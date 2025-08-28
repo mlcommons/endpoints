@@ -1,0 +1,58 @@
+name: Auto Request Review
+
+on:
+  pull_request:
+    types: [opened, ready_for_review]
+
+jobs:
+  auto-review:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Auto request review
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo, number } = context.issue;
+
+            // Default reviewers for all components
+            const defaultReviewers = ['nvzhihanj'];
+
+            // Component-specific reviewers (you can expand this later)
+            const componentReviewers = {
+              'src/inference_endpoint/load_generator/': ['nvzhihanj'],
+              'src/inference_endpoint/dataset_manager/': ['nvzhihanj'],
+              'src/inference_endpoint/endpoint_client/': ['nvzhihanj'],
+              'src/inference_endpoint/metrics/': ['nvzhihanj'],
+              'src/inference_endpoint/config/': ['nvzhihanj'],
+              'src/inference_endpoint/plugins/': ['nvzhihanj'],
+            };
+
+            // Get changed files
+            const { data: files } = await github.rest.pulls.listFiles({
+              owner,
+              repo,
+              pull_number: number,
+            });
+
+            // Determine which reviewers to request based on changed files
+            let reviewersToRequest = new Set(defaultReviewers);
+
+            for (const file of files) {
+              for (const [component, componentReviewers] of Object.entries(componentReviewers)) {
+                if (file.filename.startsWith(component)) {
+                  componentReviewers.forEach(reviewer => reviewersToRequest.add(reviewer));
+                }
+              }
+            }
+
+            // Request reviews
+            if (reviewersToRequest.size > 0) {
+              await github.rest.pulls.requestReviewers({
+                owner,
+                repo,
+                pull_number: number,
+                reviewers: Array.from(reviewersToRequest),
+              });
+
+              console.log(`Requested review from: ${Array.from(reviewersToRequest).join(', ')}`);
+            }
