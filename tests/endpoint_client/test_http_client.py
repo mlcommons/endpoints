@@ -315,18 +315,25 @@ class TestAsyncHTTPEndpointClientIntegration:
             assert result.response_output == f"Future test {i}"
 
     @pytest.mark.asyncio
-    async def test_future_with_callback(self, async_client):
+    async def test_future_with_callback(self, async_client, http_config):
         """Test using both future and callback patterns."""
         callback_results = []
 
         async def user_callback(result: QueryResult):
             callback_results.append(result)
 
+        # Create unique ZMQ config for second client to avoid conflicts
+        timestamp = int(time.time() * 1000)
+        unique_zmq_config = ZMQConfig(
+            zmq_request_queue_prefix=f"ipc:///tmp/test_callback_worker_{timestamp}",
+            zmq_response_queue_addr=f"ipc:///tmp/test_callback_responses_{timestamp}",
+        )
+
         # Create client with callback
         client = AsyncHTTPEndpointClient(
-            config=async_client._client.config,
-            aiohttp_config=async_client._client.aiohttp_config,
-            zmq_config=async_client._client.zmq_config,
+            config=http_config,
+            aiohttp_config=AioHttpConfig(),
+            zmq_config=unique_zmq_config,
             complete_callback=user_callback,
         )
         await client.start()
@@ -379,9 +386,12 @@ class TestAsyncHTTPEndpointClientIntegration:
             # Send request
             future = await client.send_request(query)
 
-            # Wait for error - expecting connection error
-            with pytest.raises((OSError, asyncio.TimeoutError)):
+            # Wait for error - expecting generic Exception with connection error
+            with pytest.raises(Exception) as exc_info:
                 await asyncio.wait_for(future, timeout=3.0)
+
+            # Verify the error message contains the invalid endpoint
+            assert "invalid-endpoint" in str(exc_info.value)
 
         finally:
             await client.shutdown()

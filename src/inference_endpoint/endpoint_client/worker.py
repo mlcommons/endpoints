@@ -255,16 +255,14 @@ class Worker:
             try:
                 response_data = json.loads(response_text)
 
-                # Echo server returns the prompt in json_payload.response_output
+                # Echo server returns the prompt in json_payload
                 if (
                     "request" in response_data
                     and "json_payload" in response_data["request"]
                 ):
                     json_payload = response_data["request"]["json_payload"]
-                    response_obj = QueryResult(
-                        query_id=json_payload.get("query_id", query.id),
-                        response_output=json_payload.get("response_output", ""),
-                    )
+                    # Parse the json_payload as a QueryResult (it's in OpenAI format)
+                    response_obj = QueryResult.from_json(json_payload)
                 else:
                     # Fallback for unexpected format
                     response_obj = QueryResult(
