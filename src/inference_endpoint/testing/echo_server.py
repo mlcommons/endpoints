@@ -94,7 +94,7 @@ class EchoServer:
                 json_payload = json.loads(raw_payload)
             completion_request = ChatCompletionQuery.from_json(json_payload)
             raw_response = completion_request.prompt
-            if self.max_osl is not None:
+            if self.max_osl is not None and len(raw_response) > 0:
                 # if max_osl is specified, it can be either larger or smaller than the length of the prompt
                 # if max_osl is larger, we can repeate the prompt until we reach the max_osl
                 if len(raw_response) > self.max_osl:

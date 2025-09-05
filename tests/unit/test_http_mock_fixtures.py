@@ -76,7 +76,6 @@ class TestHttpEchoMockFixtures:
                 assert response.status == 200
 
                 response_data = await response.json()
-                # print(f"Response data: \n{response_data}\n")
                 response = QueryResult.from_json(response_data)
 
                 assert len(response.response_output) == 100
@@ -94,8 +93,6 @@ class TestHttpEchoMockFixtures:
                 assert response.status == 200
                 response_data = await response.json()
                 # Verify echo response structure
-                response_data = await response.json()
-                # print(f"Response data: \n{response_data}\n")
                 response = QueryResult.from_json(response_data)
 
                 assert len(response.response_output) == 5
