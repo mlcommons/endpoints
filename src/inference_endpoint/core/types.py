@@ -162,15 +162,6 @@ class QueryResult:
                 error=error_msg,
             )
 
-        # Fallback to internal format (backward compatibility)
-        elif "id" in json_value:
-            return QueryResult(
-                query_id=json_value["id"],
-                response_output=json_value.get("response_output", ""),
-                error=json_value.get("error"),
-                metadata=json_value.get("metadata", {}),
-            )
-
         else:
             raise ValueError("Unrecognized response format")
 
