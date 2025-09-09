@@ -34,6 +34,8 @@ class Query:
     metadata: dict[str, Any] = field(default_factory=dict)
     status: QueryStatus = QueryStatus.PENDING
     created_at: float | None = None
+    modalities: list[str] = field(default_factory=lambda: ["text"])
+    response_format: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if self.created_at is None:
@@ -76,6 +78,8 @@ class ChatCompletionQuery(Query):
             "stream": self.stream,
             "max_completion_tokens": self.max_tokens,
             "temperature": self.temperature,
+            "modalities": self.modalities,
+            "response_format": self.response_format,
         }
 
     @classmethod
@@ -96,6 +100,8 @@ class ChatCompletionQuery(Query):
             stream=json_value.get("stream"),
             max_tokens=json_value.get("max_completion_tokens"),
             temperature=json_value.get("temperature"),
+            modalities=json_value.get("modalities"),
+            response_format=json_value.get("response_format"),
         )
 
 
