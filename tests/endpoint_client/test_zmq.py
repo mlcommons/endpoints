@@ -37,11 +37,11 @@ class TestZMQConfig:
 
                 assert (
                     config.zmq_request_queue_prefix
-                    == "ipc://mlperf_endpoint_http_worker_12345"
+                    == "ipc:///tmp/mlperf_endpoint_http_worker_12345"
                 )
                 assert (
                     config.zmq_response_queue_addr
-                    == "ipc://mlperf_endpoint_http_responses_12345"
+                    == "ipc:///tmp/mlperf_endpoint_http_responses_12345"
                 )
 
     def test_custom_paths_preserved(self):
@@ -68,7 +68,7 @@ class TestZMQConfig:
                 assert config.zmq_request_queue_prefix == custom_request
                 assert (
                     config.zmq_response_queue_addr
-                    == "ipc://mlperf_endpoint_http_responses_12345"
+                    == "ipc:///tmp/mlperf_endpoint_http_responses_12345"
                 )
 
     def test_path_generation_includes_pid(self):
@@ -79,11 +79,11 @@ class TestZMQConfig:
             # Should include PID in the path
             pid = os.getpid()
             assert (
-                f"ipc://mlperf_endpoint_http_worker_{pid}"
+                f"ipc:///tmp/mlperf_endpoint_http_worker_{pid}"
                 == config.zmq_request_queue_prefix
             )
             assert (
-                f"ipc://mlperf_endpoint_http_responses_{pid}"
+                f"ipc:///tmp/mlperf_endpoint_http_responses_{pid}"
                 == config.zmq_response_queue_addr
             )
 
