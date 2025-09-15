@@ -242,10 +242,7 @@ class HTTPEndpointClient:
                     # even if the callback raises an exception, the future is still properly
                     # resolved and the caller can await it. This prevents hangs in user code.
                     if self.complete_callback:
-                        try:
-                            self.complete_callback(message)
-                        except Exception as e:
-                            logger.error(f"Error in user callback: {e}")
+                        self.complete_callback(message)
 
                 except TimeoutError:
                     # Check shutdown and continue

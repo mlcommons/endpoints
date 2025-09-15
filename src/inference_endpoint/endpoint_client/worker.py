@@ -212,34 +212,30 @@ class Worker:
                         break
 
                     # Parse JSON and extract content
-                    try:
-                        chunk_data = orjson.loads(data_str)
-                        choices = chunk_data.get("choices", [])
-                        if not choices:
-                            continue
-
-                        delta = choices[0].get("delta", {})
-                        content = delta.get("content", "")
-                        is_final = delta.get("finish_reason") is not None
-
-                        if not content:
-                            continue
-
-                        accumulated_content.append(content)
-
-                        # Send first chunk with metadata
-                        if not first_chunk_sent:
-                            stream_chunk = StreamChunk(
-                                query_id=query.id,
-                                response_chunk=content,
-                                is_complete=is_final,
-                                metadata={"first_chunk": True, "final_chunk": is_final},
-                            )
-                            await self._response_socket.send(stream_chunk)
-                            first_chunk_sent = True
-
-                    except (ValueError, TypeError, KeyError):
+                    chunk_data = orjson.loads(data_str)
+                    choices = chunk_data.get("choices", [])
+                    if not choices:
                         continue
+
+                    delta = choices[0].get("delta", {})
+                    content = delta.get("content", "")
+                    is_final = delta.get("finish_reason") is not None
+
+                    if not content:
+                        continue
+
+                    accumulated_content.append(content)
+
+                    # Send first chunk with metadata
+                    if not first_chunk_sent:
+                        stream_chunk = StreamChunk(
+                            query_id=query.id,
+                            response_chunk=content,
+                            is_complete=is_final,
+                            metadata={"first_chunk": True, "final_chunk": is_final},
+                        )
+                        await self._response_socket.send(stream_chunk)
+                        first_chunk_sent = True
 
             # Send final complete response
             final_response = QueryResult(
@@ -255,15 +251,10 @@ class Worker:
             response_text = await response.text()
 
             # Parse JSON response
-            try:
-                response_data = orjson.loads(response_text)
-                response_obj = QueryResult.from_json(response_data)
-            except (ValueError, TypeError) as e:
-                await self._handle_error(
-                    query.id, f"Failed to parse response: {str(e)}"
-                )
-                return
+            response_data = orjson.loads(response_text)
+            response_obj = QueryResult.from_json(response_data)
 
+            # Send response back to the main process
             await self._response_socket.send(response_obj)
 
     def _handle_signal(self, signum: int, frame: Any) -> None:

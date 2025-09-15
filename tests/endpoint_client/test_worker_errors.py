@@ -630,15 +630,19 @@ class TestWorkerErrorHandling:
 
                 await request_push.send(pickle.dumps(query))
 
-                # Should still get final response even with malformed chunks
+                # Should get error response due to malformed JSON
                 response_data = await response_pull.recv()
                 response = pickle.loads(response_data)
 
-                # Verify we get a response (malformed JSON chunks are skipped)
+                # Verify we get an error response
                 assert isinstance(response, QueryResult)
                 assert response.query_id == "test-malformed-json"
-                assert response.metadata.get("final_chunk") is True
-                assert response.response_output == ""  # No valid content parsed
+                assert response.error is not None
+                assert (
+                    "unexpected character" in response.error
+                    or "JSONDecodeError" in response.error
+                )
+                assert response.response_output is None
 
                 # Shutdown
                 worker._shutdown = True
@@ -873,7 +877,8 @@ class TestWorkerErrorHandling:
                 model="gpt-3.5-turbo",
             )
 
-            await worker._handle_non_streaming_request(query)
+            # Call through _process_request to get proper error handling
+            await worker._process_request(query)
 
             # Verify error response was sent
             response_data = await asyncio.wait_for(response_pull.recv(), timeout=1.0)
@@ -881,7 +886,11 @@ class TestWorkerErrorHandling:
 
             assert isinstance(response, QueryResult)
             assert response.query_id == "test-bad-json"
-            assert "Failed to parse response" in response.error
+            assert response.error is not None
+            assert (
+                "invalid literal" in response.error
+                or "JSONDecodeError" in response.error
+            )
 
             response_pull.close()
             worker._response_socket.close()
