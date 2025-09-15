@@ -622,10 +622,10 @@ class TestHTTPEndpointClientStreaming:
             num_workers=1,
         )
 
-        # Use tmp_path for unique socket paths
+        # Use tmp_path for unique socket paths (shortened to avoid path length limit)
         zmq_config = ZMQConfig(
-            zmq_request_queue_prefix=f"ipc://{tmp_path}/test_stream_error_req",
-            zmq_response_queue_addr=f"ipc://{tmp_path}/test_stream_error_resp",
+            zmq_request_queue_prefix=f"ipc://{tmp_path}/tse_req",
+            zmq_response_queue_addr=f"ipc://{tmp_path}/tse_resp",
         )
 
         client = HTTPEndpointClient(

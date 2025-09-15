@@ -7,7 +7,7 @@ import signal
 import pytest
 import zmq
 import zmq.asyncio
-from inference_endpoint.core.types import ChatCompletionQuery, QueryResult
+from inference_endpoint.core.types import ChatCompletionQuery, QueryResult, StreamChunk
 from inference_endpoint.endpoint_client.configs import (
     AioHttpConfig,
     HTTPClientConfig,
@@ -54,6 +54,7 @@ class TestWorkerBasicFunctionality:
             zmq_config=zmq_config,
             request_socket_addr=f"{zmq_config.zmq_request_queue_prefix}_0_requests",
             response_socket_addr=zmq_config.zmq_response_queue_addr,
+            readiness_socket_addr=zmq_config.zmq_readiness_queue_addr,
         )
 
         # Create ZMQ context and sockets
@@ -75,8 +76,8 @@ class TestWorkerBasicFunctionality:
             # Start worker in background
             worker_task = asyncio.create_task(worker.run())
 
-            # Wait for worker to initialize
-            await asyncio.sleep(0.5)
+            # Wait for worker process to initialize
+            await asyncio.sleep(0.1)
 
             # Send test query
             query = ChatCompletionQuery(
@@ -124,6 +125,7 @@ class TestWorkerBasicFunctionality:
             zmq_config=zmq_config,
             request_socket_addr=f"{zmq_config.zmq_request_queue_prefix}_0_requests",
             response_socket_addr=zmq_config.zmq_response_queue_addr,
+            readiness_socket_addr=zmq_config.zmq_readiness_queue_addr,
         )
 
         # Create ZMQ context and sockets
@@ -143,7 +145,7 @@ class TestWorkerBasicFunctionality:
 
             # Start worker
             worker_task = asyncio.create_task(worker.run())
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.1)
 
             # Send streaming query
             query = ChatCompletionQuery(
@@ -208,6 +210,7 @@ class TestWorkerBasicFunctionality:
             zmq_config=zmq_config,
             request_socket_addr=f"{zmq_config.zmq_request_queue_prefix}_0_requests",
             response_socket_addr=zmq_config.zmq_response_queue_addr,
+            readiness_socket_addr=zmq_config.zmq_readiness_queue_addr,
         )
 
         context = zmq.asyncio.Context()
@@ -222,7 +225,7 @@ class TestWorkerBasicFunctionality:
 
             # Start worker
             worker_task = asyncio.create_task(worker.run())
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.1)
 
             # Send multiple queries
             num_queries = 5
@@ -279,6 +282,7 @@ class TestWorkerBasicFunctionality:
             zmq_config=zmq_config,
             request_socket_addr=f"{zmq_config.zmq_request_queue_prefix}_0_requests",
             response_socket_addr=zmq_config.zmq_response_queue_addr,
+            readiness_socket_addr=zmq_config.zmq_readiness_queue_addr,
         )
 
         context = zmq.asyncio.Context()
@@ -290,7 +294,7 @@ class TestWorkerBasicFunctionality:
 
             # Start worker
             worker_task = asyncio.create_task(worker.run())
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.1)
 
             # Verify worker is running
             assert not worker._shutdown
@@ -324,6 +328,7 @@ class TestWorkerBasicFunctionality:
             zmq_config=zmq_config,
             request_socket_addr=f"{zmq_config.zmq_request_queue_prefix}_0_requests",
             response_socket_addr=zmq_config.zmq_response_queue_addr,
+            readiness_socket_addr=zmq_config.zmq_readiness_queue_addr,
         )
 
         context = zmq.asyncio.Context()
@@ -418,6 +423,7 @@ class TestWorkerBasicFunctionality:
             zmq_config=zmq_config,
             request_socket_addr=f"{zmq_config.zmq_request_queue_prefix}_0_requests",
             response_socket_addr=zmq_config.zmq_response_queue_addr,
+            readiness_socket_addr=zmq_config.zmq_readiness_queue_addr,
         )
 
         context = zmq.asyncio.Context()
@@ -432,7 +438,7 @@ class TestWorkerBasicFunctionality:
 
             # Start worker
             worker_task = asyncio.create_task(worker.run())
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.1)
 
             # Send streaming query with empty prompt (should still get response structure)
             query = ChatCompletionQuery(
@@ -494,6 +500,7 @@ class TestWorkerBasicFunctionality:
             zmq_config=zmq_config,
             request_socket_addr=f"{zmq_config.zmq_request_queue_prefix}_0_requests",
             response_socket_addr=zmq_config.zmq_response_queue_addr,
+            readiness_socket_addr=zmq_config.zmq_readiness_queue_addr,
         )
 
         # Start worker to initialize resources
@@ -528,6 +535,7 @@ class TestWorkerBasicFunctionality:
             zmq_config=zmq_config,
             request_socket_addr=f"{zmq_config.zmq_request_queue_prefix}_0_requests",
             response_socket_addr=zmq_config.zmq_response_queue_addr,
+            readiness_socket_addr=zmq_config.zmq_readiness_queue_addr,
         )
 
         # Manually set some resources to None to test partial cleanup
@@ -553,6 +561,7 @@ class TestWorkerBasicFunctionality:
             zmq_config=zmq_config,
             request_socket_addr=f"{zmq_config.zmq_request_queue_prefix}_0_requests",
             response_socket_addr=zmq_config.zmq_response_queue_addr,
+            readiness_socket_addr=zmq_config.zmq_readiness_queue_addr,
         )
 
         # Test SIGTERM
@@ -581,6 +590,7 @@ class TestWorkerBasicFunctionality:
             zmq_config=zmq_config,
             request_socket_addr=f"{zmq_config.zmq_request_queue_prefix}_0_requests",
             response_socket_addr=zmq_config.zmq_response_queue_addr,
+            readiness_socket_addr=zmq_config.zmq_readiness_queue_addr,
         )
 
         # Start worker briefly to initialize session
@@ -609,6 +619,7 @@ class TestWorkerBasicFunctionality:
             zmq_config=zmq_config,
             request_socket_addr=f"{zmq_config.zmq_request_queue_prefix}_0_requests",
             response_socket_addr=zmq_config.zmq_response_queue_addr,
+            readiness_socket_addr=zmq_config.zmq_readiness_queue_addr,
         )
 
         context = zmq.asyncio.Context()
@@ -623,7 +634,7 @@ class TestWorkerBasicFunctionality:
 
             # Start worker
             worker_task = asyncio.create_task(worker.run())
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.1)
 
             # Create query with custom headers
             query = ChatCompletionQuery(
@@ -674,6 +685,7 @@ class TestWorkerBasicFunctionality:
             zmq_config=zmq_config,
             request_socket_addr=f"{zmq_config.zmq_request_queue_prefix}_0_requests",
             response_socket_addr=zmq_config.zmq_response_queue_addr,
+            readiness_socket_addr=zmq_config.zmq_readiness_queue_addr,
         )
 
         context = zmq.asyncio.Context()
@@ -688,7 +700,7 @@ class TestWorkerBasicFunctionality:
 
             # Start worker
             worker_task = asyncio.create_task(worker.run())
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.1)
 
             # Send query with large content (100KB of text with spaces)
             large_content = "Hello world! " * (100 * 1024 // 13)  # ~100KB
@@ -718,6 +730,163 @@ class TestWorkerBasicFunctionality:
             assert response.response_output == large_content
             assert response.error is None
             assert len(response.response_output) == len(large_content)
+
+            # Shutdown
+            worker._shutdown = True
+            await asyncio.wait_for(worker_task, timeout=2.0)
+
+            request_push.close()
+            response_pull.close()
+
+        finally:
+            context.term()
+
+    @pytest.mark.asyncio
+    async def test_worker_streaming_chunk_before_final_single_word(
+        self, mock_http_echo_server, worker_config, zmq_config
+    ):
+        """Test that first streaming chunk always arrives before final response, even for single-word echo."""
+        http_config, aiohttp_config = worker_config
+
+        # Create unique socket addresses (using short suffixes to avoid path length limits)
+        worker_id = 0
+        request_addr = f"{zmq_config.zmq_request_queue_prefix}_{worker_id}_sw"
+        response_addr = f"{zmq_config.zmq_response_queue_addr}_sw"
+        readiness_addr = f"{zmq_config.zmq_readiness_queue_addr}_sw"
+
+        worker = Worker(
+            worker_id=worker_id,
+            http_config=http_config,
+            aiohttp_config=aiohttp_config,
+            zmq_config=zmq_config,
+            request_socket_addr=request_addr,
+            response_socket_addr=response_addr,
+            readiness_socket_addr=readiness_addr,
+        )
+
+        context = zmq.asyncio.Context()
+
+        try:
+            # Create sockets
+            request_push = context.socket(zmq.PUSH)
+            request_push.connect(request_addr)
+
+            response_pull = context.socket(zmq.PULL)
+            response_pull.bind(response_addr)
+
+            # Start worker
+            worker_task = asyncio.create_task(worker.run())
+            await asyncio.sleep(0.1)
+
+            # Test single-word prompt that will echo as single word
+            query = ChatCompletionQuery(
+                id="test-single-word-order",
+                prompt="Hi",  # Single word that will be echoed
+                model="gpt-3.5-turbo",
+                stream=True,
+            )
+
+            await request_push.send(pickle.dumps(query))
+
+            # Collect all responses in order
+            responses_in_order = []
+
+            while True:
+                try:
+                    response_data = await asyncio.wait_for(
+                        response_pull.recv(), timeout=0.5
+                    )
+                    response = pickle.loads(response_data)
+                    responses_in_order.append(response)
+
+                    # Check if it's the final QueryResult
+                    if isinstance(response, QueryResult) and not isinstance(
+                        response, StreamChunk
+                    ):
+                        break
+
+                except TimeoutError:
+                    break
+
+            # Verify we got at least 2 responses (1 StreamChunk + 1 final QueryResult)
+            assert (
+                len(responses_in_order) >= 2
+            ), f"Expected at least 2 responses, got {len(responses_in_order)}"
+
+            # Verify first response is a StreamChunk
+            first_response = responses_in_order[0]
+            assert isinstance(
+                first_response, StreamChunk
+            ), "First response should be a StreamChunk"
+            assert first_response.response_chunk == "Hi"
+            assert first_response.metadata.get("first_chunk") is True
+            assert first_response.query_id == "test-single-word-order"
+
+            # Verify last response is the final QueryResult
+            last_response = responses_in_order[-1]
+            assert isinstance(
+                last_response, QueryResult
+            ), "Last response should be a QueryResult"
+            assert not isinstance(
+                last_response, StreamChunk
+            ), "Last response should not be a StreamChunk"
+            assert last_response.response_output == "Hi"
+            assert last_response.metadata.get("final_chunk") is True
+            assert last_response.query_id == "test-single-word-order"
+
+            # Verify ordering: StreamChunk(s) before final QueryResult
+            found_final = False
+            for i, resp in enumerate(responses_in_order):
+                if isinstance(resp, QueryResult) and not isinstance(resp, StreamChunk):
+                    found_final = True
+                    # Ensure all previous responses were StreamChunks
+                    for j in range(i):
+                        assert isinstance(
+                            responses_in_order[j], StreamChunk
+                        ), f"Response {j} before final should be a StreamChunk"
+
+            assert found_final, "Should have found a final QueryResult"
+
+            # Test with another edge case: empty prompt
+            query2 = ChatCompletionQuery(
+                id="test-empty-order",
+                prompt="",  # Empty prompt
+                model="gpt-3.5-turbo",
+                stream=True,
+            )
+
+            await request_push.send(pickle.dumps(query2))
+
+            # Collect responses for empty prompt
+            responses_empty = []
+            while True:
+                try:
+                    response_data = await asyncio.wait_for(
+                        response_pull.recv(), timeout=0.5
+                    )
+                    response = pickle.loads(response_data)
+                    responses_empty.append(response)
+
+                    if isinstance(response, QueryResult) and not isinstance(
+                        response, StreamChunk
+                    ):
+                        break
+
+                except TimeoutError:
+                    break
+
+            # For empty prompt, we only expect the final response
+            assert (
+                len(responses_empty) == 1
+            ), "Empty prompt should only return final response"
+            assert isinstance(
+                responses_empty[0], QueryResult
+            ), "Should be final QueryResult"
+            assert not isinstance(
+                responses_empty[0], StreamChunk
+            ), "Should not be a StreamChunk"
+            assert responses_empty[0].response_output == ""
+            assert responses_empty[0].query_id == "test-empty-order"
 
             # Shutdown
             worker._shutdown = True

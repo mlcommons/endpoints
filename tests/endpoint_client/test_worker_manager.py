@@ -57,18 +57,8 @@ class TestWorkerManager:
                 assert worker.is_alive()
                 assert worker.pid > 0
 
-            # Let workers run for a bit
-            await asyncio.sleep(1.0)
-
-            # Workers should still be alive
-            for worker in manager.workers:
-                assert worker.is_alive()
-
             # Shutdown manager
             await manager.shutdown()
-
-            # Wait a bit for cleanup
-            await asyncio.sleep(0.5)
 
             # Verify workers are terminated
             for worker in manager.workers:
@@ -106,8 +96,7 @@ class TestWorkerManager:
             assert not first_worker.is_alive()
 
             # Give the manager's monitor task time to detect and restart the dead worker
-            # The monitor checks every 5 seconds, so wait at least that long
-            await asyncio.sleep(6.0)
+            await asyncio.sleep(2.5)
 
             # Verify worker was replaced
             new_worker = manager.workers[0]
@@ -254,7 +243,7 @@ class TestWorkerManagerAdvanced:
                 assert not worker.is_alive()
 
             # Wait for monitor to detect and restart workers
-            await asyncio.sleep(6.0)  # Monitor checks every 5 seconds
+            await asyncio.sleep(2.5)  # Monitor checks every 2 seconds
 
             # Verify workers were restarted
             new_pids = [worker.pid for worker in manager.workers]

@@ -37,11 +37,11 @@ class TestZMQConfig:
 
                 assert (
                     config.zmq_request_queue_prefix
-                    == "ipc:///tmp/mlperf_endpoint_http_worker_12345"
+                    == "ipc:///tmp/mlperf_endpoint_http_worker_requests_12345"
                 )
                 assert (
                     config.zmq_response_queue_addr
-                    == "ipc:///tmp/mlperf_endpoint_http_responses_12345"
+                    == "ipc:///tmp/mlperf_endpoint_http_worker_responses_12345"
                 )
 
     def test_custom_paths_preserved(self):
@@ -68,7 +68,7 @@ class TestZMQConfig:
                 assert config.zmq_request_queue_prefix == custom_request
                 assert (
                     config.zmq_response_queue_addr
-                    == "ipc:///tmp/mlperf_endpoint_http_responses_12345"
+                    == "ipc:///tmp/mlperf_endpoint_http_worker_responses_12345"
                 )
 
     def test_path_generation_includes_pid(self):
@@ -79,11 +79,11 @@ class TestZMQConfig:
             # Should include PID in the path
             pid = os.getpid()
             assert (
-                f"ipc:///tmp/mlperf_endpoint_http_worker_{pid}"
+                f"ipc:///tmp/mlperf_endpoint_http_worker_requests_{pid}"
                 == config.zmq_request_queue_prefix
             )
             assert (
-                f"ipc:///tmp/mlperf_endpoint_http_responses_{pid}"
+                f"ipc:///tmp/mlperf_endpoint_http_worker_responses_{pid}"
                 == config.zmq_response_queue_addr
             )
 
@@ -264,7 +264,7 @@ class TestZMQPushPullIntegration:
             # Large response
             {
                 "query_id": "test-large-result",
-                "response_output": "Y" * 5000,  # 5KB response
+                "response_output": "Y" * 10000,  # 10KB response
                 "error": None,
                 "metadata": {
                     "model": "gpt-3.5-turbo",
@@ -295,7 +295,18 @@ class TestZMQPushPullIntegration:
         self, zmq_config, result_case, tmp_path
     ):
         """Test sending and receiving QueryResult objects with various scenarios."""
-        address = f"ipc://{tmp_path}/test_result_{result_case['query_id']}"
+        # Use shorter path to avoid Unix socket path length limit (107 chars)
+        # Map long query_ids to short names
+        id_map = {
+            "test-basic-result": "basic",
+            "test-empty-result": "empty",
+            "test-error-result": "error",
+            "test-large-result": "large",
+            "test-special-result": "spec",
+            "test-json-result": "json",
+        }
+        short_id = id_map.get(result_case["query_id"], result_case["query_id"][:5])
+        address = f"ipc://{tmp_path}/tr_{short_id}"
 
         context = zmq.asyncio.Context()
 

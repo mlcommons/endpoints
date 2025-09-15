@@ -19,8 +19,9 @@ class HTTPClientConfig:
     )  # -1 means unlimited, otherwise limits concurrent requests via semaphore
 
     # Worker lifecycle timeouts
-    # [INIT] Time to wait for workers to be ready
-    worker_ready_wait_time: float = 0.5  # init
+    worker_initialization_timeout: float = (
+        10.0  # Max time to wait for all workers to be ready
+    )
     worker_health_check_interval: float = 2.0  # runtime
     worker_graceful_shutdown_wait: float = 0.5  # post-run
     worker_force_kill_timeout: float = 1.0  # post-run
@@ -155,6 +156,7 @@ class ZMQConfig:
     # ZMQ addresses (use None for auto-generation)
     zmq_request_queue_prefix: str | None = None
     zmq_response_queue_addr: str | None = None
+    zmq_readiness_queue_addr: str | None = None
 
     # ZMQ socket options
     zmq_linger: int = 0  # Don't block on close
@@ -166,10 +168,19 @@ class ZMQConfig:
     def __post_init__(self):
         """Generate portable ZMQ socket paths if not provided."""
         if self.zmq_request_queue_prefix is None:
-            self.zmq_request_queue_prefix = ZMQConfig._get_ipc_path("http_worker")
+            self.zmq_request_queue_prefix = ZMQConfig._get_ipc_path(
+                "http_worker_requests"
+            )
 
         if self.zmq_response_queue_addr is None:
-            self.zmq_response_queue_addr = ZMQConfig._get_ipc_path("http_responses")
+            self.zmq_response_queue_addr = ZMQConfig._get_ipc_path(
+                "http_worker_responses"
+            )
+
+        if self.zmq_readiness_queue_addr is None:
+            self.zmq_readiness_queue_addr = ZMQConfig._get_ipc_path(
+                "http_worker_readiness"
+            )
 
     @staticmethod
     def _get_ipc_path(name: str) -> str:

@@ -53,6 +53,7 @@ class TestWorkerErrorHandling:
             zmq_config=zmq_config,
             request_socket_addr=f"{zmq_config.zmq_request_queue_prefix}_0_requests",
             response_socket_addr=zmq_config.zmq_response_queue_addr,
+            readiness_socket_addr=zmq_config.zmq_readiness_queue_addr,
         )
 
         context = zmq.asyncio.Context()
@@ -126,6 +127,7 @@ class TestWorkerErrorHandling:
             zmq_config=zmq_config,
             request_socket_addr=f"{zmq_config.zmq_request_queue_prefix}_0_requests",
             response_socket_addr=zmq_config.zmq_response_queue_addr,
+            readiness_socket_addr=zmq_config.zmq_readiness_queue_addr,
         )
 
         context = zmq.asyncio.Context()
@@ -195,6 +197,7 @@ class TestWorkerErrorHandling:
             zmq_config=zmq_config,
             request_socket_addr=f"{zmq_config.zmq_request_queue_prefix}_0_requests",
             response_socket_addr=zmq_config.zmq_response_queue_addr,
+            readiness_socket_addr=zmq_config.zmq_readiness_queue_addr,
         )
 
         worker_task = None
@@ -289,6 +292,7 @@ class TestWorkerErrorHandling:
             zmq_config=zmq_config,
             request_socket_addr=f"{zmq_config.zmq_request_queue_prefix}_0_requests",
             response_socket_addr=zmq_config.zmq_response_queue_addr,
+            readiness_socket_addr=zmq_config.zmq_readiness_queue_addr,
         )
 
         worker_task = None
@@ -374,6 +378,7 @@ class TestWorkerErrorHandling:
             zmq_config=zmq_config,
             request_socket_addr=f"{zmq_config.zmq_request_queue_prefix}_0_requests",
             response_socket_addr=zmq_config.zmq_response_queue_addr,
+            readiness_socket_addr=zmq_config.zmq_readiness_queue_addr,
         )
 
         context = zmq.asyncio.Context()
@@ -436,6 +441,7 @@ class TestWorkerErrorHandling:
             zmq_config=zmq_config,
             request_socket_addr=f"{zmq_config.zmq_request_queue_prefix}_0_requests",
             response_socket_addr=zmq_config.zmq_response_queue_addr,
+            readiness_socket_addr=zmq_config.zmq_readiness_queue_addr,
         )
 
         context = zmq.asyncio.Context()
@@ -494,6 +500,7 @@ class TestWorkerErrorHandling:
             zmq_config=zmq_config,
             request_socket_addr=f"{zmq_config.zmq_request_queue_prefix}_0_requests",
             response_socket_addr=zmq_config.zmq_response_queue_addr,
+            readiness_socket_addr=zmq_config.zmq_readiness_queue_addr,
         )
 
         # Mock session to return various HTTP errors
@@ -594,6 +601,7 @@ class TestWorkerErrorHandling:
                 zmq_config=zmq_config,
                 request_socket_addr=f"{zmq_config.zmq_request_queue_prefix}_0_requests",
                 response_socket_addr=zmq_config.zmq_response_queue_addr,
+                readiness_socket_addr=zmq_config.zmq_readiness_queue_addr,
             )
 
             context = zmq.asyncio.Context()
@@ -658,6 +666,7 @@ class TestWorkerErrorHandling:
             zmq_config=zmq_config,
             request_socket_addr="invalid://socket/address",
             response_socket_addr=zmq_config.zmq_response_queue_addr,
+            readiness_socket_addr=zmq_config.zmq_readiness_queue_addr,
         )
 
         # Worker run should handle the error gracefully
@@ -678,6 +687,7 @@ class TestWorkerErrorHandling:
             zmq_config=zmq_config,
             request_socket_addr=f"{zmq_config.zmq_request_queue_prefix}_0_requests",
             response_socket_addr=zmq_config.zmq_response_queue_addr,
+            readiness_socket_addr=zmq_config.zmq_readiness_queue_addr,
         )
 
         context = zmq.asyncio.Context()
@@ -748,6 +758,7 @@ class TestWorkerErrorHandling:
                     zmq_config=zmq_config,
                     request_socket_addr=f"{zmq_config.zmq_request_queue_prefix}_{i}_requests",
                     response_socket_addr=zmq_config.zmq_response_queue_addr,
+                    readiness_socket_addr=zmq_config.zmq_readiness_queue_addr,
                 )
                 workers.append(worker)
                 worker_tasks.append(asyncio.create_task(worker.run()))
@@ -820,6 +831,7 @@ class TestWorkerErrorHandling:
             zmq_config=zmq_config,
             request_socket_addr=f"{zmq_config.zmq_request_queue_prefix}_0_requests",
             response_socket_addr=zmq_config.zmq_response_queue_addr,
+            readiness_socket_addr=zmq_config.zmq_readiness_queue_addr,
         )
 
         # Initialize components

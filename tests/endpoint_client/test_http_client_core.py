@@ -4,7 +4,6 @@ import asyncio
 import pickle
 import time
 
-import aiohttp
 import pytest
 import pytest_asyncio
 import zmq
@@ -442,6 +441,9 @@ class TestHTTPEndpointClientErrorHandling:
             )
 
             future = client.issue_query(query)
+
+            # Allow time for error to propagate through ZMQ
+            await asyncio.sleep(0.2)
 
             # Should get error
             with pytest.raises(Exception) as exc_info:
@@ -1217,9 +1219,27 @@ class TestHTTPEndpointClientCoverage:
 
             future = client.issue_query(query)
 
+            # Wait for the error to propagate through the system
+            # The flow is: client -> ZMQ -> worker -> HTTP error -> ZMQ -> client
+            await asyncio.sleep(0.5)
+
             # Should get an exception due to connection error
-            with pytest.raises((aiohttp.ClientError, asyncio.TimeoutError, Exception)):
-                await asyncio.wait_for(future, timeout=5.0)
+            with pytest.raises(Exception) as exc_info:
+                result = await asyncio.wait_for(future, timeout=5.0)
+                # If we get here without exception, print for debugging
+                print(f"ERROR: Got result instead of exception: {result}")
+                print(
+                    f"Result error field: {getattr(result, 'error', 'NO ERROR FIELD')}"
+                )
+                raise AssertionError(f"Expected exception but got result: {result}")
+
+            # Verify the error message contains expected content
+            error_msg = str(exc_info.value)
+            assert (
+                "invalid-host-does-not-exist" in error_msg
+                or "Cannot connect" in error_msg
+                or "Name or service not known" in error_msg
+            )
 
         finally:
             await client.shutdown()

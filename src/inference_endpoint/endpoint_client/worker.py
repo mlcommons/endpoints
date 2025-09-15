@@ -31,6 +31,7 @@ def worker_main(
     zmq_config: ZMQConfig,
     request_queue_addr: str,
     response_queue_addr: str,
+    readiness_queue_addr: str,
 ):
     """Entry point for worker process."""
     # Install uvloop which also enables it
@@ -49,6 +50,7 @@ def worker_main(
         zmq_config=zmq_config,
         request_socket_addr=request_queue_addr,
         response_socket_addr=response_queue_addr,
+        readiness_socket_addr=readiness_queue_addr,
     )
 
     # Run event loop
@@ -66,6 +68,7 @@ class Worker:
         zmq_config: ZMQConfig,
         request_socket_addr: str,
         response_socket_addr: str,
+        readiness_socket_addr: str,
     ):
         """Initialize worker with configurations and ZMQ addresses."""
         self.worker_id = worker_id
@@ -74,11 +77,13 @@ class Worker:
         self.zmq_config = zmq_config
         self.request_socket_addr = request_socket_addr
         self.response_socket_addr = response_socket_addr
+        self.readiness_socket_addr = readiness_socket_addr
         self._shutdown = False
         self._session: aiohttp.ClientSession | None = None
         self._zmq_context: zmq.asyncio.Context | None = None
         self._request_socket: ZMQPullSocket | None = None
         self._response_socket: ZMQPushSocket | None = None
+        self._readiness_socket: ZMQPushSocket | None = None
         self.tcp_connector: aiohttp.TCPConnector | None = None
 
     async def run(self) -> None:
@@ -90,6 +95,9 @@ class Worker:
         )
         self._response_socket = ZMQPushSocket(
             self._zmq_context, self.response_socket_addr, self.zmq_config
+        )
+        self._readiness_socket = ZMQPushSocket(
+            self._zmq_context, self.readiness_socket_addr, self.zmq_config
         )
 
         # Create TCP connector
@@ -112,7 +120,9 @@ class Worker:
             signal.signal(signal.SIGTERM, self._handle_signal)
             signal.signal(signal.SIGINT, self._handle_signal)
 
-            logger.info(f"Worker {self.worker_id} started")
+            # Send readiness signal
+            await self._readiness_socket.send(self.worker_id)
+            logger.info(f"Worker {self.worker_id} started and ready")
 
             # Main processing loop
             while not self._shutdown:
@@ -279,6 +289,8 @@ class Worker:
             self._request_socket.close()
         if self._response_socket:
             self._response_socket.close()
+        if self._readiness_socket:
+            self._readiness_socket.close()
 
         # Terminate ZMQ context
         if self._zmq_context:
@@ -307,17 +319,55 @@ class WorkerManager:
 
     async def initialize(self) -> None:
         """Initialize workers and ZMQ infrastructure."""
-        # Spawn worker processes
-        for i in range(self.http_config.num_workers):
-            worker = self._spawn_worker(i)
-            self.workers.append(worker)
-            self.worker_pids[i] = worker.pid
+        # Create readiness pull socket to receive worker ready signals
+        readiness_socket = ZMQPullSocket(
+            self.zmq_context,
+            self.zmq_config.zmq_readiness_queue_addr,
+            self.zmq_config,
+            bind=True,
+        )
 
-        # Start monitoring task
-        self._monitor_task = asyncio.create_task(self._monitor_workers())
+        try:
+            # Spawn worker processes
+            for i in range(self.http_config.num_workers):
+                worker = self._spawn_worker(i)
+                self.workers.append(worker)
+                self.worker_pids[i] = worker.pid
 
-        # Wait for workers to be ready
-        await asyncio.sleep(self.http_config.worker_ready_wait_time)
+            # Wait for all workers to signal readiness
+            ready_workers = set()
+            start_time = asyncio.get_event_loop().time()
+            timeout = self.http_config.worker_initialization_timeout
+
+            while len(ready_workers) < self.http_config.num_workers:
+                elapsed = asyncio.get_event_loop().time() - start_time
+                if elapsed > timeout:
+                    raise TimeoutError(
+                        f"Workers failed to initialize within {timeout} seconds. "
+                        f"Only {len(ready_workers)}/{self.http_config.num_workers} workers ready."
+                    )
+
+                try:
+                    # Wait for readiness signal with remaining timeout
+                    remaining_timeout = timeout - elapsed
+                    worker_id = await asyncio.wait_for(
+                        readiness_socket.receive(), timeout=remaining_timeout
+                    )
+                    ready_workers.add(worker_id)
+                    logger.info(
+                        f"Worker {worker_id} is ready ({len(ready_workers)}/{self.http_config.num_workers})"
+                    )
+                except TimeoutError:
+                    continue
+
+            logger.info(f"All {self.http_config.num_workers} workers are ready")
+
+            # Start monitoring task
+            self._monitor_task = asyncio.create_task(self._monitor_workers())
+
+        finally:
+            # Close readiness socket
+            readiness_socket.close()
 
     def _spawn_worker(self, worker_id: int) -> Process:
         """Spawn a single worker process."""
@@ -325,6 +375,7 @@ class WorkerManager:
             f"{self.zmq_config.zmq_request_queue_prefix}_{worker_id}_requests"
         )
         response_queue_addr = self.zmq_config.zmq_response_queue_addr
+        readiness_queue_addr = self.zmq_config.zmq_readiness_queue_addr
 
         # Create worker process
         process = Process(
@@ -336,6 +387,7 @@ class WorkerManager:
                 self.zmq_config,
                 request_queue_addr,
                 response_queue_addr,
+                readiness_queue_addr,
             ),
             daemon=False,
         )
