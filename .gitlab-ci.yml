@@ -1,0 +1,86 @@
+# GitLab CI Configuration for Tests
+# Converted from GitHub Actions workflow
+
+stages:
+  - lint
+  - test
+
+variables:
+  PYTHON_VERSION: "3.12"
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+
+# Cache pip dependencies for faster builds
+cache:
+  paths:
+    - .cache/pip
+    - .venv/
+
+# Pre-commit Job - Converted from GitHub Actions pre-commit.yml
+pre-commit:
+  stage: lint # GitHub equivalent: jobs: (line 9 in pre-commit.yml)
+  image: python:${PYTHON_VERSION} # GitHub equivalent: runs-on: ubuntu-latest + setup-python@v4 with python-version: "3.12" (lines 11, 17-20)
+  tags:
+    - type/docker # Ensure runner supports Docker containers
+    - os/linux # Linux-based runner (equivalent to ubuntu-latest in GitHub)
+
+  # Run on merge requests and pushes to main branches - same triggers as GitHub
+  rules: # GitHub equivalent: on: pull_request/push branches: [main, master] (lines 3-7)
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event" # GitHub equivalent: pull_request (line 4)
+    - if: $CI_COMMIT_BRANCH == "main" # GitHub equivalent: push branches: [main] (lines 6-7, modified to remove master)
+
+  before_script:
+    # Full repository history needed for pre-commit to work properly
+    - git fetch --unshallow || true # GitHub equivalent: fetch-depth: 0 (line 15) - gets full git history
+    # Install pip and pre-commit - matches GitHub dependency installation
+    - python -m pip install --upgrade pip # GitHub equivalent: python -m pip install --upgrade pip (line 24)
+    - pip install pre-commit # GitHub equivalent: pip install pre-commit (line 25)
+
+  script:
+    # Run pre-commit on all files with diff output on failure - exact same command as GitHub
+    - pre-commit run --all-files --show-diff-on-failure # GitHub equivalent: identical command (line 29)
+
+test:
+  stage: test
+  image: python:${PYTHON_VERSION}
+  tags:
+    - type/docker # Ensure runner supports Docker containers
+    - os/linux # Linux-based runner
+
+  # Run on merge requests and pushes to main branches
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == "main"
+
+  before_script:
+    - python -m pip install --upgrade pip
+    - pip install -e .
+    - pip install -r requirements/test.txt
+
+  script:
+    - pytest -xv -m "not slow" --cov=src --cov-report=xml --cov-report=html
+
+  # after_script:
+  #   # Upload coverage to Codecov (requires CODECOV_TOKEN in CI/CD variables)
+  #   - |
+  #     if [ -n "$CODECOV_TOKEN" ]; then
+  #       curl -s https://codecov.io/bash | bash -s -- \
+  #         -f ./coverage.xml \
+  #         -F unittests \
+  #         -n codecov-umbrella \
+  #         || echo "Codecov upload failed (non-blocking)"
+  #     else
+  #       echo "CODECOV_TOKEN not set - skipping coverage upload"
+  #     fi
+
+  # artifacts:
+  #   when: always
+  #   paths:
+  #     - coverage.xml
+  #     - htmlcov/
+  #   reports:
+  #     coverage_report:
+  #       coverage_format: cobertura
+  #       path: coverage.xml
+  #   expire_in: 1 week
+
+  # coverage: "/TOTAL.+ ([0-9]{1,3}%)/"
