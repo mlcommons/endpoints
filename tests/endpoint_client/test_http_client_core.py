@@ -132,9 +132,6 @@ class TestHTTPEndpointClientConcurrency:
 
     @pytest.mark.asyncio
     @pytest.mark.slow
-    @pytest.mark.skip(
-        reason="Exception: Cannot connect to host localhost:37433 ssl:default [Connect call failed ('127.0.0.1', 37433)]"
-    )
     async def test_massive_concurrency(self, mock_http_echo_server, tmp_path):
         """Test high concurrent requests with proper connection management."""
         actual_max_concurrency = 10000
@@ -220,9 +217,6 @@ class TestHTTPEndpointClientConcurrency:
 
     @pytest.mark.asyncio
     @pytest.mark.slow
-    @pytest.mark.skip(
-        reason="Exception: Cannot connect to host localhost:36571 ssl:default [Connect call failed ('127.0.0.1', 36571)]"
-    )
     async def test_many_workers(self, mock_http_echo_server, tmp_path):
         """Test with many workers."""
         actual_max_concurrency = 1000
@@ -271,9 +265,6 @@ class TestHTTPEndpointClientConcurrency:
                 await client.shutdown()
 
     @pytest.mark.asyncio
-    @pytest.mark.skip(
-        reason="Exception: Cannot connect to host localhost:34709 ssl:default [Connect call failed ('127.0.0.1', 34709)]"
-    )
     async def test_concurrency_limit_with_futures(
         self, mock_http_echo_server, tmp_path
     ):
@@ -644,9 +635,6 @@ class TestHTTPEndpointClientCoverage:
         await client.shutdown()
 
     @pytest.mark.asyncio
-    @pytest.mark.skip(
-        reason="Exception: Cannot connect to host localhost:33309 ssl:default [Connect call failed ('127.0.0.1', 33309)]"
-    )
     async def test_initialization_with_callback(self, mock_http_echo_server):
         """Test HTTPEndpointClient initialization with callback."""
         callback_called = []
@@ -712,9 +700,6 @@ class TestHTTPEndpointClientCoverage:
             await client.shutdown()
 
     @pytest.mark.asyncio
-    @pytest.mark.skip(
-        reason="Exception: Cannot connect to host localhost:36689 ssl:default [Connect call failed ('127.0.0.1', 36689)]"
-    )
     async def test_initialization_without_concurrency_limit(
         self, mock_http_echo_server
     ):
@@ -803,9 +788,6 @@ class TestHTTPEndpointClientCoverage:
             await client.shutdown()
 
     @pytest.mark.asyncio
-    @pytest.mark.skip(
-        reason="Exception: Cannot connect to host localhost:43987 ssl:default [Connect call failed ('127.0.0.1', 43987)]"
-    )
     async def test_response_handler_timeout_path(self, mock_http_echo_server):
         """Test response handler timeout path in _handle_responses."""
         timestamp = int(time.time() * 1000)
@@ -848,14 +830,12 @@ class TestHTTPEndpointClientCoverage:
 
             assert result.query_id == "timeout-test"
             assert result.response_output == "Test after timeout"
+            assert mock_http_echo_server.url is not None
 
         finally:
             await client.shutdown()
 
     @pytest.mark.asyncio
-    @pytest.mark.skip(
-        reason="Exception: Cannot connect to host localhost:33123 ssl:default [Connect call failed ('127.0.0.1', 33123)]"
-    )
     async def test_callback_error_handling(self, mock_http_echo_server):
         """Test error handling in user callback."""
         timestamp = int(time.time() * 1000)

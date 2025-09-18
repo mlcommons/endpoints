@@ -14,7 +14,7 @@ from inference_endpoint.core.types import ChatCompletionQuery, QueryResult
 
 class EchoServer:
     def __init__(
-        self, *, host: str = "localhost", port: int = 0, max_osl: int | None = None
+        self, *, host: str = "127.0.0.1", port: int = 0, max_osl: int | None = None
     ):
         self.host = host
         self.port = port  # If 0, will auto-assign available port
@@ -286,7 +286,7 @@ Examples:
 
     parser.add_argument("--version", action="version", version="%(prog)s 0.1.0")
     parser.add_argument(
-        "--host", type=str, help="hostname/address to bind to", default="localhost"
+        "--host", type=str, help="hostname/address to bind to", default="127.0.0.1"
     )
     parser.add_argument("--port", type=int, help="port to bind to", default=12345)
 

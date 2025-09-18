@@ -105,6 +105,7 @@ python_files = ["test_*.py", "*_test.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 asyncio_mode = "strict"
+timeout = 300
 addopts = [
     "--strict-markers",
     "--strict-config",
