@@ -29,6 +29,7 @@ class TestHTTPEndpointClientConcurrency:
         max_concurrency=-1,
         zmq_high_water_mark=10000,
         zmq_io_threads=None,
+        aiohttp_config=None,
     ):
         """Helper method to create a client with custom configuration."""
         http_config = HTTPClientConfig(
@@ -40,6 +41,7 @@ class TestHTTPEndpointClientConcurrency:
         zmq_config_kwargs = {
             "zmq_request_queue_prefix": f"ipc://{tmp_path}/test_custom_req",
             "zmq_response_queue_addr": f"ipc://{tmp_path}/test_custom_resp",
+            "zmq_readiness_queue_addr": f"ipc://{tmp_path}/test_custom_ready",
             "zmq_high_water_mark": zmq_high_water_mark,
         }
         if zmq_io_threads is not None:
@@ -47,13 +49,17 @@ class TestHTTPEndpointClientConcurrency:
 
         zmq_config = ZMQConfig(**zmq_config_kwargs)
 
+        # Use provided aiohttp_config or create default
+        if aiohttp_config is None:
+            aiohttp_config = AioHttpConfig()
+
         return HTTPEndpointClient(
             config=http_config,
-            aiohttp_config=AioHttpConfig(),
+            aiohttp_config=aiohttp_config,
             zmq_config=zmq_config,
         )
 
-    @pytest.fixture(scope="class")
+    @pytest.fixture
     def http_config(self, mock_http_echo_server):
         """Create HTTP client configuration with echo server URL."""
         return HTTPClientConfig(
@@ -62,18 +68,17 @@ class TestHTTPEndpointClientConcurrency:
             max_concurrency=-1,  # No limit by default
         )
 
-    @pytest.fixture(scope="class")
-    def zmq_config(self, tmp_path_factory):
+    @pytest.fixture
+    def zmq_config(self, tmp_path):
         """Create ZMQ configuration with unique addresses."""
-        # Use tmp_path_factory for class-scoped fixture
-        tmp_dir = tmp_path_factory.mktemp("test_conc")
         return ZMQConfig(
-            zmq_request_queue_prefix=f"ipc://{tmp_dir}/test_conc_req",
-            zmq_response_queue_addr=f"ipc://{tmp_dir}/test_conc_resp",
+            zmq_request_queue_prefix=f"ipc://{tmp_path}/test_conc_req",
+            zmq_response_queue_addr=f"ipc://{tmp_path}/test_conc_resp",
+            zmq_readiness_queue_addr=f"ipc://{tmp_path}/test_conc_ready",
             zmq_high_water_mark=10000,  # Higher for massive tests
         )
 
-    @pytest_asyncio.fixture(scope="class")
+    @pytest_asyncio.fixture
     async def http_client(self, http_config, zmq_config):
         """Create and start HTTP endpoint client."""
         client = HTTPEndpointClient(
@@ -86,7 +91,49 @@ class TestHTTPEndpointClientConcurrency:
         await client.shutdown()
 
     @pytest.mark.asyncio
-    @pytest.mark.skip(reason="Currently hanging")
+    async def test_basic_future_handling_standalone(
+        self, mock_http_echo_server, tmp_path
+    ):
+        """Test basic future-based request/response without class fixture."""
+        # Create a fresh client in the test's own event loop
+        http_config = HTTPClientConfig(
+            endpoint_url=f"{mock_http_echo_server.url}/v1/chat/completions",
+            num_workers=2,
+        )
+
+        zmq_config = ZMQConfig(
+            zmq_request_queue_prefix=f"ipc://{tmp_path}/test_standalone_req",
+            zmq_response_queue_addr=f"ipc://{tmp_path}/test_standalone_resp",
+            zmq_readiness_queue_addr=f"ipc://{tmp_path}/test_standalone_ready",
+        )
+
+        client = HTTPEndpointClient(
+            config=http_config,
+            aiohttp_config=AioHttpConfig(),
+            zmq_config=zmq_config,
+        )
+
+        await client.start()
+
+        try:
+            query = ChatCompletionQuery(
+                id="future-test",
+                prompt="Test future handling",
+                model="gpt-3.5-turbo",
+            )
+
+            # issue_query returns a future directly
+            future = client.issue_query(query)
+            assert isinstance(future, asyncio.Future)
+
+            # Await the future
+            result = await asyncio.wait_for(future, timeout=2.0)
+            assert result.query_id == "future-test"
+            assert result.response_output == "Test future handling"
+        finally:
+            await client.shutdown()
+
+    @pytest.mark.asyncio
     async def test_basic_future_handling(self, http_client):
         """Test basic future-based request/response."""
         query = ChatCompletionQuery(
@@ -105,7 +152,6 @@ class TestHTTPEndpointClientConcurrency:
         assert result.response_output == "Test future handling"
 
     @pytest.mark.asyncio
-    @pytest.mark.skip(reason="Currently hanging")
     async def test_concurrent_futures_proper_handling(self, http_client):
         """Test proper concurrent future handling - collect then await all."""
         num_requests = 50
@@ -132,8 +178,10 @@ class TestHTTPEndpointClientConcurrency:
 
     @pytest.mark.asyncio
     @pytest.mark.slow
-    async def test_massive_concurrency(self, mock_http_echo_server, tmp_path):
-        """Test high concurrent requests with proper connection management."""
+    async def test_massive_concurrency_non_streaming(
+        self, mock_http_echo_server, tmp_path
+    ):
+        """Test high concurrent requests with proper connection management in non-streaming mode."""
         actual_max_concurrency = 10000
 
         # create client with unlimited concurrency
@@ -158,6 +206,7 @@ class TestHTTPEndpointClientConcurrency:
                     id=f"massive-{i}",
                     prompt=f"Request {i}",
                     model="gpt-3.5-turbo",
+                    stream=False,
                 )
                 future = client.issue_query(query)
                 futures.append(future)
@@ -176,14 +225,64 @@ class TestHTTPEndpointClientConcurrency:
             duration = end_time - start_time
             rps = num_requests / duration
             print(
-                f"\nProcessed {num_requests} requests in {duration:.2f}s ({rps:.0f} req/s)"
+                f"\nNon-streaming mode performance: {num_requests} requests in {duration:.2f}s = {rps:.0f} RPS"
             )
-
         finally:
             await client.shutdown()
 
     @pytest.mark.asyncio
-    @pytest.mark.skip(reason="Currently hanging")
+    @pytest.mark.slow
+    async def test_massive_concurrency_streaming(self, mock_http_echo_server, tmp_path):
+        """Test high concurrent requests with proper connection management in streaming mode."""
+        actual_max_concurrency = 10000
+
+        # create client with unlimited concurrency
+        client = self._create_custom_client(
+            mock_http_echo_server,
+            tmp_path,
+            num_workers=1,
+            max_concurrency=-1,
+            zmq_high_water_mark=actual_max_concurrency,
+        )
+
+        await client.start()
+
+        try:
+            num_requests = actual_max_concurrency
+
+            # Collect futures
+            start_time = time.time()
+            futures = []
+            for i in range(num_requests):
+                query = ChatCompletionQuery(
+                    id=f"massive-streaming-{i}",
+                    prompt=f"Streaming request {i}",
+                    model="gpt-3.5-turbo",
+                    stream=True,
+                )
+                future = client.issue_query(query)
+                futures.append(future)
+
+            # Wait for all futures to complete
+            results = await asyncio.gather(*futures)
+            end_time = time.time()
+
+            # Verify results
+            assert len(results) == num_requests
+            result_ids = {r.query_id for r in results}
+            expected_ids = {f"massive-streaming-{i}" for i in range(num_requests)}
+            assert result_ids == expected_ids
+
+            # Print performance metrics
+            duration = end_time - start_time
+            rps = num_requests / duration
+            print(
+                f"\nStreaming mode performance: {num_requests} requests in {duration:.2f}s = {rps:.0f} RPS"
+            )
+        finally:
+            await client.shutdown()
+
+    @pytest.mark.asyncio
     async def test_massive_payloads(self, http_client):
         """Test handling very large payloads."""
         # Create payloads of different sizes
@@ -373,7 +472,6 @@ class TestHTTPEndpointClientConcurrency:
             pass  # Already shut down
 
     @pytest.mark.asyncio
-    @pytest.mark.skip(reason="Currently hanging")
     async def test_mixed_callback_and_future_pattern(self, http_client):
         """Test using both callbacks and futures together."""
         callback_results = []
@@ -603,7 +701,7 @@ class TestHTTPEndpointClientErrorHandling:
 class TestHTTPEndpointClientCoverage:
     """Tests to improve code coverage."""
 
-    @pytest.fixture(scope="class")
+    @pytest.fixture
     def http_config(self, mock_http_echo_server):
         """Create HTTP client configuration with echo server URL."""
         return HTTPClientConfig(
@@ -612,17 +710,15 @@ class TestHTTPEndpointClientCoverage:
             max_concurrency=-1,
         )
 
-    @pytest.fixture(scope="class")
-    def zmq_config(self, tmp_path_factory):
+    @pytest.fixture
+    def zmq_config(self, tmp_path):
         """Create ZMQ configuration with unique addresses."""
-        # Use tmp_path_factory for class-scoped fixture
-        tmp_dir = tmp_path_factory.mktemp("test_coverage")
         return ZMQConfig(
-            zmq_request_queue_prefix=f"ipc://{tmp_dir}/test_coverage_req",
-            zmq_response_queue_addr=f"ipc://{tmp_dir}/test_coverage_resp",
+            zmq_request_queue_prefix=f"ipc://{tmp_path}/test_coverage_req",
+            zmq_response_queue_addr=f"ipc://{tmp_path}/test_coverage_resp",
         )
 
-    @pytest_asyncio.fixture(scope="class")
+    @pytest_asyncio.fixture
     async def http_client(self, http_config, zmq_config):
         """Create and start HTTP endpoint client."""
         client = HTTPEndpointClient(
@@ -1079,7 +1175,6 @@ class TestHTTPEndpointClientCoverage:
             context.term()
 
     @pytest.mark.asyncio
-    @pytest.mark.skip(reason="Currently hanging")
     async def test_empty_prompt(self, http_client):
         """Test handling empty prompt."""
         query = ChatCompletionQuery(
@@ -1095,7 +1190,6 @@ class TestHTTPEndpointClientCoverage:
         assert result.response_output == ""
 
     @pytest.mark.asyncio
-    @pytest.mark.skip(reason="Currently hanging")
     async def test_special_characters_in_prompt(self, http_client):
         """Test handling special characters and unicode."""
         special_prompts = [
@@ -1122,7 +1216,6 @@ class TestHTTPEndpointClientCoverage:
             assert result.response_output == prompt
 
     @pytest.mark.asyncio
-    @pytest.mark.skip(reason="Currently hanging")
     async def test_metadata_propagation(self, http_client):
         """Test that query metadata is preserved."""
         query = ChatCompletionQuery(
@@ -1253,7 +1346,6 @@ class TestHTTPEndpointClientCoverage:
             await client.shutdown()
 
     @pytest.mark.asyncio
-    @pytest.mark.skip(reason="Currently hanging")
     async def test_response_for_unknown_query_id(self, http_client):
         """Test handling response for unknown query ID by checking internal state."""
         # Verify client is in a good state

@@ -2,8 +2,10 @@
 
 import asyncio
 import logging
+import multiprocessing
 import os
 import signal
+import sys
 from collections.abc import AsyncGenerator
 from multiprocessing import Process
 from typing import Any
@@ -24,6 +26,13 @@ from inference_endpoint.endpoint_client.zmq_utils import ZMQPullSocket, ZMQPushS
 logger = logging.getLogger(__name__)
 
 
+try:
+    multiprocessing.set_start_method("spawn", force=False)
+except RuntimeError:
+    # Already set, which is fine
+    pass
+
+
 def worker_main(
     worker_id: int,
     http_config: HTTPClientConfig,
@@ -34,6 +43,14 @@ def worker_main(
     readiness_queue_addr: str,
 ):
     """Entry point for worker process."""
+    # Configure logging for worker process
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format=f"%(levelname)-8s %(name)s:%(filename)s:%(lineno)d [Worker-{worker_id}] %(message)s",
+        stream=sys.stdout,
+        force=True,  # Override any existing configuration
+    )
+
     # Install uvloop which also enables it
     try:
         import uvloop

@@ -215,7 +215,9 @@ class EchoServer:
         # Start the server
         self.runner = web.AppRunner(self.app)
         await self.runner.setup()
-        self.site = web.TCPSite(self.runner, self.host, self.port)
+        # Create TCP site with backlog
+        # NOTE(vir): 10k for test_massive_concurrency integration tests
+        self.site = web.TCPSite(self.runner, self.host, self.port, backlog=10000)
         await self.site.start()
 
         # Get the actual port if we used port 0

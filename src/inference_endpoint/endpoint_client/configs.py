@@ -129,7 +129,6 @@ class AioHttpConfig:
             "limit_per_host": self.tcp_connector_limit_per_host,
             "ttl_dns_cache": self.tcp_connector_ttl_dns_cache,
             "use_dns_cache": self.tcp_connector_use_dns_cache,
-            "enable_cleanup_closed": self.tcp_connector_enable_cleanup_closed,
             "force_close": self.tcp_connector_force_close,
             "keepalive_timeout": self.tcp_connector_keepalive_timeout,
             "happy_eyeballs_delay": self.tcp_connector_happy_eyeballs_delay,

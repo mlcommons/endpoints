@@ -14,7 +14,6 @@ from inference_endpoint.endpoint_client.configs import (
 from inference_endpoint.testing.echo_server import EchoServer
 
 
-@pytest.mark.skip(reason="Currently hanging")
 class TestHTTPEndpointClientStreaming:
     """Test streaming functionality with echo server integration."""
 
@@ -192,7 +191,8 @@ class TestHTTPEndpointClientStreaming:
             # Each streaming query should produce:
             # - StreamChunk messages for first chunks (except empty responses)
             # - QueryResult message for final response
-            assert len(received_responses) >= 3  # At least one QueryResult per query
+            # At least one QueryResult per query
+            assert len(received_responses) >= 3
 
             # Verify we have both chunk and final responses for each query
             for query_id in ["test-stream-1", "test-stream-2", "test-stream-3"]:
