@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 from inference_endpoint.testing.echo_server import EchoServer
+from inference_endpoint.dataset_manager.dataloader import DataLoader
 
 src_path = str(Path(__file__).parent.parent / "src")
 sys.path.insert(0, src_path)
@@ -92,3 +93,15 @@ def mock_http_echo_server():
         yield server
     finally:
         server.stop()
+
+@pytest.fixture
+def dummy_dataloader():
+    class DummyDataLoader(DataLoader):
+        def __init__(self, n_samples: int = 100):
+            super().__init__(None)
+            self.n_samples = n_samples
+
+        def load_sample(self, sample_index: int) -> int:
+            assert sample_index >= 0 and sample_index < self.n_samples
+            return sample_index
+    return DummyDataLoader()

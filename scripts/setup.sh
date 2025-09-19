@@ -7,10 +7,10 @@ echo "🚀 Setting up MLPerf Inference Endpoint Benchmarking System..."
 
 # Check Python version
 python_version=$(python3 --version 2>&1 | grep -oP '\d+\.\d+' | head -1)
-required_version="3.11"
+required_version="3.12"
 
 if [ "$(printf '%s\n' "$required_version" "$python_version" | sort -V | head -n1)" != "$required_version" ]; then
-    echo "❌ Error: Python 3.11+ required, found Python $python_version"
+    echo "❌ Error: Python 3.12+ required, found Python $python_version"
     exit 1
 fi
 

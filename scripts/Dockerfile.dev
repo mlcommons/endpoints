@@ -1,0 +1,32 @@
+# Development Dockerfile for the MLPerf Inference Endpoint Benchmarking System
+# From project root:
+# docker build -f scripts/Dockerfile.dev -t inference-endpoint-dev .
+# docker run -v $(pwd):/mnt/inference-endpoint -it inference-endpoint-dev bash
+
+FROM python:3.12-slim
+
+# Set environment variables
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# Install system dependencies
+RUN apt-get update && \
+    apt-get install -y  --no-install-recommends build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir /mnt/inference-endpoint
+WORKDIR /mnt/inference-endpoint
+COPY requirements/ ./requirements/
+COPY pyproject.toml .
+COPY src/ ./src/
+
+# Create a non-root user for security
+RUN useradd --create-home --shell /bin/bash appuser && \
+    chown -R appuser:appuser /mnt/inference-endpoint
+USER appuser
+ENV PATH="/home/appuser/.local/bin:$PATH"
+
+RUN pip install --no-cache-dir -r requirements/dev.txt -r requirements/test.txt
+RUN pip install -e .
