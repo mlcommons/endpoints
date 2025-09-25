@@ -12,7 +12,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from inference_endpoint.dataset_manager.dataloader import DataLoader
+from inference_endpoint.dataset_manager.dataloader import (
+    DataLoader,
+    HFDataLoader,
+    PickleReader,
+)
 from inference_endpoint.testing.echo_server import EchoServer
 
 src_path = str(Path(__file__).parent.parent / "src")
@@ -106,4 +110,46 @@ def dummy_dataloader():
             assert sample_index >= 0 and sample_index < self.n_samples
             return sample_index
 
+        def num_samples(self) -> int:
+            return self.n_samples
+
     return DummyDataLoader()
+
+
+@pytest.fixture
+def ds_pickle_dataset_path():
+    """
+    Returns the path to the ds_samples.pkl file.
+    """
+    return "tests/datasets/ds_samples.pkl"
+
+
+@pytest.fixture
+def ds_pickle_reader(ds_pickle_dataset_path):
+    """
+    Returns a PickleReader object for the ds_samples.pkl file.
+    """
+
+    def parser(row):
+        ret = {}
+        for column in row.index.to_list():
+            ret[column] = row[column]
+        return ret
+
+    return PickleReader(ds_pickle_dataset_path, parser=parser)
+
+
+@pytest.fixture
+def hf_squad_dataset_path():
+    """
+    Returns the path to the squad dataset.
+    """
+    return "tests/datasets/squad_pruned"
+
+
+@pytest.fixture
+def hf_squad_dataset(hf_squad_dataset_path):
+    """
+    Returns a HFDataLoader object for the squad dataset.
+    """
+    return HFDataLoader(hf_squad_dataset_path, format="arrow")

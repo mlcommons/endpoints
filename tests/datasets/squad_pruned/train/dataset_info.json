@@ -1,0 +1,76 @@
+{
+  "builder_name": "parquet",
+  "citation": "",
+  "config_name": "plain_text",
+  "dataset_name": "squad",
+  "dataset_size": 89834388,
+  "description": "",
+  "download_checksums": {
+    "hf://datasets/squad@7b6d24c440a36b6815f21b70d25016731768db1f/plain_text/train-00000-of-00001.parquet": {
+      "num_bytes": 14458314,
+      "checksum": null
+    },
+    "hf://datasets/squad@7b6d24c440a36b6815f21b70d25016731768db1f/plain_text/validation-00000-of-00001.parquet": {
+      "num_bytes": 1819889,
+      "checksum": null
+    }
+  },
+  "download_size": 16278203,
+  "features": {
+    "id": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "title": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "context": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "question": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "answers": {
+      "text": {
+        "feature": {
+          "dtype": "string",
+          "_type": "Value"
+        },
+        "_type": "List"
+      },
+      "answer_start": {
+        "feature": {
+          "dtype": "int32",
+          "_type": "Value"
+        },
+        "_type": "List"
+      }
+    }
+  },
+  "homepage": "",
+  "license": "",
+  "size_in_bytes": 106112591,
+  "splits": {
+    "train": {
+      "name": "train",
+      "num_bytes": 79357058,
+      "num_examples": 87599,
+      "dataset_name": "squad"
+    },
+    "validation": {
+      "name": "validation",
+      "num_bytes": 10477330,
+      "num_examples": 10570,
+      "dataset_name": "squad"
+    }
+  },
+  "version": {
+    "version_str": "0.0.0",
+    "major": 0,
+    "minor": 0,
+    "patch": 0
+  }
+}

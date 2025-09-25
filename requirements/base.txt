@@ -10,3 +10,4 @@ aiohttp==3.12.15
 orjson==3.11.3
 pyzmq==27.0.2
 uvloop==0.21.0
+datasets==4.1.1
