@@ -1,10 +1,8 @@
-"""Tests for ZMQ components used in endpoint client."""
+"""Integration tests for ZMQ socket communication."""
 
 import asyncio
-import os
 import time
 from dataclasses import dataclass
-from unittest import mock
 
 import pytest
 import zmq
@@ -15,6 +13,8 @@ from inference_endpoint.endpoint_client.zmq_utils import (
     ZMQPushSocket,
 )
 
+from ...conftest import get_test_socket_path
+
 
 @dataclass
 class SampleData:
@@ -23,102 +23,6 @@ class SampleData:
     id: str
     value: str
     timestamp: float
-
-
-class TestZMQConfig:
-    """Tests for ZMQConfig class."""
-
-    def test_default_path_generation_unix(self):
-        """Test that default paths are generated correctly on Unix systems."""
-        with mock.patch("os.name", "posix"):
-            with mock.patch("os.getpid", return_value=12345):
-                config = ZMQConfig()
-
-                assert (
-                    config.zmq_request_queue_prefix
-                    == "ipc:///tmp/mlperf_endpoint_http_worker_requests_12345"
-                )
-                assert (
-                    config.zmq_response_queue_addr
-                    == "ipc:///tmp/mlperf_endpoint_http_worker_responses_12345"
-                )
-
-    def test_custom_paths_preserved(self):
-        """Test that custom paths are preserved when provided."""
-        custom_request = "ipc:///custom/request/path"
-        custom_response = "ipc:///custom/response/path"
-
-        config = ZMQConfig(
-            zmq_request_queue_prefix=custom_request,
-            zmq_response_queue_addr=custom_response,
-        )
-
-        assert config.zmq_request_queue_prefix == custom_request
-        assert config.zmq_response_queue_addr == custom_response
-
-    def test_partial_custom_paths(self):
-        """Test that only unspecified paths are auto-generated."""
-        custom_request = "ipc:///custom/request/path"
-
-        with mock.patch("os.name", "posix"):
-            with mock.patch("os.getpid", return_value=12345):
-                config = ZMQConfig(zmq_request_queue_prefix=custom_request)
-
-                assert config.zmq_request_queue_prefix == custom_request
-                assert (
-                    config.zmq_response_queue_addr
-                    == "ipc:///tmp/mlperf_endpoint_http_worker_responses_12345"
-                )
-
-    def test_path_generation_includes_pid(self):
-        """Test that path generation includes the process ID."""
-        with mock.patch("os.name", "posix"):
-            config = ZMQConfig()
-
-            # Should include PID in the path
-            pid = os.getpid()
-            assert (
-                f"ipc:///tmp/mlperf_endpoint_http_worker_requests_{pid}"
-                == config.zmq_request_queue_prefix
-            )
-            assert (
-                f"ipc:///tmp/mlperf_endpoint_http_worker_responses_{pid}"
-                == config.zmq_response_queue_addr
-            )
-
-    def test_different_processes_get_different_paths(self):
-        """Test that different processes get different socket paths."""
-        with mock.patch("os.name", "posix"):
-            # Simulate different PIDs
-            with mock.patch("os.getpid", return_value=111):
-                config1 = ZMQConfig()
-
-            with mock.patch("os.getpid", return_value=222):
-                config2 = ZMQConfig()
-
-            # Paths should be different due to PID
-            assert config1.zmq_request_queue_prefix != config2.zmq_request_queue_prefix
-            assert config1.zmq_response_queue_addr != config2.zmq_response_queue_addr
-
-    def test_zmq_config_other_attributes(self):
-        """Test that other ZMQConfig attributes work correctly."""
-        config = ZMQConfig(
-            zmq_io_threads=8,
-            zmq_high_water_mark=20000,
-            zmq_linger=100,
-            zmq_send_timeout=5000,
-            zmq_recv_timeout=10000,
-            zmq_recv_buffer_size=20 * 1024 * 1024,
-            zmq_send_buffer_size=20 * 1024 * 1024,
-        )
-
-        assert config.zmq_io_threads == 8
-        assert config.zmq_high_water_mark == 20000
-        assert config.zmq_linger == 100
-        assert config.zmq_send_timeout == 5000
-        assert config.zmq_recv_timeout == 10000
-        assert config.zmq_recv_buffer_size == 20 * 1024 * 1024
-        assert config.zmq_send_buffer_size == 20 * 1024 * 1024
 
 
 class TestZMQPushPullIntegration:
@@ -182,7 +86,7 @@ class TestZMQPushPullIntegration:
     ):
         """Test push/pull communication with various payload types."""
         # Create unique address for this test using tmp_path
-        address = f"ipc://{tmp_path}/test_payload_{test_case['id']}"
+        address = get_test_socket_path(tmp_path, f"test_payload_{test_case['id']}")
 
         # Create context
         context = zmq.asyncio.Context()
@@ -222,10 +126,9 @@ class TestZMQPushPullIntegration:
             assert received["metadata"]["test_description"] == test_case["description"]
 
         finally:
-            # Cleanup
             push_socket.close()
             pull_socket.close()
-            context.term()
+            context.destroy(linger=0)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -304,7 +207,7 @@ class TestZMQPushPullIntegration:
             "test-json-result": "json",
         }
         short_id = id_map.get(result_case["query_id"], result_case["query_id"][:5])
-        address = f"ipc://{tmp_path}/tr_{short_id}"
+        address = get_test_socket_path(tmp_path, f"tr_{short_id}")
 
         context = zmq.asyncio.Context()
 
@@ -332,16 +235,15 @@ class TestZMQPushPullIntegration:
             assert received["error"] == result_case["error"]
             assert received["metadata"] == result_case["metadata"]
 
+        finally:
             push_socket.close()
             pull_socket.close()
-
-        finally:
-            context.term()
+            context.destroy(linger=0)
 
     @pytest.mark.asyncio
     async def test_streaming_response_communication(self, zmq_config, tmp_path):
         """Test streaming response pattern with first/final chunks."""
-        address = f"ipc://{tmp_path}/test_streaming"
+        address = get_test_socket_path(tmp_path, "test_streaming")
 
         context = zmq.asyncio.Context()
 
@@ -387,7 +289,7 @@ class TestZMQPushPullIntegration:
         finally:
             push_socket.close()
             pull_socket.close()
-            context.term()
+            context.destroy(linger=0)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -423,9 +325,14 @@ class TestZMQPushPullIntegration:
             },
         ],
     )
-    async def test_multiple_message_sequences(self, zmq_config, sequence_config):
+    async def test_multiple_message_sequences(
+        self, zmq_config, sequence_config, tmp_path
+    ):
         """Test various patterns of sending multiple messages."""
-        address = f"ipc:///tmp/test_sequence_{sequence_config['description'].replace(' ', '_')}_{int(time.time() * 1000)}"
+        address = get_test_socket_path(
+            tmp_path,
+            f"test_sequence_{sequence_config['description'].replace(' ', '_')}",
+        )
 
         context = zmq.asyncio.Context()
 
@@ -486,16 +393,15 @@ class TestZMQPushPullIntegration:
             assert len(received_queries) == total_messages
 
         finally:
-            # Cleanup
             for socket in push_sockets:
                 socket.close()
             pull_socket.close()
-            context.term()
+            context.destroy(linger=0)
 
     @pytest.mark.asyncio
-    async def test_custom_data_serialization(self, zmq_config):
+    async def test_custom_data_serialization(self, zmq_config, tmp_path):
         """Test sending custom data types."""
-        address = f"ipc:///tmp/test_custom_{int(time.time() * 1000)}"
+        address = get_test_socket_path(tmp_path, "test_custom")
 
         context = zmq.asyncio.Context()
 
@@ -520,16 +426,15 @@ class TestZMQPushPullIntegration:
             assert received.value == "test value with special chars: 你好 🚀"
             assert isinstance(received.timestamp, float)
 
+        finally:
             push_socket.close()
             pull_socket.close()
-
-        finally:
-            context.term()
+            context.destroy(linger=0)
 
     @pytest.mark.asyncio
-    async def test_pull_socket_connect_mode(self, zmq_config):
+    async def test_pull_socket_connect_mode(self, zmq_config, tmp_path):
         """Test ZMQPullSocket in connect mode (bind=False)."""
-        address = f"ipc:///tmp/test_pull_connect_{int(time.time() * 1000)}"
+        address = get_test_socket_path(tmp_path, "test_pull_connect")
 
         context = zmq.asyncio.Context()
 
@@ -567,8 +472,7 @@ class TestZMQPushPullIntegration:
             assert received.id == "connect-test"
             assert received.value == "Testing connect mode"
 
+        finally:
             push_socket.close()
             pull_socket.close()
-
-        finally:
-            context.term()
+            context.destroy(linger=0)

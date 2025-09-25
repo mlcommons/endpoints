@@ -15,3 +15,6 @@ ruff>=0.3.0
 
 # Development tools
 pre-commit>=3.0.0
+
+# Profiling tools
+line-profiler==5.0.0

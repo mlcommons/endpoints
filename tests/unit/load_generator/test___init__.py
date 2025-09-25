@@ -1,12 +1,15 @@
 import random
 import time
 from collections import defaultdict
+from typing import Any
 
+import pytest
 from inference_endpoint import metrics
 from inference_endpoint.config.ruleset import RuntimeSettings
 from inference_endpoint.load_generator import LoadGenerator, SampleIssuer
 from inference_endpoint.load_generator.scheduler import (
     MaxThroughputScheduler,
+    SampleEvent,
     SampleFactory,
     WithoutReplacementSampleOrder,
 )
@@ -19,9 +22,10 @@ class DummySampleFactory(SampleFactory):
     def sample_complete_callback(output, sid=None):
         assert isinstance(output, list)
         assert len(output) == 1
-        assert output[0] == (
-            sid**2
-        )  # DummyDataloader returns sample index as data, model is x^2
+        # sid is the sample_index from the dataset
+        # output is a list of chunks, each chunk is a list containing the value
+        assert output[0][0] == sid**2
+        # Track by dataset index
         DummySampleFactory._output_histogram[sid] += 1
 
 
@@ -30,12 +34,15 @@ def DummyXSquaredModel(x):
 
 
 class DummySampleIssuer(SampleIssuer):
-    def process_sample_data(self, s_uuid: int, sample_data: bytes):
+    def process_sample_data(self, s_uuid: int, sample_data: Any):
         output = DummyXSquaredModel(sample_data)
-        self.push_response_chunk(s_uuid, output)
-        self.stop_response_thread(s_uuid)
+        # Push the result as a chunk
+        self.push_response_chunk(s_uuid, [output])
+        # Signal completion
+        self.push_response_chunk(s_uuid, SampleEvent.COMPLETE)
 
 
+@pytest.mark.xdist_group(name="serial_load_generator")
 def test_load_generator_full_run(dummy_dataloader):
     # Reset for test
     DummySampleFactory._output_histogram.clear()

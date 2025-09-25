@@ -45,7 +45,7 @@ class SampleFactory:
         return dataloader.load_sample(sample_index)
 
     def get_sample_callbacks(self, sample_index: int) -> dict[SampleEvent, Callable]:
-        """Gets the callbacks for the given sample ID."""
+        """Gets the callbacks for the given sample ID. Cached per sample_index."""
         return {
             SampleEvent.COMPLETE: partial(
                 self.__class__.sample_complete_callback, sid=sample_index

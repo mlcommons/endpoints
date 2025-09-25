@@ -1,5 +1,6 @@
 import random
 
+from inference_endpoint.core.types import QueryResult
 from inference_endpoint.dataset_manager.dataloader import DataLoader
 from inference_endpoint.load_generator.scheduler import (
     SampleEvent,
@@ -31,13 +32,14 @@ def test_sample_factory(dummy_dataloader: DataLoader):
         obj = sample.get_bytes()
         assert obj == idx, "Sample 'bytes' should be equal to index for DummyDataLoader"
 
-        sample.callbacks[SampleEvent.COMPLETE](None)
+        result = QueryResult(id=sample.uuid, response_output=None)
+        sample.callbacks[SampleEvent.COMPLETE](result)
         assert len(completed) == len(
             uuids
         ), "Completed callback should be called for each sample"
         assert (
             completed[-1] == idx
-        ), "Completed callback should be called for the last sample"
+        ), "Completed callback should be called with correct sample index"
 
 
 def test_without_replacement_sample_order():

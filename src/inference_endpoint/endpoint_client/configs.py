@@ -18,100 +18,129 @@ class HTTPClientConfig:
         -1
     )  # -1: unlimited, else: limit concurrent requests via semaphore
 
+    # WARNING: Use with caution
+    # Can cause large performance overhead on main-thread (user / Loadgen)
+    #
+    # When enabled, all chunks will be made available via get_ready_responses() ASAP
+    # When disabled, only first chunk of every response will arrive via get_ready_responses()
+    #
+    # NOTE:
+    #   - StreamChunk.metadata['first_chunk'] is set for first chunk of every response
+    #   - At end of stream, QueryResult is returned with the entire response content
+    stream_all_chunks: bool = False
+
     # Worker lifecycle timeouts
     worker_initialization_timeout: float = 10.0  # init
-    worker_health_check_interval: float = 2.0  # runtime
     worker_graceful_shutdown_wait: float = 0.5  # post-run
-    worker_force_kill_timeout: float = 1.0  # post-run
+    worker_force_kill_timeout: float = 0.5  # post-run
 
-    # Response handling timeouts, for signal handling
-    response_handler_timeout: float = 1.0
-    worker_request_timeout: float = 1.0
+    # TODO(vir):
+    #   -  move streaming to HttpClient config (not per-query)
+    #   -  add max-sequence-length to HttpClient config (not per-query), base streaming_buffer_size on it
+    streaming_buffer_size: int = 128 * 1024  # 128KB buffer for streaming tokens
 
 
 @dataclass
 class SocketConfig:
-    """Linux socket optimizations for HTTP performance."""
+    """Default values for socket options."""
 
-    # Essential socket options
-    tcp_nodelay: bool = True  # Disable Nagle's algorithm for lower latency
-    so_keepalive: bool = True  # Enable TCP keepalive
-    so_reuseaddr: bool = True  # Allow socket reuse
+    # Nagle's algorithm batches small packets to improve network efficiency
+    # TCP_NODELAY disables Nagle's algorithm lower latency in both directions
+    # Causes increased CPU usage due to more packets being sent
+    tcp_nodelay: int = 1
 
-    # Socket buffer sizes (0 means use system default)
-    so_rcvbuf: int = 0  # Receive buffer size
-    so_sndbuf: int = 0  # Send buffer size
+    # Quick ACK mode (Linux-specific)
+    # Forces immediate acknowledgment of received packets
+    # instead of the default delayed ACK behavior.
+    tcp_quickack: int = 1
 
-    # TCP keepalive parameters (Linux-specific)
-    tcp_keepidle: int = 60  # Seconds before sending keepalive probes
-    tcp_keepintvl: int = 10  # Interval between keepalive probes
-    tcp_keepcnt: int = 6  # Number of keepalive probes before closing
+    # Connection keepalive settings for long-lived connections
+    so_keepalive: int = 1  # Enable keepalive at socket level
+    tcp_keepidle: int = 30  # Start keepalive probes after 30 seconds idle
+    tcp_keepcnt: int = 1  # 1 failed keepalive probes = dead
+    tcp_keepintvl: int = 30  # Send probes every 30 seconds
+
+    # Make sure socket buffers are never the bottle neck
+    # With HTTP/1.1, a TCP socket will only be used for a single request
+    # Largest message size would be server response in Offline Mode
+    # 4MB /4 bytes per token = 1M tokens in any given packet
+    so_rcvbuf: int = 1024 * 1024 * 10  # 4MB receive buffer
+    so_sndbuf: int = 1024 * 1024 * 10  # 4MB send buffer
+
+    # Linux-specific
+    # Causes socket to be closed if no data is received for the specified time
+    #
+    # WARNING:
+    # offline-mode might suffer dropped conections due to this timeout
+    tcp_user_timeout: int = 30000  # 30 seconds
 
     def apply_to_socket(self, sock: socket.socket) -> None:
-        """Apply Linux socket optimizations."""
-        # TCP_NODELAY - disable Nagle's algorithm
-        if self.tcp_nodelay:
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        """
+        Apply the default socket options to the given socket.
+        Socket is used by aiohttp.ClientSession to create TCP connections for HTTP requests.
 
-        # SO_KEEPALIVE and related options
-        if self.so_keepalive:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, self.tcp_keepidle)
+        With socket-reuse enabled, TCP connection can be maintained across requests.
+        """
+
+        # Low-latency optimizations for streaming
+        sock.setsockopt(socket.SOL_TCP, socket.TCP_NODELAY, self.tcp_nodelay)
+
+        # Connection keepalive settings for long-lived SSE connections
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, self.so_keepalive)
+
+        # Fine-tune keepalive timing
+        if hasattr(socket, "TCP_KEEPIDLE"):
+            sock.setsockopt(socket.SOL_TCP, socket.TCP_KEEPIDLE, self.tcp_keepidle)
+            sock.setsockopt(socket.SOL_TCP, socket.TCP_KEEPINTVL, self.tcp_keepintvl)
+            sock.setsockopt(socket.SOL_TCP, socket.TCP_KEEPCNT, self.tcp_keepcnt)
+
+        # Buffer size optimizations for streaming
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, self.so_rcvbuf)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, self.so_sndbuf)
+
+        # Enable Quick ACK mode
+        if hasattr(socket, "TCP_QUICKACK"):
+            sock.setsockopt(socket.SOL_TCP, socket.TCP_QUICKACK, self.tcp_quickack)
+
+        # Set idle connection timeout
+        if hasattr(socket, "TCP_USER_TIMEOUT"):
             sock.setsockopt(
-                socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, self.tcp_keepintvl
+                socket.SOL_TCP, socket.TCP_USER_TIMEOUT, self.tcp_user_timeout
             )
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, self.tcp_keepcnt)
-
-        # SO_REUSEADDR - allow socket reuse
-        if self.so_reuseaddr:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-
-        # Socket buffer sizes
-        if self.so_rcvbuf > 0:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, self.so_rcvbuf)
-        if self.so_sndbuf > 0:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, self.so_sndbuf)
 
 
 @dataclass
 class AioHttpConfig:
     """Configuration for aiohttp client session and connectors."""
 
-    # TCP Connector settings
-
-    # aiohttp.ClientSession configs
+    # lifetime timeouts
     client_timeout_total: float | None = None  # None means no timeout
     client_timeout_connect: float | None = None
     client_timeout_sock_read: float | None = None
-    client_session_connector_owner: bool = (
-        False  # TCP connector is owned by USER directly
-    )
+
+    # skip these headers in requests
     skip_auto_headers: list[str] = field(
         default_factory=lambda: ["User-Agent", "Accept-Encoding"]
     )
 
-    # aiohttp.TCPConnector configs
+    # TCP Connection Pooling
+    tcp_connector_limit: int | None = None  # None for unlimited (system limit)
+    tcp_connector_limit_per_host: int | None = None
+    tcp_connector_force_close: bool = False  # Enable connection pooling
+    tcp_connector_keepalive_timeout: int = 30  # 30 seconds timeout for idle connection
+
+    # DNS caching
     tcp_connector_use_dns_cache: bool = True
-    tcp_connector_ttl_dns_cache: int = 300
-    tcp_connector_enable_cleanup_closed: bool = True
-    tcp_connector_limit: int = 0  # 0 means unlimited
-    tcp_connector_limit_per_host: int = 0  # 0 means unlimited per host
-    tcp_connector_keepalive_timeout: int = (
-        30  # Keep TCP connections alive for 30 seconds
-    )
-    tcp_connector_force_close: bool = (
-        False  # Keep TCP connections alive, reuse across requests
-    )
-    tcp_connector_enable_tcp_nodelay: bool = True  # Disable Nagle's algorithm
-    tcp_connector_happy_eyeballs_delay: float = (
-        0.25  # Delay for IPv4/IPv6 connection race
-    )
-    tcp_connector_family: int = 0  # 0 = AF_UNSPEC (both IPv4 and IPv6)
+    tcp_connector_ttl_dns_cache: int = 300  # 5 min
 
-    # Streaming configs
-    streaming_buffer_size: int = 64 * 1024  # 64KB buffer for streaming
+    # Happy Eyeballs effects the staggering of connection attempts (RFC 8305)
+    # When disabled, we issue connection in traditional sequential manner (IPv4 first, then IPv6)
+    # This offers better connection latency when host is known reliable
+    tcp_connector_happy_eyeballs_delay: float | None = None  # None = disabled
 
-    # Socket-level defaults
+    tcp_connector_family: int = socket.AF_UNSPEC  # IPv4 and IPv6
+
+    # Socket defaults
     socket_defaults: SocketConfig = field(default_factory=SocketConfig)
 
     def create_tcp_connector(self, **kwargs) -> aiohttp.TCPConnector:
@@ -127,10 +156,10 @@ class AioHttpConfig:
         connector_kwargs: dict[str, Any] = {
             "limit": self.tcp_connector_limit,
             "limit_per_host": self.tcp_connector_limit_per_host,
-            "ttl_dns_cache": self.tcp_connector_ttl_dns_cache,
-            "use_dns_cache": self.tcp_connector_use_dns_cache,
             "force_close": self.tcp_connector_force_close,
             "keepalive_timeout": self.tcp_connector_keepalive_timeout,
+            "ttl_dns_cache": self.tcp_connector_ttl_dns_cache,
+            "use_dns_cache": self.tcp_connector_use_dns_cache,
             "happy_eyeballs_delay": self.tcp_connector_happy_eyeballs_delay,
             "family": self.tcp_connector_family,
             "socket_factory": socket_factory,
@@ -138,7 +167,6 @@ class AioHttpConfig:
 
         # Allow overrides from kwargs
         connector_kwargs.update(kwargs)
-
         return aiohttp.TCPConnector(**connector_kwargs)
 
 
@@ -150,7 +178,7 @@ class ZMQConfig:
     zmq_io_threads: int = 4  # Number of ZMQ IO threads
     zmq_high_water_mark: int = 10_000  # max msg queue size
 
-    # ZMQ addresses (use None for auto-generation)
+    # ZMQ addresses (use None for auto-generated prefixes using PID)
     zmq_request_queue_prefix: str | None = None
     zmq_response_queue_addr: str | None = None
     zmq_readiness_queue_addr: str | None = None
@@ -158,7 +186,7 @@ class ZMQConfig:
     # ZMQ socket options
     zmq_linger: int = 0  # Don't block on close
     zmq_send_timeout: int = -1  # Non-blocking send
-    zmq_recv_timeout: int = -1  # Blocking receive
+    zmq_recv_timeout: int = 100  # Timeout on receive() call
     zmq_recv_buffer_size: int = 10 * 1024 * 1024  # 10MB receive buffer
     zmq_send_buffer_size: int = 10 * 1024 * 1024  # 10MB send buffer
 

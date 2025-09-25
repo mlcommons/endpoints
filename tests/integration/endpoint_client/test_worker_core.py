@@ -15,6 +15,8 @@ from inference_endpoint.endpoint_client.configs import (
 )
 from inference_endpoint.endpoint_client.worker import Worker
 
+from ...conftest import get_test_socket_path
+
 
 class TestWorkerBasicFunctionality:
     """Test basic Worker functionality for request/response handling."""
@@ -24,8 +26,12 @@ class TestWorkerBasicFunctionality:
         """Create unique ZMQ configuration for each test."""
         # Use tmp_path for unique socket paths per test
         return ZMQConfig(
-            zmq_request_queue_prefix=f"ipc://{tmp_path}/test_worker_req",
-            zmq_response_queue_addr=f"ipc://{tmp_path}/test_worker_resp",
+            zmq_request_queue_prefix=get_test_socket_path(
+                tmp_path, "test_worker", "_req"
+            ),
+            zmq_response_queue_addr=get_test_socket_path(
+                tmp_path, "test_worker", "_resp"
+            ),
             zmq_high_water_mark=100,
         )
 
@@ -106,10 +112,9 @@ class TestWorkerBasicFunctionality:
             await worker_task
 
         finally:
-            # Cleanup
             request_push.close()
             response_pull.close()
-            context.term()
+            context.destroy(linger=0)
 
     @pytest.mark.asyncio
     async def test_worker_streaming_request(
@@ -195,7 +200,7 @@ class TestWorkerBasicFunctionality:
         finally:
             request_push.close()
             response_pull.close()
-            context.term()
+            context.destroy(linger=0)
 
     @pytest.mark.asyncio
     async def test_worker_multiple_requests(
@@ -268,24 +273,35 @@ class TestWorkerBasicFunctionality:
         finally:
             request_push.close()
             response_pull.close()
-            context.term()
+            context.destroy(linger=0)
 
     @pytest.mark.asyncio
     async def test_worker_signal_handling(
-        self, mock_http_echo_server, worker_config, zmq_config
+        self, mock_http_echo_server, worker_config, tmp_path
     ):
         """Test worker responds to signals correctly."""
         http_config, aiohttp_config = worker_config
+
+        # Use a short timeout for this test so worker exits quickly
+        test_zmq_config = ZMQConfig(
+            zmq_request_queue_prefix=get_test_socket_path(
+                tmp_path, "test_worker_sig", "_req"
+            ),
+            zmq_response_queue_addr=get_test_socket_path(
+                tmp_path, "test_worker_sig", "_resp"
+            ),
+            zmq_recv_timeout=100,  # Short timeout (100ms) for fast shutdown
+        )
 
         # Create worker
         worker = Worker(
             worker_id=0,
             http_config=http_config,
             aiohttp_config=aiohttp_config,
-            zmq_config=zmq_config,
-            request_socket_addr=f"{zmq_config.zmq_request_queue_prefix}_0_requests",
-            response_socket_addr=zmq_config.zmq_response_queue_addr,
-            readiness_socket_addr=zmq_config.zmq_readiness_queue_addr,
+            zmq_config=test_zmq_config,
+            request_socket_addr=f"{test_zmq_config.zmq_request_queue_prefix}_0_requests",
+            response_socket_addr=test_zmq_config.zmq_response_queue_addr,
+            readiness_socket_addr=test_zmq_config.zmq_readiness_queue_addr,
         )
 
         context = zmq.asyncio.Context()
@@ -293,7 +309,7 @@ class TestWorkerBasicFunctionality:
         try:
             # Create minimal sockets
             response_pull = context.socket(zmq.PULL)
-            response_pull.bind(zmq_config.zmq_response_queue_addr)
+            response_pull.bind(test_zmq_config.zmq_response_queue_addr)
 
             # Start worker
             worker_task = asyncio.create_task(worker.run())
@@ -303,18 +319,17 @@ class TestWorkerBasicFunctionality:
             assert not worker._shutdown
 
             # Send signal
-            worker._handle_signal(signal.SIGTERM, None)
+            worker.shutdown(signal.SIGTERM, None)
 
             # Verify shutdown flag is set
             assert worker._shutdown
 
-            # Worker should exit gracefully
-            await asyncio.wait_for(worker_task, timeout=3.0)
-
-            response_pull.close()
+            # Worker should exit gracefully after the receive timeout
+            await asyncio.wait_for(worker_task, timeout=1.0)
 
         finally:
-            context.term()
+            response_pull.close()
+            context.destroy(linger=0)
 
     @pytest.mark.asyncio
     async def test_worker_streaming_first_last_token_metadata(
@@ -411,7 +426,7 @@ class TestWorkerBasicFunctionality:
         finally:
             request_push.close()
             response_pull.close()
-            context.term()
+            context.destroy(linger=0)
 
     @pytest.mark.asyncio
     async def test_worker_streaming_empty_chunks(
@@ -489,7 +504,7 @@ class TestWorkerBasicFunctionality:
         finally:
             request_push.close()
             response_pull.close()
-            context.term()
+            context.destroy(linger=0)
 
     @pytest.mark.asyncio
     async def test_worker_cleanup_with_resources(
@@ -570,12 +585,12 @@ class TestWorkerBasicFunctionality:
         )
 
         # Test SIGTERM
-        worker._handle_signal(signal.SIGTERM, None)
+        worker.shutdown(signal.SIGTERM, None)
         assert worker._shutdown is True
 
         # Reset and test SIGINT
         worker._shutdown = False
-        worker._handle_signal(signal.SIGINT, None)
+        worker.shutdown(signal.SIGINT, None)
         assert worker._shutdown is True
 
     @pytest.mark.asyncio
@@ -675,7 +690,7 @@ class TestWorkerBasicFunctionality:
         finally:
             request_push.close()
             response_pull.close()
-            context.term()
+            context.destroy(linger=0)
 
     @pytest.mark.asyncio
     async def test_worker_large_response_handling(
@@ -746,7 +761,7 @@ class TestWorkerBasicFunctionality:
         finally:
             request_push.close()
             response_pull.close()
-            context.term()
+            context.destroy(linger=0)
 
     @pytest.mark.asyncio
     async def test_worker_streaming_chunk_before_final_single_word(
@@ -906,4 +921,4 @@ class TestWorkerBasicFunctionality:
         finally:
             request_push.close()
             response_pull.close()
-            context.term()
+            context.destroy(linger=0)
