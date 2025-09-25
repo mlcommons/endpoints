@@ -1,10 +1,9 @@
 import math
 import random
-import threading
 import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from functools import partial
 
@@ -25,14 +24,6 @@ class Sample:
     uuid: int
     callbacks: dict[SampleEvent, Callable]
     get_bytes: Callable
-    _events: dict[SampleEvent, threading.Event] = field(
-        init=False, default_factory=dict
-    )
-
-    def __post_init__(self):
-        for event in SampleEvent:
-            self._events[event] = threading.Event()
-        # Consumer of Sample should create a thread and wait on the events.
 
 
 class SampleFactory:
