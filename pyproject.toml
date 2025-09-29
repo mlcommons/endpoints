@@ -78,7 +78,10 @@ target-version = "py312"
 line-length = 88
 exclude = [
     "tests/datasets/*",
+    "src/inference_endpoint/openai/openai_types_gen.py",
+    "src/inference_endpoint/openai/openapi.yaml",
 ]
+
 
 [tool.ruff.lint]
 select = [

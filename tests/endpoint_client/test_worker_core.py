@@ -7,7 +7,7 @@ import signal
 import pytest
 import zmq
 import zmq.asyncio
-from inference_endpoint.core.types import ChatCompletionQuery, QueryResult, StreamChunk
+from inference_endpoint.core.types import Query, QueryResult, StreamChunk
 from inference_endpoint.endpoint_client.configs import (
     AioHttpConfig,
     HTTPClientConfig,
@@ -80,11 +80,13 @@ class TestWorkerBasicFunctionality:
             await asyncio.sleep(0.1)
 
             # Send test query
-            query = ChatCompletionQuery(
+            query = Query(
                 id="test-non-streaming",
-                prompt="Hello, echo server!",
-                model="gpt-3.5-turbo",
-                stream=False,
+                data={
+                    "prompt": "Hello, echo server!",
+                    "model": "gpt-3.5-turbo",
+                    "stream": False,
+                },
             )
 
             await request_push.send(pickle.dumps(query))
@@ -95,7 +97,7 @@ class TestWorkerBasicFunctionality:
 
             # Verify response
             assert isinstance(response, QueryResult)
-            assert response.query_id == "test-non-streaming"
+            assert response.id == "test-non-streaming"
             assert response.response_output == "Hello, echo server!"
             assert response.error is None
 
@@ -103,11 +105,10 @@ class TestWorkerBasicFunctionality:
             worker._shutdown = True
             await worker_task
 
+        finally:
             # Cleanup
             request_push.close()
             response_pull.close()
-
-        finally:
             context.term()
 
     @pytest.mark.asyncio
@@ -148,11 +149,13 @@ class TestWorkerBasicFunctionality:
             await asyncio.sleep(0.1)
 
             # Send streaming query
-            query = ChatCompletionQuery(
+            query = Query(
                 id="test-streaming",
-                prompt="Stream this response please",
-                model="gpt-3.5-turbo",
-                stream=True,
+                data={
+                    "prompt": "Stream this response please",
+                    "model": "gpt-3.5-turbo",
+                    "stream": True,
+                },
             )
 
             await request_push.send(pickle.dumps(query))
@@ -180,7 +183,7 @@ class TestWorkerBasicFunctionality:
 
             # Verify first chunk
             assert responses[0].metadata.get("first_chunk") is True
-            assert responses[0].query_id == "test-streaming"
+            assert responses[0].id == "test-streaming"
 
             # Verify final response
             assert final_content == "Stream this response please"
@@ -189,10 +192,9 @@ class TestWorkerBasicFunctionality:
             worker._shutdown = True
             await worker_task
 
+        finally:
             request_push.close()
             response_pull.close()
-
-        finally:
             context.term()
 
     @pytest.mark.asyncio
@@ -231,11 +233,13 @@ class TestWorkerBasicFunctionality:
             num_queries = 5
             queries = []
             for i in range(num_queries):
-                query = ChatCompletionQuery(
+                query = Query(
                     id=f"test-multi-{i}",
-                    prompt=f"Request number {i}",
-                    model="gpt-3.5-turbo",
-                    stream=False,
+                    data={
+                        "prompt": f"Request number {i}",
+                        "model": "gpt-3.5-turbo",
+                        "stream": False,
+                    },
                 )
                 queries.append(query)
                 await request_push.send(pickle.dumps(query))
@@ -247,24 +251,23 @@ class TestWorkerBasicFunctionality:
                     response_pull.recv(), timeout=2.0
                 )
                 response = pickle.loads(response_data)
-                responses[response.query_id] = response
+                responses[response.id] = response
 
             # Verify all responses
             assert len(responses) == num_queries
             for i in range(num_queries):
-                query_id = f"test-multi-{i}"
-                assert query_id in responses
-                assert responses[query_id].response_output == f"Request number {i}"
-                assert responses[query_id].error is None
+                id = f"test-multi-{i}"
+                assert id in responses
+                assert responses[id].response_output == f"Request number {i}"
+                assert responses[id].error is None
 
             # Shutdown
             worker._shutdown = True
             await asyncio.wait_for(worker_task, timeout=2.0)
 
+        finally:
             request_push.close()
             response_pull.close()
-
-        finally:
             context.term()
 
     @pytest.mark.asyncio
@@ -346,11 +349,13 @@ class TestWorkerBasicFunctionality:
             await asyncio.sleep(0.1)
 
             # Send streaming query with multi-word response to ensure multiple chunks
-            query = ChatCompletionQuery(
+            query = Query(
                 id="test-first-last-token",
-                prompt="Hello world this is a test",  # Multi-word to get multiple chunks
-                model="gpt-3.5-turbo",
-                stream=True,
+                data={
+                    "prompt": "Hello world this is a test",  # Multi-word to get multiple chunks
+                    "model": "gpt-3.5-turbo",
+                    "stream": True,
+                },
             )
 
             await request_push.send(pickle.dumps(query))
@@ -386,27 +391,26 @@ class TestWorkerBasicFunctionality:
             first_chunk = stream_chunks[0]
             assert first_chunk.metadata.get("first_chunk") is True
             assert first_chunk.metadata.get("final_chunk") is False
-            assert first_chunk.query_id == "test-first-last-token"
+            assert first_chunk.id == "test-first-last-token"
             assert first_chunk.response_chunk  # Should have content
 
             # Verify final result metadata
             assert final_result.metadata.get("final_chunk") is True
-            assert final_result.query_id == "test-first-last-token"
+            assert final_result.id == "test-first-last-token"
             assert final_result.response_output == "Hello world this is a test"
 
             # Verify intermediate chunks (if any) don't have first_chunk set to True
             for chunk in stream_chunks[1:]:
                 assert chunk.metadata.get("first_chunk") is not True
-                assert chunk.query_id == "test-first-last-token"
+                assert chunk.id == "test-first-last-token"
 
             # Shutdown
             worker._shutdown = True
             await worker_task
 
+        finally:
             request_push.close()
             response_pull.close()
-
-        finally:
             context.term()
 
     @pytest.mark.asyncio
@@ -441,11 +445,13 @@ class TestWorkerBasicFunctionality:
             await asyncio.sleep(0.1)
 
             # Send streaming query with empty prompt (should still get response structure)
-            query = ChatCompletionQuery(
+            query = Query(
                 id="test-empty-chunks",
-                prompt="",  # Empty prompt
-                model="gpt-3.5-turbo",
-                stream=True,
+                data={
+                    "prompt": "",  # Empty prompt
+                    "model": "gpt-3.5-turbo",
+                    "stream": True,
+                },
             )
 
             await request_push.send(pickle.dumps(query))
@@ -473,17 +479,16 @@ class TestWorkerBasicFunctionality:
             # Verify final response
             final_response = responses[-1]
             assert final_response.metadata.get("final_chunk") is True
-            assert final_response.query_id == "test-empty-chunks"
+            assert final_response.id == "test-empty-chunks"
             assert final_response.response_output == ""  # Empty content
 
             # Shutdown
             worker._shutdown = True
             await asyncio.wait_for(worker_task, timeout=2.0)
 
+        finally:
             request_push.close()
             response_pull.close()
-
-        finally:
             context.term()
 
     @pytest.mark.asyncio
@@ -637,11 +642,13 @@ class TestWorkerBasicFunctionality:
             await asyncio.sleep(0.1)
 
             # Create query with custom headers
-            query = ChatCompletionQuery(
+            query = Query(
                 id="test-headers",
-                prompt="Test with headers",
-                model="gpt-3.5-turbo",
-                stream=False,
+                data={
+                    "prompt": "Test with headers",
+                    "model": "gpt-3.5-turbo",
+                    "stream": False,
+                },
             )
             # Add headers attribute
             query.headers = {
@@ -657,7 +664,7 @@ class TestWorkerBasicFunctionality:
 
             # Echo server should return our prompt
             assert isinstance(response, QueryResult)
-            assert response.query_id == "test-headers"
+            assert response.id == "test-headers"
             assert response.response_output == "Test with headers"
             assert response.error is None
 
@@ -665,10 +672,9 @@ class TestWorkerBasicFunctionality:
             worker._shutdown = True
             await asyncio.wait_for(worker_task, timeout=2.0)
 
+        finally:
             request_push.close()
             response_pull.close()
-
-        finally:
             context.term()
 
     @pytest.mark.asyncio
@@ -704,11 +710,13 @@ class TestWorkerBasicFunctionality:
 
             # Send query with large content (100KB of text with spaces)
             large_content = "Hello world! " * (100 * 1024 // 13)  # ~100KB
-            query = ChatCompletionQuery(
+            query = Query(
                 id="test-large-response",
-                prompt=large_content,
-                model="gpt-3.5-turbo",
-                stream=False,
+                data={
+                    "prompt": large_content,
+                    "model": "gpt-3.5-turbo",
+                    "stream": False,
+                },
             )
 
             await request_push.send(pickle.dumps(query))
@@ -719,7 +727,7 @@ class TestWorkerBasicFunctionality:
 
             # Verify response
             assert isinstance(response, QueryResult)
-            assert response.query_id == "test-large-response"
+            assert response.id == "test-large-response"
 
             # Check if there's an error first
             if response.error:
@@ -735,10 +743,9 @@ class TestWorkerBasicFunctionality:
             worker._shutdown = True
             await asyncio.wait_for(worker_task, timeout=2.0)
 
+        finally:
             request_push.close()
             response_pull.close()
-
-        finally:
             context.term()
 
     @pytest.mark.asyncio
@@ -779,11 +786,13 @@ class TestWorkerBasicFunctionality:
             await asyncio.sleep(0.1)
 
             # Test single-word prompt that will echo as single word
-            query = ChatCompletionQuery(
+            query = Query(
                 id="test-single-word-order",
-                prompt="Hi",  # Single word that will be echoed
-                model="gpt-3.5-turbo",
-                stream=True,
+                data={
+                    "prompt": "Hi",  # Single word that will be echoed
+                    "model": "gpt-3.5-turbo",
+                    "stream": True,
+                },
             )
 
             await request_push.send(pickle.dumps(query))
@@ -820,7 +829,7 @@ class TestWorkerBasicFunctionality:
             ), "First response should be a StreamChunk"
             assert first_response.response_chunk == "Hi"
             assert first_response.metadata.get("first_chunk") is True
-            assert first_response.query_id == "test-single-word-order"
+            assert first_response.id == "test-single-word-order"
 
             # Verify last response is the final QueryResult
             last_response = responses_in_order[-1]
@@ -832,7 +841,7 @@ class TestWorkerBasicFunctionality:
             ), "Last response should not be a StreamChunk"
             assert last_response.response_output == "Hi"
             assert last_response.metadata.get("final_chunk") is True
-            assert last_response.query_id == "test-single-word-order"
+            assert last_response.id == "test-single-word-order"
 
             # Verify ordering: StreamChunk(s) before final QueryResult
             found_final = False
@@ -848,11 +857,13 @@ class TestWorkerBasicFunctionality:
             assert found_final, "Should have found a final QueryResult"
 
             # Test with another edge case: empty prompt
-            query2 = ChatCompletionQuery(
+            query2 = Query(
                 id="test-empty-order",
-                prompt="",  # Empty prompt
-                model="gpt-3.5-turbo",
-                stream=True,
+                data={
+                    "prompt": "",  # Empty prompt
+                    "model": "gpt-3.5-turbo",
+                    "stream": True,
+                },
             )
 
             await request_push.send(pickle.dumps(query2))
@@ -886,14 +897,13 @@ class TestWorkerBasicFunctionality:
                 responses_empty[0], StreamChunk
             ), "Should not be a StreamChunk"
             assert responses_empty[0].response_output == ""
-            assert responses_empty[0].query_id == "test-empty-order"
+            assert responses_empty[0].id == "test-empty-order"
 
             # Shutdown
             worker._shutdown = True
             await asyncio.wait_for(worker_task, timeout=2.0)
 
+        finally:
             request_push.close()
             response_pull.close()
-
-        finally:
             context.term()

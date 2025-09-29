@@ -8,7 +8,7 @@ import pytest
 import pytest_asyncio
 import zmq
 import zmq.asyncio
-from inference_endpoint.core.types import ChatCompletionQuery, QueryResult
+from inference_endpoint.core.types import Query, QueryResult
 from inference_endpoint.endpoint_client import HTTPEndpointClient
 from inference_endpoint.endpoint_client.configs import (
     AioHttpConfig,
@@ -116,10 +116,13 @@ class TestHTTPEndpointClientConcurrency:
         await client.start()
 
         try:
-            query = ChatCompletionQuery(
+            query = Query(
                 id="future-test",
-                prompt="Test future handling",
-                model="gpt-3.5-turbo",
+                data={
+                    "prompt": "Test future handling",
+                    "model": "gpt-3.5-turbo",
+                    "stream": False,
+                },
             )
 
             # issue_query returns a future directly
@@ -128,7 +131,7 @@ class TestHTTPEndpointClientConcurrency:
 
             # Await the future
             result = await asyncio.wait_for(future, timeout=2.0)
-            assert result.query_id == "future-test"
+            assert result.id == "future-test"
             assert result.response_output == "Test future handling"
         finally:
             await client.shutdown()
@@ -136,10 +139,12 @@ class TestHTTPEndpointClientConcurrency:
     @pytest.mark.asyncio
     async def test_basic_future_handling(self, http_client):
         """Test basic future-based request/response."""
-        query = ChatCompletionQuery(
+        query = Query(
             id="future-test",
-            prompt="Test future handling",
-            model="gpt-3.5-turbo",
+            data={
+                "prompt": "Test future handling",
+                "model": "gpt-3.5-turbo",
+            },
         )
 
         # issue_query returns a future directly
@@ -148,7 +153,7 @@ class TestHTTPEndpointClientConcurrency:
 
         # Await the future
         result = await future
-        assert result.query_id == "future-test"
+        assert result.id == "future-test"
         assert result.response_output == "Test future handling"
 
     @pytest.mark.asyncio
@@ -159,10 +164,12 @@ class TestHTTPEndpointClientConcurrency:
         # Collect all futures first
         futures = []
         for i in range(num_requests):
-            query = ChatCompletionQuery(
+            query = Query(
                 id=f"concurrent-{i}",
-                prompt=f"Concurrent request {i}",
-                model="gpt-3.5-turbo",
+                data={
+                    "prompt": f"Concurrent request {i}",
+                    "model": "gpt-3.5-turbo",
+                },
             )
             future = http_client.issue_query(query)
             futures.append(future)
@@ -173,7 +180,7 @@ class TestHTTPEndpointClientConcurrency:
         # Verify all results
         assert len(results) == num_requests
         for i, result in enumerate(results):
-            assert result.query_id == f"concurrent-{i}"
+            assert result.id == f"concurrent-{i}"
             assert result.response_output == f"Concurrent request {i}"
 
     @pytest.mark.asyncio
@@ -202,11 +209,13 @@ class TestHTTPEndpointClientConcurrency:
             start_time = time.time()
             futures = []
             for i in range(num_requests):
-                query = ChatCompletionQuery(
+                query = Query(
                     id=f"massive-{i}",
-                    prompt=f"Request {i}",
-                    model="gpt-3.5-turbo",
-                    stream=False,
+                    data={
+                        "prompt": f"Request {i}",
+                        "model": "gpt-3.5-turbo",
+                        "stream": False,
+                    },
                 )
                 future = client.issue_query(query)
                 futures.append(future)
@@ -217,7 +226,7 @@ class TestHTTPEndpointClientConcurrency:
 
             # Verify results
             assert len(results) == num_requests
-            result_ids = {r.query_id for r in results}
+            result_ids = {r.id for r in results}
             expected_ids = {f"massive-{i}" for i in range(num_requests)}
             assert result_ids == expected_ids
 
@@ -254,11 +263,13 @@ class TestHTTPEndpointClientConcurrency:
             start_time = time.time()
             futures = []
             for i in range(num_requests):
-                query = ChatCompletionQuery(
+                query = Query(
                     id=f"massive-streaming-{i}",
-                    prompt=f"Streaming request {i}",
-                    model="gpt-3.5-turbo",
-                    stream=True,
+                    data={
+                        "prompt": f"Streaming request {i}",
+                        "model": "gpt-3.5-turbo",
+                        "stream": True,
+                    },
                 )
                 future = client.issue_query(query)
                 futures.append(future)
@@ -269,7 +280,7 @@ class TestHTTPEndpointClientConcurrency:
 
             # Verify results
             assert len(results) == num_requests
-            result_ids = {r.query_id for r in results}
+            result_ids = {r.id for r in results}
             expected_ids = {f"massive-streaming-{i}" for i in range(num_requests)}
             assert result_ids == expected_ids
 
@@ -298,11 +309,13 @@ class TestHTTPEndpointClientConcurrency:
         for name, size in payload_sizes:
             # Create large prompt
             large_prompt = "x" * size
-            query = ChatCompletionQuery(
+            query = Query(
                 id=f"payload-{name}",
-                prompt=large_prompt,
-                model="gpt-3.5-turbo",
-                max_tokens=2000,
+                data={
+                    "prompt": large_prompt,
+                    "model": "gpt-3.5-turbo",
+                    "max_tokens": 2000,
+                },
             )
             future = http_client.issue_query(query)
             futures.append((name, size, future))
@@ -310,7 +323,7 @@ class TestHTTPEndpointClientConcurrency:
         # Wait for all payloads
         for name, size, future in futures:
             result = await future
-            assert result.query_id == f"payload-{name}"
+            assert result.id == f"payload-{name}"
             assert len(result.response_output) == size
             print(f"\nSuccessfully processed {name} payload ({size} bytes)")
 
@@ -341,10 +354,12 @@ class TestHTTPEndpointClientConcurrency:
 
                 start_time = time.time()
                 for i in range(num_requests):
-                    query = ChatCompletionQuery(
+                    query = Query(
                         id=f"worker-test-{i}",
-                        prompt=f"Testing {num_workers} workers - request {i}",
-                        model="gpt-3.5-turbo",
+                        data={
+                            "prompt": f"Testing {num_workers} workers - request {i}",
+                            "model": "gpt-3.5-turbo",
+                        },
                     )
                     future = client.issue_query(query)
                     futures.append(future)
@@ -388,10 +403,12 @@ class TestHTTPEndpointClientConcurrency:
 
             # Record when each request is issued
             for i in range(num_requests):
-                query = ChatCompletionQuery(
+                query = Query(
                     id=f"limited-{i}",
-                    prompt=f"Concurrency limited request {i}",
-                    model="gpt-3.5-turbo",
+                    data={
+                        "prompt": f"Concurrency limited request {i}",
+                        "model": "gpt-3.5-turbo",
+                    },
                 )
 
                 issue_times.append(time.time())
@@ -440,10 +457,12 @@ class TestHTTPEndpointClientConcurrency:
             # Create futures
             futures = []
             for i in range(10):
-                query = ChatCompletionQuery(
+                query = Query(
                     id=f"cancel-{i}",
-                    prompt=f"To be cancelled {i}",
-                    model="gpt-3.5-turbo",
+                    data={
+                        "prompt": f"To be cancelled {i}",
+                        "model": "gpt-3.5-turbo",
+                    },
                 )
                 future = client.issue_query(query)
                 futures.append(future)
@@ -485,10 +504,12 @@ class TestHTTPEndpointClientConcurrency:
         # Send requests and collect futures
         futures = []
         for i in range(10):
-            query = ChatCompletionQuery(
+            query = Query(
                 id=f"mixed-{i}",
-                prompt=f"Mixed pattern {i}",
-                model="gpt-3.5-turbo",
+                data={
+                    "prompt": f"Mixed pattern {i}",
+                    "model": "gpt-3.5-turbo",
+                },
             )
             future = http_client.issue_query(query)
             futures.append(future)
@@ -501,8 +522,8 @@ class TestHTTPEndpointClientConcurrency:
         assert len(callback_results) == 10
 
         # Results should match
-        future_ids = {r.query_id for r in future_results}
-        callback_ids = {r.query_id for r in callback_results}
+        future_ids = {r.id for r in future_results}
+        callback_ids = {r.id for r in callback_results}
         assert future_ids == callback_ids
 
 
@@ -536,10 +557,12 @@ class TestHTTPEndpointClientErrorHandling:
 
         try:
             # Send request
-            query = ChatCompletionQuery(
+            query = Query(
                 id="error-test",
-                prompt="This should fail",
-                model="gpt-3.5-turbo",
+                data={
+                    "prompt": "This should fail",
+                    "model": "gpt-3.5-turbo",
+                },
             )
 
             future = client.issue_query(query)
@@ -597,7 +620,7 @@ class TestHTTPEndpointClientErrorHandling:
 
             # Send valid response
             result1 = QueryResult(
-                query_id="test-1",
+                id="test-1",
                 response_output="Success",
             )
             await response_push.send(pickle.dumps(result1))
@@ -607,7 +630,7 @@ class TestHTTPEndpointClientErrorHandling:
 
             # Send another valid response to verify recovery
             result2 = QueryResult(
-                query_id="test-2",
+                id="test-2",
                 response_output="Success after error",
             )
             await response_push.send(pickle.dumps(result2))
@@ -628,12 +651,13 @@ class TestHTTPEndpointClientErrorHandling:
             # Second future should also complete (handler recovered)
             assert future2.done()
             assert future2.result().response_output == "Success after error"
-
+        except Exception as e:
+            print(f"Error in test_response_handler_error_recovery: {e}")
+            raise e
+        finally:
             # Cleanup
             response_push.close()
             await client.shutdown()
-
-        finally:
             context.term()
 
     @pytest.mark.asyncio
@@ -681,10 +705,12 @@ class TestHTTPEndpointClientErrorHandling:
             original_socket = client.worker_push_sockets[0]
             client.worker_push_sockets[0] = FailingSocket(original_socket)
 
-            query = ChatCompletionQuery(
+            query = Query(
                 id="send-fail",
-                prompt="This will fail to send",
-                model="gpt-3.5-turbo",
+                data={
+                    "prompt": "This will fail to send",
+                    "model": "gpt-3.5-turbo",
+                },
             )
 
             future = client.issue_query(query)
@@ -777,10 +803,12 @@ class TestHTTPEndpointClientCoverage:
 
         try:
             # Test that callback is called
-            query = ChatCompletionQuery(
+            query = Query(
                 id="callback-test",
-                prompt="Test callback",
-                model="gpt-3.5-turbo",
+                data={
+                    "prompt": "Test callback",
+                    "model": "gpt-3.5-turbo",
+                },
             )
 
             future = client.issue_query(query)
@@ -790,7 +818,7 @@ class TestHTTPEndpointClientCoverage:
             await asyncio.sleep(0.1)
 
             assert len(callback_called) == 1
-            assert callback_called[0].query_id == "callback-test"
+            assert callback_called[0].id == "callback-test"
 
         finally:
             await client.shutdown()
@@ -825,16 +853,18 @@ class TestHTTPEndpointClientCoverage:
 
         try:
             # Test that requests work without concurrency limit
-            query = ChatCompletionQuery(
+            query = Query(
                 id="no-limit-test",
-                prompt="Test no limit",
-                model="gpt-3.5-turbo",
+                data={
+                    "prompt": "Test no limit",
+                    "model": "gpt-3.5-turbo",
+                },
             )
 
             future = client.issue_query(query)
             result = await future
 
-            assert result.query_id == "no-limit-test"
+            assert result.id == "no-limit-test"
             assert result.response_output == "Test no limit"
 
         finally:
@@ -915,16 +945,18 @@ class TestHTTPEndpointClientCoverage:
             assert not client._response_handler_task.done()
 
             # Send a request to verify normal operation still works
-            query = ChatCompletionQuery(
+            query = Query(
                 id="timeout-test",
-                prompt="Test after timeout",
-                model="gpt-3.5-turbo",
+                data={
+                    "prompt": "Test after timeout",
+                    "model": "gpt-3.5-turbo",
+                },
             )
 
             future = client.issue_query(query)
             result = await future
 
-            assert result.query_id == "timeout-test"
+            assert result.id == "timeout-test"
             assert result.response_output == "Test after timeout"
             assert mock_http_echo_server.url is not None
 
@@ -963,17 +995,19 @@ class TestHTTPEndpointClientCoverage:
 
         try:
             # Send request that will trigger callback error
-            query = ChatCompletionQuery(
+            query = Query(
                 id="callback-error-test",
-                prompt="Test callback error",
-                model="gpt-3.5-turbo",
+                data={
+                    "prompt": "Test callback error",
+                    "model": "gpt-3.5-turbo",
+                },
             )
 
             future = client.issue_query(query)
             result = await future
 
             # Future should still complete successfully despite callback error
-            assert result.query_id == "callback-error-test"
+            assert result.id == "callback-error-test"
             assert result.response_output == "Test callback error"
 
             # Wait for callback to be processed
@@ -1033,7 +1067,7 @@ class TestHTTPEndpointClientCoverage:
 
             # Send error response
             error_result = QueryResult(
-                query_id="error-test",
+                id="error-test",
                 response_output="",
                 error="Simulated error response",
             )
@@ -1177,16 +1211,18 @@ class TestHTTPEndpointClientCoverage:
     @pytest.mark.asyncio
     async def test_empty_prompt(self, http_client):
         """Test handling empty prompt."""
-        query = ChatCompletionQuery(
+        query = Query(
             id="empty-prompt",
-            prompt="",
-            model="gpt-3.5-turbo",
+            data={
+                "prompt": "",
+                "model": "gpt-3.5-turbo",
+            },
         )
 
         future = http_client.issue_query(query)
         result = await future
 
-        assert result.query_id == "empty-prompt"
+        assert result.id == "empty-prompt"
         assert result.response_output == ""
 
     @pytest.mark.asyncio
@@ -1202,10 +1238,12 @@ class TestHTTPEndpointClientCoverage:
 
         futures = []
         for i, prompt in enumerate(special_prompts):
-            query = ChatCompletionQuery(
+            query = Query(
                 id=f"special-{i}",
-                prompt=prompt,
-                model="gpt-3.5-turbo",
+                data={
+                    "prompt": prompt,
+                    "model": "gpt-3.5-turbo",
+                },
             )
             future = http_client.issue_query(query)
             futures.append((prompt, future))
@@ -1218,16 +1256,18 @@ class TestHTTPEndpointClientCoverage:
     @pytest.mark.asyncio
     async def test_metadata_propagation(self, http_client):
         """Test that query metadata is preserved."""
-        query = ChatCompletionQuery(
+        query = Query(
             id="metadata-test",
-            prompt="Test metadata",
-            model="gpt-3.5-turbo",
-            max_tokens=100,
-            temperature=0.5,
-            metadata={
-                "user_id": "test-user",
-                "session_id": "test-session",
-                "custom_field": "custom_value",
+            data={
+                "prompt": "Test metadata",
+                "model": "gpt-3.5-turbo",
+                "max_tokens": 100,
+                "temperature": 0.5,
+                "metadata": {
+                    "user_id": "test-user",
+                    "session_id": "test-session",
+                    "custom_field": "custom_value",
+                },
             },
         )
 
@@ -1235,7 +1275,7 @@ class TestHTTPEndpointClientCoverage:
         result = await future
 
         # Echo server should preserve the query
-        assert result.query_id == "metadata-test"
+        assert result.id == "metadata-test"
         assert result.response_output == "Test metadata"
 
     @pytest.mark.asyncio
@@ -1261,10 +1301,12 @@ class TestHTTPEndpointClientCoverage:
             # Send many requests
             futures = []
             for i in range(100):
-                query = ChatCompletionQuery(
+                query = Query(
                     id=f"shutdown-{i}",
-                    prompt=f"Shutdown test {i}",
-                    model="gpt-3.5-turbo",
+                    data={
+                        "prompt": f"Shutdown test {i}",
+                        "model": "gpt-3.5-turbo",
+                    },
                 )
                 future = client.issue_query(query)
                 futures.append(future)
@@ -1312,10 +1354,12 @@ class TestHTTPEndpointClientCoverage:
 
         try:
             # Send request to invalid endpoint
-            query = ChatCompletionQuery(
+            query = Query(
                 id="error-test",
-                prompt="Test error",
-                model="gpt-3.5-turbo",
+                data={
+                    "prompt": "Test error",
+                    "model": "gpt-3.5-turbo",
+                },
             )
 
             future = client.issue_query(query)
@@ -1346,7 +1390,7 @@ class TestHTTPEndpointClientCoverage:
             await client.shutdown()
 
     @pytest.mark.asyncio
-    async def test_response_for_unknown_query_id(self, http_client):
+    async def test_response_for_unknown_sample_id(self, http_client):
         """Test handling response for unknown query ID by checking internal state."""
         # Verify client is in a good state
         assert http_client.worker_push_sockets, "Client should have worker sockets"
@@ -1355,17 +1399,19 @@ class TestHTTPEndpointClientCoverage:
         ), "Client should not be shut down"
 
         # Send a normal request first
-        query = ChatCompletionQuery(
+        query = Query(
             id="known-query",
-            prompt="Test query",
-            model="gpt-3.5-turbo",
+            data={
+                "prompt": "Test query",
+                "model": "gpt-3.5-turbo",
+            },
         )
 
         future = http_client.issue_query(query)
         result = await future
 
         # Verify the query was processed and removed from pending futures
-        assert result.query_id == "known-query"
+        assert result.id == "known-query"
         assert "known-query" not in http_client._pending_futures
 
         # Test that the client handles normal operations correctly

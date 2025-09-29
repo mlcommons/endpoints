@@ -6,7 +6,7 @@ import pickle
 import pytest
 import zmq
 import zmq.asyncio
-from inference_endpoint.core.types import ChatCompletionQuery, QueryResult
+from inference_endpoint.core.types import Query, QueryResult
 from inference_endpoint.endpoint_client.configs import (
     AioHttpConfig,
     HTTPClientConfig,
@@ -71,10 +71,13 @@ class TestWorkerErrorHandling:
             await asyncio.sleep(0.5)
 
             # Send query
-            query = ChatCompletionQuery(
+            query = Query(
                 id="test-error",
-                prompt="This should fail",
-                model="gpt-3.5-turbo",
+                data={
+                    "prompt": "This should fail",
+                    "model": "gpt-3.5-turbo",
+                    "stream": False,
+                },
             )
 
             await request_push.send(pickle.dumps(query))
@@ -85,7 +88,7 @@ class TestWorkerErrorHandling:
 
             # Verify error response
             assert isinstance(response, QueryResult)
-            assert response.query_id == "test-error"
+            assert response.id == "test-error"
             assert response.error is not None
             assert (
                 (
@@ -98,17 +101,16 @@ class TestWorkerErrorHandling:
 
             # Verify error response metadata (may be empty for error responses)
             # Just check that we got an error response with the right query ID
-            assert response.query_id == "test-error"
+            assert response.id == "test-error"
             assert response.error is not None
 
             # Shutdown
             worker._shutdown = True
             await asyncio.wait_for(worker_task, timeout=2.0)
 
+        finally:
             request_push.close()
             response_pull.close()
-
-        finally:
             context.term()
 
     @pytest.mark.asyncio
@@ -145,11 +147,13 @@ class TestWorkerErrorHandling:
             await asyncio.sleep(0.5)
 
             # Send streaming query
-            query = ChatCompletionQuery(
+            query = Query(
                 id="test-streaming-error",
-                prompt="This should fail",
-                model="gpt-3.5-turbo",
-                stream=True,
+                data={
+                    "prompt": "This should fail",
+                    "model": "gpt-3.5-turbo",
+                    "stream": True,
+                },
             )
 
             await request_push.send(pickle.dumps(query))
@@ -160,7 +164,7 @@ class TestWorkerErrorHandling:
 
             # Verify error response
             assert isinstance(response, QueryResult)
-            assert response.query_id == "test-streaming-error"
+            assert response.id == "test-streaming-error"
             assert response.error is not None
             # Should get url back as error
             assert "http://localhost:99999/invalid" in response.error
@@ -169,10 +173,9 @@ class TestWorkerErrorHandling:
             worker._shutdown = True
             await asyncio.wait_for(worker_task, timeout=2.0)
 
+        finally:
             request_push.close()
             response_pull.close()
-
-        finally:
             context.term()
 
     @pytest.mark.asyncio
@@ -218,11 +221,13 @@ class TestWorkerErrorHandling:
             await asyncio.sleep(0.5)
 
             # Send non-streaming query
-            query = ChatCompletionQuery(
+            query = Query(
                 id="test-exception-non-streaming",
-                prompt="Test exception handling",
-                model="gpt-3.5-turbo",
-                stream=False,
+                data={
+                    "prompt": "Test exception handling",
+                    "model": "gpt-3.5-turbo",
+                    "stream": False,
+                },
             )
             await request_socket.send(query)
 
@@ -242,7 +247,7 @@ class TestWorkerErrorHandling:
 
             # Verify error response
             assert isinstance(response, QueryResult)
-            assert response.query_id == "test-exception-non-streaming"
+            assert response.id == "test-exception-non-streaming"
             assert response.error is not None
             assert "Simulated processing error" in response.error
             assert response.response_output is None
@@ -315,11 +320,13 @@ class TestWorkerErrorHandling:
             request_push.connect(f"{zmq_config.zmq_request_queue_prefix}_0_requests")
 
             # Send streaming query
-            query = ChatCompletionQuery(
+            query = Query(
                 id="test-exception-streaming",
-                prompt="Test streaming exception handling",
-                model="gpt-3.5-turbo",
-                stream=True,
+                data={
+                    "prompt": "Test streaming exception handling",
+                    "model": "gpt-3.5-turbo",
+                    "stream": True,
+                },
             )
             await request_push.send(pickle.dumps(query))
 
@@ -332,7 +339,7 @@ class TestWorkerErrorHandling:
 
             # Verify error response
             assert isinstance(response, QueryResult)
-            assert response.query_id == "test-exception-streaming"
+            assert response.id == "test-exception-streaming"
             assert response.error is not None
             assert "Simulated streaming processing error" in response.error
             assert response.response_output is None
@@ -396,11 +403,13 @@ class TestWorkerErrorHandling:
             await asyncio.sleep(0.5)
 
             # Send query
-            query = ChatCompletionQuery(
+            query = Query(
                 id="test-connection-error",
-                prompt="Test connection error",
-                model="gpt-3.5-turbo",
-                stream=False,
+                data={
+                    "prompt": "Test connection error",
+                    "model": "gpt-3.5-turbo",
+                    "stream": False,
+                },
             )
 
             await request_push.send(pickle.dumps(query))
@@ -410,7 +419,7 @@ class TestWorkerErrorHandling:
             response = pickle.loads(response_data)
 
             assert isinstance(response, QueryResult)
-            assert response.query_id == "test-connection-error"
+            assert response.id == "test-connection-error"
             assert response.error is not None
             assert "99999" in response.error or "Cannot connect" in response.error
 
@@ -418,10 +427,9 @@ class TestWorkerErrorHandling:
             worker._shutdown = True
             await asyncio.wait_for(worker_task, timeout=2.0)
 
+        finally:
             request_push.close()
             response_pull.close()
-
-        finally:
             context.term()
 
     @pytest.mark.asyncio
@@ -459,11 +467,13 @@ class TestWorkerErrorHandling:
             await asyncio.sleep(0.5)
 
             # Send streaming query
-            query = ChatCompletionQuery(
+            query = Query(
                 id="test-streaming-404",
-                prompt="This should get 404",
-                model="gpt-3.5-turbo",
-                stream=True,
+                data={
+                    "prompt": "This should get 404",
+                    "model": "gpt-3.5-turbo",
+                    "stream": True,
+                },
             )
 
             await request_push.send(pickle.dumps(query))
@@ -474,7 +484,7 @@ class TestWorkerErrorHandling:
 
             # Verify HTTP error response
             assert isinstance(response, QueryResult)
-            assert response.query_id == "test-streaming-404"
+            assert response.id == "test-streaming-404"
             assert response.error is not None
             assert "HTTP 404" in response.error
 
@@ -482,10 +492,9 @@ class TestWorkerErrorHandling:
             worker._shutdown = True
             await asyncio.wait_for(worker_task, timeout=2.0)
 
+        finally:
             request_push.close()
             response_pull.close()
-
-        finally:
             context.term()
 
     @pytest.mark.asyncio
@@ -536,10 +545,13 @@ class TestWorkerErrorHandling:
             await asyncio.sleep(0.1)
 
             # Send query that will get HTTP error
-            query = ChatCompletionQuery(
+            query = Query(
                 id="test-http-500",
-                prompt="This will fail",
-                model="gpt-3.5-turbo",
+                data={
+                    "prompt": "This will fail",
+                    "model": "gpt-3.5-turbo",
+                    "stream": False,
+                },
             )
 
             await worker._handle_non_streaming_request(query)
@@ -549,14 +561,13 @@ class TestWorkerErrorHandling:
             response = pickle.loads(response_data)
 
             assert isinstance(response, QueryResult)
-            assert response.query_id == "test-http-500"
+            assert response.id == "test-http-500"
             assert "HTTP 500" in response.error
             assert "Internal Server Error" in response.error
 
+        finally:
             response_pull.close()
             worker._response_socket.close()
-
-        finally:
             context.term()
             worker._zmq_context.term()
 
@@ -621,11 +632,13 @@ class TestWorkerErrorHandling:
                 await asyncio.sleep(0.5)
 
                 # Send streaming query
-                query = ChatCompletionQuery(
+                query = Query(
                     id="test-malformed-json",
-                    prompt="Test malformed JSON",
-                    model="gpt-3.5-turbo",
-                    stream=True,
+                    data={
+                        "prompt": "Test malformed JSON",
+                        "model": "gpt-3.5-turbo",
+                        "stream": True,
+                    },
                 )
 
                 await request_push.send(pickle.dumps(query))
@@ -636,7 +649,7 @@ class TestWorkerErrorHandling:
 
                 # Verify we get an error response
                 assert isinstance(response, QueryResult)
-                assert response.query_id == "test-malformed-json"
+                assert response.id == "test-malformed-json"
                 assert response.error is not None
                 assert (
                     "unexpected character" in response.error
@@ -648,10 +661,9 @@ class TestWorkerErrorHandling:
                 worker._shutdown = True
                 await asyncio.wait_for(worker_task, timeout=2.0)
 
+            finally:
                 request_push.close()
                 response_pull.close()
-
-            finally:
                 context.term()
 
         finally:
@@ -704,11 +716,13 @@ class TestWorkerErrorHandling:
             )
 
             # Create query
-            query = ChatCompletionQuery(
+            query = Query(
                 id="test-zmq-error",
-                prompt="Test ZMQ error",
-                model="gpt-3.5-turbo",
-                stream=False,
+                data={
+                    "prompt": "Test ZMQ error",
+                    "model": "gpt-3.5-turbo",
+                    "stream": False,
+                },
             )
 
             # Close the response socket to simulate error
@@ -716,7 +730,7 @@ class TestWorkerErrorHandling:
 
             # Try to send response - should handle the error gracefully
             response = QueryResult(
-                query_id=query.id,
+                id=query.id,
                 response_output="test",
                 error="ZMQ socket closed",
             )
@@ -779,11 +793,13 @@ class TestWorkerErrorHandling:
                 request_sockets.append(request_push)
 
                 # Send a query to this worker
-                query = ChatCompletionQuery(
+                query = Query(
                     id=f"test-concurrent-error-{i}",
-                    prompt=f"Worker {i} error test",
-                    model="gpt-3.5-turbo",
-                    stream=False,
+                    data={
+                        "prompt": f"Worker {i} error test",
+                        "model": "gpt-3.5-turbo",
+                        "stream": False,
+                    },
                 )
                 await request_push.send(pickle.dumps(query))
 
@@ -792,21 +808,21 @@ class TestWorkerErrorHandling:
             for _ in range(3):
                 response_data = await response_pull.recv()
                 response = pickle.loads(response_data)
-                responses[response.query_id] = response
+                responses[response.id] = response
 
             # Verify all workers handled errors
             assert len(responses) == 3
             for i in range(3):
-                query_id = f"test-concurrent-error-{i}"
-                assert query_id in responses
-                assert responses[query_id].error is not None
+                sample_id = f"test-concurrent-error-{i}"
+                assert sample_id in responses
+                assert responses[sample_id].error is not None
                 assert (
                     (
-                        "connection" in responses[query_id].error.lower()
-                        and "refused" in responses[query_id].error.lower()
+                        "connection" in responses[sample_id].error.lower()
+                        and "refused" in responses[sample_id].error.lower()
                     )
-                    or "cannot connect" in responses[query_id].error.lower()
-                    or "99999" in responses[query_id].error
+                    or "cannot connect" in responses[sample_id].error.lower()
+                    or "99999" in responses[sample_id].error
                 )
 
             # Shutdown all workers
@@ -815,12 +831,11 @@ class TestWorkerErrorHandling:
 
             await asyncio.gather(*worker_tasks, return_exceptions=True)
 
+        finally:
             # Close sockets
             for sock in request_sockets:
                 sock.close()
             response_pull.close()
-
-        finally:
             context.term()
 
     @pytest.mark.asyncio
@@ -871,10 +886,13 @@ class TestWorkerErrorHandling:
             await asyncio.sleep(0.1)
 
             # Send query that will get invalid JSON
-            query = ChatCompletionQuery(
+            query = Query(
                 id="test-bad-json",
-                prompt="Will get bad JSON",
-                model="gpt-3.5-turbo",
+                data={
+                    "prompt": "Will get bad JSON",
+                    "model": "gpt-3.5-turbo",
+                    "stream": False,
+                },
             )
 
             # Call through _process_request to get proper error handling
@@ -885,16 +903,15 @@ class TestWorkerErrorHandling:
             response = pickle.loads(response_data)
 
             assert isinstance(response, QueryResult)
-            assert response.query_id == "test-bad-json"
+            assert response.id == "test-bad-json"
             assert response.error is not None
             assert (
                 "invalid literal" in response.error
                 or "JSONDecodeError" in response.error
             )
 
+        finally:
             response_pull.close()
             worker._response_socket.close()
-
-        finally:
             context.term()
             worker._zmq_context.term()

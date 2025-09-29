@@ -4,33 +4,24 @@ import asyncio
 
 import aiohttp
 import pytest
-from inference_endpoint.core.types import ChatCompletionQuery, QueryResult, StreamChunk
+from inference_endpoint.core.types import Query, QueryResult, StreamChunk
 from inference_endpoint.endpoint_client import HTTPEndpointClient
 from inference_endpoint.endpoint_client.configs import (
     AioHttpConfig,
     HTTPClientConfig,
     ZMQConfig,
 )
-from inference_endpoint.testing.echo_server import EchoServer
 
 
 class TestHTTPEndpointClientStreaming:
     """Test streaming functionality with echo server integration."""
 
     @pytest.fixture
-    def echo_server(self):
-        """Start echo server for testing."""
-        server = EchoServer(host="localhost", port=0)
-        server.start()
-        yield server
-        server.stop()
-
-    @pytest.fixture
-    def client_config(self, echo_server, tmp_path):
+    def client_config(self, mock_http_echo_server, tmp_path):
         """Create client configuration for echo server."""
         # Use tmp_path for unique socket paths per test
         http_config = HTTPClientConfig(
-            endpoint_url=f"{echo_server.url}/v1/chat/completions",
+            endpoint_url=f"{mock_http_echo_server.url}/v1/chat/completions",
             num_workers=2,
             max_concurrency=10,
         )
@@ -69,22 +60,26 @@ class TestHTTPEndpointClientStreaming:
 
             # Non-streaming
             for i in range(5):
-                query = ChatCompletionQuery(
+                query = Query(
                     id=f"non-stream-{i}",
-                    prompt=f"Non-streaming request {i}",
-                    model="gpt-3.5-turbo",
-                    stream=False,
+                    data={
+                        "prompt": f"Non-streaming request {i}",
+                        "model": "gpt-3.5-turbo",
+                        "stream": False,
+                    },
                 )
                 future = client.issue_query(query)
                 futures.append(("non-stream", i, future))
 
             # Streaming
             for i in range(5):
-                query = ChatCompletionQuery(
+                query = Query(
                     id=f"stream-{i}",
-                    prompt=f"Streaming request {i}",
-                    model="gpt-3.5-turbo",
-                    stream=True,
+                    data={
+                        "prompt": f"Streaming request {i}",
+                        "model": "gpt-3.5-turbo",
+                        "stream": True,
+                    },
                 )
                 future = client.issue_query(query)
                 futures.append(("stream", i, future))
@@ -93,10 +88,10 @@ class TestHTTPEndpointClientStreaming:
             for req_type, idx, future in futures:
                 result = await future
                 if req_type == "non-stream":
-                    assert result.query_id == f"non-stream-{idx}"
+                    assert result.id == f"non-stream-{idx}"
                     assert result.response_output == f"Non-streaming request {idx}"
                 else:
-                    assert result.query_id == f"stream-{idx}"
+                    assert result.id == f"stream-{idx}"
                     assert (
                         "Streaming" in result.response_output
                         or result.response_output == f"Streaming request {idx}"
@@ -116,19 +111,19 @@ class TestHTTPEndpointClientStreaming:
         def response_callback(response):
             # Handle both StreamChunk and QueryResult messages
             match response:
-                case StreamChunk(query_id=qid, response_chunk=chunk, metadata=meta):
+                case StreamChunk(id=qid, response_chunk=chunk, metadata=meta):
                     received_responses.append(
                         {
-                            "query_id": qid,
+                            "id": qid,
                             "content": chunk,
                             "metadata": meta,
                             "type": "StreamChunk",
                         }
                     )
-                case QueryResult(query_id=qid, response_output=output, metadata=meta):
+                case QueryResult(id=qid, response_output=output, metadata=meta):
                     received_responses.append(
                         {
-                            "query_id": qid,
+                            "id": qid,
                             "content": output,
                             "metadata": meta,
                             "type": "QueryResult",
@@ -144,47 +139,53 @@ class TestHTTPEndpointClientStreaming:
             await asyncio.sleep(0.5)  # Let workers initialize
 
             # Test 1: Single word response
-            query1 = ChatCompletionQuery(
+            query1 = Query(
                 id="test-stream-1",
-                prompt="Hello",
-                model="gpt-3.5-turbo",
-                stream=True,
+                data={
+                    "prompt": "Hello",
+                    "model": "gpt-3.5-turbo",
+                    "stream": True,
+                },
             )
 
             future1 = client.issue_query(query1)
             result1 = await future1
 
             # Verify we got the complete response
-            assert result1.query_id == "test-stream-1"
+            assert result1.id == "test-stream-1"
             assert result1.response_output == "Hello"
 
             # Test 2: Multi-word response
-            query2 = ChatCompletionQuery(
+            query2 = Query(
                 id="test-stream-2",
-                prompt="This is a longer streaming test message",
-                model="gpt-3.5-turbo",
-                stream=True,
+                data={
+                    "prompt": "This is a longer streaming test message",
+                    "model": "gpt-3.5-turbo",
+                    "stream": True,
+                },
             )
 
             future2 = client.issue_query(query2)
             result2 = await future2
 
             # Verify complete response
-            assert result2.query_id == "test-stream-2"
+            assert result2.id == "test-stream-2"
             assert result2.response_output == "This is a longer streaming test message"
 
             # Test 3: Empty response
-            query3 = ChatCompletionQuery(
+            query3 = Query(
                 id="test-stream-3",
-                prompt="",
-                model="gpt-3.5-turbo",
-                stream=True,
+                data={
+                    "prompt": "",
+                    "model": "gpt-3.5-turbo",
+                    "stream": True,
+                },
             )
 
             future3 = client.issue_query(query3)
             result3 = await future3
 
-            assert result3.query_id == "test-stream-3"
+            assert result3.id == "test-stream-3"
             assert result3.response_output == ""
 
             # Verify callback received both StreamChunk and QueryResult messages
@@ -195,9 +196,9 @@ class TestHTTPEndpointClientStreaming:
             assert len(received_responses) >= 3
 
             # Verify we have both chunk and final responses for each query
-            for query_id in ["test-stream-1", "test-stream-2", "test-stream-3"]:
+            for sample_id in ["test-stream-1", "test-stream-2", "test-stream-3"]:
                 query_responses = [
-                    r for r in received_responses if r["query_id"] == query_id
+                    r for r in received_responses if r["id"] == sample_id
                 ]
 
                 # Get StreamChunk and QueryResult messages separately
@@ -211,13 +212,13 @@ class TestHTTPEndpointClientStreaming:
                 # Should have exactly one QueryResult per query
                 assert (
                     len(query_results) == 1
-                ), f"Should have exactly one QueryResult for {query_id}"
+                ), f"Should have exactly one QueryResult for {sample_id}"
 
                 # Non-empty responses should have StreamChunk
-                if query_id != "test-stream-3":  # Not empty
+                if sample_id != "test-stream-3":  # Not empty
                     assert (
                         len(stream_chunks) >= 1
-                    ), f"Should have at least one StreamChunk for {query_id}"
+                    ), f"Should have at least one StreamChunk for {sample_id}"
                 else:  # Empty response has no chunks
                     assert (
                         len(stream_chunks) == 0
@@ -225,14 +226,14 @@ class TestHTTPEndpointClientStreaming:
 
                 # Verify final content
                 final_response = query_results[0]
-                if query_id == "test-stream-1":
+                if sample_id == "test-stream-1":
                     assert final_response["content"] == "Hello"
-                elif query_id == "test-stream-2":
+                elif sample_id == "test-stream-2":
                     assert (
                         final_response["content"]
                         == "This is a longer streaming test message"
                     )
-                elif query_id == "test-stream-3":
+                elif sample_id == "test-stream-3":
                     assert final_response["content"] == ""
 
         finally:
@@ -253,29 +254,35 @@ class TestHTTPEndpointClientStreaming:
             futures = []
 
             # Non-streaming request
-            query_non_stream = ChatCompletionQuery(
+            query_non_stream = Query(
                 id="non-stream-1",
-                prompt="Non-streaming response",
-                model="gpt-3.5-turbo",
-                stream=False,
+                data={
+                    "prompt": "Non-streaming response",
+                    "model": "gpt-3.5-turbo",
+                    "stream": False,
+                },
             )
             futures.append(("non-stream", client.issue_query(query_non_stream)))
 
             # Streaming request
-            query_stream = ChatCompletionQuery(
+            query_stream = Query(
                 id="stream-1",
-                prompt="Streaming response test",
-                model="gpt-3.5-turbo",
-                stream=True,
+                data={
+                    "prompt": "Streaming response test",
+                    "model": "gpt-3.5-turbo",
+                    "stream": True,
+                },
             )
             futures.append(("stream", client.issue_query(query_stream)))
 
             # Another non-streaming
-            query_non_stream2 = ChatCompletionQuery(
+            query_non_stream2 = Query(
                 id="non-stream-2",
-                prompt="Another non-streaming",
-                model="gpt-3.5-turbo",
-                stream=False,
+                data={
+                    "prompt": "Another non-streaming",
+                    "model": "gpt-3.5-turbo",
+                    "stream": False,
+                },
             )
             futures.append(("non-stream", client.issue_query(query_non_stream2)))
 
@@ -313,11 +320,13 @@ class TestHTTPEndpointClientStreaming:
             # Send 10 concurrent streaming requests
             futures = []
             for i in range(10):
-                query = ChatCompletionQuery(
+                query = Query(
                     id=f"concurrent-stream-{i}",
-                    prompt=f"Concurrent streaming request number {i}",
-                    model="gpt-3.5-turbo",
-                    stream=True,
+                    data={
+                        "prompt": f"Concurrent streaming request number {i}",
+                        "model": "gpt-3.5-turbo",
+                        "stream": True,
+                    },
                 )
                 futures.append((i, client.issue_query(query)))
 
@@ -331,7 +340,7 @@ class TestHTTPEndpointClientStreaming:
             assert len(results) == 10
 
             for idx, result in results:
-                assert result.query_id == f"concurrent-stream-{idx}"
+                assert result.id == f"concurrent-stream-{idx}"
                 assert (
                     result.response_output
                     == f"Concurrent streaming request number {idx}"
@@ -364,11 +373,13 @@ class TestHTTPEndpointClientStreaming:
             await client.start()
             await asyncio.sleep(0.5)
 
-            query = ChatCompletionQuery(
+            query = Query(
                 id="test-single-resolution",
-                prompt="Test single future resolution with multiple words",
-                model="gpt-3.5-turbo",
-                stream=True,
+                data={
+                    "prompt": "Test single future resolution with multiple words",
+                    "model": "gpt-3.5-turbo",
+                    "stream": True,
+                },
             )
 
             future = client.issue_query(query)
@@ -382,7 +393,7 @@ class TestHTTPEndpointClientStreaming:
             # Verify future was only resolved once
             assert resolution_count == 1
             assert resolved_result is not None
-            assert resolved_result.query_id == "test-single-resolution"
+            assert resolved_result.id == "test-single-resolution"
             assert (
                 resolved_result.response_output
                 == "Test single future resolution with multiple words"
@@ -407,11 +418,13 @@ class TestHTTPEndpointClientStreaming:
             await asyncio.sleep(0.5)
 
             # Test 1: Access first chunk before completion
-            query = ChatCompletionQuery(
+            query = Query(
                 id="test-first-chunk",
-                prompt="Test first chunk access functionality",
-                model="gpt-3.5-turbo",
-                stream=True,
+                data={
+                    "prompt": "Test first chunk access functionality",
+                    "model": "gpt-3.5-turbo",
+                    "stream": True,
+                },
             )
 
             future = client.issue_query(query)
@@ -432,11 +445,13 @@ class TestHTTPEndpointClientStreaming:
             assert result.response_output == "Test first chunk access functionality"
 
             # Test 2: Check if first chunk is ready without waiting
-            query2 = ChatCompletionQuery(
+            query2 = Query(
                 id="test-first-ready",
-                prompt="Quick response",
-                model="gpt-3.5-turbo",
-                stream=True,
+                data={
+                    "prompt": "Quick response",
+                    "model": "gpt-3.5-turbo",
+                    "stream": True,
+                },
             )
 
             future2 = client.issue_query(query2)
@@ -463,11 +478,13 @@ class TestHTTPEndpointClientStreaming:
             await asyncio.sleep(0.5)
 
             # Test single-word response
-            query = ChatCompletionQuery(
+            query = Query(
                 id="test-single-chunk",
-                prompt="Hi",  # Single word response
-                model="gpt-3.5-turbo",
-                stream=True,
+                data={
+                    "prompt": "Hi",
+                    "model": "gpt-3.5-turbo",
+                    "stream": True,
+                },
             )
 
             future = client.issue_query(query)
@@ -496,11 +513,13 @@ class TestHTTPEndpointClientStreaming:
 
             # Create multiple streaming queries
             queries = [
-                ChatCompletionQuery(
+                Query(
                     id=f"race-{i}",
-                    prompt=f"Query number {i} with different content",
-                    model="gpt-3.5-turbo",
-                    stream=True,
+                    data={
+                        "prompt": f"Query number {i} with different content",
+                        "model": "gpt-3.5-turbo",
+                        "stream": True,
+                    },
                 )
                 for i in range(5)
             ]
@@ -529,7 +548,7 @@ class TestHTTPEndpointClientStreaming:
 
             # Get first complete
             winner = done.pop().result()
-            assert winner.query_id.startswith("race-")
+            assert winner.id.startswith("race-")
             assert "Query number" in winner.response_output
 
             # Clean up remaining
@@ -556,11 +575,13 @@ class TestHTTPEndpointClientStreaming:
         try:
             await client.start()
 
-            query = ChatCompletionQuery(
+            query = Query(
                 id="test-metadata",
-                prompt="Test metadata propagation",
-                model="gpt-3.5-turbo",
-                stream=True,
+                data={
+                    "prompt": "Test metadata propagation",
+                    "model": "gpt-3.5-turbo",
+                    "stream": True,
+                },
             )
 
             future = client.issue_query(query)
@@ -594,11 +615,13 @@ class TestHTTPEndpointClientStreaming:
             await asyncio.sleep(0.5)
 
             # Non-streaming query
-            query = ChatCompletionQuery(
+            query = Query(
                 id="test-non-stream",
-                prompt="Regular non-streaming response",
-                model="gpt-3.5-turbo",
-                stream=False,
+                data={
+                    "prompt": "Regular non-streaming response",
+                    "model": "gpt-3.5-turbo",
+                    "stream": False,
+                },
             )
 
             future = client.issue_query(query)
@@ -608,7 +631,7 @@ class TestHTTPEndpointClientStreaming:
 
             # Should work as regular future
             result = await future
-            assert result.query_id == "test-non-stream"
+            assert result.id == "test-non-stream"
             assert result.response_output == "Regular non-streaming response"
 
         finally:
@@ -638,11 +661,13 @@ class TestHTTPEndpointClientStreaming:
         try:
             await client.start()
 
-            query = ChatCompletionQuery(
+            query = Query(
                 id="test-error",
-                prompt="This will fail",
-                model="gpt-3.5-turbo",
-                stream=True,
+                data={
+                    "prompt": "This will fail",
+                    "model": "gpt-3.5-turbo",
+                    "stream": True,
+                },
             )
 
             future = client.issue_query(query)
@@ -690,11 +715,13 @@ class TestHTTPEndpointClientStreaming:
 
             futures = []
             for name, prompt in test_cases:
-                query = ChatCompletionQuery(
+                query = Query(
                     id=f"length-{name}",
-                    prompt=prompt,
-                    model="gpt-3.5-turbo",
-                    stream=True,
+                    data={
+                        "prompt": prompt,
+                        "model": "gpt-3.5-turbo",
+                        "stream": True,
+                    },
                 )
                 futures.append((name, prompt, client.issue_query(query)))
 

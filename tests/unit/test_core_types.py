@@ -5,11 +5,12 @@ These tests verify the basic data structures work correctly.
 """
 
 from inference_endpoint.core.types import (
-    ChatCompletionQuery,
+    Query,
     QueryResult,
     QueryStatus,
     StreamChunk,
 )
+from inference_endpoint.openai.openai_adapter import OpenAIAdapter
 
 
 class TestQuery:
@@ -17,43 +18,44 @@ class TestQuery:
 
     def test_query_creation(self) -> None:
         """Test creating a basic query."""
-        query = ChatCompletionQuery(
-            prompt="Test prompt", model="test-model", max_tokens=100
-        )
+        payload = {
+            "prompt": "Test prompt",
+            "model": "test-model",
+            "max_completion_tokens": 100,
+        }
+        query = OpenAIAdapter.to_openai_request(
+            Query(id="test-123", data=payload)
+        ).model_dump(mode="json")
 
-        assert query.prompt == "Test prompt"
-        assert query.model == "test-model"
-        assert query.max_tokens == 100
-        assert query.temperature == 0.7  # default value
-        assert query.status == QueryStatus.PENDING
-        assert query.id is not None
-        assert query.created_at is not None
+        assert query["messages"][0]["content"] == "Test prompt"
+        assert query["model"] == "test-model"
+        assert query["max_completion_tokens"] == 100
+        assert query["temperature"] == 0.7  # default value
+        # assert query["created_at"] is not None
 
     def test_query_store_load(self) -> None:
         """Test creating a basic query."""
-        query = ChatCompletionQuery(
-            prompt="Test prompt", model="test-model", max_tokens=100
-        )
+        payload = {
+            "prompt": "Test prompt",
+            "model": "test-model",
+            "max_completion_tokens": 100,
+            "temperature": 0.7,
+        }
 
-        query_loaded = ChatCompletionQuery.from_json(query.to_json())
-        assert query_loaded.prompt == query.prompt
-        assert query_loaded.model == query.model
-        assert query_loaded.max_tokens == query.max_tokens
-        assert query_loaded.temperature == query.temperature
-        assert query_loaded.status == query.status
-        assert query_loaded.id is not None
+        query_loaded = OpenAIAdapter.to_openai_request(
+            Query(id="test-123", data=payload)
+        )
+        assert query_loaded.messages[0].root.content == payload["prompt"]
+        assert query_loaded.model.root == payload["model"]
+        assert query_loaded.max_completion_tokens == payload["max_completion_tokens"]
+        assert query_loaded.temperature == payload["temperature"]
 
     def test_query_defaults(self) -> None:
         """Test query with minimal parameters."""
-        query = ChatCompletionQuery()
-
-        assert query.prompt == ""
-        assert query.model == ""
-        assert query.max_tokens == 100
-        assert query.temperature == 0.7
-        assert query.stream is False
-        assert query.metadata == {}
-        assert query.status == QueryStatus.PENDING
+        query = Query(id="test-123", data={"prompt": ""})
+        assert "prompt" in query.data and query.data["prompt"] == ""
+        assert query.id == "test-123"
+        assert query.created_at is not None
 
 
 class TestQueryResult:
@@ -61,9 +63,9 @@ class TestQueryResult:
 
     def test_query_result_creation(self) -> None:
         """Test creating a query result."""
-        result = QueryResult(query_id="test-123", response_output="Test response")
+        result = QueryResult(id="test-123", response_output="Test response")
 
-        assert result.query_id == "test-123"
+        assert result.id == "test-123"
         assert result.response_output == "Test response"
         assert result.error is None
         assert result.completed_at is not None
@@ -74,11 +76,9 @@ class TestStreamChunk:
 
     def test_stream_chunk_creation(self) -> None:
         """Test creating a stream chunk."""
-        chunk = StreamChunk(
-            query_id="test-123", response_chunk="partial", is_complete=False
-        )
+        chunk = StreamChunk(id="test-123", response_chunk="partial", is_complete=False)
 
-        assert chunk.query_id == "test-123"
+        assert chunk.id == "test-123"
         assert chunk.response_chunk == "partial"
         assert chunk.is_complete is False
         assert chunk.metadata == {}

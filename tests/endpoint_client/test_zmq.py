@@ -9,7 +9,6 @@ from unittest import mock
 import pytest
 import zmq
 import zmq.asyncio
-from inference_endpoint.core.types import ChatCompletionQuery, QueryResult
 from inference_endpoint.endpoint_client.zmq_utils import (
     ZMQConfig,
     ZMQPullSocket,
@@ -199,14 +198,14 @@ class TestZMQPushPullIntegration:
             await asyncio.sleep(0.1)
 
             # Send a query with the test case data
-            test_query = ChatCompletionQuery(
-                id=test_case["id"],
-                prompt=test_case["prompt"],
-                model="gpt-3.5-turbo",
-                max_tokens=50,
-                temperature=0.7,
-                metadata={"test_description": test_case["description"]},
-            )
+            test_query = {
+                "id": test_case["id"],
+                "prompt": test_case["prompt"],
+                "model": "gpt-3.5-turbo",
+                "max_completion_tokens": 50,
+                "temperature": 0.7,
+                "metadata": {"test_description": test_case["description"]},
+            }
 
             await push_socket.send(test_query)
 
@@ -214,19 +213,18 @@ class TestZMQPushPullIntegration:
             received = await pull_socket.receive()
 
             # Verify
-            assert isinstance(received, ChatCompletionQuery)
-            assert received.id == test_case["id"]
-            assert received.prompt == test_case["prompt"]
-            assert received.model == "gpt-3.5-turbo"
-            assert received.max_tokens == 50
-            assert received.temperature == 0.7
-            assert received.metadata["test_description"] == test_case["description"]
+            assert isinstance(received, type(test_query))
+            assert received["id"] == test_case["id"]
+            assert received["prompt"] == test_case["prompt"]
+            assert received["model"] == "gpt-3.5-turbo"
+            assert received["max_completion_tokens"] == 50
+            assert received["temperature"] == 0.7
+            assert received["metadata"]["test_description"] == test_case["description"]
 
+        finally:
             # Cleanup
             push_socket.close()
             pull_socket.close()
-
-        finally:
             context.term()
 
     @pytest.mark.asyncio
@@ -317,22 +315,22 @@ class TestZMQPushPullIntegration:
             await asyncio.sleep(0.1)
 
             # Send a QueryResult
-            test_result = QueryResult(
-                query_id=result_case["query_id"],
-                response_output=result_case["response_output"],
-                error=result_case["error"],
-                metadata=result_case["metadata"],
-            )
+            test_result = {
+                "query_id": result_case["query_id"],
+                "response_output": result_case["response_output"],
+                "error": result_case["error"],
+                "metadata": result_case["metadata"],
+            }
 
             await push_socket.send(test_result)
             received = await pull_socket.receive()
 
             # Verify
-            assert isinstance(received, QueryResult)
-            assert received.query_id == result_case["query_id"]
-            assert received.response_output == result_case["response_output"]
-            assert received.error == result_case["error"]
-            assert received.metadata == result_case["metadata"]
+            assert isinstance(received, type(test_result))
+            assert received["query_id"] == result_case["query_id"]
+            assert received["response_output"] == result_case["response_output"]
+            assert received["error"] == result_case["error"]
+            assert received["metadata"] == result_case["metadata"]
 
             push_socket.close()
             pull_socket.close()
@@ -354,42 +352,41 @@ class TestZMQPushPullIntegration:
             await asyncio.sleep(0.1)
 
             # Send first chunk
-            first_chunk = QueryResult(
-                query_id="stream-123",
-                response_output="Once",
-                metadata={"first_chunk": True, "final_chunk": False},
-            )
+            first_chunk = {
+                "query_id": "stream-123",
+                "response_output": "Once",
+                "metadata": {"first_chunk": True, "final_chunk": False},
+            }
 
             await push_socket.send(first_chunk)
             received_first = await pull_socket.receive()
 
-            assert received_first.query_id == "stream-123"
-            assert received_first.response_output == "Once"
-            assert received_first.metadata["first_chunk"] is True
-            assert received_first.metadata["final_chunk"] is False
+            assert received_first["query_id"] == "stream-123"
+            assert received_first["response_output"] == "Once"
+            assert received_first["metadata"]["first_chunk"] is True
+            assert received_first["metadata"]["final_chunk"] is False
 
             # Send final chunk
-            final_chunk = QueryResult(
-                query_id="stream-123",
-                response_output="Once upon a time in a land far away...",
-                metadata={"first_chunk": False, "final_chunk": True},
-            )
+            final_chunk = {
+                "query_id": "stream-123",
+                "response_output": "Once upon a time in a land far away...",
+                "metadata": {"first_chunk": False, "final_chunk": True},
+            }
 
             await push_socket.send(final_chunk)
             received_final = await pull_socket.receive()
 
-            assert received_final.query_id == "stream-123"
+            assert received_final["query_id"] == "stream-123"
             assert (
-                received_final.response_output
+                received_final["response_output"]
                 == "Once upon a time in a land far away..."
             )
-            assert received_final.metadata["first_chunk"] is False
-            assert received_final.metadata["final_chunk"] is True
-
-            push_socket.close()
-            pull_socket.close()
+            assert received_final["metadata"]["first_chunk"] is False
+            assert received_final["metadata"]["final_chunk"] is True
 
         finally:
+            push_socket.close()
+            pull_socket.close()
             context.term()
 
     @pytest.mark.asyncio
@@ -456,11 +453,11 @@ class TestZMQPushPullIntegration:
                 tasks = []
                 for socket_idx, push_socket in enumerate(push_sockets):
                     for msg_idx in range(sequence_config["num_messages_per_socket"]):
-                        query = ChatCompletionQuery(
-                            id=f"socket-{socket_idx}-msg-{msg_idx}",
-                            prompt=f"Query from socket {socket_idx}, message {msg_idx}",
-                            model="gpt-3.5-turbo",
-                        )
+                        query = {
+                            "id": f"socket-{socket_idx}-msg-{msg_idx}",
+                            "prompt": f"Query from socket {socket_idx}, message {msg_idx}",
+                            "model": "gpt-3.5-turbo",
+                        }
                         sent_queries.append(query)
                         tasks.append(push_socket.send(query))
                 await asyncio.gather(*tasks)
@@ -468,11 +465,11 @@ class TestZMQPushPullIntegration:
                 # Send messages sequentially
                 for socket_idx, push_socket in enumerate(push_sockets):
                     for msg_idx in range(sequence_config["num_messages_per_socket"]):
-                        query = ChatCompletionQuery(
-                            id=f"socket-{socket_idx}-msg-{msg_idx}",
-                            prompt=f"Query from socket {socket_idx}, message {msg_idx}",
-                            model="gpt-3.5-turbo",
-                        )
+                        query = {
+                            "id": f"socket-{socket_idx}-msg-{msg_idx}",
+                            "prompt": f"Query from socket {socket_idx}, message {msg_idx}",
+                            "model": "gpt-3.5-turbo",
+                        }
                         sent_queries.append(query)
                         await push_socket.send(query)
 
@@ -483,17 +480,16 @@ class TestZMQPushPullIntegration:
                 received_queries.append(received)
 
             # Verify all messages received (order may vary)
-            received_ids = {q.id for q in received_queries}
-            expected_ids = {q.id for q in sent_queries}
+            received_ids = {q["id"] for q in received_queries}
+            expected_ids = {q["id"] for q in sent_queries}
             assert received_ids == expected_ids
             assert len(received_queries) == total_messages
 
+        finally:
             # Cleanup
             for socket in push_sockets:
                 socket.close()
             pull_socket.close()
-
-        finally:
             context.term()
 
     @pytest.mark.asyncio

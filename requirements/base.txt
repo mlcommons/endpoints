@@ -11,3 +11,5 @@ orjson==3.11.3
 pyzmq==27.0.2
 uvloop==0.21.0
 datasets==4.1.1
+pydantic==2.11.7
+pydantic_core==2.33.2

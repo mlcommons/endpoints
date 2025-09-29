@@ -6,10 +6,13 @@ import json
 import logging
 import threading
 import time
+import uuid
 
 from aiohttp import web
 
-from inference_endpoint.core.types import ChatCompletionQuery, QueryResult
+from inference_endpoint.core.types import QueryResult
+from inference_endpoint.openai.openai_adapter import OpenAIAdapter
+from inference_endpoint.openai.openai_types_gen import CreateChatCompletionRequest
 
 
 class EchoServer:
@@ -91,58 +94,64 @@ class EchoServer:
 
     async def _handle_streaming_response(
         self,
+        id: str,
         request: web.Request,
-        completion_request: ChatCompletionQuery,
+        completion_request: CreateChatCompletionRequest,
         content: str,
     ) -> web.StreamResponse:
         """Handle streaming response with SSE format."""
-        response = web.StreamResponse(
-            status=200,
-            headers={
-                "Content-Type": "text/event-stream",
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-            },
-        )
-        await response.prepare(request)
+        try:
+            response = web.StreamResponse(
+                status=200,
+                headers={
+                    "Content-Type": "text/event-stream",
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                },
+            )
+            await response.prepare(request)
 
-        # Send content in chunks (word by word for echo server)
-        words = content.split() if content else []
+            # Send content in chunks (word by word for echo server)
+            words = content.split() if content else []
 
-        # Send chunks
-        for i, word in enumerate(words):
-            # Add space before word (except first)
-            chunk_content = f" {word}" if i > 0 else word
+            # Send chunks
+            for i, word in enumerate(words):
+                # Add space before word (except first)
+                chunk_content = f" {word}" if i > 0 else word
 
-            chunk_data = {
-                "id": f"chatcmpl-{completion_request.id}",
+                chunk_data = {
+                    "id": id,
+                    "object": "chat.completion.chunk",
+                    "created": int(time.time()),
+                    "model": str(completion_request.model.root),
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"content": chunk_content},
+                            "finish_reason": None,
+                        }
+                    ],
+                }
+
+                await response.write(f"data: {json.dumps(chunk_data)}\n\n".encode())
+
+            # Send final chunk with finish_reason
+            final_chunk = {
+                "id": id,
                 "object": "chat.completion.chunk",
                 "created": int(time.time()),
-                "model": completion_request.model,
-                "choices": [
-                    {
-                        "index": 0,
-                        "delta": {"content": chunk_content},
-                        "finish_reason": None,
-                    }
-                ],
+                "model": str(completion_request.model.root),
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
             }
 
-            await response.write(f"data: {json.dumps(chunk_data)}\n\n".encode())
-
-        # Send final chunk with finish_reason
-        final_chunk = {
-            "id": f"chatcmpl-{completion_request.id}",
-            "object": "chat.completion.chunk",
-            "created": int(time.time()),
-            "model": completion_request.model,
-            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
-        }
-
-        await response.write(f"data: {json.dumps(final_chunk)}\n\n".encode())
-        await response.write(b"data: [DONE]\n\n")
-
-        return response
+            await response.write(f"data: {json.dumps(final_chunk)}\n\n".encode())
+            await response.write(b"data: [DONE]\n\n")
+            return response
+        except Exception as e:
+            self.logger.error(f"Error handling streaming response: {e}")
+            raise e
+        finally:
+            pass
 
     async def _handle_echo_chat_completions_request(
         self, request: web.Request
@@ -156,8 +165,13 @@ class EchoServer:
             else:
                 raw_payload = await request.text()
                 json_payload = json.loads(raw_payload)
-            completion_request = ChatCompletionQuery.from_json(json_payload)
-            raw_response = completion_request.prompt
+            completion_request = CreateChatCompletionRequest(**json_payload)
+            if completion_request.messages and len(completion_request.messages) > 0:
+                raw_response = completion_request.messages[0].root.content
+            else:
+                raise ValueError("Request must contain at least one message")
+            id = json_payload.get("id", str(uuid.uuid4()))
+            self.logger.debug(f"Content of request: {raw_response}")
             if self.max_osl is not None and len(raw_response) > 0:
                 # if max_osl is specified, it can be either larger or smaller than the length of the prompt
                 # if max_osl is larger, we can repeate the prompt until we reach the max_osl
@@ -171,22 +185,28 @@ class EchoServer:
                     raw_response = raw_response[: self.max_osl]
 
             # Check if this is a streaming request
-            if completion_request.stream:
+            self.logger.debug(f"Streaming response: {completion_request.stream}\n")
+            if completion_request.stream is True:
                 # Return SSE (Server-Sent Events) format for streaming
                 return await self._handle_streaming_response(
-                    request, completion_request, raw_response
+                    id, request, completion_request, raw_response
                 )
             else:
                 # Non-streaming: return QueryResult as before
                 response = QueryResult(
-                    query_id=completion_request.id,
+                    id=id,
                     response_output=raw_response,
                 )
-                echo_response = response.to_json()
+                echo_response = OpenAIAdapter.to_openai_response(response).model_dump(
+                    mode="json"
+                )
+                echo_response["id"] = id
+                self.logger.debug(f"Echo response (non-streaming): {echo_response}")
                 return web.json_response(echo_response, status=200)
 
         except Exception as e:
             # A catch-all exception handler to help debug the issue without bringing down the server
+            self.logger.error(f"Error handling chat completions request: {e}")
             return web.json_response(
                 {"error": f"error encountered : {str(e)}"},
                 status=400,
@@ -196,54 +216,54 @@ class EchoServer:
         """Run the server in a separate thread."""
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
-
-        try:
-            self._loop.run_until_complete(self._start_server())
-        except Exception as e:
-            print(f"Server error: {e}")
+        self._loop.run_until_complete(self._start_server())
 
     async def _start_server(self):
         """Start the HTTP server."""
-        # Create the web application
-        self.app = web.Application()
+        try:
+            # Create the web application
+            self.app = web.Application()
 
-        self.app.router.add_post(
-            "/v1/chat/completions", self._handle_echo_chat_completions_request
-        )
-        self.app.router.add_post("/echo", self._handle_echo_request)
+            self.app.router.add_post(
+                "/v1/chat/completions", self._handle_echo_chat_completions_request
+            )
+            self.app.router.add_post("/echo", self._handle_echo_request)
 
-        # Start the server
-        self.runner = web.AppRunner(self.app)
-        await self.runner.setup()
-        # Create TCP site with backlog
-        # NOTE(vir): 10k for test_massive_concurrency integration tests
-        self.site = web.TCPSite(self.runner, self.host, self.port, backlog=10000)
-        await self.site.start()
+            # Start the server
+            self.runner = web.AppRunner(self.app)
+            await self.runner.setup()
+            # Create TCP site with backlog
+            # NOTE(vir): 10k for test_massive_concurrency integration tests
+            self.site = web.TCPSite(self.runner, self.host, self.port, backlog=10000)
+            await self.site.start()
 
-        # Get the actual port if we used port 0
-        if self.port == 0:
-            # Get the actual port assigned by the OS
-            server_socket = self.site._server.sockets[0]
-            self._actual_port = server_socket.getsockname()[1]
-        else:
-            self._actual_port = self.port
+            # Get the actual port if we used port 0
+            if self.port == 0:
+                # Get the actual port assigned by the OS
+                server_socket = self.site._server.sockets[0]
+                self._actual_port = server_socket.getsockname()[1]
+            else:
+                self._actual_port = self.port
 
-        self.logger.info(
-            f"==========================\nServer started at {self.url}\n==========================",
-        )
+            self.logger.info(
+                f"==========================\nServer started at {self.url}\n==========================",
+            )
 
-        # Signal that the port is ready
-        self._port_ready_event.set()
+            # Signal that the port is ready
+            self._port_ready_event.set()
 
-        # Wait for shutdown signal
-        while not self._shutdown_event.is_set():
-            await asyncio.sleep(0.1)
+            # Wait for shutdown signal
+            while not self._shutdown_event.is_set():
+                await asyncio.sleep(0.1)
 
-        # Clean up
-        if self.site:
-            await self.site.stop()
-        if self.runner:
-            await self.runner.cleanup()
+        except Exception as e:
+            self.logger.error(f"Server error: {e}")
+
+        finally:  # Clean up
+            if self.site:
+                await self.site.stop()
+            if self.runner:
+                await self.runner.cleanup()
 
     def start(self):
         """Start the server in a background thread."""
@@ -327,11 +347,11 @@ def main():
         server.start()
 
         # Wait for the server thread to finish
-        print("Server is running. Press Ctrl+C to stop...")
+        server.logger.info("Server is running. Press Ctrl+C to stop...")
         server._server_thread.join()
 
     except KeyboardInterrupt:
-        print("\nKeyboard interrupt received, stopping server...")
+        server.logger.warning("\nKeyboard interrupt received, stopping server...")
         if server:
             server.stop()
     except Exception as e:

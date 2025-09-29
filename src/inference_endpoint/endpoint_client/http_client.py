@@ -89,6 +89,7 @@ class HTTPEndpointClient:
         self._concurrency_semaphore = None
         if config.max_concurrency > 0:
             self._concurrency_semaphore = asyncio.Semaphore(config.max_concurrency)
+        self.logger = logging.getLogger(__name__)
 
     def issue_query(
         self, query: Query
@@ -111,13 +112,13 @@ class HTTPEndpointClient:
             StreamingFuture for streaming queries, asyncio.Future otherwise
         """
         # Create appropriate future type
+        self.logger.info(f"Query issued: {query}")
         future = (
             StreamingFuture()
-            if query.stream
+            if query.data.get("stream", False)
             else asyncio.get_event_loop().create_future()
         )
         self._pending_futures[query.id] = future
-
         # Schedule the actual send
         asyncio.create_task(self._issue_query_impl(query))
 
@@ -141,6 +142,8 @@ class HTTPEndpointClient:
                 # Also set exception on first chunk future for streaming
                 if isinstance(future, StreamingFuture) and not future.first.done():
                     future.first.set_exception(e)
+            logger.error(f"Error sending query to worker: {e}")
+            raise
 
     async def _send_to_worker(self, query: Query) -> None:
         """Send query to worker via ZMQ."""
@@ -187,12 +190,17 @@ class HTTPEndpointClient:
                         response_socket.receive(),
                         timeout=self.config.response_handler_timeout,
                     )
+                    assert isinstance(message, QueryResult) or isinstance(
+                        message, StreamChunk
+                    ), f"Invalid message type: {type(message)}"
 
                     # Future must exist - we created it when issuing query
-                    future = self._pending_futures[message.query_id]
-                    assert future is not None, f"No future for {message.query_id}"
-                    assert not future.done(), f"Double response for {message.query_id}"
-
+                    assert (
+                        message.id in self._pending_futures
+                    ), f"No future for {message.id}"
+                    future = self._pending_futures[message.id]
+                    assert future is not None, f"No future for {message.id}"
+                    assert not future.done(), f"Double response for {message.id}"
                     # Handle by message type
                     match message:
                         case StreamChunk():
@@ -205,11 +213,11 @@ class HTTPEndpointClient:
                             if message.is_complete:
                                 # Single chunk complete - create QueryResult and complete
                                 result = QueryResult(
-                                    query_id=message.query_id,
+                                    id=message.id,
                                     response_output=message.response_chunk,
                                 )
                                 future.set_result(result)
-                                self._pending_futures.pop(message.query_id)
+                                self._pending_futures.pop(message.id)
 
                         case QueryResult():
                             # Complete the future
@@ -234,8 +242,10 @@ class HTTPEndpointClient:
 
                                 future.set_result(message)
 
-                            self._pending_futures.pop(message.query_id)
+                            self._pending_futures.pop(message.id)
 
+                        case _:
+                            raise ValueError(f"Invalid message type: {type(message)}")
                     # Call callback after future is resolved
                     # NOTE(vir):
                     # We call the callback after future resolution to ensure that
@@ -249,7 +259,8 @@ class HTTPEndpointClient:
                     continue
                 except Exception as e:
                     logger.error(f"Error handling response: {e}")
-
+        except Exception as e:
+            logger.error(f"Error handling responses: {e}")
         finally:
             response_socket.close()
 

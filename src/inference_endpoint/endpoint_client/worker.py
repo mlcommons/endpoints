@@ -15,13 +15,19 @@ import orjson
 import zmq
 import zmq.asyncio
 
-from inference_endpoint.core.types import Query, QueryResult, StreamChunk
+from inference_endpoint.core.types import (
+    Query,
+    QueryResult,
+    StreamChunk,
+)
 from inference_endpoint.endpoint_client.configs import (
     AioHttpConfig,
     HTTPClientConfig,
     ZMQConfig,
 )
 from inference_endpoint.endpoint_client.zmq_utils import ZMQPullSocket, ZMQPushSocket
+from inference_endpoint.openai.openai_adapter import OpenAIAdapter
+from inference_endpoint.openai.openai_types_gen import CreateChatCompletionResponse
 
 logger = logging.getLogger(__name__)
 
@@ -166,7 +172,7 @@ class Worker:
         """Send error response for a query."""
         error_message = str(error) if isinstance(error, Exception) else error
         error_response = QueryResult(
-            query_id=query_id,
+            id=query_id,
             response_output=None,
             error=error_message,
         )
@@ -183,10 +189,12 @@ class Worker:
         """
         url = self.http_config.endpoint_url
         headers = query.headers if hasattr(query, "headers") else {}
+        payload = OpenAIAdapter.to_openai_request(query).model_dump(mode="json")
+        payload["id"] = query.id
 
         async with self._session.post(
             url,
-            json=query.to_json(),
+            json=payload,
             headers=headers,
         ) as response:
             if response.status != 200:
@@ -201,7 +209,7 @@ class Worker:
     async def _process_request(self, query: Query) -> None:
         """Process a single query."""
         try:
-            if query.stream:
+            if query.data.get("stream", False):
                 await self._handle_streaming_request(query)
             else:
                 await self._handle_non_streaming_request(query)
@@ -246,7 +254,7 @@ class Worker:
                     # Send first chunk with metadata
                     if not first_chunk_sent:
                         stream_chunk = StreamChunk(
-                            query_id=query.id,
+                            id=query.id,
                             response_chunk=content,
                             is_complete=is_final,
                             metadata={"first_chunk": True, "final_chunk": is_final},
@@ -256,7 +264,7 @@ class Worker:
 
             # Send final complete response
             final_response = QueryResult(
-                query_id=query.id,
+                id=query.id,
                 response_output="".join(accumulated_content),
                 metadata={"first_chunk": not first_chunk_sent, "final_chunk": True},
             )
@@ -269,8 +277,10 @@ class Worker:
 
             # Parse JSON response
             response_data = orjson.loads(response_text)
-            response_obj = QueryResult.from_json(response_data)
-
+            response_obj = OpenAIAdapter.from_openai_response(
+                CreateChatCompletionResponse(**response_data, ignore_extra=True)
+            )
+            response_obj.id = query.id
             # Send response back to the main process
             await self._response_socket.send(response_obj)
 

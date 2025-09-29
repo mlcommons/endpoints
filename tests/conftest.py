@@ -95,6 +95,8 @@ def mock_http_echo_server():
 
     try:
         yield server
+    except Exception as e:
+        raise RuntimeError(f"Mock Echo Server error: {e}") from e
     finally:
         server.stop()
 
