@@ -43,10 +43,36 @@ class EchoServer:
         self.max_osl = max_osl
 
     def get_max_osl(self):
+        """
+        Retrieve the current maximum output sequence length (OSL) setting.
+
+        Returns:
+            int: The maximum length allowed for output sequences in the echo server.
+        """
         return self.max_osl
 
+    def get_response(self, request: str) -> str:
+        """
+        Return the input request string as the response.
+
+        This method serves as a simple echo mechanism, returning the exact request string unchanged. It can be overridden in subclasses to provide custom response generation logic.
+
+        Args:
+            request (str): The input request string to be echoed back.
+
+        Returns:
+            str: The input request string passed through unmodified
+        """
+        return request
+
     async def _handle_echo_request(self, request: web.Request) -> web.Response:
-        """Handle incoming HTTP requests and echo back the payload without checking the payload."""
+        """
+        Handle a generic HTTP request and return a JSON response that echoes all request details.
+
+        Captures and logs comprehensive request information including method, URL, endpoint, query parameters, headers, and payload (both JSON and raw formats). Designed for testing and debugging network interactions.
+
+        Returns a standardized JSON response containing the full request details and a success message.
+        """
         # Extract request data
         endpoint = request.path
         query_params = dict(request.query)
@@ -99,7 +125,23 @@ class EchoServer:
         completion_request: CreateChatCompletionRequest,
         content: str,
     ) -> web.StreamResponse:
-        """Handle streaming response with SSE format."""
+        """
+        Handle a streaming chat completion response using Server-Sent Events (SSE).
+
+        Streams the response word by word, simulating an OpenAI-compatible chat completion endpoint. Creates an SSE-formatted stream with individual word chunks and a final completion marker.
+
+        Args:
+            id (str): Unique identifier for the streaming response.
+            request (web.Request): The original web request.
+            completion_request (CreateChatCompletionRequest): The parsed chat completion request.
+            content (str): The content to be streamed.
+
+        Returns:
+            web.StreamResponse: A streaming HTTP response with chunked SSE data.
+
+        Raises:
+            Any underlying exceptions that occur during streaming, which will be logged.
+        """
         try:
             response = web.StreamResponse(
                 status=200,
@@ -110,9 +152,10 @@ class EchoServer:
                 },
             )
             await response.prepare(request)
+            raw_response = self.get_response(content)
 
             # Send content in chunks (word by word for echo server)
-            words = content.split() if content else []
+            words = raw_response.split() if raw_response else []
 
             # Send chunks
             for i, word in enumerate(words):
@@ -156,7 +199,16 @@ class EchoServer:
     async def _handle_echo_chat_completions_request(
         self, request: web.Request
     ) -> web.Response:
-        """Handle incoming HTTP OpenAI chat completions requests and echo back a QueryResult payload."""
+        """
+        Handle an incoming HTTP request to the OpenAI chat completions endpoint.
+
+        Processes the request by extracting the first message content, generating a response via `get_response()`, and returning either a streaming Server-Sent Events (SSE) response or a standard JSON response based on the request configuration.
+
+        Supports handling JSON payloads, enforcing maximum output sequence length, and converting the response to OpenAI-compatible format. Logs request and response details for debugging.
+
+        Raises:
+            ValueError: If no messages are present in the request payload.
+        """
 
         # Get request body
         try:
@@ -167,11 +219,14 @@ class EchoServer:
                 json_payload = json.loads(raw_payload)
             completion_request = CreateChatCompletionRequest(**json_payload)
             if completion_request.messages and len(completion_request.messages) > 0:
-                raw_response = completion_request.messages[0].root.content
+                raw_request = completion_request.messages[0].root.content
             else:
                 raise ValueError("Request must contain at least one message")
             id = json_payload.get("id", str(uuid.uuid4()))
-            self.logger.debug(f"Content of request: {raw_response}")
+            raw_response = self.get_response(raw_request)
+            self.logger.debug(
+                f"Content of request: {raw_request} - response : {raw_response}"
+            )
             if self.max_osl is not None and len(raw_response) > 0:
                 # if max_osl is specified, it can be either larger or smaller than the length of the prompt
                 # if max_osl is larger, we can repeate the prompt until we reach the max_osl

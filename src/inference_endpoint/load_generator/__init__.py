@@ -5,6 +5,7 @@ This module handles load pattern generation and query lifecycle management.
 Status: To be implemented by the development team.
 """
 
+import logging
 import queue
 import threading
 import time
@@ -67,13 +68,35 @@ class SampleIssuer(ABC):
         }
 
     def stop_response_thread(self, s_uuid: int):
+        """
+        Stop and clean up the response processing thread associated with the given sample UUID.
+
+        This method signals the thread to terminate by pushing a `None` chunk, waits for the thread to finish,
+        and then removes references to the thread and its corresponding queue to free resources.
+        """
         self.push_response_chunk(s_uuid, None)
         self.threads[s_uuid].join()
         del self.threads[s_uuid]
         del self.queues[s_uuid]
 
+    def __del__(self):
+        """
+        Ensure all active response processing threads are stopped when the SampleIssuer object is destroyed.
+        """
+        for s_uuid in self.threads:
+            self.stop_response_thread(s_uuid)
+
     @abstractmethod
     def process_sample_data(self, s_uuid: int, sample_data: Any):
+        """
+        Abstract method to handle the physical or logical processing of sample data associated with a given sample UUID.
+
+        Subclasses must implement this method to define how the sample data is processed or stored.
+
+        Parameters:
+            s_uuid (int): Unique identifier for the sample.
+            sample_data (Any): Data content of the sample to be processed.
+        """
         raise NotImplementedError
 
 
@@ -112,30 +135,45 @@ class LoadGenerator:
         self.sample_issuer = sample_issuer
 
     def start_test(self):
+        """
+        Start a new benchmark session and run its sample issuance in a separate thread.
+
+        Returns:
+            BenchmarkSession: The created benchmark session object, which contains session state and the thread running the test.
+        """
         sess = BenchmarkSession(self.rt_settings)
         sess.thread = threading.Thread(target=self._run_session, args=(sess,))
         sess.thread.start()
         return sess
 
     def _run_session(self, sess: BenchmarkSession):
-        sess.mark_start_timestamp()
-        last_issue_timestamp_ns = 0
-        for sample, delay_ns in self.scheduler:
-            scheduled_issue_time_ns = last_issue_timestamp_ns + delay_ns
-            while True:
-                now = time.monotonic_ns()
-                if now >= scheduled_issue_time_ns:
-                    break
-                sleep_ns(scheduled_issue_time_ns - now)
-            # TODO: Log return value of .issue()to session live statistics
-            self.sample_issuer.issue(sample)
-            last_issue_timestamp_ns = time.monotonic_ns()
+        """
+        Run the benchmark session by issuing samples according to the scheduler while respecting timing constraints.
 
-            if last_issue_timestamp_ns >= sess.max_end_time_ns:
-                warnings.warn(
-                    "Session timeout reached. Stopping benchmark.",
-                    RuntimeWarning,
-                    stacklevel=2,
-                )
-                break
-        sess.test_end_event.set()
+        Marks the session start time, then iterates over scheduled samples and their delays, sleeping as needed to maintain the schedule. Issues each sample using the SampleIssuer. Stops issuing samples and raises a warning if the session's maximum allowed duration is reached. Logs any unexpected errors during session execution and ensures the session end event is set upon completion.
+        """
+        try:
+            sess.mark_start_timestamp()
+            last_issue_timestamp_ns = 0
+            for sample, delay_ns in self.scheduler:
+                scheduled_issue_time_ns = last_issue_timestamp_ns + delay_ns
+                while True:
+                    now = time.monotonic_ns()
+                    if now >= scheduled_issue_time_ns:
+                        break
+                    sleep_ns(scheduled_issue_time_ns - now)
+                # TODO: Log return value of .issue()to session live statistics
+                self.sample_issuer.issue(sample)
+                last_issue_timestamp_ns = time.monotonic_ns()
+
+                if last_issue_timestamp_ns >= sess.max_end_time_ns:
+                    warnings.warn(
+                        "Session timeout reached. Stopping benchmark.",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
+                    break
+        except Exception as e:
+            logging.error(f"Error running session: {e}")
+        finally:
+            sess.test_end_event.set()

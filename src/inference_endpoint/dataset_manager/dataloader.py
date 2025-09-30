@@ -177,4 +177,22 @@ class HFDataLoader(DataLoader):
         return self.parser(self.data[self.split][index])
 
     def num_samples(self):
+        """
+        Returns the total number of samples in the specified dataset split.
+
+        Returns:
+            int: Number of samples in the current dataset split.
+        """
         return len(self.data[self.split])
+
+
+class DeepSeekR1ChatCompletionDataLoader(PickleReader):
+    def __init__(self, file_path, parser: Callable[[Any], Any] = None):
+        """
+        Initialize a DeepSeekR1ChatCompletionDataLoader for loading chat completion datasets from a pickle file.
+
+        Args:
+            file_path (str): Path to the pickle file containing chat completion data.
+            parser (Callable[[Any], Any], optional): Callable to parse individual data samples. If not provided, defaults to the parent class's parsing mechanism.
+        """
+        super().__init__(file_path, parser=parser)
