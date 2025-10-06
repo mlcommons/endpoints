@@ -1,7 +1,6 @@
 import random
 
 from inference_endpoint.core.types import QueryResult
-from inference_endpoint.dataset_manager.dataloader import DataLoader
 from inference_endpoint.load_generator.scheduler import (
     SampleEvent,
     SampleFactory,
@@ -9,9 +8,14 @@ from inference_endpoint.load_generator.scheduler import (
     WithReplacementSampleOrder,
 )
 
+from tests.test_helpers import DummyDataLoader
 
-def test_sample_factory(dummy_dataloader: DataLoader):
+
+def test_sample_factory():
     completed = []
+
+    # Create dataloader instance
+    dummy_dataloader = DummyDataLoader(n_samples=100)
 
     class TestingFactory(SampleFactory):
         @staticmethod

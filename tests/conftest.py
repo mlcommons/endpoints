@@ -4,17 +4,13 @@ Benchmarking System.
 This file provides shared fixtures and configuration for all tests.
 """
 
-import hashlib
-
 # Add src to path for imports
 import sys
-import uuid
 from pathlib import Path
 from typing import Any
 
 import pytest
 from inference_endpoint.dataset_manager.dataloader import (
-    DataLoader,
     HFDataLoader,
     PickleReader,
 )
@@ -39,44 +35,6 @@ def sample_config() -> dict[str, Any]:
             "memory_limit": "4GB",
         },
     }
-
-
-@pytest.fixture
-def create_test_query():
-    """Factory for creating test queries with various configurations.
-
-    This is a flexible factory that can create queries with different sizes,
-    streaming modes, and custom IDs for testing purposes.
-
-    Examples:
-        # Create a simple query
-        query = create_test_query()
-
-        # Create a large query for performance testing
-        large_query = create_test_query(prompt_size=1000, stream=False)
-
-        # Create a streaming query with custom ID
-        streaming_query = create_test_query(stream=True, query_id="test-123")
-    """
-    from inference_endpoint.core.types import Query
-
-    def _create_query(
-        prompt_size: int = 100,
-        stream: bool = False,
-        query_id: str | None = None,
-    ):
-        """Create a test query with specified parameters."""
-        prompt = "a" * prompt_size  # Simple prompt of specified size
-        return Query(
-            id=query_id or str(uuid.uuid4()),
-            data={
-                "model": "test-model",
-                "prompt": prompt,
-                "stream": stream,
-            },
-        )
-
-    return _create_query
 
 
 @pytest.fixture(scope="session")
@@ -123,23 +81,6 @@ def mock_http_echo_server():
 
 
 @pytest.fixture
-def dummy_dataloader():
-    class DummyDataLoader(DataLoader):
-        def __init__(self, n_samples: int = 100):
-            super().__init__(None)
-            self.n_samples = n_samples
-
-        def load_sample(self, sample_index: int) -> int:
-            assert sample_index >= 0 and sample_index < self.n_samples
-            return sample_index
-
-        def num_samples(self) -> int:
-            return self.n_samples
-
-    return DummyDataLoader()
-
-
-@pytest.fixture
 def ds_pickle_dataset_path():
     """
     Returns the path to the ds_samples.pkl file.
@@ -176,24 +117,3 @@ def hf_squad_dataset(hf_squad_dataset_path):
     Returns a HFDataLoader object for the squad dataset.
     """
     return HFDataLoader(hf_squad_dataset_path, format="arrow")
-
-
-def get_test_socket_path(tmp_path, test_name, suffix=""):
-    """Generate a short socket name using hash to avoid path length limits.
-
-    This avoids Unix domain socket path length limits (typically 108 chars)
-    when pytest runs tests in parallel with long temporary directory paths.
-
-    Args:
-        tmp_path: The pytest tmp_path fixture
-        test_name: A unique identifier for the test
-        suffix: Optional suffix to append (e.g., "_req", "_resp")
-
-    Returns:
-        A short IPC socket path like "ipc:///tmp/.../a1b2c3d4_req"
-    """
-    # Create a hash of the test name to ensure uniqueness
-    hash_val = hashlib.md5(test_name.encode()).hexdigest()[:8]
-    # Combine with a short suffix
-    name = f"{hash_val}{suffix}"
-    return f"ipc://{tmp_path}/{name}"

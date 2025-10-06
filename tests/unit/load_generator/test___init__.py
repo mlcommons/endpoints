@@ -14,6 +14,8 @@ from inference_endpoint.load_generator.scheduler import (
     WithoutReplacementSampleOrder,
 )
 
+from tests.test_helpers import DummyDataLoader
+
 
 class DummySampleFactory(SampleFactory):
     _output_histogram = defaultdict(int)
@@ -43,9 +45,12 @@ class DummySampleIssuer(SampleIssuer):
 
 
 @pytest.mark.xdist_group(name="serial_load_generator")
-def test_load_generator_full_run(dummy_dataloader):
+def test_load_generator_full_run():
     # Reset for test
     DummySampleFactory._output_histogram.clear()
+
+    # Create dataloader instance
+    dummy_dataloader = DummyDataLoader(n_samples=100)
 
     rt_settings = RuntimeSettings(
         metrics.Throughput(5000),

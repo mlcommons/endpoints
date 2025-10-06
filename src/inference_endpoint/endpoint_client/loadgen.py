@@ -33,6 +33,7 @@ class HttpClientSampleIssuer(SampleIssuer):
         self.response_task: asyncio.Task | None = None
 
         # Map query ID -> Sample for routing
+        # Only accessed from event loop thread (lock-free)
         self.query_id_to_sample: dict[str, Sample] = {}
 
         # Signals when all pending queries complete
@@ -56,7 +57,9 @@ class HttpClientSampleIssuer(SampleIssuer):
                 if response is None:  # timed out without a response
                     continue
 
+                # Safe: single-threaded access (event loop thread)
                 sample = self.query_id_to_sample.get(response.id)
+
                 assert (
                     sample is not None
                 ), f"Sample not found for response: {response.id}"
@@ -81,9 +84,9 @@ class HttpClientSampleIssuer(SampleIssuer):
                     case QueryResult():
                         # Final response for both streaming and non-streaming
                         sample.callbacks[SampleEvent.COMPLETE](response)
-                        self.query_id_to_sample.pop(response.id, None)
 
-                        # Signal if all queries complete
+                        # Remove from map and check if all complete
+                        self.query_id_to_sample.pop(response.id, None)
                         if len(self.query_id_to_sample) == 0:
                             self._all_complete_event.set()
 
@@ -102,15 +105,19 @@ class HttpClientSampleIssuer(SampleIssuer):
 
         Flow:
         1. Create Query from sample data, and to track response
-        3. Issue via HTTP client
+        2. Issue via HTTP client
         4. Call REQUEST_SENT callback on Query
         """
         # Convert int uuid to string for consistency with Query.id type
         query_id: str = str(sample.uuid)
         query = Query(id=query_id, data=sample.get_bytes())
 
-        # Store sample for response routing
-        self.query_id_to_sample[query_id] = sample
+        # Schedule state mutation on event loop thread
+        # This ensures all dict access happens from single thread
+        def _add_to_map(query_id: str, sample: Sample):
+            self.query_id_to_sample[query_id] = sample
+
+        self.http_client.loop.call_soon_threadsafe(_add_to_map, query_id, sample)
 
         # Issue via HTTP client (thread-safe, non-blocking)
         self.http_client.issue_query(query)
@@ -127,9 +134,6 @@ class HttpClientSampleIssuer(SampleIssuer):
         Returns:
             True if all complete, False if timeout
         """
-        if len(self.query_id_to_sample) == 0:
-            return True  # Already complete
-
         result = self._all_complete_event.wait(timeout=timeout)
         return result
 

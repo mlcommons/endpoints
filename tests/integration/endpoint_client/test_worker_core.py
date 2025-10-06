@@ -15,7 +15,7 @@ from inference_endpoint.endpoint_client.configs import (
 )
 from inference_endpoint.endpoint_client.worker import Worker
 
-from ...conftest import get_test_socket_path
+from ...test_helpers import get_test_socket_path
 
 
 class TestWorkerBasicFunctionality:

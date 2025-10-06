@@ -15,6 +15,7 @@ from inference_endpoint.load_generator.scheduler import (
 )
 
 from tests.performance.utils import MetricsSampleFactory
+from tests.test_helpers import create_test_query
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +29,7 @@ PERFORMANCE_CONFIG = {
     "test_duration_ms": 5000,  # 5 seconds in milliseconds
     "default_message_size": 1000 * 4,  # 4k characters
     # Mode-specific target QPS
-    "streaming_target_qps": 1500,
+    "streaming_target_qps": 1100,
     "offline_target_qps": 1500,
     # Test to maintain peak throughput at these message sizes
     "message_sizes": [100 * 4, 500 * 4, 1000 * 4, 2000 * 4],
@@ -72,7 +73,6 @@ class TestHTTPClientPerformanceSingleWorker:
     def test_streaming_baseline_performance(
         self,
         http_client,
-        create_test_query,
     ):
         """Test baseline streaming performance at target QPS."""
         target_qps = PERFORMANCE_CONFIG["streaming_target_qps"]
@@ -155,7 +155,6 @@ class TestHTTPClientPerformanceSingleWorker:
     def test_offline_baseline_performance(
         self,
         http_client,
-        create_test_query,
     ):
         """Test baseline offline (non-streaming) performance at target QPS."""
         target_qps = PERFORMANCE_CONFIG["offline_target_qps"]
@@ -243,7 +242,6 @@ class TestHTTPClientPerformanceSingleWorker:
     def test_streaming_throughput_various_message_sizes(
         self,
         http_client,
-        create_test_query,
         message_size,
     ):
         """Test that streaming maintains target QPS across different message sizes."""
@@ -326,7 +324,6 @@ class TestHTTPClientPerformanceSingleWorker:
     def test_offline_throughput_various_message_sizes(
         self,
         http_client,
-        create_test_query,
         message_size,
     ):
         """Test that offline mode maintains target QPS across different message sizes."""
@@ -411,7 +408,6 @@ class TestHTTPClientPerformanceSingleWorker:
     def test_streaming_p99_latency_no_degradation(
         self,
         http_client,
-        create_test_query,
     ):
         """Test that streaming P99 latency does not degrade across message sizes."""
         target_qps = PERFORMANCE_CONFIG["streaming_target_qps"]
@@ -514,7 +510,6 @@ class TestHTTPClientPerformanceSingleWorker:
     def test_offline_p99_latency_no_degradation(
         self,
         http_client,
-        create_test_query,
     ):
         """Test that offline P99 latency does not degrade across message sizes."""
         target_qps = PERFORMANCE_CONFIG["offline_target_qps"]

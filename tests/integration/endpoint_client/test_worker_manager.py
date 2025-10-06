@@ -24,7 +24,7 @@ from inference_endpoint.endpoint_client.configs import (
 )
 from inference_endpoint.endpoint_client.worker import WorkerManager
 
-from ...conftest import get_test_socket_path
+from ...test_helpers import get_test_socket_path
 
 
 def check_for_zombies(pids: list[int], timeout: float = 1.0) -> list[int]:
