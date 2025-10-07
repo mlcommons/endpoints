@@ -12,9 +12,8 @@ import atexit
 import glob
 import os
 import sys
-import time
 
-from inference_endpoint.profiling import pause, print_stats
+from inference_endpoint.profiling import shutdown
 from inference_endpoint.profiling.line_profiler import (
     ENV_VAR_ENABLE_LINE_PROFILER,
     ENV_VAR_LINE_PROFILER_LOGFILE,
@@ -35,8 +34,7 @@ def pytest_configure(config):
             "/tmp/mlperf_client_profiles/profile"
         )
 
-    # Suppress harmless line_profiler shutdown error during final teardown
-    # Register early so it runs late (atexit is LIFO)
+    # Suppress stderr during interpreter shutdown to hide line_profiler internal errors
     atexit.register(_suppress_stderr_during_shutdown)
 
 
@@ -45,18 +43,8 @@ def pytest_sessionfinish(session, exitstatus):
     if os.environ.get(ENV_VAR_ENABLE_LINE_PROFILER) != "1":
         return
 
-    # Pause profiler and print main process stats
-    pause()
-    print_stats(stream=sys.stderr, prefix="pytest-main")
-
-    # Mark as complete to prevent atexit double-printing
-    from inference_endpoint.profiling.line_profiler import _profiler_state
-
-    _profiler_state._stats_printed = True
-    _profiler_state._atexit_registered = False
-
-    # Give workers time to write their profile files
-    time.sleep(0.1)
+    # Shutdown profiler completely (disables atexit handler and prints stats)
+    shutdown()
 
     # Collect and display worker profiles
     _print_worker_profiles()

@@ -49,7 +49,7 @@ def temp_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return tmp_path_factory.mktemp("test_artifacts")
 
 
-@pytest.fixture(scope="class")
+@pytest.fixture(scope="function")
 def mock_http_echo_server():
     """
     Mock HTTP server that echoes back the request payload in the appropriate format.

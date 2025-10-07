@@ -11,12 +11,6 @@ async def futures_http_client(request):
     This fixture expects the test to provide configs via a `client_config` fixture
     that returns (http_config, aiohttp_config, zmq_config).
 
-    The fixture will:
-    - Create the client
-    - Start it
-    - Yield the started client
-    - Properly shut it down after the test
-
     Usage in test class:
         @pytest.fixture
         def client_config(self, mock_http_echo_server, tmp_path):

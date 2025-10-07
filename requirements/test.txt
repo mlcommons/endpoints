@@ -12,6 +12,7 @@ pytest-benchmark>=4.0.0
 
 # Test utilities
 coverage>=7.0.0
+line-profiler==5.0.0
 
 # HTTP server and client for mock server fixture
 aiohttp>=3.8.0

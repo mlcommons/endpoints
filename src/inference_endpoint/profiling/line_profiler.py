@@ -9,6 +9,7 @@ This module provides a clean singleton API for profiling:
 """
 
 import atexit
+import contextlib
 import io
 import os
 import sys
@@ -76,42 +77,42 @@ class ProfilerState:
             pass  # Suppress all errors during shutdown
 
     def _cleanup(self):
-        """Cleanup function called at interpreter exit or explicit shutdown."""
-        if not self.profiler or self._stats_printed:
+        """Cleanup function called at interpreter exit or explicit shutdown.
+
+        Prints stats (if any) and then completely tears down the profiler
+        to prevent shutdown errors.
+        """
+        if not self.profiler or self._stats_printed or not self.profiler.functions:
+            self._teardown_profiler()
             return
 
-        # Check if profiler has any tracked functions
-        try:
-            if not self.profiler.functions:
-                return
-        except (AttributeError, TypeError):
-            return  # Profiler partially torn down
-
-        try:
+        with contextlib.suppress(Exception):
             self.pause()
-            pid = os.getpid()
-
-            # Determine output destination
-            if self.output_file:
-                if self.output_file.parent != Path("."):
-                    self.output_file.parent.mkdir(parents=True, exist_ok=True)
-                stream = self.output_file.with_name(
-                    f"{self.output_file.name}.{pid}"
-                ).open(mode="w")
-                should_close = True
-            else:
-                stream = sys.stderr
-                should_close = False
-
-            try:
-                self.print_stats(stream=stream, prefix=f"PID {pid}")
-            finally:
-                if should_close:
-                    stream.close()
-
+            self._print_stats_to_destination()
             self._stats_printed = True
-        except Exception:
-            pass  # Silently fail during cleanup
+            self._teardown_profiler()
+
+    def _print_stats_to_destination(self):
+        """Print stats to configured output destination."""
+        pid = os.getpid()
+
+        if self.output_file:
+            output_path = self.output_file.with_name(f"{self.output_file.name}.{pid}")
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            with output_path.open(mode="w") as stream:
+                self.print_stats(stream=stream, prefix=f"PID {pid}")
+        else:
+            self.print_stats(stream=sys.stderr, prefix=f"PID {pid}")
+
+    def _teardown_profiler(self):
+        """Teardown profiler to prevent shutdown errors."""
+        if not self.profiler:
+            return
+
+        self.profiler.disable()
+        self.profiler.functions.clear()
+        self.profiler.enable_count = 0
+        self.profiler = None
 
     def profile(self, func: F) -> F:
         """Profile decorator for functions."""

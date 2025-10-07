@@ -393,15 +393,13 @@ class Worker:
 
     async def _cleanup(self) -> None:
         """Clean up resources."""
-        logger.info(f"Worker {self.worker_id} shutting down...")
-
         # Close aiohttp session
         if self._session:
             await self._session.close()
 
         # Cancel and clear active tasks
         logger.info(
-            f"Worker {self.worker_id} will cancel {len(self._active_tasks)} tasks to cleanup."
+            f"Worker {self.worker_id} will cancel {len(self._active_tasks)} tasks and cleanup."
         )
         for task in self._active_tasks:
             task.cancel()

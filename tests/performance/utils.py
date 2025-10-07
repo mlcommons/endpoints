@@ -25,6 +25,7 @@ class PerformanceMetrics:
     def __init__(self):
         self.latencies: list[float] = []
         self.ttft_latencies: list[float] = []
+        self.tpot_latencies: list[float] = []  # Time per output token
         self.errors: list[Exception] = []
         self.start_time: float | None = None
         self.end_time: float | None = None
@@ -34,6 +35,7 @@ class PerformanceMetrics:
         self.first_chunk_times: dict[
             str | int, float
         ] = {}  # Support both UUID strings and ints
+        self.output_tokens: dict[str | int, int] = {}  # Track output token counts
         self.issue_times: list[float] = []  # Track when requests are issued
         self.first_issue_time: float | None = None
         self.last_issue_time: float | None = None
@@ -66,13 +68,34 @@ class PerformanceMetrics:
             self.ttft_latencies.append(ttft)
             self.first_chunk_times[sample_id] = time.time()
 
-    def record_request_complete(self, sample_id: str | int):
-        """Record request completion and calculate latency."""
+    def record_request_complete(
+        self, sample_id: str | int, output_tokens: int | None = None
+    ):
+        """Record request completion and calculate latency and TPOT.
+
+        Args:
+            sample_id: Unique identifier for the request
+            output_tokens: Number of output tokens (for TPOT calculation)
+        """
         if sample_id in self.request_times:
-            latency = time.time() - self.request_times[sample_id]
+            completion_time = time.time()
+            latency = completion_time - self.request_times[sample_id]
             self.latencies.append(latency)
+
+            # Calculate TPOT: (total_duration - ttft) / (output_tokens - 1)
+            if (
+                sample_id in self.first_chunk_times
+                and output_tokens
+                and output_tokens > 1
+            ):
+                ttft = self.first_chunk_times[sample_id] - self.request_times[sample_id]
+                generation_time = latency - ttft
+                tpot = generation_time / (output_tokens - 1)
+                self.tpot_latencies.append(tpot)
+
             del self.request_times[sample_id]
             self.first_chunk_times.pop(sample_id, None)
+            self.output_tokens.pop(sample_id, None)
         else:
             logger.warning(
                 f"record_request_complete called for unknown sample_id: {sample_id}, tracked IDs: {list(self.request_times.keys())[:5]}"
@@ -137,7 +160,7 @@ class PerformanceMetrics:
         return 0.0
 
     def get_summary(self) -> dict:
-        """Get summary statistics - simplified to essentials."""
+        """Get summary statistics including TTFT and TPOT metrics."""
         summary = {
             "total_requests": self.total_requests,
             "total_issued": self.total_issued,
@@ -149,11 +172,14 @@ class PerformanceMetrics:
             "success_rate": 100.0 - self.error_rate,
             "latencies": {
                 "p99": self.calculate_percentile(self.latencies, 99),
+                "ttft_p99": self.calculate_percentile(self.ttft_latencies, 99)
+                if self.ttft_latencies
+                else 0.0,
+                "tpot_p99": self.calculate_percentile(self.tpot_latencies, 99)
+                if self.tpot_latencies
+                else 0.0,
             },
         }
-
-        if self.ttft_latencies:
-            summary["ttft_p99"] = self.calculate_percentile(self.ttft_latencies, 99)
 
         return summary
 
@@ -173,12 +199,14 @@ def format_performance_report(metrics: dict) -> str:
     report.append(f"Success Rate: {metrics.get('success_rate', 0):.2f}%")
     report.append(f"Error Rate: {metrics.get('error_rate', 0):.2f}%")
 
-    if "latencies" in metrics and "p99" in metrics["latencies"]:
-        p99 = metrics["latencies"]["p99"]
-        report.append(f"P99 Latency: {p99:.3f}s")
-
-    if "ttft_p99" in metrics:
-        report.append(f"TTFT P99: {metrics['ttft_p99']:.3f}s")
+    if "latencies" in metrics:
+        latencies = metrics["latencies"]
+        if "p99" in latencies:
+            report.append(f"P99 Latency: {latencies['p99']:.3f}s")
+        if "ttft_p99" in latencies:
+            report.append(f"TTFT P99: {latencies['ttft_p99']:.3f}s")
+        if "tpot_p99" in latencies:
+            report.append(f"TPOT P99: {latencies['tpot_p99']:.6f}s")
 
     report.append("=" * 60)
     return "\n".join(report)
@@ -212,12 +240,16 @@ class MetricsSampleFactory(SampleFactory):
             pass
 
         def on_complete(result: QueryResult | StreamChunk):
-            """Record completion and calculate latency."""
+            """Record completion and calculate latency and TPOT."""
             if isinstance(result, QueryResult) and result.error:
                 self.metrics.record_error(Exception(result.error))
             else:
                 response_id = result.id
-                self.metrics.record_request_complete(response_id)
+                # Extract output tokens from the response (count of words as a proxy for tokens)
+                output_tokens = None
+                if hasattr(result, "response_output") and result.response_output:
+                    output_tokens = len(result.response_output.split())
+                self.metrics.record_request_complete(response_id, output_tokens)
 
         return {
             SampleEvent.REQUEST_SENT: on_request_sent,

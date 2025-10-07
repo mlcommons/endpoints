@@ -1,7 +1,6 @@
 """Unit tests for the line_profiler module."""
 
 import asyncio
-import atexit
 import io
 import os
 from unittest import mock
@@ -19,22 +18,6 @@ from inference_endpoint.profiling import (
 from inference_endpoint.profiling.line_profiler import (
     ENV_VAR_ENABLE_LINE_PROFILER,
 )
-
-
-def _suppress_stderr_during_shutdown():
-    """Suppress stderr at OS level to hide harmless line_profiler shutdown errors."""
-    try:
-        # Redirect stderr file descriptor to /dev/null
-        devnull = os.open(os.devnull, os.O_WRONLY)
-        os.dup2(devnull, 2)
-        os.close(devnull)
-    except Exception:
-        pass  # Silently fail if stderr redirection fails
-
-
-# Register early so it runs late (atexit is LIFO)
-# This suppresses the harmless line_profiler shutdown error
-atexit.register(_suppress_stderr_during_shutdown)
 
 
 @pytest.fixture(autouse=True)
@@ -209,22 +192,6 @@ class TestProfilerMethods:
                 state.print_stats(stream=output, prefix="Test")
 
                 # Should produce no output when no functions are profiled
-                assert output.getvalue() == ""
-
-    def test_print_stats_with_prefix_no_output_when_no_functions(self):
-        """Test print_stats with prefix produces no output when no functions profiled."""
-        with mock.patch.dict(os.environ, {ENV_VAR_ENABLE_LINE_PROFILER: "1"}):
-            line_profiler.ProfilerState._instance = None
-            state = line_profiler.ProfilerState()
-
-            if state.profiler:
-                # Ensure no functions are profiled
-                assert len(state.profiler.functions) == 0
-
-                output = io.StringIO()
-                state.print_stats(stream=output, prefix="Worker 0")
-
-                # Should produce no output, including no prefix headers
                 assert output.getvalue() == ""
 
 
