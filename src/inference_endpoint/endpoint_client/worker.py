@@ -6,6 +6,7 @@ import multiprocessing
 import os
 import signal
 import sys
+import traceback
 from collections.abc import AsyncGenerator
 from multiprocessing import Process
 from typing import Any
@@ -28,14 +29,22 @@ from inference_endpoint.endpoint_client.configs import (
 from inference_endpoint.endpoint_client.zmq_utils import ZMQPullSocket, ZMQPushSocket
 from inference_endpoint.openai.openai_adapter import OpenAIAdapter
 from inference_endpoint.openai.openai_types_gen import CreateChatCompletionResponse
+from inference_endpoint.profiling import is_enabled as profiling_is_enabled
+from inference_endpoint.profiling import profile
+from inference_endpoint.profiling import shutdown as profiler_shutdown
 
 logger = logging.getLogger(__name__)
 
 
+# Configure multiprocessing to use 'spawn' method for worker creation
+# - 'spawn' starts a fresh Python interpreter for each worker (clean slate)
+# - Slower startup (re-import modules) vs fork's copy-on-write
+# - Requires pickling (can't use local functions in worker_main)
+# - This is the recommended approach for async + multiprocessing applications
 try:
     multiprocessing.set_start_method("spawn", force=False)
 except RuntimeError:
-    # Already set, which is fine
+    # Already set, which is fine (likely in tests or when importing multiple times)
     pass
 
 
@@ -51,11 +60,11 @@ def worker_main(
     """Entry point for worker process."""
     # Configure logging for worker process
     logging.basicConfig(
-        level=logging.DEBUG,
-        format=f"%(levelname)-8s %(name)s:%(filename)s:%(lineno)d [Worker-{worker_id}] %(message)s",
-        stream=sys.stdout,
-        force=True,  # Override any existing configuration
+        level=logging.INFO,
+        format=f"[Worker-{worker_id}] %(levelname)-5s - %(message)s (%(module)s:%(lineno)d)",
+        force=True,
     )
+    logger = logging.getLogger(__name__)
 
     # Install uvloop which also enables it
     try:
@@ -66,18 +75,30 @@ def worker_main(
         logger.info("uvloop not available, using default event loop")
 
     # Create and run worker
-    worker = Worker(
-        worker_id=worker_id,
-        http_config=http_config,
-        aiohttp_config=aiohttp_config,
-        zmq_config=zmq_config,
-        request_socket_addr=request_queue_addr,
-        response_socket_addr=response_queue_addr,
-        readiness_socket_addr=readiness_queue_addr,
-    )
+    try:
+        worker = Worker(
+            worker_id=worker_id,
+            http_config=http_config,
+            aiohttp_config=aiohttp_config,
+            zmq_config=zmq_config,
+            request_socket_addr=request_queue_addr,
+            response_socket_addr=response_queue_addr,
+            readiness_socket_addr=readiness_queue_addr,
+        )
 
-    # Run event loop
-    asyncio.run(worker.run())
+        # Log if profiling is enabled
+        if profiling_is_enabled():
+            logger.info(
+                f"Profiling enabled for worker {worker_id} (PID: {os.getpid()})"
+            )
+
+        # Run event loop - worker handles its own signals and cleanup
+        asyncio.run(worker.run())
+    except Exception as e:
+        logger.error(
+            f"Worker {worker_id} crashed: {type(e).__name__}: {str(e)}\n{traceback.format_exc()}"
+        )
+        sys.exit(1)
 
 
 class Worker:
@@ -108,68 +129,100 @@ class Worker:
         self._response_socket: ZMQPushSocket | None = None
         self._readiness_socket: ZMQPushSocket | None = None
         self.tcp_connector: aiohttp.TCPConnector | None = None
+        # Track active request tasks
+        self._active_tasks: set[asyncio.Task] = set()
 
     async def run(self) -> None:
         """Main worker loop - pull requests, execute, push responses."""
-        # Initialize ZMQ context and sockets
-        self._zmq_context = zmq.asyncio.Context()
-        self._request_socket = ZMQPullSocket(
-            self._zmq_context, self.request_socket_addr, self.zmq_config, bind=True
-        )
-        self._response_socket = ZMQPushSocket(
-            self._zmq_context, self.response_socket_addr, self.zmq_config
-        )
-        self._readiness_socket = ZMQPushSocket(
-            self._zmq_context, self.readiness_socket_addr, self.zmq_config
-        )
-
-        # Create TCP connector
-        self.tcp_connector = self.aiohttp_config.create_tcp_connector()
-
-        # Create aiohttp session with TCP connector
-        self._session = aiohttp.ClientSession(
-            connector=self.tcp_connector,
-            timeout=aiohttp.ClientTimeout(
-                total=self.aiohttp_config.client_timeout_total,
-                connect=self.aiohttp_config.client_timeout_connect,
-                sock_read=self.aiohttp_config.client_timeout_sock_read,
-            ),
-            connector_owner=self.aiohttp_config.client_session_connector_owner,
-            skip_auto_headers=self.aiohttp_config.skip_auto_headers,
-        )
-
         try:
-            # Signal handlers for graceful shutdown
-            signal.signal(signal.SIGTERM, self._handle_signal)
-            signal.signal(signal.SIGINT, self._handle_signal)
+            # Initialize ZMQ context and sockets
+            self._zmq_context = zmq.asyncio.Context()
+            self._request_socket = ZMQPullSocket(
+                self._zmq_context, self.request_socket_addr, self.zmq_config, bind=True
+            )
+            self._response_socket = ZMQPushSocket(
+                self._zmq_context, self.response_socket_addr, self.zmq_config
+            )
+            self._readiness_socket = ZMQPushSocket(
+                self._zmq_context, self.readiness_socket_addr, self.zmq_config
+            )
 
-            # Send readiness signal
+            # Create TCP connector
+            self.tcp_connector = self.aiohttp_config.create_tcp_connector()
+
+            # Create aiohttp session with TCP connector
+            self._session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(
+                    total=self.aiohttp_config.client_timeout_total,
+                    connect=self.aiohttp_config.client_timeout_connect,
+                    sock_read=self.aiohttp_config.client_timeout_sock_read,
+                ),
+                connector=self.tcp_connector,
+                connector_owner=False,  # owned by Worker
+                skip_auto_headers=self.aiohttp_config.skip_auto_headers,
+            )
+
+            # Signal handlers for graceful shutdown
+            signal.signal(signal.SIGTERM, self.shutdown)
+            signal.signal(signal.SIGINT, self.shutdown)
+
+            # Send readiness signal only after successful initialization
             await self._readiness_socket.send(self.worker_id)
             logger.info(f"Worker {self.worker_id} started and ready")
 
-            # Main processing loop
-            while not self._shutdown:
-                try:
-                    # Pull query from queue with timeout
-                    query = await asyncio.wait_for(
-                        self._request_socket.receive(),
-                        timeout=self.http_config.worker_request_timeout,
-                    )
+            # Close readiness socket with linger to ensure message is transmitted
+            self._readiness_socket.close(linger_ms=1000)
+            self._readiness_socket = None
 
-                    # Process query asynchronously
-                    asyncio.create_task(self._process_request(query))
+        except Exception as e:
+            logger.error(
+                f"Worker {self.worker_id} failed to initialize: {type(e).__name__}: {str(e)}"
+            )
+            # Exit with error code to signal failure to parent process
+            sys.exit(1)
 
-                except TimeoutError:
-                    continue
-                except Exception as e:
-                    logger.error(f"Worker {self.worker_id} error: {e}")
-
+        try:
+            # Run main processing loop
+            await self._main_loop()
         finally:
             # Cleanup
             await self._cleanup()
 
+    @profile
+    async def _main_loop(self) -> None:
+        """Main processing loop - continuously pull and process requests."""
+        while not self._shutdown:
+            try:
+                # Pull query from queue with timeout
+                query = await self._request_socket.receive()
+
+                # Handle timeout (no query available)
+                if query is None:
+                    continue
+
+                # Process query asynchronously and track the task
+                task = asyncio.create_task(self._process_request(query))
+                self._active_tasks.add(task)
+
+                # Remove task from active set when it completes
+                task.add_done_callback(self._active_tasks.discard)
+
+            except asyncio.CancelledError:
+                break
+
+            except Exception as e:
+                # Don't exit on errors in the main loop, just log and continue
+                logger.error(
+                    f"Worker {self.worker_id} error in main loop: {type(e).__name__}: {str(e)}"
+                )
+
     async def _handle_error(self, query_id: str, error: Exception | str) -> None:
         """Send error response for a query."""
+
+        # Skip if we're shutting down or response socket is not available
+        if self._shutdown or not self._response_socket:
+            return
+
         error_message = str(error) if isinstance(error, Exception) else error
         error_response = QueryResult(
             id=query_id,
@@ -178,6 +231,7 @@ class Worker:
         )
         await self._response_socket.send(error_response)
 
+    @profile
     async def _make_http_request(
         self, query: Query
     ) -> AsyncGenerator[aiohttp.ClientResponse, None]:
@@ -187,6 +241,11 @@ class Worker:
         Yields the response object if status is 200.
         Handles error cases and sends error responses.
         """
+        # Check if we're shutting down or session is closed
+        if self._shutdown or not self._session:
+            await self._handle_error(query.id, "Worker is shutting down")
+            return
+
         url = self.http_config.endpoint_url
         headers = query.headers if hasattr(query, "headers") else {}
         payload = OpenAIAdapter.to_openai_request(query).model_dump(mode="json")
@@ -217,47 +276,88 @@ class Worker:
         except Exception as e:
             await self._handle_error(query.id, e)
 
+    @profile
+    async def _iter_sse_lines(
+        self, response: aiohttp.ClientResponse
+    ) -> AsyncGenerator[str, None]:
+        """
+        Iterate over complete SSE lines from response stream.
+
+        Handles incomplete lines at chunk boundaries by buffering until
+        a newline is encountered.
+        """
+        incomplete_line = ""
+
+        async for chunk in response.content.iter_any():
+            # Prepend any incomplete line from previous chunk
+            text = incomplete_line + chunk.decode("utf-8")
+
+            # Split by newline - last element may be incomplete
+            lines = text.split("\n")
+
+            # Save last element (might be incomplete if no trailing \n)
+            incomplete_line = lines.pop(-1)
+
+            # Yield all complete lines (everything except the last element)
+            for line in lines:
+                yield line
+
+        # After stream ends, yield any remaining incomplete line
+        if incomplete_line:
+            yield incomplete_line
+
+    @profile
+    def _parse_sse_line(self, line: str) -> tuple[str, bool]:
+        """
+        Parse an SSE line and extract content.
+        Raise on JSON decode error.
+
+        Returns:
+            tuple: (content, is_done) where content is the extracted text and is_done signals [DONE].
+        """
+        line = line.strip()
+        if not line or not line.startswith("data: "):
+            return "", False
+
+        data_str = line[6:]  # Remove "data: " prefix
+        if data_str == "[DONE]":
+            return "", True
+
+        chunk_data = orjson.loads(data_str)
+        choices = chunk_data.get("choices", [])
+        if not choices:
+            return "", False
+
+        delta = choices[0].get("delta", {})
+        return delta.get("content", ""), False
+
+    @profile
     async def _handle_streaming_request(self, query: Query) -> None:
-        """Handle streaming response."""
+        """Handle streaming response with pythonic line-by-line processing."""
         async for response in self._make_http_request(query):
             accumulated_content = []
             first_chunk_sent = False
 
-            # Process SSE stream
-            async for line_bytes in response.content:
-                lines = line_bytes.decode("utf-8").strip().split("\n")
+            # Process SSE stream line by line
+            async for line in self._iter_sse_lines(response):
+                # Parse SSE line
+                content, is_done = self._parse_sse_line(line)
+                if is_done:
+                    break
 
-                for line in lines:
-                    # Skip empty lines and non-SSE data
-                    if not line or not line.startswith("data: "):
-                        continue
-
-                    data_str = line[6:]  # Remove "data: " prefix
-                    if data_str == "[DONE]":
-                        break
-
-                    # Parse JSON and extract content
-                    chunk_data = orjson.loads(data_str)
-                    choices = chunk_data.get("choices", [])
-                    if not choices:
-                        continue
-
-                    delta = choices[0].get("delta", {})
-                    content = delta.get("content", "")
-                    is_final = delta.get("finish_reason") is not None
-
-                    if not content:
-                        continue
-
+                if content:
                     accumulated_content.append(content)
 
-                    # Send first chunk with metadata
-                    if not first_chunk_sent:
+                    # Send chunk based on mode
+                    if self.http_config.stream_all_chunks or not first_chunk_sent:
                         stream_chunk = StreamChunk(
                             id=query.id,
                             response_chunk=content,
-                            is_complete=is_final,
-                            metadata={"first_chunk": True, "final_chunk": is_final},
+                            is_complete=False,
+                            metadata={
+                                "first_chunk": not first_chunk_sent,
+                                "final_chunk": False,
+                            },
                         )
                         await self._response_socket.send(stream_chunk)
                         first_chunk_sent = True
@@ -270,6 +370,7 @@ class Worker:
             )
             await self._response_socket.send(final_response)
 
+    @profile
     async def _handle_non_streaming_request(self, query: Query) -> None:
         """Handle non-streaming response."""
         async for response in self._make_http_request(query):
@@ -280,39 +381,42 @@ class Worker:
             response_obj = OpenAIAdapter.from_openai_response(
                 CreateChatCompletionResponse(**response_data, ignore_extra=True)
             )
+
             response_obj.id = query.id
             # Send response back to the main process
             await self._response_socket.send(response_obj)
 
-    def _handle_signal(self, signum: int, frame: Any) -> None:
-        """Handle shutdown signals."""
-        logger.info(f"Worker {self.worker_id} received signal {signum}")
-        self._shutdown = True
+    def shutdown(self, signum: int | None = None, frame: Any | None = None) -> None:
+        """Trigger shutdown of worker process."""
+        self._shutdown = True  # will invoke _cleanup() from main loop
+        profiler_shutdown()
 
     async def _cleanup(self) -> None:
         """Clean up resources."""
-        logger.info(f"Worker {self.worker_id} shutting down...")
-
-        # Close TCP connector
-        if self.tcp_connector:
-            await self.tcp_connector.close()
-            self.tcp_connector = None
-
         # Close aiohttp session
         if self._session:
             await self._session.close()
 
-        # Close ZMQ sockets
-        if self._request_socket:
-            self._request_socket.close()
-        if self._response_socket:
-            self._response_socket.close()
-        if self._readiness_socket:
-            self._readiness_socket.close()
+        # Cancel and clear active tasks
+        logger.info(
+            f"Worker {self.worker_id} will cancel {len(self._active_tasks)} tasks and cleanup."
+        )
+        for task in self._active_tasks:
+            task.cancel()
+        self._active_tasks.clear()
+
+        # Close TCP connector
+        if self.tcp_connector:
+            await self.tcp_connector.close()
+
+        # Close ZMQ sockets (readiness socket already closed after initialization)
+        for socket in (self._request_socket, self._response_socket):
+            if socket:
+                socket.close()
 
         # Terminate ZMQ context
         if self._zmq_context:
-            self._zmq_context.term()
+            self._zmq_context.destroy(linger=0)
 
 
 class WorkerManager:
@@ -333,7 +437,6 @@ class WorkerManager:
         self.workers: list[Process] = []
         self.worker_pids: dict[int, int] = {}  # worker_id -> pid
         self._shutdown_event = asyncio.Event()
-        self._monitor_task: asyncio.Task | None = None
 
     async def initialize(self) -> None:
         """Initialize workers and ZMQ infrastructure."""
@@ -353,35 +456,28 @@ class WorkerManager:
                 self.worker_pids[i] = worker.pid
 
             # Wait for all workers to signal readiness
-            ready_workers = set()
-            start_time = asyncio.get_event_loop().time()
-            timeout = self.http_config.worker_initialization_timeout
+            async def wait_for_all_workers():
+                ready_count = 0
+                # Keep trying until we get all N readiness signals
+                while ready_count < self.http_config.num_workers:
+                    worker_id = await readiness_socket.receive()
+                    if worker_id is not None:
+                        ready_count += 1
+                        logger.info(
+                            f"Worker {worker_id} is ready ({ready_count}/{self.http_config.num_workers})"
+                        )
+                return ready_count
 
-            while len(ready_workers) < self.http_config.num_workers:
-                elapsed = asyncio.get_event_loop().time() - start_time
-                if elapsed > timeout:
-                    raise TimeoutError(
-                        f"Workers failed to initialize within {timeout} seconds. "
-                        f"Only {len(ready_workers)}/{self.http_config.num_workers} workers ready."
-                    )
-
-                try:
-                    # Wait for readiness signal with remaining timeout
-                    remaining_timeout = timeout - elapsed
-                    worker_id = await asyncio.wait_for(
-                        readiness_socket.receive(), timeout=remaining_timeout
-                    )
-                    ready_workers.add(worker_id)
-                    logger.info(
-                        f"Worker {worker_id} is ready ({len(ready_workers)}/{self.http_config.num_workers})"
-                    )
-                except TimeoutError:
-                    continue
-
-            logger.info(f"All {self.http_config.num_workers} workers are ready")
-
-            # Start monitoring task
-            self._monitor_task = asyncio.create_task(self._monitor_workers())
+            try:
+                ready_count = await asyncio.wait_for(
+                    wait_for_all_workers(),
+                    timeout=self.http_config.worker_initialization_timeout,
+                )
+                logger.info(f"All {ready_count} workers are ready")
+            except TimeoutError as e:
+                raise TimeoutError(
+                    f"Workers failed to initialize within {self.http_config.worker_initialization_timeout} seconds."
+                ) from e
 
         finally:
             # Close readiness socket
@@ -412,48 +508,38 @@ class WorkerManager:
         process.start()
         return process
 
-    async def _monitor_workers(self) -> None:
-        """Monitor worker health and restart if needed."""
-        while not self._shutdown_event.is_set():
-            for i, worker in enumerate(self.workers):
-                if not worker.is_alive():
-                    logger.warning(f"Worker {i} died, restarting...")
-                    # Terminate zombie process
-                    if worker.pid:
-                        try:
-                            os.kill(worker.pid, signal.SIGKILL)
-                        except ProcessLookupError:
-                            pass
-
-                    # Spawn new worker
-                    new_worker = self._spawn_worker(i)
-                    self.workers[i] = new_worker
-                    self.worker_pids[i] = new_worker.pid
-
-            await asyncio.sleep(self.http_config.worker_health_check_interval)
-
     async def shutdown(self) -> None:
-        """Graceful shutdown of all workers."""
+        """
+        Graceful shutdown of all workers with proper zombie reaping.
+
+        Zombie processes occur when a child dies but parent hasn't called join().
+        Without proper reaping, dead workers remain in the process table as zombies
+        with state 'Z'.
+        """
         self._shutdown_event.set()
 
-        # Cancel monitor task
-        if self._monitor_task:
-            self._monitor_task.cancel()
-            try:
-                await self._monitor_task
-            except asyncio.CancelledError:
-                pass
-
-        # Send SIGTERM to all workers
+        # Send SIGTERM to alive workers
         for worker in self.workers:
             if worker.is_alive():
-                worker.terminate()
+                worker.terminate()  # Send SIGTERM for graceful shutdown
+            else:
+                # Worker is already dead (possibly zombie) - reap immediately
+                worker.join(timeout=0.1)
 
-        # Wait for graceful shutdown
+        # Wait for graceful shutdown to complete
         await asyncio.sleep(self.http_config.worker_graceful_shutdown_wait)
 
-        # Force kill any remaining workers
+        # Force kill any remaining workers and ensure all are reaped
+        loop = asyncio.get_event_loop()
         for worker in self.workers:
             if worker.is_alive():
+                # Worker didn't respond to SIGTERM - force kill with SIGKILL
                 worker.kill()
-                worker.join(timeout=self.http_config.worker_force_kill_timeout)
+                # Run blocking join() in thread pool to avoid blocking event loop
+                # This reaps the forcefully killed worker
+                await loop.run_in_executor(
+                    None, worker.join, self.http_config.worker_force_kill_timeout
+                )
+            else:
+                # Worker died during graceful shutdown - reap to prevent zombie
+                worker.join(timeout=0.1)

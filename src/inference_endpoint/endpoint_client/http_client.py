@@ -2,9 +2,10 @@
 
 import asyncio
 import logging
-from collections.abc import Callable
-from typing import Any
+import threading
+import uuid
 
+import uvloop
 import zmq
 import zmq.asyncio
 
@@ -17,25 +18,10 @@ from inference_endpoint.endpoint_client.configs import (
 from inference_endpoint.endpoint_client.worker import WorkerManager
 from inference_endpoint.endpoint_client.zmq_utils import ZMQPullSocket, ZMQPushSocket
 
+# required for ZMQ context to work with uvloop
+asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+
 logger = logging.getLogger(__name__)
-
-
-class StreamingFuture(asyncio.Future):
-    """Future that also exposes first chunk for streaming responses."""
-
-    def __init__(self):
-        super().__init__()
-        self._first = asyncio.Future()
-
-    @property
-    def first(self):
-        """First chunk future - can be awaited or checked."""
-        return self._first
-
-    def _set_first_chunk(self, chunk: str):
-        """Set first chunk."""
-        assert not self._first.done(), "First chunk already set"
-        self._first.set_result(chunk)
 
 
 class HTTPEndpointClient:
@@ -45,7 +31,6 @@ class HTTPEndpointClient:
     This client provides high-performance HTTP request handling by:
     - Using multiple worker processes to parallelize running concurrent HTTP requests
     - ZMQ for inter-process communication for efficient message passing
-    - Both future-based and callback-based response handling
     - Round-robin load balancing across workers
 
     Architecture:
@@ -60,7 +45,6 @@ class HTTPEndpointClient:
         config: HTTPClientConfig,
         aiohttp_config: AioHttpConfig,
         zmq_config: ZMQConfig,
-        complete_callback: Callable[[Any], None] | None = None,
     ):
         """
         Initialize HTTP endpoint client.
@@ -69,226 +53,149 @@ class HTTPEndpointClient:
             config: HTTP client configuration
             aiohttp_config: aiohttp configuration
             zmq_config: ZMQ configuration
-            complete_callback: Optional synchronous callback for completed requests
         """
+        # Generate unique ID to avoid conflicts between multiple client instances
+        self.client_id = uuid.uuid4().hex[:8]
+
         self.config = config
         self.aiohttp_config = aiohttp_config
         self.zmq_config = zmq_config
-        self.complete_callback = complete_callback
-        self.zmq_context = zmq.asyncio.Context(io_threads=zmq_config.zmq_io_threads)
-        self.worker_push_sockets: list[ZMQPushSocket] = []
 
+        self.loop: asyncio.AbstractEventLoop | None = None
+        self.loop_thread: threading.Thread | None = None
+
+        self.zmq_context: zmq.asyncio.Context | None = None
+        self.worker_push_sockets: list[ZMQPushSocket] = []
         self.worker_manager: WorkerManager | None = None
         self.current_worker_idx = 0
 
-        self._shutdown_event = asyncio.Event()
-        self._response_handler_task: asyncio.Task | None = None
-        self._pending_futures: dict[str, asyncio.Future] = {}
+        self._shutdown_event: asyncio.Event | None = None
+        self._response_socket: ZMQPullSocket | None = None
+        self._concurrency_semaphore: asyncio.Semaphore | None = None
 
-        # Create concurrency semaphore if configured
-        self._concurrency_semaphore = None
-        if config.max_concurrency > 0:
-            self._concurrency_semaphore = asyncio.Semaphore(config.max_concurrency)
         self.logger = logging.getLogger(__name__)
 
-    def issue_query(
-        self, query: Query
-    ) -> asyncio.Future[QueryResult] | StreamingFuture:
-        """
-        Send a query to the endpoint and return a future for the response.
+    def start(self):
+        """Start event loop thread and initialize client."""
+        self.loop = asyncio.new_event_loop()
 
-        The returned future can be:
-        - Awaited directly: `result = await client.issue_query(query)`
-        - Checked for completion: `if future.done(): result = future.result()`
-        - Used with asyncio utilities: `done, pending = await asyncio.wait([future])`
-
-        For streaming queries, returns a StreamingFuture which also exposes:
-        - `await future.first` to get the first chunk as soon as available
-
-        Args:
-            query: Query object containing request details
-
-        Returns:
-            StreamingFuture for streaming queries, asyncio.Future otherwise
-        """
-        # Create appropriate future type
-        self.logger.info(f"Query issued: {query}")
-        future = (
-            StreamingFuture()
-            if query.data.get("stream", False)
-            else asyncio.get_event_loop().create_future()
+        self.loop_thread = threading.Thread(
+            target=self.loop.run_forever,
+            daemon=True,
+            name=f"HttpClient-EventLoop-{self.client_id}",
         )
-        self._pending_futures[query.id] = future
-        # Schedule the actual send
-        asyncio.create_task(self._issue_query_impl(query))
+        self.loop_thread.start()
 
-        return future
+        asyncio.run_coroutine_threadsafe(self.async_start(), self.loop).result()
 
-    async def _issue_query_impl(self, query: Query) -> None:
-        """Internal implementation of send request."""
-        try:
-            # Apply concurrency limit if configured
-            if self._concurrency_semaphore:
-                async with self._concurrency_semaphore:
-                    await self._send_to_worker(query)
-            else:
-                await self._send_to_worker(query)
-        except Exception as e:
-            # If sending fails, complete the future with error
-            future = self._pending_futures.get(query.id)
-            if future and not future.done():
-                future.set_exception(e)
-
-                # Also set exception on first chunk future for streaming
-                if isinstance(future, StreamingFuture) and not future.first.done():
-                    future.first.set_exception(e)
-            logger.error(f"Error sending query to worker: {e}")
-            raise
-
-    async def _send_to_worker(self, query: Query) -> None:
-        """Send query to worker via ZMQ."""
-        # Round-robin to next worker
-        worker_idx = self.current_worker_idx
-        self.current_worker_idx = (self.current_worker_idx + 1) % len(
-            self.worker_push_sockets
+    async def async_start(self):
+        """Initialize ZMQ, workers, and sockets."""
+        self.zmq_context = zmq.asyncio.Context(
+            io_threads=self.zmq_config.zmq_io_threads
         )
+        self._shutdown_event = asyncio.Event()
 
-        # Send query directly to worker's queue
-        await self.worker_push_sockets[worker_idx].send(query)
+        if self.config.max_concurrency > 0:
+            self._concurrency_semaphore = asyncio.Semaphore(self.config.max_concurrency)
 
-    async def start(self) -> None:
-        """Initialize client and start worker manager."""
-        # Initialize worker push sockets
         for i in range(self.config.num_workers):
             address = f"{self.zmq_config.zmq_request_queue_prefix}_{i}_requests"
             push_socket = ZMQPushSocket(self.zmq_context, address, self.zmq_config)
             self.worker_push_sockets.append(push_socket)
 
-        # Start worker manager
         self.worker_manager = WorkerManager(
             self.config, self.aiohttp_config, self.zmq_config, self.zmq_context
         )
         await self.worker_manager.initialize()
 
-        # Start response handler
-        self._response_handler_task = asyncio.create_task(self._handle_responses())
-
-    async def _handle_responses(self) -> None:
-        """Handle responses from workers."""
-        response_socket = ZMQPullSocket(
+        self._response_socket = ZMQPullSocket(
             self.zmq_context,
             self.zmq_config.zmq_response_queue_addr,
             self.zmq_config,
             bind=True,
         )
 
-        try:
-            while not self._shutdown_event.is_set():
-                try:
-                    # Blocking receive with timeout for shutdown check
-                    message = await asyncio.wait_for(
-                        response_socket.receive(),
-                        timeout=self.config.response_handler_timeout,
-                    )
-                    assert isinstance(message, QueryResult) or isinstance(
-                        message, StreamChunk
-                    ), f"Invalid message type: {type(message)}"
+    def issue_query(self, query: Query) -> None:
+        """
+        Issue query to endpoint.
+        Synchronous wrapper for issue_query_async.
 
-                    # Future must exist - we created it when issuing query
-                    assert (
-                        message.id in self._pending_futures
-                    ), f"No future for {message.id}"
-                    future = self._pending_futures[message.id]
-                    assert future is not None, f"No future for {message.id}"
-                    assert not future.done(), f"Double response for {message.id}"
-                    # Handle by message type
-                    match message:
-                        case StreamChunk():
-                            # Only streaming queries get StreamChunk
-                            assert isinstance(
-                                future, StreamingFuture
-                            ), "StreamChunk for non-streaming query"
-                            future._set_first_chunk(message.response_chunk)
+        Args:
+            query: Query object containing request details
+        """
+        self.loop.call_soon_threadsafe(
+            lambda: asyncio.create_task(self.issue_query_async(query))
+        )
 
-                            if message.is_complete:
-                                # Single chunk complete - create QueryResult and complete
-                                result = QueryResult(
-                                    id=message.id,
-                                    response_output=message.response_chunk,
-                                )
-                                future.set_result(result)
-                                self._pending_futures.pop(message.id)
+    async def issue_query_async(self, query: Query) -> None:
+        """
+        Issue query to endpoint.
+        Issue query to worker via ZMQ (non-blocking)
 
-                        case QueryResult():
-                            # Complete the future
-                            if message.error:
-                                exception = Exception(message.error)
-                                future.set_exception(exception)
+        Args:
+            query: Query object containing request details
+        """
+        if self._concurrency_semaphore:
+            async with self._concurrency_semaphore:
+                await self._send_to_worker(query)
+        else:
+            await self._send_to_worker(query)
 
-                                # Set exception on first chunk if streaming and not set yet
-                                if (
-                                    isinstance(future, StreamingFuture)
-                                    and not future.first.done()
-                                ):
-                                    future.first.set_exception(exception)
-                            else:
-                                # Set first chunk for empty streaming responses
-                                if isinstance(future, StreamingFuture):
-                                    if (
-                                        message.metadata.get("first_chunk")
-                                        and not future.first.done()
-                                    ):
-                                        future._set_first_chunk("")  # Empty response
+    def get_ready_responses(self) -> QueryResult | StreamChunk | None:
+        """
+        Get next ready response from workers (synchronous wrapper).
+        Blocks until a response is available or timeout occurs.
 
-                                future.set_result(message)
+        Returns:
+            QueryResult or StreamChunk from worker, or None on timeout
+        """
+        future = asyncio.run_coroutine_threadsafe(
+            self.get_ready_responses_async(), self.loop
+        )
+        return future.result()
 
-                            self._pending_futures.pop(message.id)
+    async def get_ready_responses_async(self) -> QueryResult | StreamChunk | None:
+        """
+        Get next ready response from any worker.
 
-                        case _:
-                            raise ValueError(f"Invalid message type: {type(message)}")
-                    # Call callback after future is resolved
-                    # NOTE(vir):
-                    # We call the callback after future resolution to ensure that
-                    # even if the callback raises an exception, the future is still properly
-                    # resolved and the caller can await it. This prevents hangs in user code.
-                    if self.complete_callback:
-                        self.complete_callback(message)
+        Returns:
+            QueryResult or StreamChunk from worker, or None on timeout
+        """
+        assert self._response_socket is not None
+        return await self._response_socket.receive()
 
-                except TimeoutError:
-                    # Check shutdown and continue
-                    continue
-                except Exception as e:
-                    logger.error(f"Error handling response: {e}")
-        except Exception as e:
-            logger.error(f"Error handling responses: {e}")
-        finally:
-            response_socket.close()
+    async def _send_to_worker(self, query: Query) -> None:
+        """Send query to worker via ZMQ."""
+        worker_idx = self.current_worker_idx
+        self.current_worker_idx = (self.current_worker_idx + 1) % len(
+            self.worker_push_sockets
+        )
+        await self.worker_push_sockets[worker_idx].send(query)
 
-    async def shutdown(self) -> None:
-        """Graceful shutdown of all components."""
-        self._shutdown_event.set()
+    def shutdown(self):
+        """Shutdown client, stop event loop, and cleanup."""
+        if self.loop:
+            asyncio.run_coroutine_threadsafe(self.async_shutdown(), self.loop).result()
+            self.loop.call_soon_threadsafe(self.loop.stop)
 
-        # Cancel all pending futures
-        for future in self._pending_futures.values():
-            if not future.done():
-                future.cancel()
-        self._pending_futures.clear()
+        if self.loop_thread:
+            self.loop_thread.join(timeout=0.1)
 
-        # Cancel response handler
-        if self._response_handler_task:
-            self._response_handler_task.cancel()
-            try:
-                await self._response_handler_task
-            except asyncio.CancelledError:
-                pass
+    async def async_shutdown(self):
+        """Shutdown async components."""
+        logger.info("Shutting down HTTP endpoint client...")
+        if self._shutdown_event:
+            self._shutdown_event.set()
 
-        # Close push sockets
+        if self._response_socket:
+            self._response_socket.close()
+
         for socket in self.worker_push_sockets:
             socket.close()
 
-        # Shutdown worker manager
         if self.worker_manager:
             await self.worker_manager.shutdown()
 
-        # Close ZMQ context
-        self.zmq_context.term()
+        if self.zmq_context:
+            self.zmq_context.destroy(linger=0)
+        logger.info("HTTP endpoint client shutdown complete.")

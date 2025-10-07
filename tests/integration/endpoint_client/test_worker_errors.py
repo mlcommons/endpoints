@@ -15,6 +15,8 @@ from inference_endpoint.endpoint_client.configs import (
 from inference_endpoint.endpoint_client.worker import Worker
 from inference_endpoint.endpoint_client.zmq_utils import ZMQPushSocket
 
+from ...test_helpers import get_test_socket_path
+
 
 class TestWorkerErrorHandling:
     """Test Worker error handling for various failure scenarios."""
@@ -30,8 +32,12 @@ class TestWorkerErrorHandling:
         aiohttp_config = AioHttpConfig()
         # Use tmp_path for unique socket paths per test
         zmq_config = ZMQConfig(
-            zmq_request_queue_prefix=f"ipc://{tmp_path}/test_error_req",
-            zmq_response_queue_addr=f"ipc://{tmp_path}/test_error_resp",
+            zmq_request_queue_prefix=get_test_socket_path(
+                tmp_path, "test_error", "_req"
+            ),
+            zmq_response_queue_addr=get_test_socket_path(
+                tmp_path, "test_error", "_resp"
+            ),
         )
         return http_config, aiohttp_config, zmq_config
 
@@ -111,7 +117,7 @@ class TestWorkerErrorHandling:
         finally:
             request_push.close()
             response_pull.close()
-            context.term()
+            context.destroy(linger=0)
 
     @pytest.mark.asyncio
     async def test_worker_streaming_http_error_handling(self, basic_config):
@@ -176,7 +182,7 @@ class TestWorkerErrorHandling:
         finally:
             request_push.close()
             response_pull.close()
-            context.term()
+            context.destroy(linger=0)
 
     @pytest.mark.asyncio
     async def test_worker_non_streaming_exception_handling(self, basic_config):
@@ -277,7 +283,7 @@ class TestWorkerErrorHandling:
             response_pull.close()
 
             # Terminate context
-            context.term()
+            context.destroy(linger=0)
 
     @pytest.mark.asyncio
     async def test_worker_streaming_exception_handling(self, basic_config):
@@ -370,7 +376,7 @@ class TestWorkerErrorHandling:
             response_pull.close()
 
             # Terminate context
-            context.term()
+            context.destroy(linger=0)
 
     @pytest.mark.asyncio
     async def test_worker_non_streaming_connection_error(self, basic_config):
@@ -430,7 +436,7 @@ class TestWorkerErrorHandling:
         finally:
             request_push.close()
             response_pull.close()
-            context.term()
+            context.destroy(linger=0)
 
     @pytest.mark.asyncio
     async def test_worker_streaming_http_404_error(
@@ -495,12 +501,29 @@ class TestWorkerErrorHandling:
         finally:
             request_push.close()
             response_pull.close()
-            context.term()
+            context.destroy(linger=0)
 
     @pytest.mark.asyncio
     async def test_non_streaming_http_error_early_return(self, basic_config):
         """Test non-streaming request with HTTP error status."""
         http_config, aiohttp_config, zmq_config = basic_config
+
+        # Create a custom HTTP server that returns HTTP 500
+        from aiohttp import web
+        from aiohttp.test_utils import TestServer
+
+        async def http_500_handler(request):
+            return web.json_response({"error": "Internal Server Error"}, status=500)
+
+        # Create a test server
+        app = web.Application()
+        app.router.add_post("/error-500", http_500_handler)
+        server = TestServer(app)
+
+        await server.start_server()
+
+        # Update config to use the error endpoint
+        http_config.endpoint_url = f"http://localhost:{server.port}/error-500"
 
         worker = Worker(
             worker_id=0,
@@ -512,37 +535,19 @@ class TestWorkerErrorHandling:
             readiness_socket_addr=zmq_config.zmq_readiness_queue_addr,
         )
 
-        # Mock session to return various HTTP errors
-        from unittest.mock import AsyncMock, MagicMock
-
-        mock_response = AsyncMock()
-        mock_response.status = 500
-        mock_response.text = AsyncMock(return_value="Internal Server Error")
-
-        # Create a proper async context manager mock
-        mock_context_manager = MagicMock()
-        mock_context_manager.__aenter__ = AsyncMock(return_value=mock_response)
-        mock_context_manager.__aexit__ = AsyncMock(return_value=None)
-
-        # Create session mock with regular MagicMock so post doesn't return a coroutine
-        mock_session = MagicMock()
-        mock_session.post.return_value = mock_context_manager
-        worker._session = mock_session
-
         context = zmq.asyncio.Context()
 
         try:
-            # Create response pull socket BEFORE initializing worker components
+            # Create sockets
+            request_push = context.socket(zmq.PUSH)
+            request_push.connect(f"{zmq_config.zmq_request_queue_prefix}_0_requests")
+
             response_pull = context.socket(zmq.PULL)
             response_pull.bind(zmq_config.zmq_response_queue_addr)
 
-            # Now initialize worker components (they will connect, not bind)
-            worker._zmq_context = zmq.asyncio.Context()
-            worker._response_socket = ZMQPushSocket(
-                worker._zmq_context, zmq_config.zmq_response_queue_addr, zmq_config
-            )
-
-            await asyncio.sleep(0.1)
+            # Start worker
+            worker_task = asyncio.create_task(worker.run())
+            await asyncio.sleep(0.5)
 
             # Send query that will get HTTP error
             query = Query(
@@ -554,7 +559,7 @@ class TestWorkerErrorHandling:
                 },
             )
 
-            await worker._handle_non_streaming_request(query)
+            await request_push.send(pickle.dumps(query))
 
             # Verify error response was sent
             response_data = await asyncio.wait_for(response_pull.recv(), timeout=1.0)
@@ -565,11 +570,15 @@ class TestWorkerErrorHandling:
             assert "HTTP 500" in response.error
             assert "Internal Server Error" in response.error
 
+            # Shutdown
+            worker._shutdown = True
+            await asyncio.wait_for(worker_task, timeout=2.0)
+
         finally:
+            request_push.close()
             response_pull.close()
-            worker._response_socket.close()
-            context.term()
-            worker._zmq_context.term()
+            context.destroy(linger=0)
+            await server.close()
 
     @pytest.mark.asyncio
     async def test_worker_streaming_malformed_json(self, basic_config):
@@ -664,7 +673,7 @@ class TestWorkerErrorHandling:
             finally:
                 request_push.close()
                 response_pull.close()
-                context.term()
+                context.destroy(linger=0)
 
         finally:
             await server.close()
@@ -687,8 +696,8 @@ class TestWorkerErrorHandling:
 
         # Worker run should handle the error gracefully
         with pytest.raises(
-            zmq.ZMQError
-        ):  # ZMQ will raise an exception for invalid address
+            SystemExit
+        ):  # Worker exits with code 1 on initialization failure
             await worker.run()
 
     @pytest.mark.asyncio
@@ -745,7 +754,7 @@ class TestWorkerErrorHandling:
             # Worker should handle this gracefully without crashing
 
         finally:
-            context.term()
+            context.destroy(linger=0)
 
     @pytest.mark.asyncio
     async def test_worker_concurrent_error_handling(self, basic_config):
@@ -832,16 +841,36 @@ class TestWorkerErrorHandling:
             await asyncio.gather(*worker_tasks, return_exceptions=True)
 
         finally:
-            # Close sockets
             for sock in request_sockets:
                 sock.close()
             response_pull.close()
-            context.term()
+            context.destroy(linger=0)
 
     @pytest.mark.asyncio
     async def test_non_streaming_invalid_json_early_return(self, basic_config):
         """Test non-streaming request with invalid JSON response."""
         http_config, aiohttp_config, zmq_config = basic_config
+
+        # Create a custom HTTP server that returns invalid JSON
+        from aiohttp import web
+        from aiohttp.test_utils import TestServer
+
+        async def invalid_json_handler(request):
+            return web.Response(
+                text="not valid json at all",
+                content_type="application/json",
+                status=200,
+            )
+
+        # Create a test server
+        app = web.Application()
+        app.router.add_post("/invalid-json", invalid_json_handler)
+        server = TestServer(app)
+
+        await server.start_server()
+
+        # Update config to use the invalid JSON endpoint
+        http_config.endpoint_url = f"http://localhost:{server.port}/invalid-json"
 
         worker = Worker(
             worker_id=0,
@@ -853,37 +882,19 @@ class TestWorkerErrorHandling:
             readiness_socket_addr=zmq_config.zmq_readiness_queue_addr,
         )
 
-        # Initialize components
-        worker._zmq_context = zmq.asyncio.Context()
-        worker._response_socket = ZMQPushSocket(
-            worker._zmq_context, zmq_config.zmq_response_queue_addr, zmq_config
-        )
-
-        # Mock session to return invalid JSON
-        from unittest.mock import AsyncMock, MagicMock
-
-        mock_response = AsyncMock()
-        mock_response.status = 200
-        mock_response.text = AsyncMock(return_value="not valid json at all")
-
-        # Create a proper async context manager mock
-        mock_context_manager = MagicMock()
-        mock_context_manager.__aenter__ = AsyncMock(return_value=mock_response)
-        mock_context_manager.__aexit__ = AsyncMock(return_value=None)
-
-        # Create session mock with regular MagicMock so post doesn't return a coroutine
-        mock_session = MagicMock()
-        mock_session.post.return_value = mock_context_manager
-        worker._session = mock_session
-
         context = zmq.asyncio.Context()
 
         try:
-            # Create response pull socket
+            # Create sockets
+            request_push = context.socket(zmq.PUSH)
+            request_push.connect(f"{zmq_config.zmq_request_queue_prefix}_0_requests")
+
             response_pull = context.socket(zmq.PULL)
             response_pull.bind(zmq_config.zmq_response_queue_addr)
 
-            await asyncio.sleep(0.1)
+            # Start worker
+            worker_task = asyncio.create_task(worker.run())
+            await asyncio.sleep(0.5)
 
             # Send query that will get invalid JSON
             query = Query(
@@ -895,8 +906,7 @@ class TestWorkerErrorHandling:
                 },
             )
 
-            # Call through _process_request to get proper error handling
-            await worker._process_request(query)
+            await request_push.send(pickle.dumps(query))
 
             # Verify error response was sent
             response_data = await asyncio.wait_for(response_pull.recv(), timeout=1.0)
@@ -910,8 +920,12 @@ class TestWorkerErrorHandling:
                 or "JSONDecodeError" in response.error
             )
 
+            # Shutdown
+            worker._shutdown = True
+            await asyncio.wait_for(worker_task, timeout=2.0)
+
         finally:
+            request_push.close()
             response_pull.close()
-            worker._response_socket.close()
-            context.term()
-            worker._zmq_context.term()
+            context.destroy(linger=0)
+            await server.close()

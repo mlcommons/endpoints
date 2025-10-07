@@ -83,7 +83,8 @@ class SampleIssuer(ABC):
         """
         Ensure all active response processing threads are stopped when the SampleIssuer object is destroyed.
         """
-        for s_uuid in self.threads:
+        # Iterate over a copy of keys since stop_response_thread modifies the dict
+        for s_uuid in list(self.threads.keys()):
             self.stop_response_thread(s_uuid)
 
     @abstractmethod

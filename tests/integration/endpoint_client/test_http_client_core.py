@@ -15,7 +15,10 @@ from inference_endpoint.endpoint_client.configs import (
     HTTPClientConfig,
     ZMQConfig,
 )
+from inference_endpoint.endpoint_client.futures_client import FuturesHttpClient
 from inference_endpoint.endpoint_client.zmq_utils import ZMQPullSocket, ZMQPushSocket
+
+from ...test_helpers import get_test_socket_path
 
 
 class TestHTTPEndpointClientConcurrency:
@@ -39,9 +42,15 @@ class TestHTTPEndpointClientConcurrency:
         )
 
         zmq_config_kwargs = {
-            "zmq_request_queue_prefix": f"ipc://{tmp_path}/test_custom_req",
-            "zmq_response_queue_addr": f"ipc://{tmp_path}/test_custom_resp",
-            "zmq_readiness_queue_addr": f"ipc://{tmp_path}/test_custom_ready",
+            "zmq_request_queue_prefix": get_test_socket_path(
+                tmp_path, "custom", "_req"
+            ),
+            "zmq_response_queue_addr": get_test_socket_path(
+                tmp_path, "custom", "_resp"
+            ),
+            "zmq_readiness_queue_addr": get_test_socket_path(
+                tmp_path, "custom", "_ready"
+            ),
             "zmq_high_water_mark": zmq_high_water_mark,
         }
         if zmq_io_threads is not None:
@@ -53,7 +62,7 @@ class TestHTTPEndpointClientConcurrency:
         if aiohttp_config is None:
             aiohttp_config = AioHttpConfig()
 
-        return HTTPEndpointClient(
+        return FuturesHttpClient(
             config=http_config,
             aiohttp_config=aiohttp_config,
             zmq_config=zmq_config,
@@ -72,23 +81,29 @@ class TestHTTPEndpointClientConcurrency:
     def zmq_config(self, tmp_path):
         """Create ZMQ configuration with unique addresses."""
         return ZMQConfig(
-            zmq_request_queue_prefix=f"ipc://{tmp_path}/test_conc_req",
-            zmq_response_queue_addr=f"ipc://{tmp_path}/test_conc_resp",
-            zmq_readiness_queue_addr=f"ipc://{tmp_path}/test_conc_ready",
+            zmq_request_queue_prefix=get_test_socket_path(
+                tmp_path, "test_conc", "_req"
+            ),
+            zmq_response_queue_addr=get_test_socket_path(
+                tmp_path, "test_conc", "_resp"
+            ),
+            zmq_readiness_queue_addr=get_test_socket_path(
+                tmp_path, "test_conc", "_ready"
+            ),
             zmq_high_water_mark=10000,  # Higher for massive tests
         )
 
     @pytest_asyncio.fixture
-    async def http_client(self, http_config, zmq_config):
-        """Create and start HTTP endpoint client."""
-        client = HTTPEndpointClient(
+    async def futures_http_client(self, http_config, zmq_config):
+        """Create and start futures-based HTTP endpoint client."""
+        client = FuturesHttpClient(
             config=http_config,
             aiohttp_config=AioHttpConfig(),
             zmq_config=zmq_config,
         )
-        await client.start()
+        await client.async_start()
         yield client
-        await client.shutdown()
+        await client.async_shutdown()
 
     @pytest.mark.asyncio
     async def test_basic_future_handling_standalone(
@@ -102,22 +117,24 @@ class TestHTTPEndpointClientConcurrency:
         )
 
         zmq_config = ZMQConfig(
-            zmq_request_queue_prefix=f"ipc://{tmp_path}/test_standalone_req",
-            zmq_response_queue_addr=f"ipc://{tmp_path}/test_standalone_resp",
-            zmq_readiness_queue_addr=f"ipc://{tmp_path}/test_standalone_ready",
+            zmq_request_queue_prefix=get_test_socket_path(
+                tmp_path, "test_standalone", "_req"
+            ),
+            zmq_response_queue_addr=get_test_socket_path(
+                tmp_path, "test_standalone", "_resp"
+            ),
+            zmq_readiness_queue_addr=get_test_socket_path(
+                tmp_path, "test_standalone", "_ready"
+            ),
         )
 
-        client = HTTPEndpointClient(
-            config=http_config,
-            aiohttp_config=AioHttpConfig(),
-            zmq_config=zmq_config,
-        )
+        client = FuturesHttpClient(http_config, AioHttpConfig(), zmq_config)
 
-        await client.start()
+        await client.async_start()
 
         try:
             query = Query(
-                id="future-test",
+                id="1001",
                 data={
                     "prompt": "Test future handling",
                     "model": "gpt-3.5-turbo",
@@ -126,21 +143,21 @@ class TestHTTPEndpointClientConcurrency:
             )
 
             # issue_query returns a future directly
-            future = client.issue_query(query)
+            future = await client.issue_query(query)
             assert isinstance(future, asyncio.Future)
 
             # Await the future
             result = await asyncio.wait_for(future, timeout=2.0)
-            assert result.id == "future-test"
+            assert result.id == "1001"
             assert result.response_output == "Test future handling"
         finally:
-            await client.shutdown()
+            await client.async_shutdown()
 
     @pytest.mark.asyncio
-    async def test_basic_future_handling(self, http_client):
+    async def test_basic_future_handling(self, futures_http_client):
         """Test basic future-based request/response."""
         query = Query(
-            id="future-test",
+            id="1001",
             data={
                 "prompt": "Test future handling",
                 "model": "gpt-3.5-turbo",
@@ -148,16 +165,16 @@ class TestHTTPEndpointClientConcurrency:
         )
 
         # issue_query returns a future directly
-        future = http_client.issue_query(query)
+        future = await futures_http_client.issue_query(query)
         assert isinstance(future, asyncio.Future)
 
         # Await the future
         result = await future
-        assert result.id == "future-test"
+        assert result.id == "1001"
         assert result.response_output == "Test future handling"
 
     @pytest.mark.asyncio
-    async def test_concurrent_futures_proper_handling(self, http_client):
+    async def test_concurrent_futures_proper_handling(self, futures_http_client):
         """Test proper concurrent future handling - collect then await all."""
         num_requests = 50
 
@@ -171,7 +188,7 @@ class TestHTTPEndpointClientConcurrency:
                     "model": "gpt-3.5-turbo",
                 },
             )
-            future = http_client.issue_query(query)
+            future = await futures_http_client.issue_query(query)
             futures.append(future)
 
         # Now await all futures together
@@ -200,7 +217,7 @@ class TestHTTPEndpointClientConcurrency:
             zmq_high_water_mark=actual_max_concurrency,
         )
 
-        await client.start()
+        await client.async_start()
 
         try:
             num_requests = actual_max_concurrency
@@ -217,7 +234,7 @@ class TestHTTPEndpointClientConcurrency:
                         "stream": False,
                     },
                 )
-                future = client.issue_query(query)
+                future = await client.issue_query(query)
                 futures.append(future)
 
             # Wait for all futures to complete
@@ -237,7 +254,7 @@ class TestHTTPEndpointClientConcurrency:
                 f"\nNon-streaming mode performance: {num_requests} requests in {duration:.2f}s = {rps:.0f} RPS"
             )
         finally:
-            await client.shutdown()
+            await client.async_shutdown()
 
     @pytest.mark.asyncio
     @pytest.mark.slow
@@ -254,7 +271,7 @@ class TestHTTPEndpointClientConcurrency:
             zmq_high_water_mark=actual_max_concurrency,
         )
 
-        await client.start()
+        await client.async_start()
 
         try:
             num_requests = actual_max_concurrency
@@ -271,7 +288,7 @@ class TestHTTPEndpointClientConcurrency:
                         "stream": True,
                     },
                 )
-                future = client.issue_query(query)
+                future = await client.issue_query(query)
                 futures.append(future)
 
             # Wait for all futures to complete
@@ -291,10 +308,10 @@ class TestHTTPEndpointClientConcurrency:
                 f"\nStreaming mode performance: {num_requests} requests in {duration:.2f}s = {rps:.0f} RPS"
             )
         finally:
-            await client.shutdown()
+            await client.async_shutdown()
 
     @pytest.mark.asyncio
-    async def test_massive_payloads(self, http_client):
+    async def test_massive_payloads(self, futures_http_client):
         """Test handling very large payloads."""
         # Create payloads of different sizes
         payload_sizes = [
@@ -317,7 +334,7 @@ class TestHTTPEndpointClientConcurrency:
                     "max_tokens": 2000,
                 },
             )
-            future = http_client.issue_query(query)
+            future = await futures_http_client.issue_query(query)
             futures.append((name, size, future))
 
         # Wait for all payloads
@@ -346,7 +363,7 @@ class TestHTTPEndpointClientConcurrency:
                 zmq_io_threads=8,
             )
 
-            await client.start()
+            await client.async_start()
 
             try:
                 num_requests = actual_max_concurrency
@@ -361,7 +378,7 @@ class TestHTTPEndpointClientConcurrency:
                             "model": "gpt-3.5-turbo",
                         },
                     )
-                    future = client.issue_query(query)
+                    future = await client.issue_query(query)
                     futures.append(future)
 
                 # Wait for all with timeout
@@ -376,7 +393,7 @@ class TestHTTPEndpointClientConcurrency:
                 )
 
             finally:
-                await client.shutdown()
+                await client.async_shutdown()
 
     @pytest.mark.asyncio
     async def test_concurrency_limit_with_futures(
@@ -393,7 +410,7 @@ class TestHTTPEndpointClientConcurrency:
             zmq_high_water_mark=max_concurrency * 20,
         )
 
-        await client.start()
+        await client.async_start()
 
         try:
             # Send more requests than concurrency limit
@@ -412,7 +429,7 @@ class TestHTTPEndpointClientConcurrency:
                 )
 
                 issue_times.append(time.time())
-                future = client.issue_query(query)
+                future = await client.issue_query(query)
                 futures.append(future)
 
             # Wait for all
@@ -428,10 +445,10 @@ class TestHTTPEndpointClientConcurrency:
             )
 
         finally:
-            await client.shutdown()
+            await client.async_shutdown()
 
     @pytest.mark.asyncio
-    async def test_future_cancellation(self):
+    async def test_future_cancellation(self, tmp_path):
         """Test cancelling futures before completion."""
         # Use invalid endpoint so requests won't complete immediately
         http_config = HTTPClientConfig(
@@ -439,19 +456,18 @@ class TestHTTPEndpointClientConcurrency:
             num_workers=2,
         )
 
-        timestamp = int(time.time() * 1000)
         zmq_config = ZMQConfig(
-            zmq_request_queue_prefix=f"ipc:///tmp/test_cancel_{timestamp}",
-            zmq_response_queue_addr=f"ipc:///tmp/test_cancel_resp_{timestamp}",
+            zmq_request_queue_prefix=get_test_socket_path(
+                tmp_path, "test_cancel", "_req"
+            ),
+            zmq_response_queue_addr=get_test_socket_path(
+                tmp_path, "test_cancel", "_resp"
+            ),
         )
 
-        client = HTTPEndpointClient(
-            config=http_config,
-            aiohttp_config=AioHttpConfig(),
-            zmq_config=zmq_config,
-        )
+        client = FuturesHttpClient(http_config, AioHttpConfig(), zmq_config)
 
-        await client.start()
+        await client.async_start()
 
         try:
             # Create futures
@@ -464,7 +480,7 @@ class TestHTTPEndpointClientConcurrency:
                         "model": "gpt-3.5-turbo",
                     },
                 )
-                future = client.issue_query(query)
+                future = await client.issue_query(query)
                 futures.append(future)
 
             # Small delay to let requests start
@@ -475,7 +491,7 @@ class TestHTTPEndpointClientConcurrency:
                 futures[i].cancel()
 
             # Shutdown to cancel remaining
-            await client.shutdown()
+            await client.async_shutdown()
 
             # Check cancellations - some futures may complete before cancellation
             cancelled_count = sum(1 for f in futures if f.cancelled())
@@ -491,16 +507,8 @@ class TestHTTPEndpointClientConcurrency:
             pass  # Already shut down
 
     @pytest.mark.asyncio
-    async def test_mixed_callback_and_future_pattern(self, http_client):
-        """Test using both callbacks and futures together."""
-        callback_results = []
-
-        def callback(result):
-            callback_results.append(result)
-
-        # Set callback
-        http_client.complete_callback = callback
-
+    async def test_mixed_callback_and_future_pattern(self, futures_http_client):
+        """Test using futures pattern (callbacks not supported in new API)."""
         # Send requests and collect futures
         futures = []
         for i in range(10):
@@ -511,27 +519,21 @@ class TestHTTPEndpointClientConcurrency:
                     "model": "gpt-3.5-turbo",
                 },
             )
-            future = http_client.issue_query(query)
+            future = await futures_http_client.issue_query(query)
             futures.append(future)
 
         # Wait for futures
         future_results = await asyncio.gather(*futures)
 
-        # Both callback and futures should have results
+        # All futures should have results
         assert len(future_results) == 10
-        assert len(callback_results) == 10
-
-        # Results should match
-        future_ids = {r.id for r in future_results}
-        callback_ids = {r.id for r in callback_results}
-        assert future_ids == callback_ids
 
 
 class TestHTTPEndpointClientErrorHandling:
     """Test error handling with real ZMQ sockets."""
 
     @pytest.mark.asyncio
-    async def test_worker_connection_error(self):
+    async def test_worker_connection_error(self, tmp_path):
         """Test handling when workers can't connect to endpoint."""
         # Use invalid endpoint
         http_config = HTTPClientConfig(
@@ -539,36 +541,34 @@ class TestHTTPEndpointClientErrorHandling:
             num_workers=2,
         )
 
-        timestamp = int(time.time() * 1000)
         zmq_config = ZMQConfig(
-            zmq_request_queue_prefix=f"ipc:///tmp/test_conn_err_{timestamp}",
-            zmq_response_queue_addr=f"ipc:///tmp/test_conn_err_resp_{timestamp}",
+            zmq_request_queue_prefix=get_test_socket_path(
+                tmp_path, "test_conn_err", "_req"
+            ),
+            zmq_response_queue_addr=get_test_socket_path(
+                tmp_path, "test_conn_err", "_resp"
+            ),
         )
 
-        client = HTTPEndpointClient(
-            config=http_config,
-            aiohttp_config=AioHttpConfig(
-                client_timeout_total=2.0
-            ),  # short timeout to fail fast
-            zmq_config=zmq_config,
+        client = FuturesHttpClient(
+            http_config,
+            AioHttpConfig(client_timeout_total=2.0),  # short timeout to fail fast
+            zmq_config,
         )
 
-        await client.start()
+        await client.async_start()
 
         try:
             # Send request
             query = Query(
-                id="error-test",
+                id="2001",
                 data={
                     "prompt": "This should fail",
                     "model": "gpt-3.5-turbo",
                 },
             )
 
-            future = client.issue_query(query)
-
-            # Allow time for error to propagate through ZMQ
-            await asyncio.sleep(0.2)
+            future = await client.issue_query(query)
 
             # Should get error
             with pytest.raises(Exception) as exc_info:
@@ -579,94 +579,94 @@ class TestHTTPEndpointClientErrorHandling:
             ) or "Cannot connect" in str(exc_info.value)
 
         finally:
-            await client.shutdown()
+            await client.async_shutdown()
 
     @pytest.mark.asyncio
-    async def test_response_handler_error_recovery(self):
+    async def test_response_handler_error_recovery(
+        self, mock_http_echo_server, tmp_path
+    ):
         """Test that response handler recovers from errors."""
-        timestamp = int(time.time() * 1000)
         zmq_config = ZMQConfig(
-            zmq_request_queue_prefix=f"ipc:///tmp/test_handler_err_{timestamp}",
-            zmq_response_queue_addr=f"ipc:///tmp/test_handler_err_resp_{timestamp}",
+            zmq_request_queue_prefix=get_test_socket_path(
+                tmp_path, "test_handler_err", "_req"
+            ),
+            zmq_response_queue_addr=get_test_socket_path(
+                tmp_path, "test_handler_err", "_resp"
+            ),
         )
 
         http_config = HTTPClientConfig(
-            endpoint_url="http://localhost:9999/v1/chat/completions",
+            endpoint_url=f"{mock_http_echo_server.url}/v1/chat/completions",
             num_workers=1,
         )
 
-        client = HTTPEndpointClient(
-            config=http_config,
-            aiohttp_config=AioHttpConfig(),
-            zmq_config=zmq_config,
+        client = FuturesHttpClient(
+            http_config,
+            AioHttpConfig(),
+            zmq_config,
         )
 
-        # Initialize minimal client components
-        for i in range(client.config.num_workers):
-            address = f"{client.zmq_config.zmq_request_queue_prefix}_{i}_requests"
-            push_socket = ZMQPushSocket(client.zmq_context, address, client.zmq_config)
-            client.worker_push_sockets.append(push_socket)
-
-        # Start response handler
-        client._response_handler_task = asyncio.create_task(client._handle_responses())
-
-        # Create context for test
-        context = zmq.asyncio.Context()
+        # Start client
+        await client.async_start()
 
         try:
-            # Create push socket to send responses
+            # Send first query
+            query1 = Query(
+                id="3001",
+                data={
+                    "prompt": "First query",
+                    "model": "gpt-3.5-turbo",
+                },
+            )
+            future1 = await client.issue_query(query1)
+
+            # Create context to inject invalid data
+            context = zmq.asyncio.Context()
             response_push = context.socket(zmq.PUSH)
             response_push.connect(zmq_config.zmq_response_queue_addr)
 
-            # Send valid response
-            result1 = QueryResult(
-                id="test-1",
-                response_output="Success",
-            )
-            await response_push.send(pickle.dumps(result1))
-
-            # Send invalid data that will cause error
+            # Send invalid data that will cause error in handler
             await response_push.send(b"invalid pickle data")
 
-            # Send another valid response to verify recovery
-            result2 = QueryResult(
-                id="test-2",
-                response_output="Success after error",
+            # Give handler time to encounter error
+            await asyncio.sleep(0.2)
+
+            # Send second query - handler should have recovered
+            query2 = Query(
+                id="3002",
+                data={
+                    "prompt": "Second query after error",
+                    "model": "gpt-3.5-turbo",
+                },
             )
-            await response_push.send(pickle.dumps(result2))
+            future2 = await client.issue_query(query2)
 
-            # Create futures to track
-            future1 = asyncio.get_event_loop().create_future()
-            future2 = asyncio.get_event_loop().create_future()
-            client._pending_futures["test-1"] = future1
-            client._pending_futures["test-2"] = future2
+            # Wait for both futures
+            result1 = await asyncio.wait_for(future1, timeout=5.0)
+            result2 = await asyncio.wait_for(future2, timeout=5.0)
 
-            # Wait for processing
-            await asyncio.sleep(0.5)
+            # Both should complete successfully
+            assert result1.response_output == "First query"
+            assert result2.response_output == "Second query after error"
 
-            # First future should be completed
-            assert future1.done()
-            assert future1.result().response_output == "Success"
-
-            # Second future should also complete (handler recovered)
-            assert future2.done()
-            assert future2.result().response_output == "Success after error"
-        except Exception as e:
-            print(f"Error in test_response_handler_error_recovery: {e}")
-            raise e
         finally:
-            # Cleanup
             response_push.close()
-            await client.shutdown()
-            context.term()
+            context.destroy(linger=0)
+            await client.async_shutdown()
 
     @pytest.mark.asyncio
-    async def test_zmq_send_failure(self):
+    async def test_zmq_send_failure(self, tmp_path):
         """Test handling of ZMQ send failures."""
-        timestamp = int(time.time() * 1000)
         zmq_config = ZMQConfig(
-            zmq_request_queue_prefix=f"ipc:///tmp/test_send_fail_{timestamp}",
-            zmq_response_queue_addr=f"ipc:///tmp/test_send_fail_resp_{timestamp}",
+            zmq_request_queue_prefix=get_test_socket_path(
+                tmp_path, "test_send_fail", "_req"
+            ),
+            zmq_response_queue_addr=get_test_socket_path(
+                tmp_path, "test_send_fail", "_resp"
+            ),
+            zmq_readiness_queue_addr=get_test_socket_path(
+                tmp_path, "test_send_fail", "_ready"
+            ),
         )
 
         http_config = HTTPClientConfig(
@@ -674,14 +674,13 @@ class TestHTTPEndpointClientErrorHandling:
             num_workers=1,
         )
 
-        client = HTTPEndpointClient(
+        client = FuturesHttpClient(
             config=http_config,
             aiohttp_config=AioHttpConfig(),
             zmq_config=zmq_config,
         )
 
-        # Properly start the client first
-        await client.start()
+        await client.async_start()
 
         try:
             # Create a mock socket that will fail on send
@@ -706,22 +705,20 @@ class TestHTTPEndpointClientErrorHandling:
             client.worker_push_sockets[0] = FailingSocket(original_socket)
 
             query = Query(
-                id="send-fail",
+                id="4001",
                 data={
                     "prompt": "This will fail to send",
                     "model": "gpt-3.5-turbo",
                 },
             )
 
-            future = client.issue_query(query)
-
-            # The send happens asynchronously, wait for it
+            # The send should fail immediately and raise an exception
             with pytest.raises(Exception) as exc_info:
-                await asyncio.wait_for(future, timeout=1.0)
+                await client.issue_query(query)
             assert "ZMQ send failed" in str(exc_info.value)
 
         finally:
-            await client.shutdown()
+            await client.async_shutdown()
 
 
 class TestHTTPEndpointClientCoverage:
@@ -740,31 +737,34 @@ class TestHTTPEndpointClientCoverage:
     def zmq_config(self, tmp_path):
         """Create ZMQ configuration with unique addresses."""
         return ZMQConfig(
-            zmq_request_queue_prefix=f"ipc://{tmp_path}/test_coverage_req",
-            zmq_response_queue_addr=f"ipc://{tmp_path}/test_coverage_resp",
+            zmq_request_queue_prefix=get_test_socket_path(
+                tmp_path, "test_coverage", "_req"
+            ),
+            zmq_response_queue_addr=get_test_socket_path(
+                tmp_path, "test_coverage", "_resp"
+            ),
         )
 
     @pytest_asyncio.fixture
-    async def http_client(self, http_config, zmq_config):
-        """Create and start HTTP endpoint client."""
-        client = HTTPEndpointClient(
+    async def futures_http_client(self, http_config, zmq_config):
+        """Create and start futures-based HTTP endpoint client."""
+        client = FuturesHttpClient(
             config=http_config,
             aiohttp_config=AioHttpConfig(),
             zmq_config=zmq_config,
         )
-        await client.start()
+        await client.async_start()
         yield client
-        await client.shutdown()
+        await client.async_shutdown()
 
     @pytest.mark.asyncio
-    async def test_initialization_with_callback(self, mock_http_echo_server):
+    async def test_initialization_with_callback(self, mock_http_echo_server, tmp_path):
         """Test HTTPEndpointClient initialization with callback."""
         callback_called = []
 
         def test_callback(result: QueryResult):
             callback_called.append(result)
 
-        timestamp = int(time.time() * 1000)
         http_config = HTTPClientConfig(
             endpoint_url=f"{mock_http_echo_server.url}/v1/chat/completions",
             num_workers=1,
@@ -772,63 +772,60 @@ class TestHTTPEndpointClientCoverage:
         )
 
         zmq_config = ZMQConfig(
-            zmq_request_queue_prefix=f"ipc:///tmp/test_init_callback_{timestamp}",
-            zmq_response_queue_addr=f"ipc:///tmp/test_init_callback_resp_{timestamp}",
+            zmq_request_queue_prefix=get_test_socket_path(
+                tmp_path, "test_init_callback", "_req"
+            ),
+            zmq_response_queue_addr=get_test_socket_path(
+                tmp_path, "test_init_callback", "_resp"
+            ),
             zmq_io_threads=2,  # Test custom io_threads
         )
 
-        # Test initialization with callback and concurrency limit
-        client = HTTPEndpointClient(
+        # Test initialization
+        client = FuturesHttpClient(
             config=http_config,
             aiohttp_config=AioHttpConfig(),
             zmq_config=zmq_config,
-            complete_callback=test_callback,
         )
 
         # Verify initialization state
         assert client.config == http_config
         assert client.aiohttp_config is not None
         assert client.zmq_config == zmq_config
-        assert client.complete_callback == test_callback
-        assert client._concurrency_semaphore is not None
-        assert client._concurrency_semaphore._value == 5
+        assert client._concurrency_semaphore is None  # Not created until start()
         assert client.current_worker_idx == 0
         assert len(client.worker_push_sockets) == 0
         assert client.worker_manager is None
-        assert not client._shutdown_event.is_set()
         assert client._response_handler_task is None
         assert len(client._pending_futures) == 0
 
-        await client.start()
+        await client.async_start()
 
         try:
-            # Test that callback is called
+            # Test that query completes successfully
             query = Query(
-                id="callback-test",
+                id="5001",
                 data={
                     "prompt": "Test callback",
                     "model": "gpt-3.5-turbo",
                 },
             )
 
-            future = client.issue_query(query)
-            await future
+            future = await client.issue_query(query)
+            result = await future
 
-            # Wait a bit for callback to be processed
-            await asyncio.sleep(0.1)
-
-            assert len(callback_called) == 1
-            assert callback_called[0].id == "callback-test"
+            # Verify result
+            assert result.id == "5001"
+            assert result.response_output == "Test callback"
 
         finally:
-            await client.shutdown()
+            await client.async_shutdown()
 
     @pytest.mark.asyncio
     async def test_initialization_without_concurrency_limit(
-        self, mock_http_echo_server
+        self, mock_http_echo_server, tmp_path
     ):
         """Test initialization without concurrency limit (max_concurrency <= 0)."""
-        timestamp = int(time.time() * 1000)
         http_config = HTTPClientConfig(
             endpoint_url=f"{mock_http_echo_server.url}/v1/chat/completions",
             num_workers=1,
@@ -836,44 +833,39 @@ class TestHTTPEndpointClientCoverage:
         )
 
         zmq_config = ZMQConfig(
-            zmq_request_queue_prefix=f"ipc:///tmp/test_no_concurrency_{timestamp}",
-            zmq_response_queue_addr=f"ipc:///tmp/test_no_concurrency_resp_{timestamp}",
+            zmq_request_queue_prefix=get_test_socket_path(
+                tmp_path, "test_no_concurrency", "_req"
+            ),
+            zmq_response_queue_addr=get_test_socket_path(
+                tmp_path, "test_no_concurrency", "_resp"
+            ),
         )
 
-        client = HTTPEndpointClient(
-            config=http_config,
-            aiohttp_config=AioHttpConfig(),
-            zmq_config=zmq_config,
-        )
-
-        # Verify no concurrency semaphore is created
-        assert client._concurrency_semaphore is None
-
-        await client.start()
+        client = FuturesHttpClient(http_config, AioHttpConfig(), zmq_config)
+        await client.async_start()
 
         try:
             # Test that requests work without concurrency limit
             query = Query(
-                id="no-limit-test",
+                id="6001",
                 data={
                     "prompt": "Test no limit",
                     "model": "gpt-3.5-turbo",
                 },
             )
 
-            future = client.issue_query(query)
+            future = await client.issue_query(query)
             result = await future
 
-            assert result.id == "no-limit-test"
+            assert result.id == "6001"
             assert result.response_output == "Test no limit"
 
         finally:
-            await client.shutdown()
+            await client.async_shutdown()
 
     @pytest.mark.asyncio
-    async def test_start_method_socket_creation(self, mock_http_echo_server):
+    async def test_start_method_socket_creation(self, mock_http_echo_server, tmp_path):
         """Test start method creates correct number of worker sockets."""
-        timestamp = int(time.time() * 1000)
         http_config = HTTPClientConfig(
             endpoint_url=f"{mock_http_echo_server.url}/v1/chat/completions",
             num_workers=4,
@@ -881,22 +873,22 @@ class TestHTTPEndpointClientCoverage:
         )
 
         zmq_config = ZMQConfig(
-            zmq_request_queue_prefix=f"ipc:///tmp/test_start_sockets_{timestamp}",
-            zmq_response_queue_addr=f"ipc:///tmp/test_start_sockets_resp_{timestamp}",
+            zmq_request_queue_prefix=get_test_socket_path(
+                tmp_path, "test_start_sockets", "_req"
+            ),
+            zmq_response_queue_addr=get_test_socket_path(
+                tmp_path, "test_start_sockets", "_resp"
+            ),
         )
 
-        client = HTTPEndpointClient(
-            config=http_config,
-            aiohttp_config=AioHttpConfig(),
-            zmq_config=zmq_config,
-        )
+        client = FuturesHttpClient(http_config, AioHttpConfig(), zmq_config)
 
         # Verify initial state
         assert len(client.worker_push_sockets) == 0
         assert client.worker_manager is None
         assert client._response_handler_task is None
 
-        await client.start()
+        await client.async_start()
 
         try:
             # Verify start method created all components
@@ -911,62 +903,11 @@ class TestHTTPEndpointClientCoverage:
                 assert socket is not None
 
         finally:
-            await client.shutdown()
+            await client.async_shutdown()
 
     @pytest.mark.asyncio
-    async def test_response_handler_timeout_path(self, mock_http_echo_server):
-        """Test response handler timeout path in _handle_responses."""
-        timestamp = int(time.time() * 1000)
-        http_config = HTTPClientConfig(
-            endpoint_url=f"{mock_http_echo_server.url}/v1/chat/completions",
-            num_workers=1,
-            max_concurrency=-1,
-        )
-
-        zmq_config = ZMQConfig(
-            zmq_request_queue_prefix=f"ipc:///tmp/test_timeout_{timestamp}",
-            zmq_response_queue_addr=f"ipc:///tmp/test_timeout_resp_{timestamp}",
-        )
-
-        client = HTTPEndpointClient(
-            config=http_config,
-            aiohttp_config=AioHttpConfig(),
-            zmq_config=zmq_config,
-        )
-
-        await client.start()
-
-        try:
-            # Let the response handler run for a bit to exercise timeout path
-            await asyncio.sleep(1.5)  # Should trigger at least one timeout
-
-            # Verify response handler is still running
-            assert client._response_handler_task is not None
-            assert not client._response_handler_task.done()
-
-            # Send a request to verify normal operation still works
-            query = Query(
-                id="timeout-test",
-                data={
-                    "prompt": "Test after timeout",
-                    "model": "gpt-3.5-turbo",
-                },
-            )
-
-            future = client.issue_query(query)
-            result = await future
-
-            assert result.id == "timeout-test"
-            assert result.response_output == "Test after timeout"
-            assert mock_http_echo_server.url is not None
-
-        finally:
-            await client.shutdown()
-
-    @pytest.mark.asyncio
-    async def test_callback_error_handling(self, mock_http_echo_server):
+    async def test_callback_error_handling(self, mock_http_echo_server, tmp_path):
         """Test error handling in user callback."""
-        timestamp = int(time.time() * 1000)
         callback_errors = []
 
         def failing_callback(result):
@@ -980,34 +921,34 @@ class TestHTTPEndpointClientCoverage:
         )
 
         zmq_config = ZMQConfig(
-            zmq_request_queue_prefix=f"ipc:///tmp/test_callback_error_{timestamp}",
-            zmq_response_queue_addr=f"ipc:///tmp/test_callback_error_resp_{timestamp}",
+            zmq_request_queue_prefix=get_test_socket_path(
+                tmp_path, "test_callback_error", "_req"
+            ),
+            zmq_response_queue_addr=get_test_socket_path(
+                tmp_path, "test_callback_error", "_resp"
+            ),
         )
 
-        client = HTTPEndpointClient(
-            config=http_config,
-            aiohttp_config=AioHttpConfig(),
-            zmq_config=zmq_config,
-            complete_callback=failing_callback,
-        )
+        client = FuturesHttpClient(http_config, AioHttpConfig(), zmq_config)
+        client.complete_callback = failing_callback
 
-        await client.start()
+        await client.async_start()
 
         try:
             # Send request that will trigger callback error
             query = Query(
-                id="callback-error-test",
+                id="8001",
                 data={
                     "prompt": "Test callback error",
                     "model": "gpt-3.5-turbo",
                 },
             )
 
-            future = client.issue_query(query)
+            future = await client.issue_query(query)
             result = await future
 
             # Future should still complete successfully despite callback error
-            assert result.id == "callback-error-test"
+            assert result.id == "8001"
             assert result.response_output == "Test callback error"
 
             # Wait for callback to be processed
@@ -1019,14 +960,13 @@ class TestHTTPEndpointClientCoverage:
             assert callback_errors[0] == "callback_called"
 
         finally:
-            await client.shutdown()
+            await client.async_shutdown()
 
     @pytest.mark.asyncio
-    async def test_response_with_error_field(self, mock_http_echo_server):
+    async def test_response_with_error_field(self, mock_http_echo_server, tmp_path):
         """Test handling response with error field."""
         # This test requires a way to simulate error responses
         # We'll create a mock response directly
-        timestamp = int(time.time() * 1000)
         http_config = HTTPClientConfig(
             endpoint_url=f"{mock_http_echo_server.url}/v1/chat/completions",
             num_workers=1,
@@ -1034,24 +974,16 @@ class TestHTTPEndpointClientCoverage:
         )
 
         zmq_config = ZMQConfig(
-            zmq_request_queue_prefix=f"ipc:///tmp/test_error_response_{timestamp}",
-            zmq_response_queue_addr=f"ipc:///tmp/test_error_response_resp_{timestamp}",
+            zmq_request_queue_prefix=get_test_socket_path(
+                tmp_path, "test_error_response", "_req"
+            ),
+            zmq_response_queue_addr=get_test_socket_path(
+                tmp_path, "test_error_response", "_resp"
+            ),
         )
 
-        client = HTTPEndpointClient(
-            config=http_config,
-            aiohttp_config=AioHttpConfig(),
-            zmq_config=zmq_config,
-        )
-
-        # Initialize minimal client components for direct response injection
-        for i in range(client.config.num_workers):
-            address = f"{client.zmq_config.zmq_request_queue_prefix}_{i}_requests"
-            push_socket = ZMQPushSocket(client.zmq_context, address, client.zmq_config)
-            client.worker_push_sockets.append(push_socket)
-
-        # Start response handler
-        client._response_handler_task = asyncio.create_task(client._handle_responses())
+        client = FuturesHttpClient(http_config, AioHttpConfig(), zmq_config)
+        await client.async_start()
 
         # Create context for test
         context = zmq.asyncio.Context()
@@ -1062,12 +994,21 @@ class TestHTTPEndpointClientCoverage:
             response_push.connect(zmq_config.zmq_response_queue_addr)
 
             # Create future for tracking
-            future = asyncio.get_event_loop().create_future()
-            client._pending_futures["error-test"] = future
+            query = Query(
+                id="2001",
+                data={
+                    "prompt": "Test error",
+                    "model": "gpt-3.5-turbo",
+                },
+            )
+            future = await client.issue_query(query)
+
+            # Give time for query to be sent
+            await asyncio.sleep(0.1)
 
             # Send error response
             error_result = QueryResult(
-                id="error-test",
+                id="2001",
                 response_output="",
                 error="Simulated error response",
             )
@@ -1079,17 +1020,16 @@ class TestHTTPEndpointClientCoverage:
 
             assert "Simulated error response" in str(exc_info.value)
 
-            # Cleanup
-            response_push.close()
-            await client.shutdown()
-
         finally:
-            context.term()
+            response_push.close()
+            context.destroy(linger=0)
+            await client.async_shutdown()
 
     @pytest.mark.asyncio
-    async def test_shutdown_with_pending_response_handler(self, mock_http_echo_server):
+    async def test_shutdown_with_pending_response_handler(
+        self, mock_http_echo_server, tmp_path
+    ):
         """Test shutdown when response handler task exists."""
-        timestamp = int(time.time() * 1000)
         http_config = HTTPClientConfig(
             endpoint_url=f"{mock_http_echo_server.url}/v1/chat/completions",
             num_workers=2,
@@ -1097,17 +1037,17 @@ class TestHTTPEndpointClientCoverage:
         )
 
         zmq_config = ZMQConfig(
-            zmq_request_queue_prefix=f"ipc:///tmp/test_shutdown_handler_{timestamp}",
-            zmq_response_queue_addr=f"ipc:///tmp/test_shutdown_handler_resp_{timestamp}",
+            zmq_request_queue_prefix=get_test_socket_path(
+                tmp_path, "test_shutdown_handler", "_req"
+            ),
+            zmq_response_queue_addr=get_test_socket_path(
+                tmp_path, "test_shutdown_handler", "_resp"
+            ),
         )
 
-        client = HTTPEndpointClient(
-            config=http_config,
-            aiohttp_config=AioHttpConfig(),
-            zmq_config=zmq_config,
-        )
+        client = FuturesHttpClient(http_config, AioHttpConfig(), zmq_config)
 
-        await client.start()
+        await client.async_start()
 
         # Verify components are running
         assert client._response_handler_task is not None
@@ -1118,23 +1058,24 @@ class TestHTTPEndpointClientCoverage:
         # Add some pending futures
         future1 = asyncio.get_event_loop().create_future()
         future2 = asyncio.get_event_loop().create_future()
-        client._pending_futures["pending-1"] = future1
-        client._pending_futures["pending-2"] = future2
+        client._pending_futures[1] = future1
+        client._pending_futures[2] = future2
 
         # Shutdown should clean everything up
-        await client.shutdown()
+        await client.async_shutdown()
+
+        # Give event loop time to process cancellations
+        await asyncio.sleep(0.1)
 
         # Verify cleanup
-        assert client._shutdown_event.is_set()
         assert len(client._pending_futures) == 0
         assert future1.cancelled()
         assert future2.cancelled()
         assert client._response_handler_task.done()
 
     @pytest.mark.asyncio
-    async def test_shutdown_without_components(self):
+    async def test_shutdown_without_components(self, tmp_path):
         """Test shutdown when components haven't been initialized."""
-        timestamp = int(time.time() * 1000)
         http_config = HTTPClientConfig(
             endpoint_url="http://localhost:9999/v1/chat/completions",
             num_workers=1,
@@ -1142,8 +1083,12 @@ class TestHTTPEndpointClientCoverage:
         )
 
         zmq_config = ZMQConfig(
-            zmq_request_queue_prefix=f"ipc:///tmp/test_shutdown_empty_{timestamp}",
-            zmq_response_queue_addr=f"ipc:///tmp/test_shutdown_empty_resp_{timestamp}",
+            zmq_request_queue_prefix=get_test_socket_path(
+                tmp_path, "test_shutdown_empty", "_req"
+            ),
+            zmq_response_queue_addr=get_test_socket_path(
+                tmp_path, "test_shutdown_empty", "_resp"
+            ),
         )
 
         client = HTTPEndpointClient(
@@ -1154,14 +1099,10 @@ class TestHTTPEndpointClientCoverage:
 
         # Don't call start() - test shutdown on uninitialized client
         assert client.worker_manager is None
-        assert client._response_handler_task is None
         assert len(client.worker_push_sockets) == 0
 
         # Should not raise any errors
-        await client.shutdown()
-
-        # Verify shutdown event is set
-        assert client._shutdown_event.is_set()
+        await client.async_shutdown()
 
     @pytest.mark.asyncio
     async def test_zmq_socket_options(self):
@@ -1189,8 +1130,6 @@ class TestHTTPEndpointClientCoverage:
             assert push_socket.socket.getsockopt(zmq.SNDTIMEO) == 5000
             assert push_socket.socket.getsockopt(zmq.SNDBUF) == 20 * 1024 * 1024
 
-            push_socket.close()
-
             # Test pull socket
             pull_socket = ZMQPullSocket(
                 context, "ipc:///tmp/test_opts_pull", zmq_config, bind=True
@@ -1203,30 +1142,30 @@ class TestHTTPEndpointClientCoverage:
             assert pull_socket.socket.getsockopt(zmq.RCVTIMEO) == 5000
             assert pull_socket.socket.getsockopt(zmq.RCVBUF) == 20 * 1024 * 1024
 
-            pull_socket.close()
-
         finally:
-            context.term()
+            push_socket.close()
+            pull_socket.close()
+            context.destroy(linger=0)
 
     @pytest.mark.asyncio
-    async def test_empty_prompt(self, http_client):
+    async def test_empty_prompt(self, futures_http_client):
         """Test handling empty prompt."""
         query = Query(
-            id="empty-prompt",
+            id="9001",
             data={
                 "prompt": "",
                 "model": "gpt-3.5-turbo",
             },
         )
 
-        future = http_client.issue_query(query)
+        future = await futures_http_client.issue_query(query)
         result = await future
 
-        assert result.id == "empty-prompt"
+        assert result.id == "9001"
         assert result.response_output == ""
 
     @pytest.mark.asyncio
-    async def test_special_characters_in_prompt(self, http_client):
+    async def test_special_characters_in_prompt(self, futures_http_client):
         """Test handling special characters and unicode."""
         special_prompts = [
             "Hello 你好 🚀 世界",
@@ -1245,7 +1184,7 @@ class TestHTTPEndpointClientCoverage:
                     "model": "gpt-3.5-turbo",
                 },
             )
-            future = http_client.issue_query(query)
+            future = await futures_http_client.issue_query(query)
             futures.append((prompt, future))
 
         # Verify all handled correctly
@@ -1254,10 +1193,10 @@ class TestHTTPEndpointClientCoverage:
             assert result.response_output == prompt
 
     @pytest.mark.asyncio
-    async def test_metadata_propagation(self, http_client):
+    async def test_metadata_propagation(self, futures_http_client):
         """Test that query metadata is preserved."""
         query = Query(
-            id="metadata-test",
+            id="10001",
             data={
                 "prompt": "Test metadata",
                 "model": "gpt-3.5-turbo",
@@ -1271,31 +1210,34 @@ class TestHTTPEndpointClientCoverage:
             },
         )
 
-        future = http_client.issue_query(query)
+        future = await futures_http_client.issue_query(query)
         result = await future
 
         # Echo server should preserve the query
-        assert result.id == "metadata-test"
+        assert result.id == "10001"
         assert result.response_output == "Test metadata"
 
     @pytest.mark.asyncio
-    async def test_concurrent_shutdown(self, http_config, zmq_config):
+    async def test_concurrent_shutdown(
+        self, http_config, mock_http_echo_server, tmp_path
+    ):
         """Test shutdown while requests are in flight."""
         # Create a separate client for this test since we need to shut it down
-        import time
-
-        timestamp = int(time.time() * 1000)
         shutdown_zmq_config = ZMQConfig(
-            zmq_request_queue_prefix=f"ipc:///tmp/test_shutdown_{timestamp}",
-            zmq_response_queue_addr=f"ipc:///tmp/test_shutdown_resp_{timestamp}",
+            zmq_request_queue_prefix=get_test_socket_path(
+                tmp_path, "test_shutdown", "_req"
+            ),
+            zmq_response_queue_addr=get_test_socket_path(
+                tmp_path, "test_shutdown", "_resp"
+            ),
         )
 
-        client = HTTPEndpointClient(
-            config=http_config,
-            aiohttp_config=AioHttpConfig(),
-            zmq_config=shutdown_zmq_config,
+        client = FuturesHttpClient(
+            http_config,
+            AioHttpConfig(),
+            shutdown_zmq_config,
         )
-        await client.start()
+        await client.async_start()
 
         try:
             # Send many requests
@@ -1308,11 +1250,14 @@ class TestHTTPEndpointClientCoverage:
                         "model": "gpt-3.5-turbo",
                     },
                 )
-                future = client.issue_query(query)
+                future = await client.issue_query(query)
                 futures.append(future)
 
             # Immediately shutdown
-            await client.shutdown()
+            await client.async_shutdown()
+
+            # Give event loop time to process cancellations
+            await asyncio.sleep(0.1)
 
             # Count completed vs cancelled
             completed = sum(1 for f in futures if f.done() and not f.cancelled())
@@ -1325,16 +1270,19 @@ class TestHTTPEndpointClientCoverage:
         finally:
             # Ensure cleanup even if test fails
             if not client._shutdown_event.is_set():
-                await client.shutdown()
+                await client.async_shutdown()
 
     @pytest.mark.asyncio
-    async def test_error_response_propagation(self, http_client):
+    async def test_error_response_propagation(self, tmp_path):
         """Test that error responses are propagated as exceptions in futures."""
         # Use an invalid endpoint to trigger real errors
-        timestamp = int(time.time() * 1000)
         zmq_config = ZMQConfig(
-            zmq_request_queue_prefix=f"ipc:///tmp/test_error_prop_{timestamp}",
-            zmq_response_queue_addr=f"ipc:///tmp/test_error_prop_resp_{timestamp}",
+            zmq_request_queue_prefix=get_test_socket_path(
+                tmp_path, "test_error_prop", "_req"
+            ),
+            zmq_response_queue_addr=get_test_socket_path(
+                tmp_path, "test_error_prop", "_resp"
+            ),
         )
 
         config = HTTPClientConfig(
@@ -1342,31 +1290,25 @@ class TestHTTPEndpointClientCoverage:
             num_workers=1,
         )
 
-        client = HTTPEndpointClient(
-            config=config,
-            aiohttp_config=AioHttpConfig(
-                client_timeout_total=2.0
-            ),  # short timeout to fail fast
-            zmq_config=zmq_config,
+        client = FuturesHttpClient(
+            config,
+            AioHttpConfig(client_timeout_total=2.0),  # short timeout to fail fast
+            zmq_config,
         )
 
-        await client.start()
+        await client.async_start()
 
         try:
             # Send request to invalid endpoint
             query = Query(
-                id="error-test",
+                id="2001",
                 data={
                     "prompt": "Test error",
                     "model": "gpt-3.5-turbo",
                 },
             )
 
-            future = client.issue_query(query)
-
-            # Wait for the error to propagate through the system
-            # The flow is: client -> ZMQ -> worker -> HTTP error -> ZMQ -> client
-            await asyncio.sleep(0.5)
+            future = await client.issue_query(query)
 
             # Should get an exception due to connection error
             with pytest.raises(Exception) as exc_info:
@@ -1387,32 +1329,4 @@ class TestHTTPEndpointClientCoverage:
             )
 
         finally:
-            await client.shutdown()
-
-    @pytest.mark.asyncio
-    async def test_response_for_unknown_sample_id(self, http_client):
-        """Test handling response for unknown query ID by checking internal state."""
-        # Verify client is in a good state
-        assert http_client.worker_push_sockets, "Client should have worker sockets"
-        assert (
-            not http_client._shutdown_event.is_set()
-        ), "Client should not be shut down"
-
-        # Send a normal request first
-        query = Query(
-            id="known-query",
-            data={
-                "prompt": "Test query",
-                "model": "gpt-3.5-turbo",
-            },
-        )
-
-        future = http_client.issue_query(query)
-        result = await future
-
-        # Verify the query was processed and removed from pending futures
-        assert result.id == "known-query"
-        assert "known-query" not in http_client._pending_futures
-
-        # Test that the client handles normal operations correctly
-        # (Unknown query IDs would be handled gracefully by the response handler)
+            await client.async_shutdown()

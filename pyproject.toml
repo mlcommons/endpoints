@@ -29,7 +29,7 @@ requires-python = ">=3.12"
 dependencies = [
     "asyncio",
     "typing-extensions>=4.0.0",
-    "orjson==3.11.3",
+    "orjson==3.11.0",
     "aiohttp==3.12.15",
     "pyzmq==27.0.2",
 ]
@@ -50,6 +50,7 @@ test = [
     "pytest-asyncio>=0.21.0",
     "pytest-cov>=4.0.0",
     "pytest-benchmark>=4.0.0",
+    "pytest-xdist==3.8.0",
 ]
 performance = [
     "pytest-benchmark>=4.0.0",
@@ -112,6 +113,7 @@ python_classes = ["Test*"]
 python_functions = ["test_*"]
 asyncio_mode = "strict"
 timeout = 300
+timeout_func_only = true
 addopts = [
     "--strict-markers",
     "--strict-config",
@@ -121,10 +123,13 @@ addopts = [
     "--cov-report=xml",
 ]
 markers = [
-    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
-    "performance: marks tests as performance tests",
+    "slow: marks tests as slow (skip in CI)",
+    "performance: marks tests as performance tests (skip in CI) - no timeout",
     "integration: marks tests as integration tests",
     "unit: marks tests as unit tests",
+]
+filterwarnings = [
+    "ignore:Session timeout reached:RuntimeWarning",
 ]
 
 [tool.coverage.run]

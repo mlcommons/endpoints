@@ -4,8 +4,6 @@ Benchmarking System.
 This file provides shared fixtures and configuration for all tests.
 """
 
-import asyncio
-
 # Add src to path for imports
 import sys
 from pathlib import Path
@@ -13,7 +11,6 @@ from typing import Any
 
 import pytest
 from inference_endpoint.dataset_manager.dataloader import (
-    DataLoader,
     HFDataLoader,
     PickleReader,
 )
@@ -21,6 +18,9 @@ from inference_endpoint.testing.echo_server import EchoServer
 
 src_path = str(Path(__file__).parent.parent / "src")
 sys.path.insert(0, src_path)
+
+# Register the profiling plugin
+pytest_plugins = ["src.inference_endpoint.profiling.pytest_profiling_plugin"]
 
 
 @pytest.fixture
@@ -37,27 +37,6 @@ def sample_config() -> dict[str, Any]:
     }
 
 
-@pytest.fixture
-def sample_query():
-    """Sample query for testing."""
-    from inference_endpoint.core.types import Query
-
-    return Query(
-        prompt="Hello, how are you?",
-        model="gpt-3.5-turbo",
-        max_tokens=50,
-        temperature=0.7,
-    )
-
-
-@pytest.fixture
-def event_loop() -> asyncio.AbstractEventLoop:
-    """Create an instance of the default event loop for the test session."""
-    loop = asyncio.get_event_loop_policy().new_event_loop()
-    yield loop
-    loop.close()
-
-
 @pytest.fixture(scope="session")
 def test_data_dir() -> Path:
     """Directory containing test data."""
@@ -70,7 +49,7 @@ def temp_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return tmp_path_factory.mktemp("test_artifacts")
 
 
-@pytest.fixture(scope="class")
+@pytest.fixture(scope="function")
 def mock_http_echo_server():
     """
     Mock HTTP server that echoes back the request payload in the appropriate format.
@@ -99,23 +78,6 @@ def mock_http_echo_server():
         raise RuntimeError(f"Mock Echo Server error: {e}") from e
     finally:
         server.stop()
-
-
-@pytest.fixture
-def dummy_dataloader():
-    class DummyDataLoader(DataLoader):
-        def __init__(self, n_samples: int = 100):
-            super().__init__(None)
-            self.n_samples = n_samples
-
-        def load_sample(self, sample_index: int) -> int:
-            assert sample_index >= 0 and sample_index < self.n_samples
-            return sample_index
-
-        def num_samples(self) -> int:
-            return self.n_samples
-
-    return DummyDataLoader()
 
 
 @pytest.fixture

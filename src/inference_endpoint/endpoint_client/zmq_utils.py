@@ -7,6 +7,7 @@ import zmq
 import zmq.asyncio
 
 from inference_endpoint.endpoint_client.configs import ZMQConfig
+from inference_endpoint.profiling import profile
 
 
 class ZMQSocket:
@@ -22,11 +23,23 @@ class ZMQSocket:
     ):
         """Initialize ZMQ socket with common configuration."""
         self.socket = context.socket(socket_type)
+        self.address = address
 
-        if bind:
-            self.socket.bind(address)
-        else:
-            self.socket.connect(address)
+        try:
+            if bind:
+                self.socket.bind(address)
+            else:
+                self.socket.connect(address)
+        except zmq.ZMQError as e:
+            if bind:
+                action = "bind to"
+                sol = "Ensure the address is not already in use."
+            else:
+                action = "connect to"
+                sol = "Ensure the target socket exists"
+            raise zmq.ZMQError(
+                f"Failed to {action} {address}: {e.strerror}. \n{sol}"
+            ) from e
 
         # Common socket options
         self.socket.setsockopt(zmq.LINGER, config.zmq_linger)
@@ -38,8 +51,10 @@ class ZMQSocket:
         """Override in subclasses to set specific socket options."""
         pass
 
-    def close(self) -> None:
+    def close(self, linger_ms: int | None = None) -> None:
         """Close socket cleanly."""
+        if linger_ms is not None:
+            self.socket.setsockopt(zmq.LINGER, linger_ms)
         self.socket.close()
 
 
@@ -56,6 +71,7 @@ class ZMQPushSocket(ZMQSocket):
         self.socket.setsockopt(zmq.SNDBUF, config.zmq_send_buffer_size)
         self.socket.setsockopt(zmq.SNDTIMEO, config.zmq_send_timeout)
 
+    @profile
     async def send(self, data: Any) -> None:
         """Serialize and send data through push socket (non-blocking)."""
         serialized = pickle.dumps(data)
@@ -81,7 +97,18 @@ class ZMQPullSocket(ZMQSocket):
         self.socket.setsockopt(zmq.RCVBUF, config.zmq_recv_buffer_size)
         self.socket.setsockopt(zmq.RCVTIMEO, config.zmq_recv_timeout)
 
-    async def receive(self) -> Any:
-        """Receive and deserialize data from pull socket (blocking)."""
-        serialized = await self.socket.recv()
-        return pickle.loads(serialized)
+    @profile
+    async def receive(self) -> Any | None:
+        """
+        Receive and deserialize data from pull socket.
+        Returns None on timeout.
+
+        Returns:
+            Deserialized data or None on timeout.
+        """
+        try:
+            serialized = await self.socket.recv()
+            return pickle.loads(serialized)
+        except zmq.Again:
+            # Timeout occurred
+            return None
