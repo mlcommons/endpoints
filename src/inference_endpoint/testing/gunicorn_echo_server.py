@@ -144,9 +144,7 @@ class StandaloneApplication(gunicorn.app.base.BaseApplication):
         """
         try:
             raw_response = content
-            model_name = (
-                "unknown-model"  # completion_request.data.get("model", "unknown")
-            )
+            model_name = completion_request.data.get("model", "unspecified-model")
 
             # Send content in chunks (word by word for echo server)
             words = raw_response.split() if raw_response else []

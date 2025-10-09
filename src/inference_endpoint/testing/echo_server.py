@@ -26,7 +26,7 @@ from abc import abstractmethod
 
 from aiohttp import web
 
-from inference_endpoint.core.types import QueryResult
+from inference_endpoint.core.types import Query, QueryResult
 from inference_endpoint.openai.openai_adapter import OpenAIAdapter
 from inference_endpoint.openai.openai_types_gen import CreateChatCompletionRequest
 
@@ -166,7 +166,7 @@ class EchoServer(HTTPServer):
         self,
         id: str,
         request: web.Request,
-        completion_request: CreateChatCompletionRequest,
+        completion_request: Query,
         content: str,
     ) -> web.StreamResponse:
         """
@@ -187,6 +187,9 @@ class EchoServer(HTTPServer):
             Any underlying exceptions that occur during streaming, which will be logged.
         """
         try:
+            # the model is a ModelIdsShared object, so convert to string
+            model_name = str(completion_request.data.get("model", "unspecified-model"))
+
             response = web.StreamResponse(
                 status=200,
                 headers={
@@ -210,7 +213,7 @@ class EchoServer(HTTPServer):
                     "id": id,
                     "object": "chat.completion.chunk",
                     "created": int(time.time()),
-                    "model": str(completion_request.model.root),
+                    "model": model_name,
                     "choices": [
                         {
                             "index": 0,
@@ -227,7 +230,7 @@ class EchoServer(HTTPServer):
                 "id": id,
                 "object": "chat.completion.chunk",
                 "created": int(time.time()),
-                "model": str(completion_request.model.root),
+                "model": model_name,
                 "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
             }
 
@@ -294,11 +297,12 @@ class EchoServer(HTTPServer):
                     raw_response = raw_response[: self.max_osl]
 
             # Check if this is a streaming request
-            self.logger.debug(f"Streaming response: {completion_request.stream}\n")
-            if completion_request.stream is True:
+            is_streaming = request_data.data.get("stream", False)
+            self.logger.debug(f"Streaming response: {is_streaming}\n")
+            if is_streaming:
                 # Return SSE (Server-Sent Events) format for streaming
                 return await self._handle_streaming_response(
-                    id, request, completion_request, raw_response
+                    id, request, request_data, raw_response
                 )
             else:
                 # Non-streaming: return QueryResult as before
