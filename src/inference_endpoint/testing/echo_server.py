@@ -48,11 +48,19 @@ class HTTPServer:
 
 class EchoServer(HTTPServer):
     def __init__(
-        self, *, host: str = "127.0.0.1", port: int = 0, max_osl: int | None = None
+        self,
+        *,
+        host: str = "127.0.0.1",
+        port: int = 0,
+        max_osl: int | None = None,
+        max_concurrent_requests: int = 40_000,
+        request_timeout: float = 300.0,
     ):
         self.host = host
         self.port = port  # If 0, will auto-assign available port
         self.max_osl = max_osl
+        self.max_concurrent_requests = max_concurrent_requests
+        self.request_timeout = request_timeout
         self._actual_port = None  # Store the actual port after binding
 
         self.app = None
@@ -63,6 +71,9 @@ class EchoServer(HTTPServer):
         self._shutdown_event = threading.Event()
         self._port_ready_event = threading.Event()  # Signal when port is ready
         self.logger = logging.getLogger(__name__)
+
+        # Semaphore for limiting concurrent requests (initialized in event loop)
+        self._request_semaphore = None
 
     @property
     def url(self):
@@ -82,7 +93,7 @@ class EchoServer(HTTPServer):
         """
         return self.max_osl
 
-    def get_response(self, request: str) -> str:
+    async def get_response(self, request: str) -> str:
         """
         Return the input request string as the response.
 
@@ -94,6 +105,8 @@ class EchoServer(HTTPServer):
         Returns:
             str: The input request string passed through unmodified
         """
+        # Made async to allow for async operations in subclasses
+        # For echo server, this just returns immediately
         return request
 
     async def _handle_echo_request(self, request: web.Request) -> web.Response:
@@ -183,7 +196,7 @@ class EchoServer(HTTPServer):
                 },
             )
             await response.prepare(request)
-            raw_response = self.get_response(content)
+            raw_response = await self.get_response(content)
 
             # Send content in chunks (word by word for echo server)
             words = raw_response.split() if raw_response else []
@@ -240,7 +253,14 @@ class EchoServer(HTTPServer):
         Raises:
             ValueError: If no messages are present in the request payload.
         """
+        # Use semaphore to limit concurrent requests
+        async with self._request_semaphore:
+            return await self._handle_echo_chat_completions_request_impl(request)
 
+    async def _handle_echo_chat_completions_request_impl(
+        self, request: web.Request
+    ) -> web.Response:
+        """Implementation of chat completions request handler with concurrency control."""
         # Get request body
         try:
             if request.content_type == "application/json":
@@ -257,7 +277,7 @@ class EchoServer(HTTPServer):
             else:
                 raise ValueError("Request must contain at least one message")
             id = json_payload.get("id", str(uuid.uuid4()))
-            raw_response = self.get_response(raw_request)
+            raw_response = await self.get_response(raw_request)
             self.logger.debug(
                 f"Content of request: {raw_request} - response : {raw_response}"
             )
@@ -303,6 +323,12 @@ class EchoServer(HTTPServer):
 
     def _run_server(self):
         """Run the server in a separate thread."""
+        try:
+            import uvloop
+
+            asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+        except ImportError:
+            self.logger.warning("uvloop not installed, using default event loop")
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
         self._loop.run_until_complete(self._start_server())
@@ -310,20 +336,29 @@ class EchoServer(HTTPServer):
     async def _start_server(self):
         """Start the HTTP server."""
         try:
-            # Create the web application
-            self.app = web.Application()
+            # Initialize semaphore for concurrency control
+            self._request_semaphore = asyncio.Semaphore(self.max_concurrent_requests)
+
+            # Create the web application with optimized settings
+            self.app = web.Application(
+                client_max_size=10 * 1024 * 1024,  # 10MB max request size
+            )
 
             self.app.router.add_post(
                 "/v1/chat/completions", self._handle_echo_chat_completions_request
             )
             self.app.router.add_post("/echo", self._handle_echo_request)
 
-            # Start the server
-            self.runner = web.AppRunner(self.app)
+            # Start the server with optimized runner settings
+            self.runner = web.AppRunner(
+                self.app,
+                access_log=None,  # Disable access log for better performance
+                keepalive_timeout=75.0,  # Longer keepalive for connection reuse
+            )
             await self.runner.setup()
             # Create TCP site with backlog
             # NOTE(vir): 10k for test_massive_concurrency integration tests
-            self.site = web.TCPSite(self.runner, self.host, self.port, backlog=10000)
+            self.site = web.TCPSite(self.runner, self.host, self.port, backlog=10_000)
             await self.site.start()
 
             # Get the actual port if we used port 0
@@ -343,7 +378,7 @@ class EchoServer(HTTPServer):
 
             # Wait for shutdown signal
             while not self._shutdown_event.is_set():
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(1.0)
 
         except Exception as e:
             self.logger.error(f"Server error: {e}")
@@ -400,6 +435,18 @@ Examples:
         "--host", type=str, help="hostname/address to bind to", default="127.0.0.1"
     )
     parser.add_argument("--port", type=int, help="port to bind to", default=12345)
+    parser.add_argument(
+        "--max-concurrent-requests",
+        type=int,
+        help="maximum number of concurrent requests to handle",
+        default=40_000,
+    )
+    parser.add_argument(
+        "--request-timeout",
+        type=float,
+        help="request timeout in seconds",
+        default=300.0,
+    )
 
     return parser
 
@@ -432,7 +479,12 @@ def main():
 
     server = None
     try:
-        server = EchoServer(host=args.host, port=args.port)
+        server = EchoServer(
+            host=args.host,
+            port=args.port,
+            max_concurrent_requests=args.max_concurrent_requests,
+            request_timeout=args.request_timeout,
+        )
         server.start()
 
         # Wait for the server thread to finish
