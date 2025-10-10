@@ -135,7 +135,8 @@ def poisson_delay_fn(expected_queries_per_second: float, rng: random.Random = ra
 class Scheduler:
     """Schedulers are responsible for building queries and determining when they should be issued to the SUT."""
 
-    PADDING_FACTOR = 1.1
+    ISSUED_SAMPELS_PADDING_FACTOR = 1.1
+    """Padding factor for the total number of samples to issue."""
 
     def __init__(
         self,
@@ -188,9 +189,7 @@ class Scheduler:
             raise NotImplementedError(
                 f"Scheduler does not support metric target type: {type(metric_target)}"
             )
-        return math.ceil(
-            expected_samples * self.PADDING_FACTOR
-        )  # 10% padding for variance
+        return math.ceil(expected_samples * self.ISSUED_SAMPELS_PADDING_FACTOR)
 
     def __iter__(self):
         for s_idx in self.sample_order:
@@ -201,6 +200,19 @@ class Scheduler:
 
 
 class MaxThroughputScheduler(Scheduler):
+    """Scheduler that issues samples with no delay."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.delay_fn = uniform_delay_fn(
+            max_delay_ns=0,
+            rng=self.runtime_settings.rng_sched,
+        )
+
+
+class UniformDelayScheduler(Scheduler):
+    """Scheduler that issues samples with a uniform delay."""
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.delay_fn = uniform_delay_fn(

@@ -1,4 +1,5 @@
 import random
+from unittest import mock
 
 import pytest
 from inference_endpoint import metrics
@@ -8,6 +9,7 @@ from inference_endpoint.load_generator.scheduler import (
     MaxThroughputScheduler,
     SampleEvent,
     SampleFactory,
+    UniformDelayScheduler,
     WithoutReplacementSampleOrder,
     WithReplacementSampleOrder,
 )
@@ -153,48 +155,10 @@ def test_with_replacement_sample_order():
 
 
 def test_max_throughput_scheduler():
-    """Test that the MaxThroughputScheduler issues the correct number of samples and delays."""
-
-    expected_delays = [
-        96645.35356921388,
-        44073.259917535266,
-        749.1470058587191,
-        91097.59624491242,
-        93926.8997363764,
-        58222.75730589491,
-        67156.34814879851,
-        8393.822683708397,
-        76648.09327917964,
-        23680.977536311777,
-        3081.4021726609963,
-        78877.27172362835,
-        34608.89655971231,
-        62328.14750391685,
-        61581.56951036152,
-        14855.463870828755,
-        18309.064740993163,
-        11441.296968868764,
-        1461.8780486909122,
-        48675.154060475834,
-        96490.15609162157,
-        6456.228097718608,
-        54108.81855511302,
-        46589.85590083095,
-        60146.344956105146,
-        8892.882999066233,
-        57900.26861873665,
-        26958.550381944824,
-        55643.25605562156,
-        64463.42341782827,
-        48103.63713665184,
-        35523.91474429834,
-        24915.212136120903,
-        93351.54980423467,
-        45338.80194764936,
-        53016.12069115903,
-        1929.9566309716854,
-        50810.19257797922,
-    ]
+    """Test that the UniformDelayScheduler issues the correct number of samples and delays."""
+    mock_rng_sched = mock.Mock(spec=random.Random)
+    mock_rng_sched.uniform.side_effect = [0.01 * i for i in range(1024)]
+    expected_delays = [0.01 * i for i in range(1024)]
     num_unique_samples = 100
     dummy_dataloader = DummyDataLoader(n_samples=num_unique_samples)
 
@@ -210,10 +174,10 @@ def test_max_throughput_scheduler():
         max_duration_ms=100,
         n_samples_from_dataset=num_unique_samples,
         n_samples_to_issue=1024,
-        rng_sched=random.Random(1234),
+        rng_sched=mock_rng_sched,
         rng_sample_index=random.Random(1234),
     )
-    scheduler = MaxThroughputScheduler(
+    scheduler = UniformDelayScheduler(
         runtime_settings=rt_settings,
         dataloader=dummy_dataloader,
         sample_factory_cls=NoOpFactory,
