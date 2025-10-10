@@ -144,7 +144,7 @@ class StandaloneApplication(gunicorn.app.base.BaseApplication):
         """
         try:
             raw_response = content
-            model_name = completion_request.data.get("model", "unspecified-model")
+            model_name = str(completion_request.data.get("model", "unspecified-model"))
 
             # Send content in chunks (word by word for echo server)
             words = raw_response.split() if raw_response else []
@@ -195,6 +195,10 @@ if __name__ == "__main__":
         "bind": "0.0.0.0:12345",
         "workers": num_workers,
         "worker_class": "uvicorn.workers.UvicornWorker",
+        "loglevel": "debug",
+        "accesslog": "-",
+        "errorlog": "-",
+        "capture_output": True,
     }
     app = StandaloneApplication(options, num_workers=num_workers)
     print(f"Starting app :: {app} url: {app.url()}")

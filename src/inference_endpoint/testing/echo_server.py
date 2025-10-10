@@ -278,7 +278,9 @@ class EchoServer(HTTPServer):
                         raw_request = message.root.content
                         break
             else:
-                raise ValueError("Request must contain at least one message")
+                raise ValueError(
+                    f"Request({type(request_data)}) must contain at least one message {request_data}"
+                )
             id = json_payload.get("id", str(uuid.uuid4()))
             raw_response = await self.get_response(raw_request)
             self.logger.debug(
