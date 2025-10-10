@@ -11,7 +11,6 @@ from inference_endpoint.config.ruleset import RuntimeSettings
 from inference_endpoint.dataset_manager.dataloader import DataLoader
 from inference_endpoint.endpoint_client.loadgen import HttpClientSampleIssuer
 from inference_endpoint.load_generator.scheduler import (
-    MaxThroughputScheduler,
     NetworkActivitySimulationScheduler,
     WithoutReplacementSampleOrder,
 )
@@ -24,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 # =============================================================================
 # PERFORMANCE TARGETS - Single worker configuration
-# Streaming uses Poisson scheduling (server mode), Offline uses max throughput
+# Tests use Poisson scheduler to verify system can sustain target QPS
 # =============================================================================
 
 PERFORMANCE_CONFIG = {
@@ -33,14 +32,10 @@ PERFORMANCE_CONFIG = {
     "test_duration_ms": 5000,  # 5 seconds
     "default_message_size": 1000,  # 1k characters
     # Target QPS thresholds (single worker)
-    # Streaming: server mode with Poisson scheduling to simulate realistic load
-    # Offline: max throughput mode to stress test the system
-    # TODO(vir): offload and optimize echo-server
-    "streaming_target_qps": 350,
+    "streaming_target_qps": 1500,
     "offline_target_qps": 1500,
     # Test across multiple message sizes to validate consistent performance
-    # TODO(vir): use msgpack/structs for serialization
-    "message_sizes": [100, 500],
+    "message_sizes": [100, 500, 1000, 2000, 5000],
     # Pass/fail criteria
     "required_success_rate_percent": 100,
     "target_qps_tolerance": 0.90,  # Must achieve 90% of target QPS
@@ -83,16 +78,14 @@ def run_performance_test(
 ) -> dict:
     """Run a performance test and return metrics summary.
 
-    Uses NetworkActivitySimulationScheduler (Poisson) for streaming mode to simulate
-    realistic server load, and MaxThroughputScheduler for offline mode to stress test
-    maximum throughput.
+    Uses Poisson scheduler to test if system can sustain target QPS.
 
     Args:
         http_client: The HTTP client to test
         target_qps: Target queries per second
         duration_ms: Test duration in milliseconds
         message_size: Size of messages in characters
-        stream: Whether to use streaming mode (uses Poisson scheduler if True, max throughput if False)
+        stream: Whether to use streaming mode
         num_samples: Number of samples in the dataset
 
     Returns:
@@ -201,6 +194,7 @@ def assert_performance_requirements(
         mode: "streaming" or "offline"
         message_size: Optional message size for better error messages
     """
+    # Achieved QPS = total_completed / total_time (completion rate)
     achieved_qps = summary["qps"]
     issued_qps = summary["issue_qps"]
     min_achievement = PERFORMANCE_CONFIG["target_qps_tolerance"]
@@ -217,7 +211,7 @@ def assert_performance_requirements(
         )
     )
 
-    # Assert QPS
+    # Assert QPS (total_completed / total_time)
     size_msg = f" at message size {message_size} characters" if message_size else ""
     if achieved_qps < target_qps * min_achievement:
         if issued_qps < target_qps * min_achievement:
@@ -236,9 +230,7 @@ def assert_performance_requirements(
 class TestHTTPClientPerformanceSingleWorker:
     """Performance tests for HTTPEndpointClient (single worker).
 
-    Streaming tests use NetworkActivitySimulationScheduler (Poisson) to simulate
-    realistic server load patterns. Offline tests use MaxThroughputScheduler to
-    measure maximum sustainable throughput.
+    Uses Poisson scheduler to test if system can sustain target QPS rates.
     """
 
     # =========================================================================
@@ -248,7 +240,7 @@ class TestHTTPClientPerformanceSingleWorker:
     @pytest.mark.performance
     @pytest.mark.xdist_group(name="serial_performance")
     def test_streaming_baseline_performance(self, http_client):
-        """Test streaming mode performance with Poisson-distributed load (server mode)."""
+        """Test streaming mode performance with Poisson-distributed load."""
         summary = run_performance_test(
             http_client,
             target_qps=PERFORMANCE_CONFIG["streaming_target_qps"],
@@ -271,7 +263,7 @@ class TestHTTPClientPerformanceSingleWorker:
     @pytest.mark.performance
     @pytest.mark.xdist_group(name="serial_performance")
     def test_offline_baseline_performance(self, http_client):
-        """Stress test offline mode at maximum throughput (no rate limiting)."""
+        """Test offline mode performance with Poisson-distributed load."""
         summary = run_performance_test(
             http_client,
             target_qps=PERFORMANCE_CONFIG["offline_target_qps"],

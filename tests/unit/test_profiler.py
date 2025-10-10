@@ -8,15 +8,17 @@ from unittest import mock
 import inference_endpoint.profiling.line_profiler as line_profiler
 import pytest
 from inference_endpoint.profiling import (
-    get_stats,
-    is_enabled,
-    pause,
-    print_stats,
     profile,
-    resume,
+)
+from inference_endpoint.profiling import (
+    profiler_is_enabled as is_enabled,
 )
 from inference_endpoint.profiling.line_profiler import (
     ENV_VAR_ENABLE_LINE_PROFILER,
+    get_stats,
+    pause,
+    print_stats,
+    resume,
 )
 
 

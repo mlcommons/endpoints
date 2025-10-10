@@ -22,6 +22,7 @@ from inference_endpoint.core.types import (
     QueryResult,
     StreamChunk,
 )
+from inference_endpoint.endpoint_client.asyncio_utils import setup_event_loop_policy
 from inference_endpoint.endpoint_client.configs import (
     AioHttpConfig,
     HTTPClientConfig,
@@ -30,7 +31,7 @@ from inference_endpoint.endpoint_client.configs import (
 from inference_endpoint.endpoint_client.zmq_utils import ZMQPullSocket, ZMQPushSocket
 from inference_endpoint.openai.openai_adapter import OpenAIAdapter, SSEMessage
 from inference_endpoint.openai.openai_types_gen import CreateChatCompletionResponse
-from inference_endpoint.profiling import profile
+from inference_endpoint.profiling import profile, profiler_check_subprocess
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +59,11 @@ def worker_main(
     readiness_queue_addr: str,
 ):
     """Entry point for worker process."""
+    # Check if we're in a subprocess and reinitialize profiler if needed
+    # This handles both fork and spawn multiprocessing modes
+    # This must be done FIRST, before any other profiling calls
+    profiler_check_subprocess()
+
     # Configure logging for worker process
     logging.basicConfig(
         level=logging.INFO,
@@ -66,10 +72,9 @@ def worker_main(
     )
     logger = logging.getLogger(__name__)
 
-    # Install uvloop which also enables it
-    import uvloop
-
-    uvloop.install()
+    # Set up event loop policy based on ENABLE_LOOP_STATS environment variable
+    # If enabled, event loop will track CPU vs I/O time automatically
+    setup_event_loop_policy()
 
     # Create and run worker
     try:
@@ -83,8 +88,8 @@ def worker_main(
             readiness_socket_addr=readiness_queue_addr,
         )
 
-        # Run event loop
-        uvloop.run(worker.run())
+        # Run event loop (uses policy configured above)
+        asyncio.run(worker.run())
 
     except Exception as e:
         logger.error(
@@ -226,7 +231,16 @@ class Worker:
         if self._shutdown or not self._response_socket:
             return
 
-        error_message = str(error) if isinstance(error, Exception) else error
+        if isinstance(error, Exception):
+            # Get error message with type name and message for better debugging
+            error_message = (
+                f"{type(error).__name__}: {str(error)}"
+                if str(error)
+                else type(error).__name__
+            )
+        else:
+            error_message = error
+
         error_response = QueryResult(
             id=query_id,
             response_output=None,
@@ -301,7 +315,7 @@ class Worker:
     @profile
     async def _iter_sse_lines(
         self, response: aiohttp.ClientResponse
-    ) -> AsyncGenerator[list[str], None]:
+    ) -> AsyncGenerator[list[str]]:
         """
         Iterate over complete SSE chunks (events) from response stream.
 

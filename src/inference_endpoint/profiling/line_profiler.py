@@ -17,11 +17,10 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Optional, TypeVar
 
-F = TypeVar("F", bound=Callable[..., Any])
+# Import environment variable constants from parent module
+from . import ENV_VAR_ENABLE_LINE_PROFILER, ENV_VAR_LINE_PROFILER_LOGFILE
 
-# Environment variable names
-ENV_VAR_ENABLE_LINE_PROFILER = "ENABLE_LINE_PROFILER"
-ENV_VAR_LINE_PROFILER_LOGFILE = "LINE_PROFILER_LOGFILE"
+F = TypeVar("F", bound=Callable[..., Any])
 
 
 class ProfilerState:

@@ -5,11 +5,11 @@ import logging
 import threading
 import uuid
 
-import uvloop
 import zmq
 import zmq.asyncio
 
 from inference_endpoint.core.types import Query, QueryResult, StreamChunk
+from inference_endpoint.endpoint_client.asyncio_utils import new_event_loop
 from inference_endpoint.endpoint_client.configs import (
     AioHttpConfig,
     HTTPClientConfig,
@@ -17,9 +17,6 @@ from inference_endpoint.endpoint_client.configs import (
 )
 from inference_endpoint.endpoint_client.worker import WorkerManager
 from inference_endpoint.endpoint_client.zmq_utils import ZMQPullSocket, ZMQPushSocket
-
-# required for ZMQ context to work with uvloop
-asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
 logger = logging.getLogger(__name__)
 
