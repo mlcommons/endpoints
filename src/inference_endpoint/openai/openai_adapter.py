@@ -17,6 +17,7 @@ import re
 import time
 
 import msgspec
+import orjson
 from inference_endpoint.core.types import Query, QueryResult
 
 from .openai_types_gen import (
@@ -164,3 +165,56 @@ class OpenAIAdapter:
             object=Object7.chat_completion,
             service_tier=ServiceTier.auto,
         )
+
+    @staticmethod
+    def encode_request(request: CreateChatCompletionRequest) -> bytes:
+        """
+        Encode request to JSON bytes using orjson.
+
+        Args:
+            request: CreateChatCompletionRequest to encode
+
+        Returns:
+            JSON bytes
+        """
+        return orjson.dumps(request.model_dump(mode="json"))
+
+    @staticmethod
+    def decode_response(response_bytes: bytes) -> CreateChatCompletionResponse:
+        """
+        Decode response from JSON bytes using orjson.
+
+        Args:
+            response_bytes: Raw JSON bytes from HTTP response
+
+        Returns:
+            CreateChatCompletionResponse object
+        """
+        response_dict = orjson.loads(response_bytes)
+        return CreateChatCompletionResponse(**response_dict, ignore_extra=True)
+
+    @staticmethod
+    def encode_response(response: CreateChatCompletionResponse) -> bytes:
+        """
+        Encode response to JSON bytes using orjson.
+
+        Args:
+            response: CreateChatCompletionResponse to encode
+
+        Returns:
+            JSON bytes
+        """
+        return orjson.dumps(response.model_dump(mode="json"))
+
+    @staticmethod
+    def decode_sse_message(json_bytes: bytes) -> SSEMessage:
+        """
+        Decode SSE message from JSON bytes.
+
+        Args:
+            json_bytes: Raw JSON bytes from SSE stream
+
+        Returns:
+            SSEMessage struct
+        """
+        return msgspec.json.decode(json_bytes, type=SSEMessage)

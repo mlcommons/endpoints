@@ -13,193 +13,285 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""
-Line-by-line profiling using the line_profiler library.
+"""Line-by-line profiling using the line_profiler library."""
 
-This module provides a clean singleton API for profiling:
-- Controlled via ENABLE_LINE_PROFILER environment variable
-- No-op decorators when disabled (zero overhead)
-- Support for both sync and async functions
-- Automatic cleanup on process exit
-"""
-
-import atexit
-import contextlib
-import io
 import os
 import sys
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Optional, TypeVar
+from typing import Any, TypeVar
+
+from . import ENV_VAR_ENABLE_LINE_PROFILER
+from .profiler_utils import (
+    get_output_path,
+    get_run_output_dir,
+    is_pytest_mode,
+    log_profiler_start,
+    print_all_profiles,
+)
 
 F = TypeVar("F", bound=Callable[..., Any])
 
-# Environment variable names
-ENV_VAR_ENABLE_LINE_PROFILER = "ENABLE_LINE_PROFILER"
-ENV_VAR_LINE_PROFILER_LOGFILE = "LINE_PROFILER_LOGFILE"
 
-
-class ProfilerState:
-    """
-    Singleton class that manages the line profiler state and lifecycle.
-
-    This encapsulates all profiling functionality and avoids multiple globals.
-    """
-
-    _instance: Optional["ProfilerState"] = None
-
-    def __new__(cls):
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-            cls._instance._initialized = False
-        return cls._instance
+class LineProfiler:
+    """Line profiler implementation."""
 
     def __init__(self):
-        if self._initialized:
-            return
+        # Configuration
+        self.enabled = os.environ.get(ENV_VAR_ENABLE_LINE_PROFILER, "0") == "1"
+        self._output_dir = None  # Lazy initialization
 
-        self._initialized = True
-        enable_profiler = os.environ.get(ENV_VAR_ENABLE_LINE_PROFILER, "0")
-        self.enabled = enable_profiler == "1"
+        # Track original PID for fork detection
+        self._original_pid = os.getpid()
+
+        # State
         self.profiler = None
-        self._stats_printed = False
-        logfile = os.environ.get(ENV_VAR_LINE_PROFILER_LOGFILE, None)
-        self.output_file = Path(logfile) if logfile else None
-        self._atexit_registered = False
+        self._session_active = False
+        self._stats_written = False
 
+        # Initialize if enabled
         if self.enabled:
-            try:
-                from line_profiler import LineProfiler
+            self._initialize_profiler()
+            self.start()
 
-                self.profiler = LineProfiler()
-                self.profiler.enable()
-                atexit.register(self._safe_cleanup)
-                self._atexit_registered = True
-            except ImportError as e:
-                raise ImportError(
-                    f"line_profiler not installed but {ENV_VAR_ENABLE_LINE_PROFILER}={enable_profiler} is set. "
-                    f"Install with: pip install line_profiler"
-                ) from e
+    @property
+    def output_dir(self) -> Path:
+        """Lazy initialization of output directory."""
+        if self._output_dir is None:
+            if self.enabled:
+                self._output_dir = get_run_output_dir() / "line_profiler"
+            else:
+                self._output_dir = Path("/tmp/mlperf_client_profiles")
+        return self._output_dir
 
-    def _safe_cleanup(self):
-        """Safe cleanup wrapper that suppresses all errors during atexit."""
-        if not self._atexit_registered:
-            return
-
+    def _initialize_profiler(self):
+        """Initialize line profiler."""
         try:
-            self._cleanup()
-        except:  # noqa: E722
-            pass  # Suppress all errors during shutdown
+            from line_profiler import LineProfiler as LP
 
-    def _cleanup(self):
-        """Cleanup function called at interpreter exit or explicit shutdown.
+            self.profiler = LP()
+        except ImportError as e:
+            raise ImportError(
+                f"line_profiler not installed but {ENV_VAR_ENABLE_LINE_PROFILER}=1 is set. "
+                f"Install with: pip install line_profiler"
+            ) from e
 
-        Prints stats (if any) and then completely tears down the profiler
-        to prevent shutdown errors.
-        """
-        if not self.profiler or self._stats_printed or not self.profiler.functions:
-            self._teardown_profiler()
+    def check_subprocess_spawn(self):
+        """Check if we're in a subprocess and reinitialize if needed."""
+        if not self.enabled:
             return
 
-        with contextlib.suppress(Exception):
-            self.pause()
-            self._print_stats_to_destination()
-            self._stats_printed = True
-            self._teardown_profiler()
+        current_pid = os.getpid()
 
-    def _print_stats_to_destination(self):
-        """Print stats to configured output destination."""
-        pid = os.getpid()
+        # Fork mode: PID changed from parent
+        if current_pid != self._original_pid:
+            self._original_pid = current_pid
+            self._stats_written = False
+            self._session_active = False
 
-        if self.output_file:
-            output_path = self.output_file.with_name(f"{self.output_file.name}.{pid}")
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            with output_path.open(mode="w") as stream:
-                self.print_stats(stream=stream, prefix=f"PID {pid}")
-        else:
-            self.print_stats(stream=sys.stderr, prefix=f"PID {pid}")
+            # Clear parent's profiler completely
+            if self.profiler:
+                try:
+                    self.profiler.disable()
+                except Exception:
+                    # Ignore errors - profiler may be in invalid state
+                    pass
+                try:
+                    self.profiler.functions.clear()
+                except Exception:
+                    # Ignore errors - functions may not exist
+                    pass
 
-    def _teardown_profiler(self):
-        """Teardown profiler to prevent shutdown errors."""
-        if not self.profiler:
+            # Create fresh profiler for child
+            self.profiler = None
+            self._initialize_profiler()
+            self.start()
+        # Spawn mode: ensure started
+        elif not self._session_active:
+            self.start()
+
+    def start(self):
+        """Start profiling session."""
+        if not self.enabled or self._session_active:
             return
 
-        self.profiler.disable()
-        self.profiler.functions.clear()
-        self.profiler.enable_count = 0
-        self.profiler = None
+        if self.profiler is None:
+            self._initialize_profiler()
+
+        self.profiler.enable()
+        self._session_active = True
+        log_profiler_start("line_profiler")
+
+    def stop(self):
+        """Stop profiling session."""
+        if not self.enabled or not self._session_active:
+            return
+
+        if self.profiler:
+            try:
+                self.profiler.disable()
+                self._session_active = False
+            except (AttributeError, TypeError, RuntimeError):
+                # Ignore errors during disable - profiler may be in invalid state
+                self._session_active = False
+
+    def shutdown(self):
+        """Shutdown profiler and write output."""
+        if not self.enabled or self._stats_written:
+            return
+
+        # Stop if active
+        if self._session_active:
+            self.stop()
+
+        # Write output
+        try:
+            self._write_output()
+            self._stats_written = True
+        except Exception as e:
+            print(
+                f"[LineProfiler] Error writing profile for PID {os.getpid()}: {e}",
+                file=sys.stderr,
+            )
 
     def profile(self, func: F) -> F:
-        """Profile decorator for functions."""
+        """Decorator to mark a function for line-by-line profiling."""
         if not self.profiler:
             return func
         return self.profiler(func)
 
-    def print_stats(self, stream=None, prefix=None):
-        """
-        Print profiling statistics.
-
-        Args:
-            stream: Output stream (defaults to sys.stdout)
-            prefix: Optional prefix for the output (e.g., "PID 1234")
-        """
-        if not self.profiler or not self.profiler.functions:
-            return
-
-        out = stream or sys.stdout
-
-        if prefix:
-            print(f"\n{'=' * 80}", file=out)
-            print(f"{prefix} - LINE PROFILER RESULTS", file=out)
-            print(f"{'=' * 80}", file=out)
-
-        self.profiler.print_stats(stream=out, output_unit=1e-6, stripzeros=True)
-        out.flush()
-        self._stats_printed = True
-
-    def get_stats(self) -> str:
-        """Get profiling statistics as a string."""
-        if not self.profiler or not self.profiler.functions:
-            return ""
-
-        output = io.StringIO()
-        self.profiler.print_stats(stream=output, output_unit=1e-6, stripzeros=True)
-        return output.getvalue()
-
-    def resume(self):
-        """Resume profiling data collection."""
-        if self.profiler:
-            self.profiler.enable()
+    def is_enabled(self) -> bool:
+        """Check if profiling is enabled."""
+        return self.enabled
 
     def pause(self):
-        """Pause profiling data collection."""
-        if self.profiler:
-            try:
-                self.profiler.disable()
-            except (AttributeError, TypeError):
-                pass  # Already torn down
+        """Pause profiling (alias for stop)."""
+        self.stop()
 
-    def shutdown(self):
-        """Explicit shutdown for worker processes. Safe to call multiple times."""
-        if self._stats_printed:
+    def resume(self):
+        """Resume profiling (alias for start)."""
+        self.start()
+
+    def print_stats(self, stream=None, prefix: str = ""):
+        """Print profiler statistics to stream."""
+        if not self.enabled or not self.profiler or not self.profiler.functions:
             return
 
-        self._atexit_registered = False  # Prevent double-printing via atexit
-        self._cleanup()
+        import sys
 
-    def is_enabled(self) -> bool:
-        """Check if profiling is currently enabled."""
-        return self.enabled
+        if stream is None:
+            stream = sys.stdout
+
+        if prefix:
+            print(f"\n{prefix} - LINE PROFILER RESULTS", file=stream)
+            print(f"{'=' * 80}", file=stream)
+
+        self.profiler.print_stats(stream=stream, output_unit=1e-6, stripzeros=True)
+
+        if prefix:
+            print(f"{'=' * 80}\n", file=stream)
+
+    def get_stats(self) -> str:
+        """Get profiler statistics as a string."""
+        if not self.enabled or not self.profiler or not self.profiler.functions:
+            return ""
+
+        import io
+
+        buffer = io.StringIO()
+        self.profiler.print_stats(stream=buffer, output_unit=1e-6, stripzeros=True)
+        return buffer.getvalue()
+
+    def _write_output(self):
+        """Write profiler output to file(s)."""
+        if not self.profiler or not self.profiler.functions:
+            return
+
+        # Create output directory
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Write to file
+        output_path = get_output_path(self.output_dir, "line_profiler", "txt")
+        with open(output_path, "w") as f:
+            self.profiler.print_stats(stream=f, output_unit=1e-6, stripzeros=True)
+            f.flush()
+            os.fsync(f.fileno())  # Ensure data is written to disk
+
+        # In standalone mode (not pytest), also print inline
+        if not is_pytest_mode():
+            self._print_inline(output_path)
+
+    def _print_inline(self, output_path: Path):
+        """Print line profiler output inline to stderr."""
+        pid = os.getpid()
+
+        print(f"\n{'=' * 80}", file=sys.stderr)
+        print(f"LINE PROFILER RESULTS - PID {pid}", file=sys.stderr)
+        print(f"Saved to: {output_path}", file=sys.stderr)
+        print(f"{'=' * 80}", file=sys.stderr)
+
+        # Print file content
+        content = output_path.read_text()
+        print(content, file=sys.stderr)
+
+        print(f"{'=' * 80}\n", file=sys.stderr)
+        sys.stderr.flush()
 
 
 # Create singleton instance
-_profiler_state = ProfilerState()
+_profiler = LineProfiler()
 
 # Public API
-profile = _profiler_state.profile
-print_stats = _profiler_state.print_stats
-get_stats = _profiler_state.get_stats
-resume = _profiler_state.resume
-pause = _profiler_state.pause
-shutdown = _profiler_state.shutdown
-is_enabled = _profiler_state.is_enabled
+profile = _profiler.profile
+shutdown = _profiler.shutdown
+is_enabled = _profiler.is_enabled
+check_subprocess_spawn = _profiler.check_subprocess_spawn
+pause = _profiler.pause
+resume = _profiler.resume
+print_stats = _profiler.print_stats
+get_stats = _profiler.get_stats
+
+
+def pytest_configure(config):
+    """Configure line_profiler for pytest session."""
+    if not _profiler.enabled:
+        return
+
+    print(
+        f"\n[Profiling] {ENV_VAR_ENABLE_LINE_PROFILER}=1 detected, profiling enabled",
+        file=sys.stderr,
+    )
+    print(f"[Profiling] Output directory: {_profiler.output_dir}", file=sys.stderr)
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """Collect and display line_profiler results after pytest session."""
+    if not _profiler.enabled:
+        return
+
+    # Shutdown main process profiler (writes its own profile)
+    try:
+        shutdown()
+
+        # Completely disable the profiler to prevent shutdown errors
+        if _profiler.profiler:
+            try:
+                _profiler.profiler.disable()
+                # Clear functions to prevent monitoring errors during cleanup
+                _profiler.profiler.functions.clear()
+                _profiler.profiler = None
+            except Exception:
+                pass
+
+    except Exception as e:
+        # Ignore errors during shutdown - line_profiler may have internal state issues
+        print(f"[LineProfiler] Warning: Error during shutdown: {e}", file=sys.stderr)
+
+    # Collect and display all profiles (main + workers)
+    try:
+        print_all_profiles(
+            profiler_name="line_profiler",
+            output_dir=_profiler.output_dir,
+        )
+    except Exception as e:
+        print(f"[LineProfiler] Warning: Error printing profiles: {e}", file=sys.stderr)

@@ -1,10 +1,23 @@
 # Profiling Guide
 
-Line-by-line profiling for the HTTP client and worker processes using `line_profiler`.
+Profiling support for the HTTP client and worker processes using multiple profiling backends.
+
+## Available Profilers
+
+The system supports multiple profiling backends:
+
+1. **line_profiler** - Line-by-line profiling with detailed per-line timing
+2. **pyinstrument** - Statistical sampling profiler with low overhead
+3. **yappi** - Multi-threaded deterministic profiler with thread/async support
+4. **Event Loop Stats** - Event loop load monitoring (CPU vs I/O wait time)
+
+Note: Only one code profiler (1-3) can be active at a time, but event loop stats (4) can run independently alongside any profiler.
 
 ## Quick Start
 
-Enable profiling with the `ENABLE_LINE_PROFILER` environment variable:
+### line_profiler (Detailed Line-by-Line)
+
+Best for: Understanding exactly which lines are slow
 
 ```bash
 # Profile integration tests
@@ -15,37 +28,94 @@ ENABLE_LINE_PROFILER=1 pytest tests/performance/
 
 # Profile specific test
 ENABLE_LINE_PROFILER=1 pytest tests/integration/endpoint_client/test_http_client_core.py::test_basic_future_handling
-```
-
-Profiling statistics are automatically displayed after tests complete.
-
-## Configuration
-
-### Environment Variables
-
-- **`ENABLE_LINE_PROFILER`**: Set to `1` to enable profiling (default: disabled)
-- **`LINE_PROFILER_LOGFILE`**: Custom path for worker profile files (default: `/tmp/mlperf_client_profiles/profile`)
-
-### Examples
-
-```bash
-# Use defaults (main to stderr, workers to /tmp/mlperf_client_profiles/)
-ENABLE_LINE_PROFILER=1 pytest tests/integration/
-
-# Custom worker profile location
-ENABLE_LINE_PROFILER=1 LINE_PROFILER_LOGFILE=/custom/path/profile pytest tests/
 
 # Profile your own script
 ENABLE_LINE_PROFILER=1 python my_script.py
 ```
 
-## How It Works
+### pyinstrument (Low-Overhead Sampling)
 
-The profiling system provides detailed line-by-line execution statistics:
+Best for: Production-like profiling with minimal overhead
 
-1. **Main process** → writes stats to `stderr`
-2. **Worker processes** → write stats to files (prevents interleaved output)
-3. **pytest plugin** → aggregates and displays all results at test end
+```bash
+# Profile integration tests
+ENABLE_PYINSTRUMENT=1 pytest tests/integration/endpoint_client/
+
+# Profile performance tests
+ENABLE_PYINSTRUMENT=1 pytest tests/performance/
+
+# Profile your own script
+ENABLE_PYINSTRUMENT=1 python my_script.py
+```
+
+### yappi (Multi-threaded Deterministic Profiler)
+
+Best for: Multi-threaded applications, async code, and precise function-level timing
+
+```bash
+# Profile integration tests with wall-clock time
+ENABLE_YAPPI=1 pytest tests/integration/endpoint_client/
+
+# Profile performance tests with CPU time
+ENABLE_YAPPI=1 pytest tests/performance/
+
+# Profile your own script
+ENABLE_YAPPI=1 python my_script.py
+
+# Show all functions (not just @profile decorated)
+ENABLE_YAPPI=1 python my_script.py
+```
+
+### Event Loop Stats (Asyncio Performance Analysis)
+
+Best for: Understanding event loop bottlenecks, CPU vs I/O wait time, and async performance
+
+```bash
+# Monitor event loop performance in tests
+ENABLE_LOOP_STATS=1 pytest tests/performance/
+
+# Combine with code profiling
+ENABLE_LOOP_STATS=1 ENABLE_YAPPI=1 pytest tests/performance/
+
+# Profile your own script
+ENABLE_LOOP_STATS=1 python my_script.py
+```
+
+Output includes:
+
+- CPU busy time vs I/O wait time breakdown
+- Event loop iterations per second
+- Concurrency metrics (file descriptors, active tasks, ready queue depth)
+- CPU usage (user vs system time)
+- Context switches (voluntary = I/O waits, involuntary = preemptions)
+- Network and disk I/O throughput
+- Per-coroutine I/O wait attribution
+
+Profiling statistics are automatically displayed/saved after tests complete.
+
+## Configuration
+
+### Environment Variables
+
+#### line_profiler
+
+- **`ENABLE_LINE_PROFILER`**: Set to `1` to enable (default: disabled)
+- **`LINE_PROFILER_LOGFILE`**: Custom path for worker profile files (default: `/tmp/mlperf_client_profiles/profile`)
+
+#### pyinstrument
+
+- **`ENABLE_PYINSTRUMENT`**: Set to `1` to enable (default: disabled)
+- **`PYINSTRUMENT_OUTPUT_DIR`**: Custom output directory (default: `pyinstrument_profiles/`)
+
+#### yappi
+
+- **`ENABLE_YAPPI`**: Set to `1` to enable (default: disabled)
+- **`YAPPI_OUTPUT_DIR`**: Custom output directory (default: `yappi_profiles/`)
+
+#### Event Loop Stats
+
+- **`ENABLE_LOOP_STATS`**: Set to `1` to enable (default: disabled)
+- **`EVENT_LOOP_STATS_LOGFILE`**: Custom path for worker stats files (default: `/tmp/mlperf_event_loop_stats/stats`)
 
 ## Usage in Code
 
@@ -58,7 +128,7 @@ from inference_endpoint.profiling import profile
 
 @profile
 async def my_async_function(data):
-    """This function will be profiled when ENABLE_LINE_PROFILER=1."""
+    """This function will be profiled when any profiler is enabled."""
     result = await process_data(data)
     return result
 
@@ -70,19 +140,19 @@ def my_sync_function(data):
 
 **Important**:
 
-- The decorator is a no-op when profiling is disabled (zero overhead).
-- May need to explicitly call shutdown() if stats are not printing to stdout by default
+- The decorator is a no-op when profiling is disabled (zero overhead)
+- May need to explicitly call profiler_shutdown() if stats are not printing to stdout by default
 
 ```python
-from inference_endpoint.profiling import is_enabled, shutdown
+from inference_endpoint.profiling import is_enabled, profiler_shutdown
 
 # Check if profiling is active
 if is_enabled():
-    print("Profiling is enabled for this process")
+  print("Profiling is enabled for this process")
 
-# Explicit shutdown for worker processes (called on signal handling)
+# Explicit profiler_shutdown for worker processes (called on signal handling)
 def cleanup():
-    shutdown()  # Writes stats to file/stderr before exit
+  profiler_shutdown()  # Writes stats to file/stderr before exit
 ```
 
 ### Main Process Profiles

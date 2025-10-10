@@ -23,6 +23,9 @@ from typing import Any
 import aiohttp
 import zmq
 
+from inference_endpoint.openai.openai_msgspec_adapter import OpenAIMsgspecAdapter
+from inference_endpoint.profiling import profiler_is_enabled
+
 
 @dataclass
 class HTTPClientConfig:
@@ -46,7 +49,7 @@ class HTTPClientConfig:
     stream_all_chunks: bool = False
 
     # Worker lifecycle timeouts
-    worker_initialization_timeout: float = 40.0  # init
+    worker_initialization_timeout: float = 10.0  # init
     worker_graceful_shutdown_wait: float = 0.5  # post-run
     worker_force_kill_timeout: float = 0.5  # post-run
 
@@ -54,6 +57,14 @@ class HTTPClientConfig:
     #   -  move streaming to HttpClient config (not per-query)
     #   -  add max-sequence-length to HttpClient config (not per-query), base streaming_buffer_size on it
     streaming_buffer_size: int = 128 * 1024  # 128KB buffer for streaming tokens
+
+    # Adapter type for OpenAI request/response serialization
+    adapter_type: type = OpenAIMsgspecAdapter
+
+    def __post_init__(self):
+        if profiler_is_enabled():
+            """Profilers need more time to printout stats on exit in workers."""
+            self.worker_graceful_shutdown_wait = 5
 
 
 @dataclass
@@ -87,8 +98,8 @@ class SocketConfig:
     # Causes socket to be closed if no data is received for the specified time
     #
     # WARNING:
-    # offline-mode might suffer dropped conections due to this timeout
-    tcp_user_timeout: int = 30000  # 30 seconds
+    # disabled since offline-mode might suffer dropped conections due to this timeout
+    tcp_user_timeout: int = 0  # 0 = disabled
 
     def apply_to_socket(self, sock: socket.socket) -> None:
         """
@@ -143,7 +154,8 @@ class AioHttpConfig:
     tcp_connector_limit: int | None = None  # None for unlimited (system limit)
     tcp_connector_limit_per_host: int | None = None
     tcp_connector_force_close: bool = False  # Enable connection pooling
-    tcp_connector_keepalive_timeout: int = 30  # 30 seconds timeout for idle connection
+    # 30 seconds timeout for idle connection
+    tcp_connector_keepalive_timeout: int = 30
 
     # DNS caching
     tcp_connector_use_dns_cache: bool = True

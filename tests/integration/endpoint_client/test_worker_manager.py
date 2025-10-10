@@ -145,7 +145,6 @@ class TestWorkerLifecycle:
             http_config=http_config,
             aiohttp_config=aiohttp_config,
             zmq_config=zmq_config,
-            zmq_context=zmq_context,
         )
 
         try:
@@ -192,7 +191,6 @@ class TestWorkerLifecycle:
             http_config=http_config,
             aiohttp_config=aiohttp_config,
             zmq_config=zmq_config,
-            zmq_context=zmq_context,
         )
 
         try:
@@ -248,7 +246,6 @@ class TestWorkerLifecycle:
             http_config=http_config,
             aiohttp_config=aiohttp_config,
             zmq_config=zmq_config,
-            zmq_context=zmq_context,
         )
 
         try:
@@ -321,7 +318,6 @@ class TestWorkerDeathScenarios:
             http_config=http_config,
             aiohttp_config=aiohttp_config,
             zmq_config=zmq_config,
-            zmq_context=zmq_context,
         )
 
         try:
@@ -386,7 +382,6 @@ class TestWorkerDeathScenarios:
             http_config=http_config,
             aiohttp_config=aiohttp_config,
             zmq_config=zmq_config,
-            zmq_context=zmq_context,
         )
 
         try:

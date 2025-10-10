@@ -18,10 +18,7 @@
 import asyncio
 import signal
 
-import msgspec
 import pytest
-import zmq
-import zmq.asyncio
 from inference_endpoint.core.types import Query, QueryResult, StreamChunk
 from inference_endpoint.endpoint_client.configs import (
     AioHttpConfig,
@@ -30,7 +27,7 @@ from inference_endpoint.endpoint_client.configs import (
 )
 from inference_endpoint.endpoint_client.worker import Worker
 
-from ...test_helpers import get_test_socket_path
+from ...test_helpers import get_test_socket_path, setup_worker_test
 
 
 class TestWorkerBasicFunctionality:
@@ -67,40 +64,13 @@ class TestWorkerBasicFunctionality:
         """Test worker handling non-streaming requests with real HTTP calls."""
         http_config, aiohttp_config = worker_config
 
-        # Create worker
-        worker = Worker(
+        async with setup_worker_test(
             worker_id=0,
             http_config=http_config,
             aiohttp_config=aiohttp_config,
             zmq_config=zmq_config,
-            request_socket_addr=f"{zmq_config.zmq_request_queue_prefix}_0_requests",
-            response_socket_addr=zmq_config.zmq_response_queue_addr,
-            readiness_socket_addr=zmq_config.zmq_readiness_queue_addr,
-        )
-
-        # Create ZMQ context and sockets
-        context = zmq.asyncio.Context()
-
-        try:
-            # Create request push socket - connect (worker binds the PULL side)
-            request_push = context.socket(zmq.PUSH)
-            request_push.connect(f"{zmq_config.zmq_request_queue_prefix}_0_requests")
-
-            # Create response pull socket - bind (worker connects with PUSH)
-            response_pull = context.socket(zmq.PULL)
-            response_pull.bind(zmq_config.zmq_response_queue_addr)
-
-            # Set socket options
-            request_push.setsockopt(zmq.SNDHWM, zmq_config.zmq_high_water_mark)
-            response_pull.setsockopt(zmq.RCVHWM, zmq_config.zmq_high_water_mark)
-
-            # Start worker in background
-            worker_task = asyncio.create_task(worker.run())
-
-            # Wait for worker process to initialize
-            await asyncio.sleep(0.1)
-
-            # Send test query
+        ) as ctx:
+            # Send test query (encoding handled automatically by ZMQPushSocket)
             query = Query(
                 id="test-non-streaming",
                 data={
@@ -109,29 +79,16 @@ class TestWorkerBasicFunctionality:
                     "stream": False,
                 },
             )
+            await ctx.request_push.send(query)
 
-            encoder = msgspec.msgpack.Encoder()
-            await request_push.send(encoder.encode(query))
-
-            # Receive response
-            response_data = await response_pull.recv()
-            decoder = msgspec.msgpack.Decoder(QueryResult | StreamChunk)
-            response = decoder.decode(response_data)
+            # Receive response (decoding handled automatically by ZMQPullSocket)
+            response = await ctx.response_pull.receive()
 
             # Verify response
             assert isinstance(response, QueryResult)
             assert response.id == "test-non-streaming"
             assert response.response_output == "Hello, echo server!"
             assert response.error is None
-
-            # Shutdown worker
-            worker._shutdown = True
-            await worker_task
-
-        finally:
-            request_push.close()
-            response_pull.close()
-            context.destroy(linger=0)
 
     @pytest.mark.asyncio
     async def test_worker_streaming_request(
@@ -140,36 +97,12 @@ class TestWorkerBasicFunctionality:
         """Test worker handling streaming requests with real HTTP calls."""
         http_config, aiohttp_config = worker_config
 
-        # Create worker
-        worker = Worker(
+        async with setup_worker_test(
             worker_id=0,
             http_config=http_config,
             aiohttp_config=aiohttp_config,
             zmq_config=zmq_config,
-            request_socket_addr=f"{zmq_config.zmq_request_queue_prefix}_0_requests",
-            response_socket_addr=zmq_config.zmq_response_queue_addr,
-            readiness_socket_addr=zmq_config.zmq_readiness_queue_addr,
-        )
-
-        # Create ZMQ context and sockets
-        context = zmq.asyncio.Context()
-
-        try:
-            # Create sockets - request socket connects (worker binds), response socket binds (worker connects)
-            request_push = context.socket(zmq.PUSH)
-            request_push.connect(f"{zmq_config.zmq_request_queue_prefix}_0_requests")
-
-            response_pull = context.socket(zmq.PULL)
-            response_pull.bind(zmq_config.zmq_response_queue_addr)
-
-            # Set socket options
-            request_push.setsockopt(zmq.SNDHWM, zmq_config.zmq_high_water_mark)
-            response_pull.setsockopt(zmq.RCVHWM, zmq_config.zmq_high_water_mark)
-
-            # Start worker
-            worker_task = asyncio.create_task(worker.run())
-            await asyncio.sleep(0.1)
-
+        ) as ctx:
             # Send streaming query
             query = Query(
                 id="test-streaming",
@@ -179,19 +112,17 @@ class TestWorkerBasicFunctionality:
                     "stream": True,
                 },
             )
-
-            encoder = msgspec.msgpack.Encoder()
-            await request_push.send(encoder.encode(query))
+            await ctx.request_push.send(query)
 
             # Collect streaming responses
             responses = []
-            decoder = msgspec.msgpack.Decoder(QueryResult | StreamChunk)
             final_content = ""
 
             while True:
                 try:
-                    response_data = await response_pull.recv()
-                    response = decoder.decode(response_data)
+                    response = await ctx.response_pull.receive()
+                    if response is None:  # Timeout
+                        break
                     responses.append(response)
 
                     # Check if this is the final chunk
@@ -212,15 +143,6 @@ class TestWorkerBasicFunctionality:
             # Verify final response
             assert final_content == "Stream this response please"
 
-            # Shutdown
-            worker._shutdown = True
-            await worker_task
-
-        finally:
-            request_push.close()
-            response_pull.close()
-            context.destroy(linger=0)
-
     @pytest.mark.asyncio
     async def test_worker_multiple_requests(
         self, mock_http_echo_server, worker_config, zmq_config
@@ -228,34 +150,14 @@ class TestWorkerBasicFunctionality:
         """Test worker handling multiple concurrent requests."""
         http_config, aiohttp_config = worker_config
 
-        # Create worker
-        worker = Worker(
+        async with setup_worker_test(
             worker_id=0,
             http_config=http_config,
             aiohttp_config=aiohttp_config,
             zmq_config=zmq_config,
-            request_socket_addr=f"{zmq_config.zmq_request_queue_prefix}_0_requests",
-            response_socket_addr=zmq_config.zmq_response_queue_addr,
-            readiness_socket_addr=zmq_config.zmq_readiness_queue_addr,
-        )
-
-        context = zmq.asyncio.Context()
-
-        try:
-            # Create sockets
-            request_push = context.socket(zmq.PUSH)
-            request_push.connect(f"{zmq_config.zmq_request_queue_prefix}_0_requests")
-
-            response_pull = context.socket(zmq.PULL)
-            response_pull.bind(zmq_config.zmq_response_queue_addr)
-
-            # Start worker
-            worker_task = asyncio.create_task(worker.run())
-            await asyncio.sleep(0.1)
-
+        ) as ctx:
             # Send multiple queries
             num_queries = 5
-            queries = []
             for i in range(num_queries):
                 query = Query(
                     id=f"test-multi-{i}",
@@ -265,36 +167,22 @@ class TestWorkerBasicFunctionality:
                         "stream": False,
                     },
                 )
-                queries.append(query)
-                encoder = msgspec.msgpack.Encoder()
-                await request_push.send(encoder.encode(query))
+                await ctx.request_push.send(query)
 
             # Collect responses
             responses = {}
-            decoder = msgspec.msgpack.Decoder(QueryResult | StreamChunk)
             for _ in range(num_queries):
-                response_data = await asyncio.wait_for(
-                    response_pull.recv(), timeout=2.0
-                )
-                response = decoder.decode(response_data)
+                response = await ctx.response_pull.receive()
+                assert response is not None  # Should not timeout
                 responses[response.id] = response
 
             # Verify all responses
             assert len(responses) == num_queries
             for i in range(num_queries):
-                id = f"test-multi-{i}"
-                assert id in responses
-                assert responses[id].response_output == f"Request number {i}"
-                assert responses[id].error is None
-
-            # Shutdown
-            worker._shutdown = True
-            await asyncio.wait_for(worker_task, timeout=2.0)
-
-        finally:
-            request_push.close()
-            response_pull.close()
-            context.destroy(linger=0)
+                query_id = f"test-multi-{i}"
+                assert query_id in responses
+                assert responses[query_id].response_output == f"Request number {i}"
+                assert responses[query_id].error is None
 
     @pytest.mark.asyncio
     async def test_worker_signal_handling(
@@ -314,43 +202,23 @@ class TestWorkerBasicFunctionality:
             zmq_recv_timeout=100,  # Short timeout (100ms) for fast shutdown
         )
 
-        # Create worker
-        worker = Worker(
+        async with setup_worker_test(
             worker_id=0,
             http_config=http_config,
             aiohttp_config=aiohttp_config,
             zmq_config=test_zmq_config,
-            request_socket_addr=f"{test_zmq_config.zmq_request_queue_prefix}_0_requests",
-            response_socket_addr=test_zmq_config.zmq_response_queue_addr,
-            readiness_socket_addr=test_zmq_config.zmq_readiness_queue_addr,
-        )
-
-        context = zmq.asyncio.Context()
-
-        try:
-            # Create minimal sockets
-            response_pull = context.socket(zmq.PULL)
-            response_pull.bind(test_zmq_config.zmq_response_queue_addr)
-
-            # Start worker
-            worker_task = asyncio.create_task(worker.run())
-            await asyncio.sleep(0.1)
-
+        ) as ctx:
             # Verify worker is running
-            assert not worker._shutdown
+            assert not ctx.worker._shutdown
 
             # Send signal
-            worker.shutdown(signal.SIGTERM, None)
+            ctx.worker.shutdown(signal.SIGTERM, None)
 
             # Verify shutdown flag is set
-            assert worker._shutdown
+            assert ctx.worker._shutdown
 
             # Worker should exit gracefully after the receive timeout
-            await asyncio.wait_for(worker_task, timeout=1.0)
-
-        finally:
-            response_pull.close()
-            context.destroy(linger=0)
+            await asyncio.wait_for(ctx.worker_task, timeout=1.0)
 
     @pytest.mark.asyncio
     async def test_worker_streaming_first_last_token_metadata(
@@ -359,31 +227,12 @@ class TestWorkerBasicFunctionality:
         """Test worker correctly sets first_chunk and final_chunk metadata in streaming responses."""
         http_config, aiohttp_config = worker_config
 
-        # Create worker
-        worker = Worker(
+        async with setup_worker_test(
             worker_id=0,
             http_config=http_config,
             aiohttp_config=aiohttp_config,
             zmq_config=zmq_config,
-            request_socket_addr=f"{zmq_config.zmq_request_queue_prefix}_0_requests",
-            response_socket_addr=zmq_config.zmq_response_queue_addr,
-            readiness_socket_addr=zmq_config.zmq_readiness_queue_addr,
-        )
-
-        context = zmq.asyncio.Context()
-
-        try:
-            # Create sockets
-            request_push = context.socket(zmq.PUSH)
-            request_push.connect(f"{zmq_config.zmq_request_queue_prefix}_0_requests")
-
-            response_pull = context.socket(zmq.PULL)
-            response_pull.bind(zmq_config.zmq_response_queue_addr)
-
-            # Start worker
-            worker_task = asyncio.create_task(worker.run())
-            await asyncio.sleep(0.1)
-
+        ) as ctx:
             # Send streaming query with multi-word response to ensure multiple chunks
             query = Query(
                 id="test-first-last-token",
@@ -393,21 +242,19 @@ class TestWorkerBasicFunctionality:
                     "stream": True,
                 },
             )
-
-            encoder = msgspec.msgpack.Encoder()
-            await request_push.send(encoder.encode(query))
+            await ctx.request_push.send(query)
 
             # Collect all streaming responses
             stream_chunks = []
             final_result = None
-            decoder = msgspec.msgpack.Decoder(QueryResult | StreamChunk)
 
             while True:
                 try:
-                    response_data = await asyncio.wait_for(
-                        response_pull.recv(), timeout=0.2
+                    response = await asyncio.wait_for(
+                        ctx.response_pull.receive(), timeout=0.2
                     )
-                    response = decoder.decode(response_data)
+                    if response is None:
+                        break
 
                     # Check if it's a StreamChunk or final QueryResult
                     if hasattr(response, "response_chunk"):
@@ -442,15 +289,6 @@ class TestWorkerBasicFunctionality:
                 assert chunk.metadata.get("first_chunk") is not True
                 assert chunk.id == "test-first-last-token"
 
-            # Shutdown
-            worker._shutdown = True
-            await worker_task
-
-        finally:
-            request_push.close()
-            response_pull.close()
-            context.destroy(linger=0)
-
     @pytest.mark.asyncio
     async def test_worker_streaming_empty_chunks(
         self, mock_http_echo_server, worker_config, zmq_config
@@ -458,30 +296,12 @@ class TestWorkerBasicFunctionality:
         """Test worker handling streaming responses with empty chunks."""
         http_config, aiohttp_config = worker_config
 
-        worker = Worker(
+        async with setup_worker_test(
             worker_id=0,
             http_config=http_config,
             aiohttp_config=aiohttp_config,
             zmq_config=zmq_config,
-            request_socket_addr=f"{zmq_config.zmq_request_queue_prefix}_0_requests",
-            response_socket_addr=zmq_config.zmq_response_queue_addr,
-            readiness_socket_addr=zmq_config.zmq_readiness_queue_addr,
-        )
-
-        context = zmq.asyncio.Context()
-
-        try:
-            # Create sockets
-            request_push = context.socket(zmq.PUSH)
-            request_push.connect(f"{zmq_config.zmq_request_queue_prefix}_0_requests")
-
-            response_pull = context.socket(zmq.PULL)
-            response_pull.bind(zmq_config.zmq_response_queue_addr)
-
-            # Start worker
-            worker_task = asyncio.create_task(worker.run())
-            await asyncio.sleep(0.1)
-
+        ) as ctx:
             # Send streaming query with empty prompt (should still get response structure)
             query = Query(
                 id="test-empty-chunks",
@@ -491,20 +311,17 @@ class TestWorkerBasicFunctionality:
                     "stream": True,
                 },
             )
-
-            encoder = msgspec.msgpack.Encoder()
-            await request_push.send(encoder.encode(query))
+            await ctx.request_push.send(query)
 
             # Collect responses
             responses = []
-            decoder = msgspec.msgpack.Decoder(QueryResult | StreamChunk)
-
             while True:
                 try:
-                    response_data = await asyncio.wait_for(
-                        response_pull.recv(), timeout=2.0
+                    response = await asyncio.wait_for(
+                        ctx.response_pull.receive(), timeout=2.0
                     )
-                    response = decoder.decode(response_data)
+                    if response is None:
+                        break
                     responses.append(response)
 
                     if response.metadata.get("final_chunk", False):
@@ -522,15 +339,6 @@ class TestWorkerBasicFunctionality:
             assert final_response.id == "test-empty-chunks"
             assert final_response.response_output == ""  # Empty content
 
-            # Shutdown
-            worker._shutdown = True
-            await asyncio.wait_for(worker_task, timeout=2.0)
-
-        finally:
-            request_push.close()
-            response_pull.close()
-            context.destroy(linger=0)
-
     @pytest.mark.asyncio
     async def test_worker_cleanup_with_resources(
         self, mock_http_echo_server, worker_config, zmq_config
@@ -538,33 +346,26 @@ class TestWorkerBasicFunctionality:
         """Test worker cleanup when resources are properly initialized."""
         http_config, aiohttp_config = worker_config
 
-        worker = Worker(
+        async with setup_worker_test(
             worker_id=0,
             http_config=http_config,
             aiohttp_config=aiohttp_config,
             zmq_config=zmq_config,
-            request_socket_addr=f"{zmq_config.zmq_request_queue_prefix}_0_requests",
-            response_socket_addr=zmq_config.zmq_response_queue_addr,
-            readiness_socket_addr=zmq_config.zmq_readiness_queue_addr,
-        )
+        ) as ctx:
+            await asyncio.sleep(0.5)  # Give worker time to initialize
 
-        # Start worker to initialize resources
-        worker_task = asyncio.create_task(worker.run())
-        await asyncio.sleep(0.5)
+            # Verify resources are initialized
+            assert ctx.worker._session is not None
+            assert ctx.worker._request_socket is not None
+            assert ctx.worker._response_socket is not None
 
-        # Verify resources are initialized
-        assert worker._session is not None
-        assert worker._zmq_context is not None
-        assert worker._request_socket is not None
-        assert worker._response_socket is not None
+            # Trigger shutdown
+            ctx.worker._shutdown = True
+            await asyncio.wait_for(ctx.worker_task, timeout=2.0)
 
-        # Trigger shutdown
-        worker._shutdown = True
-        await asyncio.wait_for(worker_task, timeout=2.0)
-
-        # Verify cleanup occurred (resources should be closed/terminated)
-        # Note: We can't directly verify closure state, but the test ensures
-        # the cleanup code path is executed without errors
+            # Verify cleanup occurred (resources should be closed/terminated)
+            # Note: We can't directly verify closure state, but the test ensures
+            # the cleanup code path is executed without errors
 
     @pytest.mark.asyncio
     async def test_worker_cleanup_with_partial_resources(
@@ -628,27 +429,17 @@ class TestWorkerBasicFunctionality:
         aiohttp_config.client_timeout_connect = 10.0
         aiohttp_config.client_timeout_sock_read = 5.0
 
-        worker = Worker(
+        async with setup_worker_test(
             worker_id=0,
             http_config=http_config,
             aiohttp_config=aiohttp_config,
             zmq_config=zmq_config,
-            request_socket_addr=f"{zmq_config.zmq_request_queue_prefix}_0_requests",
-            response_socket_addr=zmq_config.zmq_response_queue_addr,
-            readiness_socket_addr=zmq_config.zmq_readiness_queue_addr,
-        )
+        ) as ctx:
+            await asyncio.sleep(0.5)  # Give worker time to initialize
 
-        # Start worker briefly to initialize session
-        worker_task = asyncio.create_task(worker.run())
-        await asyncio.sleep(0.5)
-
-        # Verify session was created with correct timeout
-        assert worker._session is not None
-        assert worker._session.timeout.total == 30.0
-
-        # Shutdown
-        worker._shutdown = True
-        await asyncio.wait_for(worker_task, timeout=2.0)
+            # Verify session was created with correct timeout
+            assert ctx.worker._session is not None
+            assert ctx.worker._session.timeout.total == 30.0
 
     @pytest.mark.asyncio
     async def test_worker_headers_passthrough(
@@ -657,30 +448,12 @@ class TestWorkerBasicFunctionality:
         """Test worker properly passes through custom headers."""
         http_config, aiohttp_config = worker_config
 
-        worker = Worker(
+        async with setup_worker_test(
             worker_id=0,
             http_config=http_config,
             aiohttp_config=aiohttp_config,
             zmq_config=zmq_config,
-            request_socket_addr=f"{zmq_config.zmq_request_queue_prefix}_0_requests",
-            response_socket_addr=zmq_config.zmq_response_queue_addr,
-            readiness_socket_addr=zmq_config.zmq_readiness_queue_addr,
-        )
-
-        context = zmq.asyncio.Context()
-
-        try:
-            # Create sockets
-            request_push = context.socket(zmq.PUSH)
-            request_push.connect(f"{zmq_config.zmq_request_queue_prefix}_0_requests")
-
-            response_pull = context.socket(zmq.PULL)
-            response_pull.bind(zmq_config.zmq_response_queue_addr)
-
-            # Start worker
-            worker_task = asyncio.create_task(worker.run())
-            await asyncio.sleep(0.1)
-
+        ) as ctx:
             # Create query with custom headers
             query = Query(
                 id="test-headers",
@@ -694,29 +467,16 @@ class TestWorkerBasicFunctionality:
                     "Authorization": "Bearer test-token",
                 },
             )
-
-            encoder = msgspec.msgpack.Encoder()
-            await request_push.send(encoder.encode(query))
+            await ctx.request_push.send(query)
 
             # Receive response
-            response_data = await response_pull.recv()
-            decoder = msgspec.msgpack.Decoder(QueryResult | StreamChunk)
-            response = decoder.decode(response_data)
+            response = await ctx.response_pull.receive()
 
             # Echo server should return our prompt
             assert isinstance(response, QueryResult)
             assert response.id == "test-headers"
             assert response.response_output == "Test with headers"
             assert response.error is None
-
-            # Shutdown
-            worker._shutdown = True
-            await asyncio.wait_for(worker_task, timeout=2.0)
-
-        finally:
-            request_push.close()
-            response_pull.close()
-            context.destroy(linger=0)
 
     @pytest.mark.asyncio
     async def test_worker_large_response_handling(
@@ -725,30 +485,12 @@ class TestWorkerBasicFunctionality:
         """Test worker handling very large responses."""
         http_config, aiohttp_config = worker_config
 
-        worker = Worker(
+        async with setup_worker_test(
             worker_id=0,
             http_config=http_config,
             aiohttp_config=aiohttp_config,
             zmq_config=zmq_config,
-            request_socket_addr=f"{zmq_config.zmq_request_queue_prefix}_0_requests",
-            response_socket_addr=zmq_config.zmq_response_queue_addr,
-            readiness_socket_addr=zmq_config.zmq_readiness_queue_addr,
-        )
-
-        context = zmq.asyncio.Context()
-
-        try:
-            # Create sockets
-            request_push = context.socket(zmq.PUSH)
-            request_push.connect(f"{zmq_config.zmq_request_queue_prefix}_0_requests")
-
-            response_pull = context.socket(zmq.PULL)
-            response_pull.bind(zmq_config.zmq_response_queue_addr)
-
-            # Start worker
-            worker_task = asyncio.create_task(worker.run())
-            await asyncio.sleep(0.1)
-
+        ) as ctx:
             # Send query with large content (100KB of text with spaces)
             large_content = "Hello world! " * (100 * 1024 // 13)  # ~100KB
             query = Query(
@@ -759,14 +501,10 @@ class TestWorkerBasicFunctionality:
                     "stream": False,
                 },
             )
-
-            encoder = msgspec.msgpack.Encoder()
-            await request_push.send(encoder.encode(query))
+            await ctx.request_push.send(query)
 
             # Receive response
-            response_data = await response_pull.recv()
-            decoder = msgspec.msgpack.Decoder(QueryResult | StreamChunk)
-            response = decoder.decode(response_data)
+            response = await ctx.response_pull.receive()
 
             # Verify response
             assert isinstance(response, QueryResult)
@@ -774,22 +512,12 @@ class TestWorkerBasicFunctionality:
 
             # Check if there's an error first
             if response.error:
-                print(f"Response error: {response.error}")
                 raise AssertionError(f"Unexpected error: {response.error}")
 
             # Verify content
             assert response.response_output == large_content
             assert response.error is None
             assert len(response.response_output) == len(large_content)
-
-            # Shutdown
-            worker._shutdown = True
-            await asyncio.wait_for(worker_task, timeout=2.0)
-
-        finally:
-            request_push.close()
-            response_pull.close()
-            context.destroy(linger=0)
 
     @pytest.mark.asyncio
     async def test_worker_streaming_chunk_before_final_single_word(
@@ -804,30 +532,15 @@ class TestWorkerBasicFunctionality:
         response_addr = f"{zmq_config.zmq_response_queue_addr}_sw"
         readiness_addr = f"{zmq_config.zmq_readiness_queue_addr}_sw"
 
-        worker = Worker(
+        async with setup_worker_test(
             worker_id=worker_id,
             http_config=http_config,
             aiohttp_config=aiohttp_config,
             zmq_config=zmq_config,
-            request_socket_addr=request_addr,
-            response_socket_addr=response_addr,
-            readiness_socket_addr=readiness_addr,
-        )
-
-        context = zmq.asyncio.Context()
-
-        try:
-            # Create sockets
-            request_push = context.socket(zmq.PUSH)
-            request_push.connect(request_addr)
-
-            response_pull = context.socket(zmq.PULL)
-            response_pull.bind(response_addr)
-
-            # Start worker
-            worker_task = asyncio.create_task(worker.run())
-            await asyncio.sleep(0.1)
-
+            request_addr=request_addr,
+            response_addr=response_addr,
+            readiness_addr=readiness_addr,
+        ) as ctx:
             # Test single-word prompt that will echo as single word
             query = Query(
                 id="test-single-word-order",
@@ -837,20 +550,18 @@ class TestWorkerBasicFunctionality:
                     "stream": True,
                 },
             )
-
-            encoder = msgspec.msgpack.Encoder()
-            await request_push.send(encoder.encode(query))
+            await ctx.request_push.send(query)
 
             # Collect all responses in order
             responses_in_order = []
-            decoder = msgspec.msgpack.Decoder(QueryResult | StreamChunk)
 
             while True:
                 try:
-                    response_data = await asyncio.wait_for(
-                        response_pull.recv(), timeout=0.5
+                    response = await asyncio.wait_for(
+                        ctx.response_pull.receive(), timeout=0.5
                     )
-                    response = decoder.decode(response_data)
+                    if response is None:
+                        break
                     responses_in_order.append(response)
 
                     # Check if it's the final QueryResult
@@ -910,19 +621,17 @@ class TestWorkerBasicFunctionality:
                     "stream": True,
                 },
             )
-
-            encoder = msgspec.msgpack.Encoder()
-            await request_push.send(encoder.encode(query2))
+            await ctx.request_push.send(query2)
 
             # Collect responses for empty prompt
             responses_empty = []
-            decoder = msgspec.msgpack.Decoder(QueryResult | StreamChunk)
             while True:
                 try:
-                    response_data = await asyncio.wait_for(
-                        response_pull.recv(), timeout=0.5
+                    response = await asyncio.wait_for(
+                        ctx.response_pull.receive(), timeout=0.5
                     )
-                    response = decoder.decode(response_data)
+                    if response is None:
+                        break
                     responses_empty.append(response)
 
                     if isinstance(response, QueryResult) and not isinstance(
@@ -949,12 +658,3 @@ class TestWorkerBasicFunctionality:
             ), "Last response should not be a StreamChunk"
             assert last_empty.response_output == ""
             assert last_empty.id == "test-empty-order"
-
-            # Shutdown
-            worker._shutdown = True
-            await asyncio.wait_for(worker_task, timeout=2.0)
-
-        finally:
-            request_push.close()
-            response_pull.close()
-            context.destroy(linger=0)

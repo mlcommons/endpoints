@@ -20,16 +20,26 @@ This module provides reusable test utilities that can be imported directly
 instead of using pytest fixtures with factory patterns.
 """
 
+import asyncio
 import hashlib
 import random
 import string
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 import zmq
 from inference_endpoint.core.types import Query, QueryResult, StreamChunk
 from inference_endpoint.dataset_manager.dataloader import DataLoader
+from inference_endpoint.endpoint_client.configs import (
+    AioHttpConfig,
+    HTTPClientConfig,
+    ZMQConfig,
+)
+from inference_endpoint.endpoint_client.worker import Worker
+from inference_endpoint.endpoint_client.zmq_utils import ZMQPullSocket, ZMQPushSocket
 from inference_endpoint.load_generator.load_generator import SampleIssuer
 from inference_endpoint.load_generator.sample import SampleEventHandler
 
@@ -282,3 +292,143 @@ class PooledSampleIssuer(SampleIssuer):
         # Check every 100 submissions to balance cleanup overhead vs memory usage
         if len(self.futures) >= 100:
             self.check_errors()
+
+
+# ==============================================================================
+# HTTP-Client Worker Integration Test Helpers
+# ==============================================================================
+
+
+@dataclass
+class WorkerTestContext:
+    """Container for worker test resources.
+
+    This dataclass holds all the resources needed for worker integration tests,
+    including the worker instance, task, and ZMQ sockets.
+
+    Attributes:
+        worker: The Worker instance under test
+        worker_task: AsyncIO task running the worker
+        request_push: ZMQ PUSH socket for sending requests to worker
+        response_pull: ZMQ PULL socket for receiving responses from worker
+        readiness_pull: ZMQ PULL socket for receiving readiness signal from worker
+    """
+
+    worker: Worker
+    worker_task: asyncio.Task
+    request_push: ZMQPushSocket
+    response_pull: ZMQPullSocket
+    readiness_pull: ZMQPullSocket
+
+
+@asynccontextmanager
+async def setup_worker_test(
+    worker_id: int,
+    http_config: HTTPClientConfig,
+    aiohttp_config: AioHttpConfig,
+    zmq_config: ZMQConfig,
+    request_addr: str | None = None,
+    response_addr: str | None = None,
+    readiness_addr: str | None = None,
+):
+    """
+    Context manager for setting up worker integration tests with automatic cleanup.
+
+    This helper creates a Worker instance with all required ZMQ sockets, starts the
+    worker, waits for readiness, and yields a WorkerTestContext. On exit, it ensures
+    proper cleanup of all resources.
+
+    Uses zmq_utils (ZMQPushSocket/ZMQPullSocket) for automatic encoding/decoding,
+    eliminating boilerplate in tests.
+
+    Args:
+        worker_id: Numeric ID for the worker
+        http_config: HTTP client configuration
+        aiohttp_config: Aiohttp session configuration
+        zmq_config: ZMQ socket configuration
+        request_addr: Custom request socket address (optional)
+        response_addr: Custom response socket address (optional)
+        readiness_addr: Custom readiness socket address (optional)
+
+    Yields:
+        WorkerTestContext: Container with worker and socket resources
+
+    Examples:
+        async with setup_worker_test(
+            worker_id=0,
+            http_config=http_config,
+            aiohttp_config=aiohttp_config,
+            zmq_config=zmq_config,
+        ) as ctx:
+            # Send query (automatic encoding)
+            query = Query(id="test", data={"prompt": "Hello"})
+            await ctx.request_push.send(query)
+
+            # Receive response (automatic decoding)
+            response = await ctx.response_pull.receive()
+            assert response.id == "test"
+    """
+    # Import here to avoid circular imports and heavy imports in test_helpers
+    from inference_endpoint.endpoint_client.worker import Worker
+    from inference_endpoint.endpoint_client.zmq_utils import (
+        ZMQPullSocket,
+        ZMQPushSocket,
+    )
+
+    # Use provided addresses or defaults
+    request_addr = (
+        request_addr or f"{zmq_config.zmq_request_queue_prefix}_{worker_id}_requests"
+    )
+    response_addr = response_addr or zmq_config.zmq_response_queue_addr
+    readiness_addr = readiness_addr or zmq_config.zmq_readiness_queue_addr
+
+    # Create worker
+    worker = Worker(
+        worker_id=worker_id,
+        http_config=http_config,
+        aiohttp_config=aiohttp_config,
+        zmq_config=zmq_config,
+        request_socket_addr=request_addr,
+        response_socket_addr=response_addr,
+        readiness_socket_addr=readiness_addr,
+    )
+
+    # Create ZMQ sockets using zmq_utils (handles encoding/decoding automatically)
+    async with (
+        ZMQPushSocket(request_addr, zmq_config) as request_push,
+        ZMQPullSocket(
+            response_addr, zmq_config, bind=True, decoder_type=QueryResult | StreamChunk
+        ) as response_pull,
+        ZMQPullSocket(
+            readiness_addr, zmq_config, bind=True, decoder_type=int
+        ) as readiness_pull,
+    ):
+        # Initialize sockets
+        await request_push.initialize()
+        await response_pull.initialize()
+        await readiness_pull.initialize()
+
+        # Start worker in background
+        worker_task = asyncio.create_task(worker.run())
+
+        # Wait for worker readiness signal
+        await readiness_pull.receive()
+        await asyncio.sleep(0.1)  # Small delay for full initialization
+
+        try:
+            # Yield resources to test
+            yield WorkerTestContext(
+                worker=worker,
+                worker_task=worker_task,
+                request_push=request_push,
+                response_pull=response_pull,
+                readiness_pull=readiness_pull,
+            )
+        finally:
+            # Cleanup: shutdown worker if still running
+            if not worker._shutdown:
+                worker._shutdown = True
+                try:
+                    await asyncio.wait_for(worker_task, timeout=2.0)
+                except TimeoutError:
+                    pass  # Worker may already be stopped

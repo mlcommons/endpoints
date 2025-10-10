@@ -92,3 +92,5 @@ def http_client(perf_http_echo_server, tmp_path):
         raise RuntimeError(f"HttpEndpointClient Error: {e}") from e
     finally:
         client.shutdown()
+        # Stop echo server AFTER client to ensure client cleanup completes first
+        perf_http_echo_server.stop()

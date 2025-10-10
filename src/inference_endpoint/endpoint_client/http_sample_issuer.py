@@ -13,12 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""LoadGenerator integration for HTTPEndpointClient."""
+"""HTTP Sample Issuer for LoadGenerator integration with HTTPEndpointClient."""
 
 import asyncio
 import logging
 import threading
 from typing import Any
+
+import aiozmq
 
 from inference_endpoint.core.types import Query, QueryResult, StreamChunk
 from inference_endpoint.endpoint_client.http_client import HTTPEndpointClient
@@ -62,6 +64,36 @@ class HttpClientSampleIssuer(SampleIssuer):
         )
 
     @profile
+    def _handle_single_response(self, response: StreamChunk | QueryResult):
+        """Handle a single response. Routes to appropriate sample callback.
+
+        This method is profiled per-invocation to track individual response processing.
+        """
+        # Route to appropriate callback based on response type
+        match response:
+            case StreamChunk(is_complete=False):
+                SampleEventHandler.stream_chunk_complete(response)
+            case StreamChunk(is_complete=True):
+                raise NotImplementedError(
+                    "StreamChunk(is_complete=True) should not be received, QueryResult is expected instead"
+                )
+            case QueryResult(error=err) if err is not None:
+                logger.error(f"Error in request {response.id}: {err}")
+                SampleEventHandler.query_result_complete(response)
+                # TODO verify if we need to update the count even if there is an error
+                self.n_inflight -= 1
+                if self.n_inflight == 0:
+                    self._client_idle_event.set()
+            case QueryResult():
+                SampleEventHandler.query_result_complete(response)
+
+                self.n_inflight -= 1
+                if self.n_inflight == 0:
+                    self._client_idle_event.set()
+            case _:
+                raise ValueError(f"Unexpected response type: {type(response)}")
+
+    @profile
     async def handle_responses(self):
         """Handle all responses in async loop. Routes responses to sample callbacks."""
         while not self._shutdown:
@@ -70,30 +102,9 @@ class HttpClientSampleIssuer(SampleIssuer):
                 if response is None:  # timed out without a response
                     continue
 
-                # Route to appropriate callback based on response type
-                match response:
-                    case StreamChunk(is_complete=False):
-                        SampleEventHandler.stream_chunk_complete(response)
-                    case StreamChunk(is_complete=True):
-                        raise NotImplementedError(
-                            "StreamChunk(is_complete=True) should not be received, QueryResult is expected instead"
-                        )
-                    case QueryResult(error=err) if err is not None:
-                        logger.error(f"Error in request {response.id}: {err}")
-                        SampleEventHandler.query_result_complete(response)
-                        # TODO verify if we need to update the count even if there is an error
-                        self.n_inflight -= 1
-                        if self.n_inflight == 0:
-                            self._client_idle_event.set()
-                    case QueryResult():
-                        SampleEventHandler.query_result_complete(response)
-
-                        self.n_inflight -= 1
-                        if self.n_inflight == 0:
-                            self._client_idle_event.set()
-                    case _:
-                        raise ValueError(f"Unexpected response type: {type(response)}")
-            except asyncio.CancelledError:
+                self._handle_single_response(response)
+            except (asyncio.CancelledError, aiozmq.ZmqStreamClosed):
+                # Normal shutdown signals - exit gracefully without logging errors
                 break
             except Exception as e:
                 logger.error(f"Error in response handler: {e}", exc_info=True)

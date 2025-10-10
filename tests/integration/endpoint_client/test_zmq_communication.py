@@ -102,16 +102,11 @@ class TestZMQPushPullIntegration:
         # Create unique address for this test using tmp_path
         address = get_test_socket_path(tmp_path, f"test_payload_{test_case['id']}")
 
-        # Create context
-        context = zmq.asyncio.Context()
-
-        try:
-            # Create pull socket first (bind)
-            pull_socket = ZMQPullSocket(context, address, zmq_config, bind=True)
-
-            # Create push socket (connect)
-            push_socket = ZMQPushSocket(context, address, zmq_config)
-
+        # Use async context managers for automatic cleanup
+        async with (
+            ZMQPullSocket(address, zmq_config, bind=True) as pull_socket,
+            ZMQPushSocket(address, zmq_config) as push_socket,
+        ):
             # Allow time for connection
             await asyncio.sleep(0.1)
 
@@ -138,11 +133,6 @@ class TestZMQPushPullIntegration:
             assert received["max_completion_tokens"] == 50
             assert received["temperature"] == 0.7
             assert received["metadata"]["test_description"] == test_case["description"]
-
-        finally:
-            push_socket.close()
-            pull_socket.close()
-            context.destroy(linger=0)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -223,12 +213,10 @@ class TestZMQPushPullIntegration:
         short_id = id_map.get(result_case["query_id"], result_case["query_id"][:5])
         address = get_test_socket_path(tmp_path, f"tr_{short_id}")
 
-        context = zmq.asyncio.Context()
-
-        try:
-            pull_socket = ZMQPullSocket(context, address, zmq_config, bind=True)
-            push_socket = ZMQPushSocket(context, address, zmq_config)
-
+        async with (
+            ZMQPullSocket(address, zmq_config, bind=True) as pull_socket,
+            ZMQPushSocket(address, zmq_config) as push_socket,
+        ):
             await asyncio.sleep(0.1)
 
             # Send a QueryResult
@@ -249,22 +237,15 @@ class TestZMQPushPullIntegration:
             assert received["error"] == result_case["error"]
             assert received["metadata"] == result_case["metadata"]
 
-        finally:
-            push_socket.close()
-            pull_socket.close()
-            context.destroy(linger=0)
-
     @pytest.mark.asyncio
     async def test_streaming_response_communication(self, zmq_config, tmp_path):
         """Test streaming response pattern with first/final chunks."""
         address = get_test_socket_path(tmp_path, "test_streaming")
 
-        context = zmq.asyncio.Context()
-
-        try:
-            pull_socket = ZMQPullSocket(context, address, zmq_config, bind=True)
-            push_socket = ZMQPushSocket(context, address, zmq_config)
-
+        async with (
+            ZMQPullSocket(address, zmq_config, bind=True) as pull_socket,
+            ZMQPushSocket(address, zmq_config) as push_socket,
+        ):
             await asyncio.sleep(0.1)
 
             # Send first chunk
@@ -299,11 +280,6 @@ class TestZMQPushPullIntegration:
             )
             assert received_final["metadata"]["first_chunk"] is False
             assert received_final["metadata"]["final_chunk"] is True
-
-        finally:
-            push_socket.close()
-            pull_socket.close()
-            context.destroy(linger=0)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -348,83 +324,81 @@ class TestZMQPushPullIntegration:
             f"test_sequence_{sequence_config['description'].replace(' ', '_')}",
         )
 
-        context = zmq.asyncio.Context()
-
-        try:
-            # Create pull socket
-            pull_socket = ZMQPullSocket(context, address, zmq_config, bind=True)
-
+        # Create pull socket with async context manager
+        async with ZMQPullSocket(address, zmq_config, bind=True) as pull_socket:
             # Create push sockets
             push_sockets = []
             for _ in range(sequence_config["num_push_sockets"]):
-                push_socket = ZMQPushSocket(context, address, zmq_config)
+                push_socket = ZMQPushSocket(address, zmq_config)
+                await push_socket.initialize()
                 push_sockets.append(push_socket)
 
-            await asyncio.sleep(0.1)
+            try:
+                await asyncio.sleep(0.1)
 
-            # Send messages
-            sent_queries = []
-            total_messages = (
-                sequence_config["num_push_sockets"]
-                * sequence_config["num_messages_per_socket"]
-            )
+                # Send messages
+                sent_queries = []
+                total_messages = (
+                    sequence_config["num_push_sockets"]
+                    * sequence_config["num_messages_per_socket"]
+                )
 
-            if sequence_config["concurrent"]:
-                # Send all messages concurrently
-                tasks = []
-                for socket_idx, push_socket in enumerate(push_sockets):
-                    for msg_idx in range(sequence_config["num_messages_per_socket"]):
-                        query = {
-                            "id": f"socket-{socket_idx}-msg-{msg_idx}",
-                            "prompt": f"Query from socket {socket_idx}, message {msg_idx}",
-                            "model": "gpt-3.5-turbo",
-                        }
-                        sent_queries.append(query)
-                        tasks.append(push_socket.send(query))
-                await asyncio.gather(*tasks)
-            else:
-                # Send messages sequentially
-                for socket_idx, push_socket in enumerate(push_sockets):
-                    for msg_idx in range(sequence_config["num_messages_per_socket"]):
-                        query = {
-                            "id": f"socket-{socket_idx}-msg-{msg_idx}",
-                            "prompt": f"Query from socket {socket_idx}, message {msg_idx}",
-                            "model": "gpt-3.5-turbo",
-                        }
-                        sent_queries.append(query)
-                        await push_socket.send(query)
+                if sequence_config["concurrent"]:
+                    # Send all messages concurrently
+                    tasks = []
+                    for socket_idx, push_socket in enumerate(push_sockets):
+                        for msg_idx in range(
+                            sequence_config["num_messages_per_socket"]
+                        ):
+                            query = {
+                                "id": f"socket-{socket_idx}-msg-{msg_idx}",
+                                "prompt": f"Query from socket {socket_idx}, message {msg_idx}",
+                                "model": "gpt-3.5-turbo",
+                            }
+                            sent_queries.append(query)
+                            tasks.append(push_socket.send(query))
+                    await asyncio.gather(*tasks)
+                else:
+                    # Send messages sequentially
+                    for socket_idx, push_socket in enumerate(push_sockets):
+                        for msg_idx in range(
+                            sequence_config["num_messages_per_socket"]
+                        ):
+                            query = {
+                                "id": f"socket-{socket_idx}-msg-{msg_idx}",
+                                "prompt": f"Query from socket {socket_idx}, message {msg_idx}",
+                                "model": "gpt-3.5-turbo",
+                            }
+                            sent_queries.append(query)
+                            await push_socket.send(query)
 
-            # Receive all messages
-            received_queries = []
-            for _ in range(total_messages):
-                received = await pull_socket.receive()
-                received_queries.append(received)
+                # Receive all messages
+                received_queries = []
+                for _ in range(total_messages):
+                    received = await pull_socket.receive()
+                    received_queries.append(received)
 
-            # Verify all messages received (order may vary)
-            received_ids = {q["id"] for q in received_queries}
-            expected_ids = {q["id"] for q in sent_queries}
-            assert received_ids == expected_ids
-            assert len(received_queries) == total_messages
+                # Verify all messages received (order may vary)
+                received_ids = {q["id"] for q in received_queries}
+                expected_ids = {q["id"] for q in sent_queries}
+                assert received_ids == expected_ids
+                assert len(received_queries) == total_messages
 
-        finally:
-            for socket in push_sockets:
-                socket.close()
-            pull_socket.close()
-            context.destroy(linger=0)
+            finally:
+                for socket in push_sockets:
+                    socket.close()
 
     @pytest.mark.asyncio
     async def test_custom_data_serialization(self, zmq_config, tmp_path):
         """Test sending custom data types."""
         address = get_test_socket_path(tmp_path, "test_custom")
 
-        context = zmq.asyncio.Context()
-
-        try:
-            pull_socket = ZMQPullSocket(
-                context, address, zmq_config, bind=True, decoder_type=SampleData
-            )
-            push_socket = ZMQPushSocket(context, address, zmq_config)
-
+        async with (
+            ZMQPullSocket(
+                address, zmq_config, bind=True, decoder_type=SampleData
+            ) as pull_socket,
+            ZMQPushSocket(address, zmq_config) as push_socket,
+        ):
             await asyncio.sleep(0.1)
 
             # Send custom data
@@ -442,11 +416,6 @@ class TestZMQPushPullIntegration:
             assert received.value == "test value with special chars: 你好 🚀"
             assert isinstance(received.timestamp, float)
 
-        finally:
-            push_socket.close()
-            pull_socket.close()
-            context.destroy(linger=0)
-
     @pytest.mark.asyncio
     async def test_pull_socket_connect_mode(self, zmq_config, tmp_path):
         """Test ZMQPullSocket in connect mode (bind=False)."""
@@ -455,21 +424,19 @@ class TestZMQPushPullIntegration:
         context = zmq.asyncio.Context()
 
         try:
-            # First create a push socket that binds
-            push_socket = ZMQPushSocket(context, address, zmq_config)
-            # Manually bind the push socket's underlying socket
-            push_socket.socket.close()  # Close the connected socket
-            push_socket.socket = context.socket(zmq.PUSH)
-            push_socket.socket.bind(address)
-            push_socket.socket.setsockopt(zmq.SNDHWM, zmq_config.zmq_high_water_mark)
-            push_socket.socket.setsockopt(zmq.LINGER, zmq_config.zmq_linger)
-            push_socket.socket.setsockopt(zmq.SNDBUF, zmq_config.zmq_send_buffer_size)
-            push_socket.socket.setsockopt(zmq.SNDTIMEO, zmq_config.zmq_send_timeout)
+            # Use raw zmq socket for push that binds (since ZMQPushSocket always connects)
+            push_raw = context.socket(zmq.PUSH)
+            push_raw.bind(address)
+            push_raw.setsockopt(zmq.SNDHWM, zmq_config.zmq_high_water_mark)
+            push_raw.setsockopt(zmq.LINGER, zmq_config.zmq_linger)
+            push_raw.setsockopt(zmq.SNDBUF, zmq_config.zmq_send_buffer_size)
+            push_raw.setsockopt(zmq.SNDTIMEO, zmq_config.zmq_send_timeout)
 
             # Create pull socket in connect mode (bind=False)
             pull_socket = ZMQPullSocket(
-                context, address, zmq_config, bind=False, decoder_type=SampleData
+                address, zmq_config, bind=False, decoder_type=SampleData
             )
+            await pull_socket.initialize()
 
             await asyncio.sleep(0.1)
 
@@ -480,7 +447,9 @@ class TestZMQPushPullIntegration:
                 timestamp=time.time(),
             )
 
-            await push_socket.send(test_data)
+            # Send using raw socket
+            encoder = msgspec.msgpack.Encoder()
+            await push_raw.send(encoder.encode(test_data))
 
             # Receive the message
             received = await pull_socket.receive()
@@ -491,6 +460,6 @@ class TestZMQPushPullIntegration:
             assert received.value == "Testing connect mode"
 
         finally:
-            push_socket.close()
+            push_raw.close()
             pull_socket.close()
             context.destroy(linger=0)

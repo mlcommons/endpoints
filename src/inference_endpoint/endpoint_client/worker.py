@@ -25,12 +25,11 @@ import traceback
 from collections.abc import AsyncGenerator
 from multiprocessing import Process
 from typing import Any
+from weakref import WeakSet
 
 import aiohttp
+import aiozmq
 import msgspec
-import orjson
-import zmq
-import zmq.asyncio
 
 from inference_endpoint.core.types import (
     Query,
@@ -43,8 +42,16 @@ from inference_endpoint.endpoint_client.configs import (
     ZMQConfig,
 )
 from inference_endpoint.endpoint_client.zmq_utils import ZMQPullSocket, ZMQPushSocket
-from inference_endpoint.openai.openai_adapter import OpenAIAdapter, SSEMessage
-from inference_endpoint.profiling import profile
+from inference_endpoint.openai.openai_msgspec_adapter import (
+    OpenAIMsgspecAdapter,
+    SSEMessage,
+)
+from inference_endpoint.profiling import (
+    profile,
+    profiler_check_subprocess,
+    profiler_shutdown,
+)
+from inference_endpoint.profiling.event_loop_profiler import new_event_loop
 
 logger = logging.getLogger(__name__)
 
@@ -72,18 +79,18 @@ def worker_main(
     readiness_queue_addr: str,
 ):
     """Entry point for worker process."""
+    # Check if we're in a subprocess and reinitialize profiler if needed
+    # This handles both fork and spawn multiprocessing modes
+    # This must be done FIRST, before any other profiling calls
+    profiler_check_subprocess()
+
     # Configure logging for worker process
     logging.basicConfig(
         level=logging.INFO,
-        format=f"[Worker-{worker_id}-{os.getpid()}] %(levelname)-5s - %(message)s (%(module)s:%(lineno)d)",
+        format=f"[Worker-{worker_id}-{os.getpid()}] %(levelname)-5s %(module)s:%(lineno)d - %(message)s",
         force=True,
     )
     logger = logging.getLogger(__name__)
-
-    # Install uvloop which also enables it
-    import uvloop
-
-    uvloop.install()
 
     # Create and run worker
     try:
@@ -97,8 +104,15 @@ def worker_main(
             readiness_socket_addr=readiness_queue_addr,
         )
 
-        # Run event loop
-        uvloop.run(worker.run())
+        # Explicitly create event loop
+        loop = new_event_loop()
+        asyncio.set_event_loop(loop)
+
+        try:
+            # Run worker using the explicitly created loop
+            loop.run_until_complete(worker.run())
+        finally:
+            loop.close()
 
     except Exception as e:
         logger.error(
@@ -130,7 +144,6 @@ class Worker:
         self.readiness_socket_addr = readiness_socket_addr
         self._shutdown = False
 
-        self._zmq_context: zmq.asyncio.Context | None = None
         self._request_socket: ZMQPullSocket | None = None
         self._response_socket: ZMQPushSocket | None = None
         self._readiness_socket: ZMQPushSocket | None = None
@@ -138,8 +151,9 @@ class Worker:
         self._session: aiohttp.ClientSession | None = None
         self.tcp_connector: aiohttp.TCPConnector | None = None
 
-        # Track active request tasks
-        self._active_tasks: set[asyncio.Task] = set()
+        # Track active request tasks using WeakSet for automatic cleanup
+        # WeakSet automatically removes tasks when they complete (garbage collected)
+        self._active_tasks: WeakSet[asyncio.Task] = WeakSet()
 
         # Reusable typed decoder for SSE chunk parsing (struct access faster than dict)
         self._sse_decoder: msgspec.json.Decoder = msgspec.json.Decoder(SSEMessage)
@@ -147,20 +161,22 @@ class Worker:
     async def run(self) -> None:
         """Main worker loop - pull requests, execute, push responses."""
         try:
-            # Initialize ZMQ context and sockets
-            self._zmq_context = zmq.asyncio.Context()
-            self._request_socket = ZMQPullSocket(
-                self._zmq_context,
+            # Get the current event loop (already created and set in worker_main)
+            loop = asyncio.get_running_loop()
+
+            # Initialize ZMQ sockets
+            self._request_socket = await ZMQPullSocket.create(
                 self.request_socket_addr,
                 self.zmq_config,
                 bind=True,
                 decoder_type=Query,
+                loop=loop,
             )
-            self._response_socket = ZMQPushSocket(
-                self._zmq_context, self.response_socket_addr, self.zmq_config
+            self._response_socket = await ZMQPushSocket.create(
+                self.response_socket_addr, self.zmq_config, loop=loop
             )
-            self._readiness_socket = ZMQPushSocket(
-                self._zmq_context, self.readiness_socket_addr, self.zmq_config
+            self._readiness_socket = await ZMQPushSocket.create(
+                self.readiness_socket_addr, self.zmq_config, loop=loop
             )
 
             # Create TCP connector
@@ -176,7 +192,6 @@ class Worker:
                 connector=self.tcp_connector,
                 connector_owner=False,  # owned by Worker
                 skip_auto_headers=self.aiohttp_config.skip_auto_headers,
-                json_serialize=lambda obj: orjson.dumps(obj).decode("utf-8"),
             )
 
             # Signal handlers for graceful shutdown
@@ -217,35 +232,51 @@ class Worker:
                     continue
 
                 # Process query asynchronously and track the task
+                # WeakSet automatically removes tasks when they complete (no callback needed)
                 task = asyncio.create_task(self._process_request(query))
                 self._active_tasks.add(task)
 
-                # Remove task from active set when it completes
-                task.add_done_callback(self._active_tasks.discard)
-
-            except asyncio.CancelledError:
+            except (asyncio.CancelledError, aiozmq.ZmqStreamClosed):
                 break
 
             except Exception as e:
-                # Don't exit on errors in the main loop, just log and continue
+                # Don't exit on other errors, just log and continue
                 logger.error(
                     f"Worker {self.worker_id} error in main loop: {type(e).__name__}: {str(e)}"
                 )
 
     async def _handle_error(self, query_id: str, error: Exception | str) -> None:
-        """Send error response for a query."""
+        """Send error response for a query.
 
+        This method is designed to never raise exceptions to prevent hanging requests.
+        Any failures in sending the error response are logged but not propagated.
+        """
         # Skip if we're shutting down or response socket is not available
         if self._shutdown or not self._response_socket:
             return
 
-        error_message = str(error) if isinstance(error, Exception) else error
-        error_response = QueryResult(
-            id=query_id,
-            response_output=None,
-            error=error_message,
-        )
-        await self._response_socket.send(error_response)
+        try:
+            if isinstance(error, Exception):
+                # Get error message with type name and message for better debugging
+                error_message = (
+                    f"{type(error).__name__}: {str(error)}"
+                    if str(error)
+                    else type(error).__name__
+                )
+            else:
+                error_message = error
+
+            error_response = QueryResult(
+                id=query_id,
+                response_output=None,
+                error=error_message,
+            )
+            await self._response_socket.send(error_response)
+        except Exception as e:
+            # Log but don't propagate - this is the last resort error handler
+            logger.error(
+                f"Worker {self.worker_id} failed to send error response for query {query_id}: {type(e).__name__}: {str(e)}"
+            )
 
     @profile
     async def _make_http_request(self, query: Query):
@@ -271,12 +302,18 @@ class Worker:
 
         url = self.http_config.endpoint_url
         headers = query.headers if hasattr(query, "headers") else {}
-        payload = OpenAIAdapter.to_openai_request(query).model_dump(
-            mode="json", exclude_unset=True
-        )
 
-        # Issue the request
-        async with self._session.post(url, json=payload, headers=headers) as response:
+        # Convert to OpenAI request and encode using msgspec for fast serialization
+        openai_request = OpenAIMsgspecAdapter.to_openai_request(query)
+        payload_bytes = OpenAIMsgspecAdapter.encode_request(openai_request)
+
+        # Set Content-Type header for JSON data
+        headers = {**headers, "Content-Type": "application/json"}
+
+        # Issue the request with pre-encoded bytes
+        async with self._session.post(
+            url, data=payload_bytes, headers=headers
+        ) as response:
             if response.status != 200:
                 error_text = await response.text()
                 await self._handle_error(
@@ -301,7 +338,7 @@ class Worker:
     @profile
     def _parse_sse_chunk(self, buffer: bytes, end_pos: int) -> list[str]:
         """Parse SSE chunk and extract content using msgspec typed decode."""
-        json_docs = OpenAIAdapter.SSE_DATA_PATTERN.findall(buffer[:end_pos])
+        json_docs = OpenAIMsgspecAdapter.SSE_DATA_PATTERN.findall(buffer[:end_pos])
 
         parsed_contents = []
         try:
@@ -317,7 +354,7 @@ class Worker:
     @profile
     async def _iter_sse_lines(
         self, response: aiohttp.ClientResponse
-    ) -> AsyncGenerator[list[str], None]:
+    ) -> AsyncGenerator[list[str]]:
         """
         Iterate over complete SSE chunks (events) from response stream.
 
@@ -405,14 +442,23 @@ class Worker:
         """Handle non-streaming response."""
         async for response in self._make_http_request(query):
             response_bytes = await response.read()
-            response_data = orjson.loads(response_bytes)
-            response_obj = OpenAIAdapter.from_json_response(query.id, response_data)
+
+            # Fast decode using msgspec (zero-copy deserialization)
+            openai_response = OpenAIMsgspecAdapter.decode_response(response_bytes)
+            response_obj = OpenAIMsgspecAdapter.from_openai_response(
+                openai_response, result_id=query.id
+            )
+
             # Send response back to the main process
             await self._response_socket.send(response_obj)
 
     def shutdown(self, signum: int | None = None, frame: Any | None = None) -> None:
         """Trigger shutdown of worker process."""
-        self._shutdown = True  # will invoke _cleanup() from main loop
+        self._shutdown = True
+        # Close request socket to wake up receive() immediately
+        if self._request_socket:
+            self._request_socket.close()
+            self._request_socket = None  # Prevent double-close in cleanup
 
     async def _cleanup(self) -> None:
         """Clean up resources."""
@@ -420,26 +466,24 @@ class Worker:
         if self._session:
             await self._session.close()
 
-        # Cancel and clear active tasks
-        logger.info(
-            f"Worker {self.worker_id} will cancel {len(self._active_tasks)} tasks and cleanup."
-        )
-        for task in self._active_tasks:
+        # Cancel active tasks (WeakSet iteration must be converted to list first)
+        # WeakSet doesn't have clear(), but tasks auto-remove when cancelled/completed
+        for task in list(self._active_tasks):
             task.cancel()
-        self._active_tasks.clear()
 
         # Close TCP connector
         if self.tcp_connector:
             await self.tcp_connector.close()
 
         # Close ZMQ sockets (readiness socket already closed after initialization)
-        for socket in (self._request_socket, self._response_socket):
-            if socket:
-                socket.close()
+        if self._request_socket:
+            self._request_socket.close()
+        if self._response_socket:
+            self._response_socket.close()
 
-        # Terminate ZMQ context
-        if self._zmq_context:
-            self._zmq_context.destroy(linger=0)
+        # Write profiler output before process exits
+        # This is the last chance to write profile data
+        profiler_shutdown()
 
 
 class WorkerManager:
@@ -450,25 +494,26 @@ class WorkerManager:
         http_config: HTTPClientConfig,
         aiohttp_config: AioHttpConfig,
         zmq_config: ZMQConfig,
-        zmq_context: zmq.asyncio.Context,
     ):
         """Initialize worker manager."""
         self.http_config = http_config
         self.aiohttp_config = aiohttp_config
         self.zmq_config = zmq_config
-        self.zmq_context = zmq_context
         self.workers: list[Process] = []
         self.worker_pids: dict[int, int] = {}  # worker_id -> pid
         self._shutdown_event = asyncio.Event()
 
     async def initialize(self) -> None:
         """Initialize workers and ZMQ infrastructure."""
+        # Get the current event loop
+        loop = asyncio.get_running_loop()
+
         # Create readiness pull socket to receive worker ready signals
-        readiness_socket = ZMQPullSocket(
-            self.zmq_context,
+        readiness_socket = await ZMQPullSocket.create(
             self.zmq_config.zmq_readiness_queue_addr,
             self.zmq_config,
             bind=True,
+            loop=loop,
         )
 
         try:

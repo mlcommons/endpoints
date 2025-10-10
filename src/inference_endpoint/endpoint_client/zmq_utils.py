@@ -1,153 +1,140 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+"""ZMQ utilities for endpoint client communication using aiozmq."""
 
-"""ZMQ utilities for endpoint client communication."""
-
+import asyncio
 from typing import Any
 
+import aiozmq
 import msgspec
 import zmq
-import zmq.asyncio
 
 from inference_endpoint.endpoint_client.configs import ZMQConfig
 from inference_endpoint.profiling import profile
 
 
-class ZMQSocket:
-    """Base class for async ZMQ sockets."""
+class _ZMQSocket:
+    """Base class for ZMQ sockets using aiozmq."""
 
-    def __init__(
-        self,
-        context: zmq.asyncio.Context,
-        socket_type: int,
-        address: str,
-        config: ZMQConfig,
-        bind: bool = False,
-    ):
-        """Initialize ZMQ socket with common configuration."""
-        self.socket = context.socket(socket_type)
+    __slots__ = ("address", "config", "_stream")
+
+    def __init__(self, address: str, config: ZMQConfig):
         self.address = address
-
-        try:
-            if bind:
-                self.socket.bind(address)
-            else:
-                self.socket.connect(address)
-        except zmq.ZMQError as e:
-            if bind:
-                action = "bind to"
-                sol = "Ensure the address is not already in use."
-            else:
-                action = "connect to"
-                sol = "Ensure the target socket exists"
-            raise zmq.ZMQError(
-                f"Failed to {action} {address}: {e.strerror}. \n{sol}"
-            ) from e
-
-        # Common socket options
-        self.socket.setsockopt(zmq.LINGER, config.zmq_linger)
-
-        # Set type-specific options
-        self._set_socket_options(config)
-
-    def _set_socket_options(self, config: ZMQConfig) -> None:
-        """Override in subclasses to set specific socket options."""
-        pass
+        self.config = config
+        self._stream: aiozmq.ZmqStream | None = None
 
     def close(self, linger_ms: int | None = None) -> None:
-        """Close socket cleanly."""
-        if linger_ms is not None:
-            self.socket.setsockopt(zmq.LINGER, linger_ms)
-        self.socket.close()
+        if self._stream:
+            if linger_ms is not None:
+                self._stream.transport.setsockopt(zmq.LINGER, linger_ms)
+            self._stream.close()
+
+    async def __aenter__(self):
+        if self._stream is None:
+            await self.initialize(loop=asyncio.get_event_loop())
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+        return False
 
 
-class ZMQPushSocket(ZMQSocket):
-    """Async wrapper for ZMQ PUSH socket."""
+class ZMQPushSocket(_ZMQSocket):
+    """Non-blocking PUSH socket using aiozmq."""
 
-    def __init__(self, context: zmq.asyncio.Context, address: str, config: ZMQConfig):
-        """
-        Initialize ZMQ push socket.
+    __slots__ = ("_encoder",)
 
-        Args:
-            context: ZMQ context
-            address: Socket address
-            config: ZMQ configuration
-        """
-        super().__init__(context, zmq.PUSH, address, config, bind=False)
+    def __init__(self, address: str, config: ZMQConfig):
+        super().__init__(address, config)
         self._encoder = msgspec.msgpack.Encoder()
 
-    def _set_socket_options(self, config: ZMQConfig) -> None:
-        """Set PUSH socket specific options."""
-        self.socket.setsockopt(zmq.SNDHWM, config.zmq_high_water_mark)
-        self.socket.setsockopt(zmq.SNDBUF, config.zmq_send_buffer_size)
-        self.socket.setsockopt(zmq.SNDTIMEO, config.zmq_send_timeout)
+    async def initialize(self, loop: asyncio.AbstractEventLoop | None = None) -> None:
+        """Initialize stream. Must be called before send()."""
+        self._stream = await aiozmq.create_zmq_stream(
+            zmq.PUSH, connect=self.address, loop=loop
+        )
+        self._stream.transport.setsockopt(zmq.LINGER, self.config.zmq_linger)
+        self._stream.transport.setsockopt(zmq.SNDHWM, self.config.zmq_high_water_mark)
+        self._stream.transport.setsockopt(zmq.SNDBUF, self.config.zmq_send_buffer_size)
+        self._stream.transport.setsockopt(zmq.SNDTIMEO, self.config.zmq_send_timeout)
+
+    @classmethod
+    async def create(
+        cls,
+        address: str,
+        config: ZMQConfig,
+        loop: asyncio.AbstractEventLoop | None = None,
+    ) -> "ZMQPushSocket":
+        """Create and initialize in one step."""
+        instance = cls(address, config)
+        await instance.initialize(loop=loop)
+        return instance
 
     @profile
     async def send(self, data: Any) -> None:
-        """Serialize to msgspec and send data through push socket."""
+        """Non-blocking zero-copy send."""
+        assert self._stream is not None
         serialized = self._encoder.encode(data)
-        await self.socket.send(serialized, flags=zmq.NOBLOCK, copy=False)
+
+        # NOTE(vir): aiozmq does not support zero copy like pyzmq
+        self._stream.write((memoryview(serialized),))
 
 
-class ZMQPullSocket(ZMQSocket):
-    """Async wrapper for ZMQ PULL socket."""
+class ZMQPullSocket(_ZMQSocket):
+    """Zero-copy PULL socket using aiozmq."""
+
+    __slots__ = ("bind", "_decoder")
 
     def __init__(
         self,
-        context: zmq.asyncio.Context,
         address: str,
         config: ZMQConfig,
         bind: bool = False,
         decoder_type: type | None = None,
     ):
-        """
-        Initialize ZMQ pull socket.
-
-        Args:
-            context: ZMQ context
-            address: Socket address
-            config: ZMQ configuration
-            bind: Whether to bind (True) or connect (False)
-            decoder_type: Expected type for decoding (e.g. Query, QueryResult | StreamChunk).
-                          If None, creates a decoder with no type constraint.
-        """
-        super().__init__(context, zmq.PULL, address, config, bind=bind)
+        super().__init__(address, config)
+        self.bind = bind
         self._decoder = (
             msgspec.msgpack.Decoder(type=decoder_type)
             if decoder_type
             else msgspec.msgpack.Decoder()
         )
 
-    def _set_socket_options(self, config: ZMQConfig) -> None:
-        """Set PULL socket specific options."""
-        self.socket.setsockopt(zmq.RCVHWM, config.zmq_high_water_mark)
-        self.socket.setsockopt(zmq.RCVBUF, config.zmq_recv_buffer_size)
-        self.socket.setsockopt(zmq.RCVTIMEO, config.zmq_recv_timeout)
+    async def initialize(self, loop: asyncio.AbstractEventLoop | None = None) -> None:
+        """Initialize stream. Must be called before receive()."""
+        if self.bind:
+            self._stream = await aiozmq.create_zmq_stream(
+                zmq.PULL, bind=self.address, loop=loop
+            )
+        else:
+            self._stream = await aiozmq.create_zmq_stream(
+                zmq.PULL, connect=self.address, loop=loop
+            )
+
+        self._stream.transport.setsockopt(zmq.LINGER, self.config.zmq_linger)
+        self._stream.transport.setsockopt(zmq.RCVHWM, self.config.zmq_high_water_mark)
+        self._stream.transport.setsockopt(zmq.RCVBUF, self.config.zmq_recv_buffer_size)
+        self._stream.transport.setsockopt(zmq.RCVTIMEO, self.config.zmq_recv_timeout)
+
+    @classmethod
+    async def create(
+        cls,
+        address: str,
+        config: ZMQConfig,
+        bind: bool = False,
+        decoder_type: type | None = None,
+        loop: asyncio.AbstractEventLoop | None = None,
+    ) -> "ZMQPullSocket":
+        """Create and initialize in one step."""
+        instance = cls(address, config, bind=bind, decoder_type=decoder_type)
+        await instance.initialize(loop=loop)
+        return instance
 
     @profile
     async def receive(self) -> Any | None:
-        """
-        Receive and deserialize msgspec data from pull socket.
-        Returns None on timeout.
+        """Receive and return decoded data. Returns None on timeout."""
+        assert self._stream is not None
 
-        Returns:
-            Deserialized data, or None on timeout.
-        """
         try:
-            serialized = await self.socket.recv(flags=0, copy=False, track=False)
-            return self._decoder.decode(serialized)
+            msg = await self._stream.read()
+            return self._decoder.decode(msg[0])
         except zmq.Again:
-            # Timeout occurred
             return None

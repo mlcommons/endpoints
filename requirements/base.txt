@@ -10,6 +10,7 @@ aiohttp==3.12.15
 duckdb==1.4.0
 orjson==3.11.0
 pyzmq==27.0.2
+aiozmq==1.0
 uvloop==0.21.0
 datasets==4.1.1
 pydantic==2.11.7

@@ -24,7 +24,7 @@ import pytest
 from inference_endpoint import metrics
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.dataset_manager.dataloader import DataLoader
-from inference_endpoint.endpoint_client.loadgen import HttpClientSampleIssuer
+from inference_endpoint.endpoint_client.http_sample_issuer import HttpClientSampleIssuer
 from inference_endpoint.load_generator.scheduler import (
     MaxThroughputScheduler,
     PoissonDistributionScheduler,

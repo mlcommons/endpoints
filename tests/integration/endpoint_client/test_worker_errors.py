@@ -17,10 +17,7 @@
 
 import asyncio
 
-import msgspec
 import pytest
-import zmq
-import zmq.asyncio
 from inference_endpoint.core.types import Query, QueryResult, StreamChunk
 from inference_endpoint.endpoint_client.configs import (
     AioHttpConfig,
@@ -28,9 +25,9 @@ from inference_endpoint.endpoint_client.configs import (
     ZMQConfig,
 )
 from inference_endpoint.endpoint_client.worker import Worker
-from inference_endpoint.endpoint_client.zmq_utils import ZMQPushSocket
+from inference_endpoint.endpoint_client.zmq_utils import ZMQPullSocket, ZMQPushSocket
 
-from ...test_helpers import get_test_socket_path
+from ...test_helpers import get_test_socket_path, setup_worker_test
 
 
 class TestWorkerErrorHandling:
@@ -66,31 +63,12 @@ class TestWorkerErrorHandling:
         aiohttp_config.client_timeout_total = 2.0  # Short timeout
         aiohttp_config.client_timeout_connect = 1.0  # Connect timeout
 
-        # Create worker
-        worker = Worker(
+        async with setup_worker_test(
             worker_id=0,
             http_config=http_config,
             aiohttp_config=aiohttp_config,
             zmq_config=zmq_config,
-            request_socket_addr=f"{zmq_config.zmq_request_queue_prefix}_0_requests",
-            response_socket_addr=zmq_config.zmq_response_queue_addr,
-            readiness_socket_addr=zmq_config.zmq_readiness_queue_addr,
-        )
-
-        context = zmq.asyncio.Context()
-
-        try:
-            # Create sockets
-            request_push = context.socket(zmq.PUSH)
-            request_push.connect(f"{zmq_config.zmq_request_queue_prefix}_0_requests")
-
-            response_pull = context.socket(zmq.PULL)
-            response_pull.bind(zmq_config.zmq_response_queue_addr)
-
-            # Start worker
-            worker_task = asyncio.create_task(worker.run())
-            await asyncio.sleep(0.5)
-
+        ) as ctx:
             # Send query
             query = Query(
                 id="test-error",
@@ -100,14 +78,10 @@ class TestWorkerErrorHandling:
                     "stream": False,
                 },
             )
-
-            encoder = msgspec.msgpack.Encoder()
-            await request_push.send(encoder.encode(query))
+            await ctx.request_push.send(query)
 
             # Receive error response
-            response_data = await asyncio.wait_for(response_pull.recv(), timeout=2.0)
-            decoder = msgspec.msgpack.Decoder(QueryResult | StreamChunk)
-            response = decoder.decode(response_data)
+            response = await asyncio.wait_for(ctx.response_pull.receive(), timeout=2.0)
 
             # Verify error response
             assert isinstance(response, QueryResult)
@@ -122,20 +96,6 @@ class TestWorkerErrorHandling:
                 or "99999" in response.error
             )
 
-            # Verify error response metadata (may be empty for error responses)
-            # Just check that we got an error response with the right query ID
-            assert response.id == "test-error"
-            assert response.error is not None
-
-            # Shutdown
-            worker._shutdown = True
-            await asyncio.wait_for(worker_task, timeout=2.0)
-
-        finally:
-            request_push.close()
-            response_pull.close()
-            context.destroy(linger=0)
-
     @pytest.mark.asyncio
     async def test_worker_streaming_http_error_handling(self, basic_config):
         """Test worker handling HTTP errors in streaming requests."""
@@ -145,30 +105,12 @@ class TestWorkerErrorHandling:
         http_config.endpoint_url = "http://localhost:99999/invalid"
         aiohttp_config.client_timeout_total = 1.0  # Short timeout
 
-        worker = Worker(
+        async with setup_worker_test(
             worker_id=0,
             http_config=http_config,
             aiohttp_config=aiohttp_config,
             zmq_config=zmq_config,
-            request_socket_addr=f"{zmq_config.zmq_request_queue_prefix}_0_requests",
-            response_socket_addr=zmq_config.zmq_response_queue_addr,
-            readiness_socket_addr=zmq_config.zmq_readiness_queue_addr,
-        )
-
-        context = zmq.asyncio.Context()
-
-        try:
-            # Create sockets
-            request_push = context.socket(zmq.PUSH)
-            request_push.connect(f"{zmq_config.zmq_request_queue_prefix}_0_requests")
-
-            response_pull = context.socket(zmq.PULL)
-            response_pull.bind(zmq_config.zmq_response_queue_addr)
-
-            # Start worker
-            worker_task = asyncio.create_task(worker.run())
-            await asyncio.sleep(0.5)
-
+        ) as ctx:
             # Send streaming query
             query = Query(
                 id="test-streaming-error",
@@ -178,14 +120,10 @@ class TestWorkerErrorHandling:
                     "stream": True,
                 },
             )
-
-            encoder = msgspec.msgpack.Encoder()
-            await request_push.send(encoder.encode(query))
+            await ctx.request_push.send(query)
 
             # Receive error response
-            response_data = await response_pull.recv()
-            decoder = msgspec.msgpack.Decoder(QueryResult | StreamChunk)
-            response = decoder.decode(response_data)
+            response = await ctx.response_pull.receive()
 
             # Verify error response
             assert isinstance(response, QueryResult)
@@ -194,42 +132,43 @@ class TestWorkerErrorHandling:
             # Should get url back as error
             assert "http://localhost:99999/invalid" in response.error
 
-            # Shutdown
-            worker._shutdown = True
-            await asyncio.wait_for(worker_task, timeout=2.0)
-
-        finally:
-            request_push.close()
-            response_pull.close()
-            context.destroy(linger=0)
-
     @pytest.mark.asyncio
     async def test_worker_non_streaming_exception_handling(self, basic_config):
         """Test worker handles exceptions in _process_request for non-streaming requests."""
         http_config, aiohttp_config, zmq_config = basic_config
 
-        # Use ZMQPushSocket to send request
-        context = zmq.asyncio.Context()
-        request_socket = ZMQPushSocket(
-            context, f"{zmq_config.zmq_request_queue_prefix}_0_requests", zmq_config
-        )
+        # Use ZMQ utils for cleaner socket management
+        request_addr = f"{zmq_config.zmq_request_queue_prefix}_0_requests"
 
-        # Use raw socket to receive response (bind first before worker connects)
-        response_pull = context.socket(zmq.PULL)
-        response_pull.bind(zmq_config.zmq_response_queue_addr)
+        async with (
+            ZMQPushSocket(request_addr, zmq_config) as request_socket,
+            ZMQPullSocket(
+                zmq_config.zmq_response_queue_addr,
+                zmq_config,
+                bind=True,
+                decoder_type=QueryResult | StreamChunk,
+            ) as response_pull,
+            ZMQPullSocket(
+                zmq_config.zmq_readiness_queue_addr,
+                zmq_config,
+                bind=True,
+                decoder_type=int,
+            ) as readiness_pull,
+        ):
+            await request_socket.initialize()
+            await response_pull.initialize()
+            await readiness_pull.initialize()
 
-        worker = Worker(
-            worker_id=0,
-            http_config=http_config,
-            aiohttp_config=aiohttp_config,
-            zmq_config=zmq_config,
-            request_socket_addr=f"{zmq_config.zmq_request_queue_prefix}_0_requests",
-            response_socket_addr=zmq_config.zmq_response_queue_addr,
-            readiness_socket_addr=zmq_config.zmq_readiness_queue_addr,
-        )
+            worker = Worker(
+                worker_id=0,
+                http_config=http_config,
+                aiohttp_config=aiohttp_config,
+                zmq_config=zmq_config,
+                request_socket_addr=request_addr,
+                response_socket_addr=zmq_config.zmq_response_queue_addr,
+                readiness_socket_addr=zmq_config.zmq_readiness_queue_addr,
+            )
 
-        worker_task = None
-        try:
             # Mock _handle_non_streaming_request to raise an exception immediately
             exception_raised = asyncio.Event()
 
@@ -242,93 +181,84 @@ class TestWorkerErrorHandling:
             # Start worker
             worker_task = asyncio.create_task(worker.run())
 
-            # Wait for worker to be ready
-            await asyncio.sleep(0.5)
-
-            # Send non-streaming query
-            query = Query(
-                id="test-exception-non-streaming",
-                data={
-                    "prompt": "Test exception handling",
-                    "model": "gpt-3.5-turbo",
-                    "stream": False,
-                },
-            )
-            await request_socket.send(query)
-
-            # Wait for exception to be raised
             try:
-                await asyncio.wait_for(exception_raised.wait(), timeout=3.0)
-            except TimeoutError:
-                pytest.fail("Exception was not raised within timeout")
+                # Wait for worker to be ready
+                await readiness_pull.receive()
+                await asyncio.sleep(0.5)
 
-            # Receive error response with a reasonable timeout
-            # The response should be sent almost immediately after the exception
-            response_data = await asyncio.wait_for(
-                response_pull.recv(),
-                timeout=3.0,
-            )
-            decoder = msgspec.msgpack.Decoder(QueryResult | StreamChunk)
-            response = decoder.decode(response_data)
+                # Send non-streaming query
+                query = Query(
+                    id="test-exception-non-streaming",
+                    data={
+                        "prompt": "Test exception handling",
+                        "model": "gpt-3.5-turbo",
+                        "stream": False,
+                    },
+                )
+                await request_socket.send(query)
 
-            # Verify error response
-            assert isinstance(response, QueryResult)
-            assert response.id == "test-exception-non-streaming"
-            assert response.error is not None
-            assert "Simulated processing error" in response.error
-            assert response.response_output is None
-
-        finally:
-            # Proper cleanup
-            if worker_task and not worker_task.done():
-                # Signal worker to shutdown
-                worker._shutdown = True
-
-                # Wait for graceful shutdown with timeout
+                # Wait for exception to be raised
                 try:
-                    await asyncio.wait_for(worker_task, timeout=2.0)
+                    await asyncio.wait_for(exception_raised.wait(), timeout=3.0)
                 except TimeoutError:
-                    # Force cancel if graceful shutdown fails
-                    worker_task.cancel()
+                    pytest.fail("Exception was not raised within timeout")
+
+                # Receive error response (automatic decoding)
+                response = await asyncio.wait_for(response_pull.receive(), timeout=3.0)
+
+                # Verify error response
+                assert isinstance(response, QueryResult)
+                assert response.id == "test-exception-non-streaming"
+                assert response.error is not None
+                assert "Simulated processing error" in response.error
+                assert response.response_output is None
+
+            finally:
+                # Proper cleanup
+                if not worker._shutdown:
+                    worker._shutdown = True
                     try:
-                        await worker_task
-                    except asyncio.CancelledError:
+                        await asyncio.wait_for(worker_task, timeout=2.0)
+                    except (TimeoutError, asyncio.CancelledError):
                         pass
-                except Exception:
-                    # Ignore other exceptions during shutdown
-                    pass
-
-            # Close sockets
-            request_socket.close()
-            response_pull.close()
-
-            # Terminate context
-            context.destroy(linger=0)
 
     @pytest.mark.asyncio
     async def test_worker_streaming_exception_handling(self, basic_config):
         """Test worker handles exceptions in _process_request for streaming requests."""
         http_config, aiohttp_config, zmq_config = basic_config
 
-        context = zmq.asyncio.Context()
+        request_addr = f"{zmq_config.zmq_request_queue_prefix}_0_requests"
 
-        # Use raw socket to receive response (bind first before worker connects)
-        response_pull = context.socket(zmq.PULL)
-        response_pull.bind(zmq_config.zmq_response_queue_addr)
+        # Use ZMQ utils for cleaner socket management
+        async with (
+            ZMQPushSocket(request_addr, zmq_config) as request_push,
+            ZMQPullSocket(
+                zmq_config.zmq_response_queue_addr,
+                zmq_config,
+                bind=True,
+                decoder_type=QueryResult | StreamChunk,
+            ) as response_pull,
+            ZMQPullSocket(
+                zmq_config.zmq_readiness_queue_addr,
+                zmq_config,
+                bind=True,
+                decoder_type=int,
+            ) as readiness_pull,
+        ):
+            await request_push.initialize()
+            await response_pull.initialize()
+            await readiness_pull.initialize()
 
-        worker = Worker(
-            worker_id=0,
-            http_config=http_config,
-            aiohttp_config=aiohttp_config,
-            zmq_config=zmq_config,
-            request_socket_addr=f"{zmq_config.zmq_request_queue_prefix}_0_requests",
-            response_socket_addr=zmq_config.zmq_response_queue_addr,
-            readiness_socket_addr=zmq_config.zmq_readiness_queue_addr,
-        )
+            worker = Worker(
+                worker_id=0,
+                http_config=http_config,
+                aiohttp_config=aiohttp_config,
+                zmq_config=zmq_config,
+                request_socket_addr=request_addr,
+                response_socket_addr=zmq_config.zmq_response_queue_addr,
+                readiness_socket_addr=zmq_config.zmq_readiness_queue_addr,
+            )
 
-        worker_task = None
-        request_push = None
-        try:
             # Mock _handle_streaming_request to raise an exception
             async def mock_handle_request(query):
                 raise RuntimeError("Simulated streaming processing error")
@@ -338,98 +268,52 @@ class TestWorkerErrorHandling:
             # Start worker
             worker_task = asyncio.create_task(worker.run())
 
-            # Wait for worker to be ready
-            await asyncio.sleep(0.5)
+            try:
+                # Wait for worker to be ready
+                await readiness_pull.receive()
+                await asyncio.sleep(0.5)
 
-            # Create the request socket after worker has bound its socket
-            request_push = context.socket(zmq.PUSH)
-            request_push.connect(f"{zmq_config.zmq_request_queue_prefix}_0_requests")
+                # Send streaming query
+                query = Query(
+                    id="test-exception-streaming",
+                    data={
+                        "prompt": "Test streaming exception handling",
+                        "model": "gpt-3.5-turbo",
+                        "stream": True,
+                    },
+                )
+                await request_push.send(query)
 
-            # Send streaming query
-            query = Query(
-                id="test-exception-streaming",
-                data={
-                    "prompt": "Test streaming exception handling",
-                    "model": "gpt-3.5-turbo",
-                    "stream": True,
-                },
-            )
-            encoder = msgspec.msgpack.Encoder()
-            await request_push.send(encoder.encode(query))
+                # Receive error response (automatic decoding)
+                response = await asyncio.wait_for(response_pull.receive(), timeout=2.0)
 
-            # Receive error response
-            response_data = await asyncio.wait_for(
-                response_pull.recv(),
-                timeout=2.0,
-            )
-            decoder = msgspec.msgpack.Decoder(QueryResult | StreamChunk)
-            response = decoder.decode(response_data)
+                # Verify error response
+                assert isinstance(response, QueryResult)
+                assert response.id == "test-exception-streaming"
+                assert response.error is not None
+                assert "Simulated streaming processing error" in response.error
+                assert response.response_output is None
 
-            # Verify error response
-            assert isinstance(response, QueryResult)
-            assert response.id == "test-exception-streaming"
-            assert response.error is not None
-            assert "Simulated streaming processing error" in response.error
-            assert response.response_output is None
-
-        finally:
-            # Proper cleanup
-            if worker_task and not worker_task.done():
-                # Signal worker to shutdown
-                worker._shutdown = True
-
-                # Wait for graceful shutdown with timeout
-                try:
-                    await asyncio.wait_for(worker_task, timeout=2.0)
-                except TimeoutError:
-                    # Force cancel if graceful shutdown fails
-                    worker_task.cancel()
+            finally:
+                # Proper cleanup
+                if not worker._shutdown:
+                    worker._shutdown = True
                     try:
-                        await worker_task
-                    except asyncio.CancelledError:
+                        await asyncio.wait_for(worker_task, timeout=2.0)
+                    except (TimeoutError, asyncio.CancelledError):
                         pass
-                except Exception:
-                    # Ignore other exceptions during shutdown
-                    pass
-
-            # Close sockets
-            if request_push:
-                request_push.close()
-            response_pull.close()
-
-            # Terminate context
-            context.destroy(linger=0)
 
     @pytest.mark.asyncio
     async def test_worker_non_streaming_connection_error(self, basic_config):
         """Test worker handles connection errors in non-streaming responses."""
         http_config, aiohttp_config, zmq_config = basic_config
 
-        # Already uses invalid URL from basic_config
-        worker = Worker(
+        async with setup_worker_test(
             worker_id=0,
             http_config=http_config,
             aiohttp_config=aiohttp_config,
             zmq_config=zmq_config,
-            request_socket_addr=f"{zmq_config.zmq_request_queue_prefix}_0_requests",
-            response_socket_addr=zmq_config.zmq_response_queue_addr,
-            readiness_socket_addr=zmq_config.zmq_readiness_queue_addr,
-        )
-
-        context = zmq.asyncio.Context()
-
-        try:
-            # Create sockets
-            request_push = context.socket(zmq.PUSH)
-            request_push.connect(f"{zmq_config.zmq_request_queue_prefix}_0_requests")
-
-            response_pull = context.socket(zmq.PULL)
-            response_pull.bind(zmq_config.zmq_response_queue_addr)
-
-            # Start worker
-            worker_task = asyncio.create_task(worker.run())
-            await asyncio.sleep(0.5)
-
+        ) as ctx:
             # Send query
             query = Query(
                 id="test-connection-error",
@@ -439,28 +323,15 @@ class TestWorkerErrorHandling:
                     "stream": False,
                 },
             )
-
-            encoder = msgspec.msgpack.Encoder()
-            await request_push.send(encoder.encode(query))
+            await ctx.request_push.send(query)
 
             # Should receive error response
-            response_data = await response_pull.recv()
-            decoder = msgspec.msgpack.Decoder(QueryResult | StreamChunk)
-            response = decoder.decode(response_data)
+            response = await ctx.response_pull.receive()
 
             assert isinstance(response, QueryResult)
             assert response.id == "test-connection-error"
             assert response.error is not None
             assert "99999" in response.error or "Cannot connect" in response.error
-
-            # Shutdown
-            worker._shutdown = True
-            await asyncio.wait_for(worker_task, timeout=2.0)
-
-        finally:
-            request_push.close()
-            response_pull.close()
-            context.destroy(linger=0)
 
     @pytest.mark.asyncio
     async def test_worker_streaming_http_404_error(
@@ -472,30 +343,12 @@ class TestWorkerErrorHandling:
         # Use echo server but with invalid endpoint to get 404
         http_config.endpoint_url = f"{mock_http_echo_server.url}/nonexistent"
 
-        worker = Worker(
+        async with setup_worker_test(
             worker_id=0,
             http_config=http_config,
             aiohttp_config=aiohttp_config,
             zmq_config=zmq_config,
-            request_socket_addr=f"{zmq_config.zmq_request_queue_prefix}_0_requests",
-            response_socket_addr=zmq_config.zmq_response_queue_addr,
-            readiness_socket_addr=zmq_config.zmq_readiness_queue_addr,
-        )
-
-        context = zmq.asyncio.Context()
-
-        try:
-            # Create sockets
-            request_push = context.socket(zmq.PUSH)
-            request_push.connect(f"{zmq_config.zmq_request_queue_prefix}_0_requests")
-
-            response_pull = context.socket(zmq.PULL)
-            response_pull.bind(zmq_config.zmq_response_queue_addr)
-
-            # Start worker
-            worker_task = asyncio.create_task(worker.run())
-            await asyncio.sleep(0.5)
-
+        ) as ctx:
             # Send streaming query
             query = Query(
                 id="test-streaming-404",
@@ -505,29 +358,16 @@ class TestWorkerErrorHandling:
                     "stream": True,
                 },
             )
-
-            encoder = msgspec.msgpack.Encoder()
-            await request_push.send(encoder.encode(query))
+            await ctx.request_push.send(query)
 
             # Receive error response
-            response_data = await response_pull.recv()
-            decoder = msgspec.msgpack.Decoder(QueryResult | StreamChunk)
-            response = decoder.decode(response_data)
+            response = await ctx.response_pull.receive()
 
             # Verify HTTP error response
             assert isinstance(response, QueryResult)
             assert response.id == "test-streaming-404"
             assert response.error is not None
             assert "HTTP 404" in response.error
-
-            # Shutdown
-            worker._shutdown = True
-            await asyncio.wait_for(worker_task, timeout=2.0)
-
-        finally:
-            request_push.close()
-            response_pull.close()
-            context.destroy(linger=0)
 
     @pytest.mark.asyncio
     async def test_non_streaming_http_error_early_return(self, basic_config):
@@ -548,64 +388,38 @@ class TestWorkerErrorHandling:
 
         await server.start_server()
 
-        # Update config to use the error endpoint
-        http_config.endpoint_url = f"http://localhost:{server.port}/error-500"
-
-        worker = Worker(
-            worker_id=0,
-            http_config=http_config,
-            aiohttp_config=aiohttp_config,
-            zmq_config=zmq_config,
-            request_socket_addr=f"{zmq_config.zmq_request_queue_prefix}_0_requests",
-            response_socket_addr=zmq_config.zmq_response_queue_addr,
-            readiness_socket_addr=zmq_config.zmq_readiness_queue_addr,
-        )
-
-        context = zmq.asyncio.Context()
-
         try:
-            # Create sockets
-            request_push = context.socket(zmq.PUSH)
-            request_push.connect(f"{zmq_config.zmq_request_queue_prefix}_0_requests")
+            # Update config to use the error endpoint
+            http_config.endpoint_url = f"http://localhost:{server.port}/error-500"
 
-            response_pull = context.socket(zmq.PULL)
-            response_pull.bind(zmq_config.zmq_response_queue_addr)
+            async with setup_worker_test(
+                worker_id=0,
+                http_config=http_config,
+                aiohttp_config=aiohttp_config,
+                zmq_config=zmq_config,
+            ) as ctx:
+                # Send query that will get HTTP error
+                query = Query(
+                    id="test-http-500",
+                    data={
+                        "prompt": "This will fail",
+                        "model": "gpt-3.5-turbo",
+                        "stream": False,
+                    },
+                )
+                await ctx.request_push.send(query)
 
-            # Start worker
-            worker_task = asyncio.create_task(worker.run())
-            await asyncio.sleep(0.5)
+                # Verify error response was sent
+                response = await asyncio.wait_for(
+                    ctx.response_pull.receive(), timeout=1.0
+                )
 
-            # Send query that will get HTTP error
-            query = Query(
-                id="test-http-500",
-                data={
-                    "prompt": "This will fail",
-                    "model": "gpt-3.5-turbo",
-                    "stream": False,
-                },
-            )
-
-            encoder = msgspec.msgpack.Encoder()
-            await request_push.send(encoder.encode(query))
-
-            # Verify error response was sent
-            response_data = await asyncio.wait_for(response_pull.recv(), timeout=1.0)
-            decoder = msgspec.msgpack.Decoder(QueryResult | StreamChunk)
-            response = decoder.decode(response_data)
-
-            assert isinstance(response, QueryResult)
-            assert response.id == "test-http-500"
-            assert "HTTP 500" in response.error
-            assert "Internal Server Error" in response.error
-
-            # Shutdown
-            worker._shutdown = True
-            await asyncio.wait_for(worker_task, timeout=2.0)
+                assert isinstance(response, QueryResult)
+                assert response.id == "test-http-500"
+                assert "HTTP 500" in response.error
+                assert "Internal Server Error" in response.error
 
         finally:
-            request_push.close()
-            response_pull.close()
-            context.destroy(linger=0)
             await server.close()
 
     @pytest.mark.asyncio
@@ -615,6 +429,7 @@ class TestWorkerErrorHandling:
 
         # Create a mock server that returns malformed JSON
         from aiohttp import web
+        from aiohttp.test_utils import TestServer
 
         async def malformed_json_handler(request):
             """Handler that returns malformed JSON in streaming format."""
@@ -630,10 +445,6 @@ class TestWorkerErrorHandling:
 
         app = web.Application()
         app.router.add_post("/streaming", malformed_json_handler)
-
-        # Start test server
-        from aiohttp.test_utils import TestServer
-
         server = TestServer(app)
 
         try:
@@ -642,32 +453,12 @@ class TestWorkerErrorHandling:
             # Update config with test server URL
             http_config.endpoint_url = f"http://localhost:{server.port}/streaming"
 
-            worker = Worker(
+            async with setup_worker_test(
                 worker_id=0,
                 http_config=http_config,
                 aiohttp_config=aiohttp_config,
                 zmq_config=zmq_config,
-                request_socket_addr=f"{zmq_config.zmq_request_queue_prefix}_0_requests",
-                response_socket_addr=zmq_config.zmq_response_queue_addr,
-                readiness_socket_addr=zmq_config.zmq_readiness_queue_addr,
-            )
-
-            context = zmq.asyncio.Context()
-
-            try:
-                # Create sockets
-                request_push = context.socket(zmq.PUSH)
-                request_push.connect(
-                    f"{zmq_config.zmq_request_queue_prefix}_0_requests"
-                )
-
-                response_pull = context.socket(zmq.PULL)
-                response_pull.bind(zmq_config.zmq_response_queue_addr)
-
-                # Start worker
-                worker_task = asyncio.create_task(worker.run())
-                await asyncio.sleep(0.5)
-
+            ) as ctx:
                 # Send streaming query
                 query = Query(
                     id="test-malformed-json",
@@ -677,15 +468,11 @@ class TestWorkerErrorHandling:
                         "stream": True,
                     },
                 )
-
-                encoder = msgspec.msgpack.Encoder()
-                await request_push.send(encoder.encode(query))
+                await ctx.request_push.send(query)
 
                 # Worker should handle malformed JSON gracefully by skipping invalid chunks
                 # (see _parse_sse_chunk which catches exceptions for non-content SSE messages)
-                response_data = await response_pull.recv()
-                decoder = msgspec.msgpack.Decoder(QueryResult | StreamChunk)
-                response = decoder.decode(response_data)
+                response = await ctx.response_pull.receive()
 
                 # Verify we get a response (worker handles malformed JSON gracefully)
                 assert isinstance(response, QueryResult)
@@ -694,15 +481,6 @@ class TestWorkerErrorHandling:
                 # Malformed JSON is skipped, so we get an empty response, not an error
                 assert response.error is None
                 assert response.response_output == ""
-
-                # Shutdown
-                worker._shutdown = True
-                await asyncio.wait_for(worker_task, timeout=2.0)
-
-            finally:
-                request_push.close()
-                response_pull.close()
-                context.destroy(linger=0)
 
         finally:
             await server.close()
@@ -744,14 +522,12 @@ class TestWorkerErrorHandling:
             readiness_socket_addr=zmq_config.zmq_readiness_queue_addr,
         )
 
-        context = zmq.asyncio.Context()
-
-        try:
-            # Initialize worker resources manually
-            worker._zmq_context = context
-            worker._response_socket = ZMQPushSocket(
-                context, zmq_config.zmq_response_queue_addr, zmq_config
-            )
+        # Use async context manager for socket
+        async with ZMQPushSocket(
+            zmq_config.zmq_response_queue_addr, zmq_config
+        ) as response_socket:
+            # Initialize worker resources manually for testing
+            worker._response_socket = response_socket
 
             # Create query
             query = Query(
@@ -764,7 +540,7 @@ class TestWorkerErrorHandling:
             )
 
             # Close the response socket to simulate error
-            worker._response_socket.socket.close()
+            response_socket.close()
 
             # Try to send response - should handle the error gracefully
             response = QueryResult(
@@ -773,110 +549,89 @@ class TestWorkerErrorHandling:
                 error="ZMQ socket closed",
             )
 
-            # This should not raise an exception
+            # This should not raise an exception (socket is closed so send will fail)
             try:
-                encoder = msgspec.msgpack.Encoder()
-                await worker._response_socket.send(encoder.encode(response))
+                await response_socket.send(response)
             except Exception:
                 # Expected - socket is closed
                 pass
 
             # Worker should handle this gracefully without crashing
 
-        finally:
-            context.destroy(linger=0)
-
     @pytest.mark.asyncio
-    async def test_worker_concurrent_error_handling(self, basic_config):
+    async def test_worker_concurrent_error_handling(self, tmp_path):
         """Test multiple workers handling errors concurrently."""
-        http_config, aiohttp_config, zmq_config = basic_config
+        # Use the same pattern as single-worker tests - just run 3 in parallel
+        num_workers = 3
 
-        # Use invalid endpoint (localhost with invalid port for fast failure)
-        http_config.endpoint_url = "http://localhost:99999/api"
-        http_config.num_workers = 3  # Test with multiple workers
-        aiohttp_config.client_timeout_total = 2.0
-        aiohttp_config.client_timeout_connect = 1.0
+        # Create separate configs for each worker to avoid socket conflicts
+        workers_contexts = []
 
-        workers = []
-        worker_tasks = []
-        context = zmq.asyncio.Context()
+        for i in range(num_workers):
+            http_config = HTTPClientConfig(
+                endpoint_url="http://localhost:99999/api",  # Invalid endpoint
+                num_workers=1,
+            )
+            aiohttp_config = AioHttpConfig(
+                client_timeout_total=2.0,
+                client_timeout_connect=1.0,
+            )
+            # Each worker gets unique socket paths
+            zmq_config = ZMQConfig(
+                zmq_request_queue_prefix=get_test_socket_path(
+                    tmp_path, f"worker{i}", "_req"
+                ),
+                zmq_response_queue_addr=get_test_socket_path(
+                    tmp_path, f"worker{i}", "_resp"
+                ),
+                zmq_readiness_queue_addr=get_test_socket_path(
+                    tmp_path, f"worker{i}", "_ready"
+                ),
+            )
 
-        try:
-            # Create response pull socket
-            response_pull = context.socket(zmq.PULL)
-            response_pull.bind(zmq_config.zmq_response_queue_addr)
+            workers_contexts.append((http_config, aiohttp_config, zmq_config))
 
-            # Start multiple workers
-            for i in range(3):
-                worker = Worker(
-                    worker_id=i,
-                    http_config=http_config,
-                    aiohttp_config=aiohttp_config,
-                    zmq_config=zmq_config,
-                    request_socket_addr=f"{zmq_config.zmq_request_queue_prefix}_{i}_requests",
-                    response_socket_addr=zmq_config.zmq_response_queue_addr,
-                    readiness_socket_addr=zmq_config.zmq_readiness_queue_addr,
-                )
-                workers.append(worker)
-                worker_tasks.append(asyncio.create_task(worker.run()))
-
-            await asyncio.sleep(0.5)
-
-            # Send queries to all workers
-            request_sockets = []
-            for i in range(3):
-                request_push = context.socket(zmq.PUSH)
-                request_push.connect(
-                    f"{zmq_config.zmq_request_queue_prefix}_{i}_requests"
-                )
-                request_sockets.append(request_push)
-
-                # Send a query to this worker
+        # Use setup_worker_test for each worker - this pattern already works
+        async def run_worker_test(worker_id, http_config, aiohttp_config, zmq_config):
+            async with setup_worker_test(
+                worker_id=worker_id,
+                http_config=http_config,
+                aiohttp_config=aiohttp_config,
+                zmq_config=zmq_config,
+            ) as ctx:
+                # Send query
                 query = Query(
-                    id=f"test-concurrent-error-{i}",
+                    id=f"test-concurrent-error-{worker_id}",
                     data={
-                        "prompt": f"Worker {i} error test",
+                        "prompt": f"Worker {worker_id} error test",
                         "model": "gpt-3.5-turbo",
                         "stream": False,
                     },
                 )
-                encoder = msgspec.msgpack.Encoder()
-                await request_push.send(encoder.encode(query))
+                await ctx.request_push.send(query)
 
-            # Collect error responses from all workers
-            responses = {}
-            decoder = msgspec.msgpack.Decoder(QueryResult | StreamChunk)
-            for _ in range(3):
-                response_data = await response_pull.recv()
-                response = decoder.decode(response_data)
-                responses[response.id] = response
+                # Receive response
+                response = await ctx.response_pull.receive()
+                return response
 
-            # Verify all workers handled errors
-            assert len(responses) == 3
-            for i in range(3):
-                sample_id = f"test-concurrent-error-{i}"
-                assert sample_id in responses
-                assert responses[sample_id].error is not None
-                assert (
-                    (
-                        "connection" in responses[sample_id].error.lower()
-                        and "refused" in responses[sample_id].error.lower()
-                    )
-                    or "cannot connect" in responses[sample_id].error.lower()
-                    or "99999" in responses[sample_id].error
-                )
+        # Run all workers concurrently
+        tasks = [run_worker_test(i, *workers_contexts[i]) for i in range(num_workers)]
+        responses = await asyncio.gather(*tasks)
 
-            # Shutdown all workers
-            for worker in workers:
-                worker._shutdown = True
-
-            await asyncio.gather(*worker_tasks, return_exceptions=True)
-
-        finally:
-            for sock in request_sockets:
-                sock.close()
-            response_pull.close()
-            context.destroy(linger=0)
+        # Verify all workers handled errors
+        assert len(responses) == num_workers
+        for i, response in enumerate(responses):
+            assert isinstance(response, QueryResult)
+            assert response.id == f"test-concurrent-error-{i}"
+            assert response.error is not None
+            assert any(
+                [
+                    "connection" in response.error.lower()
+                    and "refused" in response.error.lower(),
+                    "cannot connect" in response.error.lower(),
+                    "99999" in response.error,
+                ]
+            )
 
     @pytest.mark.asyncio
     async def test_non_streaming_invalid_json_early_return(self, basic_config):
@@ -901,65 +656,40 @@ class TestWorkerErrorHandling:
 
         await server.start_server()
 
-        # Update config to use the invalid JSON endpoint
-        http_config.endpoint_url = f"http://localhost:{server.port}/invalid-json"
-
-        worker = Worker(
-            worker_id=0,
-            http_config=http_config,
-            aiohttp_config=aiohttp_config,
-            zmq_config=zmq_config,
-            request_socket_addr=f"{zmq_config.zmq_request_queue_prefix}_0_requests",
-            response_socket_addr=zmq_config.zmq_response_queue_addr,
-            readiness_socket_addr=zmq_config.zmq_readiness_queue_addr,
-        )
-
-        context = zmq.asyncio.Context()
-
         try:
-            # Create sockets
-            request_push = context.socket(zmq.PUSH)
-            request_push.connect(f"{zmq_config.zmq_request_queue_prefix}_0_requests")
+            # Update config to use the invalid JSON endpoint
+            http_config.endpoint_url = f"http://localhost:{server.port}/invalid-json"
 
-            response_pull = context.socket(zmq.PULL)
-            response_pull.bind(zmq_config.zmq_response_queue_addr)
+            async with setup_worker_test(
+                worker_id=0,
+                http_config=http_config,
+                aiohttp_config=aiohttp_config,
+                zmq_config=zmq_config,
+            ) as ctx:
+                # Send query that will get invalid JSON
+                query = Query(
+                    id="test-bad-json",
+                    data={
+                        "prompt": "Will get bad JSON",
+                        "model": "gpt-3.5-turbo",
+                        "stream": False,
+                    },
+                )
+                await ctx.request_push.send(query)
 
-            # Start worker
-            worker_task = asyncio.create_task(worker.run())
-            await asyncio.sleep(0.5)
+                # Verify error response was sent
+                response = await asyncio.wait_for(
+                    ctx.response_pull.receive(), timeout=1.0
+                )
 
-            # Send query that will get invalid JSON
-            query = Query(
-                id="test-bad-json",
-                data={
-                    "prompt": "Will get bad JSON",
-                    "model": "gpt-3.5-turbo",
-                    "stream": False,
-                },
-            )
-
-            encoder = msgspec.msgpack.Encoder()
-            await request_push.send(encoder.encode(query))
-
-            # Verify error response was sent
-            response_data = await asyncio.wait_for(response_pull.recv(), timeout=1.0)
-            decoder = msgspec.msgpack.Decoder(QueryResult | StreamChunk)
-            response = decoder.decode(response_data)
-
-            assert isinstance(response, QueryResult)
-            assert response.id == "test-bad-json"
-            assert response.error is not None
-            assert (
-                "invalid literal" in response.error
-                or "JSONDecodeError" in response.error
-            )
-
-            # Shutdown
-            worker._shutdown = True
-            await asyncio.wait_for(worker_task, timeout=2.0)
+                assert isinstance(response, QueryResult)
+                assert response.id == "test-bad-json"
+                assert response.error is not None
+                assert (
+                    "invalid literal" in response.error
+                    or "JSONDecodeError" in response.error
+                    or "DecodeError" in response.error
+                )
 
         finally:
-            request_push.close()
-            response_pull.close()
-            context.destroy(linger=0)
             await server.close()

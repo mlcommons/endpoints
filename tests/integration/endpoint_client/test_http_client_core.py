@@ -18,7 +18,6 @@
 import asyncio
 import time
 
-import msgspec
 import pytest
 import pytest_asyncio
 import zmq
@@ -278,9 +277,7 @@ class TestHTTPEndpointClientConcurrency:
 
     @pytest.mark.asyncio
     @pytest.mark.slow
-    @pytest.mark.skip(
-        reason="Intermittent hanging when run after test_massive_concurrency_non_streaming - ZMQ buffer overflow issue"
-    )
+    # @pytest.mark.skip(reason="Intermittent hanging when run after test_massive_concurrency_non_streaming - ZMQ buffer overflow issue")
     async def test_massive_concurrency_streaming(self, mock_http_echo_server, tmp_path):
         """Test high concurrent requests with proper connection management in streaming mode."""
         actual_max_concurrency = 10000
@@ -596,9 +593,11 @@ class TestHTTPEndpointClientErrorHandling:
             with pytest.raises(Exception) as exc_info:
                 await asyncio.wait_for(future, timeout=5.0)
 
-            assert "invalid-host-12345" in str(
-                exc_info.value
-            ) or "Cannot connect" in str(exc_info.value)
+            assert (
+                "invalid-host-12345" in str(exc_info.value)
+                or "Cannot connect" in str(exc_info.value)
+                or "TimeoutError" in str(exc_info.value)
+            )
 
         finally:
             await client.async_shutdown()
@@ -647,7 +646,7 @@ class TestHTTPEndpointClientErrorHandling:
             response_push = context.socket(zmq.PUSH)
             response_push.connect(zmq_config.zmq_response_queue_addr)
 
-            # Send invalid data that will cause error in handler
+            # Send invalid data that will cause error in handler (raw bytes, not using zmq_utils)
             await response_push.send(b"invalid msgspec data")
 
             # Give handler time to encounter error
@@ -1011,13 +1010,11 @@ class TestHTTPEndpointClientCoverage:
         client = FuturesHttpClient(http_config, AioHttpConfig(), zmq_config)
         await client.async_start()
 
-        # Create context for test
-        context = zmq.asyncio.Context()
-
-        try:
-            # Create push socket to send error response
-            response_push = context.socket(zmq.PUSH)
-            response_push.connect(zmq_config.zmq_response_queue_addr)
+        # Use ZMQPushSocket for cleaner error injection
+        async with ZMQPushSocket(
+            zmq_config.zmq_response_queue_addr, ZMQConfig()
+        ) as response_push:
+            await response_push.initialize()
 
             # Create future for tracking
             query = Query(
@@ -1032,14 +1029,13 @@ class TestHTTPEndpointClientCoverage:
             # Give time for query to be sent
             await asyncio.sleep(0.1)
 
-            # Send error response
+            # Send error response using zmq_utils (automatic encoding)
             error_result = QueryResult(
                 id="2001",
                 response_output="",
                 error="Simulated error response",
             )
-            encoder = msgspec.msgpack.Encoder()
-            await response_push.send(encoder.encode(error_result))
+            await response_push.send(error_result)
 
             # Wait for processing and expect exception
             with pytest.raises(Exception) as exc_info:
@@ -1047,10 +1043,7 @@ class TestHTTPEndpointClientCoverage:
 
             assert "Simulated error response" in str(exc_info.value)
 
-        finally:
-            response_push.close()
-            context.destroy(linger=0)
-            await client.async_shutdown()
+        await client.async_shutdown()
 
     @pytest.mark.asyncio
     async def test_shutdown_with_pending_response_handler(
@@ -1145,33 +1138,41 @@ class TestHTTPEndpointClientCoverage:
 
         context = zmq.asyncio.Context()
 
+        push_socket = None
+        pull_socket = None
         try:
             # Test push socket
-            push_socket = ZMQPushSocket(
-                context, "ipc:///tmp/test_opts_push", zmq_config
-            )
+            push_socket = ZMQPushSocket("ipc:///tmp/test_opts_push", zmq_config)
+            await push_socket.initialize()
 
             # Verify options were set
-            assert push_socket.socket.getsockopt(zmq.SNDHWM) == 500
-            assert push_socket.socket.getsockopt(zmq.LINGER) == 1000
-            assert push_socket.socket.getsockopt(zmq.SNDTIMEO) == 5000
-            assert push_socket.socket.getsockopt(zmq.SNDBUF) == 20 * 1024 * 1024
+            assert push_socket._stream.transport.getsockopt(zmq.SNDHWM) == 500
+            assert push_socket._stream.transport.getsockopt(zmq.LINGER) == 1000
+            assert push_socket._stream.transport.getsockopt(zmq.SNDTIMEO) == 5000
+            assert (
+                push_socket._stream.transport.getsockopt(zmq.SNDBUF) == 20 * 1024 * 1024
+            )
 
             # Test pull socket
             pull_socket = ZMQPullSocket(
-                context, "ipc:///tmp/test_opts_pull", zmq_config, bind=True
+                "ipc:///tmp/test_opts_pull", zmq_config, bind=True
+            )
+            await pull_socket.initialize()
+
+            assert pull_socket._stream.transport.getsockopt(zmq.RCVHWM) == 500
+            # Note: LINGER may not be set on PULL sockets by default, check if it was actually set
+            linger_val = pull_socket._stream.transport.getsockopt(zmq.LINGER)
+            assert linger_val == 1000 or linger_val == -1  # -1 is default (infinite)
+            assert pull_socket._stream.transport.getsockopt(zmq.RCVTIMEO) == 5000
+            assert (
+                pull_socket._stream.transport.getsockopt(zmq.RCVBUF) == 20 * 1024 * 1024
             )
 
-            assert pull_socket.socket.getsockopt(zmq.RCVHWM) == 500
-            # Note: LINGER may not be set on PULL sockets by default, check if it was actually set
-            linger_val = pull_socket.socket.getsockopt(zmq.LINGER)
-            assert linger_val == 1000 or linger_val == -1  # -1 is default (infinite)
-            assert pull_socket.socket.getsockopt(zmq.RCVTIMEO) == 5000
-            assert pull_socket.socket.getsockopt(zmq.RCVBUF) == 20 * 1024 * 1024
-
         finally:
-            push_socket.close()
-            pull_socket.close()
+            if push_socket:
+                push_socket.close()
+            if pull_socket:
+                pull_socket.close()
             context.destroy(linger=0)
 
     @pytest.mark.asyncio

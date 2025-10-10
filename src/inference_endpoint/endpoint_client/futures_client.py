@@ -18,8 +18,6 @@
 import asyncio
 import logging
 
-import zmq.asyncio
-
 from inference_endpoint.core.types import Query, QueryResult, StreamChunk
 from inference_endpoint.endpoint_client.http_client import HTTPEndpointClient
 from inference_endpoint.endpoint_client.worker import WorkerManager
@@ -66,10 +64,7 @@ class FuturesHttpClient(HTTPEndpointClient):
             # Set loop to current running loop
             self.loop = asyncio.get_running_loop()
 
-            # Initialize ZMQ, workers, and sockets (parent's async_start without loop creation)
-            self.zmq_context = zmq.asyncio.Context(
-                io_threads=self.zmq_config.zmq_io_threads
-            )
+            # Initialize ZMQ, workers, and sockets
             self._shutdown_event = asyncio.Event()
 
             if self.config.max_concurrency > 0:
@@ -79,16 +74,15 @@ class FuturesHttpClient(HTTPEndpointClient):
 
             for i in range(self.config.num_workers):
                 address = f"{self.zmq_config.zmq_request_queue_prefix}_{i}_requests"
-                push_socket = ZMQPushSocket(self.zmq_context, address, self.zmq_config)
+                push_socket = await ZMQPushSocket.create(address, self.zmq_config)
                 self.worker_push_sockets.append(push_socket)
 
             self.worker_manager = WorkerManager(
-                self.config, self.aiohttp_config, self.zmq_config, self.zmq_context
+                self.config, self.aiohttp_config, self.zmq_config
             )
             await self.worker_manager.initialize()
 
-            self._response_socket = ZMQPullSocket(
-                self.zmq_context,
+            self._response_socket = await ZMQPullSocket.create(
                 self.zmq_config.zmq_response_queue_addr,
                 self.zmq_config,
                 bind=True,

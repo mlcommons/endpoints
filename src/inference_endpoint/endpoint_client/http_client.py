@@ -20,10 +20,6 @@ import logging
 import threading
 import uuid
 
-import uvloop
-import zmq
-import zmq.asyncio
-
 from inference_endpoint.core.types import Query, QueryResult, StreamChunk
 from inference_endpoint.endpoint_client.configs import (
     AioHttpConfig,
@@ -32,9 +28,7 @@ from inference_endpoint.endpoint_client.configs import (
 )
 from inference_endpoint.endpoint_client.worker import WorkerManager
 from inference_endpoint.endpoint_client.zmq_utils import ZMQPullSocket, ZMQPushSocket
-
-# required for ZMQ context to work with uvloop
-asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+from inference_endpoint.profiling.event_loop_profiler import new_event_loop
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +73,6 @@ class HTTPEndpointClient:
         self.loop: asyncio.AbstractEventLoop | None = None
         self.loop_thread: threading.Thread | None = None
 
-        self.zmq_context: zmq.asyncio.Context | None = None
         self.worker_push_sockets: list[ZMQPushSocket] = []
         self.worker_manager: WorkerManager | None = None
         self.current_worker_idx = 0
@@ -93,7 +86,7 @@ class HTTPEndpointClient:
     def start(self):
         """Start event loop thread and initialize client."""
         try:
-            self.loop = uvloop.new_event_loop()
+            self.loop = new_event_loop()
             asyncio.set_event_loop(self.loop)
 
             self.loop_thread = threading.Thread(
@@ -110,9 +103,6 @@ class HTTPEndpointClient:
 
     async def async_start(self):
         """Initialize ZMQ, workers, and sockets."""
-        self.zmq_context = zmq.asyncio.Context(
-            io_threads=self.zmq_config.zmq_io_threads
-        )
         self._shutdown_event = asyncio.Event()
 
         if self.config.max_concurrency > 0:
@@ -120,20 +110,22 @@ class HTTPEndpointClient:
 
         for i in range(self.config.num_workers):
             address = f"{self.zmq_config.zmq_request_queue_prefix}_{i}_requests"
-            push_socket = ZMQPushSocket(self.zmq_context, address, self.zmq_config)
+            push_socket = await ZMQPushSocket.create(
+                address, self.zmq_config, loop=self.loop
+            )
             self.worker_push_sockets.append(push_socket)
 
         self.worker_manager = WorkerManager(
-            self.config, self.aiohttp_config, self.zmq_config, self.zmq_context
+            self.config, self.aiohttp_config, self.zmq_config
         )
         await self.worker_manager.initialize()
 
-        self._response_socket = ZMQPullSocket(
-            self.zmq_context,
+        self._response_socket = await ZMQPullSocket.create(
             self.zmq_config.zmq_response_queue_addr,
             self.zmq_config,
             bind=True,
             decoder_type=QueryResult | StreamChunk,
+            loop=self.loop,
         )
 
     def issue_query(self, query: Query) -> None:
@@ -217,6 +209,4 @@ class HTTPEndpointClient:
         if self.worker_manager:
             await self.worker_manager.shutdown()
 
-        if self.zmq_context:
-            self.zmq_context.destroy(linger=0)
         logger.info("HTTP endpoint client shutdown complete.")
