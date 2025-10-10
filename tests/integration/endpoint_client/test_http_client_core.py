@@ -693,6 +693,10 @@ class TestHTTPEndpointClientErrorHandling:
                     )
                     self._original_socket = original_socket
 
+                @property
+                def is_closed(self):
+                    return False
+
                 async def send(self, data):
                     raise Exception("ZMQ send failed")
 

@@ -74,6 +74,7 @@ class FuturesHttpClient(HTTPEndpointClient):
             self.zmq_config.zmq_response_queue_addr,
             self.zmq_config,
             bind=True,
+            decoder_type=QueryResult | StreamChunk,
         )
 
         # Schedule response handler in current loop
