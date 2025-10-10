@@ -1,0 +1,240 @@
+---
+globs: **/*.py
+alwaysApply: false
+---
+Try avoid these performance antipatterns in python code you write:
+
+
+Anti-Pattern Benchmark Suite, repeat=5, number=5
+┏━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━┳━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━┓
+┃ Pattern ┃                                         Benchmark ┃  ┃ Min     ┃ Max     ┃ Mean    ┃ Min (+)         ┃ Max (+)         ┃ Mean (+)        ┃
+┡━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━╇━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━┩
+│       1 │                               Copy slice to Local │  │ 0.200   │ 0.230   │ 0.209   │ 0.132 (33.8%)   │ 0.224 (2.7%)    │ 0.156 (25.4%)   │
+│       2 │                                Copy name to Local │  │ 0.117   │ 0.130   │ 0.122   │ 0.084 (28.3%)   │ 0.089 (31.5%)   │ 0.086 (29.6%)   │
+│       3 │                           Copy dict item to Local │  │ 0.184   │ 0.257   │ 0.219   │ 0.085 (53.9%)   │ 0.092 (64.1%)   │ 0.088 (59.7%)   │
+│       4 │                          Copy class attr to Local │  │ 0.146   │ 0.149   │ 0.148   │ 0.058 (60.0%)   │ 0.060 (59.7%)   │ 0.059 (59.9%)   │
+│       5 │      Importing specific name instead of namespace │  │ 0.000   │ 0.000   │ 0.000   │ 0.000 (2.9%)    │ 0.000 (40.4%)   │ 0.000 (15.7%)   │
+│       6 │          Slicing with memoryview instead of bytes │  │ 0.001   │ 0.001   │ 0.001   │ 0.000 (40.0%)   │ 0.001 (23.0%)   │ 0.001 (34.9%)   │
+│       7 │                   **Kwargs for known keyword args │  │ 0.000   │ 0.000   │ 0.000   │ 0.000 (38.1%)   │ 0.000 (29.9%)   │ 0.000 (35.2%)   │
+│       8 │                                    Tiny Functions │  │ 0.000   │ 0.000   │ 0.000   │ 0.000 (60.7%)   │ 0.000 (55.8%)   │ 0.000 (58.6%)   │
+│       9 │                        Class instead of dataclass │  │ 0.548   │ 0.654   │ 0.596   │ 0.279 (49.0%)   │ 0.306 (53.1%)   │ 0.295 (50.4%)   │
+│      10 │                   Namedtuple instead of dataclass │  │ 0.556   │ 0.648   │ 0.578   │ 0.394 (29.0%)   │ 0.539 (16.7%)   │ 0.432 (25.2%)   │
+│      11 │                       class instead of namedtuple │  │ 0.433   │ 0.516   │ 0.465   │ 0.293 (32.3%)   │ 0.315 (39.0%)   │ 0.303 (34.9%)   │
+│      12 │            namedtuple class instead of namedtuple │  │ 0.383   │ 0.392   │ 0.387   │ 0.395 (-3.2%)   │ 0.422 (-7.6%)   │ 0.405 (-4.8%)   │
+│      13 │                             dict instead of class │  │ 0.288   │ 0.307   │ 0.294   │ 0.318 (-10.6%)  │ 0.375 (-22.1%)  │ 0.345 (-17.3%)  │
+│      14 │                                  class with slots │  │ 0.327   │ 0.427   │ 0.360   │ 0.257 (21.4%)   │ 0.298 (30.3%)   │ 0.275 (23.7%)   │
+│      15 │                              dataclass with slots │  │ 0.561   │ 0.611   │ 0.593   │ 0.523 (6.8%)    │ 0.588 (3.7%)    │ 0.552 (7.0%)    │
+│      16 │ Using a list comprehension to filter another list │  │ 0.029   │ 0.030   │ 0.029   │ 0.022 (24.7%)   │ 0.025 (14.8%)   │ 0.023 (21.6%)   │
+│      17 │            Refactoring Try..except outside a loop │  │ 0.020   │ 0.020   │ 0.020   │ 0.018 (11.0%)   │ 0.019 (8.4%)    │ 0.018 (10.6%)   │
+└─────────┴───────────────────────────────────────────────────┴──┴─────────┴─────────┴─────────┴─────────────────┴─────────────────┴─────────────────┘
+
+
+Explanations:
+
+**1. Copy slice to Local**
+- **Anti-pattern:** Accessing elements directly in a loop, instead of copying them to local variables.
+- **Why it's slower:** Local variable access is faster than repeated indexing.
+- ```python
+# Slower
+for n in range(100000):
+    x[n] + y[n]
+# Faster
+i = x[n]
+j = y[n]
+for n in range(100000):
+    i + j
+```
+
+**2. Copy name to Local**
+- **Anti-pattern:** Directly accessing global variables inside a tight loop.
+- **Why it's slower:** Each access goes up the scope chain; local assignment is faster.
+- ```python
+# Slower
+for _ in range(100000):
+    x + y
+# Faster
+i = x
+j = y
+for _ in range(100000):
+    i + j
+```
+
+**3. Copy dict item to Local**
+- **Anti-pattern:** Repeatedly accessing dictionary keys inside a loop.
+- **Why it's slower:** Dict lookups are costly compared to local variables.
+- ```python
+# Slower
+for _ in range(100000):
+    d["x"] + d["y"]
+# Faster
+i = d["x"]
+j = d["y"]
+for _ in range(100000):
+    i + j
+```
+
+**4. Copy class attr to Local**
+- **Anti-pattern:** Repeatedly accessing object attributes in loops.
+- **Why it's slower:** Attribute lookups have overhead; local variables are faster.
+- ```python
+# Slower
+for _ in range(100000):
+    foo.x + foo.y
+# Faster
+i = foo.x
+j = foo.y
+for _ in range(100000):
+    i + j
+```
+
+**5. Importing specific name instead of namespace**
+- **Anti-pattern:** Using `from module import name` vs. importing the whole module.
+- **Why it matters:** Direct imports can sometimes bypass attribute lookup, but are contextually less flexible.
+- ```python
+# Preferred (specific name import, may be faster)
+from os.path import exists
+exists('/')
+# Namespace (slower in tight loops)
+import os
+os.path.exists('/')
+```
+
+**6. Slicing with memoryview instead of bytes**
+- **Anti-pattern:** Slicing a `memoryview` instead of plain bytes.
+- **Why it's slower:** Creating a `memoryview` may introduce overhead for simple slicing tasks.
+- ```python
+# Slower
+word = memoryview(b'A' * 1000)
+n = word[0:10]
+# Faster
+word = b'A' * 1000
+n = word[0:10]
+```
+
+**7. \*\*Kwargs for known keyword args**
+- **Anti-pattern:** Using `**kwargs` in functions where argument names are known and fixed.
+- **Why it's slower:** Dictionary unpacking is slower than positional or named arguments.
+- ```python
+# Slower
+def func(**kwargs): return kwargs['a'] + kwargs['b']
+func(a=1, b=2)
+# Faster
+def func(a, b): return a + b
+func(a=1, b=2)
+```
+
+**8. Tiny Functions**
+- **Anti-pattern:** Defining very small functions that are only used in tight loops.
+- **Why it's slower:** Function call overhead is non-negligible for tiny operations.
+- ```python
+# Slower
+def add(x, y): return x + y
+for n in range(100000): add(x, n)
+# Faster
+for n in range(100000): x + n
+```
+
+**9. Class instead of dataclass**
+- **Anti-pattern:** Using a regular class for data storage vs. using a dataclass/namedtuple.
+- **Why it's slower:** Dataclass/namedtuple provide faster instantiation and attribute lookup.
+- ```python
+# Slower
+class Pet:
+    def __init__(self, legs, noise): ...
+dog = Pet(4, "woof")
+# Faster
+@dataclass
+class Pet: legs: int; noise: str
+dog = Pet(4, "woof")
+```
+
+**10. Namedtuple instead of dataclass**
+- **Comparison:** Namedtuple vs. dataclass for storing simple data.
+- **Why:** Dataclass is more flexible, but namedtuple can be marginally quicker in strict scenarios.
+- ```python
+# Namedtuple
+Pet = namedtuple("Pet", "legs noise")
+dog = Pet(4, "woof")
+# Dataclass
+@dataclass
+class Pet: legs: int; noise: str
+dog = Pet(4, "woof")
+```
+
+**11. class instead of namedtuple**
+- **Anti-pattern:** Using a custom class when a namedtuple suffices.
+- **Why it's slower:** Namedtuple has optimized memory and attribute access.
+- ```python
+# Slower
+class Pet: ...
+# Faster
+Pet = namedtuple("Pet", "legs noise")
+```
+
+**12. namedtuple class instead of namedtuple**
+- **Comparison:** Using `typing.NamedTuple` base class vs. classic namedtuple.
+- **Why:** Classic namedtuple can be faster for very simple cases.
+- ```python
+# Typing NamedTuple
+class Pet(NamedTuple): legs: int; noise: str
+# Classic namedtuple
+Pet = namedtuple("Pet", "legs noise")
+```
+
+**13. dict instead of class**
+- **Anti-pattern:** Using dictionaries for structured data vs. object with attributes.
+- **Why:** Attribute access on class is quicker and more readable.
+- ```python
+# Slower
+dog = {"legs": 4, "noise": "woof"}
+# Faster
+class Pet: ...
+dog = Pet(4, "woof")
+```
+
+**14. class with slots**
+- **Pattern:** Use `__slots__` to avoid per-instance `__dict__` and save memory.
+- ```python
+class Pet:
+    __slots__ = ['legs', 'noise']
+```
+
+**15. dataclass with slots**
+- **Pattern:** Use `@dataclass(slots=True)` for faster attribute access and less memory.
+- ```python
+@dataclass(slots=True)
+class Pet:
+    legs: int
+    noise: str
+```
+
+**16. Using a list comprehension to filter another list**
+- **Anti-pattern:** Filtering with a loop instead of a list comprehension.
+- **Why:** Comprehensions are faster and more Pythonic.
+- ```python
+# Slower
+result = []
+for i in inputs:
+    if i % 2:
+        result.append(i)
+
+# Faster
+result = [i for i in inputs if i % 2]
+```
+
+**17. Refactoring Try..except outside a loop**
+- **Anti-pattern:** Placing try/except inside the loop rather than wrapping the loop.
+- **Why:** Fewer exception handler setups if wrapped outside.
+- ```python
+# Slower
+for _ in items:
+    try: _ = items['a']
+    except Exception: pass
+
+# Faster
+try:
+    for _ in items:
+        _ = items['a']
+except Exception:
+    pass
+```
