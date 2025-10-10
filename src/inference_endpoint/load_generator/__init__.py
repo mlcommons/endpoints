@@ -16,7 +16,8 @@ from typing import Any
 
 from ..config.ruleset import RuntimeSettings
 from ..utils import sleep_ns
-from .scheduler import Sample, SampleEvent, Scheduler
+from .events import SampleEvent
+from .scheduler import Sample, Scheduler
 
 
 class SampleIssuer(ABC):
