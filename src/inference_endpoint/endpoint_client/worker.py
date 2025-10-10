@@ -30,7 +30,7 @@ from inference_endpoint.endpoint_client.configs import (
 from inference_endpoint.endpoint_client.zmq_utils import ZMQPullSocket, ZMQPushSocket
 from inference_endpoint.openai.openai_adapter import OpenAIAdapter, SSEMessage
 from inference_endpoint.openai.openai_types_gen import CreateChatCompletionResponse
-from inference_endpoint.profiling import profile
+from inference_endpoint.profiling import profile, profiler_check_subprocess
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +58,11 @@ def worker_main(
     readiness_queue_addr: str,
 ):
     """Entry point for worker process."""
+    # Check if we're in a subprocess and reinitialize profiler if needed
+    # This handles both fork and spawn multiprocessing modes
+    # This must be done FIRST, before any other profiling calls
+    profiler_check_subprocess()
+
     # Configure logging for worker process
     logging.basicConfig(
         level=logging.INFO,
