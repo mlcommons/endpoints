@@ -1,5 +1,7 @@
+import re
 import time
 
+import msgspec
 from inference_endpoint.core.types import Query, QueryResult
 
 from .openai_types_gen import (
@@ -18,8 +20,32 @@ from .openai_types_gen import (
 )
 
 
+# msgspec structs for typed SSE message parsing (OpenAI streaming format)
+class SSEDelta(msgspec.Struct):
+    """SSE delta object containing content."""
+
+    content: str = ""
+
+
+class SSEChoice(msgspec.Struct):
+    """SSE choice object containing delta."""
+
+    delta: SSEDelta = msgspec.field(default_factory=SSEDelta)
+    finish_reason: str | None = None
+
+
+class SSEMessage(msgspec.Struct):
+    """SSE message structure for OpenAI streaming responses."""
+
+    choices: list[SSEChoice] = msgspec.field(default_factory=list)
+
+
 class OpenAIAdapter:
     """Adapter for OpenAI API."""
+
+    # Pre-compiled regex for extracting SSE data fields with JSON content
+    # Matches "data: {json content}" and captures the JSON part
+    SSE_DATA_PATTERN = re.compile(rb"data:\s*(\{[^\n]+\})", re.MULTILINE)
 
     @staticmethod
     def to_openai_request(query: Query) -> CreateChatCompletionRequest:

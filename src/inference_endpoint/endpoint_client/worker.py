@@ -12,6 +12,7 @@ from multiprocessing import Process
 from typing import Any
 
 import aiohttp
+import msgspec
 import orjson
 import zmq
 import zmq.asyncio
@@ -27,11 +28,9 @@ from inference_endpoint.endpoint_client.configs import (
     ZMQConfig,
 )
 from inference_endpoint.endpoint_client.zmq_utils import ZMQPullSocket, ZMQPushSocket
-from inference_endpoint.openai.openai_adapter import OpenAIAdapter
+from inference_endpoint.openai.openai_adapter import OpenAIAdapter, SSEMessage
 from inference_endpoint.openai.openai_types_gen import CreateChatCompletionResponse
-from inference_endpoint.profiling import is_enabled as profiling_is_enabled
 from inference_endpoint.profiling import profile
-from inference_endpoint.profiling import shutdown as profiler_shutdown
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +40,7 @@ logger = logging.getLogger(__name__)
 # - Slower startup (re-import modules) vs fork's copy-on-write
 # - Requires pickling (can't use local functions in worker_main)
 # - This is the recommended approach for async + multiprocessing applications
+# - uvloop requires use of 'spawn'
 try:
     multiprocessing.set_start_method("spawn", force=False)
 except RuntimeError:
@@ -61,18 +61,15 @@ def worker_main(
     # Configure logging for worker process
     logging.basicConfig(
         level=logging.INFO,
-        format=f"[Worker-{worker_id}] %(levelname)-5s - %(message)s (%(module)s:%(lineno)d)",
+        format=f"[Worker-{worker_id}-{os.getpid()}] %(levelname)-5s - %(message)s (%(module)s:%(lineno)d)",
         force=True,
     )
     logger = logging.getLogger(__name__)
 
     # Install uvloop which also enables it
-    try:
-        import uvloop
+    import uvloop
 
-        uvloop.install()
-    except ImportError:
-        logger.info("uvloop not available, using default event loop")
+    uvloop.install()
 
     # Create and run worker
     try:
@@ -86,14 +83,9 @@ def worker_main(
             readiness_socket_addr=readiness_queue_addr,
         )
 
-        # Log if profiling is enabled
-        if profiling_is_enabled():
-            logger.info(
-                f"Profiling enabled for worker {worker_id} (PID: {os.getpid()})"
-            )
+        # Run event loop
+        uvloop.run(worker.run())
 
-        # Run event loop - worker handles its own signals and cleanup
-        asyncio.run(worker.run())
     except Exception as e:
         logger.error(
             f"Worker {worker_id} crashed: {type(e).__name__}: {str(e)}\n{traceback.format_exc()}"
@@ -123,14 +115,20 @@ class Worker:
         self.response_socket_addr = response_socket_addr
         self.readiness_socket_addr = readiness_socket_addr
         self._shutdown = False
-        self._session: aiohttp.ClientSession | None = None
+
         self._zmq_context: zmq.asyncio.Context | None = None
         self._request_socket: ZMQPullSocket | None = None
         self._response_socket: ZMQPushSocket | None = None
         self._readiness_socket: ZMQPushSocket | None = None
+
+        self._session: aiohttp.ClientSession | None = None
         self.tcp_connector: aiohttp.TCPConnector | None = None
+
         # Track active request tasks
         self._active_tasks: set[asyncio.Task] = set()
+
+        # Reusable typed decoder for SSE chunk parsing (struct access faster than dict)
+        self._sse_decoder: msgspec.json.Decoder = msgspec.json.Decoder(SSEMessage)
 
     async def run(self) -> None:
         """Main worker loop - pull requests, execute, push responses."""
@@ -138,7 +136,11 @@ class Worker:
             # Initialize ZMQ context and sockets
             self._zmq_context = zmq.asyncio.Context()
             self._request_socket = ZMQPullSocket(
-                self._zmq_context, self.request_socket_addr, self.zmq_config, bind=True
+                self._zmq_context,
+                self.request_socket_addr,
+                self.zmq_config,
+                bind=True,
+                decoder_type=Query,
             )
             self._response_socket = ZMQPushSocket(
                 self._zmq_context, self.response_socket_addr, self.zmq_config
@@ -160,6 +162,7 @@ class Worker:
                 connector=self.tcp_connector,
                 connector_owner=False,  # owned by Worker
                 skip_auto_headers=self.aiohttp_config.skip_auto_headers,
+                json_serialize=lambda obj: orjson.dumps(obj).decode("utf-8"),
             )
 
             # Signal handlers for graceful shutdown
@@ -232,14 +235,21 @@ class Worker:
         await self._response_socket.send(error_response)
 
     @profile
-    async def _make_http_request(
-        self, query: Query
-    ) -> AsyncGenerator[aiohttp.ClientResponse, None]:
+    async def _make_http_request(self, query: Query):
         """
-        Common HTTP request setup and execution.
+        Common HTTP request setup and execution as async generator.
 
         Yields the response object if status is 200.
         Handles error cases and sends error responses.
+        Auto-closes response when context exits.
+
+        NOTE:
+        Does not use @asynccontextmanager (which allows "async with" syntax)
+        This is done to avoid context manager overhead.
+
+        Usage:
+            async for response in self._make_http_request(query):
+                # use response
         """
         # Check if we're shutting down or session is closed
         if self._shutdown or not self._session:
@@ -248,14 +258,10 @@ class Worker:
 
         url = self.http_config.endpoint_url
         headers = query.headers if hasattr(query, "headers") else {}
-        payload = OpenAIAdapter.to_openai_request(query).model_dump(mode="json")
-        payload["id"] = query.id
+        payload = OpenAIAdapter.to_openai_request(query).model_dump()
 
-        async with self._session.post(
-            url,
-            json=payload,
-            headers=headers,
-        ) as response:
+        # Issue the request
+        async with self._session.post(url, json=payload, headers=headers) as response:
             if response.status != 200:
                 error_text = await response.text()
                 await self._handle_error(
@@ -277,80 +283,86 @@ class Worker:
             await self._handle_error(query.id, e)
 
     @profile
-    async def _iter_sse_lines(
-        self, response: aiohttp.ClientResponse
-    ) -> AsyncGenerator[str, None]:
-        """
-        Iterate over complete SSE lines from response stream.
+    def _parse_sse_chunk(self, buffer: bytes, end_pos: int) -> list[str]:
+        """Parse SSE chunk and extract content using msgspec typed decode."""
+        json_docs = OpenAIAdapter.SSE_DATA_PATTERN.findall(buffer[:end_pos])
 
-        Handles incomplete lines at chunk boundaries by buffering until
-        a newline is encountered.
-        """
-        incomplete_line = ""
+        parsed_contents = []
+        try:
+            for json_doc in json_docs:
+                msg = self._sse_decoder.decode(json_doc)
+                parsed_contents.append(msg.choices[0].delta.content)
+        except Exception:
+            # Normal for non-content SSE messages (role, finish_reason, etc)
+            pass
 
-        async for chunk in response.content.iter_any():
-            # Prepend any incomplete line from previous chunk
-            text = incomplete_line + chunk.decode("utf-8")
-
-            # Split by newline - last element may be incomplete
-            lines = text.split("\n")
-
-            # Save last element (might be incomplete if no trailing \n)
-            incomplete_line = lines.pop(-1)
-
-            # Yield all complete lines (everything except the last element)
-            for line in lines:
-                yield line
-
-        # After stream ends, yield any remaining incomplete line
-        if incomplete_line:
-            yield incomplete_line
+        return parsed_contents
 
     @profile
-    def _parse_sse_line(self, line: str) -> tuple[str, bool]:
+    async def _iter_sse_lines(
+        self, response: aiohttp.ClientResponse
+    ) -> AsyncGenerator[list[str], None]:
         """
-        Parse an SSE line and extract content.
-        Raise on JSON decode error.
+        Iterate over complete SSE chunks (events) from response stream.
 
-        Returns:
-            tuple: (content, is_done) where content is the extracted text and is_done signals [DONE].
+        SSE events are delimited by double newlines (\\n\\n).
+        Handles incomplete chunks at boundaries by buffering until
+        a complete event is encountered.
+
+        Yields all complete chunks from a single network read as a batch,
+        with content extracted from each SSE event, to reduce async
+        suspend/resume overhead.
         """
-        line = line.strip()
-        if not line or not line.startswith("data: "):
-            return "", False
+        incomplete_chunk = b""
 
-        data_str = line[6:]  # Remove "data: " prefix
-        if data_str == "[DONE]":
-            return "", True
+        async for chunk_bytes in response.content.iter_any():
+            # Prepend incomplete chunk and find last complete event boundary
+            buffer = incomplete_chunk + chunk_bytes
+            last_delimiter = buffer.rfind(b"\n\n")
 
-        chunk_data = orjson.loads(data_str)
-        choices = chunk_data.get("choices", [])
-        if not choices:
-            return "", False
+            if last_delimiter == -1:
+                # No complete events yet, buffer everything
+                incomplete_chunk = buffer
+                continue
 
-        delta = choices[0].get("delta", {})
-        return delta.get("content", ""), False
+            # Save incomplete chunk for next iteration (+2 skips "\n\n")
+            incomplete_chunk = buffer[last_delimiter + 2 :]
+
+            # Yield batch if any content found
+            if parsed_contents := self._parse_sse_chunk(buffer, last_delimiter):
+                yield parsed_contents
+
+        # After stream ends, parse any remaining incomplete chunk
+        if incomplete_chunk:
+            if parsed_contents := self._parse_sse_chunk(
+                incomplete_chunk, len(incomplete_chunk)
+            ):
+                yield parsed_contents
 
     @profile
     async def _handle_streaming_request(self, query: Query) -> None:
-        """Handle streaming response with pythonic line-by-line processing."""
+        """Handle streaming response."""
         async for response in self._make_http_request(query):
             accumulated_content = []
             first_chunk_sent = False
 
-            # Process SSE stream line by line
-            async for line in self._iter_sse_lines(response):
-                # Parse SSE line
-                content, is_done = self._parse_sse_line(line)
-                if is_done:
-                    break
+            # Process SSE stream - yields batches of chunks
+            async for chunk_batch in self._iter_sse_lines(response):
+                accumulated_content.extend(chunk_batch)
 
-                if content:
-                    accumulated_content.append(content)
+                # Determine which chunks to send: all or just first
+                chunks_to_send = (
+                    chunk_batch
+                    if self.http_config.stream_all_chunks
+                    else chunk_batch[:1]
+                    if not first_chunk_sent
+                    else []
+                )
 
-                    # Send chunk based on mode
-                    if self.http_config.stream_all_chunks or not first_chunk_sent:
-                        stream_chunk = StreamChunk(
+                # Send chunks
+                for content in chunks_to_send:
+                    await self._response_socket.send(
+                        StreamChunk(
                             id=query.id,
                             response_chunk=content,
                             is_complete=False,
@@ -359,37 +371,38 @@ class Worker:
                                 "final_chunk": False,
                             },
                         )
-                        await self._response_socket.send(stream_chunk)
-                        first_chunk_sent = True
+                    )
+                    first_chunk_sent = True
 
             # Send final complete response
-            final_response = QueryResult(
-                id=query.id,
-                response_output="".join(accumulated_content),
-                metadata={"first_chunk": not first_chunk_sent, "final_chunk": True},
+            final_output = "".join(accumulated_content)
+            await self._response_socket.send(
+                QueryResult(
+                    id=query.id,
+                    response_output=final_output,
+                    metadata={"first_chunk": not first_chunk_sent, "final_chunk": True},
+                )
             )
-            await self._response_socket.send(final_response)
 
     @profile
     async def _handle_non_streaming_request(self, query: Query) -> None:
         """Handle non-streaming response."""
         async for response in self._make_http_request(query):
-            response_text = await response.text()
-
-            # Parse JSON response
-            response_data = orjson.loads(response_text)
+            response_bytes = await response.read()
+            response_data = orjson.loads(response_bytes)
             response_obj = OpenAIAdapter.from_openai_response(
                 CreateChatCompletionResponse(**response_data, ignore_extra=True)
             )
 
+            # Override query id for loadgen
             response_obj.id = query.id
+
             # Send response back to the main process
             await self._response_socket.send(response_obj)
 
     def shutdown(self, signum: int | None = None, frame: Any | None = None) -> None:
         """Trigger shutdown of worker process."""
         self._shutdown = True  # will invoke _cleanup() from main loop
-        profiler_shutdown()
 
     async def _cleanup(self) -> None:
         """Clean up resources."""

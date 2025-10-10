@@ -77,7 +77,8 @@ class HTTPEndpointClient:
 
     def start(self):
         """Start event loop thread and initialize client."""
-        self.loop = asyncio.new_event_loop()
+        self.loop = uvloop.new_event_loop()
+        asyncio.set_event_loop(self.loop)
 
         self.loop_thread = threading.Thread(
             target=self.loop.run_forever,
@@ -113,6 +114,7 @@ class HTTPEndpointClient:
             self.zmq_config.zmq_response_queue_addr,
             self.zmq_config,
             bind=True,
+            decoder_type=QueryResult | StreamChunk,
         )
 
     def issue_query(self, query: Query) -> None:

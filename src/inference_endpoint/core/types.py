@@ -6,9 +6,10 @@ This module defines the basic data structures used throughout the system.
 
 import time
 import uuid
-from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
+
+import msgspec
 
 
 class QueryStatus(Enum):
@@ -21,42 +22,32 @@ class QueryStatus(Enum):
     CANCELLED = "cancelled"
 
 
-@dataclass
-class Query:
+class Query(msgspec.Struct, kw_only=True):
     """Represents a single query to be processed."""
 
-    id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    data: dict[str, Any] = field(default_factory=dict)
-    created_at: float | None = None
-
-    def __post_init__(self) -> None:
-        if self.created_at is None:
-            self.created_at = time.time()
+    id: str = msgspec.field(default_factory=lambda: str(uuid.uuid4()))
+    data: dict[str, Any] = msgspec.field(default_factory=dict)
+    headers: dict[str, str] = msgspec.field(default_factory=dict)
+    created_at: float = msgspec.field(default_factory=time.time)
 
 
-@dataclass
-class QueryResult:
+class QueryResult(msgspec.Struct, tag="query_result", kw_only=True):
     """Result of a completed query."""
 
-    id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    response_output: str = ""
-    metadata: dict[str, Any] = field(default_factory=dict)
+    id: str = ""
+    response_output: str | None = None
+    metadata: dict[str, Any] = msgspec.field(default_factory=dict)
     error: str | None = None
-    completed_at: float | None = None
-
-    def __post_init__(self) -> None:
-        if self.completed_at is None:
-            self.completed_at = time.time()
+    completed_at: float = msgspec.field(default_factory=time.time)
 
 
-@dataclass
-class StreamChunk:
+class StreamChunk(msgspec.Struct, tag="stream_chunk", kw_only=True):
     """A chunk of streaming response."""
 
-    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    id: str = ""
     response_chunk: str = ""
     is_complete: bool = False
-    metadata: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = msgspec.field(default_factory=dict)
 
 
 # Type aliases for clarity

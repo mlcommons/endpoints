@@ -77,7 +77,7 @@ class HttpClientSampleIssuer(SampleIssuer):
                             "StreamChunk(is_complete=True) should not be received, QueryResult is expected instead"
                         )
 
-                    case QueryResult(error=err) if err:
+                    case QueryResult(error=err) if err is not None:
                         logger.error(f"Error in request {response.id}: {err}")
                         self.query_id_to_sample.pop(response.id, None)
 
