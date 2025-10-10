@@ -4,19 +4,12 @@ import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
-from enum import Enum
 from functools import partial
 
 from .. import metrics
 from ..config.ruleset import RuntimeSettings
 from ..dataset_manager.dataloader import DataLoader
-
-
-class SampleEvent(Enum):
-    COMPLETE = "complete"
-    FIRST_CHUNK = "first_chunk_received"
-    NON_FIRST_CHUNK = "non_first_chunk_received"
-    REQUEST_SENT = "request_sent"
+from .events import SampleEvent
 
 
 @dataclass(frozen=True)

@@ -7,6 +7,7 @@ typing-extensions>=4.0.0
 # Note: asyncio is part of Python 3.11+ standard library
 # Additional dependencies will be added as components are implemented
 aiohttp==3.12.15
+duckdb==1.4.0
 orjson==3.11.0
 pyzmq==27.0.2
 uvloop==0.21.0

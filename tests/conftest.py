@@ -4,8 +4,9 @@ Benchmarking System.
 This file provides shared fixtures and configuration for all tests.
 """
 
-# Add src to path for imports
+import sqlite3
 import sys
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,7 @@ from inference_endpoint.dataset_manager.dataloader import (
 )
 from inference_endpoint.testing.echo_server import EchoServer
 
+# Add src to path for imports
 src_path = str(Path(__file__).parent.parent / "src")
 sys.path.insert(0, src_path)
 
@@ -117,3 +119,43 @@ def hf_squad_dataset(hf_squad_dataset_path):
     Returns a HFDataLoader object for the squad dataset.
     """
     return HFDataLoader(hf_squad_dataset_path, format="arrow")
+
+
+@pytest.fixture
+def events_db(tmp_path):
+    """Returns a sample in-memory sqlite database for events.
+    This database contains events for 3 sent queries, but only 2 are completed. The 3rd query has no 'received' events.
+    """
+    test_db = str(tmp_path / f"test_events_{uuid.uuid4().hex}.db")
+    conn = sqlite3.connect(test_db)
+    cur = conn.cursor()
+    cur.execute(
+        "CREATE TABLE IF NOT EXISTS events (sample_uuid INTEGER, event_type TEXT, timestamp_ns INTEGER)"
+    )
+
+    events = [
+        (1, "request_sent", 10000),
+        (2, "request_sent", 10003),
+        (1, "first_chunk_received", 10010),
+        (2, "first_chunk_received", 10190),
+        (1, "non_first_chunk_received", 10201),
+        (3, "request_sent", 10202),
+        (1, "non_first_chunk_received", 10203),
+        (2, "non_first_chunk_received", 10210),
+        (1, "non_first_chunk_received", 10211),
+        (1, "complete", 10211),
+        (2, "non_first_chunk_received", 10214),
+        (2, "non_first_chunk_received", 10217),
+        (2, "non_first_chunk_received", 10219),
+        (2, "complete", 10219),
+    ]
+    cur.executemany(
+        "INSERT INTO events (sample_uuid, event_type, timestamp_ns) VALUES (?, ?, ?)",
+        events,
+    )
+    conn.commit()
+    yield test_db
+
+    cur.close()
+    conn.close()
+    Path(test_db).unlink()
