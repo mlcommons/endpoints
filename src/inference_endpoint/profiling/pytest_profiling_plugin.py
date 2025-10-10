@@ -13,7 +13,7 @@ import glob
 import os
 import sys
 
-from inference_endpoint.profiling import shutdown
+from inference_endpoint.profiling import profiler_shutdown
 from inference_endpoint.profiling.line_profiler import (
     ENV_VAR_ENABLE_LINE_PROFILER,
     ENV_VAR_LINE_PROFILER_LOGFILE,
@@ -44,7 +44,7 @@ def pytest_sessionfinish(session, exitstatus):
         return
 
     # Shutdown profiler completely (disables atexit handler and prints stats)
-    shutdown()
+    profiler_shutdown()
 
     # Collect and display worker profiles
     _print_worker_profiles()

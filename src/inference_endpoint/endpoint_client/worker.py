@@ -231,7 +231,16 @@ class Worker:
         if self._shutdown or not self._response_socket:
             return
 
-        error_message = str(error) if isinstance(error, Exception) else error
+        if isinstance(error, Exception):
+            # Get error message with type name and message for better debugging
+            error_message = (
+                f"{type(error).__name__}: {str(error)}"
+                if str(error)
+                else type(error).__name__
+            )
+        else:
+            error_message = error
+
         error_response = QueryResult(
             id=query_id,
             response_output=None,

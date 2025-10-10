@@ -20,3 +20,5 @@ pre-commit>=3.0.0
 
 # Profiling tools
 line-profiler==5.0.0
+pyinstrument==5.1.1
+yappi==1.6.10
