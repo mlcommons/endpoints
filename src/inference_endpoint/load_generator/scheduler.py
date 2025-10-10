@@ -134,6 +134,7 @@ def poisson_delay_fn(expected_queries_per_second: float, rng: random.Random = ra
 
 class Scheduler:
     """Schedulers are responsible for building queries and determining when they should be issued to the SUT."""
+    PADDING_FACTOR = 1.1
 
     def __init__(
         self,
@@ -170,10 +171,10 @@ class Scheduler:
         Returns:
             int: The total number of samples to issue to the SUT throughout the course of the test run.
         """
+        assert self.runtime_settings.n_samples_to_issue is None, "n_samples_to_issue must be None for this method to be called"
         metric_target = self.runtime_settings.metric_target
         if isinstance(metric_target, metrics.Throughput):
-            expected_sps = metric_target.target
-            expected_samples = expected_sps * (
+            expected_samples = metric_target.target * (
                 self.runtime_settings.min_duration_ms / 1000
             )
         elif isinstance(metric_target, metrics.QueryLatency):
@@ -184,7 +185,7 @@ class Scheduler:
             raise NotImplementedError(
                 f"Scheduler does not support metric target type: {type(metric_target)}"
             )
-        return math.ceil(expected_samples * (1.1))  # 10% padding for variance
+        return math.ceil(expected_samples * self.PADDING_FACTOR)  # 10% padding for variance
 
     def __iter__(self):
         for s_idx in self.sample_order:
@@ -197,7 +198,7 @@ class Scheduler:
 class MaxThroughputScheduler(Scheduler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.delay_fn = uniform_delay_fn(rng=self.runtime_settings.rng_sched)
+        self.delay_fn = uniform_delay_fn(max_delay_ns = self.runtime_settings.max_duration_ms * 1_000, rng=self.runtime_settings.rng_sched)
 
 
 class NetworkActivitySimulationScheduler(Scheduler):
