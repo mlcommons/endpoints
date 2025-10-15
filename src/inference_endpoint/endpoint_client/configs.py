@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import aiohttp
+import zmq
 
 
 @dataclass
@@ -196,16 +197,25 @@ class ZMQConfig:
             self.zmq_request_queue_prefix = ZMQConfig._get_ipc_path(
                 "http_worker_requests"
             )
+        assert (
+            len(self.zmq_request_queue_prefix) <= zmq.IPC_PATH_MAX_LEN
+        ), "ZMQ request queue prefix is too long"
 
         if self.zmq_response_queue_addr is None:
             self.zmq_response_queue_addr = ZMQConfig._get_ipc_path(
                 "http_worker_responses"
             )
+        assert (
+            len(self.zmq_response_queue_addr) <= zmq.IPC_PATH_MAX_LEN
+        ), "ZMQ response queue address is too long"
 
         if self.zmq_readiness_queue_addr is None:
             self.zmq_readiness_queue_addr = ZMQConfig._get_ipc_path(
                 "http_worker_readiness"
             )
+        assert (
+            len(self.zmq_readiness_queue_addr) <= zmq.IPC_PATH_MAX_LEN
+        ), "ZMQ readiness queue address is too long"
 
     @staticmethod
     def _get_ipc_path(name: str) -> str:
@@ -221,7 +231,9 @@ class ZMQConfig:
 
         # Include PID to avoid conflicts between processes
         pid = os.getpid()
-        return f"ipc:///tmp/mlperf_endpoint_{name}_{pid}"
+        ipc_path = f"ipc:///tmp/mlperf_endpoint_{name}_{pid}"
+        assert len(ipc_path) <= zmq.IPC_PATH_MAX_LEN, "ZMQ socket path is too long"
+        return ipc_path
 
 
 __all__ = ["HTTPClientConfig", "AioHttpConfig", "ZMQConfig", "SocketConfig"]

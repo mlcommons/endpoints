@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import zmq
 from inference_endpoint.endpoint_client.configs import (
     AioHttpConfig,
     HTTPClientConfig,
@@ -12,6 +13,8 @@ from inference_endpoint.endpoint_client.configs import (
 from inference_endpoint.endpoint_client.http_client import HTTPEndpointClient
 from inference_endpoint.testing.echo_server import EchoServer
 from inference_endpoint.utils.logging import setup_logging
+
+from tests.test_helpers import get_test_socket_path
 
 # Add the src directory to the Python path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
@@ -48,11 +51,16 @@ def http_client(perf_http_echo_server, tmp_path):
         endpoint_url=f"{perf_http_echo_server.url}/v1/chat/completions",
         num_workers=1,
     )
+    assert (
+        len(str(tmp_path)) <= zmq.IPC_PATH_MAX_LEN
+    ), "tmp_path is too long for ZMQ - consider setting --basetemp=<short_path> for pytest"
 
     zmq_config = ZMQConfig(
         zmq_io_threads=4,
-        zmq_request_queue_prefix=f"ipc://{tmp_path}/perf_test_raw",
-        zmq_response_queue_addr=f"ipc://{tmp_path}/perf_test_raw_responses",
+        zmq_request_queue_prefix=get_test_socket_path(tmp_path, "perf_test_raw"),
+        zmq_response_queue_addr=get_test_socket_path(
+            tmp_path, "perf_test_raw_responses"
+        ),
         zmq_high_water_mark=100_000,
     )
 
