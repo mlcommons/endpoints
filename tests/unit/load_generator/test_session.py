@@ -16,7 +16,8 @@ from inference_endpoint.metrics.recorder import MetricsReporter
 from tests.test_helpers import DummyDataLoader, PooledSampleIssuer
 
 # The following are tests for PooledSampleIssuer in test_helpers.py. If these tests pass
-# but session.py tests fail, it's probably not the PooledSamplerIssuer's fault.
+# The following are tests for PooledSampleIssuer in test_helpers.py. If these tests pass
+# but session.py tests fail, it's probably not the PooledSampleIssuer's fault.
 
 
 def noop(*args, **kwargs):
