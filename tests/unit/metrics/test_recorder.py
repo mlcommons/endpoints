@@ -1,5 +1,4 @@
 import multiprocessing
-import sqlite3
 import uuid
 from collections import defaultdict, namedtuple
 from unittest.mock import patch
@@ -10,6 +9,7 @@ from inference_endpoint.metrics.recorder import (
     EventRecorder,
     MetricsReporter,
     RollupQueryTable,
+    sqlite3_cursor,
 )
 
 
@@ -103,15 +103,17 @@ def test_record_event(events_db, sample_uuids):
         rec.record_event(SampleEvent.NON_FIRST_CHUNK, 10217, sample_uuid=uuid2)
         rec.record_event(SampleEvent.NON_FIRST_CHUNK, 10219, sample_uuid=uuid2)
         rec.record_event(SampleEvent.COMPLETE, 10219, sample_uuid=uuid2)
-        rec.commit_txns(force=True)
 
-        recorder_cursor = rec.conn.cursor()
-        actual_rows = recorder_cursor.execute("SELECT * FROM events").fetchall()
-        recorder_cursor.close()
+        # Wait for writer thread to process all events
+        rec.wait_for_writes()
 
-    conn = sqlite3.connect(events_db)
-    cur = conn.cursor()
-    expected_rows = cur.execute("SELECT * FROM events").fetchall()
+        # Read from the database directly
+        with sqlite3_cursor(rec.connection_name) as (cursor, conn):
+            actual_rows = cursor.execute("SELECT * FROM events").fetchall()
+
+    with sqlite3_cursor(events_db) as (cursor, conn):
+        expected_rows = cursor.execute("SELECT * FROM events").fetchall()
+
     assert expected_rows == actual_rows
     assert len(actual_rows) == 14
 
@@ -125,10 +127,8 @@ def worker_proc_read_entries(sess_id, events_created_ev, uuid1, uuid2):
         (uuid2, "first_chunk_received", 10190),
         (uuid1, "non_first_chunk_received", 10201),
     ]
-    with get_EventRecorder(session_id=sess_id) as rec:
-        recorder_cursor = rec.conn.cursor()
-        actual_rows = recorder_cursor.execute("SELECT * FROM events").fetchall()
-        recorder_cursor.close()
+    with sqlite3_cursor(EventRecorder.db_path(sess_id)) as (cursor, _):
+        actual_rows = cursor.execute("SELECT * FROM events").fetchall()
     assert expected_rows == actual_rows
 
 
@@ -152,7 +152,8 @@ def test_shm_usage(sample_uuids):
         rec.record_event(SampleEvent.FIRST_CHUNK, 10010, sample_uuid=uuid1)
         rec.record_event(SampleEvent.FIRST_CHUNK, 10190, sample_uuid=uuid2)
         rec.record_event(SampleEvent.NON_FIRST_CHUNK, 10201, sample_uuid=uuid1)
-        rec.commit_txns(force=True)
+        # Wait for writer thread to process all events
+        rec.wait_for_writes()
     events_created_ev.set()
 
     worker_proc.join(timeout=5)
