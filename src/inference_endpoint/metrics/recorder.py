@@ -7,12 +7,13 @@ import multiprocessing
 import os
 import shutil
 import sqlite3
+import threading
 import uuid
 from functools import partial
 from pathlib import Path
 from typing import Any, ClassVar
 
-from ..load_generator.events import Event
+from ..load_generator.events import Event, SampleEvent, SessionEvent
 from ..profiling import profile
 from ..utils import byte_quantity_to_str
 
@@ -21,19 +22,19 @@ logger = logging.getLogger(__name__)
 
 @dataclasses.dataclass
 class EventRow:
-    sample_uuid: int
+    sample_uuid: str
     event_type: Event
     timestamp_ns: int
 
     @staticmethod
     def to_table_query() -> str:
-        return "CREATE TABLE IF NOT EXISTS events (sample_uuid INTEGER, event_type TEXT, timestamp_ns INTEGER)"
+        return "CREATE TABLE IF NOT EXISTS events (sample_uuid VARCHAR(32), event_type VARCHAR(32), timestamp_ns INTEGER)"
 
     @staticmethod
     def insert_query() -> str:
         return "INSERT INTO events (sample_uuid, event_type, timestamp_ns) VALUES (?, ?, ?)"
 
-    def to_insert_params(self) -> tuple[int, str, int]:
+    def to_insert_params(self) -> tuple[str, str, int]:
         return (
             self.sample_uuid,
             self.event_type.value,
@@ -62,6 +63,7 @@ class EventRecorder:
         session_id: str | None = None,
         txn_buffer_size: int = 1000,
         min_memory_req_bytes: int = 1024 * 1024 * 1024,
+        idle_notify_th_ev: threading.Event | None = None,
     ):
         """Creates a new EventRecorder.
 
@@ -69,6 +71,7 @@ class EventRecorder:
             session_id: Optional session id to connect to an existing database. If not provided, a new database will be created.
             txn_buffer_size: The number of events to buffer before committing to the database. (Default: 1000)
             min_memory_req_bytes: The minimum amount of free space (in bytes) in /dev/shm required to create a new database. (Default: 1GB)
+            idle_notify_th_ev: Optional threading.Event. If provided, EventRecorder will set when the number of inflight samples is 0.
         """
         if session_id is None:
             session_id = uuid.uuid4().hex
@@ -112,6 +115,10 @@ class EventRecorder:
         self.event_buffer = []
         self.txn_buffer_size = txn_buffer_size
 
+        self.idle_notify_th_ev = idle_notify_th_ev
+        self.n_inflight_samples = 0
+        self.should_check_idle = False
+
     def init_db(self):
         if not self.is_closed:
             logging.debug(f"Database already initialized at {self.connection_name}")
@@ -150,7 +157,7 @@ class EventRecorder:
         self,
         ev_type: Event,
         timestamp_ns: int,
-        sample_uuid: int = 0,
+        sample_uuid: str = "",
         force_commit: bool = False,
     ):
         """Records an event. If this event recorder has a positive buffer size, the event will be stored in memory until the buffer is full.
@@ -158,9 +165,28 @@ class EventRecorder:
         Args:
             ev_type (Event): The type of event to record.
             timestamp_ns (int): The timestamp in nanoseconds of the event.
-            sample_uuid (int): The sample uuid of the event.
+            sample_uuid (str): The sample uuid of the event.
             force_commit (bool): Whether to commit the transaction even if the buffer is not full.
         """
+        if ev_type == SampleEvent.REQUEST_SENT:
+            self.n_inflight_samples += 1
+        elif ev_type == SampleEvent.COMPLETE:
+            self.n_inflight_samples -= 1
+        elif ev_type == SessionEvent.LG_STOP:
+            self.should_check_idle = True
+
+        if self.n_inflight_samples < 0:
+            raise RuntimeError(
+                f"Number of inflight samples is negative: {self.n_inflight_samples}"
+            )
+
+        if (
+            self.should_check_idle
+            and self.idle_notify_th_ev is not None
+            and self.n_inflight_samples == 0
+        ):
+            self.idle_notify_th_ev.set()
+
         if self.is_closed:
             logging.debug(
                 "Database is not connected but record_event() was called. Initializing database."
@@ -195,7 +221,7 @@ class EventRecorder:
 
 @dataclasses.dataclass
 class MetricRow:
-    sample_uuid: int
+    sample_uuid: str
     metric_type: str
     metric_value: float
 

@@ -8,6 +8,8 @@ class Event(Enum):
 class SessionEvent(Event):
     TEST_STARTED = "test_started"
     TEST_ENDED = "test_ended"
+    LG_ISSUE_CALLED = "lg_issue"
+    LG_STOP = "lg_stop"
 
 
 class SampleEvent(Event):

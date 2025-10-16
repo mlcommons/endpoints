@@ -9,10 +9,17 @@ import hashlib
 import random
 import string
 import uuid
+from collections import defaultdict
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from pathlib import Path
 
 from inference_endpoint.core.types import Query
 from inference_endpoint.dataset_manager.dataloader import DataLoader
+from inference_endpoint.load_generator.events import SampleEvent
+from inference_endpoint.load_generator.load_generator import SampleIssuer
+from inference_endpoint.load_generator.sample import SampleFactory
 
 
 def _generate_random_word(
@@ -155,3 +162,136 @@ def get_test_socket_path(tmp_path: Path, test_name: str, suffix: str = "") -> st
     # Combine with a short suffix
     name = f"{hash_val}{suffix}"
     return f"ipc://{tmp_path}/{name}"
+
+
+class SerialSampleIssuer(SampleIssuer):
+    """SampleIssuer for testing. No threading, and is blocking. Whenever issue is called,
+    it performs the provided compute function, calling callbacks when necessary.
+
+    The compute function should be a generator, yielding the 'chunks' of the supposed
+    response.
+    """
+
+    def __init__(self, compute_func=None):
+        if compute_func is None:
+            self.compute_func = lambda x: x
+        else:
+            self.compute_func = compute_func
+
+    def issue(self, sample):
+        dat = sample.get_bytes()
+        sample.callbacks[SampleEvent.REQUEST_SENT](None)
+        first = True
+        chunks = []
+        for chunk in self.compute_func(dat):
+            chunks.append(chunk)
+            if first:
+                sample.callbacks[SampleEvent.FIRST_CHUNK](chunk)
+                first = False
+            else:
+                sample.callbacks[SampleEvent.NON_FIRST_CHUNK](chunk)
+        sample.callbacks[SampleEvent.COMPLETE](chunks)
+
+
+class PooledSampleIssuer(SampleIssuer):
+    """SampleIssuer that has a non-blocking issue() method. Has a pool of workers which compute
+    the samples in parallel.
+
+    Uses ThreadPoolExecutor to properly propagate exceptions from worker threads to the main thread.
+    Call check_errors() to raise any exceptions that occurred in workers and clean up completed futures.
+    """
+
+    def __init__(self, compute_func=None, n_workers: int = 4):
+        self.n_workers = n_workers
+        if compute_func is None:
+            self.compute_func = lambda x: x
+        else:
+            self.compute_func = compute_func
+        self.executor = ThreadPoolExecutor(max_workers=n_workers)
+        self.futures = []
+
+    def shutdown(self):
+        """Shutdown the executor and wait for all tasks to complete.
+
+        Raises any exceptions that occurred in worker threads.
+        """
+        self.executor.shutdown(wait=True)
+        # Check all futures for exceptions
+        for future in self.futures:
+            future.result()  # This will raise if the worker raised an exception
+        self.futures.clear()
+
+    def handle_sample(self, sample):
+        dat = sample.get_bytes()
+        first = True
+        chunks = []
+        for chunk in self.compute_func(dat):
+            chunks.append(chunk)
+            if first:
+                sample.callbacks[SampleEvent.FIRST_CHUNK](chunk)
+                first = False
+            else:
+                sample.callbacks[SampleEvent.NON_FIRST_CHUNK](chunk)
+        sample.callbacks[SampleEvent.COMPLETE](chunks)
+
+    def check_errors(self):
+        """Check if any worker thread has raised an exception and re-raise it.
+
+        This checks completed futures without blocking and removes them from the list
+        to prevent unbounded memory growth.
+        """
+        remaining_futures = []
+        for future in self.futures:
+            if future.done():
+                # This will raise if the worker raised an exception
+                future.result()
+                # Don't keep completed futures
+            else:
+                # Keep incomplete futures
+                remaining_futures.append(future)
+        self.futures = remaining_futures
+
+    def issue(self, sample):
+        """Submit a sample to be processed by the worker pool."""
+        sample.callbacks[SampleEvent.REQUEST_SENT](None)
+        future = self.executor.submit(self.handle_sample, sample)
+        self.futures.append(future)
+
+        # Periodically clean up completed futures to prevent unbounded growth
+        # Check every 100 submissions to balance cleanup overhead vs memory usage
+        if len(self.futures) >= 100:
+            self.check_errors()
+
+
+class HistogramSampleFactory(SampleFactory):
+    def __init__(self, *args, **kwargs):
+        super().__init__(None, None)
+
+        self.sent_hist = defaultdict(int)
+        self.completed_hist = defaultdict(int)
+        self.completed_chunks = {}
+        self.uuid_to_idx = {}
+
+    @staticmethod
+    def sample_get_bytes(dataloader, sample_index):
+        return sample_index
+
+    def inc_sent(self, sample_index: int, sample_uuid: str, val):
+        self.sent_hist[sample_index] += 1
+
+    def inc_completed(self, sample_index: int, sample_uuid: str, val):
+        self.completed_hist[sample_index] += 1
+        self.completed_chunks[sample_uuid] = val
+
+    def get_sample_callbacks(
+        self, sample_index: int, sample_uuid: str
+    ) -> dict[SampleEvent, Callable]:
+        self.uuid_to_idx[sample_uuid] = sample_index
+        return {
+            SampleEvent.REQUEST_SENT: partial(self.inc_sent, sample_index, sample_uuid),
+            SampleEvent.FIRST_CHUNK: (lambda val: None),
+            SampleEvent.NON_FIRST_CHUNK: (lambda val: None),
+            SampleEvent.COMPLETE: partial(
+                self.inc_completed, sample_index, sample_uuid
+            ),
+        }

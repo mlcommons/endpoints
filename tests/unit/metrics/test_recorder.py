@@ -13,18 +13,24 @@ from inference_endpoint.metrics.recorder import (
 )
 
 
-def test_derive_ttft(events_db):
+def test_derive_ttft(events_db, sample_uuids):
+    uuid1 = sample_uuids(1)
+    uuid2 = sample_uuids(2)
+
     with MetricsReporter(events_db, intermediate_chunks_logged=True) as reporter:
         ttft_rows = reporter.derive_TTFT()
     assert len(ttft_rows) == 2
     assert ttft_rows[0].metric_type == "ttft"
     assert ttft_rows[1].metric_type == "ttft"
     d = {row.sample_uuid: row.metric_value for row in ttft_rows}
-    assert d[1] == 10
-    assert d[2] == 187
+    assert d[uuid1] == 10
+    assert d[uuid2] == 187
 
 
-def test_derive_tpot(events_db):
+def test_derive_tpot(events_db, sample_uuids):
+    uuid1 = sample_uuids(1)
+    uuid2 = sample_uuids(2)
+
     with MetricsReporter(events_db, intermediate_chunks_logged=True) as reporter:
         tpot_rows = reporter.derive_TPOT()
     assert len(tpot_rows) == 7
@@ -33,8 +39,8 @@ def test_derive_tpot(events_db):
         assert row.metric_type == "tpot"
         d[row.sample_uuid].append(row.metric_value)
 
-    assert d[1] == [191, 2, 8]
-    assert d[2] == [20, 4, 3, 2]
+    assert d[uuid1] == [191, 2, 8]
+    assert d[uuid2] == [20, 4, 3, 2]
 
 
 def test_tpot_to_histogram(events_db):
@@ -77,22 +83,26 @@ def get_EventRecorder(*args, **kwargs):
     return EventRecorder(*args, min_memory_req_bytes=128 * 1024 * 1024, **kwargs)
 
 
-def test_record_event(events_db):
+def test_record_event(events_db, sample_uuids):
+    uuid1 = sample_uuids(1)
+    uuid2 = sample_uuids(2)
+    uuid3 = sample_uuids(3)
+
     with get_EventRecorder() as rec:
-        rec.record_event(SampleEvent.REQUEST_SENT, 10000, sample_uuid=1)
-        rec.record_event(SampleEvent.REQUEST_SENT, 10003, sample_uuid=2)
-        rec.record_event(SampleEvent.FIRST_CHUNK, 10010, sample_uuid=1)
-        rec.record_event(SampleEvent.FIRST_CHUNK, 10190, sample_uuid=2)
-        rec.record_event(SampleEvent.NON_FIRST_CHUNK, 10201, sample_uuid=1)
-        rec.record_event(SampleEvent.REQUEST_SENT, 10202, sample_uuid=3)
-        rec.record_event(SampleEvent.NON_FIRST_CHUNK, 10203, sample_uuid=1)
-        rec.record_event(SampleEvent.NON_FIRST_CHUNK, 10210, sample_uuid=2)
-        rec.record_event(SampleEvent.NON_FIRST_CHUNK, 10211, sample_uuid=1)
-        rec.record_event(SampleEvent.COMPLETE, 10211, sample_uuid=1)
-        rec.record_event(SampleEvent.NON_FIRST_CHUNK, 10214, sample_uuid=2)
-        rec.record_event(SampleEvent.NON_FIRST_CHUNK, 10217, sample_uuid=2)
-        rec.record_event(SampleEvent.NON_FIRST_CHUNK, 10219, sample_uuid=2)
-        rec.record_event(SampleEvent.COMPLETE, 10219, sample_uuid=2)
+        rec.record_event(SampleEvent.REQUEST_SENT, 10000, sample_uuid=uuid1)
+        rec.record_event(SampleEvent.REQUEST_SENT, 10003, sample_uuid=uuid2)
+        rec.record_event(SampleEvent.FIRST_CHUNK, 10010, sample_uuid=uuid1)
+        rec.record_event(SampleEvent.FIRST_CHUNK, 10190, sample_uuid=uuid2)
+        rec.record_event(SampleEvent.NON_FIRST_CHUNK, 10201, sample_uuid=uuid1)
+        rec.record_event(SampleEvent.REQUEST_SENT, 10202, sample_uuid=uuid3)
+        rec.record_event(SampleEvent.NON_FIRST_CHUNK, 10203, sample_uuid=uuid1)
+        rec.record_event(SampleEvent.NON_FIRST_CHUNK, 10210, sample_uuid=uuid2)
+        rec.record_event(SampleEvent.NON_FIRST_CHUNK, 10211, sample_uuid=uuid1)
+        rec.record_event(SampleEvent.COMPLETE, 10211, sample_uuid=uuid1)
+        rec.record_event(SampleEvent.NON_FIRST_CHUNK, 10214, sample_uuid=uuid2)
+        rec.record_event(SampleEvent.NON_FIRST_CHUNK, 10217, sample_uuid=uuid2)
+        rec.record_event(SampleEvent.NON_FIRST_CHUNK, 10219, sample_uuid=uuid2)
+        rec.record_event(SampleEvent.COMPLETE, 10219, sample_uuid=uuid2)
         rec.commit_txns(force=True)
 
         recorder_cursor = rec.conn.cursor()
@@ -106,14 +116,14 @@ def test_record_event(events_db):
     assert len(actual_rows) == 14
 
 
-def worker_proc_read_entries(sess_id, events_created_ev):
+def worker_proc_read_entries(sess_id, events_created_ev, uuid1, uuid2):
     events_created_ev.wait()
     expected_rows = [
-        (1, "request_sent", 10000),
-        (2, "request_sent", 10003),
-        (1, "first_chunk_received", 10010),
-        (2, "first_chunk_received", 10190),
-        (1, "non_first_chunk_received", 10201),
+        (uuid1, "request_sent", 10000),
+        (uuid2, "request_sent", 10003),
+        (uuid1, "first_chunk_received", 10010),
+        (uuid2, "first_chunk_received", 10190),
+        (uuid1, "non_first_chunk_received", 10201),
     ]
     with get_EventRecorder(session_id=sess_id) as rec:
         recorder_cursor = rec.conn.cursor()
@@ -122,23 +132,26 @@ def worker_proc_read_entries(sess_id, events_created_ev):
     assert expected_rows == actual_rows
 
 
-def test_shm_usage():
+def test_shm_usage(sample_uuids):
+    uuid1 = sample_uuids(1)
+    uuid2 = sample_uuids(2)
+
     # Set mp start method
     ctx = multiprocessing.get_context("spawn")
     events_created_ev = ctx.Event()
     sess_id = uuid.uuid4().hex
 
     worker_proc = ctx.Process(
-        target=worker_proc_read_entries, args=(sess_id, events_created_ev)
+        target=worker_proc_read_entries, args=(sess_id, events_created_ev, uuid1, uuid2)
     )
     worker_proc.start()
 
     with get_EventRecorder(session_id=sess_id) as rec:
-        rec.record_event(SampleEvent.REQUEST_SENT, 10000, sample_uuid=1)
-        rec.record_event(SampleEvent.REQUEST_SENT, 10003, sample_uuid=2)
-        rec.record_event(SampleEvent.FIRST_CHUNK, 10010, sample_uuid=1)
-        rec.record_event(SampleEvent.FIRST_CHUNK, 10190, sample_uuid=2)
-        rec.record_event(SampleEvent.NON_FIRST_CHUNK, 10201, sample_uuid=1)
+        rec.record_event(SampleEvent.REQUEST_SENT, 10000, sample_uuid=uuid1)
+        rec.record_event(SampleEvent.REQUEST_SENT, 10003, sample_uuid=uuid2)
+        rec.record_event(SampleEvent.FIRST_CHUNK, 10010, sample_uuid=uuid1)
+        rec.record_event(SampleEvent.FIRST_CHUNK, 10190, sample_uuid=uuid2)
+        rec.record_event(SampleEvent.NON_FIRST_CHUNK, 10201, sample_uuid=uuid1)
         rec.commit_txns(force=True)
     events_created_ev.set()
 

@@ -1,49 +1,10 @@
 import random
 
-from inference_endpoint.core.types import QueryResult
 from inference_endpoint.load_generator.scheduler import (
-    SampleEvent,
-    SampleFactory,
+    MaxThroughputScheduler,
     WithoutReplacementSampleOrder,
     WithReplacementSampleOrder,
 )
-
-from tests.test_helpers import DummyDataLoader
-
-
-def test_sample_factory():
-    completed = []
-
-    # Create dataloader instance
-    dummy_dataloader = DummyDataLoader(n_samples=100)
-
-    class TestingFactory(SampleFactory):
-        @staticmethod
-        def sample_complete_callback(output, sid=None):
-            completed.append(sid)
-
-    factory = TestingFactory(dummy_dataloader)
-
-    indices = list(range(dummy_dataloader.n_samples))
-    random.shuffle(indices)
-
-    uuids = set()
-    for idx in indices:
-        sample = factory(idx)
-        assert sample.uuid not in uuids, "UUIDs should be unique but found duplicate"
-        uuids.add(sample.uuid)
-
-        obj = sample.get_bytes()
-        assert obj == idx, "Sample 'bytes' should be equal to index for DummyDataLoader"
-
-        result = QueryResult(id=sample.uuid, response_output=None)
-        sample.callbacks[SampleEvent.COMPLETE](result)
-        assert len(completed) == len(
-            uuids
-        ), "Completed callback should be called for each sample"
-        assert (
-            completed[-1] == idx
-        ), "Completed callback should be called with correct sample index"
 
 
 def test_without_replacement_sample_order():
@@ -79,3 +40,23 @@ def test_with_replacement_sample_order():
     ], "Order does not match expected deterministic order"
     # Note with this specific seed and order, 94 occurs twice in the first 10 indices
     assert indices[:10].count(94) == 2, "94 should occur twice in the first 10 indices"
+
+
+def test_max_throughput_scheduler(runtime_settings):
+    scheduler = MaxThroughputScheduler(runtime_settings, WithReplacementSampleOrder)
+    indices = list(iter(scheduler))
+    assert len(indices) == 100
+    for _, delay in indices:
+        assert delay == 0
+    assert [s_idx for s_idx, _ in indices[:10]] == [
+        81,
+        14,
+        3,
+        94,
+        35,
+        31,
+        28,
+        17,
+        94,
+        13,
+    ], "Order does not match expected deterministic order"

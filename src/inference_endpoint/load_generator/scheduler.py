@@ -1,58 +1,8 @@
-import math
 import random
-import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass
-from functools import partial
 
-from .. import metrics
 from ..config.ruleset import RuntimeSettings
-from ..dataset_manager.dataloader import DataLoader
-from .events import SampleEvent
-
-
-@dataclass(frozen=True)
-class Sample:
-    uuid: int
-    callbacks: dict[SampleEvent, Callable]
-    get_bytes: Callable
-
-
-class SampleFactory:
-    def __init__(self, dataloader: DataLoader):
-        self.dataloader = dataloader
-
-    @staticmethod
-    def sample_complete_callback(output, sid=None):
-        """Scheduler-specific callback for sample completion.
-
-        Args:
-            output: The output of the sample. This is typically the raw bytes of the output.
-            sid: The sample ID.
-        """
-        pass
-
-    @staticmethod
-    def sample_get_bytes(dataloader: DataLoader, sample_index: int):
-        return dataloader.load_sample(sample_index)
-
-    def get_sample_callbacks(self, sample_index: int) -> dict[SampleEvent, Callable]:
-        """Gets the callbacks for the given sample ID."""
-        return {
-            SampleEvent.COMPLETE: partial(
-                self.__class__.sample_complete_callback, sid=sample_index
-            ),
-        }
-
-    def __call__(self, sample_index: int) -> Sample:
-        return Sample(
-            uuid=uuid.uuid4().int,
-            callbacks=self.get_sample_callbacks(sample_index),
-            get_bytes=partial(
-                self.__class__.sample_get_bytes, self.dataloader, sample_index
-            ),
-        )
 
 
 class SampleOrder(ABC):
@@ -112,7 +62,9 @@ class WithReplacementSampleOrder(SampleOrder):
         return self.rng.randint(0, self.n_samples_in_dataset - 1)
 
 
-def uniform_delay_fn(max_delay_ns: int = 0, rng: random.Random = random):
+def uniform_delay_fn(
+    max_delay_ns: int = 0, rng: random.Random = random
+) -> Callable[[], float]:
     def _fn():
         if max_delay_ns == 0:
             return 0
@@ -121,7 +73,9 @@ def uniform_delay_fn(max_delay_ns: int = 0, rng: random.Random = random):
     return _fn
 
 
-def poisson_delay_fn(expected_queries_per_second: float, rng: random.Random = random):
+def poisson_delay_fn(
+    expected_queries_per_second: float, rng: random.Random = random
+) -> Callable[[], float]:
     queries_per_ns = expected_queries_per_second / 1e9
 
     def _fn():
@@ -138,19 +92,11 @@ class Scheduler:
     def __init__(
         self,
         runtime_settings: RuntimeSettings,
-        dataloader: DataLoader,
-        sample_factory_cls: type[SampleFactory],
         sample_order_cls: type[SampleOrder],
     ):
         self.runtime_settings = runtime_settings
-        self.dataloader = dataloader
-        self.sample_factory = sample_factory_cls(dataloader)
 
-        self.total_samples_to_issue = (
-            runtime_settings.n_samples_to_issue
-            if runtime_settings.n_samples_to_issue
-            else self.calc_total_samples_to_issue()
-        )
+        self.total_samples_to_issue = runtime_settings.total_samples_to_issue()
         self.n_unique_samples = runtime_settings.n_samples_from_dataset
         self.sample_order = iter(
             sample_order_cls(
@@ -161,37 +107,9 @@ class Scheduler:
         )
         self.delay_fn = None  # Subclasses must set this
 
-    def calc_total_samples_to_issue(self) -> int:
-        """Calculate the total number of samples to issue to the SUT throughout the course of the test run.
-
-        If `runtime_settings.n_samples_to_issue` is set, then this method is not called.
-        If it is not set, then it is calculated based on the scenario-based Scheduler implementation.
-
-        Returns:
-            int: The total number of samples to issue to the SUT throughout the course of the test run.
-        """
-        metric_target = self.runtime_settings.metric_target
-        if isinstance(metric_target, metrics.Throughput):
-            expected_sps = metric_target.target
-            expected_samples = expected_sps * (
-                self.runtime_settings.min_duration_ms / 1000
-            )
-        elif isinstance(metric_target, metrics.QueryLatency):
-            expected_samples = (
-                self.runtime_settings.min_duration_ms / metric_target.target
-            )
-        else:
-            raise NotImplementedError(
-                f"Scheduler does not support metric target type: {type(metric_target)}"
-            )
-        return math.ceil(expected_samples * (1.1))  # 10% padding for variance
-
     def __iter__(self):
         for s_idx in self.sample_order:
-            sample = self.sample_factory(s_idx)
-            delay_ns = self.delay_fn()
-            yield sample, delay_ns
-            # Load generator should track last_issue_timestamp, sleep the difference, and then issue.
+            yield s_idx, self.delay_fn()
 
 
 class MaxThroughputScheduler(Scheduler):
