@@ -1,9 +1,9 @@
 """Core functionality tests for the HTTP endpoint client."""
 
 import asyncio
-import pickle
 import time
 
+import msgspec
 import pytest
 import pytest_asyncio
 import zmq
@@ -626,7 +626,7 @@ class TestHTTPEndpointClientErrorHandling:
             response_push.connect(zmq_config.zmq_response_queue_addr)
 
             # Send invalid data that will cause error in handler
-            await response_push.send(b"invalid pickle data")
+            await response_push.send(b"invalid msgspec data")
 
             # Give handler time to encounter error
             await asyncio.sleep(0.2)
@@ -692,6 +692,10 @@ class TestHTTPEndpointClientErrorHandling:
                         else None
                     )
                     self._original_socket = original_socket
+
+                @property
+                def is_closed(self):
+                    return False
 
                 async def send(self, data):
                     raise Exception("ZMQ send failed")
@@ -1012,7 +1016,8 @@ class TestHTTPEndpointClientCoverage:
                 response_output="",
                 error="Simulated error response",
             )
-            await response_push.send(pickle.dumps(error_result))
+            encoder = msgspec.msgpack.Encoder()
+            await response_push.send(encoder.encode(error_result))
 
             # Wait for processing and expect exception
             with pytest.raises(Exception) as exc_info:

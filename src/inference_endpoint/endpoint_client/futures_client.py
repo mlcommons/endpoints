@@ -74,6 +74,7 @@ class FuturesHttpClient(HTTPEndpointClient):
             self.zmq_config.zmq_response_queue_addr,
             self.zmq_config,
             bind=True,
+            decoder_type=QueryResult | StreamChunk,
         )
 
         # Schedule response handler in current loop
@@ -141,7 +142,7 @@ class FuturesHttpClient(HTTPEndpointClient):
                             "StreamChunk(is_complete=True) should not be received, QueryResult is expected instead"
                         )
 
-                    case QueryResult(error=err) if err:
+                    case QueryResult(error=err) if err is not None:
                         self._set_future_exception(future, Exception(err))
                         self._pending_futures.pop(response.id)
 

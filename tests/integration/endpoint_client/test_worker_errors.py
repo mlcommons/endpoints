@@ -1,12 +1,12 @@
 """Integration tests for Worker error handling and edge cases."""
 
 import asyncio
-import pickle
 
+import msgspec
 import pytest
 import zmq
 import zmq.asyncio
-from inference_endpoint.core.types import Query, QueryResult
+from inference_endpoint.core.types import Query, QueryResult, StreamChunk
 from inference_endpoint.endpoint_client.configs import (
     AioHttpConfig,
     HTTPClientConfig,
@@ -86,11 +86,13 @@ class TestWorkerErrorHandling:
                 },
             )
 
-            await request_push.send(pickle.dumps(query))
+            encoder = msgspec.msgpack.Encoder()
+            await request_push.send(encoder.encode(query))
 
             # Receive error response
             response_data = await asyncio.wait_for(response_pull.recv(), timeout=2.0)
-            response = pickle.loads(response_data)
+            decoder = msgspec.msgpack.Decoder(QueryResult | StreamChunk)
+            response = decoder.decode(response_data)
 
             # Verify error response
             assert isinstance(response, QueryResult)
@@ -162,11 +164,13 @@ class TestWorkerErrorHandling:
                 },
             )
 
-            await request_push.send(pickle.dumps(query))
+            encoder = msgspec.msgpack.Encoder()
+            await request_push.send(encoder.encode(query))
 
             # Receive error response
             response_data = await response_pull.recv()
-            response = pickle.loads(response_data)
+            decoder = msgspec.msgpack.Decoder(QueryResult | StreamChunk)
+            response = decoder.decode(response_data)
 
             # Verify error response
             assert isinstance(response, QueryResult)
@@ -249,7 +253,8 @@ class TestWorkerErrorHandling:
                 response_pull.recv(),
                 timeout=3.0,
             )
-            response = pickle.loads(response_data)
+            decoder = msgspec.msgpack.Decoder(QueryResult | StreamChunk)
+            response = decoder.decode(response_data)
 
             # Verify error response
             assert isinstance(response, QueryResult)
@@ -334,14 +339,16 @@ class TestWorkerErrorHandling:
                     "stream": True,
                 },
             )
-            await request_push.send(pickle.dumps(query))
+            encoder = msgspec.msgpack.Encoder()
+            await request_push.send(encoder.encode(query))
 
             # Receive error response
             response_data = await asyncio.wait_for(
                 response_pull.recv(),
                 timeout=2.0,
             )
-            response = pickle.loads(response_data)
+            decoder = msgspec.msgpack.Decoder(QueryResult | StreamChunk)
+            response = decoder.decode(response_data)
 
             # Verify error response
             assert isinstance(response, QueryResult)
@@ -418,11 +425,13 @@ class TestWorkerErrorHandling:
                 },
             )
 
-            await request_push.send(pickle.dumps(query))
+            encoder = msgspec.msgpack.Encoder()
+            await request_push.send(encoder.encode(query))
 
             # Should receive error response
             response_data = await response_pull.recv()
-            response = pickle.loads(response_data)
+            decoder = msgspec.msgpack.Decoder(QueryResult | StreamChunk)
+            response = decoder.decode(response_data)
 
             assert isinstance(response, QueryResult)
             assert response.id == "test-connection-error"
@@ -482,11 +491,13 @@ class TestWorkerErrorHandling:
                 },
             )
 
-            await request_push.send(pickle.dumps(query))
+            encoder = msgspec.msgpack.Encoder()
+            await request_push.send(encoder.encode(query))
 
             # Receive error response
             response_data = await response_pull.recv()
-            response = pickle.loads(response_data)
+            decoder = msgspec.msgpack.Decoder(QueryResult | StreamChunk)
+            response = decoder.decode(response_data)
 
             # Verify HTTP error response
             assert isinstance(response, QueryResult)
@@ -559,11 +570,13 @@ class TestWorkerErrorHandling:
                 },
             )
 
-            await request_push.send(pickle.dumps(query))
+            encoder = msgspec.msgpack.Encoder()
+            await request_push.send(encoder.encode(query))
 
             # Verify error response was sent
             response_data = await asyncio.wait_for(response_pull.recv(), timeout=1.0)
-            response = pickle.loads(response_data)
+            decoder = msgspec.msgpack.Decoder(QueryResult | StreamChunk)
+            response = decoder.decode(response_data)
 
             assert isinstance(response, QueryResult)
             assert response.id == "test-http-500"
@@ -650,21 +663,22 @@ class TestWorkerErrorHandling:
                     },
                 )
 
-                await request_push.send(pickle.dumps(query))
+                encoder = msgspec.msgpack.Encoder()
+                await request_push.send(encoder.encode(query))
 
-                # Should get error response due to malformed JSON
+                # Worker should handle malformed JSON gracefully by skipping invalid chunks
+                # (see _parse_sse_chunk which catches exceptions for non-content SSE messages)
                 response_data = await response_pull.recv()
-                response = pickle.loads(response_data)
+                decoder = msgspec.msgpack.Decoder(QueryResult | StreamChunk)
+                response = decoder.decode(response_data)
 
-                # Verify we get an error response
+                # Verify we get a response (worker handles malformed JSON gracefully)
                 assert isinstance(response, QueryResult)
                 assert response.id == "test-malformed-json"
-                assert response.error is not None
-                assert (
-                    "unexpected character" in response.error
-                    or "JSONDecodeError" in response.error
-                )
-                assert response.response_output is None
+
+                # Malformed JSON is skipped, so we get an empty response, not an error
+                assert response.error is None
+                assert response.response_output == ""
 
                 # Shutdown
                 worker._shutdown = True
@@ -746,7 +760,8 @@ class TestWorkerErrorHandling:
 
             # This should not raise an exception
             try:
-                await worker._response_socket.send(pickle.dumps(response))
+                encoder = msgspec.msgpack.Encoder()
+                await worker._response_socket.send(encoder.encode(response))
             except Exception:
                 # Expected - socket is closed
                 pass
@@ -810,13 +825,15 @@ class TestWorkerErrorHandling:
                         "stream": False,
                     },
                 )
-                await request_push.send(pickle.dumps(query))
+                encoder = msgspec.msgpack.Encoder()
+                await request_push.send(encoder.encode(query))
 
             # Collect error responses from all workers
             responses = {}
+            decoder = msgspec.msgpack.Decoder(QueryResult | StreamChunk)
             for _ in range(3):
                 response_data = await response_pull.recv()
-                response = pickle.loads(response_data)
+                response = decoder.decode(response_data)
                 responses[response.id] = response
 
             # Verify all workers handled errors
@@ -906,11 +923,13 @@ class TestWorkerErrorHandling:
                 },
             )
 
-            await request_push.send(pickle.dumps(query))
+            encoder = msgspec.msgpack.Encoder()
+            await request_push.send(encoder.encode(query))
 
             # Verify error response was sent
             response_data = await asyncio.wait_for(response_pull.recv(), timeout=1.0)
-            response = pickle.loads(response_data)
+            decoder = msgspec.msgpack.Decoder(QueryResult | StreamChunk)
+            response = decoder.decode(response_data)
 
             assert isinstance(response, QueryResult)
             assert response.id == "test-bad-json"

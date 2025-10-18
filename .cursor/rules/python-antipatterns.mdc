@@ -1,0 +1,658 @@
+---
+globs: **/*.py
+alwaysApply: false
+---
+
+Try avoid these performance antipatterns in python code you write:
+
+***
+
+### 1. **Match statements (sequence)**
+- **Slow**
+```python
+def sequence_match_logical():
+    seq = ["🐸", "🐛", "🦋", "🪲"]
+    frogs = 0
+    for _ in range(100_000):
+        if isinstance(seq, Sequence) and len(seq) > 0 and seq[0] == "🐸":
+            frogs += 1
+```
+- **Fast**
+```python
+def sequence_match_statement():
+    seq = ["🐸", "🐛", "🦋", "🪲"]
+    frogs = 0
+    for _ in range(100_000):
+        match seq:
+            case ["🐸", *_]: frogs += 1
+```
+
+***
+
+### 2. **Match statements (literal)**
+- **Slow**
+```python
+def literal_match_logical():
+    seq = ["🐊", "🐛", "🐈", "🦋", "🪲", "🐳"]
+    butterflies, caterpillars, beetles = 0, 0, 0
+    for _ in range(100_000):
+        for x in seq:
+            if x == "🦋":
+                butterflies += 1
+            elif x == "🐛":
+                caterpillars += 1
+            elif x == "🪲":
+                beetles += 1
+```
+- **Fast**
+```python
+def literal_match_statement():
+    seq = ["🐊", "🐛", "🐈", "🦋", "🪲", "🐳"]
+    butterflies, caterpillars, beetles = 0, 0, 0
+    for _ in range(100_000):
+        for x in seq:
+            match x:
+                case "🦋": butterflies += 1
+                case "🐛": caterpillars += 1
+                case "🪲": beetles += 1
+```
+
+***
+
+### 3. **Match statements (mapping)**
+- **Slow**
+```python
+def mapping_match_logical():
+    boats = [
+        {"🐓": 1}, {"🦊": 1, "🌽": 1},
+        {"🐓": 1, "🌽": 1}, {"🐓": 1, "🦊": 1},
+    ]
+    problems = valid_boats = 0
+    for _ in range(100_000):
+        for boat in boats:
+            if isinstance(boat, Mapping):
+                if "🐓" in boat and "🌽" in boat:
+                    problems += 1
+                elif "🐓" in boat and "🦊" in boat:
+                    problems += 1
+                else:
+                    valid_boats += 1
+```
+- **Fast**
+```python
+def mapping_match_statement():
+    boats = [
+        {"🐓": 1}, {"🦊": 1, "🌽": 1},
+        {"🐓": 1, "🌽": 1}, {"🐓": 1, "🦊": 1},
+    ]
+    problems = valid_boats = 0
+    for _ in range(100_000):
+        for boat in boats:
+            match boat:
+                case {"🐓": _, "🌽": _}: problems += 1
+                case {"🐓": _, "🦊": _}: problems += 1
+                case _: valid_boats += 1
+```
+
+***
+
+### 4. **Match statements (classes)**
+- **Slow**
+```python
+def bench_class_matching_logical():
+    drivers = [
+        Driver(name="Max Verstappen", team="Red Bull"),
+        Driver(name="Sergio Perez", team="Red Bull"),
+        Driver(name="Charles Leclerc", team="Ferrari"),
+        Driver(name="Lewis Hamilton", team="Mercedes"),
+    ]
+    for _ in range(100_000):
+        for driver in drivers:
+            if not isinstance(driver, Driver):
+                desc = "Invalid request"
+            elif driver.name == "Max Verstappen":
+                desc = "Max Verstappen, the current world #1"
+            elif driver.team == "Ferrari":
+                desc = f"{driver.name}, a Ferrari driver!! 🐎"
+            else:
+                desc = f"{driver.name}, a {driver.team} driver."
+```
+- **Fast**
+```python
+def bench_class_matching_statement():
+    drivers = [
+        Driver(name="Max Verstappen", team="Red Bull"),
+        Driver(name="Sergio Perez", team="Red Bull"),
+        Driver(name="Charles Leclerc", team="Ferrari"),
+        Driver(name="Lewis Hamilton", team="Mercedes"),
+    ]
+    for _ in range(100_000):
+        for driver in drivers:
+            match driver:
+                case Driver(name="Max Verstappen"): desc = "Max Verstappen, the current world #1"
+                case Driver(name=name, team="Ferrari"): desc = f"{name}, a Ferrari driver!! 🐎"
+                case Driver(name=name, team=team): desc = f"{name}, a {team} driver."
+                case _: desc = "Invalid request"
+```
+
+***
+
+### 5. **Inline globals in loop**
+- **Slow**
+```python
+def global_constant_in_loop():
+    total = MY_GLOBAL_CONSTANT_A
+    for i in range(10_000):
+        total += i * MY_GLOBAL_CONSTANT_C
+```
+- **Fast**
+```python
+def local_constant_in_loop():
+    total = 3.14
+    for i in range(10_000):
+        total += i * 1234
+```
+
+***
+
+### 6. **GC with higher threshold**
+- **Slow**
+```python
+def load_with_gc():
+    t1, t2, t3 = gc.get_threshold()
+    gc.set_threshold(1000, 20, 20)
+    for _ in range(100_000):
+        _cyclic_references()
+    gc.set_threshold(t1, t2, t3)
+```
+- **Fast**
+```python
+def load_gc_at_end():
+    t1, t2, t3 = gc.get_threshold()
+    gc.set_threshold(10, 10, 10)
+    for _ in range(100_000):
+        _cyclic_references()
+    gc.set_threshold(t1, t2, t3)
+```
+
+***
+
+### 7. **Importing specific name instead of namespace**
+- **Slow**
+```python
+def dotted_import():
+    for _ in range(100_000):
+        return os.path.exists('/')
+```
+- **Fast**
+```python
+def direct_import():
+    for _ in range(100_000):
+        return exists('/')
+```
+
+***
+
+### 8. **Refactoring Try..except outside a loop**
+- **Slow**
+```python
+def try_in_loop():
+    items = {'a': 1}
+    for _ in range(100_000):
+        try:
+            _ = items['a']
+        except Exception:
+            pass
+```
+- **Fast**
+```python
+def try_outside_loop():
+    items = {'a': 1}
+    try:
+        for _ in range(100_000):
+            _ = items['a']
+    except Exception:
+        pass
+```
+
+***
+
+### 9. **Class instead of dataclass**
+- **Slow**
+```python
+def attributes_in_class():
+    class Pet:
+        legs: int
+        noise: str
+        def __init__(self, legs, noise): self.legs = legs; self.noise = noise
+        def __repr__(self): return ""
+    for _ in range(100_000):
+        dog = Pet(4, "woof")
+        str(dog)
+```
+- **Fast**
+```python
+def attributes_in_dataclass():
+    @dataclass
+    class Pet:
+        legs: int
+        noise: str
+    for _ in range(100_000):
+        dog = Pet(4, "woof")
+        str(dog)
+```
+
+***
+
+### 10. **Namedtuple instead of dataclass**
+- **Slow**
+```python
+def attributes_in_namedtuple():
+    Pet = namedtuple("Pet", "legs noise")
+    for _ in range(100_000):
+        dog = Pet(4, "woof")
+        str(dog)
+```
+- **Fast**
+```python
+def attributes_in_dataclass():
+    @dataclass
+    class Pet:
+        legs: int
+        noise: str
+    for _ in range(100_000):
+        dog = Pet(4, "woof")
+        str(dog)
+```
+
+***
+
+### 11. **class instead of namedtuple**
+- **Slow**
+```python
+def attributes_in_class():
+    class Pet:
+        legs: int
+        noise: str
+        def __init__(self, legs, noise): self.legs = legs; self.noise = noise
+        def __repr__(self): return ""
+    for _ in range(100_000):
+        dog = Pet(4, "woof")
+        str(dog)
+```
+- **Fast**
+```python
+def attributes_in_namedtuple():
+    Pet = namedtuple("Pet", "legs noise")
+    for _ in range(100_000):
+        dog = Pet(4, "woof")
+        str(dog)
+```
+
+***
+
+### 12. **namedtuple class instead of namedtuple**
+- **Slow**
+```python
+def attributes_in_namedtuple_type():
+    class Pet(typing.NamedTuple):
+        legs: int
+        noise: str
+    for _ in range(100_000):
+        dog = Pet(4, "woof")
+        str(dog)
+```
+- **Fast**
+```python
+def attributes_in_namedtuple():
+    Pet = namedtuple("Pet", "legs noise")
+    for _ in range(100_000):
+        dog = Pet(4, "woof")
+        str(dog)
+```
+
+***
+
+### 13. **dict instead of class**
+- **Slow**
+```python
+def attributes_in_dict():
+    for _ in range(100_000):
+        dog = {"legs": 4, "noise": "woof"}
+        str(dog)
+```
+- **Fast**
+```python
+def attributes_in_class():
+    class Pet:
+        legs: int
+        noise: str
+        def __init__(self, legs, noise): self.legs = legs; self.noise = noise
+        def __repr__(self): return ""
+    for _ in range(100_000):
+        dog = Pet(4, "woof")
+        str(dog)
+```
+
+***
+
+### 14. **class with slots**
+- **Slow**
+```python
+def attributes_in_class():
+    class Pet:
+        legs: int
+        noise: str
+        def __init__(self, legs, noise): self.legs = legs; self.noise = noise
+        def __repr__(self): return ""
+    for _ in range(100_000):
+        dog = Pet(4, "woof")
+        str(dog)
+```
+- **Fast**
+```python
+def attributes_in_class_with_slots():
+    class Pet:
+        legs: int
+        noise: str
+        __slots__ = 'legs', 'noise'
+        def __init__(self, legs, noise): self.legs = legs; self.noise = noise
+        def __repr__(self): return ""
+    for _ in range(100_000):
+        dog = Pet(4, "woof")
+        str(dog)
+```
+
+***
+
+### 15. **dataclass with slots**
+- **Slow**
+```python
+def attributes_in_dataclass():
+    @dataclass
+    class Pet:
+        legs: int
+        noise: str
+    for _ in range(100_000):
+        dog = Pet(4, "woof")
+        str(dog)
+```
+- **Fast**
+```python
+def attributes_in_dataclass_with_slots():
+    @dataclass(slots=True)
+    class Pet:
+        legs: int
+        noise: str
+    for _ in range(100_000):
+        dog = Pet(4, "woof")
+        str(dog)
+```
+
+***
+
+### 16. **Using a list comprehension to filter another list**
+- **Slow**
+```python
+def filter_list_as_loop():
+    result = []
+    inputs = range(100_000)
+    for i in inputs:
+        if i % 2:
+            result.append(i)
+```
+- **Fast**
+```python
+def filter_list_as_comprehension():
+    inputs = range(100_000)
+    result = [i for i in inputs if i % 2]
+```
+
+***
+
+### 17. **Join list comprehension instead of generator expression**
+- **Slow**
+```python
+def join_list_comprehension():
+    words = ['data', 'type', 'is', 'so', 'long', 'now']
+    for x in range(100_000):
+        ''.join([ele.title() for ele in words])
+```
+- **Fast**
+```python
+def join_generator_expression():
+    words = ['data', 'type', 'is', 'so', 'long', 'now']
+    for x in range(100_000):
+        ''.join(ele.title() for ele in words)
+```
+
+***
+
+### 18. **Using fullmatch instead of anchors**
+- **Slow**
+```python
+def regex_with_anchors():
+    SNAKE_CASE_RE = re.compile(r'^([a-z]+\d*_[a-z\d_]*|_+[a-z\d]+[a-z\d_]*)$')
+    tests = ['data_type', 'data_type_', '_dataType', 'dataType', 'data type']
+    for x in range(100_000):
+        for test_str in tests:
+            SNAKE_CASE_RE.match(test_str)
+```
+- **Fast**
+```python
+def regex_with_fullmatch():
+    SNAKE_CASE_RE = re.compile(r'([a-z]+\d*_[a-z\d_]*|_+[a-z\d]+[a-z\d_]*)')
+    tests = ['data_type', 'data_type_', '_dataType', 'dataType', 'data type']
+    for x in range(100_000):
+        for test_str in tests:
+            SNAKE_CASE_RE.fullmatch(test_str)
+```
+
+***
+
+### 19. **Using a-zA-Z instead of IGNORECASE**
+- **Slow**
+```python
+def regex_with_capitalrange():
+    SNAKE_CASE_RE = re.compile(r'([a-zA-Z]+\d*_[a-zA-Z\d_]*|_+[a-zA-Z\d]+[a-zA-Z\d_]*)')
+    tests = ['data_type', 'data_type_URL', '_DataType', 'DataTypeURL', 'Data Type URL']
+    for x in range(100_000):
+        for test_str in tests:
+            SNAKE_CASE_RE.fullmatch(test_str)
+```
+- **Fast**
+```python
+def regex_with_ignorecase():
+    SNAKE_CASE_RE = re.compile(r'([a-z]+\d*_[a-z\d_]*|_+[a-z\d]+[a-z\d_]*)', re.IGNORECASE)
+    tests = ['data_type', 'data_type_URL', '_DataType', 'DataTypeURL', 'Data Type URL']
+    for x in range(100_000):
+        for test_str in tests:
+            SNAKE_CASE_RE.fullmatch(test_str)
+```
+
+***
+
+### 20. **Kwargs for known keyword args**
+- **Slow**
+```python
+def keyword_call():
+    func_with_kwargs(a=1, b=2, c=3)
+```
+- **Fast**
+```python
+def positional_call():
+    func_with_named_args(a=1, b=2, c=3)
+```
+
+***
+
+### 21. **Tiny Functions**
+- **Slow**
+```python
+def use_tiny_func():
+    x = 1
+    for n in range(100_000):
+        add(x, n)
+        add(n, x)
+```
+- **Fast**
+```python
+def inline_tiny_func():
+    x = 1
+    for n in range(100_000):
+        x + n
+        n + x
+```
+
+***
+
+### 22. **Slicing with memoryview instead of bytes**
+- **Slow**
+```python
+def bytes_slice():
+    word = b'A' * 1000
+    for i in range(1000):
+        n = word[0:i]
+```
+- **Fast**
+```python
+def memoryview_slice():
+    word = memoryview(b'A' * 1000)
+    for i in range(1000):
+        n = word[0:i]
+```
+
+***
+
+### 23. **Loop invariant Code Motion**
+- **Slow**
+```python
+def before():
+    x = (1, 2, 3, 4)
+    i = 6
+    for j in range(100_000):
+        len(x) * i + j
+```
+- **Fast**
+```python
+def after():
+    x = (1, 2, 3, 4)
+    i = 6
+    x_i = len(x) * i
+    for j in range(100_000):
+        x_i + j
+```
+
+***
+
+### 24. **Copy slice to Local**
+- **Slow**
+```python
+def slice_as_local():
+    x = list(range(100_000))
+    y = list(range(100_000))
+    for n in range(100_000):
+        x[n] + y[n]
+        x[n] + y[n]
+        x[n] + y[n]
+        x[n] + y[n]
+        x[n] + y[n]
+```
+- **Fast**
+```python
+def slice_copy_to_fast():
+    x = list(range(100_000))
+    y = list(range(100_000))
+    for n in range(100_000):
+        i = x[n]
+        j = y[n]
+        i + j
+        i + j
+        i + j
+        i + j
+        i + j
+```
+
+***
+
+### 25. **Copy name to Local**
+- **Slow**
+```python
+def as_local():
+    for _ in range(100_000):
+        x + y
+        x + y
+        x + y
+        x + y
+        x + y
+```
+- **Fast**
+```python
+def copy_name_to_fast():
+    i = x
+    j = y
+    for _ in range(100_000):
+        i + j
+        i + j
+        i + j
+        i + j
+        i + j
+```
+
+***
+
+### 26. **Copy dict item to Local**
+- **Slow**
+```python
+def dont_copy_dict_key_to_fast():
+    for _ in range(100_000):
+        d["x"] + d["y"]
+        d["x"] + d["y"]
+        d["x"] + d["y"]
+        d["x"] + d["y"]
+        d["x"] + d["y"]
+```
+- **Fast**
+```python
+def copy_dict_key_to_fast():
+    i = d["x"]
+    j = d["y"]
+    for _ in range(100_000):
+        i + j
+        i + j
+        i + j
+        i + j
+        i + j
+```
+
+***
+
+### 27. **Copy class attr to Local**
+- **Slow**
+```python
+def dont_copy_attr_to_fast():
+    for _ in range(100_000):
+        foo.x + foo.y
+        foo.x + foo.y
+        foo.x + foo.y
+        foo.x + foo.y
+        foo.x + foo.y
+```
+- **Fast**
+```python
+def copy_attr_to_fast():
+    i = foo.x
+    j = foo.y
+    for _ in range(100_000):
+        i + j
+        i + j
+        i + j
+        i + j
+        i + j
+```
+
+***
+
+These minimal code snippets **accurately reflect the benchmark order and results in your environment, showing both slow (anti-pattern) and fast (optimized) variants for each case.**
+
+[1](https://github.com/tonybaloney/anti-patterns/blob/master/README.md)

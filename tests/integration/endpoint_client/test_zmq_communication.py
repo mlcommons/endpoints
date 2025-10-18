@@ -2,8 +2,8 @@
 
 import asyncio
 import time
-from dataclasses import dataclass
 
+import msgspec
 import pytest
 import zmq
 import zmq.asyncio
@@ -16,8 +16,7 @@ from inference_endpoint.endpoint_client.zmq_utils import (
 from ...test_helpers import get_test_socket_path
 
 
-@dataclass
-class SampleData:
+class SampleData(msgspec.Struct):
     """Simple test data class for serialization tests."""
 
     id: str
@@ -406,7 +405,9 @@ class TestZMQPushPullIntegration:
         context = zmq.asyncio.Context()
 
         try:
-            pull_socket = ZMQPullSocket(context, address, zmq_config, bind=True)
+            pull_socket = ZMQPullSocket(
+                context, address, zmq_config, bind=True, decoder_type=SampleData
+            )
             push_socket = ZMQPushSocket(context, address, zmq_config)
 
             await asyncio.sleep(0.1)
@@ -451,7 +452,9 @@ class TestZMQPushPullIntegration:
             push_socket.socket.setsockopt(zmq.SNDTIMEO, zmq_config.zmq_send_timeout)
 
             # Create pull socket in connect mode (bind=False)
-            pull_socket = ZMQPullSocket(context, address, zmq_config, bind=False)
+            pull_socket = ZMQPullSocket(
+                context, address, zmq_config, bind=False, decoder_type=SampleData
+            )
 
             await asyncio.sleep(0.1)
 

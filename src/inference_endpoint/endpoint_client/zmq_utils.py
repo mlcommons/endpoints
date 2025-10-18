@@ -1,8 +1,8 @@
 """ZMQ utilities for endpoint client communication."""
 
-import pickle
 from typing import Any
 
+import msgspec
 import zmq
 import zmq.asyncio
 
@@ -62,8 +62,16 @@ class ZMQPushSocket(ZMQSocket):
     """Async wrapper for ZMQ PUSH socket."""
 
     def __init__(self, context: zmq.asyncio.Context, address: str, config: ZMQConfig):
-        """Initialize ZMQ push socket."""
+        """
+        Initialize ZMQ push socket.
+
+        Args:
+            context: ZMQ context
+            address: Socket address
+            config: ZMQ configuration
+        """
         super().__init__(context, zmq.PUSH, address, config, bind=False)
+        self._encoder = msgspec.msgpack.Encoder()
 
     def _set_socket_options(self, config: ZMQConfig) -> None:
         """Set PUSH socket specific options."""
@@ -73,9 +81,9 @@ class ZMQPushSocket(ZMQSocket):
 
     @profile
     async def send(self, data: Any) -> None:
-        """Serialize and send data through push socket (non-blocking)."""
-        serialized = pickle.dumps(data)
-        await self.socket.send(serialized, zmq.NOBLOCK)
+        """Serialize to msgspec and send data through push socket."""
+        serialized = self._encoder.encode(data)
+        await self.socket.send(serialized, flags=zmq.NOBLOCK, copy=False)
 
 
 class ZMQPullSocket(ZMQSocket):
@@ -87,9 +95,25 @@ class ZMQPullSocket(ZMQSocket):
         address: str,
         config: ZMQConfig,
         bind: bool = False,
+        decoder_type: type | None = None,
     ):
-        """Initialize ZMQ pull socket."""
+        """
+        Initialize ZMQ pull socket.
+
+        Args:
+            context: ZMQ context
+            address: Socket address
+            config: ZMQ configuration
+            bind: Whether to bind (True) or connect (False)
+            decoder_type: Expected type for decoding (e.g. Query, QueryResult | StreamChunk).
+                          If None, creates a decoder with no type constraint.
+        """
         super().__init__(context, zmq.PULL, address, config, bind=bind)
+        self._decoder = (
+            msgspec.msgpack.Decoder(type=decoder_type)
+            if decoder_type
+            else msgspec.msgpack.Decoder()
+        )
 
     def _set_socket_options(self, config: ZMQConfig) -> None:
         """Set PULL socket specific options."""
@@ -100,15 +124,15 @@ class ZMQPullSocket(ZMQSocket):
     @profile
     async def receive(self) -> Any | None:
         """
-        Receive and deserialize data from pull socket.
+        Receive and deserialize msgspec data from pull socket.
         Returns None on timeout.
 
         Returns:
-            Deserialized data or None on timeout.
+            Deserialized data, or None on timeout.
         """
         try:
-            serialized = await self.socket.recv()
-            return pickle.loads(serialized)
+            serialized = await self.socket.recv(flags=0, copy=False, track=False)
+            return self._decoder.decode(serialized)
         except zmq.Again:
             # Timeout occurred
             return None
