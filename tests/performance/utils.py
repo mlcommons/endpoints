@@ -7,7 +7,6 @@ from collections.abc import Callable
 
 from inference_endpoint.core.types import Query, QueryResult, StreamChunk
 from inference_endpoint.load_generator.events import SampleEvent
-from inference_endpoint.load_generator.sample import SampleFactory
 
 try:
     import uvloop
@@ -213,7 +212,7 @@ def format_performance_report(metrics: dict) -> str:
     return "\n".join(report)
 
 
-class MetricsSampleFactory(SampleFactory):
+class MetricsSampleFactory:
     """SampleFactory with built-in performance metrics tracking.
 
     Manages its own PerformanceMetrics collector internally.

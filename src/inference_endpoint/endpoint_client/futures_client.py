@@ -47,37 +47,43 @@ class FuturesHttpClient(HTTPEndpointClient):
 
     async def async_start(self):
         """Start HTTP client and response handler."""
-        # Set loop to current running loop
-        self.loop = asyncio.get_running_loop()
+        try:
+            # Set loop to current running loop
+            self.loop = asyncio.get_running_loop()
 
-        # Initialize ZMQ, workers, and sockets (parent's async_start without loop creation)
-        self.zmq_context = zmq.asyncio.Context(
-            io_threads=self.zmq_config.zmq_io_threads
-        )
-        self._shutdown_event = asyncio.Event()
+            # Initialize ZMQ, workers, and sockets (parent's async_start without loop creation)
+            self.zmq_context = zmq.asyncio.Context(
+                io_threads=self.zmq_config.zmq_io_threads
+            )
+            self._shutdown_event = asyncio.Event()
 
-        if self.config.max_concurrency > 0:
-            self._concurrency_semaphore = asyncio.Semaphore(self.config.max_concurrency)
+            if self.config.max_concurrency > 0:
+                self._concurrency_semaphore = asyncio.Semaphore(
+                    self.config.max_concurrency
+                )
 
-        for i in range(self.config.num_workers):
-            address = f"{self.zmq_config.zmq_request_queue_prefix}_{i}_requests"
-            push_socket = ZMQPushSocket(self.zmq_context, address, self.zmq_config)
-            self.worker_push_sockets.append(push_socket)
+            for i in range(self.config.num_workers):
+                address = f"{self.zmq_config.zmq_request_queue_prefix}_{i}_requests"
+                push_socket = ZMQPushSocket(self.zmq_context, address, self.zmq_config)
+                self.worker_push_sockets.append(push_socket)
 
-        self.worker_manager = WorkerManager(
-            self.config, self.aiohttp_config, self.zmq_config, self.zmq_context
-        )
-        await self.worker_manager.initialize()
+            self.worker_manager = WorkerManager(
+                self.config, self.aiohttp_config, self.zmq_config, self.zmq_context
+            )
+            await self.worker_manager.initialize()
 
-        self._response_socket = ZMQPullSocket(
-            self.zmq_context,
-            self.zmq_config.zmq_response_queue_addr,
-            self.zmq_config,
-            bind=True,
-        )
+            self._response_socket = ZMQPullSocket(
+                self.zmq_context,
+                self.zmq_config.zmq_response_queue_addr,
+                self.zmq_config,
+                bind=True,
+            )
 
-        # Schedule response handler in current loop
-        self._response_handler_task = asyncio.create_task(self._handle_responses())
+            # Schedule response handler in current loop
+            self._response_handler_task = asyncio.create_task(self._handle_responses())
+        except Exception as e:
+            logger.exception(f"Failed to start FuturesHttpClient: {e}")
+            raise e
 
     async def issue_query(self, query: Query) -> asyncio.Future:
         """Issue query and return future for response."""

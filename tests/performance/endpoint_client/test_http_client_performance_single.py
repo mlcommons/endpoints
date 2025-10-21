@@ -14,8 +14,8 @@ from inference_endpoint.load_generator.scheduler import (
     WithoutReplacementSampleOrder,
 )
 from inference_endpoint.load_generator.session import BenchmarkSession
+from inference_endpoint.metrics.recorder import EventRecorder
 
-from tests.performance.utils import MetricsSampleFactory
 from tests.test_helpers import create_test_query
 
 logger = logging.getLogger(__name__)
@@ -136,33 +136,34 @@ def run_performance_test(
     sample_issuer = HttpClientSampleIssuer(http_client)
     sample_issuer.start()
 
-    # Start benchmark session with metrics-tracking sample factory
-    # MetricsSampleFactory will store itself in _latest_instance for retrieval
-    session = BenchmarkSession.start(
-        rt_settings,
-        dataloader,
-        sample_issuer,
-        scheduler,
-        sample_factory_cls=MetricsSampleFactory,
-        name=f"perf_test_{stream}_{target_qps}qps",
-        stop_sample_issuer_on_test_end=False,  # We'll handle shutdown manually
-    )
+    with EventRecorder():
+        # Start benchmark session with metrics-tracking sample factory
+        # MetricsSampleFactory will store itself in _latest_instance for retrieval
+        session = BenchmarkSession.start(
+            rt_settings,
+            dataloader,
+            sample_issuer,
+            scheduler,
+            # sample_factory_cls=MetricsSampleFactory,
+            name=f"perf_test_{stream}_{target_qps}qps",
+            stop_sample_issuer_on_test_end=False,  # We'll handle shutdown manually
+        )
 
-    # Get reference to the sample factory instance (stored during __init__)
-    # sample_factory = MetricsSampleFactory._latest_instance
-    # assert sample_factory is not None, "MetricsSampleFactory instance not found"
+        # Get reference to the sample factory instance (stored during __init__)
+        # sample_factory = MetricsSampleFactory._latest_instance
+        # assert sample_factory is not None, "MetricsSampleFactory instance not found"
 
-    # Wait for test to complete
-    session.wait_for_test_end()
+        # Wait for test to complete
+        session.wait_for_test_end()
 
-    # Wait for all pending responses to complete
-    sample_issuer.wait_for_all_complete()
+        # Wait for all pending responses to complete
+        sample_issuer.wait_for_all_complete()
 
-    # Stop metrics collection
-    # sample_factory.metrics.stop()
+        # Stop metrics collection
+        # sample_factory.metrics.stop()
 
-    # Shutdown
-    sample_issuer.shutdown()
+        # Shutdown
+        sample_issuer.shutdown()
 
     # Get summary from factory's metrics
     # return sample_factory.metrics.get_summary()
@@ -211,7 +212,7 @@ def assert_performance_requirements(
     ), f"Success rate must be >= {required_success_rate}%, got {summary['success_rate']}%"
 
 
-@pytest.mark.timeout(0)  # Disable timeout for all performance tests
+@pytest.mark.timeout(600)  # Disable timeout for all performance tests
 class TestHTTPClientPerformanceSingleWorker:
     """Performance tests for HTTPEndpointClient (single worker).
 

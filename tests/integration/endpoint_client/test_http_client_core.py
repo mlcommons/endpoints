@@ -271,9 +271,8 @@ class TestHTTPEndpointClientConcurrency:
             zmq_high_water_mark=actual_max_concurrency,
         )
 
-        await client.async_start()
-
         try:
+            await client.async_start()
             num_requests = actual_max_concurrency
 
             # Collect futures

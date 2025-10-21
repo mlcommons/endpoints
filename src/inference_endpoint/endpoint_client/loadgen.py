@@ -69,9 +69,9 @@ class HttpClientSampleIssuer(SampleIssuer):
                 match response:
                     case StreamChunk(is_complete=False):
                         if response.metadata.get("first_chunk", False):
-                            sample.callbacks[SampleEvent.FIRST_CHUNK](response)
+                            sample.on_first_chunk(response)
                         else:
-                            sample.callbacks[SampleEvent.NON_FIRST_CHUNK](response)
+                            sample.on_non_first_chunk(response)
 
                     case StreamChunk(is_complete=True):
                         raise NotImplementedError(
@@ -84,7 +84,7 @@ class HttpClientSampleIssuer(SampleIssuer):
 
                     case QueryResult():
                         # Final response for both streaming and non-streaming
-                        sample.callbacks[SampleEvent.COMPLETE](response)
+                        sample.on_complete(response)
 
                         # Remove from map and check if all complete
                         self.query_id_to_sample.pop(response.id, None)
@@ -111,7 +111,7 @@ class HttpClientSampleIssuer(SampleIssuer):
         """
         # Convert int uuid to string for consistency with Query.id type
         query_id: str = str(sample.uuid)
-        query = Query(id=query_id, data=sample.get_bytes())
+        query = Query(id=query_id, data=sample.data)
 
         # Schedule state mutation on event loop thread
         # This ensures all dict access happens from single thread

@@ -116,12 +116,6 @@ def test_many_chunk_performance(
         cleanup_connections["delete"].append(conn_name)
 
         start_time = time.monotonic_ns()
-        for sample_uuid in range(n_samples):
-            rec.record_event(
-                SampleEvent.REQUEST_SENT,
-                time.monotonic_ns(),
-                sample_uuid=sample_uuid + 1,
-            )
 
         for sample_uuid in range(n_samples):
             rec.record_event(
@@ -203,12 +197,6 @@ def test_2_chunk_per_query_performance(
         cleanup_connections["delete"].append(conn_name)
 
         start_time = time.monotonic_ns()
-        for sample_uuid in range(n_queries):
-            rec.record_event(
-                SampleEvent.REQUEST_SENT,
-                time.monotonic_ns(),
-                sample_uuid=sample_uuid + 1,
-            )
 
         order = list(range(n_queries))
         random.shuffle(order)
@@ -275,7 +263,7 @@ def test_db_write_performance(cleanup_connections, check_time_fn):
         def bulk_write():
             for i in range(n_events):
                 rec.record_event(
-                    SampleEvent.REQUEST_SENT, time.monotonic_ns(), sample_uuid=i + 1
+                    SampleEvent.FIRST_CHUNK, time.monotonic_ns(), sample_uuid=i + 1
                 )
             rec.wait_for_writes(force_commit=True)
 
