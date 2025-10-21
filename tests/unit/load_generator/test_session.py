@@ -87,11 +87,11 @@ def test_session_start():
         rng_sample_index=random.Random(1234),
     )
 
-    def digits_of_square_iter(n: int):
+    def compute_digits_of_square(n: int):
         yield from str(n**2)
 
     dl = DummyDataLoader(n_samples=100)
-    sample_issuer = PooledSampleIssuer(digits_of_square_iter)
+    sample_issuer = PooledSampleIssuer(compute_digits_of_square)
     sched = MaxThroughputScheduler(rt_settings, WithoutReplacementSampleOrder)
 
     with tqdm(desc="pytest_test_session_start", total=10_000, unit="samples") as pbar:

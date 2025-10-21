@@ -19,10 +19,7 @@ class BenchmarkSession:
         session_id: str | None = None,
     ):
         self.runtime_settings = runtime_settings
-        if session_id:
-            self.session_id = session_id
-        else:
-            self.session_id = uuid.uuid4().hex
+        self.session_id = session_id if session_id else uuid.uuid4().hex
 
         self.end_event = threading.Event()
         self.thread = None
@@ -55,9 +52,18 @@ class BenchmarkSession:
             if stop_sample_issuer_on_test_end:
                 load_generator.sample_issuer.shutdown()
 
-    def wait_for_test_end(self):
-        self.thread.join()
-        self.thread = None
+    def wait_for_test_end(self, timeout: float | None = None) -> bool:
+        """
+        Join the test thread and return True if the test completed, False if it timed out.
+
+        Args:
+            timeout: The maximum time to wait for the test to complete. If None, wait indefinitely.
+
+        Returns:
+            bool: True if the test thread has completed, False if it timed out.
+        """
+        self.thread.join(timeout=timeout)
+        return not self.thread.is_alive()
 
     @classmethod
     def start(

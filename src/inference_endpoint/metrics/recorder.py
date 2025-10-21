@@ -325,7 +325,9 @@ class EventRecorder:
         rec_inst = EventRecorder.LIVE
 
         if not rec_inst._writer_started:
-            raise RuntimeError("Writer thread not started")
+            raise RuntimeError(
+                "Writer thread not started - Users should use `with EventRecorder(...)` to ensure the writer thread is started"
+            )
 
         # Update inflight sample tracking
         if ev_type == SessionEvent.LOADGEN_ISSUE_CALLED:

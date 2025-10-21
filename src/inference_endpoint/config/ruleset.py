@@ -41,7 +41,7 @@ class RuntimeSettings:
         Returns:
             int: The total number of samples to issue to the SUT throughout the course of the test run.
         """
-        if self.n_samples_to_issue:
+        if self.n_samples_to_issue is not None:
             return self.n_samples_to_issue
 
         if isinstance(self.metric_target, metrics.Throughput):

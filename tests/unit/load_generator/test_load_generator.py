@@ -92,10 +92,10 @@ def test_full_run(record_event_mock):
         rng_sample_index=random.Random(1234),
     )
 
-    def digits_of_square_iter(n: int):
+    def compute_digits_of_square(n: int):
         yield from str(n**2)
 
-    sample_issuer = SerialSampleIssuer(digits_of_square_iter)
+    sample_issuer = SerialSampleIssuer(compute_digits_of_square)
     load_generator = SchedulerBasedLoadGenerator(
         sample_issuer,
         NoEventRecordingSample,

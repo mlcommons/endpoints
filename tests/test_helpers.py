@@ -170,7 +170,7 @@ class SerialSampleIssuer(SampleIssuer):
 
     def __init__(self, compute_func=None):
         if compute_func is None:
-            self.compute_func = lambda x: x
+            self.compute_func = lambda x: [x]
         else:
             self.compute_func = compute_func
 
@@ -198,7 +198,7 @@ class PooledSampleIssuer(SampleIssuer):
     def __init__(self, compute_func=None, n_workers: int = 4):
         self.n_workers = n_workers
         if compute_func is None:
-            self.compute_func = lambda x: x
+            self.compute_func = lambda x: [x]
         else:
             self.compute_func = compute_func
         self.executor = ThreadPoolExecutor(max_workers=n_workers)
