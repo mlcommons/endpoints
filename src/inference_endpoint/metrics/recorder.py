@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import atexit
 import contextlib
 import dataclasses
@@ -69,6 +71,17 @@ def register_cleanup(shm_path: str):
     logger.debug(f"Registered at-exit cleanup for {shm_path}")
 
 
+class EventRecorderSingletonViolation(RuntimeError):
+    """Raised when an attempt is made to create a second EventRecorder while one is already active.
+
+    This is to prevent:
+        - Multiple writer connections to the same database
+        - Potential writes to the wrong event database if multiple are open
+    """
+
+    pass
+
+
 class EventRecorder:
     """Records events to a shared memory database, which can be accessed across multiple processes.
 
@@ -77,7 +90,11 @@ class EventRecorder:
 
     This class uses a dedicated writer thread to handle all SQLite operations, making it thread-safe.
     Events are queued via record_event() and processed asynchronously by the writer thread.
+
+    Only 1 EventRecorder can be actively writing events at a time.
     """
+
+    LIVE: EventRecorder | None = None
 
     _created_session_dbs: ClassVar[set[str]] = set()
 
@@ -90,7 +107,7 @@ class EventRecorder:
         session_id: str | None = None,
         txn_buffer_size: int = 1000,
         min_memory_req_bytes: int = 1024 * 1024 * 1024,
-        idle_notify_th_ev: threading.Event | None = None,
+        notify_idle: threading.Event | None = None,
     ):
         """Creates a new EventRecorder.
 
@@ -98,7 +115,7 @@ class EventRecorder:
             session_id: Optional session id to connect to an existing database. If not provided, a new database will be created.
             txn_buffer_size: The number of events to buffer before committing to the database. (Default: 1000)
             min_memory_req_bytes: The minimum amount of free space (in bytes) in /dev/shm required to create a new database. (Default: 1GB)
-            idle_notify_th_ev: Optional threading.Event. If provided, EventRecorder will set when the number of inflight samples is 0.
+            notify_idle: Optional threading.Event. If provided, EventRecorder will set when the number of inflight samples is 0.
         """
         if session_id is None:
             session_id = uuid.uuid4().hex
@@ -142,7 +159,7 @@ class EventRecorder:
         self.writer_thread: threading.Thread | None = None
         self._writer_started = False
 
-        self.idle_notify_th_ev = idle_notify_th_ev
+        self.notify_idle = notify_idle
         self.n_inflight_samples = 0
         self.should_check_idle = False
 
@@ -197,41 +214,54 @@ class EventRecorder:
                     continue
 
                 # Check for sentinel values
+                should_commit = False
                 if item is EventRecorder._STOP_SENTINEL:
                     # Commit any remaining events before stopping
                     if event_buffer:
                         logging.debug(
                             f"Writer thread stopping - committing final {len(event_buffer)} transactions"
                         )
-                    commit_buffer()
-                    self.event_queue.task_done()
-                    break
-
-                if item is EventRecorder._FORCE_COMMIT_SENTINEL:
+                    should_commit = True
+                elif item is EventRecorder._FORCE_COMMIT_SENTINEL:
                     # Force commit current buffer
                     if event_buffer:
                         logging.debug(
                             f"Force committing {len(event_buffer)} transactions"
                         )
-                    commit_buffer()
-                    self.event_queue.task_done()
-                    continue
-
-                # Regular event - add to buffer
-                event_buffer.append(item)
+                    should_commit = True
+                else:
+                    # Regular event - add to buffer
+                    event_buffer.append(item)
+                    should_commit = len(event_buffer) >= self.txn_buffer_size
 
                 # Commit if buffer is full
-                if len(event_buffer) >= self.txn_buffer_size:
+                if should_commit:
                     logging.debug(
                         f"Committing {len(event_buffer)} transactions (max buffer size: {self.txn_buffer_size})"
                     )
                     commit_buffer()
-
                 self.event_queue.task_done()
+
+                if (
+                    self.should_check_idle
+                    and self.notify_idle is not None
+                    and self.n_inflight_samples == 0
+                    and self.event_queue.empty()
+                ):
+                    self.notify_idle.set()
+
+                if item is EventRecorder._STOP_SENTINEL:
+                    break
         logging.debug(f"Writer thread stopped for {self.connection_name}")
 
     def _start_writer_thread(self):
         """Starts the writer thread if not already started."""
+        if EventRecorder.LIVE is not None:
+            raise EventRecorderSingletonViolation(
+                f"EventRecorder {EventRecorder.LIVE.session_id} is already active, cannot open {self.session_id}"
+            )
+        EventRecorder.LIVE = self
+
         if self._writer_started:
             logging.debug("Writer thread already started")
             return
@@ -259,13 +289,15 @@ class EventRecorder:
         self.event_queue.join()
 
     @profile
+    @classmethod
     def record_event(
-        self,
+        cls,
         ev_type: Event,
         timestamp_ns: int,
         sample_uuid: str = "",
         force_commit: bool = False,
-    ):
+        assert_active: bool = True,
+    ) -> bool:
         """Records an event by pushing it to the queue for the writer thread to process.
 
         This method is thread-safe and can be called from multiple threads simultaneously.
@@ -276,36 +308,43 @@ class EventRecorder:
             timestamp_ns (int): The timestamp in nanoseconds of the event.
             sample_uuid (str): The sample uuid of the event.
             force_commit (bool): Whether to force commit the current buffer immediately.
+            assert_active (bool): Whether to raise an exception if no EventRecorder is active.
+                                  If False, this method will return False. (Default: True)
+
+        Returns:
+            bool: True if the event was recorded, False otherwise. If assert_active is True,
+            this method will always return True or raise an exception.
         """
-        if not self._writer_started:
+        if EventRecorder.LIVE is None:
+            if assert_active:
+                raise EventRecorderSingletonViolation(
+                    "No EventRecorder is active, cannot record event"
+                )
+            return False
+
+        rec_inst = EventRecorder.LIVE
+
+        if not rec_inst._writer_started:
             raise RuntimeError("Writer thread not started")
 
         # Update inflight sample tracking
-        if ev_type == SampleEvent.REQUEST_SENT:
-            self.n_inflight_samples += 1
+        if ev_type == SessionEvent.LOADGEN_ISSUE_CALLED:
+            rec_inst.n_inflight_samples += 1
         elif ev_type == SampleEvent.COMPLETE:
-            self.n_inflight_samples -= 1
-        elif ev_type == SessionEvent.LG_STOP:
-            self.should_check_idle = True
+            rec_inst.n_inflight_samples -= 1
 
-        if self.n_inflight_samples < 0:
+        if rec_inst.n_inflight_samples < 0:
             raise RuntimeError(
-                f"Number of inflight samples is negative: {self.n_inflight_samples}"
+                f"Number of inflight samples is negative: {rec_inst.n_inflight_samples}"
             )
 
-        if (
-            self.should_check_idle
-            and self.idle_notify_th_ev is not None
-            and self.n_inflight_samples == 0
-        ):
-            self.idle_notify_th_ev.set()
-
         # Push event to queue for writer thread to process
-        self.event_queue.put((sample_uuid, ev_type.value, timestamp_ns))
+        rec_inst.event_queue.put((sample_uuid, ev_type.value, timestamp_ns))
 
         # If force commit requested, send sentinel
         if force_commit:
-            self.event_queue.put(self._FORCE_COMMIT_SENTINEL)
+            rec_inst.event_queue.put(EventRecorder._FORCE_COMMIT_SENTINEL)
+        return True
 
     def close(self):
         """Closes the EventRecorder and stops the writer thread.
@@ -313,6 +352,12 @@ class EventRecorder:
         This method signals the writer thread to stop, waits for it to finish processing
         all queued events, and then joins the thread.
         """
+        if EventRecorder.LIVE is not self:
+            raise EventRecorderSingletonViolation(
+                f"EventRecorder {self.session_id} is not active, cannot close"
+            )
+        EventRecorder.LIVE = None
+
         if not self._writer_started:
             logging.debug("Writer thread was never started, nothing to close")
             return
@@ -492,13 +537,13 @@ class MetricsReporter:
 
     def derive_TTFT(self) -> RollupQueryTable:
         return self.derive_metric(
-            """
+            f"""
             SELECT
                 sample_uuid,
-                MAX(CASE WHEN event_type = 'first_chunk_received' THEN timestamp_ns END) -
-                MAX(CASE WHEN event_type = 'request_sent' THEN timestamp_ns END) AS ttft
+                MAX(CASE WHEN event_type = '{SampleEvent.FIRST_CHUNK.value}' THEN timestamp_ns END) -
+                MAX(CASE WHEN event_type = '{SessionEvent.LOADGEN_ISSUE_CALLED.value}' THEN timestamp_ns END) AS ttft
             FROM events
-            WHERE event_type IN ('request_sent', 'first_chunk_received')
+            WHERE event_type IN ('{SessionEvent.LOADGEN_ISSUE_CALLED.value}', '{SampleEvent.FIRST_CHUNK.value}')
             GROUP BY sample_uuid
             HAVING COUNT(DISTINCT event_type) = 2
             """,
@@ -507,7 +552,7 @@ class MetricsReporter:
 
     def derive_TPOT(self) -> RollupQueryTable:
         if self.intermediate_chunks_logged:
-            query = """
+            query = f"""
             WITH chunk_events AS (
                 SELECT
                     sample_uuid,
@@ -518,7 +563,7 @@ class MetricsReporter:
                         ORDER BY timestamp_ns
                     ) AS prev_timestamp
                 FROM events
-                WHERE event_type IN ('first_chunk_received', 'non_first_chunk_received')
+                WHERE event_type IN ('{SampleEvent.FIRST_CHUNK.value}', '{SampleEvent.NON_FIRST_CHUNK.value}')
             )
             SELECT
                 sample_uuid,
@@ -528,13 +573,13 @@ class MetricsReporter:
             ORDER BY sample_uuid, timestamp_ns
             """
         else:
-            query = """
+            query = f"""
             SELECT
                 sample_uuid,
-                MAX(CASE WHEN event_type = 'non_first_chunk_received' THEN timestamp_ns END) -
-                MAX(CASE WHEN event_type = 'first_chunk_received' THEN timestamp_ns END) AS tpot
+                MAX(CASE WHEN event_type = '{SampleEvent.NON_FIRST_CHUNK.value}' THEN timestamp_ns END) -
+                MAX(CASE WHEN event_type = '{SampleEvent.FIRST_CHUNK.value}' THEN timestamp_ns END) AS tpot
             FROM events
-            WHERE event_type IN ('first_chunk_received', 'non_first_chunk_received')
+            WHERE event_type IN ('{SampleEvent.FIRST_CHUNK.value}', '{SampleEvent.NON_FIRST_CHUNK.value}')
             GROUP BY sample_uuid
             HAVING COUNT(DISTINCT event_type) = 2
             """
@@ -547,10 +592,10 @@ class MetricsReporter:
         - "completed" (int): The number of samples completed
         - "in_flight" (int): The number of samples in flight
         """
-        statuses = self.cur_.execute("""
+        statuses = self.cur_.execute(f"""
         SELECT
-            COUNT(DISTINCT CASE WHEN event_type = 'request_sent' THEN sample_uuid END) AS request_sent_count,
-            COUNT(DISTINCT CASE WHEN event_type = 'complete' THEN sample_uuid END) AS complete_count
+            COUNT(DISTINCT CASE WHEN event_type = '{SessionEvent.LOADGEN_ISSUE_CALLED.value}' THEN sample_uuid END) AS request_sent_count,
+            COUNT(DISTINCT CASE WHEN event_type = '{SampleEvent.COMPLETE.value}' THEN sample_uuid END) AS complete_count
         FROM events
         """).fetchone()
 

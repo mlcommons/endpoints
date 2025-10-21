@@ -9,17 +9,13 @@ import hashlib
 import random
 import string
 import uuid
-from collections import defaultdict
-from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from functools import partial
 from pathlib import Path
 
 from inference_endpoint.core.types import Query
 from inference_endpoint.dataset_manager.dataloader import DataLoader
-from inference_endpoint.load_generator.events import SampleEvent
 from inference_endpoint.load_generator.load_generator import SampleIssuer
-from inference_endpoint.load_generator.sample import SampleFactory
+from inference_endpoint.load_generator.sample import Sample
 
 
 def _generate_random_word(
@@ -179,18 +175,16 @@ class SerialSampleIssuer(SampleIssuer):
             self.compute_func = compute_func
 
     def issue(self, sample):
-        dat = sample.get_bytes()
-        sample.callbacks[SampleEvent.REQUEST_SENT](None)
         first = True
         chunks = []
-        for chunk in self.compute_func(dat):
+        for chunk in self.compute_func(sample.data):
             chunks.append(chunk)
             if first:
-                sample.callbacks[SampleEvent.FIRST_CHUNK](chunk)
+                sample.on_first_chunk(chunk)
                 first = False
             else:
-                sample.callbacks[SampleEvent.NON_FIRST_CHUNK](chunk)
-        sample.callbacks[SampleEvent.COMPLETE](chunks)
+                sample.on_non_first_chunk(chunk)
+        sample.on_complete(chunks)
 
 
 class PooledSampleIssuer(SampleIssuer):
@@ -210,29 +204,36 @@ class PooledSampleIssuer(SampleIssuer):
         self.executor = ThreadPoolExecutor(max_workers=n_workers)
         self.futures = []
 
-    def shutdown(self):
+    def shutdown(self, wait: bool = True):
         """Shutdown the executor and wait for all tasks to complete.
+
+        Args:
+            wait: Whether to wait for all tasks to complete before returning.
+                  If False, the executor will be shutdown and the method will return immediately.
+                  The caller is responsible for checking the futures for exceptions. (Default: True)
 
         Raises any exceptions that occurred in worker threads.
         """
-        self.executor.shutdown(wait=True)
-        # Check all futures for exceptions
-        for future in self.futures:
-            future.result()  # This will raise if the worker raised an exception
-        self.futures.clear()
+        print("Shutting down executor")
+        self.executor.shutdown(wait=wait)
+
+        if wait:
+            # Check all futures for exceptions
+            for future in self.futures:
+                future.result()  # This will raise if the worker raised an exception
+            self.futures.clear()
 
     def handle_sample(self, sample):
-        dat = sample.get_bytes()
         first = True
         chunks = []
-        for chunk in self.compute_func(dat):
+        for chunk in self.compute_func(sample.data):
             chunks.append(chunk)
             if first:
-                sample.callbacks[SampleEvent.FIRST_CHUNK](chunk)
+                sample.on_first_chunk(chunk)
                 first = False
             else:
-                sample.callbacks[SampleEvent.NON_FIRST_CHUNK](chunk)
-        sample.callbacks[SampleEvent.COMPLETE](chunks)
+                sample.on_non_first_chunk(chunk)
+        sample.on_complete(chunks)
 
     def check_errors(self):
         """Check if any worker thread has raised an exception and re-raise it.
@@ -253,7 +254,6 @@ class PooledSampleIssuer(SampleIssuer):
 
     def issue(self, sample):
         """Submit a sample to be processed by the worker pool."""
-        sample.callbacks[SampleEvent.REQUEST_SENT](None)
         future = self.executor.submit(self.handle_sample, sample)
         self.futures.append(future)
 
@@ -263,35 +263,37 @@ class PooledSampleIssuer(SampleIssuer):
             self.check_errors()
 
 
-class HistogramSampleFactory(SampleFactory):
-    def __init__(self, *args, **kwargs):
-        super().__init__(None, None)
+class NoEventRecordingSample(Sample):
+    _UNSET = object()
+    # Sentinel value for uninitialized attributes that is different from None
+    # to avoid confusion with actual None values
 
-        self.sent_hist = defaultdict(int)
-        self.completed_hist = defaultdict(int)
-        self.completed_chunks = {}
-        self.uuid_to_idx = {}
+    def __init__(self, data):
+        super().__init__(data)
 
-    @staticmethod
-    def sample_get_bytes(dataloader, sample_index):
-        return sample_index
+        self.first_chunk = NoEventRecordingSample._UNSET
+        self.non_first_chunks = []
+        self.complete_all_chunks = NoEventRecordingSample._UNSET
 
-    def inc_sent(self, sample_index: int, sample_uuid: str, val):
-        self.sent_hist[sample_index] += 1
+    def on_first_chunk(self, chunk):
+        self.first_chunk = chunk
 
-    def inc_completed(self, sample_index: int, sample_uuid: str, val):
-        self.completed_hist[sample_index] += 1
-        self.completed_chunks[sample_uuid] = val
+    def on_non_first_chunk(self, chunk):
+        self.non_first_chunks.append(chunk)
 
-    def get_sample_callbacks(
-        self, sample_index: int, sample_uuid: str
-    ) -> dict[SampleEvent, Callable]:
-        self.uuid_to_idx[sample_uuid] = sample_index
-        return {
-            SampleEvent.REQUEST_SENT: partial(self.inc_sent, sample_index, sample_uuid),
-            SampleEvent.FIRST_CHUNK: (lambda val: None),
-            SampleEvent.NON_FIRST_CHUNK: (lambda val: None),
-            SampleEvent.COMPLETE: partial(
-                self.inc_completed, sample_index, sample_uuid
-            ),
-        }
+    def on_complete(self, chunks):
+        self.complete_all_chunks = chunks
+
+
+class ProgressBarSample(Sample):
+    pbar = None
+
+    @classmethod
+    def set_pbar(cls, pbar=None):
+        cls.pbar = pbar
+
+    def on_complete(self, chunks):
+        super().on_complete(chunks)
+
+        if ProgressBarSample.pbar is not None:
+            ProgressBarSample.pbar.update(1)

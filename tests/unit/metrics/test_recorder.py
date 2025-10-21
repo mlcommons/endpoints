@@ -4,9 +4,10 @@ from collections import defaultdict, namedtuple
 from unittest.mock import patch
 
 import pytest
-from inference_endpoint.load_generator.events import SampleEvent
+from inference_endpoint.load_generator.events import SampleEvent, SessionEvent
 from inference_endpoint.metrics.recorder import (
     EventRecorder,
+    EventRecorderSingletonViolation,
     MetricsReporter,
     RollupQueryTable,
     sqlite3_cursor,
@@ -83,18 +84,51 @@ def get_EventRecorder(*args, **kwargs):
     return EventRecorder(*args, min_memory_req_bytes=128 * 1024 * 1024, **kwargs)
 
 
+def test_event_recorder_singleton_violation_create_multiple():
+    with get_EventRecorder():
+        with pytest.raises(EventRecorderSingletonViolation):
+            with get_EventRecorder():
+                pass
+
+
+def test_event_recorder_singleton_violation_close_non_active():
+    with get_EventRecorder():
+        other_rec = get_EventRecorder()
+        with pytest.raises(EventRecorderSingletonViolation):
+            other_rec.close()
+
+
+def test_event_recorder_singleton_violation_record_event_non_active(sample_uuids):
+    assert (
+        EventRecorder.LIVE is None
+    ), "Cannot run test - EventRecorder is active from previous test"
+    with pytest.raises(EventRecorderSingletonViolation):
+        EventRecorder.record_event(
+            SessionEvent.LOADGEN_ISSUE_CALLED, 10000, sample_uuid=sample_uuids(1)
+        )
+    assert (
+        EventRecorder.record_event(
+            SessionEvent.LOADGEN_ISSUE_CALLED,
+            10000,
+            sample_uuid=sample_uuids(1),
+            assert_active=False,
+        )
+        is False
+    )
+
+
 def test_record_event(events_db, sample_uuids):
     uuid1 = sample_uuids(1)
     uuid2 = sample_uuids(2)
     uuid3 = sample_uuids(3)
 
     with get_EventRecorder() as rec:
-        rec.record_event(SampleEvent.REQUEST_SENT, 10000, sample_uuid=uuid1)
-        rec.record_event(SampleEvent.REQUEST_SENT, 10003, sample_uuid=uuid2)
+        rec.record_event(SessionEvent.LOADGEN_ISSUE_CALLED, 10000, sample_uuid=uuid1)
+        rec.record_event(SessionEvent.LOADGEN_ISSUE_CALLED, 10003, sample_uuid=uuid2)
         rec.record_event(SampleEvent.FIRST_CHUNK, 10010, sample_uuid=uuid1)
         rec.record_event(SampleEvent.FIRST_CHUNK, 10190, sample_uuid=uuid2)
         rec.record_event(SampleEvent.NON_FIRST_CHUNK, 10201, sample_uuid=uuid1)
-        rec.record_event(SampleEvent.REQUEST_SENT, 10202, sample_uuid=uuid3)
+        rec.record_event(SessionEvent.LOADGEN_ISSUE_CALLED, 10202, sample_uuid=uuid3)
         rec.record_event(SampleEvent.NON_FIRST_CHUNK, 10203, sample_uuid=uuid1)
         rec.record_event(SampleEvent.NON_FIRST_CHUNK, 10210, sample_uuid=uuid2)
         rec.record_event(SampleEvent.NON_FIRST_CHUNK, 10211, sample_uuid=uuid1)
@@ -108,10 +142,10 @@ def test_record_event(events_db, sample_uuids):
         rec.wait_for_writes()
 
         # Read from the database directly
-        with sqlite3_cursor(rec.connection_name) as (cursor, conn):
+        with sqlite3_cursor(rec.connection_name) as (cursor, _):
             actual_rows = cursor.execute("SELECT * FROM events").fetchall()
 
-    with sqlite3_cursor(events_db) as (cursor, conn):
+    with sqlite3_cursor(events_db) as (cursor, _):
         expected_rows = cursor.execute("SELECT * FROM events").fetchall()
 
     assert expected_rows == actual_rows
@@ -121,11 +155,11 @@ def test_record_event(events_db, sample_uuids):
 def worker_proc_read_entries(sess_id, events_created_ev, uuid1, uuid2):
     events_created_ev.wait()
     expected_rows = [
-        (uuid1, "request_sent", 10000),
-        (uuid2, "request_sent", 10003),
-        (uuid1, "first_chunk_received", 10010),
-        (uuid2, "first_chunk_received", 10190),
-        (uuid1, "non_first_chunk_received", 10201),
+        (uuid1, SessionEvent.LOADGEN_ISSUE_CALLED.value, 10000),
+        (uuid2, SessionEvent.LOADGEN_ISSUE_CALLED.value, 10003),
+        (uuid1, SampleEvent.FIRST_CHUNK.value, 10010),
+        (uuid2, SampleEvent.FIRST_CHUNK.value, 10190),
+        (uuid1, SampleEvent.NON_FIRST_CHUNK.value, 10201),
     ]
     with sqlite3_cursor(EventRecorder.db_path(sess_id)) as (cursor, _):
         actual_rows = cursor.execute("SELECT * FROM events").fetchall()
@@ -147,8 +181,8 @@ def test_shm_usage(sample_uuids):
     worker_proc.start()
 
     with get_EventRecorder(session_id=sess_id) as rec:
-        rec.record_event(SampleEvent.REQUEST_SENT, 10000, sample_uuid=uuid1)
-        rec.record_event(SampleEvent.REQUEST_SENT, 10003, sample_uuid=uuid2)
+        rec.record_event(SessionEvent.LOADGEN_ISSUE_CALLED, 10000, sample_uuid=uuid1)
+        rec.record_event(SessionEvent.LOADGEN_ISSUE_CALLED, 10003, sample_uuid=uuid2)
         rec.record_event(SampleEvent.FIRST_CHUNK, 10010, sample_uuid=uuid1)
         rec.record_event(SampleEvent.FIRST_CHUNK, 10190, sample_uuid=uuid2)
         rec.record_event(SampleEvent.NON_FIRST_CHUNK, 10201, sample_uuid=uuid1)

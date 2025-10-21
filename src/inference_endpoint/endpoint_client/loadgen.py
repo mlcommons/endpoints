@@ -8,7 +8,8 @@ from typing import Any
 from inference_endpoint.core.types import Query, QueryResult, StreamChunk
 from inference_endpoint.endpoint_client.http_client import HTTPEndpointClient
 from inference_endpoint.load_generator import SampleIssuer
-from inference_endpoint.load_generator.scheduler import Sample, SampleEvent
+from inference_endpoint.load_generator.events import SampleEvent
+from inference_endpoint.load_generator.sample import Sample
 from inference_endpoint.profiling import profile
 
 logger = logging.getLogger(__name__)

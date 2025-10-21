@@ -1,4 +1,6 @@
 import random
+from collections import defaultdict
+from unittest.mock import patch
 
 import inference_endpoint.metrics as metrics
 from inference_endpoint.config.ruleset import RuntimeSettings
@@ -12,7 +14,11 @@ from inference_endpoint.load_generator.scheduler import (
     WithoutReplacementSampleOrder,
 )
 
-from tests.test_helpers import HistogramSampleFactory, SerialSampleIssuer
+from tests.test_helpers import (
+    DummyDataLoader,
+    NoEventRecordingSample,
+    SerialSampleIssuer,
+)
 
 
 class FibonacciSampleOrder(SampleOrder):
@@ -33,7 +39,14 @@ class FibonacciSampleOrder(SampleOrder):
         return retval
 
 
-def test_load_generator(runtime_settings):
+@patch("inference_endpoint.load_generator.load_generator.EventRecorder.record_event")
+@patch(
+    "inference_endpoint.load_generator.load_generator.LoadGenerator.load_sample_data"
+)
+def test_load_generator(load_sample_data_mock, event_recorder_mock, runtime_settings):
+    load_sample_data_mock.side_effect = lambda index, _uuid: index**2
+    event_recorder_mock.return_value = True
+
     class ListAppendIssuer(SampleIssuer):
         def __init__(self):
             self.issued = []
@@ -41,14 +54,12 @@ def test_load_generator(runtime_settings):
         def issue(self, sample):
             self.issued.append(sample)
 
-    def fake_sample_factory(s_idx):
-        return s_idx**2
-
     fake_sample_issuer = ListAppendIssuer()
 
     load_generator = SchedulerBasedLoadGenerator(
         fake_sample_issuer,
-        fake_sample_factory,
+        NoEventRecordingSample,
+        None,  # No Dataloader to set, we're using Mock to prevent accessing the
         scheduler=MaxThroughputScheduler(
             runtime_settings,
             FibonacciSampleOrder,
@@ -56,16 +67,20 @@ def test_load_generator(runtime_settings):
     )
     a = 0
     b = 1
-    for i, (sample, _) in enumerate(load_generator):
-        assert sample == a**2
-        assert sample == fake_sample_issuer.issued[i]
+    for i, issued_sample in enumerate(load_generator):
+        assert issued_sample.sample.data == a**2
+        assert issued_sample.sample == fake_sample_issuer.issued[i]
         assert len(fake_sample_issuer.issued) == i + 1
+
         c = a + b
         a = b
         b = c
 
 
-def test_full_run():
+@patch("inference_endpoint.metrics.recorder.EventRecorder.record_event")
+def test_full_run(record_event_mock):
+    record_event_mock.return_value = None
+
     rt_settings = RuntimeSettings(
         metrics.Throughput(5000),
         [metrics.Throughput(5000)],
@@ -80,32 +95,48 @@ def test_full_run():
     def digits_of_square_iter(n: int):
         yield from str(n**2)
 
-    sample_factory = HistogramSampleFactory()
     sample_issuer = SerialSampleIssuer(digits_of_square_iter)
     load_generator = SchedulerBasedLoadGenerator(
         sample_issuer,
-        sample_factory,
+        NoEventRecordingSample,
+        DummyDataLoader(100),
         scheduler=MaxThroughputScheduler(
             rt_settings,
             WithoutReplacementSampleOrder,
         ),
     )
 
-    for sample, _ in load_generator:
+    sent_hist = defaultdict(int)
+    sent_uuids = defaultdict(list)
+    seen_uuids = set()
+    for issued_sample in load_generator:
         # The test issuer is serial, so we can confirm that a sample is completed before the next
         # is issued.
-        assert "".join(sample_factory.completed_chunks[sample.uuid]) == str(
-            sample_factory.uuid_to_idx[sample.uuid] ** 2
-        )
+        expected = str(issued_sample.index**2)
+        assert issued_sample.sample.first_chunk == expected[0]
+        assert len(issued_sample.sample.non_first_chunks) == len(expected) - 1
+        assert "".join(issued_sample.sample.non_first_chunks) == expected[1:]
+        assert "".join(issued_sample.sample.complete_all_chunks) == expected
+
+        sent_hist[issued_sample.index] += 1
+        sent_uuids[issued_sample.index].append(issued_sample.sample.uuid)
+        seen_uuids.add(issued_sample.sample.uuid)
 
     # WithoutReplacementSampleOrder should ensure that as long as total # of samples issued is a multiple of dataset size,
     # the number of issues per sample is the same
     target_issues = rt_settings.n_samples_to_issue // rt_settings.n_samples_from_dataset
-    for sid, n_sent in sample_factory.sent_hist.items():
+    for index, n_sent in sent_hist.items():
         assert (
             n_sent == target_issues
-        ), f"Sample {sid} should have been issued {target_issues} times, but was issued {n_sent} times"
-    for sid, n_completed in sample_factory.completed_hist.items():
+        ), f"Sample {index} should have been issued {target_issues} times, but was issued {n_sent} times"
+
+        # Check uuid uniqueness
+        n_distinct_uuids = len(set(sent_uuids[index]))
         assert (
-            n_completed == target_issues
-        ), f"Sample {sid} should have been completed {target_issues} times, but was completed {n_completed} times"
+            n_distinct_uuids == n_sent
+        ), f"Sample {index} should have {n_sent} unique uuids, but has {n_distinct_uuids}"
+
+    # Check that ALL uuids are unique
+    assert (
+        len(seen_uuids) == rt_settings.n_samples_to_issue
+    ), f"Should have seen {rt_settings.n_samples_to_issue} unique uuids, but saw {len(seen_uuids)}"

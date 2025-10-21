@@ -8,12 +8,12 @@ class Event(Enum):
 class SessionEvent(Event):
     TEST_STARTED = "test_started"
     TEST_ENDED = "test_ended"
-    LG_ISSUE_CALLED = "lg_issue"
-    LG_STOP = "lg_stop"
+    LOADGEN_ISSUE_CALLED = "loadgen_issue_called"
+    LOADGEN_STOP = "loadgen_stop"
+    LOADGEN_DATA_LOAD = "loadgen_data_load"
 
 
 class SampleEvent(Event):
     COMPLETE = "complete"
     FIRST_CHUNK = "first_chunk_received"
     NON_FIRST_CHUNK = "non_first_chunk_received"
-    REQUEST_SENT = "request_sent"

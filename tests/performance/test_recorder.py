@@ -141,7 +141,7 @@ def test_many_chunk_performance(
             rec.record_event(
                 SampleEvent.COMPLETE, time.monotonic_ns(), sample_uuid=sample_uuid + 1
             )
-        rec.commit_txns(force=True)
+        rec.wait_for_writes(force_commit=True)
         end_time = time.monotonic_ns()
 
     assert (
@@ -233,7 +233,7 @@ def test_2_chunk_per_query_performance(
                 SampleEvent.COMPLETE, time.monotonic_ns(), sample_uuid=sample_uuid + 1
             )
 
-        rec.commit_txns(force=True)
+        rec.wait_for_writes(force_commit=True)
         end_time = time.monotonic_ns()
 
     assert (
@@ -277,7 +277,7 @@ def test_db_write_performance(cleanup_connections, check_time_fn):
                 rec.record_event(
                     SampleEvent.REQUEST_SENT, time.monotonic_ns(), sample_uuid=i + 1
                 )
-            rec.commit_txns(force=True)
+            rec.wait_for_writes(force_commit=True)
 
         check_time_fn(
             bulk_write,

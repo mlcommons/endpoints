@@ -8,12 +8,12 @@ from inference_endpoint import metrics
 from inference_endpoint.config.ruleset import RuntimeSettings
 from inference_endpoint.dataset_manager.dataloader import DataLoader
 from inference_endpoint.endpoint_client.loadgen import HttpClientSampleIssuer
-from inference_endpoint.load_generator import LoadGenerator
 from inference_endpoint.load_generator.scheduler import (
     MaxThroughputScheduler,
     NetworkActivitySimulationScheduler,
     WithoutReplacementSampleOrder,
 )
+from inference_endpoint.load_generator.session import BenchmarkSession
 
 from tests.performance.utils import MetricsSampleFactory
 from tests.test_helpers import create_test_query
@@ -124,39 +124,48 @@ def run_performance_test(
     if stream:
         scheduler = NetworkActivitySimulationScheduler(
             rt_settings,
-            dataloader,
-            MetricsSampleFactory,
             WithoutReplacementSampleOrder,
         )
     else:
         scheduler = MaxThroughputScheduler(
             rt_settings,
-            dataloader,
-            MetricsSampleFactory,
             WithoutReplacementSampleOrder,
         )
 
-    # Use the scheduler's factory instance for the issuer
-    sample_factory = scheduler.sample_factory
+    # Create sample issuer
     sample_issuer = HttpClientSampleIssuer(http_client)
     sample_issuer.start()
 
-    # Create load generator
-    load_gen = LoadGenerator(scheduler, sample_issuer)
+    # Start benchmark session with metrics-tracking sample factory
+    # MetricsSampleFactory will store itself in _latest_instance for retrieval
+    session = BenchmarkSession.start(
+        rt_settings,
+        dataloader,
+        sample_issuer,
+        scheduler,
+        sample_factory_cls=MetricsSampleFactory,
+        name=f"perf_test_{stream}_{target_qps}qps",
+        stop_sample_issuer_on_test_end=False,  # We'll handle shutdown manually
+    )
 
-    # Start test
-    try:
-        sess = load_gen.start_test()
-        sess.wait_for_test_end()
+    # Get reference to the sample factory instance (stored during __init__)
+    # sample_factory = MetricsSampleFactory._latest_instance
+    # assert sample_factory is not None, "MetricsSampleFactory instance not found"
 
-        # Wait for all pending responses to complete
-        sample_issuer.wait_for_all_complete()
-    finally:
-        sample_factory.metrics.stop()
-        sample_issuer.shutdown()
+    # Wait for test to complete
+    session.wait_for_test_end()
+
+    # Wait for all pending responses to complete
+    sample_issuer.wait_for_all_complete()
+
+    # Stop metrics collection
+    # sample_factory.metrics.stop()
+
+    # Shutdown
+    sample_issuer.shutdown()
 
     # Get summary from factory's metrics
-    return sample_factory.metrics.get_summary()
+    # return sample_factory.metrics.get_summary()
 
 
 def assert_performance_requirements(

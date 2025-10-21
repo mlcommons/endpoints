@@ -18,6 +18,7 @@ from inference_endpoint.dataset_manager.dataloader import (
     HFDataLoader,
     PickleReader,
 )
+from inference_endpoint.load_generator.events import SampleEvent, SessionEvent
 from inference_endpoint.testing.echo_server import EchoServer
 
 # Add src to path for imports
@@ -160,20 +161,20 @@ def events_db(tmp_path, sample_uuids):
     uuid3 = sample_uuids(3)
 
     events = [
-        (uuid1, "request_sent", 10000),
-        (uuid2, "request_sent", 10003),
-        (uuid1, "first_chunk_received", 10010),
-        (uuid2, "first_chunk_received", 10190),
-        (uuid1, "non_first_chunk_received", 10201),
-        (uuid3, "request_sent", 10202),
-        (uuid1, "non_first_chunk_received", 10203),
-        (uuid2, "non_first_chunk_received", 10210),
-        (uuid1, "non_first_chunk_received", 10211),
-        (uuid1, "complete", 10211),
-        (uuid2, "non_first_chunk_received", 10214),
-        (uuid2, "non_first_chunk_received", 10217),
-        (uuid2, "non_first_chunk_received", 10219),
-        (uuid2, "complete", 10219),
+        (uuid1, SessionEvent.LOADGEN_ISSUE_CALLED.value, 10000),
+        (uuid2, SessionEvent.LOADGEN_ISSUE_CALLED.value, 10003),
+        (uuid1, SampleEvent.FIRST_CHUNK.value, 10010),
+        (uuid2, SampleEvent.FIRST_CHUNK.value, 10190),
+        (uuid1, SampleEvent.NON_FIRST_CHUNK.value, 10201),
+        (uuid3, SessionEvent.LOADGEN_ISSUE_CALLED.value, 10202),
+        (uuid1, SampleEvent.NON_FIRST_CHUNK.value, 10203),
+        (uuid2, SampleEvent.NON_FIRST_CHUNK.value, 10210),
+        (uuid1, SampleEvent.NON_FIRST_CHUNK.value, 10211),
+        (uuid1, SampleEvent.COMPLETE.value, 10211),
+        (uuid2, SampleEvent.NON_FIRST_CHUNK.value, 10214),
+        (uuid2, SampleEvent.NON_FIRST_CHUNK.value, 10217),
+        (uuid2, SampleEvent.NON_FIRST_CHUNK.value, 10219),
+        (uuid2, SampleEvent.COMPLETE.value, 10219),
     ]
     cur.executemany(
         "INSERT INTO events (sample_uuid, event_type, timestamp_ns) VALUES (?, ?, ?)",

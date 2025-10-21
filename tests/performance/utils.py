@@ -6,7 +6,8 @@ import time
 from collections.abc import Callable
 
 from inference_endpoint.core.types import Query, QueryResult, StreamChunk
-from inference_endpoint.load_generator.scheduler import SampleEvent, SampleFactory
+from inference_endpoint.load_generator.events import SampleEvent
+from inference_endpoint.load_generator.sample import SampleFactory
 
 try:
     import uvloop
@@ -220,11 +221,13 @@ class MetricsSampleFactory(SampleFactory):
     """
 
     def __init__(self, dataloader):
-        super().__init__(dataloader)
+        super().__init__(dataloader, None)
         self.metrics = PerformanceMetrics()
         self.metrics.start()
 
-    def get_sample_callbacks(self, sample_index: int) -> dict[SampleEvent, Callable]:
+    def get_sample_callbacks(
+        self, sample_index: int, sample_uuid: str
+    ) -> dict[SampleEvent, Callable]:
         """Return callbacks that record metrics for each event."""
 
         def on_request_sent(query: Query):

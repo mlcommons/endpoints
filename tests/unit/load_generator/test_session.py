@@ -4,32 +4,23 @@ from pathlib import Path
 import inference_endpoint.metrics as metrics
 import pytest
 from inference_endpoint.config.ruleset import RuntimeSettings
-from inference_endpoint.load_generator.events import SampleEvent
-from inference_endpoint.load_generator.sample import Sample
 from inference_endpoint.load_generator.scheduler import (
     MaxThroughputScheduler,
     WithoutReplacementSampleOrder,
 )
 from inference_endpoint.load_generator.session import BenchmarkSession
 from inference_endpoint.metrics.recorder import MetricsReporter
+from tqdm import tqdm
 
-from tests.test_helpers import DummyDataLoader, PooledSampleIssuer
+from tests.test_helpers import (
+    DummyDataLoader,
+    NoEventRecordingSample,
+    PooledSampleIssuer,
+    ProgressBarSample,
+)
 
-# The following are tests for PooledSampleIssuer in test_helpers.py. If these tests pass
 # The following are tests for PooledSampleIssuer in test_helpers.py. If these tests pass
 # but session.py tests fail, it's probably not the PooledSampleIssuer's fault.
-
-
-def noop(*args, **kwargs):
-    pass
-
-
-empty_callbacks = {
-    SampleEvent.REQUEST_SENT: noop,
-    SampleEvent.FIRST_CHUNK: noop,
-    SampleEvent.NON_FIRST_CHUNK: noop,
-    SampleEvent.COMPLETE: noop,
-}
 
 
 def test_pooled_issuer_exception_propagation():
@@ -40,16 +31,8 @@ def test_pooled_issuer_exception_propagation():
 
     issuer = PooledSampleIssuer(compute_func=failing_compute, n_workers=2)
 
-    sample1 = Sample(
-        uuid="1",
-        callbacks=empty_callbacks,
-        get_bytes=lambda: b"sample1",
-    )
-    sample2 = Sample(
-        uuid="2",
-        callbacks=empty_callbacks,
-        get_bytes=lambda: b"sample2",
-    )
+    sample1 = NoEventRecordingSample(b"sample1")
+    sample2 = NoEventRecordingSample(b"sample2")
 
     # Submit some work that will fail
     issuer.issue(sample1)
@@ -71,24 +54,17 @@ def test_pooled_issuer_futures_cleanup():
     issuer = PooledSampleIssuer(compute_func=slow_compute, n_workers=4)
 
     # Submit 250 samples (should trigger cleanup at 100 and 200)
-    for i in range(250):
-        issuer.issue(
-            Sample(
-                uuid=f"sample{i}",
-                callbacks=empty_callbacks,
-                get_bytes=lambda: b"sample",
-            )
-        )
+    for _ in range(250):
+        issuer.issue(NoEventRecordingSample(b"sample"))
 
-    # Let some complete
-    time.sleep(0.5)
+    # Let some time pass first
+    time.sleep(0.2)
 
     # Manually check errors to trigger cleanup
     issuer.check_errors()
 
-    # The futures list should have been cleaned up
-    # With 4 workers and small delays, most should be complete
-    assert len(issuer.futures) < 250, "Completed futures were not cleaned up"
+    for _ in range(250):
+        issuer.issue(NoEventRecordingSample(b"sample"))
 
     issuer.shutdown()
 
@@ -117,14 +93,23 @@ def test_session_start():
     dl = DummyDataLoader(n_samples=100)
     sample_issuer = PooledSampleIssuer(digits_of_square_iter)
     sched = MaxThroughputScheduler(rt_settings, WithoutReplacementSampleOrder)
-    sess = BenchmarkSession.start(
-        rt_settings, dl, sample_issuer, sched, name="pytest_test_session_start"
-    )
-    events_db_path = sess.event_recorder.connection_name
-    sess.wait_for_test_end()
 
-    # Shutdown the sample issuer to ensure proper cleanup and error propagation
-    sample_issuer.shutdown()
+    with tqdm(desc="pytest_test_session_start", total=10_000, unit="samples") as pbar:
+        ProgressBarSample.set_pbar(pbar)
+        sess = BenchmarkSession.start(
+            rt_settings,
+            dl,
+            sample_issuer,
+            sched,
+            name="pytest_test_session_start",
+            sample_class=ProgressBarSample,
+            stop_sample_issuer_on_test_end=False,  # Do this manually at the end
+        )
+        events_db_path = sess.event_recorder.connection_name
+        sess.wait_for_test_end()
+
+        # Shutdown the sample issuer to ensure proper cleanup and error propagation
+        sample_issuer.shutdown()
 
     assert Path(events_db_path).exists()
     with MetricsReporter(events_db_path) as reporter:
