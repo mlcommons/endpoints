@@ -23,7 +23,7 @@ class PerModelRuleset:
         10 * 60 * 1000
     )  # Minimum duration in milliseconds required for a valid run
     max_duration_ms_valid: int = None  # Maximum duration in milliseconds. Used as a timeout / kill for a benchmark run. Set to None for no timeout.
-    min_query_count_valid: int = None  # Minimum number of queries required to be sent to the SUT for a valid run, if None, no minimum is enforced
+    min_sample_count_valid: int = None  # Minimum number of samples required to be sent to the SUT for a valid run, if None, no minimum is enforced
     metric: type[metrics.Metric] | None = (
         None  # any subclass of Metric. Used as metric to evaluate the performance of the benchmark.
     )
@@ -34,7 +34,7 @@ class PerModelRuleset:
 
 @dataclass(frozen=True)
 class PerQueryRuleset(PerModelRuleset):
-    min_query_count_valid: int = 270336
+    min_sample_count_valid: int = 270336
     metric: type[metrics.Metric] = metrics.Throughput
     target_latency_percentile: float = (
         99.0  # Percentile of per-query latencies to use for metric comparison
@@ -47,7 +47,7 @@ class PerQueryRuleset(PerModelRuleset):
 
 @dataclass(frozen=True)
 class TokenBasedRuleset(PerModelRuleset):
-    min_query_count_valid: int = 270336
+    min_sample_count_valid: int = 270336
     metric: type[metrics.Metric] = metrics.Throughput
     max_ttft_latency_ms: int = (
         None  # Maximum TTFT latency in milliseconds allowed for a valid run
@@ -62,7 +62,7 @@ class TokenBasedRuleset(PerModelRuleset):
 
 # Notes:
 # The following fields' values are taken from submission checker
-#  - min_query_count_valid (from min-queries key)
+#  - min_sample_count_valid (from min-queries key)
 #  - max_samples_memory_capacity (this is performance_sample_count)
 #        Also I think this is completely bizarre... I searched all of github.com/mlcommons/inference for references to performance_sample_count:
 #        https://github.com/search?q=repo%3Amlcommons%2Finference%20performance_sample_count&type=code
@@ -164,6 +164,10 @@ class RoundRuleset(BenchmarkSuiteRuleset):
         if user_config.total_sample_count:
             total_sample_count = user_config.total_sample_count
 
+        min_sample_count = ruleset.min_sample_count_valid
+        if user_config.min_sample_count is not None:
+            min_sample_count = user_config.min_sample_count
+
         return _RuntimeSettings(
             metric_target=metric_target,
             reported_metrics=reported_metrics,
@@ -171,6 +175,7 @@ class RoundRuleset(BenchmarkSuiteRuleset):
             max_duration_ms=max_duration_ms,
             n_samples_from_dataset=n_samples_from_dataset,
             n_samples_to_issue=total_sample_count,
+            min_sample_count=min_sample_count,
             rng_sched=random.Random(self.scheduler_rng_seed),
             rng_sample_index=random.Random(self.sample_index_rng_seed),
             optimization_priority=opt_prio,

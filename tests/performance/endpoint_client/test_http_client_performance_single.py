@@ -116,6 +116,7 @@ def run_performance_test(
         max_duration_ms=duration_ms * 2,
         n_samples_from_dataset=num_samples,
         n_samples_to_issue=None,  # Run until duration
+        min_sample_count=num_samples,
         rng_sched=random.Random(1234),
         rng_sample_index=random.Random(1234),
     )

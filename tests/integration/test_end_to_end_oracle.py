@@ -86,6 +86,7 @@ async def test_load_generator_full_run(
         max_duration_ms=10_000_000,
         n_samples_from_dataset=dummy_dataloader.num_samples(),
         n_samples_to_issue=dummy_dataloader.num_samples(),
+        min_sample_count=1,
         rng_sched=random.Random(1234),
         rng_sample_index=random.Random(1234),
     )

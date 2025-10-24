@@ -90,6 +90,7 @@ def test_session_start(clean_sample_event_hooks):
         max_duration_ms=10_000,
         n_samples_from_dataset=100,
         n_samples_to_issue=10_000,
+        min_sample_count=100,
         rng_sched=random.Random(1234),
         rng_sample_index=random.Random(1234),
     )

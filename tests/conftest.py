@@ -322,6 +322,7 @@ def max_throughput_runtime_settings():
         max_duration_ms=1000,
         n_samples_from_dataset=100,
         n_samples_to_issue=100,
+        min_sample_count=100,
         rng_sched=random.Random(42),
         rng_sample_index=random.Random(42),
     )

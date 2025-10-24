@@ -24,7 +24,8 @@ class RuntimeSettings:
     min_duration_ms: int
     max_duration_ms: int
     n_samples_from_dataset: int
-    n_samples_to_issue: int
+    n_samples_to_issue: int | None
+    min_sample_count: int
     rng_sched: random.Random
     rng_sample_index: random.Random
 
@@ -53,7 +54,9 @@ class RuntimeSettings:
             raise NotImplementedError(
                 f"Cannot infer n_samples_to_issue from metric target type: {type(self.metric_target)}"
             )
-        return math.ceil(expected_samples * (padding_factor))
+        return max(
+            self.min_sample_count, math.ceil(expected_samples * (padding_factor))
+        )
 
 
 @dataclass(frozen=True)
