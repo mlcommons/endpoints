@@ -25,7 +25,7 @@ from .load_generator import LoadGenerator, SampleIssuer, SchedulerBasedLoadGener
 from .sample import IssuedSample, Sample, SampleEventHandler
 from .scheduler import (
     MaxThroughputScheduler,
-    NetworkActivitySimulationScheduler,
+    PoissonDistributionScheduler,
     SampleOrder,
     Scheduler,
     WithoutReplacementSampleOrder,
@@ -42,7 +42,7 @@ __all__ = [
     "IssuedSample",
     "Scheduler",
     "MaxThroughputScheduler",
-    "NetworkActivitySimulationScheduler",
+    "PoissonDistributionScheduler",
     "SampleOrder",
     "WithReplacementSampleOrder",
     "WithoutReplacementSampleOrder",

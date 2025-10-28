@@ -1,0 +1,41 @@
+# Online Latency Benchmark
+name: "online-benchmark"
+version: "1.0"
+type: "online"
+
+model_params:
+  temperature: 0.7
+  top_p: 0.9
+  max_new_tokens: 1024
+
+datasets:
+  - name: "latency-test"
+    type: "performance"
+    path: "datasets/queries.pkl"
+    format: "pkl"
+    samples: 500
+
+settings:
+  runtime:
+    min_duration_ms: 600000 # 10 minutes
+    max_duration_ms: 1800000 # 30 minutes
+    random_seed: 42
+
+  load_pattern:
+    type: "poisson"
+    qps: 10
+
+  client:
+    workers: 4
+    max_concurrency: 32
+
+metrics:
+  collect:
+    - "throughput"
+    - "latency"
+    - "ttft"
+    - "tpot"
+
+environment:
+  endpoint: "http://localhost:8000"
+  api_key: null

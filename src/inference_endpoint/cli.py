@@ -16,13 +16,32 @@
 """
 Command Line Interface for the MLPerf Inference Endpoint Benchmarking System.
 
-This module provides a simple CLI that can be extended as components are developed.
+This module provides CLI for performance benchmarking and accuracy evaluation.
 """
 
 import argparse
 import asyncio
 import logging
+import sys
+import traceback
 from pathlib import Path
+
+from inference_endpoint import __version__
+from inference_endpoint.commands import (
+    run_benchmark_command,
+    run_eval_command,
+    run_info_command,
+    run_init_command,
+    run_probe_command,
+    run_validate_command,
+)
+from inference_endpoint.exceptions import (
+    CLIError,
+    ExecutionError,
+    InputValidationError,
+    SetupError,
+)
+from inference_endpoint.utils.logging import setup_logging
 
 logger = logging.getLogger(__name__)
 
@@ -30,58 +49,119 @@ logger = logging.getLogger(__name__)
 def create_parser() -> argparse.ArgumentParser:
     """Create the command line argument parser."""
     parser = argparse.ArgumentParser(
-        description="MLPerf Inference Endpoint Benchmarking System",
+        description="Inference Endpoint Benchmarking Tool",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Run a basic benchmark (when implemented)
-  inference-endpoint run --config configs/default.yaml
-
-  # Show version
-  inference-endpoint --version
-
-  # Show help
-  inference-endpoint --help
-        """,
     )
 
     # Global options
-    parser.add_argument("--version", action="version", version="%(prog)s 0.1.0")
+    parser.add_argument("--version", action="version", version=__version__)
     parser.add_argument(
-        "--verbose", "-v", action="store_true", help="Enable verbose logging"
+        "--verbose", "-v", action="count", default=0, help="Increase verbosity"
     )
-    parser.add_argument("--config", "-c", type=Path, help="Configuration file path")
 
     # Subcommands
-    subparsers = parser.add_subparsers(dest="command", help="Available commands")
+    subparsers = parser.add_subparsers(dest="command")
 
-    # Run command (placeholder for now)
-    run_parser = subparsers.add_parser("run", help="Run a benchmark")
-    run_parser.add_argument("--dataset", type=Path, help="Dataset file path")
-    run_parser.add_argument("--endpoint", type=str, help="Endpoint URL")
+    # ===== Benchmark command =====
+    benchmark_parser = subparsers.add_parser(
+        "benchmark", help="Run performance benchmark"
+    )
+    benchmark_subparsers = benchmark_parser.add_subparsers(dest="benchmark_mode")
 
-    # Info command
-    subparsers.add_parser("info", help="Show system information")
+    # benchmark offline
+    offline_parser = benchmark_subparsers.add_parser(
+        "offline",
+        help="Max throughput test (all queries at t=0)",
+        description="Offline mode: Issues all queries at once (max throughput burst). "
+        "QPS is used only to calculate total queries based on duration.",
+    )
+    _add_benchmark_args(offline_parser)
+
+    # benchmark online
+    online_parser = benchmark_subparsers.add_parser(
+        "online",
+        help="Online latency test (Poisson distribution)",
+        description="Online mode: Issues queries following Poisson distribution at target QPS. "
+        "For fixed-concurrency mode, use YAML config with load_pattern.type='concurrency' (not yet implemented).",
+    )
+    _add_benchmark_args(online_parser)
+    online_parser.add_argument(
+        "--qps",
+        type=float,
+        help="Target QPS (queries per second) for Poisson distribution",
+    )
+
+    # benchmark (generic with config)
+    _add_benchmark_args(benchmark_parser)
+    benchmark_parser.add_argument(
+        "--mode", choices=["perf", "acc", "both"], help="Test mode"
+    )
+
+    # ===== Eval command =====
+    eval_parser = subparsers.add_parser("eval", help="Run accuracy evaluation")
+    eval_parser.add_argument(
+        "--dataset", type=str, help="Dataset name(s) or path (comma-separated)"
+    )
+    eval_parser.add_argument(
+        "--endpoint", "-e", type=str, required=True, help="Endpoint URL"
+    )
+    eval_parser.add_argument("--api-key", type=str, help="API key")
+    eval_parser.add_argument("--config", "-c", type=Path, help="Custom eval config")
+    eval_parser.add_argument("--output", "-o", type=Path, help="Output file")
+    eval_parser.add_argument("--judge", type=str, help="Judge model (future)")
+
+    # ===== Probe command =====
+    probe_parser = subparsers.add_parser("probe", help="Test endpoint connectivity")
+    probe_parser.add_argument(
+        "--endpoint", "-e", type=str, required=True, help="Endpoint URL"
+    )
+    probe_parser.add_argument("--api-key", type=str, help="API key")
+    probe_parser.add_argument(
+        "--model", type=str, help="Model name (default: test-model)"
+    )
+    probe_parser.add_argument(
+        "--requests", type=int, default=10, help="Number of test requests"
+    )
+    probe_parser.add_argument(
+        "--prompt",
+        type=str,
+        default="Please write me a joke in 30 words.",
+        help="Test prompt text",
+    )
+
+    # ===== Utility commands =====
+    subparsers.add_parser("info", help="Show system info")
+
+    validate_parser = subparsers.add_parser("validate", help="Validate YAML config")
+    validate_parser.add_argument(
+        "--config", "-c", type=Path, required=True, help="Config file"
+    )
+
+    init_parser = subparsers.add_parser("init", help="Generate config template")
+    init_parser.add_argument(
+        "--template",
+        choices=["offline", "online", "eval", "submission"],
+        required=True,
+        help="Template type",
+    )
+    init_parser.add_argument("--output", "-o", type=str, help="Output filename")
 
     return parser
 
 
-async def run_benchmark(args: argparse.Namespace) -> None:
-    """Run a benchmark (placeholder implementation)."""
-    logger.info("Benchmark functionality not yet implemented")
-    logger.info("This is a placeholder for future development")
-    logger.info(f"Config: {args.config}")
-    logger.info(f"Dataset: {args.dataset}")
-    logger.info(f"Endpoint: {args.endpoint}")
-
-
-async def show_info(args: argparse.Namespace) -> None:
-    """Show system information."""
-    logger.info("MLPerf Inference Endpoint Benchmarking System")
-    logger.info("Version: 0.1.0")
-    logger.info("Status: Development - Core components not yet implemented")
-    logger.info("Target: 50k QPS capability")
-    logger.info("Architecture: Modular, event-driven design")
+def _add_benchmark_args(parser: argparse.ArgumentParser) -> None:
+    """Add common benchmark arguments to parser."""
+    parser.add_argument("--config", "-c", type=Path, help="YAML config file")
+    parser.add_argument("--endpoint", "-e", type=str, help="Endpoint URL")
+    parser.add_argument("--api-key", type=str, help="API key")
+    parser.add_argument("--model", type=str, help="Model name (e.g., llama-2-70b)")
+    parser.add_argument("--dataset", "-d", type=Path, help="Dataset file")
+    parser.add_argument("--concurrency", type=int, help="Max concurrent requests")
+    parser.add_argument("--workers", type=int, help="Number of workers")
+    parser.add_argument("--duration", type=int, help="Duration in seconds")
+    parser.add_argument("--min-tokens", type=int, help="Min output tokens")
+    parser.add_argument("--max-tokens", type=int, help="Max output tokens")
+    parser.add_argument("--output", "-o", type=Path, help="Results output file")
 
 
 async def main() -> None:
@@ -89,22 +169,71 @@ async def main() -> None:
     parser = create_parser()
     args = parser.parse_args()
 
-    # Set logging level
-    if args.verbose:
-        logging.getLogger().setLevel(logging.DEBUG)
-
-    # Handle commands
-    if args.command == "run":
-        await run_benchmark(args)
-    elif args.command == "info":
-        await show_info(args)
-    elif not args.command:
-        # No command specified, show help
-        parser.print_help()
+    # Setup logging based on verbosity
+    if args.verbose >= 2:
+        log_level = logging.DEBUG
+    elif args.verbose == 1:
+        log_level = logging.INFO
     else:
-        logger.error(f"Unknown command: {args.command}")
-        parser.print_help()
-        return
+        log_level = logging.WARNING
+
+    setup_logging()
+    logging.getLogger().setLevel(log_level)
+
+    # Dispatch commands
+    try:
+        if args.command == "benchmark":
+            await run_benchmark_command(args)
+        elif args.command == "eval":
+            await run_eval_command(args)
+        elif args.command == "probe":
+            await run_probe_command(args)
+        elif args.command == "info":
+            await run_info_command(args)
+        elif args.command == "validate":
+            await run_validate_command(args)
+        elif args.command == "init":
+            await run_init_command(args)
+        elif not args.command:
+            parser.print_help()
+        else:
+            logger.error(f"Unknown command: {args.command}")
+            parser.print_help()
+            sys.exit(1)
+    except KeyboardInterrupt:
+        logger.info("\nInterrupted")
+        sys.exit(0)
+    except InputValidationError as e:
+        # User input errors - log without stack trace
+        logger.error(f"Validation error: {e}")
+        sys.exit(1)
+    except SetupError as e:
+        # Setup/initialization errors - log with optional stack trace
+        logger.error(f"Setup failed: {e}")
+        if args.verbose >= 2:
+            traceback.print_exc()
+        sys.exit(1)
+    except ExecutionError as e:
+        # Execution errors - log with optional stack trace
+        logger.error(f"Execution failed: {e}")
+        if args.verbose >= 2:
+            traceback.print_exc()
+        sys.exit(1)
+    except NotImplementedError as e:
+        # Feature not implemented
+        logger.error(f"Not implemented: {e}")
+        sys.exit(1)
+    except CLIError as e:
+        # Generic CLI error
+        logger.error(f"Error: {e}")
+        if args.verbose >= 2:
+            traceback.print_exc()
+        sys.exit(1)
+    except Exception as e:
+        # Unexpected error - always show details
+        logger.error(f"Unexpected error: {e}")
+        traceback.print_exc()
+        sys.exit(1)
 
 
 if __name__ == "__main__":
