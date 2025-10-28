@@ -1,3 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Configuration schema definitions for YAML-based benchmark configs."""
 
 from enum import Enum
@@ -87,13 +102,17 @@ class ModelParams(BaseModel):
 
 
 class Baseline(BaseModel):
-    """Locked baseline configuration for official submissions."""
+    """Locked baseline configuration for official submissions.
+
+    TODO: This overlaps with BenchmarkSuiteRuleset concept.
+    Should integrate with actual ruleset classes instead of string references.
+    See architecture-refactoring-plan.md for integration plan.
+    """
 
     locked: bool = False
     model: str  # Model identifier (e.g., "llama-2-70b")
-    # TODO: This should use mlcommon ruleset, putting a placeholder for now to pipeclean
-    # functional blocker first
     ruleset: str  # Ruleset version (e.g., "mlperf-inference-v6.0")
+    # TODO: Change to: ruleset: BenchmarkSuiteRuleset | str | None
 
 
 class Dataset(BaseModel):
@@ -108,7 +127,12 @@ class Dataset(BaseModel):
 
 
 class RuntimeSettings(BaseModel):
-    """Runtime configuration settings."""
+    """Runtime configuration settings.
+
+    TODO: This duplicates config/ruleset.py RuntimeSettings.
+    See architecture-refactoring-plan.md for unification plan.
+    Frontend (YAML) vs Backend (execution) - should be unified.
+    """
 
     min_duration_ms: int = 600000  # 10 minutes
     max_duration_ms: int = 1800000  # 30 minutes
@@ -156,13 +180,20 @@ def _default_metrics() -> list[str]:
 
 
 class Metrics(BaseModel):
-    """Metrics collection configuration."""
+    """Metrics collection configuration.
+
+    TODO: This uses string metrics while ruleset.py uses metrics.Metric types.
+    Should unify to use metrics.Metric throughout for type safety.
+    """
 
     collect: list[str] = Field(default_factory=_default_metrics)
 
 
-class Environment(BaseModel):
-    """Environment configuration (lowest priority)."""
+class EndpointConfig(BaseModel):
+    """Endpoint connection configuration (lowest priority in config merging).
+
+    Contains endpoint URL and authentication settings.
+    """
 
     endpoint: str | None = None
     api_key: str | None = None
@@ -180,7 +211,7 @@ class BenchmarkConfig(BaseModel):
     datasets: list[Dataset]
     settings: Settings = Field(default_factory=Settings)
     metrics: Metrics = Field(default_factory=Metrics)
-    environment: Environment = Field(default_factory=Environment)
+    endpoint_config: EndpointConfig = Field(default_factory=EndpointConfig)
 
     def is_locked(self) -> bool:
         """Check if baseline is locked."""

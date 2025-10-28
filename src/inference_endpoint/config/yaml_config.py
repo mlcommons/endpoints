@@ -1,3 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """YAML configuration loading and merging with CLI arguments."""
 
 import logging
@@ -65,6 +80,9 @@ class ConfigLoader:
         Returns:
             Merged configuration dict
 
+            TODO: Should return frozen dataclass instead of mutable dict.
+            See architecture-refactoring-plan.md #8 for type-safe approach.
+
         Raises:
             ConfigError: If CLI tries to override locked baseline
         """
@@ -106,9 +124,9 @@ class ConfigLoader:
         # Datasets from YAML
         merged["datasets"] = [d.model_dump() for d in config.datasets]
 
-        # Environment from YAML
-        merged["endpoint"] = config.environment.endpoint
-        merged["api_key"] = config.environment.api_key
+        # Endpoint config from YAML
+        merged["endpoint"] = config.endpoint_config.endpoint
+        merged["api_key"] = config.endpoint_config.api_key
 
         # Override with CLI args (only non-None values)
         for key, value in cli_args.items():

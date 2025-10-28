@@ -30,7 +30,7 @@ settings:
 
   client:
     workers: 4
-    max_concurrency: 32 # Should match target_concurrency
+    max_concurrency: 32 # Should exceed/match target_concurrency
 
 metrics:
   collect:
@@ -39,7 +39,7 @@ metrics:
     - "ttft"
     - "tpot"
 
-environment:
+endpoint_config:
   endpoint: "http://localhost:8000"
   api_key: null
 # How this differs from Poisson mode:
