@@ -133,9 +133,14 @@ class MaxThroughputScheduler(Scheduler):
         self.delay_fn = uniform_delay_fn(rng=self.runtime_settings.rng_sched)
 
 
-class NetworkActivitySimulationScheduler(Scheduler):
-    """Simulate client-server network usage behavior by using a Poisson process to issue queries.
-    The delay between each sample is sampled from an exponential distribution, centered around the expected latency.
+class PoissonDistributionScheduler(Scheduler):
+    """Poisson-distributed query scheduler for online benchmarking.
+
+    Simulates realistic client-server network usage by using a Poisson process
+    to issue queries. The delay between each sample is sampled from an exponential
+    distribution, centered around the expected latency based on target QPS.
+
+    Use this scheduler for online latency testing with sustained QPS.
     """
 
     def __init__(self, *args, **kwargs):

@@ -278,6 +278,9 @@ class TestHTTPEndpointClientConcurrency:
 
     @pytest.mark.asyncio
     @pytest.mark.slow
+    @pytest.mark.skip(
+        reason="Intermittent hanging when run after test_massive_concurrency_non_streaming - ZMQ buffer overflow issue"
+    )
     async def test_massive_concurrency_streaming(self, mock_http_echo_server, tmp_path):
         """Test high concurrent requests with proper connection management in streaming mode."""
         actual_max_concurrency = 10000

@@ -39,6 +39,61 @@ The Huggingface squad dataset (used here) has the following columns : `'id', 'ti
 Note that the HF version is a flattened version of the original squad dataset - each question/answer is a flattened version of `(data['data'][0]['paragraphs'][0])['qas'][0].keys()`
 The pruned version holds 50 samples from each slice (training and validation)
 
+## `dummy_1k.pkl`
+
+**Purpose:** Dummy dataset for local CLI testing (NOT real benchmark data).
+
+**Samples:** 1000
+
+**Format:** Pickle (pandas DataFrame with columns: `text_input`, `ref_output`)
+
+**Size:** ~132 KB
+
+**Content:**
+
+- 10 prompt templates (stories, explanations, poems, descriptions, etc.)
+- 10 topics (AI, quantum computing, renewable energy, space, biotech, etc.)
+- Rotated to create 1000 unique prompts with case numbers for variation
+
+**Generation:**
+
+```bash
+python scripts/create_dummy_dataset.py
+```
+
+**Example Prompts:**
+
+```
+Write a short story about artificial intelligence (case 0)
+Explain the concept of quantum computing (case 1) in simple terms
+Create a poem about renewable energy (case 2)
+Describe space exploration (case 3) in detail
+```
+
+**Use Cases:**
+
+- Testing CLI commands locally with echo server
+- Quick smoke tests before production deployment
+- Validating configuration changes
+- Development and debugging without large datasets
+
+**Usage:**
+
+```bash
+# Test offline benchmark
+inference-endpoint benchmark offline \
+  --endpoint http://localhost:8765 \
+  --dataset tests/datasets/dummy_1k.pkl \
+  --duration 10
+
+# Test probe
+inference-endpoint probe \
+  --endpoint http://localhost:8765 \
+  --requests 10
+```
+
+See `docs/LOCAL_TESTING.md` for complete testing guide.
+
 ### Candidates
 
 - CNN / DailyMail v3.0.0

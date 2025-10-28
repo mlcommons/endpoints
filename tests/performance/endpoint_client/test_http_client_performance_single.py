@@ -27,7 +27,7 @@ from inference_endpoint.dataset_manager.dataloader import DataLoader
 from inference_endpoint.endpoint_client.loadgen import HttpClientSampleIssuer
 from inference_endpoint.load_generator.scheduler import (
     MaxThroughputScheduler,
-    NetworkActivitySimulationScheduler,
+    PoissonDistributionScheduler,
     WithoutReplacementSampleOrder,
 )
 from inference_endpoint.load_generator.session import BenchmarkSession
@@ -98,7 +98,7 @@ def run_performance_test(
 ) -> dict:
     """Run a performance test and return metrics summary.
 
-    Uses NetworkActivitySimulationScheduler (Poisson) for streaming mode to simulate
+    Uses PoissonDistributionScheduler for streaming mode to simulate
     realistic server load, and MaxThroughputScheduler for offline mode to stress test
     maximum throughput.
 
@@ -140,7 +140,7 @@ def run_performance_test(
     # - Streaming (server mode): Use Poisson scheduler to simulate realistic load arrival
     # - Offline: Use max throughput scheduler to stress test the system
     if stream:
-        sched_cls = NetworkActivitySimulationScheduler
+        sched_cls = PoissonDistributionScheduler
     else:
         sched_cls = MaxThroughputScheduler
     scheduler = sched_cls(rt_settings, WithoutReplacementSampleOrder)
@@ -252,7 +252,7 @@ def assert_performance_requirements(
 class TestHTTPClientPerformanceSingleWorker:
     """Performance tests for HTTPEndpointClient (single worker).
 
-    Streaming tests use NetworkActivitySimulationScheduler (Poisson) to simulate
+    Streaming tests use PoissonDistributionScheduler to simulate
     realistic server load patterns. Offline tests use MaxThroughputScheduler to
     measure maximum sustainable throughput.
     """

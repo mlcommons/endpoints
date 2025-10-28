@@ -31,11 +31,42 @@ pre-commit install
 inference-endpoint --help
 
 # Show system information
-inference-endpoint info
+inference-endpoint -v info
 
-# Run a benchmark (placeholder - not yet implemented)
-inference-endpoint run --config configs/default.yaml
+# Test endpoint connectivity
+inference-endpoint probe --endpoint http://your-endpoint:8000
+
+# Run offline benchmark (max throughput)
+inference-endpoint benchmark offline \
+  --endpoint http://your-endpoint:8000 \
+  --dataset tests/datasets/dummy_1k.pkl \
+  --duration 60
+
+# Run online benchmark (sustained QPS)
+inference-endpoint benchmark online \
+  --endpoint http://your-endpoint:8000 \
+  --dataset tests/datasets/dummy_1k.pkl \
+  --qps 100 \
+  --duration 60
 ```
+
+### Local Testing
+
+```bash
+# Start local echo server
+python -m inference_endpoint.testing.echo_server --port 8765 &
+
+# Test with dummy dataset (included in repo)
+inference-endpoint benchmark offline \
+  --endpoint http://localhost:8765 \
+  --dataset tests/datasets/dummy_1k.pkl \
+  --duration 10
+
+# Stop echo server
+pkill -f echo_server
+```
+
+See [Local Testing Guide](docs/LOCAL_TESTING.md) for detailed instructions.
 
 ## 📚 Documentation
 

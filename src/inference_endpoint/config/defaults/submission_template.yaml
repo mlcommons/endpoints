@@ -1,0 +1,71 @@
+# Official Submission Template
+name: "llama-2-70b-submission"
+version: "1.0"
+type: "submission"
+benchmark_mode: "offline" # Required for submission: "offline" or "online"
+
+# Locked baseline
+baseline:
+  locked: true
+  model: "llama-2-70b"
+  ruleset: "mlperf-inference-v6.0"
+
+model_params:
+  temperature: 0.7
+  top_k: 50
+  top_p: 0.9
+  max_new_tokens: 2048
+  osl_distribution:
+    type: "normal"
+    mean: 1000
+    std: 200
+    min: 512
+    max: 2048
+
+# Combined performance + accuracy datasets
+datasets:
+  - name: "performance-test"
+    type: "performance"
+    path: "datasets/openorca.pkl"
+    format: "pkl"
+    samples: 5000
+
+  - name: "gpqa-accuracy"
+    type: "accuracy"
+    path: "datasets/gpqa.pkl"
+    format: "pkl"
+    samples: 500
+    eval_method: "exact_match"
+
+  - name: "aime-accuracy"
+    type: "accuracy"
+    path: "datasets/aime.pkl"
+    format: "pkl"
+    samples: 300
+    eval_method: "exact_match"
+
+settings:
+  runtime:
+    min_duration_ms: 600000 # 10 minutes
+    max_duration_ms: 1800000 # 30 minutes
+    random_seed: 42
+
+  load_pattern:
+    type: "max_throughput"
+    qps: 100
+
+  client:
+    workers: 4
+    max_concurrency: 32
+
+metrics:
+  collect:
+    - "throughput"
+    - "latency"
+    - "ttft"
+    - "tpot"
+    - "accuracy"
+
+environment:
+  endpoint: "http://localhost:8000"
+  api_key: null

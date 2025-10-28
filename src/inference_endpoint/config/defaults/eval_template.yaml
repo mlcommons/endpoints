@@ -1,0 +1,35 @@
+# Accuracy Evaluation
+name: "accuracy-eval"
+version: "1.0"
+type: "eval"
+
+model_params:
+  temperature: 0.0
+  max_new_tokens: 2048
+
+datasets:
+  - name: "gpqa"
+    type: "accuracy"
+    path: "datasets/gpqa.pkl"
+    format: "pkl"
+    samples: 500
+    eval_method: "exact_match"
+
+settings:
+  runtime:
+    random_seed: 42
+
+  load_pattern:
+    type: "max_throughput"
+
+  client:
+    workers: 4
+    max_concurrency: 32
+
+metrics:
+  collect:
+    - "accuracy"
+
+environment:
+  endpoint: "http://localhost:8000"
+  api_key: null
