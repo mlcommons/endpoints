@@ -22,8 +22,11 @@ These tests verify end-to-end benchmark execution with real HTTP server:
 - Results collection and reporting
 """
 
+import argparse
+
+# Verify JSON structure
+import json
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 from inference_endpoint.commands.benchmark import run_benchmark_command
@@ -37,21 +40,23 @@ class TestBenchmarkCommandIntegration:
         self, mock_http_echo_server, ds_pickle_dataset_path, caplog
     ):
         """Test offline benchmark completes successfully."""
-        args = MagicMock()
-        args.benchmark_mode = "offline"
-        args.config = None
-        args.endpoint = mock_http_echo_server.url
-        args.dataset = Path(ds_pickle_dataset_path)
-        args.api_key = None
-        args.qps = None  # Use default
-        args.concurrency = None
-        args.workers = 1
-        args.duration = None  # Use default
-        args.min_tokens = None
-        args.max_tokens = None
-        args.mode = None
-        args.output = None
-        args.verbose = 1
+        args = argparse.Namespace(
+            benchmark_mode="offline",
+            config=None,
+            endpoint=mock_http_echo_server.url,
+            dataset=Path(ds_pickle_dataset_path),
+            api_key=None,
+            qps=None,
+            concurrency=None,
+            workers=1,
+            duration=None,
+            min_tokens=None,
+            max_tokens=None,
+            mode=None,
+            output=None,
+            verbose=1,
+            model="echo-server",
+        )
 
         with caplog.at_level("INFO"):
             await run_benchmark_command(args)
@@ -70,22 +75,24 @@ class TestBenchmarkCommandIntegration:
         self, mock_http_echo_server, ds_pickle_dataset_path, caplog
     ):
         """Test online benchmark with Poisson distribution."""
-        args = MagicMock()
-        args.benchmark_mode = "online"
-        args.config = None
-        args.endpoint = mock_http_echo_server.url
-        args.dataset = Path(ds_pickle_dataset_path)
-        args.api_key = None
-        args.qps = 50  # Override default
-        args.concurrency = None
-        args.workers = 1
-        args.duration = 2  # Short test
-        args.min_tokens = None
-        args.max_tokens = None
-        args.mode = None
-        args.output = None
-        args.verbose = 1
 
+        args = argparse.Namespace(
+            benchmark_mode="online",
+            config=None,
+            endpoint=mock_http_echo_server.url,
+            dataset=Path(ds_pickle_dataset_path),
+            api_key=None,
+            qps=50,
+            concurrency=None,
+            workers=1,
+            duration=2,
+            min_tokens=None,
+            max_tokens=None,
+            mode=None,
+            output=None,
+            verbose=1,
+            model="echo-server",
+        )
         with caplog.at_level("INFO"):
             await run_benchmark_command(args)
 
@@ -105,29 +112,27 @@ class TestBenchmarkCommandIntegration:
         """Test benchmark saves results to JSON file."""
         output_file = tmp_path / "benchmark_results.json"
 
-        args = MagicMock()
-        args.benchmark_mode = "offline"
-        args.config = None
-        args.endpoint = mock_http_echo_server.url
-        args.dataset = Path(ds_pickle_dataset_path)
-        args.api_key = None
-        args.qps = None
-        args.concurrency = None
-        args.workers = 1
-        args.duration = None
-        args.min_tokens = None
-        args.max_tokens = None
-        args.mode = None
-        args.output = output_file
-        args.verbose = 0
-
+        args = argparse.Namespace(
+            benchmark_mode="offline",
+            config=None,
+            endpoint=mock_http_echo_server.url,
+            dataset=Path(ds_pickle_dataset_path),
+            api_key=None,
+            qps=None,
+            concurrency=None,
+            workers=1,
+            duration=None,
+            min_tokens=None,
+            max_tokens=None,
+            mode=None,
+            output=output_file,
+            verbose=0,
+            model="echo-server",
+        )
         await run_benchmark_command(args)
 
         # Verify file was created
         assert output_file.exists()
-
-        # Verify JSON structure
-        import json
 
         with open(output_file) as f:
             results = json.load(f)
@@ -142,22 +147,24 @@ class TestBenchmarkCommandIntegration:
         self, mock_http_echo_server, ds_pickle_dataset_path, caplog
     ):
         """Test that benchmark logs mode and scheduler information."""
-        args = MagicMock()
-        args.benchmark_mode = "online"
-        args.config = None
-        args.endpoint = mock_http_echo_server.url
-        args.dataset = Path(ds_pickle_dataset_path)
-        args.api_key = None
-        args.qps = 20
-        args.concurrency = None
-        args.workers = 1
-        args.duration = 2
-        args.min_tokens = None
-        args.max_tokens = None
-        args.mode = "perf"
-        args.output = None
-        args.verbose = 1
 
+        args = argparse.Namespace(
+            benchmark_mode="online",
+            config=None,
+            endpoint=mock_http_echo_server.url,
+            dataset=Path(ds_pickle_dataset_path),
+            api_key=None,
+            qps=20,
+            concurrency=None,
+            workers=1,
+            duration=2,
+            min_tokens=None,
+            max_tokens=None,
+            mode="perf",
+            output=None,
+            verbose=1,
+            model="echo-server",
+        )
         with caplog.at_level("INFO"):
             await run_benchmark_command(args)
 

@@ -254,8 +254,15 @@ def _run_benchmark(
             logger.info(f"Inferred dataset format: {dataset_format}")
 
         # Create loader using factory
+        def parser(x):
+            return {
+                "prompt": x.text_input,
+                "output": x.ref_output,
+                "model": config.get("model", "gpt-3.5-turbo"),
+            }
+
         dataloader = DataLoaderFactory.create_loader(
-            dataset_path, format=dataset_format
+            dataset_path, format=dataset_format, parser=parser
         )
         dataloader.load()
         logger.info(f"Loaded {dataloader.num_samples()} samples")
