@@ -53,6 +53,7 @@ test = [
     "pytest-cov>=4.0.0",
     "pytest-benchmark>=4.0.0",
     "pytest-xdist==3.8.0",
+    "PyYAML>=6.0",
 ]
 performance = [
     "pytest-benchmark>=4.0.0",
@@ -123,12 +124,14 @@ addopts = [
     "--cov-report=term-missing",
     "--cov-report=html",
     "--cov-report=xml",
+    "-m not run_explicitly",
 ]
 markers = [
     "slow: marks tests as slow (skip in CI)",
     "performance: marks tests as performance tests (skip in CI) - no timeout",
     "integration: marks tests as integration tests",
     "unit: marks tests as unit tests",
+    "run_explicitly: mark test to only run explicitly",
 ]
 filterwarnings = [
     "ignore:Session timeout reached:RuntimeWarning",

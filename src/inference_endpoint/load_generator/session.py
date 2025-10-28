@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 import uuid
@@ -32,6 +33,7 @@ class BenchmarkSession:
         runtime_settings: RuntimeSettings,
         session_id: str | None = None,
     ):
+        self.logger = logging.getLogger(__name__)
         self.runtime_settings = runtime_settings
         self.session_id = session_id if session_id else uuid.uuid4().hex
 
@@ -72,6 +74,9 @@ class BenchmarkSession:
                         f"Max shutdown timeout of {max_shutdown_timeout_s}s reached"
                     )
                 self.end_event.wait(timeout=10.0)
+                self.logger.info(
+                    f"Waiting for the test to end... {self.event_recorder.n_inflight_samples} samples remaining"
+                )
 
             if stop_sample_issuer_on_test_end:
                 load_generator.sample_issuer.shutdown()

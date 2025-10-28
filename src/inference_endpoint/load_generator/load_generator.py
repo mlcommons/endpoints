@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 import time
 from abc import ABC, abstractmethod
 from typing import Any
@@ -96,6 +97,7 @@ class LoadGenerator(ABC):
             timestamp_ns,
             sample_uuid=sample.uuid,
         )
+        logging.debug(f"Issuing sample {sample.uuid} at {timestamp_ns}")
         self.sample_issuer.issue(sample)
         return timestamp_ns
 

@@ -103,7 +103,7 @@ class PickleReader(DataLoader):
             return
         with open(self.file_path, "rb") as file:
             self.data = pickle.load(file)
-            self.logger.info(
+            self.logger.debug(
                 f"Loading data from {self.file_path} with columns: {self.data.columns}"
             )
             assert "text_input" in self.data.columns

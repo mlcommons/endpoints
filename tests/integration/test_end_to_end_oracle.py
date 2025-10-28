@@ -41,19 +41,11 @@ from inference_endpoint.load_generator import (
 from tests.test_helpers import get_test_socket_path
 
 
-class ResponseCache:
-    def __init__(self):
-        self.cache: {str: str} = {}
-
-    def on_complete_hook(self, result: QueryResult):
-        self.cache[result.id] = result.response_output
-
-
 class DeepSeekR1SampleIssuer(HttpClientSampleIssuer):
     def __init__(self, tmp_path: str, url: str):
         self.http_config = HTTPClientConfig(
             endpoint_url=f"{url}/v1/chat/completions",
-            num_workers=2,
+            num_workers=16,
             max_concurrency=10,
         )
         self.aiohttp_config = AioHttpConfig()
@@ -73,20 +65,121 @@ class DeepSeekR1SampleIssuer(HttpClientSampleIssuer):
         )
 
 
+async def run_benchmark(server_url, dataloader, tmp_path, rt_settings):
+    # Step 1. Register the complete hook to store the responses from the server.
+    server_responses: {str: str} = {}
+
+    def on_complete_hook(result: QueryResult):
+        """Callback to store the responses from the server."""
+        server_responses[result.id] = result.response_output
+
+    SampleEventHandler.register_hook(SampleEvent.COMPLETE, on_complete_hook)
+
+    # Step 2. Create the scheduler.
+    scheduler = MaxThroughputScheduler(
+        rt_settings,
+        WithoutReplacementSampleOrder,
+    )
+    logging.info(f"Number of samples to issue: {scheduler.total_samples_to_issue}")
+
+    try:
+        # Step 3. Create the sample issuer.
+        sample_issuer = DeepSeekR1SampleIssuer(tmp_path, server_url)
+        sample_issuer.http_client.start()
+        sample_issuer.start()
+
+        # Step 4. Create the benchmark session.
+        sess = BenchmarkSession.start(
+            rt_settings,
+            dataloader,
+            sample_issuer,
+            scheduler,
+            name="pytest_run_benchmark",
+            stop_sample_issuer_on_test_end=False,
+            max_shutdown_timeout_s=3 * 60,
+        )
+
+        # Step 5. Wait for the test to end.
+        logging.info("Waiting for the test to end...")
+        sess.wait_for_test_end()
+        # Step 6. Return the sample UUID map and the server responses.
+        return sess.sample_uuid_map, server_responses
+    finally:
+        # Step 7. Shutdown the sample issuer and the HTTP client.
+        sample_issuer.shutdown()
+        sample_issuer.http_client.shutdown()
+
+
+"""
+Test the load generator full run with a given URL.
+"""
+
+
+async def _run_load_generator_full_run_url(
+    url, dataset_path, tmp_path, clean_sample_event_hooks, hf_model_name
+):
+    def parser(x):
+        res = {"prompt": x.text_input, "output": x.ref_output, "model": hf_model_name}
+        return res
+
+    dummy_dataloader = DeepSeekR1ChatCompletionDataLoader(dataset_path, parser)
+    dummy_dataloader.load()
+    assert dummy_dataloader.num_samples() > 0
+
+    rt_settings = RuntimeSettings(
+        metrics.Throughput(50),
+        [metrics.Throughput(50)],
+        min_duration_ms=1_00,
+        max_duration_ms=1_000,
+        n_samples_from_dataset=dummy_dataloader.num_samples(),
+        n_samples_to_issue=dummy_dataloader.num_samples(),
+        rng_sched=random.Random(1234),
+        rng_sample_index=random.Random(1234),
+    )
+
+    scheduler = MaxThroughputScheduler(
+        rt_settings,
+        WithoutReplacementSampleOrder,
+    )
+    logging.info(f"Number of samples to issue: {scheduler.total_samples_to_issue}")
+    # Now call the benchmark
+    sample_uuid_map, response_cache = await run_benchmark(
+        url, dummy_dataloader, tmp_path, rt_settings
+    )
+    num_responses_in_cache = len(response_cache)
+    assert (
+        num_responses_in_cache == scheduler.total_samples_to_issue
+    ), "Number of samples in response cache and number of samples in dataset should be the same"
+    vals = {}
+    for i in range(dummy_dataloader.num_samples()):
+        entry = dummy_dataloader.load_sample(i)
+        vals[i] = entry["output"]
+    num_samples_in_dataset = len(vals)
+    logging.info(f"Number of samples in dataset: {num_samples_in_dataset}")
+    logging.info(f"Total samples to issue: {scheduler.total_samples_to_issue}")
+    logging.info(f"Request data: {num_responses_in_cache}")
+
+    for sample_uuid, resp in response_cache.items():
+        if resp is None:
+            logging.error(f"Sample {sample_uuid} has no response")
+        else:
+            sample_index = sample_uuid_map[sample_uuid].index
+            logging.info(
+                f"Sample {sample_uuid} should have been response {vals[sample_index][0:30]}, but was response {resp[0:30]}"
+            )
+
+
 @pytest.mark.asyncio
-async def test_load_generator_full_run(
+async def test_load_generator_full_run_mock_http_oracle_server(
     mock_http_oracle_server,
     ds_pickle_dataset_path,
     tmp_path,
     clean_sample_event_hooks,
+    hf_model_name,
 ):
     def parser(x):
-        return {"prompt": x.text_input, "output": x.ref_output}
-
-    response_cache = ResponseCache()
-    SampleEventHandler.register_hook(
-        SampleEvent.COMPLETE, response_cache.on_complete_hook
-    )
+        res = {"prompt": x.text_input, "output": x.ref_output, "model": hf_model_name}
+        return res
 
     dummy_dataloader = DeepSeekR1ChatCompletionDataLoader(
         ds_pickle_dataset_path, parser
@@ -112,55 +205,90 @@ async def test_load_generator_full_run(
     )
     logging.info(f"Number of samples to issue: {scheduler.total_samples_to_issue}")
 
-    try:
-        sample_issuer = DeepSeekR1SampleIssuer(tmp_path, mock_http_oracle_server.url)
-        # Start HTTP client first to initialize its event loop
-        sample_issuer.http_client.start()
-        # Then start the sample issuer which needs the client's loop
-        sample_issuer.start()
+    sample_uuid_map, response_cache = await run_benchmark(
+        mock_http_oracle_server.url, dummy_dataloader, tmp_path, rt_settings
+    )
+    num_responses_in_cache = len(response_cache)
+    assert (
+        num_responses_in_cache == scheduler.total_samples_to_issue
+    ), "Number of samples in response cache and number of samples in dataset should be the same"
+    vals = {}
+    for i in range(dummy_dataloader.num_samples()):
+        entry = dummy_dataloader.load_sample(i)
+        vals[i] = entry["output"]
+    num_samples_in_dataset = len(vals)
+    logging.info(f"Number of samples in dataset: {num_samples_in_dataset}")
+    logging.info(f"Total samples to issue: {scheduler.total_samples_to_issue}")
+    logging.info(f"Request data: {num_responses_in_cache}")
+    assert (
+        num_samples_in_dataset == scheduler.total_samples_to_issue
+    ), "Number of samples in dataset and number of samples in request data should be the same"
 
-        sess = BenchmarkSession.start(
-            rt_settings,
-            dummy_dataloader,
-            sample_issuer,
-            scheduler,
-            name="pytest_test_load_generator_full_run",
-            stop_sample_issuer_on_test_end=False,
+    for sample_uuid, resp in response_cache.items():
+        sample_index = sample_uuid_map[sample_uuid].index
+        logging.info(
+            f"Sample {sample_uuid} should have been response {vals[sample_index][0:30]}, but was response {resp[0:30]}"
         )
-
-        sess.wait_for_test_end()
-    except Exception as e:
-        logging.info(f"Error: {e}")
-        raise e
-    finally:
-        logging.info(f"Request data: {response_cache.cache}")
-
-    try:
-        vals = {}
-        for i in range(dummy_dataloader.num_samples()):
-            entry = dummy_dataloader.load_sample(i)
-            vals[i] = entry["output"]
-        num_samples_in_dataset = len(vals)
-
-        logging.info(f"Number of samples in dataset: {num_samples_in_dataset}")
-        logging.info(f"Total samples to issue: {scheduler.total_samples_to_issue}")
-        logging.info(f"Request data: {len(response_cache.cache)}")
         assert (
-            num_samples_in_dataset == scheduler.total_samples_to_issue
-        ), "Number of samples in dataset and number of samples in request data should be the same"
+            resp == vals[sample_index]
+        ), f"Sample {sample_uuid} should have been response {vals[sample_index][0:30]}, but was response {resp[0:30]}"
 
-        for sample_uuid, resp in response_cache.cache.items():
-            sample_index = sess.sample_uuid_map[sample_uuid].index
-            logging.info(
-                f"Sample {sample_uuid} should have been response {vals[sample_index][0:30]}, but was response {resp[0:30]}"
-            )
-            assert (
-                resp == vals[sample_index]
-            ), f"Sample {sample_uuid} should have been response {vals[sample_index][0:30]}, but was response {resp[0:30]}"
-    except Exception as e:
-        logging.info(f"Error: {e}")
-        raise e
-    finally:
-        # Cleanup: shutdown the sample issuer and HTTP client
-        sample_issuer.shutdown()
-        sample_issuer.http_client.shutdown()
+
+@pytest.mark.asyncio
+@pytest.mark.slow
+@pytest.mark.run_explicitly
+@pytest.mark.timeout(0)
+async def test_load_generator_full_run_vllm_docker_server(
+    vllm_docker_server,
+    ds_pickle_dataset_path,
+    tmp_path,
+    clean_sample_event_hooks,
+    hf_model_name,
+):
+    await _run_load_generator_full_run_url(
+        vllm_docker_server.url,
+        ds_pickle_dataset_path,
+        tmp_path,
+        clean_sample_event_hooks,
+        hf_model_name,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.slow
+@pytest.mark.run_explicitly
+@pytest.mark.timeout(0)
+async def test_load_generator_full_run_sglang_docker_server(
+    sglang_docker_server,
+    ds_pickle_dataset_path,
+    tmp_path,
+    clean_sample_event_hooks,
+    hf_model_name,
+):
+    await _run_load_generator_full_run_url(
+        sglang_docker_server.url,
+        ds_pickle_dataset_path,
+        tmp_path,
+        clean_sample_event_hooks,
+        hf_model_name,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.slow
+@pytest.mark.run_explicitly
+@pytest.mark.timeout(0)
+async def test_load_generator_full_run_trtllm_docker_server(
+    trtllm_docker_server,
+    ds_pickle_dataset_path,
+    tmp_path,
+    clean_sample_event_hooks,
+    hf_model_name,
+):
+    await _run_load_generator_full_run_url(
+        trtllm_docker_server.url,
+        ds_pickle_dataset_path,
+        tmp_path,
+        clean_sample_event_hooks,
+        hf_model_name,
+    )

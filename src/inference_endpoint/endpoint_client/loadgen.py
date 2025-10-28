@@ -80,6 +80,11 @@ class HttpClientSampleIssuer(SampleIssuer):
                         )
                     case QueryResult(error=err) if err is not None:
                         logger.error(f"Error in request {response.id}: {err}")
+                        SampleEventHandler.query_result_complete(response)
+                        # TODO verify if we need to update the count even if there is an error
+                        self.n_inflight -= 1
+                        if self.n_inflight == 0:
+                            self._client_idle_event.set()
                     case QueryResult():
                         SampleEventHandler.query_result_complete(response)
 

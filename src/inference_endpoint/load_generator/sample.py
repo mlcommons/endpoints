@@ -133,9 +133,9 @@ class _SampleEventHandler:
 
         assert isinstance(result, QueryResult), f"Invalid result type: {type(result)}"
 
+        # Even if there is an error, we still record the event to count the sample as complete
         if result.error is not None:
             logger.error(f"Error in request {result.id}: {result.error}")
-            return
 
         EventRecorder.record_event(
             SampleEvent.COMPLETE,

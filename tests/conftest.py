@@ -20,6 +20,7 @@ This file provides shared fixtures and configuration for all tests.
 """
 
 import logging
+import os
 import random
 import sqlite3
 import sys
@@ -27,8 +28,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-import inference_endpoint.metrics as metrics
 import pytest
+from inference_endpoint import metrics
 from inference_endpoint.config.ruleset import RuntimeSettings
 from inference_endpoint.dataset_manager.dataloader import (
     DataLoader,
@@ -38,8 +39,10 @@ from inference_endpoint.dataset_manager.dataloader import (
 )
 from inference_endpoint.load_generator.events import SampleEvent, SessionEvent
 from inference_endpoint.load_generator.sample import SampleEventHandler
-from inference_endpoint.testing.echo_server import EchoServer
+from inference_endpoint.testing.docker_server import DockerServer
+from inference_endpoint.testing.echo_server import EchoServer, HTTPServer
 
+logger = logging.getLogger(__name__)
 # Add src to path for imports
 src_path = str(Path(__file__).parent.parent / "src")
 sys.path.insert(0, src_path)
@@ -94,13 +97,43 @@ def mock_http_echo_server():
     """
 
     # Create and start the server with dynamic port allocation (port=0)
-    server = EchoServer(port=0)
-    server.start()
 
     try:
+        server = EchoServer(port=0)
+        logging.info("Starting mock HTTP echo server")
+        server.start()
         yield server
     except Exception as e:
+        logging.error(f"Mock Echo Server error: {e}")
         raise RuntimeError(f"Mock Echo Server error: {e}") from e
+    finally:
+        logging.info("Stopping mock HTTP echo server")
+        if server:
+            server.stop()
+
+
+@pytest.fixture
+def mock_http_external_server():
+    class ExternalServer(HTTPServer):
+        def __init__(self):
+            super().__init__()
+
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+        @property
+        def url(self):
+            return f"http://{os.getenv('EXTERNAL_SERVER_HOST', 'localhost')}:{os.getenv('EXTERNAL_SERVER_PORT', '8000')}"
+
+    try:
+        server = ExternalServer()
+        server.start()
+        yield server
+    except Exception as e:
+        raise RuntimeError(f"Mock External Server error: {e}") from e
     finally:
         server.stop()
 
@@ -203,6 +236,7 @@ def events_db(tmp_path, sample_uuids):
     """Returns a sample in-memory sqlite database for events.
     This database contains events for 3 sent queries, but only 2 are completed. The 3rd query has no 'received' events.
     """
+    logger.info(f"Creating events database at {tmp_path}")
     test_db = str(tmp_path / f"test_events_{uuid.uuid4().hex}.db")
     conn = sqlite3.connect(test_db)
     cur = conn.cursor()
@@ -243,6 +277,7 @@ def events_db(tmp_path, sample_uuids):
     cur.close()
     conn.close()
     Path(test_db).unlink()
+    logger.info(f"Events database at {test_db} deleted")
 
 
 class OracleServer(EchoServer):
@@ -296,6 +331,7 @@ class OracleServer(EchoServer):
         Returns:
             str: The matching output for the request, or a default message if not found.
         """
+        logging.debug(f"\nGetting response for request: \n{request}\n")
         return self.data.get(request, "No response found")
 
 
@@ -326,6 +362,84 @@ def mock_http_oracle_server(ds_pickle_dataset_path):
         raise RuntimeError(f"Mock Oracle Server error: {e}") from e
     finally:
         server.stop()
+
+
+@pytest.fixture(scope="session")
+def hf_model_name():
+    return "meta-llama/Llama-3.1-8B-Instruct"
+
+
+@pytest.fixture(scope="session")
+def vllm_llama31_8b_cmd():
+    hf_home = os.getenv("HF_HOME")
+    hf_token = os.getenv("HF_TOKEN")
+
+    vllm_user_cmd = f"--runtime nvidia --gpus all -v {hf_home}:/root/.cache/huggingface --env HF_TOKEN={hf_token} -p 8000:8000 --ipc=host vllm/vllm-openai:latest --model meta-llama/Llama-3.1-8B-Instruct --chat-template-content-format openai"
+    return vllm_user_cmd
+
+
+@pytest.fixture(scope="session")
+def sglang_llama31_8b_cmd():
+    hf_home = os.getenv("HF_HOME")
+    hf_token = os.getenv("HF_TOKEN")
+    sglang_user_cmd = f"--gpus all --shm-size 32g --net host -v {hf_home}:/root/.cache/huggingface --env HF_TOKEN={hf_token} --ipc=host lmsysorg/sglang:latest python3 -m sglang.launch_server --model-path meta-llama/Llama-3.1-8B-Instruct --host 0.0.0.0 --port 8000 --tp-size 1"
+    return sglang_user_cmd
+
+
+@pytest.fixture(scope="session")
+def trtllm_llama31_8b_cmd():
+    hf_home = os.getenv("HF_HOME")
+    hf_token = os.getenv("HF_TOKEN")
+    trtllm_user_cmd = f"-v {hf_home}:/root/.cache/huggingface --env HF_TOKEN={hf_token} --net host --ipc host --gpus all nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc1 trtllm-serve serve meta-llama/Llama-3.1-8B-Instruct --backend pytorch"
+    return trtllm_user_cmd
+
+
+@pytest.fixture(scope="session")
+def vllm_docker_server(hf_model_name, vllm_llama31_8b_cmd):
+    server: DockerServer = None
+    try:
+        server = DockerServer(
+            hf_model_name, user_cmd=vllm_llama31_8b_cmd, timeout_seconds=20 * 60
+        )
+        server.start(timeout_seconds=20 * 60)
+        yield server
+    except Exception as e:
+        raise RuntimeError(f"DockerServer error: {e}") from e
+    finally:
+        if server:
+            server.stop()
+
+
+@pytest.fixture(scope="session")
+def sglang_docker_server(hf_model_name, sglang_llama31_8b_cmd):
+    server: DockerServer = None
+    try:
+        server = DockerServer(
+            hf_model_name, user_cmd=sglang_llama31_8b_cmd, timeout_seconds=20 * 60
+        )
+        server.start(timeout_seconds=20 * 60)
+        yield server
+    except Exception as e:
+        raise RuntimeError(f"DockerServer error: {e}") from e
+    finally:
+        if server:
+            server.stop()
+
+
+@pytest.fixture(scope="session")
+def trtllm_docker_server(hf_model_name, trtllm_llama31_8b_cmd):
+    server: DockerServer = None
+    try:
+        server = DockerServer(
+            hf_model_name, user_cmd=trtllm_llama31_8b_cmd, timeout_seconds=20 * 60
+        )
+        server.start(timeout_seconds=20 * 60)
+        yield server
+    except Exception as e:
+        raise RuntimeError(f"DockerServer error: {e}") from e
+    finally:
+        if server:
+            server.stop()
 
 
 @pytest.fixture

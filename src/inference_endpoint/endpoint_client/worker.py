@@ -44,7 +44,6 @@ from inference_endpoint.endpoint_client.configs import (
 )
 from inference_endpoint.endpoint_client.zmq_utils import ZMQPullSocket, ZMQPushSocket
 from inference_endpoint.openai.openai_adapter import OpenAIAdapter, SSEMessage
-from inference_endpoint.openai.openai_types_gen import CreateChatCompletionResponse
 from inference_endpoint.profiling import profile
 
 logger = logging.getLogger(__name__)
@@ -188,16 +187,15 @@ class Worker:
             await self._readiness_socket.send(self.worker_id)
             logger.info(f"Worker {self.worker_id} started and ready")
 
-            # Close readiness socket with linger to ensure message is transmitted
-            self._readiness_socket.close(linger_ms=1000)
-            self._readiness_socket = None
-
         except Exception as e:
             logger.error(
                 f"Worker {self.worker_id} failed to initialize: {type(e).__name__}: {str(e)}"
             )
             # Exit with error code to signal failure to parent process
             sys.exit(1)
+        finally:
+            if self._readiness_socket:
+                self._readiness_socket.close(linger_ms=1000)
 
         try:
             # Run main processing loop
@@ -273,7 +271,9 @@ class Worker:
 
         url = self.http_config.endpoint_url
         headers = query.headers if hasattr(query, "headers") else {}
-        payload = OpenAIAdapter.to_openai_request(query).model_dump()
+        payload = OpenAIAdapter.to_openai_request(query).model_dump(
+            mode="json", exclude_unset=True
+        )
 
         # Issue the request
         async with self._session.post(url, json=payload, headers=headers) as response:
@@ -282,8 +282,9 @@ class Worker:
                 await self._handle_error(
                     query.id, f"HTTP {response.status}: {error_text}"
                 )
+                logger.error(f"Request {query.id} failed with HTTP Error: {error_text}")
                 return
-
+            logger.debug(f"HTTP Response: {response}")
             yield response
 
     async def _process_request(self, query: Query) -> None:
@@ -405,11 +406,7 @@ class Worker:
         async for response in self._make_http_request(query):
             response_bytes = await response.read()
             response_data = orjson.loads(response_bytes)
-            response_obj = OpenAIAdapter.from_openai_response(
-                CreateChatCompletionResponse(**response_data, ignore_extra=True),
-                result_id=query.id,
-            )
-
+            response_obj = OpenAIAdapter.from_json_response(query.id, response_data)
             # Send response back to the main process
             await self._response_socket.send(response_obj)
 
@@ -485,6 +482,7 @@ class WorkerManager:
             async def wait_for_all_workers():
                 ready_count = 0
                 # Keep trying until we get all N readiness signals
+
                 while ready_count < self.http_config.num_workers:
                     worker_id = await readiness_socket.receive()
                     if worker_id is not None:
@@ -492,19 +490,18 @@ class WorkerManager:
                         logger.info(
                             f"Worker {worker_id} is ready ({ready_count}/{self.http_config.num_workers})"
                         )
+
                 return ready_count
 
-            try:
-                ready_count = await asyncio.wait_for(
-                    wait_for_all_workers(),
-                    timeout=self.http_config.worker_initialization_timeout,
-                )
-                logger.info(f"All {ready_count} workers are ready")
-            except TimeoutError as e:
-                raise TimeoutError(
-                    f"Workers failed to initialize within {self.http_config.worker_initialization_timeout} seconds."
-                ) from e
-
+            ready_count = await asyncio.wait_for(
+                wait_for_all_workers(),
+                timeout=self.http_config.worker_initialization_timeout,
+            )
+            logger.info(f"All {ready_count} workers are ready")
+        except TimeoutError as e:
+            raise TimeoutError(
+                f"Workers failed to initialize within {self.http_config.worker_initialization_timeout} seconds."
+            ) from e
         finally:
             # Close readiness socket
             readiness_socket.close()

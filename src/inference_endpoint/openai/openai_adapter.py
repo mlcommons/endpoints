@@ -29,6 +29,7 @@ from .openai_types_gen import (
     ModelIdsShared,
     Object7,
     ReasoningEffort,
+    Role,
     Role5,
     Role6,
     ServiceTier,
@@ -68,15 +69,22 @@ class OpenAIAdapter:
         if "prompt" not in query.data:
             raise ValueError("prompt not found in json_value")
 
-        return CreateChatCompletionRequest(
+        request = CreateChatCompletionRequest(
             model=ModelIdsShared(query.data.get("model", "no-model-name")),
-            service_tier=ServiceTier.auto,
+            # service_tier=ServiceTier.auto,
             reasoning_effort=ReasoningEffort.medium,
-            messages=[{"role": Role5.user, "content": query.data["prompt"]}],
+            messages=[
+                {
+                    "role": Role.assistant.value,
+                    "content": "You are a helpful assistant.",
+                },
+                {"role": Role5.user.value, "content": query.data["prompt"]},
+            ],
             stream=query.data.get("stream", False),
             max_completion_tokens=query.data.get("max_completion_tokens", 100),
             temperature=query.data.get("temperature", 0.7),
         )
+        return request
 
     @staticmethod
     def from_openai_request(request: CreateChatCompletionRequest) -> Query:
@@ -115,6 +123,25 @@ class OpenAIAdapter:
         return QueryResult(
             id=result_id,
             response_output=response.choices[0].message.content,
+        )
+
+    @staticmethod
+    def from_json_response(query_id, response: dict) -> QueryResult:
+        """Convert an OpenAI response data to a QueryResult.
+        Note that this function fixes the fields to be compatible with
+        OpenAI pydantic definitions. This includes updating the refusal and
+        logprobs fields to be compatible with the OpenAI pydantic definitions.
+        Args:
+            query_id: The ID of the query.
+            response: The OpenAI response data to convert.
+        Returns:
+            A QueryResult object.
+        """
+        response["choices"][0]["message"]["refusal"] = "None"
+        response["choices"][0]["logprobs"] = {"content": [], "refusal": []}
+        return OpenAIAdapter.from_openai_response(
+            CreateChatCompletionResponse(**response, ignore_extra=True),
+            result_id=query_id,
         )
 
     @staticmethod

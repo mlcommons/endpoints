@@ -22,6 +22,7 @@ import logging
 import threading
 import time
 import uuid
+from abc import abstractmethod
 
 from aiohttp import web
 
@@ -30,7 +31,22 @@ from inference_endpoint.openai.openai_adapter import OpenAIAdapter
 from inference_endpoint.openai.openai_types_gen import CreateChatCompletionRequest
 
 
-class EchoServer:
+class HTTPServer:
+    @property
+    @abstractmethod
+    def url(self):
+        pass
+
+    @abstractmethod
+    def start(self):
+        pass
+
+    @abstractmethod
+    def stop(self):
+        pass
+
+
+class EchoServer(HTTPServer):
     def __init__(
         self, *, host: str = "127.0.0.1", port: int = 0, max_osl: int | None = None
     ):
@@ -234,7 +250,10 @@ class EchoServer:
                 json_payload = json.loads(raw_payload)
             completion_request = CreateChatCompletionRequest(**json_payload)
             if completion_request.messages and len(completion_request.messages) > 0:
-                raw_request = completion_request.messages[0].root.content
+                for message in completion_request.messages:
+                    if str(message.root.role.value) == "user":
+                        raw_request = message.root.content
+                        break
             else:
                 raise ValueError("Request must contain at least one message")
             id = json_payload.get("id", str(uuid.uuid4()))

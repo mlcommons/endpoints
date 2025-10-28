@@ -126,28 +126,28 @@ class TestHTTPEndpointClientConcurrency:
     ):
         """Test basic future-based request/response without class fixture."""
         # Create a fresh client in the test's own event loop
-        http_config = HTTPClientConfig(
-            endpoint_url=f"{mock_http_echo_server.url}/v1/chat/completions",
-            num_workers=2,
-        )
-
-        zmq_config = ZMQConfig(
-            zmq_request_queue_prefix=get_test_socket_path(
-                tmp_path, "test_standalone", "_req"
-            ),
-            zmq_response_queue_addr=get_test_socket_path(
-                tmp_path, "test_standalone", "_resp"
-            ),
-            zmq_readiness_queue_addr=get_test_socket_path(
-                tmp_path, "test_standalone", "_ready"
-            ),
-        )
-
-        client = FuturesHttpClient(http_config, AioHttpConfig(), zmq_config)
-
-        await client.async_start()
-
         try:
+            http_config = HTTPClientConfig(
+                endpoint_url=f"{mock_http_echo_server.url}/v1/chat/completions",
+                num_workers=2,
+            )
+
+            zmq_config = ZMQConfig(
+                zmq_request_queue_prefix=get_test_socket_path(
+                    tmp_path, "test_standalone", "_req"
+                ),
+                zmq_response_queue_addr=get_test_socket_path(
+                    tmp_path, "test_standalone", "_resp"
+                ),
+                zmq_readiness_queue_addr=get_test_socket_path(
+                    tmp_path, "test_standalone", "_ready"
+                ),
+            )
+
+            client = FuturesHttpClient(http_config, AioHttpConfig(), zmq_config)
+
+            await client.async_start()
+
             query = Query(
                 id="1001",
                 data={
@@ -165,6 +165,11 @@ class TestHTTPEndpointClientConcurrency:
             result = await asyncio.wait_for(future, timeout=2.0)
             assert result.id == "1001"
             assert result.response_output == "Test future handling"
+        except Exception as e:
+            raise RuntimeError(
+                f"Test basic future handling standalone error: {e}"
+            ) from e
+
         finally:
             await client.async_shutdown()
 

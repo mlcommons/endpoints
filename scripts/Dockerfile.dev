@@ -1,6 +1,6 @@
 # Development Dockerfile for the MLPerf Inference Endpoint Benchmarking System
 # From project root:
-# docker build -f scripts/Dockerfile.dev -t inference-endpoint-dev .
+# docker build -f scripts/Dockerfile.dev --build-arg USER_ID=$(id -u) --build-arg GROUP_ID=$(id -g) -t inference-endpoint-dev .
 # docker run -v $(pwd):/mnt/inference-endpoint -it --shm-size=512m inference-endpoint-dev bash
 
 FROM python:3.12-slim
@@ -23,8 +23,14 @@ COPY pyproject.toml .
 COPY src/ ./src/
 
 # Create a non-root user for security
-RUN useradd --create-home --shell /bin/bash appuser && \
-    chown -R appuser:appuser /mnt/inference-endpoint
+# Accept UID and GID as build arguments to match host user
+ARG USER_ID=1000
+ARG GROUP_ID=1000
+RUN if ! getent group ${GROUP_ID}; then \
+        groupadd -g ${GROUP_ID} appuser; \
+    fi && \
+    useradd -u ${USER_ID} -g ${GROUP_ID} --create-home --shell /bin/bash appuser --no-log-init && \
+    chown -R ${USER_ID}:${GROUP_ID} /mnt/inference-endpoint
 USER appuser
 ENV PATH="/home/appuser/.local/bin:$PATH"
 

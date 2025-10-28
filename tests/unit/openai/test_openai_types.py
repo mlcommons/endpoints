@@ -60,13 +60,23 @@ class TestOpenAIAPITypes:
             )
         )
 
-        assert query.model_dump(mode="json")["messages"] == [
-            {
-                "role": "user",
-                "content": "Test prompt",
-                "name": None,
-            },
-        ]
+        messages = query.model_dump(mode="json")["messages"]
+        assert len(messages) == 2, f"Expected 2 messages, got {len(messages)}"
+        for message in messages:
+            assert message["role"] in [
+                "assistant",
+                "user",
+            ], f"Expected role to be assistant or user, got {message['role']}"
+            assert (
+                message["content"] is not None
+            ), f"Expected content to be not None, got {message['content']}"
+            assert (
+                message["name"] is None
+            ), f"Expected name to be None, got {message['name']}"
+            if message["role"] == "assistant":
+                assert message["content"] == "You are a helpful assistant."
+            else:
+                assert message["content"] == "Test prompt"
 
     def test_create_chat_completion_response_from_query_result(self):
         message_content = "You are a helpful assistant."
