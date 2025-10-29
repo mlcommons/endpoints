@@ -31,7 +31,7 @@ from inference_endpoint.load_generator.scheduler import (
     WithoutReplacementSampleOrder,
 )
 from inference_endpoint.load_generator.session import BenchmarkSession
-from inference_endpoint.metrics.recorder import MetricsReporter
+from inference_endpoint.metrics.reporter import MetricsReporter
 
 from tests.test_helpers import create_test_query
 
@@ -86,6 +86,12 @@ class QueryDataLoader(DataLoader):
 # =============================================================================
 # TEST RUNNER HELPERS
 # =============================================================================
+
+
+class ApproximatedTokenizer:
+    def tokenize(self, text: str) -> list[str]:
+        """Gives an approximation of the tokens by just splitting into words."""
+        return text.split(" ")
 
 
 def run_performance_test(
@@ -145,31 +151,36 @@ def run_performance_test(
         sched_cls = MaxThroughputScheduler
     scheduler = sched_cls(rt_settings, WithoutReplacementSampleOrder)
 
+    tokenizer = ApproximatedTokenizer()
+
     # Create sample issuer
     sample_issuer = HttpClientSampleIssuer(http_client)
-    sample_issuer.start()
 
-    # Start benchmark session with metrics-tracking sample factory
-    # MetricsSampleFactory will store itself in _latest_instance for retrieval
-    session = BenchmarkSession.start(
-        rt_settings,
-        dataloader,
-        sample_issuer,
-        scheduler,
-        name=f"perf_test_{stream}_{target_qps}qps_{uuid.uuid4().hex}",
-        stop_sample_issuer_on_test_end=False,  # We'll handle shutdown manually
-    )
+    try:
+        sample_issuer.start()
 
-    events_db_path = session.event_recorder.connection_name
+        # Start benchmark session with metrics-tracking sample factory
+        # MetricsSampleFactory will store itself in _latest_instance for retrieval
+        session = BenchmarkSession.start(
+            rt_settings,
+            dataloader,
+            sample_issuer,
+            scheduler,
+            name=f"perf_test_{stream}_{target_qps}qps_{uuid.uuid4().hex}",
+            stop_sample_issuer_on_test_end=False,  # We'll handle shutdown manually
+            tokenizer_override=tokenizer,
+        )
 
-    # Wait for test to complete
-    session.wait_for_test_end()
+        events_db_path = session.event_recorder.connection_name
 
-    # Wait for all pending responses to complete
-    sample_issuer.wait_for_all_complete()
+        # Wait for test to complete
+        session.wait_for_test_end()
 
-    # Shutdown
-    sample_issuer.shutdown()
+        # Wait for all pending responses to complete
+        sample_issuer.wait_for_all_complete()
+    finally:
+        # Shutdown
+        sample_issuer.shutdown()
 
     # Get summary of metrics
     assert Path(events_db_path).exists()
@@ -178,8 +189,12 @@ def run_performance_test(
     with MetricsReporter(events_db_path) as reporter:
         stats = reporter.get_sample_statuses()
         ttft_stats = reporter.derive_TTFT()
-        tpot_stats = reporter.derive_TPOT()
         sample_latency_stats = reporter.derive_sample_latency()
+        tpot_stats = reporter.derive_TPOT(
+            tokenizer,
+            ttft_rollup=ttft_stats,
+            sample_latency_rollup=sample_latency_stats,
+        )
         test_duration = reporter.derive_duration()
 
     test_qps = stats["total_sent"] / (test_duration / 1e9)
@@ -197,7 +212,7 @@ def run_performance_test(
         "issue_qps": issue_qps,
         "latencies": {
             "sample_latency_p99": sample_latency_stats.percentile(99),
-            "ttft_p99": ttft_stats.percentile(99),
+            "ttft_p99": ttft_stats.percentile(99) if stream else 0.0,
             "tpot_p99": tpot_stats.percentile(99),
         },
     }

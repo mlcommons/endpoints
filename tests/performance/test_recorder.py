@@ -21,13 +21,19 @@ from pathlib import Path
 
 import pytest
 from inference_endpoint.load_generator.events import SampleEvent, SessionEvent
-from inference_endpoint.metrics.recorder import EventRecorder, MetricsReporter
+from inference_endpoint.metrics.recorder import EventRecorder
+from inference_endpoint.metrics.reporter import MetricsReporter
 from inference_endpoint.profiling.line_profiler import ENV_VAR_ENABLE_LINE_PROFILER
 
 
 def get_EventRecorder(*args, **kwargs):
     # Set requirement to 128MB for testing
     return EventRecorder(*args, min_memory_req_bytes=128 * 1024 * 1024, **kwargs)
+
+
+class CharTokenizer:
+    def tokenize(self, text: str) -> list[str]:
+        return list(text)
 
 
 @pytest.fixture
@@ -73,9 +79,17 @@ def timing_log(tmp_path):
 
 @pytest.fixture
 def check_time_fn(timing_log):
-    def check_time(fn, thresh, log_key: str, variant: str = "default", rel_tol=0.05):
+    def check_time(
+        fn,
+        thresh,
+        *args,
+        log_key: str,
+        variant: str = "default",
+        rel_tol=0.05,
+        **kwargs,
+    ):
         start_time = time.monotonic_ns()
-        r = fn()
+        r = fn(*args, **kwargs)
         end_time = time.monotonic_ns()
         duration_sec = (end_time - start_time) / 1e9
         timing_log.log(log_key, duration_sec, variant=variant)
@@ -111,11 +125,15 @@ class ReporterTimeThresholds:
     [
         (
             "duckdb",
-            ReporterTimeThresholds(write=20e-6, ttft=0.1, tpot=1, sample_statuses=0.15),
+            ReporterTimeThresholds(
+                write=20e-6, ttft=0.1, tpot=1.5, sample_statuses=0.15
+            ),
         ),
         (
             "sqlite",
-            ReporterTimeThresholds(write=20e-6, ttft=0.3, tpot=2, sample_statuses=0.3),
+            ReporterTimeThresholds(
+                write=20e-6, ttft=0.3, tpot=1.5, sample_statuses=0.3
+            ),
         ),
     ],
 )
@@ -135,26 +153,29 @@ def test_many_chunk_performance(
             rec.record_event(
                 SessionEvent.LOADGEN_ISSUE_CALLED,
                 time.monotonic_ns(),
-                sample_uuid=sample_uuid + 1,
+                sample_uuid=str(sample_uuid + 1),
             )
 
         for sample_uuid in range(n_samples):
             rec.record_event(
                 SampleEvent.FIRST_CHUNK,
                 time.monotonic_ns(),
-                sample_uuid=sample_uuid + 1,
+                sample_uuid=str(sample_uuid + 1),
             )
 
         for _ in range(n_chunks):
             rec.record_event(
                 SampleEvent.NON_FIRST_CHUNK,
                 time.monotonic_ns(),
-                sample_uuid=random.randint(1, n_samples),
+                sample_uuid=str(random.randint(1, n_samples)),
             )
 
         for sample_uuid in range(n_samples):
             rec.record_event(
-                SampleEvent.COMPLETE, time.monotonic_ns(), sample_uuid=sample_uuid + 1
+                SampleEvent.COMPLETE,
+                time.monotonic_ns(),
+                sample_uuid=str(sample_uuid + 1),
+                output="test",
             )
         rec.wait_for_writes(force_commit=True)
         end_time = time.monotonic_ns()
@@ -163,9 +184,7 @@ def test_many_chunk_performance(
         end_time - start_time
     ) / 1e9 <= n_chunks * time_thresholds.write  # Cap at ~20 microseconds per event
 
-    with MetricsReporter(
-        conn_name, client_type=client_type, intermediate_chunks_logged=True
-    ) as reporter:
+    with MetricsReporter(conn_name, client_type=client_type) as reporter:
         variant = f"{client_type}_{n_chunks}rows_{n_samples}samples"
         assert check_time_fn(
             reporter.get_sample_statuses,
@@ -173,7 +192,7 @@ def test_many_chunk_performance(
             log_key="many_chunk_completed",
             variant=variant,
         ) == {"total_sent": n_samples, "completed": n_samples, "in_flight": 0}
-        check_time_fn(
+        ttft_rollup = check_time_fn(
             reporter.derive_TTFT,
             time_thresholds.ttft,
             log_key="many_chunk_ttft",
@@ -182,8 +201,10 @@ def test_many_chunk_performance(
         check_time_fn(
             reporter.derive_TPOT,
             time_thresholds.tpot,
+            CharTokenizer(),
             log_key="many_chunk_tpot",
             variant=variant,
+            ttft_rollup=ttft_rollup,
         )
 
 
@@ -195,13 +216,13 @@ def test_many_chunk_performance(
         (
             "duckdb",
             ReporterTimeThresholds(
-                write=20e-6, ttft=0.3, tpot=0.3, sample_statuses=0.15
+                write=20e-6, ttft=0.3, tpot=1.5, sample_statuses=0.15
             ),
         ),
         (
             "sqlite",
             ReporterTimeThresholds(
-                write=20e-6, ttft=0.6, tpot=0.6, sample_statuses=0.3
+                write=20e-6, ttft=0.6, tpot=1.5, sample_statuses=0.3
             ),
         ),
     ],
@@ -222,7 +243,7 @@ def test_2_chunk_per_query_performance(
             rec.record_event(
                 SessionEvent.LOADGEN_ISSUE_CALLED,
                 time.monotonic_ns(),
-                sample_uuid=sample_uuid + 1,
+                sample_uuid=str(sample_uuid + 1),
             )
 
         order = list(range(n_queries))
@@ -231,7 +252,7 @@ def test_2_chunk_per_query_performance(
             rec.record_event(
                 SampleEvent.FIRST_CHUNK,
                 time.monotonic_ns(),
-                sample_uuid=sample_uuid + 1,
+                sample_uuid=str(sample_uuid + 1),
             )
 
         random.shuffle(order)
@@ -239,13 +260,16 @@ def test_2_chunk_per_query_performance(
             rec.record_event(
                 SampleEvent.NON_FIRST_CHUNK,
                 time.monotonic_ns(),
-                sample_uuid=sample_uuid + 1,
+                sample_uuid=str(sample_uuid + 1),
             )
 
         random.shuffle(order)
         for sample_uuid in order:
             rec.record_event(
-                SampleEvent.COMPLETE, time.monotonic_ns(), sample_uuid=sample_uuid + 1
+                SampleEvent.COMPLETE,
+                time.monotonic_ns(),
+                sample_uuid=str(sample_uuid + 1),
+                output="test",
             )
 
         rec.wait_for_writes(force_commit=True)
@@ -255,9 +279,7 @@ def test_2_chunk_per_query_performance(
         end_time - start_time
     ) / 1e9 <= n_events * time_thresholds.write  # Cap at ~20 microseconds per event
 
-    with MetricsReporter(
-        conn_name, client_type=client_type, intermediate_chunks_logged=False
-    ) as reporter:
+    with MetricsReporter(conn_name, client_type=client_type) as reporter:
         variant = f"{client_type}_{n_events}events"
         assert check_time_fn(
             reporter.get_sample_statuses,
@@ -265,7 +287,7 @@ def test_2_chunk_per_query_performance(
             log_key="2_chunk_per_query_completed",
             variant=variant,
         ) == {"total_sent": n_queries, "completed": n_queries, "in_flight": 0}
-        check_time_fn(
+        ttft_rollup = check_time_fn(
             reporter.derive_TTFT,
             time_thresholds.ttft,
             log_key="2_chunk_per_query_ttft",
@@ -274,8 +296,10 @@ def test_2_chunk_per_query_performance(
         check_time_fn(
             reporter.derive_TPOT,
             time_thresholds.tpot,
+            CharTokenizer(),
             log_key="2_chunk_per_query_tpot",
             variant=variant,
+            ttft_rollup=ttft_rollup,
         )
 
 
@@ -292,7 +316,7 @@ def test_db_write_performance(cleanup_connections, check_time_fn):
                 rec.record_event(
                     SessionEvent.LOADGEN_ISSUE_CALLED,
                     time.monotonic_ns(),
-                    sample_uuid=i + 1,
+                    sample_uuid=str(i + 1),
                 )
             rec.wait_for_writes(force_commit=True)
 

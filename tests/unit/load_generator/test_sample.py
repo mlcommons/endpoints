@@ -54,7 +54,9 @@ def test_sample_callback_times(record_event_mock):
     non_first_chunk = StreamChunk(id=sample.uuid, metadata={"first_chunk": False})
     complete_result = QueryResult(id=sample.uuid)
 
-    def fake_record_event(ev_type: SampleEvent, timestamp_ns: int, sample_uuid: str):
+    def fake_record_event(
+        ev_type: SampleEvent, timestamp_ns: int, sample_uuid: str, **kwargs
+    ):
         assert sample_uuid == sample.uuid
         events.append((ev_type, timestamp_ns))
 

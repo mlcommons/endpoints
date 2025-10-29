@@ -27,7 +27,7 @@ from inference_endpoint.load_generator.scheduler import (
     WithoutReplacementSampleOrder,
 )
 from inference_endpoint.load_generator.session import BenchmarkSession
-from inference_endpoint.metrics.recorder import MetricsReporter
+from inference_endpoint.metrics.reporter import MetricsReporter
 from tqdm import tqdm
 
 from tests.test_helpers import (
