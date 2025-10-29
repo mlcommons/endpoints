@@ -15,7 +15,7 @@
 
 import multiprocessing
 import uuid
-from collections import defaultdict, namedtuple
+from collections import namedtuple
 from unittest.mock import patch
 
 import pytest
@@ -23,122 +23,9 @@ from inference_endpoint.load_generator.events import SampleEvent, SessionEvent
 from inference_endpoint.metrics.recorder import (
     EventRecorder,
     EventRecorderSingletonViolation,
-    MetricsReporter,
-    RollupQueryTable,
     sqlite3_cursor,
 )
-
-
-def test_derive_ttft(events_db, sample_uuids):
-    uuid1 = sample_uuids(1)
-    uuid2 = sample_uuids(2)
-
-    with MetricsReporter(events_db, intermediate_chunks_logged=True) as reporter:
-        ttft_rows = reporter.derive_TTFT()
-    assert len(ttft_rows) == 2
-    assert ttft_rows[0].metric_type == "ttft"
-    assert ttft_rows[1].metric_type == "ttft"
-    d = {row.sample_uuid: row.metric_value for row in ttft_rows}
-    assert d[uuid1] == 10
-    assert d[uuid2] == 187
-
-
-def test_derive_tpot(events_db, sample_uuids):
-    uuid1 = sample_uuids(1)
-    uuid2 = sample_uuids(2)
-
-    with MetricsReporter(events_db, intermediate_chunks_logged=True) as reporter:
-        tpot_rows = reporter.derive_TPOT()
-    assert len(tpot_rows) == 7
-    d = defaultdict(list)
-    for row in tpot_rows:
-        assert row.metric_type == "tpot"
-        d[row.sample_uuid].append(row.metric_value)
-
-    assert d[uuid1] == [191, 2, 8]
-    assert d[uuid2] == [20, 4, 3, 2]
-
-
-def test_derive_sample_latency(events_db, sample_uuids):
-    uuid1 = sample_uuids(1)
-    uuid2 = sample_uuids(2)
-
-    with MetricsReporter(events_db, intermediate_chunks_logged=True) as reporter:
-        sample_latency_rows = reporter.derive_sample_latency()
-
-    assert len(sample_latency_rows) == 2
-    latency1, latency2 = tuple(sorted(sample_latency_rows, key=lambda x: x.sample_uuid))
-    assert latency1.metric_type == "sample_latency"
-    assert latency1.sample_uuid == uuid1
-    assert latency1.metric_value == 10211 - 10000
-
-    assert latency2.metric_type == "sample_latency"
-    assert latency2.sample_uuid == uuid2
-    assert latency2.metric_value == 10219 - 10003
-
-
-def test_derive_duration(events_db):
-    with MetricsReporter(events_db, intermediate_chunks_logged=True) as reporter:
-        duration = reporter.derive_duration()
-    assert duration == (10300 - 5000)
-
-
-def test_derive_duration_malformed(tmp_path):
-    test_db_path = str(tmp_path / "bad_events.db")
-    with sqlite3_cursor(test_db_path) as (cursor, _):
-        cursor.execute(
-            "CREATE TABLE IF NOT EXISTS events (sample_uuid VARCHAR(32), event_type VARCHAR(32), timestamp_ns INTEGER)"
-        )
-        cursor.executemany(
-            "INSERT INTO events (sample_uuid, event_type, timestamp_ns) VALUES (?, ?, ?)",
-            [
-                ("", SessionEvent.TEST_STARTED.value, 5000),
-                ("", SessionEvent.TEST_ENDED.value, 10300),
-                ("", SessionEvent.TEST_STARTED.value, 11000),
-                ("", SessionEvent.TEST_ENDED.value, 12000),
-            ],
-        )
-
-    with MetricsReporter(test_db_path) as reporter:
-        with pytest.raises(
-            RuntimeError, match="Multiple TEST_STARTED or TEST_ENDED events found"
-        ):
-            reporter.derive_duration()
-
-
-def test_tpot_to_histogram(events_db):
-    with MetricsReporter(events_db, intermediate_chunks_logged=True) as reporter:
-        tpot_rows = reporter.derive_TPOT()
-    buckets, counts = tpot_rows.to_histogram(n_buckets=3)
-    assert buckets == [2, 65, 128]
-    assert counts == [6, 0, 1]
-
-
-def test_histogram_bucket_iter_path():
-    values = list(range(10)) + list(range(20, 40)) + list(range(45, 60))
-    table = RollupQueryTable(
-        metric_type="test", from_query="", rows=[(0, v) for v in values]
-    )
-    buckets, counts = table.to_histogram(n_buckets=10)
-    assert len(buckets) == 10
-    assert len(counts) == 10
-    assert sum(counts) == len(values)
-    assert buckets == [0, 5, 11, 17, 23, 29, 35, 41, 47, 53]
-    assert counts == [5, 5, 0, 3, 6, 6, 5, 2, 6, 7]
-
-
-def test_histogram_presort_path():
-    # For 45 values, log_2(45) ~= 5.49, so with 4 buckets, it will force the presort algorithm path
-    values = list(range(10)) + list(range(20, 40)) + list(range(45, 60))
-    table = RollupQueryTable(
-        metric_type="test", from_query="", rows=[(0, v) for v in values]
-    )
-    buckets, counts = table.to_histogram(n_buckets=4)
-    assert len(buckets) == 4
-    assert len(counts) == 4
-    assert sum(counts) == len(values)
-    assert buckets == [0, 14, 29, 44]
-    assert counts == [10, 9, 11, 15]
+from inference_endpoint.metrics.reporter import MetricsReporter
 
 
 def get_EventRecorder(*args, **kwargs):

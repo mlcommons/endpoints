@@ -19,12 +19,14 @@ Benchmarking System.
 This file provides shared fixtures and configuration for all tests.
 """
 
+import json
 import logging
 import os
 import random
 import sqlite3
 import sys
 import uuid
+from collections import UserDict
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +41,7 @@ from inference_endpoint.dataset_manager.dataloader import (
 )
 from inference_endpoint.load_generator.events import SampleEvent, SessionEvent
 from inference_endpoint.load_generator.sample import SampleEventHandler
+from inference_endpoint.metrics.reporter import MetricsReporter
 from inference_endpoint.testing.docker_server import DockerServer
 from inference_endpoint.testing.echo_server import EchoServer, HTTPServer
 
@@ -278,6 +281,41 @@ def events_db(tmp_path, sample_uuids):
     conn.close()
     Path(test_db).unlink()
     logger.info(f"Events database at {test_db} deleted")
+
+
+@pytest.fixture
+def fake_outputs(tmp_path, sample_uuids):
+    """Returns the path to a temporary file, containing fake outputs for the events_db fixture."""
+    uuid1 = sample_uuids(1)
+    uuid2 = sample_uuids(2)
+
+    class FakeOutputs(UserDict):
+        def __init__(self, path: Path):
+            super().__init__()
+
+            self.path = path
+
+    output_path = tmp_path / "outputs.jsonl"
+    fake_outputs = FakeOutputs(output_path)
+    fake_outputs[uuid1] = "Hello, world"
+    fake_outputs[uuid2] = "And goodbye."
+
+    # Generate test outputs file
+    with output_path.open("w") as f:
+        for s_uuid, output in fake_outputs.items():
+            f.write(json.dumps({"s_uuid": s_uuid, "output": output}) + "\n")
+
+    yield fake_outputs
+
+    output_path.unlink()
+
+
+@pytest.fixture
+def events_db_reporter_with_fake_outputs(events_db, fake_outputs):
+    """Returns a MetricsReporter object with the fake outputs path set."""
+    with MetricsReporter(events_db) as reporter:
+        reporter.outputs_path = fake_outputs.path
+        yield reporter
 
 
 class OracleServer(EchoServer):

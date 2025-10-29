@@ -18,9 +18,7 @@ from __future__ import annotations
 import atexit
 import contextlib
 import dataclasses
-import importlib
 import logging
-import math
 import multiprocessing
 import queue
 import shutil
@@ -29,7 +27,9 @@ import threading
 import uuid
 from functools import partial
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import ClassVar
+
+import orjson
 
 from ..load_generator.events import Event, SampleEvent, SessionEvent
 from ..profiling import profile
@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 
 
 @contextlib.contextmanager
-def sqlite3_cursor(path: str):
+def sqlite3_cursor(path: Path):
     """Context manager for SQLite cursor that properly handles connection lifecycle.
 
     Args:
@@ -48,7 +48,7 @@ def sqlite3_cursor(path: str):
     Yields:
         A SQLite cursor object.
     """
-    conn = sqlite3.connect(path)
+    conn = sqlite3.connect(str(path))
     cursor = conn.cursor()
     try:
         yield cursor, conn
@@ -79,11 +79,11 @@ class EventRow:
         )
 
 
-def register_cleanup(shm_path: str):
+def register_cleanup(file_path: str):
     if multiprocessing.parent_process() is not None:
         return
-    atexit.register(partial(Path(shm_path).unlink, missing_ok=True))
-    logger.debug(f"Registered at-exit cleanup for {shm_path}")
+    atexit.register(partial(Path(file_path).unlink, missing_ok=True))
+    logger.debug(f"Registered at-exit cleanup for {file_path}")
 
 
 class EventRecorderSingletonViolation(RuntimeError):
@@ -141,6 +141,7 @@ class EventRecorder:
 
         if self.connection_name not in EventRecorder._created_session_dbs:
             register_cleanup(self.connection_name)
+            register_cleanup(self.outputs_path)
             EventRecorder._created_session_dbs.add(self.connection_name)
 
         if not Path(self.connection_name).parent.exists():
@@ -182,13 +183,17 @@ class EventRecorder:
         self.should_check_idle = False
 
     @property
-    def connection_name(self):
+    def connection_name(self) -> Path:
         # To support accessing in multiple processes, we store the db in /dev/shm
         # Otherwise, using mode=memory&cache=shared only works within the same process
         return EventRecorder.db_path(self.session_id)
 
+    @property
+    def outputs_path(self) -> Path:
+        return Path(self.connection_name).with_suffix(".outputs.jsonl")
+
     @staticmethod
-    def db_path(session_id: str):
+    def db_path(session_id: str) -> Path:
         """Helper method to figure out the path of a session's database without creating an EventRecorder instance.
 
         Args:
@@ -197,7 +202,7 @@ class EventRecorder:
         Returns:
             The path to the session's database.
         """
-        return f"/dev/shm/mlperf_testsession_{session_id}.db"
+        return Path(f"/dev/shm/mlperf_testsession_{session_id}.db")
 
     def _writer_loop(self):
         """Writer thread loop that processes events from the queue and commits them to the database.
@@ -207,12 +212,16 @@ class EventRecorder:
         """
         logging.debug(f"Writer thread started for {self.connection_name}")
 
-        with sqlite3_cursor(self.connection_name) as (cur, conn):
+        with (
+            sqlite3_cursor(self.connection_name) as (cur, conn),
+            self.outputs_path.open("w") as outputs,
+        ):
             # Initialize the database table
             cur.execute(EventRow.to_table_query())
             conn.commit()
 
             event_buffer = []
+            output_buffer = []
 
             insert_query = EventRow.insert_query()
 
@@ -222,6 +231,13 @@ class EventRecorder:
                     cur.executemany(insert_query, event_buffer)
                     conn.commit()
                     event_buffer.clear()
+
+                    # Write outputs to JSONL
+                    if output_buffer:
+                        for output in output_buffer:
+                            outputs.write(orjson.dumps(output).decode("utf-8") + "\n")
+                        output_buffer.clear()
+                        outputs.flush()
 
             while True:
                 try:
@@ -249,7 +265,14 @@ class EventRecorder:
                     should_commit = True
                 else:
                     # Regular event - add to buffer
-                    event_buffer.append(item)
+                    event_buffer.append(item[:-1])
+                    if item[-1] is not None and item[1] == SampleEvent.COMPLETE.value:
+                        output_buffer.append(
+                            {
+                                "s_uuid": item[0],
+                                "output": item[-1],
+                            }
+                        )
                     should_commit = len(event_buffer) >= self.txn_buffer_size
 
                 # Commit if buffer is full
@@ -315,6 +338,7 @@ class EventRecorder:
         sample_uuid: str = "",
         force_commit: bool = False,
         assert_active: bool = True,
+        output: str | None = None,
     ) -> bool:
         """Records an event by pushing it to the queue for the writer thread to process.
 
@@ -328,7 +352,8 @@ class EventRecorder:
             force_commit (bool): Whether to force commit the current buffer immediately.
             assert_active (bool): Whether to raise an exception if no EventRecorder is active.
                                   If False, this method will return False. (Default: True)
-
+            output (str): The output to record associated with the event. Should only be used
+                          for SampleEvent.COMPLETE events. (Default: None)
         Returns:
             bool: True if the event was recorded, False otherwise. If assert_active is True,
             this method will always return True or raise an exception.
@@ -359,7 +384,7 @@ class EventRecorder:
             )
 
         # Push event to queue for writer thread to process
-        rec_inst.event_queue.put((sample_uuid, ev_type.value, timestamp_ns))
+        rec_inst.event_queue.put((sample_uuid, ev_type.value, timestamp_ns, output))
 
         # If force commit requested, send sentinel
         if force_commit:
@@ -409,304 +434,4 @@ class EventRecorder:
 
     def __exit__(self, exc_type, exc_value, traceback):
         """Context manager exit - stops the writer thread."""
-        self.close()
-
-
-@dataclasses.dataclass
-class MetricRow:
-    sample_uuid: str
-    metric_type: str
-    metric_value: float
-
-
-@dataclasses.dataclass(frozen=True)
-class RollupQueryTable:
-    """Represents a table that is the result of a roll-up query.
-    This class lazily converts tuples to MetricRow objects on-access to reduce unnecessary overhead.
-
-    The columns are assumed to be (sample_uuid, metric_value). If a roll-up query returns different columns,
-    define a subclass and override the __getitem__ method.
-    """
-
-    metric_type: str
-    from_query: str
-    rows: list[tuple[Any, ...]]
-
-    def __getitem__(self, index: int) -> MetricRow:
-        if index >= len(self.rows):
-            raise IndexError(f"Index {index} out of range for {self.metric_type}")
-        return MetricRow(self.rows[index][0], self.metric_type, self.rows[index][1])
-
-    def __len__(self) -> int:
-        return len(self.rows)
-
-    def to_histogram(self, n_buckets: int = 20) -> tuple[list[int], list[int]]:
-        """Returns a histogram of the metrics values.
-
-        The buckets are uniformly sized, distributed between the min and max values.
-        Bucket lower and upper bounds are integers, and the upper bound is exclusive.
-        When determining the lower bound, we round down to the nearest integer.
-
-        Args:
-            n_buckets: The number of buckets to create.
-
-        Returns:
-            A tuple of lists, the first list is the buckets, the second list is the counts.
-        """
-        min_value = min(self.rows, key=lambda x: x[1])[1]
-        max_value = max(self.rows, key=lambda x: x[1])[1]
-        diff = max_value - min_value
-        step = diff / n_buckets
-        buckets = []
-        counts = []
-        for i in range(n_buckets):
-            lower = int(min_value + i * step)
-            buckets.append(lower)
-            counts.append(0)
-
-        # 2 options here:
-        # O(N * M) where N is the number of rows and M is the number of buckets
-        # O(N log N) where N is the number of rows
-        if math.log(len(self.rows), 2) < n_buckets:
-            for row in self.rows:
-                for i in range(n_buckets):
-                    if i == n_buckets - 1:
-                        counts[i] += 1
-                        break
-                    elif row[1] < buckets[i + 1]:
-                        counts[i] += 1
-                        break
-        else:
-            bucket_idx = 0
-            for row in sorted(self.rows, key=lambda x: x[1]):
-                while (
-                    bucket_idx < (n_buckets - 1) and row[1] >= buckets[bucket_idx + 1]
-                ):
-                    bucket_idx += 1
-                counts[bucket_idx] += 1
-        return buckets, counts
-
-    def percentile(self, percentile: float) -> float:
-        if percentile < 0 or percentile > 100:
-            raise ValueError(f"Percentile must be between 0 and 100, got {percentile}")
-
-        if len(self.rows) == 0:
-            return 0.0
-
-        index = min(int(len(self.rows) * percentile / 100), len(self.rows) - 1)
-        sorted_rows = sorted(self.rows, key=lambda x: x[1])
-        return sorted_rows[index][1]
-
-
-class MetricsReporter:
-    """Derives metrics from events via rollup queries. This is a *read only* client."""
-
-    def __init__(
-        self,
-        connection_name: str,
-        client_type: str = "duckdb",
-        intermediate_chunks_logged: bool = False,
-    ):
-        """
-        Creates a new MetricsReporter.
-
-        Args:
-            connection_name: The path to the database to connect to.
-            client_type: The client type to use to connect to the database. Choices: ["duckdb", "sqlite"] (Default: "duckdb")
-            intermediate_chunks_logged: Whether to assume that there are intermediate chunks logged per sample, or if only the first and last chunks are logged.
-                                        This is used to select faster queries to calculate TPOT (Default: False)
-        """
-        self.connection_name = connection_name
-        self.client_type = client_type
-        self.intermediate_chunks_logged = intermediate_chunks_logged
-        self.is_closed = True
-
-    def init_connection(self):
-        if not self.is_closed:
-            logging.debug(f"Connection already initialized at {self.connection_name}")
-            return
-
-        if self.client_type == "duckdb":
-            logging.debug(f"Initializing duckdb connection at {self.connection_name}")
-            if importlib.util.find_spec("duckdb") is None:
-                raise ImportError("duckdb is not installed")
-            duckdb = importlib.import_module("duckdb")
-            # Install sqlite extension
-            self.conn = duckdb.connect()
-
-            logging.debug("Installing sqlite extension for duckdb")
-            self.conn.install_extension("sqlite")
-            self.conn.load_extension("sqlite")
-
-            logging.debug(
-                f"Attaching {self.connection_name} to duckdb in read-only mode"
-            )
-            self.conn.execute(
-                f"ATTACH '{self.connection_name}' AS sqlite_db (TYPE sqlite, READ_ONLY)"
-            )
-            self.conn.execute("USE sqlite_db")
-
-            self.cur_ = (
-                self.conn
-            )  # duckdb calls execute() on connection, there is no cursor object
-        elif self.client_type == "sqlite":
-            logging.debug(
-                f"Initializing read-only sqlite connection at {self.connection_name}"
-            )
-            self.conn = sqlite3.connect(
-                f"file:{self.connection_name}?mode=ro", uri=True
-            )
-            self.cur_ = self.conn.cursor()
-        else:
-            raise ValueError(f"Invalid client type: {self.client_type}")
-        self.is_closed = False
-
-    @profile
-    def derive_metric(self, query: str, metric_type: str) -> RollupQueryTable:
-        res = self.cur_.execute(query)
-        logging.debug(f"Roll-up for {metric_type}. Running query: {query}")
-        return RollupQueryTable(metric_type, query, res.fetchall())
-
-    def derive_TTFT(self) -> RollupQueryTable:
-        return self.derive_metric(
-            f"""
-            SELECT
-                sample_uuid,
-                MAX(CASE WHEN event_type = '{SampleEvent.FIRST_CHUNK.value}' THEN timestamp_ns END) -
-                MAX(CASE WHEN event_type = '{SessionEvent.LOADGEN_ISSUE_CALLED.value}' THEN timestamp_ns END) AS ttft
-            FROM events
-            WHERE event_type IN ('{SessionEvent.LOADGEN_ISSUE_CALLED.value}', '{SampleEvent.FIRST_CHUNK.value}')
-            GROUP BY sample_uuid
-            HAVING COUNT(DISTINCT event_type) = 2
-            """,
-            "ttft",
-        )
-
-    def derive_TPOT(self) -> RollupQueryTable:
-        if self.intermediate_chunks_logged:
-            query = f"""
-            WITH chunk_events AS (
-                SELECT
-                    sample_uuid,
-                    event_type,
-                    timestamp_ns,
-                    LAG(timestamp_ns) OVER (
-                        PARTITION BY sample_uuid
-                        ORDER BY timestamp_ns
-                    ) AS prev_timestamp
-                FROM events
-                WHERE event_type IN ('{SampleEvent.FIRST_CHUNK.value}', '{SampleEvent.NON_FIRST_CHUNK.value}')
-            )
-            SELECT
-                sample_uuid,
-                (timestamp_ns - prev_timestamp) AS tpot
-            FROM chunk_events
-            WHERE prev_timestamp IS NOT NULL
-            ORDER BY sample_uuid, timestamp_ns
-            """
-        else:
-            query = f"""
-            SELECT
-                sample_uuid,
-                MAX(CASE WHEN event_type = '{SampleEvent.NON_FIRST_CHUNK.value}' THEN timestamp_ns END) -
-                MAX(CASE WHEN event_type = '{SampleEvent.FIRST_CHUNK.value}' THEN timestamp_ns END) AS tpot
-            FROM events
-            WHERE event_type IN ('{SampleEvent.FIRST_CHUNK.value}', '{SampleEvent.NON_FIRST_CHUNK.value}')
-            GROUP BY sample_uuid
-            HAVING COUNT(DISTINCT event_type) = 2
-            """
-        return self.derive_metric(query, "tpot")
-
-    def derive_duration(self) -> RollupQueryTable:
-        """Calculates the total test duration as the difference between TEST_ENDED and TEST_STARTED events.
-
-        Returns:
-            RollupQueryTable: A table containing the duration in nanoseconds.
-        """
-        n_time_bounds = self.cur_.execute(f"""
-        SELECT
-            COUNT(DISTINCT CASE WHEN event_type = '{SessionEvent.TEST_STARTED.value}' THEN timestamp_ns END) AS n_starts,
-            COUNT(DISTINCT CASE WHEN event_type = '{SessionEvent.TEST_ENDED.value}' THEN timestamp_ns END) AS n_ends
-        FROM events
-        """).fetchone()
-        if n_time_bounds != (1, 1):
-            raise RuntimeError(
-                f"Multiple TEST_STARTED or TEST_ENDED events found - {n_time_bounds[0]} START events, {n_time_bounds[1]} END events"
-            )
-
-        # Must have a dummy sample_uuid column, as RollupQueryTable uses it as a primary key
-        rollup = self.derive_metric(
-            f"""
-            SELECT
-                '' as sample_uuid,
-                MAX(CASE WHEN event_type = '{SessionEvent.TEST_ENDED.value}' THEN timestamp_ns END) -
-                MAX(CASE WHEN event_type = '{SessionEvent.TEST_STARTED.value}' THEN timestamp_ns END) AS duration
-            FROM events
-            WHERE event_type IN ('{SessionEvent.TEST_STARTED.value}', '{SessionEvent.TEST_ENDED.value}')
-            HAVING COUNT(DISTINCT event_type) = 2
-            """,
-            "duration",
-        )
-        if len(rollup) == 0:
-            return None  # Test did not complete, return None
-        elif len(rollup) > 1:
-            raise RuntimeError("Malformed query result - Only 1 row expected")
-        return rollup[0].metric_value
-
-    def derive_sample_latency(self) -> RollupQueryTable:
-        """Calculates the end-to-end latency for each sample from issue to completion.
-
-        Returns:
-            RollupQueryTable: A table containing per-sample latencies in nanoseconds.
-        """
-        return self.derive_metric(
-            f"""
-            SELECT
-                sample_uuid,
-                MAX(CASE WHEN event_type = '{SampleEvent.COMPLETE.value}' THEN timestamp_ns END) -
-                MAX(CASE WHEN event_type = '{SessionEvent.LOADGEN_ISSUE_CALLED.value}' THEN timestamp_ns END) AS latency
-            FROM events
-            WHERE event_type IN ('{SessionEvent.LOADGEN_ISSUE_CALLED.value}', '{SampleEvent.COMPLETE.value}')
-            GROUP BY sample_uuid
-            HAVING COUNT(DISTINCT event_type) = 2
-            """,
-            "sample_latency",
-        )
-
-    @profile
-    def get_sample_statuses(self) -> dict[int, str]:
-        """Returns a dictionary with the following keys:
-        - "total_sent" (int): The total number of samples sent
-        - "completed" (int): The number of samples completed
-        - "in_flight" (int): The number of samples in flight
-        """
-        statuses = self.cur_.execute(f"""
-        SELECT
-            COUNT(DISTINCT CASE WHEN event_type = '{SessionEvent.LOADGEN_ISSUE_CALLED.value}' THEN sample_uuid END) AS request_sent_count,
-            COUNT(DISTINCT CASE WHEN event_type = '{SampleEvent.COMPLETE.value}' THEN sample_uuid END) AS complete_count
-        FROM events
-        """).fetchone()
-
-        return {
-            "total_sent": statuses[0],
-            "completed": statuses[1],
-            "in_flight": statuses[0] - statuses[1],
-        }
-
-    def close(self):
-        if self.is_closed:
-            logging.debug("Connection is already closed, skipping close")
-            return
-        self.is_closed = True
-
-        if self.cur_ is not self.conn:
-            self.cur_.close()
-        self.conn.close()
-
-    def __enter__(self):
-        if self.is_closed:
-            self.init_connection()
-        return self
-
-    def __exit__(self, exc_type, exc_value, traceback):
         self.close()

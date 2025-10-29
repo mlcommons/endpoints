@@ -16,15 +16,24 @@
 from __future__ import annotations
 
 import logging
+import os
+import shutil
 import threading
 import time
 import uuid
+from pathlib import Path
+
+import orjson
+from transformers import AutoTokenizer
 
 from ..config.ruleset import RuntimeSettings
 from ..dataset_manager.dataloader import DataLoader
 from ..metrics.recorder import EventRecorder
+from ..metrics.reporter import MetricsReporter
 from .events import SessionEvent
 from .load_generator import LoadGenerator, SampleIssuer, SchedulerBasedLoadGenerator
+
+logger = logging.getLogger(__name__)
 
 
 class BenchmarkSession:
@@ -54,6 +63,8 @@ class BenchmarkSession:
         load_generator: LoadGenerator,
         stop_sample_issuer_on_test_end: bool = True,
         max_shutdown_timeout_s: float = 300.0,
+        report_path: os.PathLike | None = None,
+        tokenizer_override: AutoTokenizer | None = None,
     ):
         with self.event_recorder:
             EventRecorder.record_event(SessionEvent.TEST_STARTED, time.monotonic_ns())
@@ -82,6 +93,65 @@ class BenchmarkSession:
                 load_generator.sample_issuer.shutdown()
             EventRecorder.record_event(SessionEvent.TEST_ENDED, time.monotonic_ns())
 
+            self.event_recorder.wait_for_writes()
+
+            # Handle reporting
+            with MetricsReporter(self.event_recorder.connection_name) as reporter:
+                has_model = hasattr(self.runtime_settings, "model")
+                tokenizer = None
+                if tokenizer_override is not None:
+                    tokenizer = tokenizer_override
+                if has_model:
+                    model = self.runtime_settings.model
+                    if tokenizer is None:
+                        try:
+                            tokenizer = AutoTokenizer.from_pretrained(
+                                model if isinstance(model, str) else model.name
+                            )
+                        except Exception as e:
+                            logger.error(
+                                f"Error loading tokenizer for model {model}: {e}"
+                            )
+                            tokenizer = None
+                report = reporter.create_report(tokenizer)
+
+                # Save to report directory if provided
+                if report_path:
+                    Path(report_path).mkdir(parents=True, exist_ok=True)
+                    report.to_json(save_to=Path(report_path) / "result_summary.json")
+
+                    # Copy over outputs for validation
+                    shutil.copy(
+                        self.event_recorder.outputs_path,
+                        Path(report_path) / "outputs.jsonl",
+                    )
+
+                    # Dump runtime settings to report directory
+                    rt_settings_data = {
+                        "min_duration_ms": self.runtime_settings.min_duration_ms,
+                        "max_duration_ms": self.runtime_settings.max_duration_ms,
+                        "n_samples_from_dataset": self.runtime_settings.n_samples_from_dataset,
+                        "n_samples_to_issue": self.runtime_settings.n_samples_to_issue,
+                        "min_sample_count": self.runtime_settings.min_sample_count,
+                        "total_samples_to_issue": self.runtime_settings.total_samples_to_issue(),
+                    }
+                    # TODO: Since RuntimeSettings stores the random.Random objects directly, there is no way
+                    # to retrieve the seed values. The best way to do this is probably a custom random.Random
+                    # class that stores the original seed as a read-only property, and unable to set the seed
+                    # after initialization.
+                    if has_model:
+                        rt_settings_data["model"] = (
+                            model if isinstance(model, str) else model.name
+                        )
+
+                    # TODO: After Zhihan's MR is merged, grab the scheduler class and other LG init settings
+                    # from the runtime settings object
+                    with (Path(report_path) / "runtime_settings.json").open("w") as f:
+                        f.write(orjson.dumps(rt_settings_data).decode("utf-8"))
+
+                # Print summary
+                report.display()
+
     def wait_for_test_end(self, timeout: float | None = None) -> bool:
         """
         Join the test thread and return True if the test completed, False if it timed out.
@@ -106,6 +176,8 @@ class BenchmarkSession:
         name: str | None = None,
         stop_sample_issuer_on_test_end: bool = True,
         max_shutdown_timeout_s: float = 300.0,
+        report_path: os.PathLike | None = None,
+        tokenizer_override: AutoTokenizer | None = None,
     ) -> BenchmarkSession:
         """Start a new BenchmarkSession in a thread.
 
@@ -118,6 +190,9 @@ class BenchmarkSession:
             stop_sample_issuer_on_test_end: Whether to stop the sample issuer on test end.
             max_shutdown_timeout_s: The maximum timeout to wait for the test to complete after all samples have been issued.
                                     If None, wait indefinitely. (Default: 300.0 seconds)
+            report_path: The path to save the report to. If None, no report will be saved.
+            tokenizer_override: The tokenizer to use for the session. If None, a tokenizer will be automatically selected
+                                based on the model name in the runtime settings.
 
         Returns:
             The new BenchmarkSession.
@@ -130,6 +205,8 @@ class BenchmarkSession:
                 load_generator,
                 stop_sample_issuer_on_test_end,
                 max_shutdown_timeout_s,
+                report_path,
+                tokenizer_override,
             ),
         )
         session.thread.start()
