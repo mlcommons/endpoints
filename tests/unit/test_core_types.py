@@ -38,7 +38,7 @@ class TestQuery:
             "model": "test-model",
             "max_completion_tokens": 100,
         }
-        query = OpenAIAdapter.to_openai_request(
+        query = OpenAIAdapter.to_endpoint_request(
             Query(id="test-123", data=payload)
         ).model_dump(mode="json")
         assert query["messages"][0]["content"] == "You are a helpful assistant."
@@ -57,7 +57,7 @@ class TestQuery:
             "temperature": 0.7,
         }
 
-        query_loaded = OpenAIAdapter.to_openai_request(
+        query_loaded = OpenAIAdapter.to_endpoint_request(
             Query(id="test-123", data=payload)
         )
         assert query_loaded.messages[0].root.content == "You are a helpful assistant."

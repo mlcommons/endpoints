@@ -286,7 +286,7 @@ class EchoServer(HTTPServer):
                     id=id,
                     response_output=raw_response,
                 )
-                echo_response = OpenAIAdapter.to_openai_response(response).model_dump(
+                echo_response = OpenAIAdapter.to_endpoint_response(response).model_dump(
                     mode="json"
                 )
                 echo_response["id"] = id

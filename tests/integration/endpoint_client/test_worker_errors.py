@@ -952,6 +952,7 @@ class TestWorkerErrorHandling:
             assert (
                 "invalid literal" in response.error
                 or "JSONDecodeError" in response.error
+                or "JSON is malformed" in response.error
             )
 
             # Shutdown

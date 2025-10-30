@@ -62,7 +62,7 @@ class TestHttpEchoMockFixtures:
         # Make a real HTTP OpenAI chat completions request to the server
         async with aiohttp.ClientSession() as session:
             prompt_text = "Test prompt for mock server"
-            payload = OpenAIAdapter.to_openai_request(
+            payload = OpenAIAdapter.to_endpoint_request(
                 Query(
                     id="test-chat-completions",
                     data={"prompt": prompt_text, "model": "gpt-3.5-turbo"},
@@ -76,7 +76,7 @@ class TestHttpEchoMockFixtures:
                 assert response.status == 200
 
                 json_payload = await response.json()
-                query_result = OpenAIAdapter.from_openai_response(
+                query_result = OpenAIAdapter.from_endpoint_response(
                     CreateChatCompletionResponse(**json_payload)
                 )
 
@@ -91,7 +91,7 @@ class TestHttpEchoMockFixtures:
         mock_http_echo_server.set_max_osl(100)
         async with aiohttp.ClientSession() as session:
             prompt_text = "What is machine learning?"
-            payload = OpenAIAdapter.to_openai_request(
+            payload = OpenAIAdapter.to_endpoint_request(
                 Query(
                     id="test-chat-completions",
                     data={"prompt": prompt_text, "model": "gpt-3.5-turbo"},
@@ -104,7 +104,7 @@ class TestHttpEchoMockFixtures:
                 assert response.status == 200
 
                 response_data = await response.json()
-                response = OpenAIAdapter.from_openai_response(
+                response = OpenAIAdapter.from_endpoint_response(
                     CreateChatCompletionResponse.model_validate(response_data)
                 )
 
@@ -113,7 +113,7 @@ class TestHttpEchoMockFixtures:
         mock_http_echo_server.set_max_osl(5)
         async with aiohttp.ClientSession() as session:
             prompt_text = "What is machine learning?"
-            payload = OpenAIAdapter.to_openai_request(
+            payload = OpenAIAdapter.to_endpoint_request(
                 Query(
                     id="test-chat-completions",
                     data={"prompt": prompt_text, "model": "gpt-3.5-turbo"},
@@ -126,7 +126,7 @@ class TestHttpEchoMockFixtures:
                 assert response.status == 200
                 response_data = await response.json()
                 # Verify echo response structure
-                response = OpenAIAdapter.from_openai_response(
+                response = OpenAIAdapter.from_endpoint_response(
                     CreateChatCompletionResponse.model_validate(response_data)
                 )
 

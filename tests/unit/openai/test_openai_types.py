@@ -53,7 +53,7 @@ class TestOpenAIAPITypes:
         ]
 
     def test_create_chat_completion_request_from_query(self):
-        query = OpenAIAdapter.to_openai_request(
+        query = OpenAIAdapter.to_endpoint_request(
             Query(
                 id="test-123",
                 data={"model": "test-model", "prompt": "Test prompt"},
@@ -136,7 +136,7 @@ class TestOpenAIAPITypes:
 
     def test_create_chat_completion_response(self):
         message_content = "You are a helpful assistant."
-        response = OpenAIAdapter.to_openai_response(
+        response = OpenAIAdapter.to_endpoint_response(
             QueryResult(id="test-123", response_output=message_content)
         ).model_dump(mode="json")
         assert response["choices"][0]["message"]["content"] == message_content
