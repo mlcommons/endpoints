@@ -23,6 +23,8 @@ from typing import Any
 import aiohttp
 import zmq
 
+from inference_endpoint.endpoint_client.adapter_protocol import HttpRequestAdapter
+
 
 @dataclass
 class HTTPClientConfig:
@@ -54,6 +56,18 @@ class HTTPClientConfig:
     #   -  move streaming to HttpClient config (not per-query)
     #   -  add max-sequence-length to HttpClient config (not per-query), base streaming_buffer_size on it
     streaming_buffer_size: int = 128 * 1024  # 128KB buffer for streaming tokens
+
+    # Request adapter for Query/Response <-> Payload/Response bytes
+    adapter_type: type[HttpRequestAdapter] = field(default=None)
+
+    def __post_init__(self):
+        # set default adapter in __post_init__ to avoid circular dependency
+        if self.adapter_type is None:
+            from inference_endpoint.openai.openai_msgspec_adapter import (
+                OpenAIMsgspecAdapter,
+            )
+
+            self.adapter_type = OpenAIMsgspecAdapter
 
 
 @dataclass
