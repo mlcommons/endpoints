@@ -272,6 +272,7 @@ class EchoServer(HTTPServer):
                 raw_payload = await request.text()
                 json_payload = json.loads(raw_payload)
             completion_request = CreateChatCompletionRequest(**json_payload)
+            request_data = OpenAIAdapter.from_openai_request(completion_request)
             if completion_request.messages and len(completion_request.messages) > 0:
                 for message in completion_request.messages:
                     if str(message.root.role.value) == "user":

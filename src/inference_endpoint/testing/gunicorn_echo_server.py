@@ -1,3 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import asyncio
 import json
 import logging
@@ -12,6 +27,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 
 from inference_endpoint.core.types import Query
+from inference_endpoint.openai.openai_types_gen import CreateChatCompletionRequest
 from inference_endpoint.testing.echo_server import OpenAIAdapter, QueryResult
 
 
@@ -88,7 +104,9 @@ class StandaloneApplication(gunicorn.app.base.BaseApplication):
     async def chat_completions(self, request: Request):
         max_osl = self.max_osl
         json_payload = await request.json()
-        completion_request = OpenAIAdapter.from_json(json_payload)
+        completion_request = OpenAIAdapter.from_openai_request(
+            CreateChatCompletionRequest(**json_payload)
+        )
         if (
             completion_request.data.get("prompt")
             and len(completion_request.data.get("prompt")) > 0
