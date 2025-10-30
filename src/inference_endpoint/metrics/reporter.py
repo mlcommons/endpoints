@@ -246,17 +246,17 @@ class Report:
 
     @functools.cached_property
     def qps(self) -> float | None:
-        """Calculates the queries (or samples) per second (QPS) based on the average latency.
-        If the average latency is 0, which is the case when 0 samples have been completed,
-        returns None.
+        """Calculates the queries (or samples) per second (QPS) based on actual throughput.
+
+        This is the actual throughput: total completed samples divided by test duration.
+        If duration is 0, which shouldn't happen in practice, returns None.
 
         Returns:
-            The QPS or None if no samples have been completed.
+            The QPS or None if duration is 0.
         """
-        avg_latency_ns = self.latency["avg"]  # Nanoseconds
-        if not avg_latency_ns:
+        if not self.duration_ns:
             return None
-        return float(1e9 / avg_latency_ns)
+        return float(self.n_samples_completed / (self.duration_ns / 1e9))
 
     @functools.cached_property
     def e2e_sample_latency_sec(self) -> float:

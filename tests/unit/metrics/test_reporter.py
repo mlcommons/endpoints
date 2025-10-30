@@ -209,7 +209,9 @@ def test_reporter_create_report(events_db_reporter_with_fake_outputs):
         assert report.tpot[k] == expected
 
     expected_e2e_latency_ns = (10211 - 10000) + (10219 - 10003)
-    assert report.qps == 1e9 / (((10211 - 10000) + (10219 - 10003)) / 2)
+    # QPS should be: completed_samples / (duration_ns / 1e9)
+    expected_qps = report.n_samples_completed / (report.duration_ns / 1e9)
+    assert report.qps == expected_qps
     assert report.e2e_sample_latency_sec == expected_e2e_latency_ns / 1e9
 
 

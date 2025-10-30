@@ -27,6 +27,9 @@ import tempfile
 import time
 from pathlib import Path
 
+from transformers import AutoTokenizer
+from transformers.utils import logging as transformers_logging
+
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import (
     BenchmarkConfig,
@@ -66,6 +69,9 @@ from inference_endpoint.load_generator import (
     WithoutReplacementSampleOrder,
 )
 from inference_endpoint.load_generator.scheduler import Scheduler
+
+# Suppress HuggingFace warnings about missing PyTorch/TensorFlow
+transformers_logging.set_verbosity_error()
 
 logger = logging.getLogger(__name__)
 
@@ -324,6 +330,32 @@ def _run_benchmark(
         benchmark_mode: TestType enum (OFFLINE or ONLINE)
     """
 
+    # Load tokenizer if model name is provided
+    # Priority: CLI args (offline/online modes) > config submission_ref (from-config mode)
+    tokenizer = None
+    model_name = getattr(args, "model", None)
+    if not model_name and config.submission_ref:
+        model_name = config.submission_ref.model
+
+    if model_name:
+        try:
+            logger.info(f"Loading tokenizer for model: {model_name}")
+            tokenizer = AutoTokenizer.from_pretrained(model_name)
+            logger.info("Tokenizer loaded successfully")
+        except Exception as e:
+            logger.warning(f"Failed to load tokenizer for {model_name}: {e}")
+            logger.warning(
+                "Continuing without tokenizer (report metrics may be limited)"
+            )
+    else:
+        # Throw exception if no model name is provided
+        raise InputValidationError("No model name provided")
+
+    # Get report path if specified
+    report_path = getattr(args, "report_path", None)
+    if report_path:
+        logger.info(f"Report will be saved to: {report_path}")
+
     # Get dataset - from CLI or from config
     # TODO: Dataset Logic is not yet fully implemented
     dataset_path = _get_dataset_path(args, config)
@@ -331,17 +363,20 @@ def _run_benchmark(
     # Load dataset using factory
     dataset_format = _get_dataset_format(config, dataset_path)
     logger.info(f"Loading: {dataset_path.name} (format: {dataset_format})")
+
+    # Determine if streaming should be enabled (only for online mode)
+    enable_streaming = benchmark_mode == TestType.ONLINE
+    if enable_streaming:
+        logger.info("Streaming enabled for TTFT metrics (online mode)")
+
     try:
         # Create loader using factory
         def parser(x):
-            # config is now BenchmarkConfig, not dict
-            model_name = (
-                config.submission_ref.model if config.submission_ref else "unset"
-            )
             return {
                 "prompt": x.text_input,
                 "output": x.ref_output,
                 "model": model_name,
+                "stream": enable_streaming,  # Enable streaming only for online mode
             }
 
         dataloader = DataLoaderFactory.create_loader(
@@ -430,6 +465,8 @@ def _run_benchmark(
             scheduler,
             name="cli_benchmark",
             stop_sample_issuer_on_test_end=False,
+            report_path=report_path,
+            tokenizer_override=tokenizer,
         )
 
         # Wait for test end with ability to interrupt
@@ -448,14 +485,16 @@ def _run_benchmark(
 
         elapsed_time = time.time() - start_time
         success_count = response_collector.count - len(response_collector.errors)
-        actual_qps = response_collector.count / elapsed_time if elapsed_time > 0 else 0
+        estimated_qps = (
+            response_collector.count / elapsed_time if elapsed_time > 0 else 0
+        )
 
         # Report results
         logger.info(f"Completed in {elapsed_time:.1f}s")
         logger.info(
             f"Results: {success_count}/{scheduler.total_samples_to_issue} successful"
         )
-        logger.info(f"QPS: {actual_qps:.1f}")
+        logger.info(f"Estimated QPS: {estimated_qps:.1f}")
 
         if response_collector.errors:
             logger.warning(f"Errors: {len(response_collector.errors)}")
@@ -479,7 +518,7 @@ def _run_benchmark(
                         "successful": success_count,
                         "failed": len(response_collector.errors),
                         "elapsed_time": elapsed_time,
-                        "qps": actual_qps,
+                        "qps": estimated_qps,
                     },
                 }
 

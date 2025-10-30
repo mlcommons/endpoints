@@ -32,13 +32,13 @@ Server is running. Press Ctrl+C to stop...
 # Terminal 2: Test probe command
 inference-endpoint -v probe \
   --endpoint http://localhost:8765 \
-  --model gpt-3.5-turbo \
+  --model Qwen/Qwen3-8B \
   --requests 5
 
 # With custom prompt and model
 inference-endpoint -v probe \
   --endpoint http://localhost:8765 \
-  --model llama-2-70b \
+  --model Qwen/Qwen3-8B \
   --requests 10 \
   --prompt "Tell me a joke in 20 words"
 ```
@@ -71,18 +71,22 @@ Waiting for 5 responses...
 # Quick test (model is required)
 inference-endpoint -v benchmark offline \
   --endpoint http://localhost:8765 \
-  --model llama-2-70b \
+  --model Qwen/Qwen3-8B \
   --dataset tests/datasets/dummy_1k.pkl
 
-# Production test with custom params
+# Production test with custom params and report generation
 inference-endpoint -v benchmark offline \
   --endpoint http://localhost:8765 \
-  --model llama-2-70b \
+  --model Qwen/Qwen3-8B \
   --dataset tests/datasets/dummy_1k.pkl \
   --qps 1000 \
   --duration 30 \
   --workers 4 \
-  --output benchmark_results.json
+  --output benchmark_results.json \
+  --report-path benchmark_report
+
+# Note: Set HF_TOKEN environment variable if using non-public models
+# export HF_TOKEN=your_huggingface_token
 ```
 
 **Expected Output:**
@@ -107,9 +111,10 @@ Cleaning up...
 # Test sustained QPS with latency focus
 inference-endpoint -v benchmark online \
   --endpoint http://localhost:8765 \
-  --model llama-2-70b \
+  --model Qwen/Qwen3-8B \
   --dataset tests/datasets/dummy_1k.pkl \
-  --qps 100
+  --qps 100 \
+  --report-path online_benchmark_report
 ```
 
 **Expected Output:**
@@ -243,21 +248,25 @@ python -m inference_endpoint.testing.echo_server --port 8000 &
 # 2. Generate fresh dataset if needed
 python scripts/create_dummy_dataset.py
 
-# 3. Test probe first
-inference-endpoint probe --endpoint http://localhost:8000 --requests 10
+# 3. Set HF_TOKEN if using non-public models (optional)
+export HF_TOKEN=your_huggingface_token
 
-# 4. Run benchmark
+# 4. Test probe first
+inference-endpoint probe --endpoint http://localhost:8000 --model Qwen/Qwen3-8B --requests 10
+
+# 5. Run benchmark with report generation
 inference-endpoint -v benchmark offline \
   --endpoint http://localhost:8000 \
-  --model llama-2-70b \
+  --model Qwen/Qwen3-8B \
   --dataset tests/datasets/dummy_1k.pkl \
   --workers 4 \
-  --output benchmark_results.json
+  --output benchmark_results.json \
+  --report-path benchmark_report
 
-# 5. Check results
+# 6. Check results
 cat benchmark_results.json | jq '.results'
 
-# 6. Stop server
+# 7. Stop server
 pkill -f echo_server
 ```
 
@@ -267,16 +276,18 @@ pkill -f echo_server
 # Offline (max throughput)
 inference-endpoint benchmark offline \
   --endpoint http://localhost:8765 \
-  --model llama-2-70b \
+  --model Qwen/Qwen3-8B \
   --dataset tests/datasets/dummy_1k.pkl \
-  --qps 1000
+  --qps 1000 \
+  --report-path offline_report
 
 # Online (Poisson distribution)
 inference-endpoint benchmark online \
   --endpoint http://localhost:8765 \
-  --model llama-2-70b \
+  --model Qwen/Qwen3-8B \
   --dataset tests/datasets/dummy_1k.pkl \
-  --qps 500
+  --qps 500 \
+  --report-path online_report
 ```
 
 ## Tips
@@ -293,3 +304,7 @@ inference-endpoint benchmark online \
 - Default max_concurrency: -1 (unlimited)
 - Dataset format auto-inferred from file extension (pkl, hf directory)
 - CLI and YAML modes are separate (no mixing allowed)
+- Use `--report-path` to generate detailed metrics reports with TTFT, TPOT, and token-based analysis
+- Model name is used to automatically load tokenizer for token-based metrics
+- Set `HF_TOKEN` environment variable for non-public models: `export HF_TOKEN=your_token`
+- Public models like `Qwen/Qwen3-8B` don't require HF_TOKEN

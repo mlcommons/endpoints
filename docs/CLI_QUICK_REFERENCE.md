@@ -8,15 +8,22 @@
 # Offline (max throughput - CLI mode)
 inference-endpoint benchmark offline \
   --endpoint URL \
-  --model llama-2-70b \
+  --model Qwen/Qwen3-8B \
   --dataset tests/datasets/dummy_1k.pkl
 
 # Online (sustained QPS - CLI mode)
 inference-endpoint benchmark online \
   --endpoint URL \
-  --model llama-2-70b \
+  --model Qwen/Qwen3-8B \
   --dataset tests/datasets/dummy_1k.pkl \
   --qps 500
+
+# With detailed report generation
+inference-endpoint benchmark offline \
+  --endpoint URL \
+  --model Qwen/Qwen3-8B \
+  --dataset tests/datasets/dummy_1k.pkl \
+  --report-path my_benchmark_report
 
 # YAML-based (YAML mode - no CLI overrides)
 inference-endpoint benchmark from-config \
@@ -58,10 +65,11 @@ inference-endpoint info
 ## Common Options
 
 - `--endpoint, -e URL` - Endpoint URL (required for CLI mode)
-- `--model NAME` - Model name (required for CLI mode, e.g., llama-2-70b)
+- `--model NAME` - Model name (required for CLI mode, e.g., Qwen/Qwen3-8B)
 - `--dataset, -d PATH` - Dataset file (required for CLI mode)
 - `--config, -c PATH` - YAML config file (required for from-config mode)
 - `--output, -o PATH` - Save results to JSON
+- `--report-path PATH` - Save detailed benchmark report with metrics
 - `--verbose, -v` - Increase verbosity (-vv for debug)
 
 ## Benchmark Options (CLI Mode Only)
@@ -137,7 +145,7 @@ inference-endpoint info
 ```bash
 inference-endpoint benchmark offline \
   --endpoint http://localhost:8000 \
-  --model gpt-3.5-turbo \
+  --model Qwen/Qwen3-8B \
   --dataset tests/datasets/dummy_1k.pkl
 ```
 
@@ -146,12 +154,13 @@ inference-endpoint benchmark offline \
 ```bash
 inference-endpoint benchmark online \
   --endpoint https://api.production.com \
-  --model llama-2-70b \
+  --model Qwen/Qwen3-8B \
   --dataset prod_queries.pkl \
   --qps 100 \
   --duration 300 \
   --workers 16 \
   --output results.json \
+  --report-path production_report \
   -v
 ```
 
@@ -175,7 +184,7 @@ inference-endpoint benchmark from-config \
 # Test connectivity
 inference-endpoint probe \
   --endpoint https://api.example.com \
-  --model llama-2-70b
+  --model Qwen/Qwen3-8B
 
 # Validate YAML config
 inference-endpoint validate --config submission.yaml
@@ -188,8 +197,8 @@ name: "test-name"
 type: "submission" # offline|online|eval|submission
 benchmark_mode: "offline" # Required for submission: offline or online
 
-baseline:
-  model: "llama-2-70b"
+submission_ref:
+  model: "Qwen/Qwen3-8B"
   ruleset: "mlperf-inference-v5.1"
 
 model_params:
@@ -246,3 +255,6 @@ endpoint_config:
 - Default duration: 10 seconds (use --duration to override)
 - Default max_concurrency: -1 (unlimited)
 - Share YAML configs for reproducible results across systems
+- Use `--report-path` to generate detailed metrics reports with TTFT, TPOT, and token-based analysis
+- Set `HF_TOKEN` environment variable for non-public models (e.g., `export HF_TOKEN=your_token`)
+- Model name is used to load tokenizer automatically for token-based metrics in reports

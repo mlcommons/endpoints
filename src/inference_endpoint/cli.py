@@ -201,6 +201,9 @@ def _add_online_specific_args(parser):
 def _add_auxiliary_args(parser):
     """Add auxiliary arguments (output-related, no benchmark impact)."""
     parser.add_argument("--output", "-o", type=Path, help="Results output file")
+    parser.add_argument(
+        "--report-path", type=Path, help="Path to save detailed benchmark report"
+    )
 
 
 # Argparse structure enforces arg validity - no manual validation needed
