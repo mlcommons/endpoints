@@ -1,4 +1,19 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """
 Custom h2load stress test runner with flexible configuration.
 Allows easy parameterization and result analysis.
@@ -106,7 +121,7 @@ class H2LoadRunner:
         )
         print(f"Protocol:             {config.protocol}")
         print()
-
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         # Build h2load command
         cmd = [
             "h2load",
@@ -118,6 +133,8 @@ class H2LoadRunner:
             str(config.max_concurrent),
             "-d",
             str(self.payload_file),
+            "--log-file",
+            f"{self.output_dir}/h2load_{config.name}{timestamp}.log",
             "-H",
             "Content-Type: application/json",
         ]
@@ -137,7 +154,7 @@ class H2LoadRunner:
         cmd.append(full_url)
 
         # Output file
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
         output_file = self.output_dir / f"{config.name}_{timestamp}.txt"
 
         print(f"Command: {' '.join(cmd)}")
