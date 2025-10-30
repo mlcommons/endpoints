@@ -93,7 +93,7 @@ class EchoServer(HTTPServer):
         """
         return self.max_osl
 
-    async def get_response(self, request: str) -> str:
+    def get_response(self, request: str) -> str:
         """
         Return the input request string as the response.
 
@@ -199,7 +199,7 @@ class EchoServer(HTTPServer):
                 },
             )
             await response.prepare(request)
-            raw_response = await self.get_response(content)
+            raw_response = self.get_response(content)
 
             # Send content in chunks (word by word for echo server)
             words = raw_response.split() if raw_response else []
@@ -283,7 +283,7 @@ class EchoServer(HTTPServer):
                     f"Request({type(request_data)}) must contain at least one message {request_data}"
                 )
             id = json_payload.get("id", str(uuid.uuid4()))
-            raw_response = await self.get_response(raw_request)
+            raw_response = self.get_response(raw_request)
             self.logger.debug(
                 f"Content of request: {raw_request} - response : {raw_response}"
             )
