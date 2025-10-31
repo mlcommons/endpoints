@@ -33,6 +33,7 @@ from typing import Any
 import pytest
 from inference_endpoint import metrics
 from inference_endpoint.config.runtime_settings import RuntimeSettings
+from inference_endpoint.config.schema import LoadPattern, LoadPatternType
 from inference_endpoint.dataset_manager.dataloader import (
     DataLoader,
     DeepSeekR1ChatCompletionDataLoader,
@@ -496,6 +497,24 @@ def max_throughput_runtime_settings():
         min_sample_count=100,
         rng_sched=random.Random(42),
         rng_sample_index=random.Random(42),
+    )
+
+
+@pytest.fixture
+def concurrency_runtime_settings():
+    return RuntimeSettings(
+        metric_target=None,
+        reported_metrics=[],
+        min_duration_ms=1000,
+        max_duration_ms=10_000,
+        n_samples_from_dataset=100,
+        n_samples_to_issue=10,
+        min_sample_count=10,
+        rng_sched=random.Random(42),
+        rng_sample_index=random.Random(42),
+        load_pattern=LoadPattern(
+            type=LoadPatternType.CONCURRENCY, qps=10.0, target_concurrency=2
+        ),
     )
 
 

@@ -425,6 +425,7 @@ class BenchmarkConfig(BaseModel):
                     f"Offline benchmarks must use 'max_throughput' load pattern, got '{load_pattern_type}'"
                 )
 
+<<<<<<< HEAD
         elif benchmark_mode == TestType.ONLINE:
             # Online mode validation
             if load_pattern_type == LoadPatternType.POISSON:
@@ -442,6 +443,20 @@ class BenchmarkConfig(BaseModel):
                         "Specify number of concurrent requests (e.g., max_concurrency: 10 in YAML or --concurrency 10 in CLI)"
                     )
 
+||||||| parent of 9ca8da9 (add concurrency scheduler)
+=======
+        # Validate CONCURRENCY pattern requirements
+        if benchmark_mode == TestType.ONLINE:
+            if load_pattern_type == LoadPatternType.CONCURRENCY:
+                if (
+                    self.settings.load_pattern.target_concurrency is None
+                    or self.settings.load_pattern.target_concurrency <= 0
+                ):
+                    raise ValueError(
+                        f"CONCURRENCY load pattern requires target_concurrency > 0, got {self.settings.load_pattern.target_concurrency}"
+                    )
+
+>>>>>>> 9ca8da9 (add concurrency scheduler)
     def validate_client_settings(self) -> None:
         """Validate client settings are reasonable.
 

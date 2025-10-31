@@ -14,8 +14,12 @@
 # limitations under the License.
 
 import random
+import threading
+import time
 
+from inference_endpoint.load_generator.sample import SampleEventHandler
 from inference_endpoint.load_generator.scheduler import (
+    ConcurrencyScheduler,
     MaxThroughputScheduler,
     WithoutReplacementSampleOrder,
     WithReplacementSampleOrder,
@@ -77,3 +81,43 @@ def test_max_throughput_scheduler(max_throughput_runtime_settings):
         94,
         13,
     ], "Order does not match expected deterministic order"
+
+
+def test_concurrency_scheduler(concurrency_runtime_settings):
+    """Test ConcurrencyScheduler with parallel query processing (concurrency=2, 10ms/query)."""
+    scheduler = ConcurrencyScheduler(
+        concurrency_runtime_settings, WithReplacementSampleOrder
+    )
+
+    # Simulate parallel query processing: 2 complete every 10ms
+    # (mimics real system with concurrency=2, 10ms processing time per query)
+    def complete_queries():
+        for _ in range(5):  # 5 batches × 2 = 10 completions
+            time.sleep(0.01)  # 10ms between batches
+            scheduler._on_query_complete(None)  # First completion in batch
+            scheduler._on_query_complete(None)  # Second completion in batch
+
+    threading.Thread(target=complete_queries, daemon=True).start()
+
+    # Track issue times
+    issue_times = []
+    start_time = time.perf_counter()
+
+    for _, _ in scheduler:
+        issue_times.append(time.perf_counter())
+
+    elapsed = time.perf_counter() - start_time
+
+    # Verify all samples issued
+    assert len(issue_times) == 10
+
+    # Expected timeline with concurrency=2, parallel processing at 10ms/query:
+    # t=0ms:  Issue Q1, Q2 (initial 2 slots)
+    # t=10ms: Q1,Q2 complete → Issue Q3, Q4
+    # t=20ms: Q3,Q4 complete → Issue Q5, Q6
+    # t=30ms: Q5,Q6 complete → Issue Q7, Q8
+    # t=40ms: Q7,Q8 complete → Issue Q9, Q10
+    # Total: ~40ms (allow 30-60ms for thread scheduling)
+    assert 0.03 < elapsed < 0.06, f"Expected ~40ms, got {elapsed*1000:.1f}ms"
+
+    SampleEventHandler.clear_hooks()
