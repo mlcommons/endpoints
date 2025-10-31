@@ -82,10 +82,10 @@ jobs:
   build-docs:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
@@ -148,7 +148,7 @@ start build/html/index.html  # On Windows
 Add to README.md:
 
 ```markdown
-[![Documentation](https://img.shields.io/badge/docs-sphinx-blue.svg)](https://mlcommons.github.io/endpoints/)
+[![Documentation](https://img.shields.io/badge/docs-sphinx-blue.svg)](https://github.com/mlcommons/endpoints)
 ```
 
 ## 📚 Resources

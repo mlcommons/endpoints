@@ -139,9 +139,9 @@ This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENS
 
 ## 👥 Contributors
 
-Credits to core contributors of projects
+Credits to core contributors of the project:
 
-- MLCommon Committee
+- MLCommons Committee
 - NVIDIA: Zhihan Jiang, Rashid Kaleem, Viraat Chandra, Alice Cheng
 - ...
 

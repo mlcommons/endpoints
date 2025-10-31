@@ -483,10 +483,9 @@ class Report:
                 "WARNING: Non-streaming-based Issuer used. TTFT metrics cannot be calculated"
             )
 
-        mode_label = self.tpot_reporting_mode.value.replace("_", " ").title()
         for section_name, metric_dict, unit, scale_factor in [
             ("TTFT", self.ttft, "ms", 1e-6),
-            (f"TPOT ({mode_label})", self.tpot, "ms", 1e-6),
+            (f"TPOT ({self.tpot_reporting_mode.value})", self.tpot, "ms", 1e-6),
             ("Latency", self.latency, "ms", 1e-6),
             ("Output sequence lengths", self.output_sequence_lengths, "tokens", 1.0),
         ]:

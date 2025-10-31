@@ -73,8 +73,8 @@ git push origin feature/test-setup
 
 Edit `.github/workflows/auto-review.yml`:
 
-```yaml
-const defaultReviewers = ['username1', 'username2'];
+```javascript
+const defaultReviewers = ["username1", "username2"];
 ```
 
 ### Modify Branch Patterns

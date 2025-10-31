@@ -41,6 +41,6 @@ Results are saved to `tinyllm_benchmark_report/` directory containing:
 
 ## Notes
 
-- Uses TinyLLM model (~15MB) for quick testing
+- Uses TinyLlama-1.1B-Chat model (~1.1GB) - popular small model with 4M+ downloads/month
 - Demonstrates framework components, not production benchmarking
 - For remote endpoints, use the CLI commands instead (see [CLI_QUICK_REFERENCE.md](../../docs/CLI_QUICK_REFERENCE.md))

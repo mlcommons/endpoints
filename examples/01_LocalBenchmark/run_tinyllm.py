@@ -38,13 +38,18 @@ from transformers.utils import logging
 logging.set_verbosity_error()  # Suppress HuggingFace warnings
 
 
-# Example: Tiny LLM for local benchmarking
+# Example: TinyLlama for local benchmarking
 # This demonstrates using a small model from HuggingFace for testing
+# TinyLlama-1.1B-Chat is a popular small model (~4M downloads/month)
 # Note: This is a minimal example - for production use, consider larger models
 class TinyLLM:
     def __init__(self):
-        self.model = AutoModelForCausalLM.from_pretrained("arnir0/Tiny-LLM")
-        self.tokenizer = AutoTokenizer.from_pretrained("arnir0/Tiny-LLM")
+        self.model = AutoModelForCausalLM.from_pretrained(
+            "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+        )
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+        )
 
     def generate_text_streamed(
         self, prompt, max_length=512, temperature=1, top_k=50, top_p=0.95
