@@ -184,8 +184,7 @@ def test_poisson_scheduler_distribution(poisson_runtime_settings):
         max_distance = max(max_distance, distance)
 
     # From: https://en.wikipedia.org/wiki/Kolmogorov%E2%80%93Smirnov_test#Kolmogorov-Smirnov_statistic
-    # use α=0.005 for strict test: 1.731 / sqrt(n)
-    # use α=0.001 for more lenient test: 1.949 / sqrt(n)
+    # use α=0.001 strict test: 1.949 / sqrt(n)
     ks_critical = 1.949 / (n**0.5)
 
     assert max_distance < ks_critical, (
