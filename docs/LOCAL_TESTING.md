@@ -302,6 +302,13 @@ inference-endpoint benchmark offline \
   --model Qwen/Qwen3-8B \
   --dataset tests/datasets/dummy_1k.pkl \
   --streaming on
+
+# Concurrency mode (fixed concurrent requests)
+inference-endpoint benchmark online \
+  --endpoint http://localhost:8765 \
+  --model Qwen/Qwen3-8B \
+  --dataset tests/datasets/dummy_1k.pkl \
+  --concurrency 32
 ```
 
 ## Tips

@@ -87,12 +87,13 @@ def test_max_throughput_scheduler(max_throughput_runtime_settings):
 
 
 def test_concurrency_scheduler(concurrency_runtime_settings):
-    """Test ConcurrencyScheduler properly gates issuance by completions.
+    """Test ConcurrencyScheduler properly gates issuance by completions with varying completion rates.
 
-    With concurrency=2:
+    With concurrency=2 and 100 samples:
     - First 2 queries are issued immediately (slots available)
     - Each subsequent issuance waits for a completion to free a slot
     - Query i (i≥2) should only issue after query (i-2) completes
+    - Completion rate changes every 10 samples to test dynamic behavior
     """
     scheduler = ConcurrencyScheduler(
         concurrency_runtime_settings, WithReplacementSampleOrder
@@ -102,33 +103,101 @@ def test_concurrency_scheduler(concurrency_runtime_settings):
     complete_events = []
     start_time = time.perf_counter()
 
+    # Define completion delays for each batch of 10 samples (in seconds)
+    # Pattern: Fast -> Slow -> Fast -> Very Slow -> Fast -> Medium -> Very Fast -> Slow -> Fast -> Medium
+    completion_delays = [
+        0.005,  # Batch 0-9:   5ms (fast)
+        0.020,  # Batch 10-19: 20ms (slow)
+        0.005,  # Batch 20-29: 5ms (fast)
+        0.050,  # Batch 30-39: 50ms (very slow)
+        0.005,  # Batch 40-49: 5ms (fast)
+        0.010,  # Batch 50-59: 10ms (medium)
+        0.002,  # Batch 60-69: 2ms (very fast)
+        0.020,  # Batch 70-79: 20ms (slow)
+        0.005,  # Batch 80-89: 5ms (fast)
+        0.010,  # Batch 90-99: 10ms (medium)
+    ]
+
     def simulate_completions():
-        """Simulate 10ms processing time per query."""
-        for i in range(10):
-            time.sleep(0.01)
-            complete_events.append((i, time.perf_counter() - start_time))
+        """Simulate variable processing time per batch of queries."""
+        for i in range(100):
+            # Determine delay based on which batch of 10 this sample belongs to
+            batch_idx = i // 10
+            delay = completion_delays[batch_idx]
+            time.sleep(delay)
+            complete_events.append((i, time.perf_counter() - start_time, delay))
             scheduler._release_slot()
 
-    threading.Thread(target=simulate_completions, daemon=True).start()
+    completion_thread = threading.Thread(target=simulate_completions, daemon=True)
+    completion_thread.start()
 
-    for query_idx, _ in enumerate(scheduler):
-        issue_events.append((query_idx, time.perf_counter() - start_time))
+    try:
+        for query_idx, _ in enumerate(scheduler):
+            issue_events.append((query_idx, time.perf_counter() - start_time))
 
-    # First 2 queries should issue immediately
-    assert issue_events[0][1] < 0.001
-    assert issue_events[1][1] < 0.001
+        # First 2 queries should issue immediately
+        assert issue_events[0][1] < 0.001, "First query should issue immediately"
+        assert issue_events[1][1] < 0.001, "Second query should issue immediately"
 
-    # With concurrency=2: first 2 issued immediately, then each completion enables 1 more
-    # Check that after initial 2, issuance is gated by completions
-    for i in range(2, 10):
-        issue_time = issue_events[i][1]
-        # This issue should happen after the (i-2)th completion
-        prev_complete_time = complete_events[i - 2][1]
-        assert (
-            issue_time >= prev_complete_time
-        ), f"Issue {i} at {issue_time:.4f}s happened before completion {i-2} at {prev_complete_time:.4f}s"
+        # With concurrency=2: first 2 issued immediately, then each completion enables 1 more
+        # Check that after initial 2, issuance is gated by completions
+        for i in range(2, 100):
+            issue_time = issue_events[i][1]
+            # This issue should happen after the (i-2)th completion
+            prev_complete_time = complete_events[i - 2][1]
+            assert (
+                issue_time >= prev_complete_time
+            ), f"Issue {i} at {issue_time:.4f}s happened before completion {i-2} at {prev_complete_time:.4f}s"
 
-    SampleEventHandler.clear_hooks()
+        # Verify expected pattern: measure avg issue intervals for each batch of 10
+        # Since concurrency=2, issue rate should track completion rate with ~2 sample lag
+        batch_issue_intervals = []
+        for batch_idx in range(10):
+            start_idx = batch_idx * 10 + 2  # Skip first 2 immediate issues
+            if start_idx >= 100:
+                break
+            end_idx = min((batch_idx + 1) * 10, 100)
+            if end_idx <= start_idx + 1:
+                continue
+
+            # Calculate average inter-issue interval for this batch
+            intervals = [
+                issue_events[i][1] - issue_events[i - 1][1]
+                for i in range(start_idx, end_idx)
+            ]
+            avg_interval = sum(intervals) / len(intervals) if intervals else 0
+            batch_issue_intervals.append(avg_interval)
+
+            # Expected interval should be close to completion delay
+            # With concurrency=2 and 2-sample lag: issues in batch i starting at index
+            # (batch_idx*10 + 2) wait on completions starting at index (batch_idx*10),
+            # which are from the same batch i
+            expected_delay = completion_delays[batch_idx]
+
+            # Allow 10% tolerance due to threading timing variance and edge effects
+            tolerance = 0.25
+            lower_bound = (1 - tolerance) * expected_delay
+            upper_bound = (1 + tolerance) * expected_delay
+            assert (
+                lower_bound <= avg_interval <= upper_bound
+            ), f"Batch {batch_idx} avg interval {avg_interval*1000:.2f}ms not in expected range [{lower_bound*1000:.2f}, {upper_bound*1000:.2f}]ms (expected {expected_delay*1000:.2f}ms)"
+
+        # Verify pattern: batches with slower completions should have slower issue rates
+        # Compare very slow batch (batch 3: 50ms) vs fast batch (batch 2: 5ms)
+        if len(batch_issue_intervals) > 3:
+            assert (
+                batch_issue_intervals[3] > batch_issue_intervals[2]
+            ), "Slower completion batch (50ms) should have slower issue rate than fast batch (5ms)"
+
+        # Compare slow batch (batch 7: 20ms) vs very fast batch (batch 6: 2ms)
+        if len(batch_issue_intervals) > 7:
+            assert (
+                batch_issue_intervals[7] > batch_issue_intervals[6]
+            ), "Slower completion batch (20ms) should have slower issue rate than very fast batch (2ms)"
+    finally:
+        # Ensure proper cleanup even if test fails
+        completion_thread.join(timeout=5.0)
+        SampleEventHandler.clear_hooks()
 
 
 def test_poisson_scheduler_distribution(poisson_runtime_settings):

@@ -243,15 +243,16 @@ def _build_config_from_cli(
         InputValidationError: If required params missing
     """
     # Determine load pattern (CLI override or mode default)
-    load_pattern_arg = getattr(args, "load_pattern", None)
-    if load_pattern_arg:
+    if load_pattern_arg := getattr(args, "load_pattern", None):
         load_pattern_type = LoadPatternType(load_pattern_arg)
     else:
-        load_pattern_type = (
-            LoadPatternType.MAX_THROUGHPUT
-            if benchmark_mode == "offline"
-            else LoadPatternType.POISSON
-        )
+        match benchmark_mode:
+            case "offline":
+                load_pattern_type = LoadPatternType.MAX_THROUGHPUT
+            case "online" if args.concurrency:
+                load_pattern_type = LoadPatternType.CONCURRENCY
+            case "online":
+                load_pattern_type = LoadPatternType.POISSON
 
     # Build BenchmarkConfig from CLI params
     return BenchmarkConfig(
@@ -270,6 +271,7 @@ def _build_config_from_cli(
             load_pattern=LoadPattern(
                 type=load_pattern_type,
                 target_qps=args.target_qps if args.target_qps else None,
+                target_concurrency=args.concurrency if args.concurrency else None,
             ),
             runtime=RuntimeConfig(
                 min_duration_ms=args.duration * 1000
@@ -284,7 +286,7 @@ def _build_config_from_cli(
             ),
             client=ClientSettings(
                 workers=args.workers if args.workers else 4,
-                max_concurrency=args.concurrency if args.concurrency else -1,
+                max_concurrency=-1,  # NOTE(vir): client always uses unlimited concurrency
             ),
         ),
         model_params=ModelParams(

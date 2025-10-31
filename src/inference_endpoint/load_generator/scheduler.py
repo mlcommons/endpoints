@@ -392,8 +392,12 @@ class ConcurrencyScheduler(Scheduler, load_pattern=LoadPatternType.CONCURRENCY):
         # Unused (required by Scheduler interface)
         self.delay_fn = lambda: 0
 
-    def _release_slot(self):
-        """Release a concurrency slot and notify waiting threads."""
+    def _release_slot(self, result=None):
+        """Release a concurrency slot and notify waiting threads.
+
+        Args:
+            result: QueryResult from completed query (unused, required by hook signature)
+        """
         with self._condition:
             self._inflight -= 1
             self._condition.notify()
