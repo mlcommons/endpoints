@@ -47,6 +47,11 @@ def test_derive_ttft(events_db, sample_uuids):
 
 
 def test_derive_tpot(events_db, sample_uuids, fake_outputs):
+    """
+    Test the derivation of Token Processing Time (TPOT) metrics with token-weighted reporting mode.
+    
+    Validates that the computed TPOT values match expected calculations based on timestamp differences and output lengths per sample UUID, using a character-level tokenizer and simulated outputs.
+    """
     uuid1 = sample_uuids(1)
     uuid2 = sample_uuids(2)
 
@@ -118,6 +123,11 @@ def test_derive_duration_malformed(tmp_path):
 def test_tpot_to_histogram(
     events_db_reporter_with_fake_outputs, fake_outputs, sample_uuids
 ):
+    """
+    Test the conversion of TPOT metric data into histogram buckets with specified boundaries.
+    
+    Validates that the buckets and counts from TPOT metrics match the expected distribution given the tokenized output lengths and timestamps in the fake data.
+    """
     uuid1 = sample_uuids(1)
     uuid2 = sample_uuids(2)
 
@@ -224,6 +234,11 @@ def test_reporter_create_report(events_db_reporter_with_fake_outputs):
 
 
 def test_reporter_json(events_db):
+    """
+    Test JSON serialization and deserialization of a metrics report.
+    
+    Ensures that the report's JSON output contains all expected keys and values, and that complex rollup summary fields remain consistent after encoding and decoding.
+    """
     with MetricsReporter(events_db) as reporter:
         report = reporter.create_report()
 

@@ -171,13 +171,10 @@ def create_parser() -> argparse.ArgumentParser:
 
 
 def _add_shared_benchmark_args(parser):
-    """Add shared benchmark arguments used by both offline and online modes.
-
-    Adds common benchmark configuration arguments. See individual argument
-    help strings for descriptions.
-
-    Args:
-        parser: The argument parser to add arguments to.
+    """
+    Add benchmark arguments common to both offline and online modes to the parser.
+    
+    These arguments configure endpoint access, model selection, dataset input, API authentication, load parameters, test duration, streaming mode, and output limitations. Refer to each argument's help text for detailed usage.
     """
     parser.add_argument(
         "--endpoint", "-e", type=str, required=True, help="Endpoint URL"

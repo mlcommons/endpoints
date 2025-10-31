@@ -360,13 +360,10 @@ class Report:
 
     @functools.cached_property
     def qps(self) -> float | None:
-        """Calculates the queries (or samples) per second (QPS) based on actual throughput.
-
-        This is the actual throughput: total completed samples divided by test duration.
-        If duration is 0, which shouldn't happen in practice, returns None.
-
-        Returns:
-            The QPS or None if duration is 0.
+        """
+        Calculate the actual queries per second (QPS) based on completed samples and test duration.
+        
+        Returns None if the test duration is zero.
         """
         if not self.duration_ns:
             return None
@@ -461,11 +458,14 @@ class Report:
         fn: Callable[[str], None] = print,
         show_e2e_sample_latency: bool = False,
     ) -> None:
-        """Displays the report in a human-readable format.
-
-        Args:
-            fn: The function to call to print a string, such as logging.info, file.write, etc. (Default: `print`)
-            show_e2e_sample_latency: Whether to show the end-to-end sample latency. (Default: False)
+        """
+        Prints a human-readable summary of the report metrics.
+        
+        Displays counts of issued and completed samples, test duration, queries per second (QPS), and detailed latency breakdowns. Optionally includes the end-to-end sample latency.
+        
+        Parameters:
+            fn (Callable[[str], None]): Function used to output each line of the summary, such as `print` or a logger function.
+            show_e2e_sample_latency (bool): If True, includes total end-to-end sample latency in the output.
         """
 
         fn("----------------- Summary -----------------")
@@ -695,27 +695,22 @@ class MetricsReporter:
         condense_table: bool = True,
         reporting_mode: TPOTReportingMode = TPOTReportingMode.REQUEST_WEIGHTED,
     ) -> RollupQueryTable | None:
-        """Derives the TPOT metric from the text outputs, ttft, and sample latencies.
-
-        Roughly, if a sample UUID `X` has a TTFT of `a`, a total latency of `b`, and an output sequence `S`,
-        then `X` will contribute `len(tokenize(S)) - 1` entries in the table, each with the value:
-             `(b - a) / len(tokenize(S) - 1)`
-        If the sample was completed in non-streaming mode however, then `a` is assumed to be 0, and `X` will
-        instead contribute `len(tokenize(S))` entries, each with the value: `b / len(tokenize(S))`
-
-        TPOT tracks the time it takes for each token after the first to be generated (in streaming mode). Since
-        the client does not have direct visibility into the endpoint / server-under-test, we have to estimate it,
-        assuming that in an ideal scenario, each token outputed in the output text took the same amount of
-        time.
-
-        Args:
-            tokenizer: A Tokenizer object from HuggingFace, used to calculate the number of tokens in a sequence
-            ttft_rollup: Precomputed TTFT RollupQueryTable. If not provided, will be derived via self.derive_TTFT()
-            sample_latency_rollup: Precomputed sample latency RollupQueryTable. If not provided, will be derived via self.derive_sample_latency()
-            condense_table: Whether to condense the table by not storing individual token times, but rather just keeping the average time per token
-                            and number of tokens per sample UUID. This is only supported if reporting_mode is TOKEN_WEIGHTED.
-                            If reporting_mode is REQUEST_WEIGHTED, each sample only contributes one entry to the table. (Default: True)
-            reporting_mode: TPOT reporting mode (REQUEST_WEIGHTED or TOKEN_WEIGHTED). (Default: REQUEST_WEIGHTED)
+        """
+        Calculate the Time Per Output Token (TPOT) metric using output sequences, Time To First Token (TTFT), and sample latencies.
+        
+        This metric estimates the average time taken to generate each token after the first in streaming scenarios, or the average time per token in non-streaming scenarios. For each sample UUID with TTFT `a`, latency `b`, and output token sequence `S`, the value per token is computed as `(b - a) / (len(tokenize(S)) - 1)` in streaming mode, or `b / len(tokenize(S))` in non-streaming mode.
+        
+        Depending on the reporting mode and condensation setting, the resulting table either reports individual token times weighted by token count, or a single averaged entry per request.
+        
+        Parameters:
+            tokenizer: Tokenizer to determine token counts from output sequences.
+            ttft_rollup: Optional precomputed TTFT metrics; derived if not provided.
+            sample_latency_rollup: Optional precomputed sample latencies; derived if not provided.
+            condense_table: If True and reporting mode is TOKEN_WEIGHTED, stores average TPOT per sample with repetition counts instead of individual token entries.
+            reporting_mode: Determines how TPOT entries are weighted—per request or per token.
+        
+        Returns:
+            A RollupQueryTable containing the TPOT metrics, or None if outputs are unavailable or TTFT data is missing.
         """
         if not self.outputs_path.exists():
             return None
@@ -791,6 +786,9 @@ class MetricsReporter:
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
+        """
+        Automatically closes the database connection and cursor when exiting a context.
+        """
         self.close()
 
     def create_report(
@@ -798,14 +796,17 @@ class MetricsReporter:
         tokenizer: Tokenizer | None = None,
         tpot_reporting_mode: TPOTReportingMode = TPOTReportingMode.REQUEST_WEIGHTED,
     ) -> Report:
-        """Creates a Report object from the metrics.
-
-        Args:
-            tokenizer: A Tokenizer object from HuggingFace. If provided, output sequence lengths will be calculated.
-            tpot_reporting_mode: TPOT reporting mode (REQUEST_WEIGHTED or TOKEN_WEIGHTED). (Default: REQUEST_WEIGHTED)
-
+        """
+        Generate a comprehensive report summarizing key metrics of sample processing.
+        
+        This method derives metrics such as Time To First Token (TTFT), sample latency, output sequence lengths, and Time Per Output Token (TPOT) according to the specified reporting mode. If a tokenizer is provided, output sequence lengths are computed, and TPOT is calculated only if TTFT data is available. The resulting metrics are aggregated into a Report object.
+        
+        Parameters:
+            tokenizer: Optional tokenizer to calculate output sequence lengths from output texts.
+            tpot_reporting_mode: Mode for TPOT metric aggregation, either request-weighted or token-weighted.
+        
         Returns:
-            Report: A Report object containing the metrics.
+            A Report instance containing summarized metrics including counts, durations, latencies, and optionally TPOT and output sequence length statistics.
         """
         sample_statuses = self.get_sample_statuses()
         ttft_rollup = self.derive_TTFT()

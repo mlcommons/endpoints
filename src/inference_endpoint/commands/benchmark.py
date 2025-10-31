@@ -231,17 +231,18 @@ async def run_benchmark_command(args: argparse.Namespace) -> None:
 def _build_config_from_cli(
     args: argparse.Namespace, benchmark_mode: str
 ) -> BenchmarkConfig:
-    """Build BenchmarkConfig from CLI arguments (CLI mode only).
-
-    Args:
-        args: Parsed CLI arguments
-        benchmark_mode: "online" or "offline"
-
+    """
+    Constructs a BenchmarkConfig object using parsed CLI arguments for offline or online benchmark execution.
+    
+    Parameters:
+        args (argparse.Namespace): Parsed CLI arguments containing dataset, endpoint, model, and execution settings.
+        benchmark_mode (str): Benchmark mode, either "online" or "offline", to determine defaults.
+    
     Returns:
-        BenchmarkConfig built from CLI params
-
+        BenchmarkConfig: Benchmark configuration populated from CLI input.
+    
     Raises:
-        InputValidationError: If required params missing
+        InputValidationError: If mandatory CLI parameters are missing.
     """
     # Determine load pattern (CLI override or mode default)
     load_pattern_arg = getattr(args, "load_pattern", None)
@@ -385,44 +386,18 @@ def _run_benchmark(
     test_mode: TestMode,
     benchmark_mode: TestType | None,
 ) -> None:
-    """Execute the actual benchmark with full lifecycle management.
-
-    This function orchestrates the complete benchmark execution:
-    1. Load tokenizer for the target model
-    2. Load and validate dataset using DataLoaderFactory
-    3. Setup runtime settings and scheduler
-    4. Create HTTP endpoint client with multiprocessing workers
-    5. Run benchmark session with signal handling
-    6. Collect and report results
-    7. Clean up resources (always, even on error)
-
-    Architecture notes:
-    - This is a SYNCHRONOUS function (not async) because HTTPEndpointClient
-      manages its own event loop in a separate thread
-    - Uses blocking operations: http_client.start(), sess.wait_for_test_end()
-    - Signal handling: SIGINT (Ctrl+C) gracefully stops benchmark
-    - Cleanup: Always executes via finally block
-
-    Streaming behavior:
-    - Enabled automatically for online mode (for TTFT metrics)
-    - Disabled for offline mode (max throughput focus)
-
-    Args:
-        args: Command arguments containing output paths, verbosity, etc.
-        config: Validated BenchmarkConfig (immutable Pydantic model).
-               Contains all benchmark parameters from CLI or YAML.
-        collect_responses: Whether to store full response text.
-                          True for accuracy modes (TestMode.ACC/BOTH).
-        test_mode: What to collect - PERF (metrics only), ACC (responses),
-                  or BOTH (metrics + responses).
-        benchmark_mode: Execution mode - OFFLINE (max throughput) or
-                       ONLINE (sustained QPS). Affects streaming and scheduling.
-
+    """
+    Runs a full synchronous benchmark session for an inference endpoint, managing tokenizer, dataset loading, runtime setup, execution, result collection, and cleanup.
+    
+    Parameters:
+    	test_mode (TestMode): Specifies which results to collect—performance metrics, accuracy details, or both.
+    	benchmark_mode (TestType | None): Indicates the benchmark execution mode which influences streaming and scheduling.
+    
     Raises:
-        InputValidationError: If model/dataset cannot be loaded or validated.
-        SetupError: If connection to endpoint fails or resources unavailable.
-        ExecutionError: If benchmark execution fails after successful setup.
-        KeyboardInterrupt: If user interrupts with Ctrl+C (re-raised for CLI handler).
+    	InputValidationError: If required model or dataset information is missing or cannot be loaded.
+    	SetupError: If endpoint client connection fails or required resources are unavailable.
+    	ExecutionError: If benchmark fails during execution after setup.
+    	KeyboardInterrupt: If user interrupts the benchmark (for clean CLI termination).
     """
 
     # Load tokenizer if model name is provided

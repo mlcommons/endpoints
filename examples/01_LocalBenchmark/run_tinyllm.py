@@ -44,6 +44,9 @@ logging.set_verbosity_error()  # Suppress HuggingFace warnings
 # Note: This is a minimal example - for production use, consider larger models
 class TinyLLM:
     def __init__(self):
+        """
+        Initialize the TinyLLM instance by loading the TinyLlama 1.1B Chat model and tokenizer from the HuggingFace repository.
+        """
         self.model = AutoModelForCausalLM.from_pretrained(
             "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
         )
@@ -54,6 +57,18 @@ class TinyLLM:
     def generate_text_streamed(
         self, prompt, max_length=512, temperature=1, top_k=50, top_p=0.95
     ):
+        """
+        Generate text from the given prompt using streaming output.
+        
+        Yields tokens incrementally as they are generated, allowing real-time consumption of the generated text.
+        
+        Parameters:
+            prompt (str): The input text prompt to condition generation on.
+            max_length (int, optional): Maximum length of the generated sequence including prompt tokens. Defaults to 512.
+            temperature (float, optional): Sampling temperature controlling randomness. Defaults to 1.
+            top_k (int, optional): Number of highest probability vocabulary tokens to keep for top-k filtering. Defaults to 50.
+            top_p (float, optional): Cumulative probability for nucleus sampling. Defaults to 0.95.
+        """
         inputs = self.tokenizer.encode(prompt, return_tensors="pt")
 
         streamer = TextIteratorStreamer(self.tokenizer)
@@ -98,6 +113,9 @@ class TinyDataLoader(DataLoader):
     """
 
     def __init__(self):
+        """
+        Initialize the TinyDataLoader with a predefined list of sample prompts for testing purposes.
+        """
         super().__init__(None)
 
         # Sample prompts for testing - replace with your dataset
@@ -126,6 +144,12 @@ class ProgressBarHook:
     """
 
     def __init__(self, pbar: tqdm | None = None):
+        """
+        Initialize the ProgressBarHook with an optional tqdm progress bar instance.
+        
+        Parameters:
+            pbar (tqdm | None): An optional tqdm progress bar to be updated on events.
+        """
         self.pbar = pbar
 
     def __call__(self, _):
@@ -147,6 +171,15 @@ class SerialSampleIssuer(SampleIssuer):
     """
 
     def __init__(self, compute_func=None, streaming: bool = True):
+        """
+        Initialize the SerialSampleIssuer with a compute function and streaming mode.
+        
+        If no compute function is provided, the identity function is used by default, 
+        which assumes streaming mode with input as an iterable of strings.
+        
+        Parameters:
+            streaming (bool): Whether to operate in streaming mode, affecting how results are processed.
+        """
         if compute_func is None:
             self.compute_func = lambda x: x  # If streaming, assumes x is Iterable[str]
         else:
