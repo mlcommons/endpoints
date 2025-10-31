@@ -106,16 +106,16 @@ def test_concurrency_scheduler(concurrency_runtime_settings):
     # Define completion delays for each batch of 10 samples (in seconds)
     # Pattern: Fast -> Slow -> Fast -> Very Slow -> Fast -> Medium -> Very Fast -> Slow -> Fast -> Medium
     completion_delays = [
-        0.005,  # Batch 0-9:   5ms (fast)
-        0.020,  # Batch 10-19: 20ms (slow)
-        0.005,  # Batch 20-29: 5ms (fast)
-        0.050,  # Batch 30-39: 50ms (very slow)
-        0.005,  # Batch 40-49: 5ms (fast)
-        0.010,  # Batch 50-59: 10ms (medium)
-        0.002,  # Batch 60-69: 2ms (very fast)
-        0.020,  # Batch 70-79: 20ms (slow)
-        0.005,  # Batch 80-89: 5ms (fast)
-        0.010,  # Batch 90-99: 10ms (medium)
+        0.005,  # Batch 0-9:   5ms
+        0.020,  # Batch 10-19: 20ms
+        0.005,  # Batch 20-29: 5ms
+        0.050,  # Batch 30-39: 50ms
+        0.005,  # Batch 40-49: 5ms
+        0.010,  # Batch 50-59: 10ms
+        0.002,  # Batch 60-69: 2ms
+        0.020,  # Batch 70-79: 20ms
+        0.005,  # Batch 80-89: 5ms
+        0.010,  # Batch 90-99: 10ms
     ]
 
     def simulate_completions():
