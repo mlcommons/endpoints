@@ -1,216 +1,92 @@
 # GitHub Setup Guide
 
-This guide walks you through setting up all the GitHub features for the MLPerf Inference Endpoint project.
+> **Note**: This is a living document that will be refined as the project evolves.
 
-## 🚀 What We've Set Up
+Quick reference for setting up GitHub workflows and branch protection for the MLPerf Inference Endpoint project.
 
-### 1. ✅ Pre-commit Hooks in CI/CD
+## 📋 Available GitHub Workflows
 
-- **File**: `.github/workflows/pre-commit.yml`
-- **What it does**: Runs pre-commit hooks on every PR and push
-- **Status**: Ready to use
+### Pre-commit Hooks (`.github/workflows/pre-commit.yml`)
 
-### 2. ✅ Default Reviewers
+Runs pre-commit hooks (ruff, formatters) on every PR and push.
 
-- **File**: `.github/workflows/auto-review.yml`
-- **What it does**: Automatically requests reviews from you (zhihanj) for all PRs
-- **Status**: Ready to use
+### Auto-Reviewer (`.github/workflows/auto-review.yml`)
 
-### 3. ✅ Branch Name Validator
+Automatically requests code reviews on new PRs.
 
-- **File**: `.github/workflows/branch-validator.yml`
-- **What it does**: Enforces branch naming conventions
-- **Status**: Ready to use
+### Branch Validator (`.github/workflows/branch-validator.yml`)
 
-### 4. ✅ PR Template
+Enforces branch naming: `feature/*`, `bugfix/*`, `hotfix/*`, `docs/*`, `test/*`, `refactor/*`, `chore/*`, `release/*`.
 
-- **File**: `.github/pull_request_template.md`
-- **What it does**: Provides a comprehensive template for all PRs
-- **Status**: Ready to use
+### Test Workflow (`.github/workflows/test.yml`)
 
-### 5. ✅ Test Workflow
+Runs pytest test suite and generates coverage reports.
 
-- **File**: `.github/workflows/test.yml`
-- **What it does**: Runs tests and generates coverage reports
-- **Status**: Ready to use
+### PR Template (`.github/pull_request_template.md`)
 
-## 🔧 Manual GitHub Configuration Required
+Standardized PR description template.
 
-### Step 1: Enable Branch Protection Rules
+## ⚙️ Manual Configuration (GitHub Web UI)
 
-1. **Go to your repository**: `https://github.com/nvzhihanj/Inference-endpoint`
-2. **Click Settings** → **Branches**
-3. **Click "Add rule"** for the `main` branch
-4. **Configure the following**:
+### Branch Protection for `main`
 
-```
-Branch name pattern: main
+**Settings** → **Branches** → **Add rule**:
 
-✓ Require a pull request before merging
-  ✓ Require approvals: 1
-  ✓ Dismiss stale PR approvals when new commits are pushed
+- Branch pattern: `main`
+- ✓ Require PR before merging (1 approval)
+- ✓ Require status checks: pre-commit, test, branch-validator
+- ✓ Require conversation resolution
+- ✓ Auto-delete head branches
 
-✓ Require status checks to pass before merging
-  ✓ Require branches to be up to date before merging
-  ✓ Status checks: pre-commit, test, branch-validator
+[Full documentation](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches)
 
-✓ Require conversation resolution before merging
-✓ Require signed commits (optional but recommended)
-✓ Require linear history (optional)
-✓ Restrict pushes that create files that are executable
-```
+### Repository Settings
 
-5. **Click "Create"**
+**Settings** → **General** → **Pull Requests**:
 
-### Step 2: Configure Repository Settings
+- Enable squash merging, merge commits, and rebase merging
+- Enable auto-delete of head branches
 
-1. **Go to Settings** → **General**
-2. **Scroll down to "Pull Requests"**
-3. **Enable**:
-   - ✅ "Allow squash merging"
-   - ✅ "Allow merge commits"
-   - ✅ "Allow rebase merging"
-   - ✅ "Automatically delete head branches"
+### GitHub Actions Permissions
 
-### Step 3: Set Up Issue Templates (Optional)
+**Settings** → **Actions** → **General**:
 
-1. **Go to Settings** → **General**
-2. **Scroll down to "Issues"**
-3. **Enable**:
-   - ✅ "Issues"
-   - ✅ "Allow users to create issues"
+- Allow all actions and reusable workflows
+- Enable read and write permissions (for auto-reviewer)
 
-## 🧪 Testing the Setup
-
-### Test 1: Create a Test Branch
+## 🧪 Quick Test
 
 ```bash
-git checkout -b feature/test-github-setup
-git push origin feature/test-github-setup
+# Create test branch
+git checkout -b feature/test-setup
+git push origin feature/test-setup
+
+# Create PR and verify:
+# - PR template loads
+# - Workflows trigger
+# - Branch protection enforced
 ```
 
-### Test 2: Create a Test PR
+## 🔧 Customization
 
-1. Go to GitHub and create a PR from `feature/test-github-setup` to `main`
-2. Verify:
-   - ✅ PR template appears
-   - ✅ Branch name validation passes
-   - ✅ Pre-commit hooks run
-   - ✅ Tests run
-   - ✅ You're automatically requested as reviewer
-
-### Test 3: Test Branch Protection
-
-1. Try to merge the test PR
-2. Verify it's blocked until:
-   - ✅ All status checks pass
-   - ✅ You approve the review
-   - ✅ Branch is up to date
-
-## 🔍 How Each Feature Works
-
-### Pre-commit Hooks in CI/CD
-
-- **Trigger**: Every PR and push to main
-- **What happens**: Runs all pre-commit hooks (ruff, ruff-format, etc.)
-- **Result**: PR is blocked if any hooks fail
-
-### Default Reviewers
-
-- **Trigger**: PR opened or marked ready for review
-- **What happens**: Automatically requests review from you
-- **Customizable**: Easy to add more reviewers later
-
-### Branch Name Validator
-
-- **Trigger**: PR opened/updated
-- **What happens**: Checks branch name against patterns
-- **Valid patterns**:
-  - `feature/component-name`
-  - `bugfix/issue-description`
-  - `hotfix/critical-fix`
-  - `docs/documentation-update`
-  - `test/testing-improvements`
-  - `refactor/code-improvement`
-  - `chore/maintenance-tasks`
-  - `release/version-number`
-
-### PR Template
-
-- **Trigger**: Every new PR
-- **What happens**: Pre-fills PR description with comprehensive template
-- **Includes**: Type of change, testing checklist, review checklist
-
-## 🚨 Troubleshooting
-
-### Issue: Workflows not running
-
-- **Check**: Repository has GitHub Actions enabled
-- **Go to**: Settings → Actions → General
-- **Enable**: "Allow all actions and reusable workflows"
-
-### Issue: Branch protection not working
-
-- **Check**: Branch protection rules are configured correctly
-- **Verify**: Status checks are required and passing
-- **Check**: Repository permissions allow branch protection
-
-### Issue: Auto-reviewer not working
-
-- **Check**: GitHub Actions have permission to request reviews
-- **Go to**: Settings → Actions → General
-- **Enable**: "Read and write permissions"
-
-## 🔄 Updating Configuration
-
-### Adding New Reviewers
+### Add Reviewers
 
 Edit `.github/workflows/auto-review.yml`:
 
 ```yaml
-const defaultReviewers = ['nvzhihanj', 'new-reviewer-username'];
+const defaultReviewers = ['username1', 'username2'];
 ```
 
-### Adding New Branch Patterns
+### Modify Branch Patterns
 
-Edit `.github/workflows/branch-validator.yml`:
+Edit `.github/workflows/branch-validator.yml` to add/remove allowed patterns.
 
-```yaml
-const validPatterns = [
-/^feature\/.+/,
-/^new-pattern\/.+/,
-// ... existing patterns
-];
-```
+### Update PR Template
 
-### Modifying PR Template
+Edit `.github/pull_request_template.md` for project-specific requirements.
 
-Edit `.github/pull_request_template.md` to add/remove sections.
+## 📚 References
 
-## 📊 Monitoring
-
-### Check Workflow Status
-
-- **Go to**: Actions tab in your repository
-- **Monitor**: Success/failure rates of workflows
-- **Investigate**: Failed workflows for issues
-
-### Check Branch Protection
-
-- **Go to**: Settings → Branches
-- **Verify**: Protection rules are active
-- **Monitor**: Any bypass attempts
-
-## 🎯 Next Steps
-
-1. **Commit and push** these new files
-2. **Configure branch protection** manually in GitHub
-3. **Test the setup** with a sample PR
-4. **Share with your team** how to use the new features
-5. **Monitor and adjust** as needed
-
-## 📚 Additional Resources
-
-- [GitHub Actions Documentation](https://docs.github.com/en/actions)
-- [Branch Protection Rules](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/defining-the-mergeability-of-pull-requests/about-protected-branches)
-- [Pull Request Templates](https://docs.github.com/en/communities/using-templates-to-encourage-useful-issues-and-pull-requests/creating-a-pull-request-template-for-your-repository)
+- [GitHub Actions](https://docs.github.com/en/actions)
+- [Branch Protection](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches)
+- [PR Templates](https://docs.github.com/en/communities/using-templates-to-encourage-useful-issues-and-pull-requests)

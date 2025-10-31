@@ -24,6 +24,7 @@ import os
 import sqlite3
 from collections import defaultdict
 from collections.abc import Callable, Iterable
+from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -37,16 +38,15 @@ if TYPE_CHECKING:
     from transformers import Tokenizer
 
 
-def get_tpot_reporting_mode() -> str:
-    # TODO: Refactor into an option
-    tpot_reporting_mode = os.environ.get(
-        "TPOT_REPORTING_MODE", "request_weighted"
-    ).lower()
-    if tpot_reporting_mode not in ["request_weighted", "token_weighted"]:
-        raise ValueError(
-            f"Invalid TPOT reporting mode: {tpot_reporting_mode}, must be one of 'request_weighted' or 'token_weighted'"
-        )
-    return tpot_reporting_mode
+class TPOTReportingMode(str, Enum):
+    """TPOT (Time Per Output Token) reporting mode.
+
+    - REQUEST_WEIGHTED: Each request contributes one entry to TPOT calculation (default)
+    - TOKEN_WEIGHTED: Each token contributes to TPOT calculation (weighted by token count)
+    """
+
+    REQUEST_WEIGHTED = "request_weighted"
+    TOKEN_WEIGHTED = "token_weighted"
 
 
 class SampleUUIDNotFoundError(Exception):
@@ -79,8 +79,7 @@ class RollupQueryTable:
     rows: list[tuple[Any, ...]]
     """The rows of the table, each a tuple of values."""
 
-    # TODO: verify the datatype hint is correct
-    repeats: list[float] | None = None
+    repeats: list[int] | None = None
     """If provided, this means the rows are condensed by consecutive duplicates. `repeats`
     represents the number of times each row should be repeated."""
 
@@ -357,6 +356,7 @@ class Report:
     tpot: dict[str, float]
     latency: dict[str, float]
     output_sequence_lengths: dict[str, int]
+    tpot_reporting_mode: TPOTReportingMode = TPOTReportingMode.REQUEST_WEIGHTED
 
     @functools.cached_property
     def qps(self) -> float | None:
@@ -483,10 +483,10 @@ class Report:
                 "WARNING: Non-streaming-based Issuer used. TTFT metrics cannot be calculated"
             )
 
-        tpot_reporting_mode = get_tpot_reporting_mode()
+        mode_label = self.tpot_reporting_mode.value.replace("_", " ").title()
         for section_name, metric_dict, unit, scale_factor in [
             ("TTFT", self.ttft, "ms", 1e-6),
-            (f"TPOT ({tpot_reporting_mode.capitalize()})", self.tpot, "ms", 1e-6),
+            (f"TPOT ({mode_label})", self.tpot, "ms", 1e-6),
             ("Latency", self.latency, "ms", 1e-6),
             ("Output sequence lengths", self.output_sequence_lengths, "tokens", 1.0),
         ]:
@@ -694,6 +694,7 @@ class MetricsReporter:
         ttft_rollup: RollupQueryTable | None = None,
         sample_latency_rollup: RollupQueryTable | None = None,
         condense_table: bool = True,
+        reporting_mode: TPOTReportingMode = TPOTReportingMode.REQUEST_WEIGHTED,
     ) -> RollupQueryTable | None:
         """Derives the TPOT metric from the text outputs, ttft, and sample latencies.
 
@@ -713,20 +714,25 @@ class MetricsReporter:
             ttft_rollup: Precomputed TTFT RollupQueryTable. If not provided, will be derived via self.derive_TTFT()
             sample_latency_rollup: Precomputed sample latency RollupQueryTable. If not provided, will be derived via self.derive_sample_latency()
             condense_table: Whether to condense the table by not storing individual token times, but rather just keeping the average time per token
-                            and number of tokens per sample UUID. This is only supported if the environment variable `TPOT_REPORTING_MODE` is set to
-                            "token_weighted". If it is set to "request_weighted", each sample only contributes one entry to the table. (Default: True)
+                            and number of tokens per sample UUID. This is only supported if reporting_mode is TOKEN_WEIGHTED.
+                            If reporting_mode is REQUEST_WEIGHTED, each sample only contributes one entry to the table. (Default: True)
+            reporting_mode: TPOT reporting mode (REQUEST_WEIGHTED or TOKEN_WEIGHTED). (Default: REQUEST_WEIGHTED)
         """
         if not self.outputs_path.exists():
             return None
 
         if ttft_rollup is None:
             ttft_rollup = self.derive_TTFT()
+
+        # If no TTFT data available, TPOT cannot be calculated accurately for streaming mode
+        if len(ttft_rollup) == 0:
+            return None
+
         if sample_latency_rollup is None:
             sample_latency_rollup = self.derive_sample_latency()
 
-        tpot_reporting_mode = get_tpot_reporting_mode()
         rows = []
-        if condense_table and tpot_reporting_mode == "token_weighted":
+        if condense_table and reporting_mode == TPOTReportingMode.TOKEN_WEIGHTED:
             repeats = []
         else:
             repeats = None
@@ -758,13 +764,13 @@ class MetricsReporter:
 
                 if condense_table:
                     rows.append((sample_uuid, avg_tpot))
-                    if tpot_reporting_mode == "token_weighted":
+                    if reporting_mode == TPOTReportingMode.TOKEN_WEIGHTED:
                         repeats.append(n_non_first_tokens)
                 else:
                     # Entries are tuples, and are such immutable. We can use list multiplication for performance
                     repeat_fac = (
                         1
-                        if tpot_reporting_mode == "request_weighted"
+                        if reporting_mode == TPOTReportingMode.REQUEST_WEIGHTED
                         else n_non_first_tokens
                     )
                     rows.extend([(sample_uuid, avg_tpot)] * repeat_fac)
@@ -788,11 +794,16 @@ class MetricsReporter:
     def __exit__(self, exc_type, exc_value, traceback):
         self.close()
 
-    def create_report(self, tokenizer: Tokenizer | None = None) -> Report:
+    def create_report(
+        self,
+        tokenizer: Tokenizer | None = None,
+        tpot_reporting_mode: TPOTReportingMode = TPOTReportingMode.REQUEST_WEIGHTED,
+    ) -> Report:
         """Creates a Report object from the metrics.
 
         Args:
             tokenizer: A Tokenizer object from HuggingFace. If provided, output sequence lengths will be calculated.
+            tpot_reporting_mode: TPOT reporting mode (REQUEST_WEIGHTED or TOKEN_WEIGHTED). (Default: REQUEST_WEIGHTED)
 
         Returns:
             Report: A Report object containing the metrics.
@@ -807,13 +818,16 @@ class MetricsReporter:
             if osl_rollup is not None:
                 output_sequence_lengths = osl_rollup.summarize()
 
-            tpot_rollup = self.derive_TPOT(
-                tokenizer,
-                ttft_rollup=ttft_rollup,
-                sample_latency_rollup=sample_latency_rollup,
-            )
-            if tpot_rollup is not None:
-                tpot_summary = tpot_rollup.summarize()
+            # Only calculate TPOT if TTFT data is available (streaming mode)
+            if len(ttft_rollup) > 0:
+                tpot_rollup = self.derive_TPOT(
+                    tokenizer,
+                    ttft_rollup=ttft_rollup,
+                    sample_latency_rollup=sample_latency_rollup,
+                    reporting_mode=tpot_reporting_mode,
+                )
+                if tpot_rollup is not None:
+                    tpot_summary = tpot_rollup.summarize()
 
         if len(ttft_rollup) == 0:
             ttft_summary = None
@@ -827,4 +841,5 @@ class MetricsReporter:
             tpot=tpot_summary,
             latency=sample_latency_rollup.summarize(),
             output_sequence_lengths=output_sequence_lengths,
+            tpot_reporting_mode=tpot_reporting_mode,
         )

@@ -6,6 +6,8 @@ A high-performance benchmarking tool for LLM endpoints.
 
 ### Installation
 
+**Requirements**: Python 3.12+ (Python 3.12 is recommended for optimal performance)
+
 ```bash
 # Clone the repository
 # Note: This repo will be migrated to https://github.com/mlcommons/endpoints
@@ -13,7 +15,6 @@ git clone https://github.com/mlcommons/endpoints.git
 cd endpoints
 
 # Create virtual environment
-# 3.12 is the preferred Python version for optimal performance.
 python3.12 -m venv venv
 source venv/bin/activate
 
@@ -108,6 +109,15 @@ The system follows a modular, event-driven architecture:
 - **Metrics Collector**: Performance measurement and analysis
 - **Configuration Manager**: System configuration (TBD)
 
+## 🚧 Pending Features
+
+The following features are planned for future releases:
+
+- [ ] **Accuracy Evaluation** - Comprehensive accuracy metrics and validation
+- [ ] **Performance Tuning** - Advanced performance optimization features
+- [ ] **Submission Ruleset Integration** - Full MLPerf submission workflow support
+- [ ] **Documentation Generation and Hosting** - Sphinx-based API documentation with GitHub Pages
+
 ## 🤝 Contributing
 
 We welcome contributions! Please see our [Development Guide](docs/DEVELOPMENT.md) for details on:
@@ -119,13 +129,23 @@ We welcome contributions! Please see our [Development Guide](docs/DEVELOPMENT.md
 
 ## 📄 License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
 
 ## 🔗 Links
 
 - [MLCommons](https://mlcommons.org/) - Machine Learning Performance Standards
 - [Project Repository](https://github.com/mlcommons/endpoints)
 - [MLPerf Inference](https://mlcommons.org/benchmarks/inference/)
+
+## 👥 Contributors
+
+Credits to core contributors of projects
+
+- MLCommon Committee
+- NVIDIA: Zhihan Jiang, Rashid Kaleem, Viraat Chandra, Alice Cheng
+- ...
+
+See [ATTRIBUTION](ATTRIBUTION) for detailed attribution information.
 
 ## 📞 Support
 

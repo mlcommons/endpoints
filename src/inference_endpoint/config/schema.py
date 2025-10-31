@@ -77,6 +77,19 @@ class TestMode(str, Enum):
     BOTH = "both"
 
 
+class StreamingMode(str, Enum):
+    """Streaming mode for response handling.
+
+    - AUTO: Automatically enable for online mode, disable for offline mode
+    - ON: Force streaming enabled (for TTFT metrics)
+    - OFF: Force streaming disabled
+    """
+
+    AUTO = "auto"
+    ON = "on"
+    OFF = "off"
+
+
 class TestType(str, Enum):
     """Test type for both config classification and execution mode.
 
@@ -127,6 +140,7 @@ class ModelParams(BaseModel):
     top_p: float | None = None
     max_new_tokens: int = 1024
     osl_distribution: OSLDistribution | None = None
+    streaming: StreamingMode = StreamingMode.AUTO
 
 
 class SubmissionReference(BaseModel):

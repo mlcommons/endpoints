@@ -45,6 +45,7 @@ from inference_endpoint.config.schema import (
     OSLDistribution,
     RuntimeConfig,
     Settings,
+    StreamingMode,
     TestMode,
     TestType,
 )
@@ -296,6 +297,7 @@ def _build_config_from_cli(
             )
             if (args.min_output_tokens or args.max_output_tokens)
             else None,
+            streaming=StreamingMode(getattr(args, "streaming", "auto")),
         ),
         endpoint_config=EndpointConfig(endpoint=args.endpoint, api_key=args.api_key),
         metrics=Metrics(),
@@ -457,16 +459,16 @@ def _run_benchmark(
     dataset_format = _get_dataset_format(config, dataset_path)
     logger.info(f"Loading: {dataset_path.name} (format: {dataset_format})")
 
-    # Determine if streaming should be enabled based on --streaming flag (tristate: auto/on/off)
-    # TODO: This should a model-level parameter, to be refactored later.
-    streaming_arg = getattr(args, "streaming", "auto")
-    if streaming_arg == "on":
+    # Determine if streaming should be enabled based on config
+    streaming_mode = config.model_params.streaming
+
+    if streaming_mode == StreamingMode.ON:
         enable_streaming = True
         logger.info("Streaming: enabled (forced via --streaming=on)")
-    elif streaming_arg == "off":
+    elif streaming_mode == StreamingMode.OFF:
         enable_streaming = False
         logger.info("Streaming: disabled (forced via --streaming=off)")
-    else:  # auto
+    else:  # StreamingMode.AUTO
         enable_streaming = benchmark_mode == TestType.ONLINE
         if enable_streaming:
             logger.info("Streaming: enabled (auto, online mode)")

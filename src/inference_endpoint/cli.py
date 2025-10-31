@@ -215,7 +215,7 @@ def _add_shared_benchmark_args(parser):
         type=str,
         choices=["auto", "on", "off"],
         default="auto",
-        help="Enable streaming for TTFT metrics (default: auto - enabled for online, disabled for offline)",
+        help="Streaming mode: auto (default - enabled for online, disabled for offline), on (force enabled), off (force disabled)",
     )
     parser.add_argument(
         "--mode", choices=["perf", "acc", "both"], help="Test mode (default: perf)"
