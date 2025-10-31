@@ -81,7 +81,7 @@ class RuntimeSettings:
     rng_sample_index: random.Random
     """Random number generator for sample indexing"""
 
-    load_pattern: LoadPattern | None = None
+    load_pattern: LoadPattern | None
     """Load pattern configuration"""
 
     @classmethod

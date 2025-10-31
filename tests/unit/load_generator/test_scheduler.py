@@ -87,34 +87,46 @@ def test_max_throughput_scheduler(max_throughput_runtime_settings):
 
 
 def test_concurrency_scheduler(concurrency_runtime_settings):
-    """Test ConcurrencyScheduler with parallel query processing (concurrency=2, 10ms/query)."""
+    """Test ConcurrencyScheduler properly gates issuance by completions.
+
+    With concurrency=2:
+    - First 2 queries are issued immediately (slots available)
+    - Each subsequent issuance waits for a completion to free a slot
+    - Query i (i≥2) should only issue after query (i-2) completes
+    """
     scheduler = ConcurrencyScheduler(
         concurrency_runtime_settings, WithReplacementSampleOrder
     )
 
-    # Mimic real system with concurrency=2, 10ms processing time per query
-    def complete_queries():
-        for _ in range(5):  # 5 batches × 2 = 10 completions
-            time.sleep(0.01)  # 10ms between batches
-            scheduler._on_query_complete(None)
-            scheduler._on_query_complete(None)
-
-    threading.Thread(target=complete_queries, daemon=True).start()
-
-    # Track issue times
-    issue_times = []
+    issue_events = []
+    complete_events = []
     start_time = time.perf_counter()
 
-    for _, _ in scheduler:
-        issue_times.append(time.perf_counter())
+    def simulate_completions():
+        """Simulate 10ms processing time per query."""
+        for i in range(10):
+            time.sleep(0.01)
+            complete_events.append((i, time.perf_counter() - start_time))
+            scheduler._release_slot()
 
-    elapsed = time.perf_counter() - start_time
+    threading.Thread(target=simulate_completions, daemon=True).start()
 
-    # Verify all samples issued
-    assert len(issue_times) == 10
+    for query_idx, _ in enumerate(scheduler):
+        issue_events.append((query_idx, time.perf_counter() - start_time))
 
-    # Expected timeline with concurrency=2, parallel processing at 10ms/query: 40ms
-    assert 0.037 < elapsed < 0.043, f"Expected ~40ms, got {elapsed*1000:.1f}ms"
+    # First 2 queries should issue immediately
+    assert issue_events[0][1] < 0.001
+    assert issue_events[1][1] < 0.001
+
+    # With concurrency=2: first 2 issued immediately, then each completion enables 1 more
+    # Check that after initial 2, issuance is gated by completions
+    for i in range(2, 10):
+        issue_time = issue_events[i][1]
+        # This issue should happen after the (i-2)th completion
+        prev_complete_time = complete_events[i - 2][1]
+        assert (
+            issue_time >= prev_complete_time
+        ), f"Issue {i} at {issue_time:.4f}s happened before completion {i-2} at {prev_complete_time:.4f}s"
 
     SampleEventHandler.clear_hooks()
 

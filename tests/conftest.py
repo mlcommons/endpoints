@@ -497,6 +497,7 @@ def max_throughput_runtime_settings():
         min_sample_count=100,
         rng_sched=random.Random(42),
         rng_sample_index=random.Random(42),
+        load_pattern=LoadPattern(type=LoadPatternType.MAX_THROUGHPUT),
     )
 
 
@@ -529,7 +530,7 @@ def concurrency_runtime_settings():
         rng_sched=random.Random(42),
         rng_sample_index=random.Random(42),
         load_pattern=LoadPattern(
-            type=LoadPatternType.CONCURRENCY, qps=10.0, target_concurrency=2
+            type=LoadPatternType.CONCURRENCY, target_concurrency=2
         ),
     )
 

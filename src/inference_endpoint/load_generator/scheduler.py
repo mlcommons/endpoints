@@ -20,6 +20,7 @@ from collections.abc import Callable, Iterator
 
 from ..config.runtime_settings import RuntimeSettings
 from ..config.schema import LoadPatternType
+from .sample import SampleEvent, SampleEventHandler
 
 
 class SampleOrder(ABC):
@@ -380,31 +381,33 @@ class ConcurrencyScheduler(Scheduler, load_pattern=LoadPatternType.CONCURRENCY):
                 f"target_concurrency must be > 0 for CONCURRENCY load pattern, got {target_concurrency}"
             )
 
-        # Use Semaphore for efficient slot management
-        self._slots_semaphore = threading.Semaphore(target_concurrency)
+        # Use Condition for concurrency control with explicit counter
+        self._condition = threading.Condition()
+        self._inflight = 0
+        self._target_concurrency = target_concurrency
 
-        # Register completion hook
-        from .sample import SampleEvent, SampleEventHandler
-
-        SampleEventHandler.register_hook(SampleEvent.COMPLETE, self._on_query_complete)
+        # Register completion hook - free up slot when query completes
+        SampleEventHandler.register_hook(SampleEvent.COMPLETE, self._release_slot)
 
         # Unused (required by Scheduler interface)
         self.delay_fn = lambda: 0
 
-    def _on_query_complete(self, _):
-        """
-        Hook called when a query completes.
-        Releases a concurrency slot allowing next query to proceed.
-        """
-        self._slots_semaphore.release()
+    def _release_slot(self):
+        """Release a concurrency slot and notify waiting threads."""
+        with self._condition:
+            self._inflight -= 1
+            self._condition.notify()
 
     def __iter__(self):
         """
         Iterate over sample indices to issue.
         Yields sample indices until total_samples_to_issue is reached.
 
-        Acquires a concurrency slot before yielding each sample index.
+        Waits for available concurrency slot before yielding each sample index.
         """
         for s_idx in self.sample_order:
-            self._slots_semaphore.acquire()
+            with self._condition:
+                while self._inflight >= self._target_concurrency:
+                    self._condition.wait()
+                self._inflight += 1
             yield s_idx, 0
