@@ -26,6 +26,7 @@ from inference_endpoint.load_generator.scheduler import (
     WithoutReplacementSampleOrder,
     WithReplacementSampleOrder,
 )
+from scipy import stats
 
 
 def test_without_replacement_sample_order():
@@ -124,70 +125,76 @@ def test_poisson_scheduler_distribution(poisson_runtime_settings):
     For a Poisson process with rate λ (1000 QPS), inter-arrival times must follow
     exponential distribution with mean = 1/λ = 1ms.
 
-    Key properties tested:
-    1. Sample mean ≈ expected mean (1ms)
-    2. Coefficient of Variation (CV) ≈ 1.0 (exponential property: std = mean)
-    3. Kolmogorov-Smirnov test confirms exponential distribution
+    Three-tier validation:
+    1. Mean with 99.9% confidence interval
+    2. Coefficient of Variation (CV) ≈ 1.0 (exponential signature)
+    3. Kolmogorov-Smirnov test for distribution shape
     """
     scheduler = PoissonDistributionScheduler(
         poisson_runtime_settings, WithReplacementSampleOrder
     )
 
+    # Test configuration
+    TARGET_QPS = 1000
+    expected_mean_s = 1.0 / TARGET_QPS
+    MIN_SAMPLES = 100  # Minimum for reliable KS test at α=0.001
+
     # Collect delays from scheduler (in seconds) for statistical analysis
     # No sleep overhead - just test the generated distribution
     delays_s = []
-    sample_count = 5000  # Large sample for robust statistical testing
-
-    for i, (_, delay_ns) in enumerate(scheduler):
-        if i >= sample_count:
-            break
+    for _, delay_ns in scheduler:
         delays_s.append(delay_ns / 1e9)  # Convert ns to seconds
 
-    # Expected mean for 1000 QPS = 1/1000 = 0.001s = 1ms
-    expected_mean_s = 1.0 / 1000.0
+    # Validate sufficient sample size
+    n = len(delays_s)
+    assert n >= MIN_SAMPLES, (
+        f"Insufficient samples: {n} < {MIN_SAMPLES}. "
+        f"Increase n_samples_to_issue in fixture."
+    )
 
-    # Calculate sample statistics
-    sample_mean = sum(delays_s) / len(delays_s)
-    sample_variance = sum((x - sample_mean) ** 2 for x in delays_s) / len(delays_s)
-    sample_std = sample_variance**0.5
+    # Validate all delays are positive (exponential property)
+    assert all(
+        d > 0 for d in delays_s
+    ), "All delays must be positive for exponential distribution"
 
-    # Coefficient of Variation = std/mean (should be ~1.0 for exponential)
+    # Calculate sample statistics using Bessel's correction for unbiased variance
+    sample_mean = sum(delays_s) / n
+    sample_variance = sum((x - sample_mean) ** 2 for x in delays_s) / (
+        n - 1
+    )  # Bessel's correction
+    sample_std = math.sqrt(sample_variance)
     cv = sample_std / sample_mean
 
-    # Test 1: Mean should match expected (±10% tolerance for large sample)
-    assert (
-        abs(sample_mean - expected_mean_s) / expected_mean_s < 0.10
-    ), f"Mean {sample_mean*1000:.3f}ms deviates >10% from expected {expected_mean_s*1000:.3f}ms"
+    # Test 1: Mean with statistical confidence interval (99.9% CI)
+    # For exponential: std(X̄) = σ/√n = μ/√n
+    z_critical = 3.29  # 99.9% two-tailed
+    margin_of_error = z_critical * (sample_std / math.sqrt(n))
+    assert abs(sample_mean - expected_mean_s) < margin_of_error, (
+        f"Mean {sample_mean*1000:.3f}ms outside 99.9% CI: "
+        f"[{(expected_mean_s - margin_of_error)*1000:.3f}, "
+        f"{(expected_mean_s + margin_of_error)*1000:.3f}] ms"
+    )
 
     # Test 2: CV should be close to 1.0 (exponential property: std = mean)
-    # Allow 10% tolerance due to finite sampling
+    # Use adaptive tolerance based on sample size, maximum (10%, 1 std. error)
+    cv_tolerance = max(0.10, 1.0 / math.sqrt(n))
     assert (
-        0.90 < cv < 1.10
-    ), f"Coefficient of Variation {cv:.3f} not close to 1.0 (exponential signature)"
+        abs(cv - 1.0) < cv_tolerance
+    ), f"CV {cv:.3f} deviates from 1.0 by more than {cv_tolerance:.3f}"
 
     # Test 3: Kolmogorov-Smirnov test for exponential distribution
-    # Sort delays and compute empirical CDF
-    sorted_delays = sorted(delays_s)
-    n = len(sorted_delays)
+    # kstest compares data against exponential CDF with scale parameter = mean
+    # Returns: (ks_statistic, p_value)
+    ks_statistic, p_value = stats.kstest(
+        delays_s,
+        "expon",
+        args=(0, sample_mean),  # loc=0 (no shift), scale=mean
+        alternative="two-sided",
+    )
 
-    # Compute KS statistic: max distance between empirical and theoretical CDF
-    # Theoretical CDF for exponential: F(x) = 1 - exp(-λx) where λ = 1/mean
-    lambda_param = 1.0 / sample_mean
-
-    max_distance = 0
-    for i, x in enumerate(sorted_delays):
-        # Empirical CDF at x
-        ecdf = (i + 1) / n
-        # Theoretical exponential CDF at x: F(x) = 1 - exp(-λx)
-        theoretical_cdf = 1 - math.exp(-lambda_param * x)
-        distance = abs(ecdf - theoretical_cdf)
-        max_distance = max(max_distance, distance)
-
-    # From: https://en.wikipedia.org/wiki/Kolmogorov%E2%80%93Smirnov_test#Kolmogorov-Smirnov_statistic
-    # use α=0.001 strict test: 1.949 / sqrt(n)
-    ks_critical = 1.949 / (n**0.5)
-
-    assert max_distance < ks_critical, (
-        f"KS test failed: D={max_distance:.4f} > critical={ks_critical:.4f} "
-        f"(distribution not exponential at α=0.001 significance level)"
+    # Reject if p-value < 0.0001 (99.99% confidence that distribution is NOT exponential)
+    ALPHA = 0.0001
+    assert p_value > ALPHA, (
+        f"KS test rejected exponential distribution: "
+        f"p-value={p_value:.4f} < α={ALPHA} (D={ks_statistic:.4f})"
     )
