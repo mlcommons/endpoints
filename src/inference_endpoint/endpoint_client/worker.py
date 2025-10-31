@@ -268,12 +268,12 @@ class Worker:
         url = self.http_config.endpoint_url
         headers = query.headers if hasattr(query, "headers") else {}
 
+        logging.debug(
+            f"Making HTTP request to {url} with payload: {query} and headers: {headers}"
+        )
+
         # Encode query to bytes using adapter
         payload_bytes = self._adapter.encode_query(query)
-
-        logging.debug(
-            f"Making HTTP request to {url} with payload: {payload} and headers: {headers}"
-        )
 
         # Issue the request with pre-encoded bytes
         async with self._session.post(
