@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
 import random
 import threading
 import time
@@ -21,6 +22,7 @@ from inference_endpoint.load_generator.sample import SampleEventHandler
 from inference_endpoint.load_generator.scheduler import (
     ConcurrencyScheduler,
     MaxThroughputScheduler,
+    PoissonDistributionScheduler,
     WithoutReplacementSampleOrder,
     WithReplacementSampleOrder,
 )
@@ -89,13 +91,12 @@ def test_concurrency_scheduler(concurrency_runtime_settings):
         concurrency_runtime_settings, WithReplacementSampleOrder
     )
 
-    # Simulate parallel query processing: 2 complete every 10ms
-    # (mimics real system with concurrency=2, 10ms processing time per query)
+    # Mimic real system with concurrency=2, 10ms processing time per query
     def complete_queries():
         for _ in range(5):  # 5 batches × 2 = 10 completions
             time.sleep(0.01)  # 10ms between batches
-            scheduler._on_query_complete(None)  # First completion in batch
-            scheduler._on_query_complete(None)  # Second completion in batch
+            scheduler._on_query_complete(None)
+            scheduler._on_query_complete(None)
 
     threading.Thread(target=complete_queries, daemon=True).start()
 
@@ -111,13 +112,83 @@ def test_concurrency_scheduler(concurrency_runtime_settings):
     # Verify all samples issued
     assert len(issue_times) == 10
 
-    # Expected timeline with concurrency=2, parallel processing at 10ms/query:
-    # t=0ms:  Issue Q1, Q2 (initial 2 slots)
-    # t=10ms: Q1,Q2 complete → Issue Q3, Q4
-    # t=20ms: Q3,Q4 complete → Issue Q5, Q6
-    # t=30ms: Q5,Q6 complete → Issue Q7, Q8
-    # t=40ms: Q7,Q8 complete → Issue Q9, Q10
-    # Total: ~40ms (allow 30-60ms for thread scheduling)
-    assert 0.03 < elapsed < 0.06, f"Expected ~40ms, got {elapsed*1000:.1f}ms"
+    # Expected timeline with concurrency=2, parallel processing at 10ms/query: 40ms
+    assert 0.037 < elapsed < 0.043, f"Expected ~40ms, got {elapsed*1000:.1f}ms"
 
     SampleEventHandler.clear_hooks()
+
+
+def test_poisson_scheduler_distribution(poisson_runtime_settings):
+    """Test PoissonDistributionScheduler produces exponentially distributed inter-arrival times.
+
+    For a Poisson process with rate λ (1000 QPS), inter-arrival times must follow
+    exponential distribution with mean = 1/λ = 1ms.
+
+    Key properties tested:
+    1. Sample mean ≈ expected mean (1ms)
+    2. Coefficient of Variation (CV) ≈ 1.0 (exponential property: std = mean)
+    3. Kolmogorov-Smirnov test confirms exponential distribution
+    """
+    scheduler = PoissonDistributionScheduler(
+        poisson_runtime_settings, WithReplacementSampleOrder
+    )
+
+    # Collect delays from scheduler (in seconds) for statistical analysis
+    # No sleep overhead - just test the generated distribution
+    delays_s = []
+    sample_count = 5000  # Large sample for robust statistical testing
+
+    for i, (_, delay_ns) in enumerate(scheduler):
+        if i >= sample_count:
+            break
+        delays_s.append(delay_ns / 1e9)  # Convert ns to seconds
+
+    # Expected mean for 1000 QPS = 1/1000 = 0.001s = 1ms
+    expected_mean_s = 1.0 / 1000.0
+
+    # Calculate sample statistics
+    sample_mean = sum(delays_s) / len(delays_s)
+    sample_variance = sum((x - sample_mean) ** 2 for x in delays_s) / len(delays_s)
+    sample_std = sample_variance**0.5
+
+    # Coefficient of Variation = std/mean (should be ~1.0 for exponential)
+    cv = sample_std / sample_mean
+
+    # Test 1: Mean should match expected (±10% tolerance for large sample)
+    assert (
+        abs(sample_mean - expected_mean_s) / expected_mean_s < 0.10
+    ), f"Mean {sample_mean*1000:.3f}ms deviates >10% from expected {expected_mean_s*1000:.3f}ms"
+
+    # Test 2: CV should be close to 1.0 (exponential property: std = mean)
+    # Allow 10% tolerance due to finite sampling
+    assert (
+        0.90 < cv < 1.10
+    ), f"Coefficient of Variation {cv:.3f} not close to 1.0 (exponential signature)"
+
+    # Test 3: Kolmogorov-Smirnov test for exponential distribution
+    # Sort delays and compute empirical CDF
+    sorted_delays = sorted(delays_s)
+    n = len(sorted_delays)
+
+    # Compute KS statistic: max distance between empirical and theoretical CDF
+    # Theoretical CDF for exponential: F(x) = 1 - exp(-λx) where λ = 1/mean
+    lambda_param = 1.0 / sample_mean
+
+    max_distance = 0
+    for i, x in enumerate(sorted_delays):
+        # Empirical CDF at x
+        ecdf = (i + 1) / n
+        # Theoretical exponential CDF at x: F(x) = 1 - exp(-λx)
+        theoretical_cdf = 1 - math.exp(-lambda_param * x)
+        distance = abs(ecdf - theoretical_cdf)
+        max_distance = max(max_distance, distance)
+
+    # From: https://en.wikipedia.org/wiki/Kolmogorov%E2%80%93Smirnov_test#Kolmogorov-Smirnov_statistic
+    # use α=0.005 for strict test: 1.731 / sqrt(n)
+    # use α=0.001 for more lenient test: 1.949 / sqrt(n)
+    ks_critical = 1.949 / (n**0.5)
+
+    assert max_distance < ks_critical, (
+        f"KS test failed: D={max_distance:.4f} > critical={ks_critical:.4f} "
+        f"(distribution not exponential at α=0.001 significance level)"
+    )

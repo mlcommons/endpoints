@@ -501,6 +501,22 @@ def max_throughput_runtime_settings():
 
 
 @pytest.fixture
+def poisson_runtime_settings():
+    return RuntimeSettings(
+        metric_target=metrics.Throughput(1000),
+        reported_metrics=[],
+        min_duration_ms=10_000,
+        max_duration_ms=15_000,
+        n_samples_from_dataset=100,
+        n_samples_to_issue=5000,
+        min_sample_count=100,
+        rng_sched=random.Random(42),
+        rng_sample_index=random.Random(42),
+        load_pattern=LoadPattern(type=LoadPatternType.POISSON, qps=100.0),
+    )
+
+
+@pytest.fixture
 def concurrency_runtime_settings():
     return RuntimeSettings(
         metric_target=None,
