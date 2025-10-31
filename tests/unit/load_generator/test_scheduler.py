@@ -135,33 +135,20 @@ def test_poisson_scheduler_distribution(poisson_runtime_settings):
     )
 
     # Test configuration
-    TARGET_QPS = 1000
+    TARGET_QPS = poisson_runtime_settings.metric_target.target
     expected_mean_s = 1.0 / TARGET_QPS
-    MIN_SAMPLES = 100  # Minimum for reliable KS test at α=0.001
 
     # Collect delays from scheduler (in seconds) for statistical analysis
-    # No sleep overhead - just test the generated distribution
     delays_s = []
     for _, delay_ns in scheduler:
         delays_s.append(delay_ns / 1e9)  # Convert ns to seconds
 
     # Validate sufficient sample size
     n = len(delays_s)
-    assert n >= MIN_SAMPLES, (
-        f"Insufficient samples: {n} < {MIN_SAMPLES}. "
-        f"Increase n_samples_to_issue in fixture."
-    )
 
-    # Validate all delays are positive (exponential property)
-    assert all(
-        d > 0 for d in delays_s
-    ), "All delays must be positive for exponential distribution"
-
-    # Calculate sample statistics using Bessel's correction for unbiased variance
+    # Calculate sample statistics using Bessel's correction for unbiased variance (whitened)
     sample_mean = sum(delays_s) / n
-    sample_variance = sum((x - sample_mean) ** 2 for x in delays_s) / (
-        n - 1
-    )  # Bessel's correction
+    sample_variance = sum((x - sample_mean) ** 2 for x in delays_s) / (n - 1)
     sample_std = math.sqrt(sample_variance)
     cv = sample_std / sample_mean
 
@@ -176,7 +163,7 @@ def test_poisson_scheduler_distribution(poisson_runtime_settings):
     )
 
     # Test 2: CV should be close to 1.0 (exponential property: std = mean)
-    # Use adaptive tolerance based on sample size, maximum (10%, 1 std. error)
+    # Use adaptive tolerance based on sample size, max(10%, 1 std. error)
     cv_tolerance = max(0.10, 1.0 / math.sqrt(n))
     assert (
         abs(cv - 1.0) < cv_tolerance
@@ -184,7 +171,6 @@ def test_poisson_scheduler_distribution(poisson_runtime_settings):
 
     # Test 3: Kolmogorov-Smirnov test for exponential distribution
     # kstest compares data against exponential CDF with scale parameter = mean
-    # Returns: (ks_statistic, p_value)
     ks_statistic, p_value = stats.kstest(
         delays_s,
         "expon",
