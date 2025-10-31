@@ -30,7 +30,7 @@ from inference_endpoint.endpoint_client.configs import (
     ZMQConfig,
 )
 from inference_endpoint.endpoint_client.http_client import HTTPEndpointClient
-from inference_endpoint.endpoint_client.loadgen import HttpClientSampleIssuer
+from inference_endpoint.endpoint_client.http_sample_issuer import HttpClientSampleIssuer
 from inference_endpoint.load_generator import (
     BenchmarkSession,
     MaxThroughputScheduler,
