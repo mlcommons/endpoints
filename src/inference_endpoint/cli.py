@@ -189,17 +189,7 @@ def _add_shared_benchmark_args(parser):
         "--dataset", "-d", type=Path, required=True, help="Dataset file"
     )
     parser.add_argument("--api-key", type=str, help="API key")
-    parser.add_argument(
-        "--target-qps",
-        type=float,
-        help="Target queries per second (required when --load-pattern=poisson)",
-    )
     parser.add_argument("--workers", type=int, help="HTTP workers (default: 4)")
-    parser.add_argument(
-        "--concurrency",
-        type=int,
-        help="Max concurrent requests (required when --load-pattern=concurrency)",
-    )
     parser.add_argument(
         "--duration",
         type=int,
@@ -230,8 +220,13 @@ def _add_shared_benchmark_args(parser):
 def _add_online_specific_args(parser):
     """Add online-specific arguments.
 
+    These arguments are only available for online mode and will be rejected
+    by argparse if used with offline mode.
+
     Currently adds:
     - load-pattern: Scheduler type (poisson, concurrency, etc.) - REQUIRED
+    - target-qps: Target QPS for poisson pattern
+    - concurrency: Max concurrent requests for concurrency pattern
 
     Load pattern choices are dynamically derived from registered Scheduler
     implementations to maintain a single source of truth.
@@ -246,6 +241,16 @@ def _add_online_specific_args(parser):
         choices=available_patterns,
         required=True,
         help=f"Load pattern (required, available: {', '.join(available_patterns)})",
+    )
+    parser.add_argument(
+        "--target-qps",
+        type=float,
+        help="Target queries per second (required when --load-pattern=poisson)",
+    )
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        help="Max concurrent requests (required when --load-pattern=concurrency)",
     )
 
 
