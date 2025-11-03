@@ -11,11 +11,12 @@ inference-endpoint benchmark offline \
   --model Qwen/Qwen3-8B \
   --dataset tests/datasets/dummy_1k.pkl
 
-# Online (sustained QPS - CLI mode - requires --target-qps)
+# Online (sustained QPS - CLI mode - requires --target-qps, --load-pattern)
 inference-endpoint benchmark online \
   --endpoint URL \
   --model Qwen/Qwen3-8B \
   --dataset tests/datasets/dummy_1k.pkl \
+  --load-pattern poisson \
   --target-qps 100
 
 # With detailed report generation
@@ -75,7 +76,7 @@ inference-endpoint info
 ## Benchmark Options (CLI Mode Only)
 
 - `--api-key KEY` - API authentication
-- `--target-qps N` - Target queries per second (required for online mode with poisson pattern)
+- `--target-qps N` - Target queries per second (required when --load-pattern=poisson)
 - `--duration SEC` - Test duration in seconds (default: 0 - run until dataset exhausted)
 - `--num-samples N` - Number of samples to issue (overrides dataset size and duration calculation)
 - `--streaming MODE` - Streaming control: `auto` (default), `on`, or `off`. Streaming will enable token streaming in response.
@@ -86,8 +87,8 @@ inference-endpoint info
 
 ## Online-Specific Options
 
-- `--load-pattern TYPE` - Load pattern: `poisson` (default), `concurrency`
-- `--concurrency N` - Max concurrent requests (required when using concurrency load pattern, default: -1 unlimited for other patterns)
+- `--load-pattern TYPE` - Load pattern (required): `poisson`, `concurrency`
+- `--concurrency N` - Max concurrent requests (required when --load-pattern=concurrency)
 
 ## Dataset Formats
 
@@ -134,11 +135,11 @@ inference-endpoint info
 - Sustains target QPS
 - Use with `benchmark online --target-qps N`
 
-**concurrency** - Online mode (fixed concurrency) - NOT YET IMPLEMENTED
+**concurrency** - Online mode (fixed concurrency)
 
 - Maintains N concurrent requests
 - QPS emerges from concurrency/latency
-- Will be available in future release
+- Use with `benchmark online --load-pattern concurrency --concurrency N`
 
 ## Examples
 
@@ -159,6 +160,7 @@ inference-endpoint benchmark online \
   --endpoint https://api.production.com \
   --model Qwen/Qwen3-8B \
   --dataset prod_queries.pkl \
+  --load-pattern poisson \
   --target-qps 100 \
   --num-samples 10000 \
   --workers 16 \
@@ -171,6 +173,7 @@ inference-endpoint benchmark online \
   --endpoint https://api.production.com \
   --model Qwen/Qwen3-8B \
   --dataset prod_queries.pkl \
+  --load-pattern poisson \
   --target-qps 100 \
   --duration 300 \
   --workers 16 \
@@ -274,7 +277,9 @@ endpoint_config:
 
 **Mode Requirements:**
 
-- Online mode requires `--target-qps` (poisson) or `--concurrency` (concurrency pattern)
+- Online mode requires `--load-pattern` (poisson or concurrency)
+  - `--load-pattern poisson` requires `--target-qps`
+  - `--load-pattern concurrency` requires `--concurrency`
 - Use `--mode both` for combined perf + accuracy runs
 - Streaming: auto (default) enables streaming responses for online, disables for offline
 

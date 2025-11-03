@@ -97,7 +97,7 @@ def create_parser() -> argparse.ArgumentParser:
     online_parser = benchmark_subparsers.add_parser(
         "online",
         help="Online benchmark (sustained QPS)",
-        description="Online mode: Issues queries at target QPS using Poisson distribution.",
+        description="Online mode: Issues queries using specified load pattern (--load-pattern required).",
     )
     _add_shared_benchmark_args(online_parser)
     _add_online_specific_args(online_parser)
@@ -192,13 +192,13 @@ def _add_shared_benchmark_args(parser):
     parser.add_argument(
         "--target-qps",
         type=float,
-        help="Target queries per second (required for online mode with poisson pattern)",
+        help="Target queries per second (required when --load-pattern=poisson)",
     )
     parser.add_argument("--workers", type=int, help="HTTP workers (default: 4)")
     parser.add_argument(
         "--concurrency",
         type=int,
-        help="Max concurrent requests (required when using concurrency load pattern, default: -1 unlimited for other patterns)",
+        help="Max concurrent requests (required when --load-pattern=concurrency)",
     )
     parser.add_argument(
         "--duration",
@@ -231,7 +231,7 @@ def _add_online_specific_args(parser):
     """Add online-specific arguments.
 
     Currently adds:
-    - load-pattern: Scheduler type (poisson, etc.)
+    - load-pattern: Scheduler type (poisson, concurrency, etc.) - REQUIRED
 
     Load pattern choices are dynamically derived from registered Scheduler
     implementations to maintain a single source of truth.
@@ -244,7 +244,8 @@ def _add_online_specific_args(parser):
     parser.add_argument(
         "--load-pattern",
         choices=available_patterns,
-        help=f"Load pattern (default: poisson, available: {', '.join(available_patterns)})",
+        required=True,
+        help=f"Load pattern (required, available: {', '.join(available_patterns)})",
     )
 
 

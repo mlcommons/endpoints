@@ -113,6 +113,7 @@ inference-endpoint -v benchmark online \
   --endpoint http://localhost:8765 \
   --model Qwen/Qwen3-8B \
   --dataset tests/datasets/dummy_1k.pkl \
+  --load-pattern poisson \
   --target-qps 100 \
   --report-path online_benchmark_report
 ```
@@ -286,6 +287,7 @@ inference-endpoint benchmark online \
   --endpoint http://localhost:8765 \
   --model Qwen/Qwen3-8B \
   --dataset tests/datasets/dummy_1k.pkl \
+  --load-pattern poisson \
   --target-qps 500 \
   --report-path online_report
 
@@ -308,6 +310,7 @@ inference-endpoint benchmark online \
   --endpoint http://localhost:8765 \
   --model Qwen/Qwen3-8B \
   --dataset tests/datasets/dummy_1k.pkl \
+  --load-pattern concurrency \
   --concurrency 32
 ```
 
@@ -316,7 +319,9 @@ inference-endpoint benchmark online \
 **Key Requirements:**
 
 - Model name is **required** for all benchmark and probe commands
-- Online mode requires `--target-qps` (poisson) or `--concurrency` (concurrency pattern)
+- Online mode requires `--load-pattern` to specify the scheduler type (poisson or concurrency)
+  - `--load-pattern poisson` requires `--target-qps`
+  - `--load-pattern concurrency` requires `--concurrency`
 - Set `HF_TOKEN` environment variable for non-public models (public models like Qwen/Qwen3-8B don't need it)
 
 **Sample Count Control:**

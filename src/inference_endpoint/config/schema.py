@@ -35,7 +35,7 @@ class LoadPatternType(str, Enum):
 
     MAX_THROUGHPUT = "max_throughput"  # Offline: all queries at t=0
     POISSON = "poisson"  # Online: fixed QPS with Poisson distribution
-    CONCURRENCY = "concurrency"  # Online: fixed concurrent requests (TODO)
+    CONCURRENCY = "concurrency"  # Online: fixed concurrent requests
     BURST = "burst"  # Burst pattern (TODO)
     STEP = "step"  # Step pattern (TODO)
 
