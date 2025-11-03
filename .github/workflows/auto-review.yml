@@ -15,16 +15,16 @@ jobs:
             const { owner, repo, number } = context.issue;
 
             // Default reviewers for all components
-            const defaultReviewers = ['nvzhihanj'];
+            const defaultReviewers = ['nvzhihanj','arekay-nv'];
 
             // Component-specific reviewers (you can expand this later)
             const componentReviewers = {
-              'src/inference_endpoint/load_generator/': ['nvzhihanj'],
-              'src/inference_endpoint/dataset_manager/': ['nvzhihanj'],
-              'src/inference_endpoint/endpoint_client/': ['nvzhihanj'],
-              'src/inference_endpoint/metrics/': ['nvzhihanj'],
-              'src/inference_endpoint/config/': ['nvzhihanj'],
-              'src/inference_endpoint/plugins/': ['nvzhihanj'],
+              'src/inference_endpoint/load_generator/': ['nvzhihanj','arekay-nv'],
+              'src/inference_endpoint/dataset_manager/': ['nvzhihanj','arekay-nv'],
+              'src/inference_endpoint/endpoint_client/': ['nvzhihanj','arekay-nv'],
+              'src/inference_endpoint/metrics/': ['nvzhihanj','arekay-nv'],
+              'src/inference_endpoint/config/': ['nvzhihanj','arekay-nv'],
+              'src/inference_endpoint/plugins/': ['nvzhihanj','arekay-nv'],
             };
 
             // Get changed files

@@ -18,11 +18,9 @@ jobs:
             // Branch naming patterns
             const validPatterns = [
               /^feature\/.+/,           // feature/component-name
-              /^bugfix\/.+/,            // bugfix/issue-description
-              /^hotfix\/.+/,            // hotfix/critical-fix
+              /^fix\/.+/,               // fix/fix-description
               /^docs\/.+/,              // docs/documentation-update
               /^test\/.+/,              // test/testing-improvements
-              /^refactor\/.+/,          // refactor/code-improvement
               /^chore\/.+/,             // chore/maintenance-tasks
               /^release\/.+/,           // release/version-number
             ];
@@ -33,11 +31,9 @@ jobs:
             if (!isValidBranch) {
               const validExamples = [
                 'feature/load-generator',
-                'bugfix/connection-timeout',
-                'hotfix/critical-memory-leak',
+                'fix/memory-leak',
                 'docs/api-documentation',
                 'test/performance-benchmarks',
-                'refactor/query-lifecycle',
                 'chore/dependency-update',
                 'release/v1.0.0'
               ];
