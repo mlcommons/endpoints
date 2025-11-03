@@ -513,7 +513,7 @@ def poisson_runtime_settings():
         min_sample_count=100,
         rng_sched=random.Random(42),
         rng_sample_index=random.Random(42),
-        load_pattern=LoadPattern(type=LoadPatternType.POISSON, qps=100.0),
+        load_pattern=LoadPattern(type=LoadPatternType.POISSON, target_qps=100.0),
     )
 
 

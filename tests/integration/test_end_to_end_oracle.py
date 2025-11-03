@@ -137,6 +137,7 @@ async def _run_load_generator_full_run_url(
         n_samples_to_issue=dummy_dataloader.num_samples(),
         rng_sched=random.Random(1234),
         rng_sample_index=random.Random(1234),
+        load_pattern=LoadPattern(type=LoadPatternType.MAX_THROUGHPUT),
     )
 
     scheduler = MaxThroughputScheduler(
