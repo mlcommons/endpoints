@@ -286,7 +286,7 @@ def _build_config_from_cli(
             ),
             client=ClientSettings(
                 workers=args.workers if args.workers else 4,
-                max_concurrency=-1,  # NOTE(vir): client always uses unlimited concurrency
+                max_concurrency=-1,  # client uses unlimited concurrency by default
             ),
         ),
         model_params=ModelParams(
