@@ -1,4 +1,4 @@
-# MLPerf Inference Endpoint Benchmarking System
+# MLPerf® Inference Endpoint Benchmarking System
 
 A high-performance benchmarking tool for LLM endpoints.
 
