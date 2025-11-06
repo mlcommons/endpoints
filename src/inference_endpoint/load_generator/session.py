@@ -67,31 +67,39 @@ class BenchmarkSession:
         tokenizer_override: AutoTokenizer | None = None,
     ):
         with self.event_recorder:
-            EventRecorder.record_event(SessionEvent.TEST_STARTED, time.monotonic_ns())
-            for issued_sample in load_generator:
-                # In the future, we'll want to push this to some thread or process that
-                # performs output verification / accuracy checks.
-                self.sample_uuid_map[issued_sample.sample.uuid] = issued_sample
-
-            self.event_recorder.should_check_idle = True
-            EventRecorder.record_event(SessionEvent.LOADGEN_STOP, time.monotonic_ns())
-            start_time = time.monotonic()
-            while self.event_recorder.n_inflight_samples != 0:
-                if (
-                    max_shutdown_timeout_s is not None
-                    and time.monotonic() - start_time > max_shutdown_timeout_s
-                ):
-                    raise TimeoutError(
-                        f"Max shutdown timeout of {max_shutdown_timeout_s}s reached"
-                    )
-                self.end_event.wait(timeout=10.0)
-                self.logger.info(
-                    f"Waiting for the test to end... {self.event_recorder.n_inflight_samples} samples remaining"
+            try:
+                EventRecorder.record_event(
+                    SessionEvent.TEST_STARTED, time.monotonic_ns()
                 )
+                for issued_sample in load_generator:
+                    # In the future, we'll want to push this to some thread or process that
+                    # performs output verification / accuracy checks.
+                    self.sample_uuid_map[issued_sample.sample.uuid] = issued_sample
 
-            if stop_sample_issuer_on_test_end:
-                load_generator.sample_issuer.shutdown()
-            EventRecorder.record_event(SessionEvent.TEST_ENDED, time.monotonic_ns())
+                self.event_recorder.should_check_idle = True
+                EventRecorder.record_event(
+                    SessionEvent.LOADGEN_STOP, time.monotonic_ns()
+                )
+                start_time = time.monotonic()
+                while self.event_recorder.n_inflight_samples != 0:
+                    if (
+                        max_shutdown_timeout_s is not None
+                        and time.monotonic() - start_time > max_shutdown_timeout_s
+                    ):
+                        raise TimeoutError(
+                            f"Max shutdown timeout of {max_shutdown_timeout_s}s reached"
+                        )
+                    self.end_event.wait(timeout=10.0)
+                    self.logger.info(
+                        f"Waiting for the test to end... {self.event_recorder.n_inflight_samples} samples remaining"
+                    )
+            except Exception as e:
+                logger.error(f"Error running benchmark session: {e}")
+                raise e
+            finally:
+                if stop_sample_issuer_on_test_end:
+                    load_generator.sample_issuer.shutdown()
+                EventRecorder.record_event(SessionEvent.TEST_ENDED, time.monotonic_ns())
 
             self.event_recorder.wait_for_writes()
 
