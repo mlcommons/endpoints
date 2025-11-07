@@ -16,8 +16,8 @@
 import math
 import random
 import threading
-import time
 
+import pytest
 from inference_endpoint.load_generator.sample import SampleEventHandler
 from inference_endpoint.load_generator.scheduler import (
     ConcurrencyScheduler,
@@ -43,8 +43,8 @@ def test_without_replacement_sample_order():
     ), "Order should be different in each pass of the dataset"
 
 
-def test_with_replacement_sample_order():
-    ordering = WithReplacementSampleOrder(12345, 100, rng=random.Random(42))
+def test_with_replacement_sample_order(random_seed):
+    ordering = WithReplacementSampleOrder(12345, 100, rng=random.Random(random_seed))
     indices = list(iter(ordering))
 
     # With Python random.Random(42), the order can be deterministic
@@ -86,126 +86,115 @@ def test_max_throughput_scheduler(max_throughput_runtime_settings):
     ], "Order does not match expected deterministic order"
 
 
-def test_concurrency_scheduler(concurrency_runtime_settings, clean_sample_event_hooks):
-    """Test ConcurrencyScheduler properly gates issuance by completions.
-    Tests that concurrency is properly limited and queries are gated by completion events.
-    """
-    target_concurrency = concurrency_runtime_settings.load_pattern.target_concurrency
+@pytest.mark.parametrize("target_concurrency", [1, 2, 100, 1000], indirect=True)
+def test_concurrency_scheduler(concurrency_runtime_settings, target_concurrency):
+    """Test ConcurrencyScheduler properly gates issuance by completions."""
     total_samples = concurrency_runtime_settings.n_samples_to_issue
 
     scheduler = ConcurrencyScheduler(
         concurrency_runtime_settings, WithReplacementSampleOrder
     )
 
-    # Track events with synchronization primitives instead of timing
-    issue_lock = threading.Lock()
-    complete_lock = threading.Lock()
-    issue_events = []  # List of issued query indices in order
-    complete_events = []  # List of completed query indices in order
-
-    # Use events for deterministic synchronization
-    issue_gates = [threading.Event() for _ in range(total_samples)]
-    completion_gates = [threading.Event() for _ in range(total_samples)]
-
-    # Track concurrency level
-    concurrency_lock = threading.Lock()
+    # State tracking
+    state_lock = threading.RLock()
+    issued_count = 0
+    completed_count = 0
     current_inflight = 0
     max_inflight = 0
 
-    def simulate_completions():
-        """Simulate query completions with event-based synchronization."""
-        nonlocal current_inflight, max_inflight
+    # Synchronization: signal when queries can complete and when they're done
+    can_complete = [threading.Event() for _ in range(total_samples)]
+    completed = [threading.Event() for _ in range(total_samples)]
+    # Signal when each query is issued
+    issued = [threading.Event() for _ in range(total_samples)]
 
-        for i in range(total_samples):
-            # Wait for this query to be issued before completing it
-            issue_gates[i].wait(timeout=5.0)
+    def completion_worker():
+        """Waits for signals to complete queries."""
+        nonlocal completed_count, current_inflight
 
-            # Simulate small variable processing time
-            time.sleep(0.001 * (1 + i % 3))  # 1-3ms pattern
+        for position in range(total_samples):
+            can_complete[position].wait()
 
-            with complete_lock:
-                complete_events.append(i)
-
-            # Decrease inflight count
-            with concurrency_lock:
+            with state_lock:
+                completed_count += 1
                 current_inflight -= 1
+                assert current_inflight >= 0, "Inflight count went negative"
 
-            # Signal completion to scheduler
             scheduler._release_slot()
-            completion_gates[i].set()
+            completed[position].set()
 
-    completion_thread = threading.Thread(target=simulate_completions, daemon=True)
-    completion_thread.start()
+    threading.Thread(target=completion_worker, daemon=True).start()
 
-    try:
-        # Issue queries through scheduler
-        for query_idx, _ in enumerate(scheduler):
-            with issue_lock:
-                issue_events.append(query_idx)
+    def issue_worker():
+        """Issues queries through scheduler."""
+        nonlocal issued_count, current_inflight, max_inflight
 
-            # Track peak concurrency
-            with concurrency_lock:
+        for position, _ in enumerate(scheduler):
+            with state_lock:
+                issued_count += 1
                 current_inflight += 1
                 max_inflight = max(max_inflight, current_inflight)
+                assert (
+                    current_inflight <= target_concurrency
+                ), f"Concurrency {current_inflight} exceeded limit {target_concurrency}"
+            issued[position].set()
 
-            # Signal that this query has been issued
-            issue_gates[query_idx].set()
+    issue_thread = threading.Thread(target=issue_worker, daemon=True)
+    issue_thread.start()
 
-        # Wait for all completions to finish
-        for i in range(total_samples):
-            assert completion_gates[i].wait(
-                timeout=5.0
-            ), f"Query {i} completion timed out"
+    try:
+        # Phase 1: First target_concurrency queries issue immediately
+        for position in range(target_concurrency):
+            issued[position].wait()
 
-        # === Deterministic Verification ===
+        with state_lock:
+            assert issued_count == target_concurrency
+            assert completed_count == 0
+            assert current_inflight == target_concurrency
 
-        # Validation: All queries were issued in sequential order
-        assert (
-            len(issue_events) == total_samples
-        ), f"Expected {total_samples} issues, got {len(issue_events)}"
-        for i, query_idx in enumerate(issue_events):
-            assert (
-                query_idx == i
-            ), f"Issue order violated: position {i} has query {query_idx}"
+        # Phase 2: Verify scheduler blocks when at capacity, unblocks on completion
+        for position in range(target_concurrency, total_samples):
+            position_to_complete = position - target_concurrency
 
-        # Validation: All queries completed
-        assert (
-            len(complete_events) == total_samples
-        ), f"Expected {total_samples} completions, got {len(complete_events)}"
+            # Verify next query hasn't issued yet (scheduler is blocking)
+            assert not issued[
+                position
+            ].is_set(), f"Query {position} issued before slot was freed"
 
-        # Validation: Peak concurrency actually reached target
-        assert (
-            max_inflight == target_concurrency
-        ), f"Max concurrent ({max_inflight}) never reached target ({target_concurrency})"
+            # Free a slot
+            can_complete[position_to_complete].set()
+            completed[position_to_complete].wait()
 
-        # Validation: gating behavior
-        # For query i where i >= target_concurrency, query (i - target_concurrency)
-        # must have completed before query i could issue.
-        #
-        # We can verify this by checking that when we issued query i,
-        # query (i - target_concurrency) had already been issued AND the scheduler
-        # had received its completion event.
-        #
-        # Since the scheduler blocks until a slot is free, and slots are freed by
-        # completions, if query i issued, then at least (i - target_concurrency + 1)
-        # completions must have occurred (to free up a slot).
-        for i in range(target_concurrency, total_samples):
-            expected_completed_query = i - target_concurrency
-            assert (
-                expected_completed_query in complete_events
-            ), f"Query {i} issued but query {expected_completed_query} not in completions yet"
+            # Verify next query now issues
+            issued[position].wait()
+
+            with state_lock:
+                assert current_inflight == target_concurrency
+
+        # Phase 3: Complete remaining queries and cleanup
+        for position in range(target_concurrency, total_samples):
+            can_complete[position].set()
+            completed[position].wait()
+
+        issue_thread.join()
+
+        # Final validation
+        with state_lock:
+            assert issued_count == total_samples
+            assert completed_count == total_samples
+            assert current_inflight == 0
+            assert max_inflight == target_concurrency
 
     finally:
-        # Ensure proper cleanup
-        completion_thread.join(timeout=5.0)
         SampleEventHandler.clear_hooks()
 
 
-def test_poisson_scheduler_distribution(poisson_runtime_settings):
+@pytest.mark.parametrize("target_qps", [50.0, 100.0, 500.0, 1000.0], indirect=True)
+def test_poisson_scheduler_distribution(poisson_runtime_settings, target_qps):
     """Test PoissonDistributionScheduler produces exponentially distributed inter-arrival times.
 
-    For a Poisson process with rate λ (1000 QPS), inter-arrival times must follow
-    exponential distribution with mean = 1/λ = 1ms.
+    For a Poisson process with rate λ (target QPS), inter-arrival times must follow
+    exponential distribution with mean = 1/λ.
 
     Three-tier validation:
     1. Mean with 99.9% confidence interval
@@ -217,7 +206,7 @@ def test_poisson_scheduler_distribution(poisson_runtime_settings):
     )
 
     # Test configuration
-    TARGET_QPS = poisson_runtime_settings.metric_target.target
+    TARGET_QPS = target_qps
     expected_mean_s = 1.0 / TARGET_QPS
 
     # Collect delays from scheduler (in seconds) for statistical analysis
@@ -235,7 +224,7 @@ def test_poisson_scheduler_distribution(poisson_runtime_settings):
     cv = sample_std / sample_mean
 
     # Test 1: Mean with statistical confidence interval (99.9% CI)
-    # For exponential: std(X̄) = σ/√n = μ/√n
+    # For exponential: std(X̄) = sigma/√n = mu/√n
     z_critical = 3.29  # 99.9% two-tailed
     margin_of_error = z_critical * (sample_std / math.sqrt(n))
     assert abs(sample_mean - expected_mean_s) < margin_of_error, (
@@ -264,5 +253,5 @@ def test_poisson_scheduler_distribution(poisson_runtime_settings):
     ALPHA = 0.0001
     assert p_value > ALPHA, (
         f"KS test rejected exponential distribution: "
-        f"p-value={p_value:.4f} < α={ALPHA} (D={ks_statistic:.4f})"
+        f"p-value={p_value:.4f} < alpha={ALPHA} (D={ks_statistic:.4f})"
     )

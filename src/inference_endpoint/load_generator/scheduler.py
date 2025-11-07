@@ -381,7 +381,7 @@ class ConcurrencyScheduler(Scheduler, load_pattern=LoadPatternType.CONCURRENCY):
                 f"target_concurrency must be > 0 for CONCURRENCY load pattern, got {target_concurrency}"
             )
 
-        # Use Condition for concurrency control with explicit counter
+        # Use threading.Condition for concurrency control with explicit counter
         self._condition = threading.Condition()
         self._inflight = 0
         self._target_concurrency = target_concurrency
