@@ -74,11 +74,11 @@ class OpenAIAdapter:
             # service_tier=ServiceTier.auto,
             reasoning_effort=ReasoningEffort.medium,
             messages=[
+                {"role": Role5.user.value, "content": query.data["prompt"]},
                 {
                     "role": Role.assistant.value,
                     "content": "You are a helpful assistant.",
                 },
-                {"role": Role5.user.value, "content": query.data["prompt"]},
             ],
             stream=query.data.get("stream", False),
             max_completion_tokens=query.data.get("max_completion_tokens", 100),

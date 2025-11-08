@@ -19,12 +19,12 @@ TODO: Very simple factory for now. Will be expanded to support multiple formats 
 """
 
 import logging
-from collections.abc import Callable
 from pathlib import Path
 
 from .dataloader import (
     DataLoader,
     HFDataLoader,
+    JsonlReader,
     PickleReader,
 )
 
@@ -44,7 +44,8 @@ class DataLoaderFactory:
     def create_loader(
         dataset_path: Path | str,
         format: str = "pkl",
-        parser: Callable | None = None,
+        key_maps: dict[str, str] | None = None,
+        metadata: dict | None = None,
         **kwargs,
     ) -> DataLoader:
         """Create appropriate dataset loader based on format.
@@ -52,7 +53,7 @@ class DataLoaderFactory:
         Args:
             dataset_path: Path to dataset file or directory
             format: Dataset format ("pkl", "jsonl", "hf")
-            parser: Optional parser function for data transformation
+            key_maps: Dictionary of key mappings for the parser
             **kwargs: Additional arguments for specific loaders
 
         Returns:
@@ -61,27 +62,22 @@ class DataLoaderFactory:
         Raises:
             ValueError: If format is unsupported
         """
+        if key_maps is None:
+            # Assume that the `prompt` key already exists in the dataset
+            key_maps = [{"prompt": "text_input"}]
+
+        def parser(x):
+            # TODO : handle the entire key_maps list
+            return {k: x[v] for k, v in key_maps[0].items()} | metadata
+
         format = format.lower()
-
         if format == "pkl" or format == "pickle":
-            # Pickle format - use DeepSeekR1ChatCompletionDataLoader
-            if parser is None:
-                # Default parser for chat completion format
-                def default_parser(x):
-                    return {"prompt": x.text_input, "output": x.ref_output}
-
-                parser = default_parser
-
             logger.info(f"Creating pickle dataset loader for {dataset_path}")
             return PickleReader(dataset_path, parser=parser)
 
         elif format == "jsonl" or format == "json":
             # JSON Lines format
-            # TODO: Implement JSONLDataLoader
-            logger.error("JSONL format not yet implemented")
-            raise NotImplementedError(
-                "JSONL dataset format not yet supported. " "Supported formats: pkl, hf"
-            )
+            return JsonlReader(dataset_path, parser=parser, metadata=metadata)
 
         elif format == "hf" or format == "huggingface":
             # HuggingFace dataset
