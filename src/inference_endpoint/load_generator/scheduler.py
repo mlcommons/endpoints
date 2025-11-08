@@ -242,6 +242,7 @@ class Scheduler:
     Built-in schedulers:
     - MaxThroughputScheduler: Issues all queries immediately (offline mode)
     - PoissonDistributionScheduler: Poisson-distributed delays (online mode)
+    - ConcurrencyScheduler: Fixed concurrency level (online mode)
 
     Attributes:
         _IMPL_MAP: Class-level registry mapping LoadPatternType to Scheduler classes.
