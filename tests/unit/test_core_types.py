@@ -60,8 +60,8 @@ class TestQuery:
         query_loaded = OpenAIAdapter.to_openai_request(
             Query(id="test-123", data=payload)
         )
-        assert query_loaded.messages[0].root.content == "You are a helpful assistant."
-        assert query_loaded.messages[1].root.content == payload["prompt"]
+        assert query_loaded.messages[0].root.content == payload["prompt"]
+        assert query_loaded.messages[1].root.content == "You are a helpful assistant."
         assert query_loaded.model.root == payload["model"]
         assert query_loaded.max_completion_tokens == payload["max_completion_tokens"]
         assert query_loaded.temperature == payload["temperature"]
