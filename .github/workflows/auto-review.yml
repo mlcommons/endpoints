@@ -34,16 +34,27 @@ jobs:
               pull_number: number,
             });
 
+            // Get PR author
+            const { data: pullRequest } = await github.rest.pulls.get({
+              owner,
+              repo,
+              pull_number: number,
+            });
+            const prAuthor = pullRequest.user.login;
+
             // Determine which reviewers to request based on changed files
             let reviewersToRequest = new Set(defaultReviewers);
 
             for (const file of files) {
-              for (const [component, componentReviewers] of Object.entries(componentReviewers)) {
+              for (const [component, reviewers] of Object.entries(componentReviewers)) {
                 if (file.filename.startsWith(component)) {
-                  componentReviewers.forEach(reviewer => reviewersToRequest.add(reviewer));
+                  reviewers.forEach(reviewer => reviewersToRequest.add(reviewer));
                 }
               }
             }
+
+            // Exclude PR author from reviewers
+            reviewersToRequest.delete(prAuthor);
 
             // Request reviews
             if (reviewersToRequest.size > 0) {
