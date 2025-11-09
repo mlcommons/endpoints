@@ -73,7 +73,7 @@ class HttpClientSampleIssuer(SampleIssuer):
                 # Route to appropriate callback based on response type
                 match response:
                     case StreamChunk(is_complete=False):
-                        # NOTE(vir): is_completed=True should not be received, QueryResult is expected instead
+                        # NOTE(vir): is_complete=True should not be received, QueryResult is expected instead
                         SampleEventHandler.stream_chunk_complete(response)
 
                     case QueryResult(error=err):
