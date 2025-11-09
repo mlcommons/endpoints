@@ -1,0 +1,18 @@
+# Attribution
+
+This project is created and maintained by MLCommons, contributed by the community.
+
+## Third-Party Attributions
+
+This section lists third-party assets and their attributions.
+
+<!-- TODO: Populate third-party asset attributions here -->
+<!-- Format:
+### Asset Name
+- Source: [URL or reference]
+- License: [License type]
+- Copyright: [Copyright holder]
+- Description: [Brief description of use]
+-->
+
+For a complete list of dependencies and their licenses, see the requirements files in the `requirements/` directory.

@@ -185,3 +185,6 @@ tmp/
 data/
 results/
 outputs/
+
+# Cursor artifacts (local development only)
+.cursor_artifacts/

@@ -24,8 +24,8 @@ from inference_endpoint.config.schema import (
     OSLDistribution,
     OSLDistributionType,
     SubmissionReference,
-    TestType,
 )
+from inference_endpoint.config.schema import TestType as BenchmarkTestType
 
 
 class TestOSLDistribution:
@@ -105,11 +105,11 @@ class TestBenchmarkConfig:
         """Test minimal valid configuration."""
         config = BenchmarkConfig(
             name="test",
-            type=TestType.OFFLINE,
+            type=BenchmarkTestType.OFFLINE,
             datasets=[{"name": "test", "type": "performance", "path": "test.pkl"}],
         )
         assert config.name == "test"
-        assert config.type == TestType.OFFLINE
+        assert config.type == BenchmarkTestType.OFFLINE
         assert len(config.datasets) == 1
 
     def test_submission_config(self):
@@ -117,7 +117,7 @@ class TestBenchmarkConfig:
         config = BenchmarkConfig(
             name="submission",
             version="1.0",
-            type=TestType.SUBMISSION,
+            type=BenchmarkTestType.SUBMISSION,
             submission_ref=SubmissionReference(
                 model="llama-2-70b", ruleset="mlperf-inference-v6.0"
             ),
@@ -146,7 +146,7 @@ class TestBenchmarkConfig:
         """Test config with multiple accuracy datasets."""
         config = BenchmarkConfig(
             name="multi-acc",
-            type=TestType.SUBMISSION,
+            type=BenchmarkTestType.SUBMISSION,
             datasets=[
                 {
                     "name": "gpqa",

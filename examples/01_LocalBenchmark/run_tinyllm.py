@@ -38,11 +38,18 @@ from transformers.utils import logging
 logging.set_verbosity_error()  # Suppress HuggingFace warnings
 
 
-# Purely for testing, I just googled "Smallest LLM on huggingface" and found this one.
+# Example: TinyLlama for local benchmarking
+# This demonstrates using a small model from HuggingFace for testing
+# TinyLlama-1.1B-Chat is a popular small model (~4M downloads/month)
+# Note: This is a minimal example - for production use, consider larger models
 class TinyLLM:
     def __init__(self):
-        self.model = AutoModelForCausalLM.from_pretrained("arnir0/Tiny-LLM")
-        self.tokenizer = AutoTokenizer.from_pretrained("arnir0/Tiny-LLM")
+        self.model = AutoModelForCausalLM.from_pretrained(
+            "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+        )
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+        )
 
     def generate_text_streamed(
         self, prompt, max_length=512, temperature=1, top_k=50, top_p=0.95
@@ -85,9 +92,15 @@ class TinyLLM:
 
 
 class TinyDataLoader(DataLoader):
+    """Example DataLoader with hardcoded prompts for testing.
+
+    In production, you would load prompts from a dataset file.
+    """
+
     def __init__(self):
         super().__init__(None)
 
+        # Sample prompts for testing - replace with your dataset
         self.samples = [
             "Can you describe what a proof of concept is?",
             "What is the capital of France?",
@@ -107,6 +120,11 @@ class TinyDataLoader(DataLoader):
 
 
 class ProgressBarHook:
+    """Hook to update progress bar on sample completion.
+
+    This demonstrates how to use event hooks to monitor benchmark progress.
+    """
+
     def __init__(self, pbar: tqdm | None = None):
         self.pbar = pbar
 
@@ -119,13 +137,13 @@ class ProgressBarHook:
 
 
 class SerialSampleIssuer(SampleIssuer):
-    """SampleIssuer for testing. No threading, and is blocking. Whenever issue is called,
-    it performs the provided compute function, calling callbacks when necessary.
+    """Example SampleIssuer for local model benchmarking.
 
-    If computation is streamed, then the compute function should be a generator, yielding
-    the 'chunks' of the supposed response.
+    This is a synchronous, blocking issuer suitable for local testing.
+    For production endpoints, use the HTTPClient from endpoint_client module.
 
-    Otherwise, the compute function should return a singular string value.
+    If computation is streamed, the compute function should be a generator yielding
+    response chunks. Otherwise, it should return a single string response.
     """
 
     def __init__(self, compute_func=None, streaming: bool = True):
@@ -157,27 +175,44 @@ class SerialSampleIssuer(SampleIssuer):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--streaming", action="store_true")
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(
+        description="Run local benchmark with TinyLLM model"
+    )
+    parser.add_argument(
+        "--streaming",
+        action="store_true",
+        help="Enable streaming mode for TTFT metrics",
+    )
     args = parser.parse_args()
 
+    # Set up progress bar hook to monitor sample completion
     pbar_hook = ProgressBarHook()
     SampleEventHandler.register_hook(SampleEvent.COMPLETE, pbar_hook)
 
+    # Initialize dataloader with sample prompts
     dataloader = TinyDataLoader()
+
+    # Configure benchmark runtime settings
+    # Note: Using MLCommons ruleset for configuration
     user_config = UserConfig(
-        user_metric_target=2,
-        min_sample_count=100,
-        min_duration_ms=10 * 1000,
-        max_duration_ms=5 * 60 * 1000,
-        ds_subset_size=dataloader.num_samples(),  # Otherwise it will use the size of Llama3.1's dataset
+        user_metric_target=2,  # Target QPS baseline
+        min_sample_count=100,  # Minimum samples to issue
+        min_duration_ms=10 * 1000,  # 10 seconds minimum
+        max_duration_ms=5 * 60 * 1000,  # 5 minutes maximum
+        ds_subset_size=dataloader.num_samples(),  # Use all available samples
     )
+
+    # Apply user config with model specifications
     rt_settings = CURRENT.apply_user_config(
-        model=mlcommons_models.Llama3_1_8b,
+        model=mlcommons_models.Llama3_1_8b,  # Model specification for ruleset
         user_config=user_config,
     )
+
+    # Initialize the model
     model_runner = TinyLLM()
 
+    # Create sample issuer based on streaming preference
     if args.streaming:
         issuer = SerialSampleIssuer(
             compute_func=model_runner.generate_text_streamed, streaming=True
@@ -186,19 +221,24 @@ if __name__ == "__main__":
         issuer = SerialSampleIssuer(
             compute_func=model_runner.generate_text_non_streamed, streaming=False
         )
+
+    # Use max throughput scheduler for offline benchmarking
     scheduler = MaxThroughputScheduler(rt_settings, WithoutReplacementSampleOrder)
 
+    # Run the benchmark session
     n_total = rt_settings.total_samples_to_issue()
-    with tqdm(desc="poc_full_run", total=n_total, unit="samples") as pbar:
+    with tqdm(desc="Local Benchmark", total=n_total, unit="samples") as pbar:
         pbar_hook.set_pbar(pbar)
         sess = BenchmarkSession.start(
             rt_settings,
             dataloader,
             issuer,
             scheduler,
-            name="poc_full_run",
+            name="tinyllm_benchmark",
             stop_sample_issuer_on_test_end=False,
-            report_path="poc_full_run_report",
+            report_path="tinyllm_benchmark_report",
             tokenizer_override=model_runner.tokenizer,
         )
         sess.wait_for_test_end()
+
+    print("\nBenchmark complete! Results saved to tinyllm_benchmark_report/")

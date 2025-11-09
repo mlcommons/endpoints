@@ -32,7 +32,7 @@ from inference_endpoint.load_generator.scheduler import (
     WithoutReplacementSampleOrder,
 )
 from inference_endpoint.load_generator.session import BenchmarkSession
-from inference_endpoint.metrics.reporter import MetricsReporter
+from inference_endpoint.metrics.reporter import MetricsReporter, TPOTReportingMode
 
 from tests.test_helpers import create_test_query
 
@@ -206,6 +206,7 @@ def run_performance_test(
             tokenizer,
             ttft_rollup=ttft_stats,
             sample_latency_rollup=sample_latency_stats,
+            reporting_mode=TPOTReportingMode.REQUEST_WEIGHTED,
         )
         test_duration = reporter.derive_duration()
 
@@ -225,7 +226,7 @@ def run_performance_test(
         "latencies": {
             "sample_latency_p99": sample_latency_stats.percentile(99),
             "ttft_p99": ttft_stats.percentile(99) if stream else 0.0,
-            "tpot_p99": tpot_stats.percentile(99),
+            "tpot_p99": tpot_stats.percentile(99) if tpot_stats else 0.0,
         },
     }
 

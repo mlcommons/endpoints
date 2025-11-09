@@ -338,6 +338,6 @@ inference-endpoint benchmark online \
 
 **Advanced:**
 
-- Streaming: auto (default), on, or off - auto enables for online, disables for offline
+- Streaming: `auto` (default), `on`, or `off` - auto enables for online, disables for offline
 - Use `--report-path` for detailed metrics reports with TTFT, TPOT, and token analysis
 - Dataset format auto-inferred from file extension

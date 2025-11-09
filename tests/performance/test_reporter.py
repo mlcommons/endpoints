@@ -20,7 +20,7 @@ import time
 import pytest
 from inference_endpoint.load_generator.events import SampleEvent, SessionEvent
 from inference_endpoint.metrics.recorder import EventRecorder
-from inference_endpoint.metrics.reporter import MetricsReporter
+from inference_endpoint.metrics.reporter import MetricsReporter, TPOTReportingMode
 from pympler import asizeof
 
 
@@ -99,6 +99,7 @@ def test_tpot_performance(cleanup_connections):
             ttft_rollup=ttft_rollup,
             sample_latency_rollup=sample_latency_rollup,
             condense_table=True,
+            reporting_mode=TPOTReportingMode.TOKEN_WEIGHTED,
         )
 
         tpot_full, full_duration_ns = time_fn(
@@ -107,6 +108,7 @@ def test_tpot_performance(cleanup_connections):
             ttft_rollup=ttft_rollup,
             sample_latency_rollup=sample_latency_rollup,
             condense_table=False,
+            reporting_mode=TPOTReportingMode.TOKEN_WEIGHTED,
         )
 
     condensed_size = asizeof.asizeof(tpot_condensed)

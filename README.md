@@ -1,10 +1,12 @@
-# MLPerf Inference Endpoint Benchmarking System
+# MLPerf® Inference Endpoint Benchmarking System
 
 A high-performance benchmarking tool for LLM endpoints.
 
 ## Quick Start
 
 ### Installation
+
+**Requirements**: Python 3.12+ (Python 3.12 is recommended for optimal performance)
 
 ```bash
 # Clone the repository
@@ -13,7 +15,6 @@ git clone https://github.com/mlcommons/endpoints.git
 cd endpoints
 
 # Create virtual environment
-# 3.12 is the preferred Python version for optimal performance.
 python3.12 -m venv venv
 source venv/bin/activate
 
@@ -109,6 +110,15 @@ The system follows a modular, event-driven architecture:
 - **Metrics Collector**: Performance measurement and analysis
 - **Configuration Manager**: System configuration (TBD)
 
+## 🚧 Pending Features
+
+The following features are planned for future releases:
+
+- [ ] **Accuracy Evaluation** - Comprehensive accuracy metrics and validation
+- [ ] **Performance Tuning** - Advanced performance optimization features
+- [ ] **Submission Ruleset Integration** - Full MLPerf submission workflow support
+- [ ] **Documentation Generation and Hosting** - Sphinx-based API documentation with GitHub Pages
+
 ## 🤝 Contributing
 
 We welcome contributions! Please see our [Development Guide](docs/DEVELOPMENT.md) for details on:
@@ -118,15 +128,37 @@ We welcome contributions! Please see our [Development Guide](docs/DEVELOPMENT.md
 - Testing requirements
 - Pull request process
 
+## 🙏 Acknowledgements
+
+This project draws inspiration from and learns from the following excellent projects:
+
+- [MLCommons Inference](https://github.com/mlcommons/inference) - MLPerf Inference benchmark suite
+- [AIPerf](https://github.com/ai-dynamo/aiperf) - AI model performance profiling framework
+- [SGLang GenAI-Bench](https://github.com/sgl-project/genai-bench) - Token-level performance evaluation tool
+- [vLLM Benchmarks](https://github.com/vllm-project/vllm/tree/main/benchmarks) - Performance benchmarking tools for vLLM
+- [InferenceMAX](https://github.com/InferenceMAX/InferenceMAX) - LLM inference optimization toolkit
+
+We are grateful to these communities for their contributions to LLM benchmarking and performance analysis.
+
 ## 📄 License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
 
 ## 🔗 Links
 
 - [MLCommons](https://mlcommons.org/) - Machine Learning Performance Standards
 - [Project Repository](https://github.com/mlcommons/endpoints)
 - [MLPerf Inference](https://mlcommons.org/benchmarks/inference/)
+
+## 👥 Contributors
+
+Credits to core contributors of the project:
+
+- MLCommons Committee
+- NVIDIA: Zhihan Jiang, Rashid Kaleem, Viraat Chandra, Alice Cheng
+- ...
+
+See [ATTRIBUTION](ATTRIBUTION) for detailed attribution information.
 
 ## 📞 Support
 

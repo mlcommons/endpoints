@@ -19,7 +19,11 @@ import math
 import pytest
 from inference_endpoint.load_generator.events import SessionEvent
 from inference_endpoint.metrics.recorder import sqlite3_cursor
-from inference_endpoint.metrics.reporter import MetricsReporter, RollupQueryTable
+from inference_endpoint.metrics.reporter import (
+    MetricsReporter,
+    RollupQueryTable,
+    TPOTReportingMode,
+)
 
 
 class CharacterTokenizer:
@@ -48,7 +52,9 @@ def test_derive_tpot(events_db, sample_uuids, fake_outputs):
 
     with MetricsReporter(events_db) as reporter:
         reporter.outputs_path = fake_outputs.path
-        tpot_rows = reporter.derive_TPOT(CharacterTokenizer())
+        tpot_rows = reporter.derive_TPOT(
+            CharacterTokenizer(), reporting_mode=TPOTReportingMode.TOKEN_WEIGHTED
+        )
 
     # From test_derive_sample_latency and ttft:
     expected_tpot1 = (10211 - 10000 - 10) / (len(fake_outputs[uuid1]) - 1)
@@ -120,7 +126,9 @@ def test_tpot_to_histogram(
     smaller, larger = sorted([expected_tpot1, expected_tpot2])
 
     reporter = events_db_reporter_with_fake_outputs
-    tpot_rows = reporter.derive_TPOT(CharacterTokenizer())
+    tpot_rows = reporter.derive_TPOT(
+        CharacterTokenizer(), reporting_mode=TPOTReportingMode.TOKEN_WEIGHTED
+    )
 
     # This isn't documented since it's an internal detail and should not be relied on, but `n_buckets`
     # is passed directly to np.histogram, so we can specify exact buckets to use
@@ -231,6 +239,7 @@ def test_reporter_json(events_db):
         "tpot",
         "latency",
         "output_sequence_lengths",
+        "tpot_reporting_mode",
         "qps",
         "e2e_sample_latency_sec",
     ]

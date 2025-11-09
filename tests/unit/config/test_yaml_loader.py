@@ -25,8 +25,8 @@ from inference_endpoint.config.schema import (
     LoadPattern,
     LoadPatternType,
     Settings,
-    TestType,
 )
+from inference_endpoint.config.schema import TestType as BenchmarkTestType
 from inference_endpoint.config.yaml_loader import ConfigError, ConfigLoader
 
 
@@ -69,7 +69,7 @@ endpoint_config:
 
         config = ConfigLoader.load_yaml(config_file)
         assert config.name == "test-config"
-        assert config.type == TestType.OFFLINE
+        assert config.type == BenchmarkTestType.OFFLINE
         assert len(config.datasets) == 1
 
     def test_load_nonexistent_file(self):
@@ -87,7 +87,7 @@ endpoint_config:
 
     def test_create_default_offline_config(self):
         """Test creating default offline config."""
-        config = BenchmarkConfig.create_default_config(TestType.OFFLINE)
+        config = BenchmarkConfig.create_default_config(BenchmarkTestType.OFFLINE)
         assert isinstance(config, BenchmarkConfig)
         assert config.settings.load_pattern.type == LoadPatternType.MAX_THROUGHPUT
         assert config.settings.runtime.min_duration_ms == 600000
@@ -95,7 +95,7 @@ endpoint_config:
 
     def test_create_default_online_config(self):
         """Test creating default online config."""
-        config = BenchmarkConfig.create_default_config(TestType.ONLINE)
+        config = BenchmarkConfig.create_default_config(BenchmarkTestType.ONLINE)
         assert isinstance(config, BenchmarkConfig)
         assert config.settings.load_pattern.type == LoadPatternType.POISSON
         assert config.settings.load_pattern.target_qps == 10.0
@@ -104,7 +104,7 @@ endpoint_config:
     def test_serialize_deserialize_roundtrip(self, tmp_path):
         """Test BenchmarkConfig.to_yaml_file() and from_yaml_file() roundtrip."""
         # Create a config
-        original = BenchmarkConfig.create_default_config(TestType.OFFLINE)
+        original = BenchmarkConfig.create_default_config(BenchmarkTestType.OFFLINE)
 
         # Save to YAML
         yaml_file = tmp_path / "test_config.yaml"
@@ -122,7 +122,7 @@ endpoint_config:
 
     def test_to_yaml_file_creates_directory(self, tmp_path):
         """Test that to_yaml_file creates parent directories."""
-        config = BenchmarkConfig.create_default_config(TestType.ONLINE)
+        config = BenchmarkConfig.create_default_config(BenchmarkTestType.ONLINE)
 
         # Save to nested path that doesn't exist
         nested_path = tmp_path / "subdir" / "nested" / "config.yaml"
@@ -138,7 +138,7 @@ endpoint_config:
         # Create a BenchmarkConfig with insufficient max_concurrency
         config = BenchmarkConfig(
             name="test",
-            type=TestType.ONLINE,
+            type=BenchmarkTestType.ONLINE,
             datasets=[],
             endpoint_config=EndpointConfig(endpoint="http://test:8000"),
             settings=Settings(
@@ -163,7 +163,7 @@ endpoint_config:
         """Test validation passes when max_concurrency >= target_concurrency."""
         config = BenchmarkConfig(
             name="test",
-            type=TestType.ONLINE,
+            type=BenchmarkTestType.ONLINE,
             datasets=[],
             endpoint_config=EndpointConfig(endpoint="http://test:8000"),
             settings=Settings(

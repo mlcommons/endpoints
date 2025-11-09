@@ -6,7 +6,7 @@ This guide provides everything you need to contribute to the MLPerf Inference En
 
 ### Prerequisites
 
-- **Python**: 3.11 or higher
+- **Python**: 3.12+ (Python 3.12 is recommended for optimal performance)
 - **Git**: Latest version
 - **Virtual Environment**: Python venv or conda
 - **IDE**: VS Code, PyCharm, or your preferred editor
@@ -18,8 +18,8 @@ This guide provides everything you need to contribute to the MLPerf Inference En
 git clone https://github.com/mlperf/inference-endpoint.git
 cd inference-endpoint
 
-# 2. Create virtual environment
-python3.11 -m venv venv
+# 2. Create virtual environment (Python 3.12+ required)
+python3.12 -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 
 # 3. Install development dependencies
@@ -39,17 +39,26 @@ pytest --version
 ```
 inference-endpoint/
 ├── src/inference_endpoint/     # Main package source
-│   ├── core/                   # Core orchestration
-│   ├── dataset_manager/        # Dataset handling (TBD)
-│   ├── load_generator/         # Load generation (TBD)
-│   ├── endpoint_client/        # Endpoint communication (TBD)
-│   ├── metrics/                # Performance measurement (TBD)
-│   ├── config/                 # Configuration (TBD)
-│   ├── utils/                  # Common utilities
-│   └── plugins/                # Extensibility system
+│   ├── cli.py                  # Command-line interface
+│   ├── commands/               # CLI command implementations
+│   ├── config/                 # Configuration and schema management
+│   ├── core/                   # Core types and orchestration
+│   ├── dataset_manager/        # Dataset handling and loading
+│   ├── endpoint_client/        # HTTP/ZMQ endpoint communication
+│   ├── load_generator/         # Load generation and scheduling
+│   ├── metrics/                # Performance measurement and reporting
+│   ├── openai/                 # OpenAI API compatibility
+│   ├── profiling/              # Performance profiling tools
+│   ├── runtime/                # Runtime configuration
+│   ├── testing/                # Test utilities (echo server, etc.)
+│   └── utils/                  # Common utilities
 ├── tests/                      # Test suite
+│   ├── unit/                   # Unit tests
+│   ├── integration/            # Integration tests
+│   ├── performance/            # Performance tests
+│   └── datasets/               # Test datasets
 ├── docs/                       # Documentation
-├── configs/                    # Configuration files (TBD)
+├── examples/                   # Usage examples
 ├── requirements/               # Dependency management
 └── scripts/                    # Utility scripts
 ```
@@ -68,21 +77,27 @@ pytest --cov=src --cov-report=html
 # Run specific test categories
 pytest -m unit          # Unit tests only
 pytest -m integration   # Integration tests only
-pytest -m performance   # Performance tests only
+pytest -m performance   # Performance tests only (no timeout)
 
 # Run tests in parallel
 pytest -n auto
 
 # Run tests with verbose output
 pytest -v
+
+# Run specific test file
+pytest tests/unit/test_core_types.py
+
+# Run with output to file (recommended)
+pytest -v 2>&1 | tee test_results.log
 ```
 
 ### Test Structure
 
 - **Unit Tests** (`tests/unit/`): Test individual components in isolation
-- **Integration Tests** (`tests/integration/`): Test component interactions
-- **Performance Tests** (`tests/performance/`): Test performance characteristics
-- **Fixtures** (`tests/fixtures/`): Test data and mock objects
+- **Integration Tests** (`tests/integration/`): Test component interactions with real servers
+- **Performance Tests** (`tests/performance/`): Test performance characteristics (marked with @pytest.mark.performance, no timeout)
+- **Test Datasets** (`tests/datasets/`): Sample datasets for testing (dummy_1k.pkl, squad_pruned/)
 
 ### Writing Tests
 
@@ -273,9 +288,8 @@ python -m pdb -m pytest test_file.py
 ### Adding Dependencies
 
 1. **Base Dependencies** (`requirements/base.txt`): Required for package to function
-2. **Development Dependencies** (`requirements/dev.txt`): Development tools and testing
-3. **Test Dependencies** (`requirements/test.txt`): Testing framework and utilities
-4. **Performance Dependencies** (`requirements/performance.txt`): Performance testing tools
+2. **Development Dependencies** (`requirements/dev.txt`): Development tools, linters, and pre-commit hooks
+3. **Test Dependencies** (`requirements/test.txt`): Testing framework and utilities (pytest, pytest-asyncio, etc.)
 
 ### Updating Dependencies
 

@@ -46,10 +46,6 @@ from inference_endpoint.metrics.reporter import MetricsReporter
 from inference_endpoint.testing.docker_server import DockerServer
 from inference_endpoint.testing.echo_server import EchoServer, HTTPServer
 
-# TODO: Only token_weighted is tested, test query weighted later
-os.environ["TPOT_REPORTING_MODE"] = "token_weighted"
-
-
 logger = logging.getLogger(__name__)
 # Add src to path for imports
 src_path = str(Path(__file__).parent.parent / "src")
