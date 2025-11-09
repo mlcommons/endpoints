@@ -483,7 +483,10 @@ def _run_benchmark(
             logger.info("Streaming: disabled (auto, offline mode)")
 
     try:
-        key_maps = [d.parser for d in config.datasets if d.parser]
+        if any(d.parser for d in config.datasets):
+            key_maps = [d.parser for d in config.datasets]
+        else:
+            key_maps = None
         logger.info(f"Parser key maps: {key_maps}")
 
         dataloader = DataLoaderFactory.create_loader(

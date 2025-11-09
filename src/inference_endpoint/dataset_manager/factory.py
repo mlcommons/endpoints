@@ -44,7 +44,7 @@ class DataLoaderFactory:
     def create_loader(
         dataset_path: Path | str,
         format: str = "pkl",
-        key_maps: dict[str, str] | None = None,
+        key_maps: list[dict[str, str]] | None = None,
         metadata: dict | None = None,
         **kwargs,
     ) -> DataLoader:
