@@ -77,7 +77,6 @@ class TestOpenAIAPITypes:
             if message["role"] == "user":
                 assert message["content"] == "Test prompt"
             # TODO : cleanup this once we have a way to handle the assistant message
-            # else:
             #     assert message["content"] == "You are a helpful assistant."
 
     def test_create_chat_completion_response_from_query_result(self):
