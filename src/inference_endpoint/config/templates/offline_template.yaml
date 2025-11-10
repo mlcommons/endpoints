@@ -4,6 +4,7 @@ version: "1.0"
 type: "offline"
 
 model_params:
+  name: "meta-llama/Llama-3.1-8B-Instruct"
   temperature: 0.7
   top_p: 0.9
   max_new_tokens: 1024
@@ -11,14 +12,16 @@ model_params:
 datasets:
   - name: "perf-test"
     type: "performance"
-    path: "datasets/openorca.pkl"
+    path: "tests/datasets/dummy_1k.pkl"
     format: "pkl"
     samples: 1000
+    parser:
+      prompt: "text_input"
 
 settings:
   runtime:
-    min_duration_ms: 600000 # 10 minutes
-    max_duration_ms: 1800000 # 30 minutes
+    min_duration_ms: 60000 # 1 minutes
+    max_duration_ms: 180000 # 3 minutes
     scheduler_random_seed: 42 # For Poisson/distribution sampling
     dataloader_random_seed: 42 # For dataset shuffling
 

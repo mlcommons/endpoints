@@ -135,6 +135,7 @@ class OSLDistribution(BaseModel):
 class ModelParams(BaseModel):
     """Model generation parameters."""
 
+    name: str | None = None
     temperature: float = 0.7
     top_k: int | None = None
     top_p: float | None = None
@@ -179,9 +180,10 @@ class Dataset(BaseModel):
     name: str
     type: DatasetType
     path: str
-    format: str = "pkl"
+    format: str | None = None
     samples: int | None = None
     eval_method: EvalMethod | None = None
+    parser: dict | None = None
 
 
 class RuntimeConfig(BaseModel):

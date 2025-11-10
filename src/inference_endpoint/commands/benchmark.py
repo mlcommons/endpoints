@@ -176,7 +176,9 @@ async def run_benchmark_command(args: argparse.Namespace) -> None:
         # ===== YAML MODE - Load from config file =====
         config_path = args.config  # Required by argparse
         try:
-            effective_config = ConfigLoader.load_yaml(Path(config_path))
+            effective_config: BenchmarkConfig = ConfigLoader.load_yaml(
+                Path(config_path)
+            )
 
             # Only auxiliary params allowed (output)
             mode_str = getattr(args, "mode", None)
@@ -203,7 +205,9 @@ async def run_benchmark_command(args: argparse.Namespace) -> None:
     elif benchmark_mode_str in ("offline", "online"):
         # ===== CLI MODE - Build config from CLI params =====
         benchmark_mode = TestType(benchmark_mode_str)  # TestType values are lowercase
-        effective_config = _build_config_from_cli(args, benchmark_mode_str)
+        effective_config: BenchmarkConfig = _build_config_from_cli(
+            args, benchmark_mode_str
+        )
         test_mode = (
             TestMode(args.mode) if getattr(args, "mode", None) else TestMode.PERF
         )
@@ -265,7 +269,7 @@ def _build_config_from_cli(
                 name=args.dataset.stem,
                 type=DatasetType.PERFORMANCE,
                 path=str(args.dataset),
-                format="pkl",  # Will be inferred by DataLoaderFactory
+                format=None,  # Will be inferred by DataLoaderFactory
             )
         ],
         settings=Settings(
@@ -291,6 +295,7 @@ def _build_config_from_cli(
             ),
         ),
         model_params=ModelParams(
+            name=args.model,
             temperature=0.7,
             max_new_tokens=args.max_output_tokens if args.max_output_tokens else 1024,
             osl_distribution=OSLDistribution(
@@ -329,8 +334,7 @@ def _get_dataset_path(args: argparse.Namespace, config: BenchmarkConfig) -> Path
     2. Validate all dataset paths exist
     3. Support dataset interleaving strategies
     """
-    # Priority: CLI args > config
-    if args.dataset:
+    if hasattr(args, "dataset") and args.dataset:
         dataset_path = Path(args.dataset)
     else:
         # TODO: Multi-dataset - currently just picks single dataset
@@ -433,6 +437,8 @@ def _run_benchmark(
     model_name = getattr(args, "model", None)
     if not model_name and config.submission_ref:
         model_name = config.submission_ref.model
+    if not model_name and config.model_params.name:
+        model_name = config.model_params.name
 
     if model_name:
         try:
@@ -478,17 +484,17 @@ def _run_benchmark(
             logger.info("Streaming: disabled (auto, offline mode)")
 
     try:
-        # Create loader using factory
-        def parser(x):
-            return {
-                "prompt": x.text_input,
-                "output": x.ref_output,
-                "model": model_name,
-                "stream": enable_streaming,  # Enable streaming only for online mode
-            }
+        if any(d.parser for d in config.datasets):
+            key_maps = [d.parser for d in config.datasets]
+        else:
+            key_maps = None
+        logger.info(f"Parser key maps: {key_maps}")
 
         dataloader = DataLoaderFactory.create_loader(
-            dataset_path, format=dataset_format, parser=parser
+            dataset_path,
+            format=dataset_format,
+            key_maps=key_maps,
+            metadata={"model": model_name, "stream": enable_streaming},
         )
         dataloader.load()
         logger.info(f"Loaded {dataloader.num_samples()} samples")

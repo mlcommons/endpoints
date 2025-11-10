@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 import pickle
 from abc import ABC, abstractmethod
 from collections.abc import Callable
@@ -158,7 +159,7 @@ class PickleReader(DataLoader):
         self.parser = parser
         self.logger = getLogger(__name__)
         if parser is None:
-
+            # TODO : remove this default implementation
             def extract_text_input(row):
                 return row.text_input
 
@@ -228,7 +229,9 @@ class PickleReader(DataLoader):
         Loads a sample from the data.
         """
         assert self.loaded, "Data is not loaded. Call load() to load the data."
-        return self.parser(self.data.iloc[index])
+        x = self.parser(self.data.iloc[index])
+        self.logger.debug(f"Loaded sample from pickle file at {index} with keys: {x}")
+        return x
 
     def get_column_names(self):
         return self.data.columns
@@ -289,3 +292,34 @@ class DeepSeekR1ChatCompletionDataLoader(PickleReader):
             parser (Callable[[Any], Any], optional): Callable to parse individual data samples. If not provided, defaults to the parent class's parsing mechanism.
         """
         super().__init__(file_path, parser=parser)
+
+
+class JsonlReader(DataLoader):
+    def __init__(
+        self,
+        file_path,
+        parser: Callable[[Any], Any] = None,
+        metadata: dict | None = None,
+    ):
+        if parser is None:
+            # TODO: Implement a parser interface where yaml files specify the fields to pars
+            def default_parser(x):
+                # Use cnn/daily mail dataset as an example for now.
+                return {"prompt": x["article"]} | metadata
+
+            parser = default_parser
+        super().__init__()
+        self.file_path = file_path
+        self.data = []
+        self.parser = parser
+
+    def load(self):
+        with open(self.file_path) as file:
+            for line in file:
+                self.data.append(self.parser(json.loads(line)))
+
+    def load_sample(self, index: int) -> Any:
+        return self.data[index]
+
+    def num_samples(self):
+        return len(self.data)
