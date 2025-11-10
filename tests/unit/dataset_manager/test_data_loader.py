@@ -13,7 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from inference_endpoint.dataset_manager.dataloader import HFDataLoader, PickleReader
+import pytest
+from inference_endpoint.dataset_manager.dataloader import (
+    HFDataLoader,
+    PickleReader,
+    RandomDataLoader,
+)
+from transformers import AutoTokenizer
 
 
 def test_ds_pickle_reader(ds_pickle_reader):
@@ -82,3 +88,45 @@ def test_custom_parser_hf_squad_dataset(hf_squad_dataset_path):
     assert "id" not in sample
     assert all(k in sample for k in ["title", "context", "question", "answers"])
     assert sample["title"] == "Egypt"
+
+
+@pytest.mark.parametrize("range_ratio", [0.5, 0.8, 1.0])
+def test_random_data_loader(range_ratio):
+    num_sequences = 1024
+    input_seq_length = 1024
+    random_seed = 42
+    vocab_size = 1024
+    tokenizer = AutoTokenizer.from_pretrained("TinyLlama/TinyLlama-1.1B-Chat-v1.0")
+    save_tokenized_data = True
+    random_data_loader = RandomDataLoader(
+        num_sequences=num_sequences,
+        input_seq_length=input_seq_length,
+        range_ratio=range_ratio,
+        random_seed=random_seed,
+        vocab_size=vocab_size,
+        tokenizer=tokenizer,
+        save_tokenized_data=save_tokenized_data,
+    )
+    assert (
+        len(random_data_loader.data) == num_sequences
+    ), f"Expected {num_sequences} samples, got {len(random_data_loader.data)}"
+    # Note that the input tokens are only loaded if save_tokenized_data is True, useful for debugging or other purposes
+    assert (
+        len(random_data_loader.input_tokens) == num_sequences
+    ), f"Expected {num_sequences} input tokens, got {len(random_data_loader.input_tokens)}"
+    # Go over the data and check the input tokens and the data length
+    for i in range(len(random_data_loader.data)):
+        assert isinstance(
+            random_data_loader.data[i], list
+        ), f"Expected list, got {type(random_data_loader.data[i])}"
+        # Note that the number of tokens can be smaller than the input_seq_length * range ration due to
+        # the decoding-encoding which may coalesce some sequences to newer tokens. We use a 0.8 factor to allow for this.
+        assert (
+            len(random_data_loader.input_tokens[i])
+            > input_seq_length * range_ratio * 0.8
+            and len(random_data_loader.input_tokens[i]) <= input_seq_length
+        ), f"Expected {input_seq_length*range_ratio} to {input_seq_length} input tokens, got {len(random_data_loader.input_tokens[i])}"
+        assert (
+            len(random_data_loader.data[i]) >= 1024 * range_ratio * 0.5
+            and len(random_data_loader.data[i]) <= 1024
+        ), f"Expected length between 1024*range_ratio*0.5 and 1024, got {len(random_data_loader.data[i])}"
