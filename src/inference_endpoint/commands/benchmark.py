@@ -332,7 +332,6 @@ def _get_dataset_path(args: argparse.Namespace, config: BenchmarkConfig) -> Path
     2. Validate all dataset paths exist
     3. Support dataset interleaving strategies
     """
-    # Priority: CLI args > config
     if hasattr(args, "dataset") and args.dataset:
         dataset_path = Path(args.dataset)
     else:

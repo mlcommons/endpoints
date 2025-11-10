@@ -29,7 +29,6 @@ from .openai_types_gen import (
     ModelIdsShared,
     Object7,
     ReasoningEffort,
-    Role,
     Role5,
     Role6,
     ServiceTier,
@@ -71,14 +70,14 @@ class OpenAIAdapter:
 
         request = CreateChatCompletionRequest(
             model=ModelIdsShared(query.data.get("model", "no-model-name")),
-            # service_tier=ServiceTier.auto,
             reasoning_effort=ReasoningEffort.medium,
             messages=[
                 {"role": Role5.user.value, "content": query.data["prompt"]},
-                {
-                    "role": Role.assistant.value,
-                    "content": "You are a helpful assistant.",
-                },
+                # TODO remove this once we have a way to handle the assistant message
+                # {
+                #     "role": Role.assistant.value,
+                #     "content": "You are a helpful assistant.",
+                # },
             ],
             stream=query.data.get("stream", False),
             max_completion_tokens=query.data.get("max_completion_tokens", 100),

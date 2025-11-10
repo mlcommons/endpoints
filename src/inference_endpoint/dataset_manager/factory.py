@@ -68,7 +68,7 @@ class DataLoaderFactory:
 
         def parser(x):
             # TODO : handle the entire key_maps list
-            return {k: x[v] for k, v in key_maps[0].items()} | metadata
+            return {k: x[v] for k, v in key_maps[0].items()} | (metadata or {})
 
         format = format.lower()
         if format == "pkl" or format == "pickle":
