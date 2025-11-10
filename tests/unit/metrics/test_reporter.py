@@ -26,11 +26,6 @@ from inference_endpoint.metrics.reporter import (
 )
 
 
-class CharacterTokenizer:
-    def tokenize(self, text: str) -> list[str]:
-        return list(text)
-
-
 def test_derive_ttft(events_db, sample_uuids):
     uuid1 = sample_uuids(1)
     uuid2 = sample_uuids(2)
@@ -46,24 +41,24 @@ def test_derive_ttft(events_db, sample_uuids):
     assert ttft_rows.filter_uuid("asdf", only_first=False) == ()
 
 
-def test_derive_tpot(events_db, sample_uuids, fake_outputs):
+def test_derive_tpot(events_db, sample_uuids, fake_outputs, tokenizer):
     uuid1 = sample_uuids(1)
     uuid2 = sample_uuids(2)
 
     with MetricsReporter(events_db) as reporter:
         reporter.outputs_path = fake_outputs.path
         tpot_rows = reporter.derive_TPOT(
-            CharacterTokenizer(), reporting_mode=TPOTReportingMode.TOKEN_WEIGHTED
+            tokenizer, reporting_mode=TPOTReportingMode.TOKEN_WEIGHTED
         )
 
     # From test_derive_sample_latency and ttft:
-    expected_tpot1 = (10211 - 10000 - 10) / (len(fake_outputs[uuid1]) - 1)
-    expected_tpot2 = (10219 - 10003 - 187) / (len(fake_outputs[uuid2]) - 1)
+    expected_tpot1 = (10211 - 10000 - 10) / len(fake_outputs[uuid1][1])
+    expected_tpot2 = (10219 - 10003 - 187) / len(fake_outputs[uuid2][1])
 
     tpot1 = tpot_rows.filter_uuid(uuid1, only_first=False)
     tpot2 = tpot_rows.filter_uuid(uuid2, only_first=False)
-    assert len(tpot1) == len(fake_outputs[uuid1]) - 1
-    assert len(tpot2) == len(fake_outputs[uuid2]) - 1
+    assert len(tpot1) == len(fake_outputs[uuid1][1])
+    assert len(tpot2) == len(fake_outputs[uuid2][1])
     assert all(tpot == expected_tpot1 for tpot in tpot1)
     assert all(tpot == expected_tpot2 for tpot in tpot2)
 
@@ -116,31 +111,44 @@ def test_derive_duration_malformed(tmp_path):
 
 
 def test_tpot_to_histogram(
-    events_db_reporter_with_fake_outputs, fake_outputs, sample_uuids
+    events_db_reporter_with_fake_outputs, fake_outputs, tokenizer, sample_uuids
 ):
     uuid1 = sample_uuids(1)
     uuid2 = sample_uuids(2)
 
-    expected_tpot1 = (10211 - 10000 - 10) / (len(fake_outputs[uuid1]) - 1)
-    expected_tpot2 = (10219 - 10003 - 187) / (len(fake_outputs[uuid2]) - 1)
-    smaller, larger = sorted([expected_tpot1, expected_tpot2])
+    expected = [
+        {
+            "tpot": (10211 - 10000 - 10) / len(fake_outputs[uuid1][1]),
+            "count": len(fake_outputs[uuid1][1]),
+        },
+        {
+            "tpot": (10219 - 10003 - 187) / len(fake_outputs[uuid2][1]),
+            "count": len(fake_outputs[uuid2][1]),
+        },
+    ]
+    expected.sort(key=lambda x: x["tpot"])
+
+    bucket_boundaries = [
+        expected[0]["tpot"] - 1,
+        (expected[0]["tpot"] + expected[1]["tpot"]) / 2,
+        expected[1]["tpot"] + 1,
+    ]
 
     reporter = events_db_reporter_with_fake_outputs
     tpot_rows = reporter.derive_TPOT(
-        CharacterTokenizer(), reporting_mode=TPOTReportingMode.TOKEN_WEIGHTED
+        tokenizer, reporting_mode=TPOTReportingMode.TOKEN_WEIGHTED
     )
 
     # This isn't documented since it's an internal detail and should not be relied on, but `n_buckets`
     # is passed directly to np.histogram, so we can specify exact buckets to use
-    bucket_boundaries = [smaller - 1, (smaller + larger) / 2, larger + 1]
     buckets, counts = tpot_rows.to_histogram(n_buckets=bucket_boundaries)
     assert len(buckets) == 2
     assert len(counts) == 2
 
     assert buckets[0] == (bucket_boundaries[0], bucket_boundaries[1])
     assert buckets[1] == (bucket_boundaries[1], bucket_boundaries[2])
-    assert counts[0] == len(fake_outputs[uuid1]) - 1
-    assert counts[1] == len(fake_outputs[uuid2]) - 1
+    assert counts[0] == expected[0]["count"]
+    assert counts[1] == expected[1]["count"]
 
 
 def test_percentile():
@@ -184,9 +192,8 @@ def test_rollup_summarize(events_db):
         assert summary["percentiles"][s] == latencies.percentile(percentile)
 
 
-def test_reporter_create_report(events_db_reporter_with_fake_outputs):
+def test_reporter_create_report(events_db_reporter_with_fake_outputs, tokenizer):
     reporter = events_db_reporter_with_fake_outputs
-    tokenizer = CharacterTokenizer()
 
     report = reporter.create_report(tokenizer)
 

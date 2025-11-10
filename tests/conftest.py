@@ -283,6 +283,16 @@ def events_db(tmp_path, sample_uuids):
     logger.info(f"Events database at {test_db} deleted")
 
 
+class CharacterTokenizer:
+    def tokenize(self, text: str) -> list[str]:
+        return list(text)
+
+
+@pytest.fixture
+def tokenizer():
+    return CharacterTokenizer()
+
+
 @pytest.fixture
 def fake_outputs(tmp_path, sample_uuids):
     """Returns the path to a temporary file, containing fake outputs for the events_db fixture."""
@@ -297,8 +307,8 @@ def fake_outputs(tmp_path, sample_uuids):
 
     output_path = tmp_path / "outputs.jsonl"
     fake_outputs = FakeOutputs(output_path)
-    fake_outputs[uuid1] = "Hello, world"
-    fake_outputs[uuid2] = "And goodbye."
+    fake_outputs[uuid1] = ["Hello, ", "world"]
+    fake_outputs[uuid2] = ["And ", "goodbye."]
 
     # Generate test outputs file
     with output_path.open("w") as f:

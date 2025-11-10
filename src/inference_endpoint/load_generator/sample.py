@@ -149,6 +149,7 @@ class _SampleEventHandler:
                 SampleEvent.FIRST_CHUNK,
                 timestamp_ns,
                 sample_uuid=chunk.id,
+                output=chunk.response_chunk,
             )
             hooks = self.first_chunk_hooks
         else:

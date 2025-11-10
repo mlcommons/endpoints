@@ -741,11 +741,18 @@ class MetricsReporter:
                 data = orjson.loads(line)
                 sample_uuid = data["s_uuid"]
                 output = data["output"]
-                output_tokens = tokenizer.tokenize(output)
-                n_non_first_tokens = len(output_tokens) - 1
-
-                if n_non_first_tokens <= 0:
+                if not isinstance(output, list):  # JSON always deserializes to list
                     continue
+                elif len(output) < 2:
+                    continue
+
+                if len(output) > 2:
+                    non_first_chunk = "".join(output[1:])
+                else:
+                    non_first_chunk = output[1]
+
+                non_first_tokens = tokenizer.tokenize(non_first_chunk)
+                n_non_first_tokens = len(non_first_tokens)
 
                 latency = sample_latency_rollup.filter_uuid(
                     sample_uuid, only_first=True
@@ -755,9 +762,10 @@ class MetricsReporter:
 
                 ttft = ttft_rollup.filter_uuid(sample_uuid, only_first=True)
                 if ttft is None:
-                    # Non-streaming mode, no TTFT available, group first token with others
-                    ttft = 0
-                    n_non_first_tokens += 1
+                    # Non-streaming mode for this sample - error
+                    raise RuntimeError(
+                        f"No TTFT found for sample {sample_uuid} in streaming mode"
+                    )
 
                 avg_tpot = (latency - ttft) / n_non_first_tokens
 

@@ -394,11 +394,11 @@ class Worker:
                     first_chunk_sent = True
 
             # Send final complete response
-            final_output = "".join(accumulated_content)
+            non_first_chunk_str = "".join(accumulated_content[1:])
             await self._response_socket.send(
                 QueryResult(
                     id=query.id,
-                    response_output=final_output,
+                    response_output=[accumulated_content[0], non_first_chunk_str],
                     metadata={"first_chunk": not first_chunk_sent, "final_chunk": True},
                 )
             )
