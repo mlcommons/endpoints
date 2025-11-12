@@ -1,10 +1,10 @@
-# Offline Throughput Benchmark
-name: "offline-benchmark"
+# Online Latency Benchmark
+name: "online-llama2-70b-cnn-benchmark"
 version: "1.0"
-type: "offline"
+type: "online"
 
 model_params:
-  name: "meta-llama/Llama-3.1-8B-Instruct"
+  name: "meta-llama/Llama-2-70b-chat-hf"
   temperature: 0.7
   top_p: 0.9
   max_new_tokens: 1024
@@ -20,13 +20,14 @@ datasets:
 
 settings:
   runtime:
-    min_duration_ms: 6000 # 10 minutes
-    max_duration_ms: 18000 # 30 minutes
-    scheduler_random_seed: 137 # For Poisson/distribution sampling
-    dataloader_random_seed: 111 # For dataset shuffling
+    min_duration_ms: 60000 # 10 minutes
+    max_duration_ms: 180000 # 30 minutes
+    scheduler_random_seed: 42 # For Poisson/distribution sampling
+    dataloader_random_seed: 42 # For dataset shuffling
 
   load_pattern:
     type: "max_throughput"
+    target_qps: 10
 
   client:
     workers: 4

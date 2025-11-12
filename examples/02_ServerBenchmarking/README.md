@@ -11,7 +11,7 @@ We are going to use [meta-llama/Llama-3.1-8B-Instruct](https://huggingface.co/me
 The following environment variables are used by the commands below to make the scripts easier to run
 
 ```
-export HF_TOKEN=<your huggingface token>
+export HF_TOKEN=<your Hugging Face token>
 export HF_HOME=<Path to your hf_home, usually /USERNAME/.cache/huggingface>
 export MODEL_NAME=<model to run, for instance meta-llama/Llama-3.1-8B-Instruct>
 ```
@@ -27,9 +27,9 @@ docker run --runtime nvidia --gpus all -v ${HF_HOME}:/root/.cache/huggingface --
 
 ```
 
-### [SgLang](https://github.com/sgl-project/sglang)
+### [SGLang](https://github.com/sgl-project/sglang)
 
-For SgLang, we use a similar docker command:
+For SGLang, we use a similar docker command:
 
 ```
 docker run --gpus all --shm-size 32g --net host -v ${HF_HOME}:/root/.cache/huggingface --env HF_TOKEN=${HF_TOKEN} --ipc=host lmsysorg/sglang:latest python3 -m sglang.launch_server --model-path ${MODEL_NAME} --host 0.0.0.0 --port 8000 --tp-size 1 --enable-metrics
@@ -41,7 +41,7 @@ On some platforms, docker is replaced by enroot to provide virtualization. The f
 
 ```
 enroot import docker://vllm/vllm-openai:latest
-enroot start -e HF_TOKEN=$HF_TOKEN -m $HF_HOME:/root/.cache/huggingface vllm+vllm-openai+latest.sqsh  --model ${MODEL_NAME}$
+enroot start -e HF_TOKEN=$HF_TOKEN -m $HF_HOME:/root/.cache/huggingface vllm+vllm-openai+latest.sqsh  --model ${MODEL_NAME}
 ```
 
 ## Launching the client
@@ -58,7 +58,7 @@ To run [llama2-70b](https://huggingface.co/meta-llama/Llama-2-70b-chat-hf) on a 
 
 ```
 export MODEL_NAME=meta-llama/Llama-2-70b-chat-hf
-export HF_TOKEN=<your hugging face token>
+export HF_TOKEN=<your Hugging Face token>
 hf download $MODEL_NAME
 
 ```
@@ -81,6 +81,6 @@ dataset["train"].to_json("cnn_dailymail_train.json")
 And then launch the example template.
 
 ```
-inference-endpoint benchmark from-config -c src/inference_endpoint/config/templates/online_llama2_70b_cnn.yaml --timeout 600
+inference-endpoint benchmark from-config -c examples/02_ServerBenchmarking/online_llama2_70b_cnn.yaml --timeout 600
 
 ```
