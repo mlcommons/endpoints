@@ -207,6 +207,7 @@ class RoundRuleset(BenchmarkSuiteRuleset):
             min_sample_count=min_sample_count,
             rng_sched=random.Random(self.scheduler_rng_seed),
             rng_sample_index=random.Random(self.sample_index_rng_seed),
+            load_pattern=None,  # not part user config
             optimization_priority=opt_prio,
             model=model,
             rules=ruleset,

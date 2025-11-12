@@ -35,7 +35,7 @@ class LoadPatternType(str, Enum):
 
     MAX_THROUGHPUT = "max_throughput"  # Offline: all queries at t=0
     POISSON = "poisson"  # Online: fixed QPS with Poisson distribution
-    CONCURRENCY = "concurrency"  # Online: fixed concurrent requests (TODO)
+    CONCURRENCY = "concurrency"  # Online: fixed concurrent requests
     BURST = "burst"  # Burst pattern (TODO)
     STEP = "step"  # Step pattern (TODO)
 
@@ -217,14 +217,14 @@ class LoadPattern(BaseModel):
     Different patterns use target_qps differently:
     - max_throughput: target_qps used for calculating total queries (offline, optional with default)
     - poisson: target_qps sets scheduler rate (online, required - validated)
-    - concurrency: target_qps not used, concurrency limit dominates (TODO)
+    - concurrency: issue at fixed target_concurrency (online, required - validated)
     """
 
     type: LoadPatternType = LoadPatternType.MAX_THROUGHPUT
     target_qps: float | None = (
         None  # Target QPS - required for poisson pattern, optional otherwise
     )
-    target_concurrency: int | None = None  # For concurrency mode (TODO)
+    target_concurrency: int | None = None  # For concurrency mode, ignored otherwise
 
 
 class ClientSettings(BaseModel):
@@ -314,7 +314,8 @@ class BenchmarkConfig(BaseModel):
     version: str = "1.0"
     type: TestType
     submission_ref: SubmissionReference | None = None  # For SUBMISSION type configs
-    benchmark_mode: TestType | None = None  # For SUBMISSION: specify offline or online
+    # For SUBMISSION: specify offline or online
+    benchmark_mode: TestType | None = None
     model_params: ModelParams = Field(default_factory=ModelParams)
     datasets: list[Dataset]
     settings: Settings = Field(default_factory=Settings)
@@ -433,7 +434,7 @@ class BenchmarkConfig(BaseModel):
         """
         load_pattern_type = self.settings.load_pattern.type
         target_qps = self.settings.load_pattern.target_qps
-        max_concurrency = self.settings.client.max_concurrency
+        target_concurrency = self.settings.load_pattern.target_concurrency
 
         if benchmark_mode == TestType.OFFLINE:
             if load_pattern_type != LoadPatternType.MAX_THROUGHPUT:
@@ -451,11 +452,11 @@ class BenchmarkConfig(BaseModel):
                         "Specify target queries per second (e.g., target_qps: 100 in YAML or --target-qps 100 in CLI)"
                     )
             elif load_pattern_type == LoadPatternType.CONCURRENCY:
-                # Concurrency pattern requires max_concurrency > 0
-                if not max_concurrency or max_concurrency <= 0:
+                # Concurrency pattern requires target_concurrency > 0
+                if not target_concurrency or target_concurrency <= 0:
                     raise ValueError(
-                        "Concurrency load pattern requires max_concurrency > 0. "
-                        "Specify number of concurrent requests (e.g., max_concurrency: 10 in YAML or --concurrency 10 in CLI)"
+                        "Concurrency load pattern requires target_concurrency > 0. "
+                        "Specify number of concurrent requests (e.g., target_concurrency: 10 under load_pattern in YAML or --concurrency 10 in CLI)"
                     )
 
     def validate_client_settings(self) -> None:
