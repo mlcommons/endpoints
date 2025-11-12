@@ -138,7 +138,7 @@ class TestBuildConfigFromCLI:
         assert config.settings.load_pattern.type.value == "poisson"
         assert config.settings.load_pattern.target_qps == 100.0
         assert config.settings.client.workers == 8
-        assert config.settings.client.max_concurrency == 64
+        assert config.settings.client.max_concurrency == -1
         assert config.settings.runtime.min_duration_ms == 600000
 
     # Note: Tests for missing endpoint/dataset/model removed
@@ -259,7 +259,7 @@ endpoint_config:
             # concurrency=None (default) - should raise error from config validation
         )
 
-        with pytest.raises(InputValidationError, match="requires max_concurrency"):
+        with pytest.raises(InputValidationError, match="requires target_concurrency"):
             await run_benchmark_command(args)
 
     # Note: Testing unsupported load patterns requires full integration

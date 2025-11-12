@@ -14,11 +14,13 @@
 # limitations under the License.
 
 import random
+import threading
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator
 
 from ..config.runtime_settings import RuntimeSettings
 from ..config.schema import LoadPatternType
+from .sample import SampleEvent, SampleEventHandler
 
 
 class SampleOrder(ABC):
@@ -240,6 +242,7 @@ class Scheduler:
     Built-in schedulers:
     - MaxThroughputScheduler: Issues all queries immediately (offline mode)
     - PoissonDistributionScheduler: Poisson-distributed delays (online mode)
+    - ConcurrencyScheduler: Fixed concurrency level (online mode)
 
     Attributes:
         _IMPL_MAP: Class-level registry mapping LoadPatternType to Scheduler classes.
@@ -359,3 +362,57 @@ class PoissonDistributionScheduler(Scheduler, load_pattern=LoadPatternType.POISS
             expected_queries_per_second=self.runtime_settings.metric_target.target,
             rng=self.runtime_settings.rng_sched,
         )
+
+
+class ConcurrencyScheduler(Scheduler, load_pattern=LoadPatternType.CONCURRENCY):
+    """Concurrency-based scheduler that maintains fixed concurrent requests.
+
+    Issues queries based on COMPLETION events rather than time delays.
+    Maintains target concurrency level (e.g., always 32 requests in-flight).
+
+    Auto-registers for LoadPatternType.CONCURRENCY.
+    """
+
+    def __init__(self, runtime_settings: RuntimeSettings, sample_order_cls):
+        super().__init__(runtime_settings, sample_order_cls)
+
+        target_concurrency = runtime_settings.load_pattern.target_concurrency
+        if target_concurrency is None or target_concurrency <= 0:
+            raise ValueError(
+                f"target_concurrency must be > 0 for CONCURRENCY load pattern, got {target_concurrency}"
+            )
+
+        # Use threading.Condition for concurrency control with explicit counter
+        self._condition = threading.Condition()
+        self._inflight = 0
+        self._target_concurrency = target_concurrency
+
+        # Register completion hook - free up slot when query completes
+        SampleEventHandler.register_hook(SampleEvent.COMPLETE, self._release_slot)
+
+        # Unused (required by Scheduler interface)
+        self.delay_fn = lambda: 0
+
+    def _release_slot(self, result=None):
+        """Release a concurrency slot and notify waiting threads.
+
+        Args:
+            result: QueryResult from completed query (unused, required by hook signature)
+        """
+        with self._condition:
+            self._inflight -= 1
+            self._condition.notify()
+
+    def __iter__(self):
+        """
+        Iterate over sample indices to issue.
+        Yields sample indices until total_samples_to_issue is reached.
+
+        Waits for available concurrency slot before yielding each sample index.
+        """
+        for s_idx in self.sample_order:
+            with self._condition:
+                while self._inflight >= self._target_concurrency:
+                    self._condition.wait()
+                self._inflight += 1
+            yield s_idx, 0

@@ -73,26 +73,21 @@ class HttpClientSampleIssuer(SampleIssuer):
                 # Route to appropriate callback based on response type
                 match response:
                     case StreamChunk(is_complete=False):
+                        # NOTE(vir): is_complete=True should not be received, QueryResult is expected instead
                         SampleEventHandler.stream_chunk_complete(response)
-                    case StreamChunk(is_complete=True):
-                        raise NotImplementedError(
-                            "StreamChunk(is_complete=True) should not be received, QueryResult is expected instead"
-                        )
-                    case QueryResult(error=err) if err is not None:
-                        logger.error(f"Error in request {response.id}: {err}")
+
+                    case QueryResult(error=err):
                         SampleEventHandler.query_result_complete(response)
-                        # TODO verify if we need to update the count even if there is an error
-                        self.n_inflight -= 1
-                        if self.n_inflight == 0:
-                            self._client_idle_event.set()
-                    case QueryResult():
-                        SampleEventHandler.query_result_complete(response)
+                        if err is not None:
+                            logger.error(f"Error in request {response.id}: {err}")
 
                         self.n_inflight -= 1
                         if self.n_inflight == 0:
                             self._client_idle_event.set()
+
                     case _:
                         raise ValueError(f"Unexpected response type: {type(response)}")
+
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -102,8 +97,12 @@ class HttpClientSampleIssuer(SampleIssuer):
     @profile
     def issue(self, sample: Sample):
         """Issue sample to HTTP endpoint."""
+        # TODO(vir):
+        # we were paying idle-event cost on every issue
+        # Q&D fix for now, move idle-check into HttpClient itself
+        if self.n_inflight == 0:
+            self._client_idle_event.clear()
         self.n_inflight += 1
-        self._client_idle_event.clear()
         self.http_client.issue_query(Query(id=sample.uuid, data=sample.data))
 
     def wait_for_all_complete(self, timeout: float | None = None):

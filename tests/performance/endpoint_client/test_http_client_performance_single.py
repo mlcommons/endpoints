@@ -23,8 +23,9 @@ from pathlib import Path
 import pytest
 from inference_endpoint import metrics
 from inference_endpoint.config.runtime_settings import RuntimeSettings
+from inference_endpoint.config.schema import LoadPattern, LoadPatternType
 from inference_endpoint.dataset_manager.dataloader import DataLoader
-from inference_endpoint.endpoint_client.loadgen import HttpClientSampleIssuer
+from inference_endpoint.endpoint_client.http_sample_issuer import HttpClientSampleIssuer
 from inference_endpoint.load_generator.scheduler import (
     MaxThroughputScheduler,
     PoissonDistributionScheduler,
@@ -129,6 +130,16 @@ def run_performance_test(
     dataloader = QueryDataLoader(queries)
     dataloader.load()
 
+    # Determine load pattern based on stream mode
+    load_pattern_type = (
+        LoadPatternType.POISSON if stream else LoadPatternType.MAX_THROUGHPUT
+    )
+    load_pattern = LoadPattern(
+        type=load_pattern_type,
+        target_qps=target_qps if stream else None,
+        target_concurrency=None,
+    )
+
     # Create runtime settings
     rt_settings = RuntimeSettings(
         metric_target=metrics.Throughput(target_qps),
@@ -140,6 +151,7 @@ def run_performance_test(
         min_sample_count=num_samples,
         rng_sched=random.Random(1234),
         rng_sample_index=random.Random(1234),
+        load_pattern=load_pattern,
     )
 
     # Choose scheduler based on mode:

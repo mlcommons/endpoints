@@ -33,6 +33,7 @@ from typing import Any
 import pytest
 from inference_endpoint import metrics
 from inference_endpoint.config.runtime_settings import RuntimeSettings
+from inference_endpoint.config.schema import LoadPattern, LoadPatternType
 from inference_endpoint.dataset_manager.dataloader import (
     DataLoader,
     DeepSeekR1ChatCompletionDataLoader,
@@ -481,7 +482,17 @@ def trtllm_docker_server(hf_model_name, trtllm_llama31_8b_cmd):
 
 
 @pytest.fixture
-def max_throughput_runtime_settings():
+def random_seed():
+    """Fixture providing the random seed for deterministic testing.
+
+    This allows tests to easily vary the random seed for different test scenarios
+    while maintaining determinism by default.
+    """
+    return 42
+
+
+@pytest.fixture
+def max_throughput_runtime_settings(random_seed):
     return RuntimeSettings(
         metrics.Throughput(100),
         reported_metrics=[],
@@ -490,8 +501,55 @@ def max_throughput_runtime_settings():
         n_samples_from_dataset=100,
         n_samples_to_issue=100,
         min_sample_count=100,
-        rng_sched=random.Random(42),
-        rng_sample_index=random.Random(42),
+        rng_sched=random.Random(random_seed),
+        rng_sample_index=random.Random(random_seed),
+        load_pattern=LoadPattern(type=LoadPatternType.MAX_THROUGHPUT),
+    )
+
+
+@pytest.fixture
+def target_qps(request):
+    """Target QPS for poisson scheduler tests."""
+    return request.param if hasattr(request, "param") else 100.0
+
+
+@pytest.fixture
+def target_concurrency(request):
+    """Target concurrency for concurrency scheduler tests."""
+    return request.param if hasattr(request, "param") else 2
+
+
+@pytest.fixture
+def poisson_runtime_settings(random_seed, target_qps):
+    return RuntimeSettings(
+        metric_target=metrics.Throughput(target_qps),
+        reported_metrics=[],
+        min_duration_ms=10_000,
+        max_duration_ms=15_000,
+        n_samples_from_dataset=100,
+        n_samples_to_issue=5000,
+        min_sample_count=100,
+        rng_sched=random.Random(random_seed),
+        rng_sample_index=random.Random(random_seed),
+        load_pattern=LoadPattern(type=LoadPatternType.POISSON, target_qps=target_qps),
+    )
+
+
+@pytest.fixture
+def concurrency_runtime_settings(random_seed, target_concurrency):
+    return RuntimeSettings(
+        metric_target=None,
+        reported_metrics=[],
+        min_duration_ms=1000,
+        max_duration_ms=10_000,
+        n_samples_from_dataset=100,
+        n_samples_to_issue=target_concurrency * 10,
+        min_sample_count=100,
+        rng_sched=random.Random(random_seed),
+        rng_sample_index=random.Random(random_seed),
+        load_pattern=LoadPattern(
+            type=LoadPatternType.CONCURRENCY, target_concurrency=target_concurrency
+        ),
     )
 
 
