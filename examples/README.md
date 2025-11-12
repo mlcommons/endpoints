@@ -8,6 +8,10 @@ This directory contains examples demonstrating how to use the MLPerf Inference E
 
 Local model benchmarking with a small HuggingFace model, demonstrating custom DataLoader and event hooks.
 
+### [02_ServerBenchmarking](02_ServerBenchmarking/)
+
+Benchmarking a real-world model served via open-source serving systems such as [vLLM](https://github.com/vllm-project/vllm) and [SGLang](https://github.com/sgl-project/sglang).
+
 ## Getting Help
 
 - For general usage: See main [README](../README.md)
