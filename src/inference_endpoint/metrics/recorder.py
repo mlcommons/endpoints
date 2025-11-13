@@ -222,7 +222,6 @@ class EventRecorder:
 
             event_buffer = []
             output_buffer = []
-            first_chunks_cache = {}
 
             insert_query = EventRow.insert_query()
 
@@ -269,39 +268,25 @@ class EventRecorder:
                     event_buffer.append(item[:-1])
                     if item[-1] is not None:
                         if item[1] == SampleEvent.FIRST_CHUNK.value:
-                            first_chunks_cache[item[0]] = {"first_chunk": item[-1]}
+                            # In post-processing, we use this to validate that the first chunk is the response output is the same as the data in the FIRST_CHUNK_RECEIVED event
+                            output_buffer.append(
+                                {"s_uuid": item[0], "first_chunk": item[-1]}
+                            )
                         if item[1] == SampleEvent.COMPLETE.value:
                             output_data = item[-1]
-                            if item[0] in output_buffer:
-                                # Presence of first chunk should indicate streaming mode.
-                                if "first_chunk" in first_chunks_cache[item[0]]:
-                                    if not isinstance(output_data, list | tuple):
-                                        # Maybe this should record an error instead of hard fail?
-                                        raise TypeError(
-                                            f"In streaming mode, the QueryResult.response_output should be a list or tuple, but got {type(output_data)}"
-                                        )
-                                    if (
-                                        item[-1][0]
-                                        != output_buffer[item[0]]["first_chunk"]
-                                    ):
-                                        raise ValueError(
-                                            "Potential cheating detected: First chunk in completed sample is not the same as the data in corresponding FIRST_CHUNK_RECEIVED event"
-                                        )
-                                else:
-                                    # Non-streaming mode. Result should be single item list or str
-                                    if isinstance(output_data, str):
-                                        output_data = [output_data]
-                                    elif isinstance(output_data, list | tuple):
-                                        if len(output_data) != 1:
-                                            raise ValueError(
-                                                "In non-streaming mode, the QueryResult.response_output should be either a single item list or "
-                                            )
-                                output_buffer.append(
-                                    {
-                                        "s_uuid": item[0],
-                                        "output": output_data,
-                                    }
+                            if not isinstance(output_data, list | tuple | str):
+                                import sys
+
+                                sys.exit(10)
+                                raise TypeError(
+                                    f"QueryResult.response_output should be a list or tuple or str, but got {type(output_data)}"
                                 )
+                            output_buffer.append(
+                                {
+                                    "s_uuid": item[0],
+                                    "output": output_data,
+                                }
+                            )
                     should_commit = len(event_buffer) >= self.txn_buffer_size
 
                 # Commit if buffer is full

@@ -23,7 +23,7 @@ import numbers
 import os
 import sqlite3
 from collections import defaultdict
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -658,6 +658,19 @@ class MetricsReporter:
             "in_flight": statuses[0] - statuses[1],
         }
 
+    def read_output_rows(self) -> Iterator[tuple[str, str]]:
+        """Iterator to load and read lines from the outputs file, decoding each line as JSON and yielding the sample_uuid and output.
+
+        Returns:
+            Iterator[tuple[str, str]]: An iterator of tuples containing the sample_uuid and output.
+        """
+        with self.outputs_path.open("r") as outputs:
+            for line in outputs:
+                data = orjson.loads(line)
+                if "output" not in data:
+                    continue
+                yield data["s_uuid"], data["output"]
+
     @profile
     def get_output_sequence_lengths(
         self, tokenizer: Tokenizer
@@ -676,14 +689,11 @@ class MetricsReporter:
             return None
 
         rows = []
-        with self.outputs_path.open("r") as outputs:
-            for line in outputs:
-                # If decoding fails or data is malformed, we should just hard-fail here and the caller can handle the exception
-                data = orjson.loads(line)
-                sample_uuid = data["s_uuid"]
-                output = data["output"]
-                output_tokens = tokenizer.tokenize(output)
-                rows.append((sample_uuid, len(output_tokens)))
+        for sample_uuid, output in self.read_output_rows():
+            if isinstance(output, list):
+                output = "".join(output)
+            output_tokens = tokenizer.tokenize(output)
+            rows.append((sample_uuid, len(output_tokens)))
         return RollupQueryTable("output_sequence_length", None, rows)
 
     @profile
@@ -736,51 +746,49 @@ class MetricsReporter:
         else:
             repeats = None
 
-        with self.outputs_path.open("r") as outputs:
-            for line in outputs:
-                data = orjson.loads(line)
-                sample_uuid = data["s_uuid"]
-                output = data["output"]
-                if not isinstance(output, list):  # JSON always deserializes to list
-                    continue
-                elif len(output) < 2:
-                    continue
+        for sample_uuid, output in self.read_output_rows():
+            if not isinstance(output, list):  # JSON always deserializes to list
+                continue
+            elif len(output) < 2:
+                continue
 
-                if len(output) > 2:
-                    non_first_chunk = "".join(output[1:])
-                else:
-                    non_first_chunk = output[1]
+            if len(output) > 2:
+                non_first_chunk = "".join(output[1:])
+            else:
+                non_first_chunk = output[1]
 
-                non_first_tokens = tokenizer.tokenize(non_first_chunk)
-                n_non_first_tokens = len(non_first_tokens)
+            if len(non_first_chunk) == 0:
+                # Possible malformed output data where empty string is included as a non-first chunk
+                continue
 
-                latency = sample_latency_rollup.filter_uuid(
-                    sample_uuid, only_first=True
+            non_first_tokens = tokenizer.tokenize(non_first_chunk)
+            n_non_first_tokens = len(non_first_tokens)
+
+            latency = sample_latency_rollup.filter_uuid(sample_uuid, only_first=True)
+            if latency is None:
+                raise SampleUUIDNotFoundError(sample_uuid, "events record")
+
+            ttft = ttft_rollup.filter_uuid(sample_uuid, only_first=True)
+            if ttft is None:
+                # Non-streaming mode for this sample - error
+                raise RuntimeError(
+                    f"No TTFT found for sample {sample_uuid} in streaming mode"
                 )
-                if latency is None:
-                    raise SampleUUIDNotFoundError(sample_uuid, "events record")
 
-                ttft = ttft_rollup.filter_uuid(sample_uuid, only_first=True)
-                if ttft is None:
-                    # Non-streaming mode for this sample - error
-                    raise RuntimeError(
-                        f"No TTFT found for sample {sample_uuid} in streaming mode"
-                    )
+            avg_tpot = (latency - ttft) / n_non_first_tokens
 
-                avg_tpot = (latency - ttft) / n_non_first_tokens
-
-                if condense_table:
-                    rows.append((sample_uuid, avg_tpot))
-                    if reporting_mode == TPOTReportingMode.TOKEN_WEIGHTED:
-                        repeats.append(n_non_first_tokens)
-                else:
-                    # Entries are tuples, and are such immutable. We can use list multiplication for performance
-                    repeat_fac = (
-                        1
-                        if reporting_mode == TPOTReportingMode.REQUEST_WEIGHTED
-                        else n_non_first_tokens
-                    )
-                    rows.extend([(sample_uuid, avg_tpot)] * repeat_fac)
+            if condense_table:
+                rows.append((sample_uuid, avg_tpot))
+                if reporting_mode == TPOTReportingMode.TOKEN_WEIGHTED:
+                    repeats.append(n_non_first_tokens)
+            else:
+                # Entries are tuples, and are such immutable. We can use list multiplication for performance
+                repeat_fac = (
+                    1
+                    if reporting_mode == TPOTReportingMode.REQUEST_WEIGHTED
+                    else n_non_first_tokens
+                )
+                rows.extend([(sample_uuid, avg_tpot)] * repeat_fac)
         return RollupQueryTable("tpot", None, rows, repeats=repeats)
 
     def close(self):

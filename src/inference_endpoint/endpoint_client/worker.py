@@ -394,11 +394,20 @@ class Worker:
                     first_chunk_sent = True
 
             # Send final complete response
-            non_first_chunk_str = "".join(accumulated_content[1:])
+            if len(accumulated_content) == 0:
+                response_output = []
+            elif len(accumulated_content) == 1:
+                response_output = [accumulated_content[0]]
+            else:
+                response_output = [
+                    accumulated_content[0],
+                    "".join(accumulated_content[1:]),
+                ]
+
             await self._response_socket.send(
                 QueryResult(
                     id=query.id,
-                    response_output=[accumulated_content[0], non_first_chunk_str],
+                    response_output=response_output,
                     metadata={"first_chunk": not first_chunk_sent, "final_chunk": True},
                 )
             )
