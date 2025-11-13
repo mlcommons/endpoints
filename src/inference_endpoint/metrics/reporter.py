@@ -658,6 +658,14 @@ class MetricsReporter:
             "in_flight": statuses[0] - statuses[1],
         }
 
+    def get_error_count(self) -> int:
+        return self.cur_.execute(f"""
+        SELECT
+            COUNT(*) AS error_count
+        FROM events
+        WHERE event_type = '{SessionEvent.ERROR.value}'
+        """).fetchone()[0]
+
     def read_output_rows(self) -> Iterator[tuple[str, str]]:
         """Iterator to load and read lines from the outputs file, decoding each line as JSON and yielding the sample_uuid and output.
 

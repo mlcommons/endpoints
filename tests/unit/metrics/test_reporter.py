@@ -26,6 +26,18 @@ from inference_endpoint.metrics.reporter import (
 )
 
 
+def test_sample_counting(events_db):
+    with MetricsReporter(events_db) as reporter:
+        stats = reporter.get_sample_statuses()
+        assert stats["completed"] == 2
+        assert stats["in_flight"] == 1
+
+
+def test_error_counting(events_db):
+    with MetricsReporter(events_db) as reporter:
+        assert reporter.get_error_count() == 3
+
+
 def test_derive_ttft(events_db, sample_uuids):
     uuid1 = sample_uuids(1)
     uuid2 = sample_uuids(2)

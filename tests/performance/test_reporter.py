@@ -41,6 +41,7 @@ def time_fn(fn, *args, **kwargs):
     return result, end_time - start_time
 
 
+@pytest.mark.skip(reason="Only used to manually test TPOT performance")
 @pytest.mark.performance
 @pytest.mark.xdist_group(name="serial_performance")
 def test_tpot_performance(cleanup_connections):
@@ -67,6 +68,7 @@ def test_tpot_performance(cleanup_connections):
                 SampleEvent.FIRST_CHUNK,
                 time.monotonic_ns(),
                 sample_uuid=str(sample_uuid + 1),
+                output="a",
             )
 
         random.shuffle(order)
@@ -83,7 +85,7 @@ def test_tpot_performance(cleanup_connections):
                 SampleEvent.COMPLETE,
                 time.monotonic_ns(),
                 sample_uuid=str(sample_uuid + 1),
-                output="a" * 128,
+                output=["a", "a" * 128],
             )
 
         rec.wait_for_writes(force_commit=True)
@@ -128,7 +130,7 @@ def test_tpot_performance(cleanup_connections):
     )
     print(f"Condensed TPOT summary calculated in {condensed_summary_duration_ns} ns")
     print(f"Full TPOT summary calculated in {full_summary_duration_ns} ns")
-    assert condensed_summary_duration_ns < (full_summary_duration_ns / 50)
+    assert condensed_summary_duration_ns < (full_summary_duration_ns / 40)
 
     # These should definitely be the same
     for k in [

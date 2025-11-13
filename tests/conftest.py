@@ -262,12 +262,15 @@ def events_db(tmp_path, sample_uuids):
         (uuid3, SessionEvent.LOADGEN_ISSUE_CALLED.value, 10202),
         (uuid1, SampleEvent.NON_FIRST_CHUNK.value, 10203),
         (uuid2, SampleEvent.NON_FIRST_CHUNK.value, 10210),
+        (uuid3, SessionEvent.ERROR.value, 10211),
         (uuid1, SampleEvent.NON_FIRST_CHUNK.value, 10211),
         (uuid1, SampleEvent.COMPLETE.value, 10211),
         (uuid2, SampleEvent.NON_FIRST_CHUNK.value, 10214),
+        (uuid3, SessionEvent.ERROR.value, 10216),
         (uuid2, SampleEvent.NON_FIRST_CHUNK.value, 10217),
         (uuid2, SampleEvent.NON_FIRST_CHUNK.value, 10219),
         (uuid2, SampleEvent.COMPLETE.value, 10219),
+        (uuid3, SessionEvent.ERROR.value, 10225),
         ("", SessionEvent.TEST_ENDED.value, 10300),
     ]
     cur.executemany(

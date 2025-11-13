@@ -25,7 +25,6 @@ from inference_endpoint.metrics.recorder import (
     EventRecorderSingletonViolation,
     sqlite3_cursor,
 )
-from inference_endpoint.metrics.reporter import MetricsReporter
 
 
 def get_EventRecorder(*args, **kwargs):
@@ -66,7 +65,7 @@ def test_event_recorder_singleton_violation_record_event_non_active(sample_uuids
     )
 
 
-def test_record_event(events_db, sample_uuids):
+def test_record_event(sample_uuids):
     uuid1 = sample_uuids(1)
     uuid2 = sample_uuids(2)
     uuid3 = sample_uuids(3)
@@ -162,13 +161,6 @@ def test_shm_usage(sample_uuids):
         ), "Worker process could not be terminated after cleanup"
         raise AssertionError("Worker process failed to complete in a reasonable time")
     assert worker_proc.exitcode == 0
-
-
-def test_sample_counting(events_db):
-    with MetricsReporter(events_db) as reporter:
-        stats = reporter.get_sample_statuses()
-        assert stats["completed"] == 2
-        assert stats["in_flight"] == 1
 
 
 MemStat = namedtuple("MemStat", ["total", "used", "free"])
