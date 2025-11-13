@@ -24,6 +24,7 @@ import queue
 import shutil
 import sqlite3
 import threading
+import time
 import uuid
 from functools import partial
 from pathlib import Path
@@ -272,7 +273,7 @@ class EventRecorder:
                             output_buffer.append(
                                 {"s_uuid": item[0], "first_chunk": item[-1]}
                             )
-                        if item[1] == SampleEvent.COMPLETE.value:
+                        elif item[1] == SampleEvent.COMPLETE.value:
                             output_data = item[-1]
                             if not isinstance(output_data, list | tuple | str):
                                 raise TypeError(
@@ -282,6 +283,14 @@ class EventRecorder:
                                 {
                                     "s_uuid": item[0],
                                     "output": output_data,
+                                }
+                            )
+                        elif item[1] == SessionEvent.ERROR.value:
+                            output_buffer.append(
+                                {
+                                    "s_uuid": item[0],
+                                    "error_type": item[1],
+                                    "error_message": item[-1],
                                 }
                             )
                     should_commit = len(event_buffer) >= self.txn_buffer_size
@@ -446,3 +455,27 @@ class EventRecorder:
     def __exit__(self, exc_type, exc_value, traceback):
         """Context manager exit - stops the writer thread."""
         self.close()
+
+
+def record_exception(
+    exc_value: Exception | str,
+    sample_uuid: str | None = None,
+):
+    """Records an exception as an event to the current event recorder.
+
+    This will force commit the existing event buffer immediately to ensure the error is surfaced
+    as soon as possible for any monitoring.
+
+    Args:
+        exc_value: The exception to record, or a string error message.
+        sample_uuid: The sample uuid to record the error for.
+    """
+    if EventRecorder.LIVE is None:
+        return
+    EventRecorder.record_event(
+        SessionEvent.ERROR,
+        time.monotonic_ns(),
+        sample_uuid=sample_uuid,
+        output=str(exc_value),
+        force_commit=True,
+    )

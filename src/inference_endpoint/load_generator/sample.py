@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..core.types import QueryResult, StreamChunk
-from ..metrics.recorder import EventRecorder
+from ..metrics.recorder import EventRecorder, record_exception
 from .events import SampleEvent
 
 logger = logging.getLogger(__name__)
@@ -179,6 +179,8 @@ class _SampleEventHandler:
         # Even if there is an error, we still record the event to count the sample as complete
         if result.error is not None:
             logger.error(f"Error in request {result.id}: {result.error}")
+
+            record_exception(result.error, result.id)
 
         EventRecorder.record_event(
             SampleEvent.COMPLETE,
