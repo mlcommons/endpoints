@@ -275,9 +275,6 @@ class EventRecorder:
                         if item[1] == SampleEvent.COMPLETE.value:
                             output_data = item[-1]
                             if not isinstance(output_data, list | tuple | str):
-                                import sys
-
-                                sys.exit(10)
                                 raise TypeError(
                                     f"QueryResult.response_output should be a list or tuple or str, but got {type(output_data)}"
                                 )

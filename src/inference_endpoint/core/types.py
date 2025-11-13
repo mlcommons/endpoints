@@ -89,10 +89,15 @@ class QueryResult(msgspec.Struct, tag="query_result", kw_only=True, frozen=True)
     Attributes:
         id: Query identifier (matches the originating Query.id).
         response_output: Generated text response from the endpoint (None if error).
+                         Can be a string, or a tuple of strings. If it is a string,
+                         it is assumed to be a non-streaming response. If it is a
+                         tuple of strings, it is assumed to be a streamed response,
+                         where the first element is the first chunk, which will not
+                         be included in the TPOT measurements.
         metadata: Additional response metadata (token counts, model info, etc.).
         error: Error message if query failed (None if successful).
         completed_at: High-resolution timestamp (nanoseconds, monotonic clock).
-                     Auto-set in __post_init__ to prevent tampering.
+                      Auto-set in __post_init__ to prevent tampering.
 
     Note:
         The completed_at field is intentionally set internally to prevent
@@ -100,7 +105,7 @@ class QueryResult(msgspec.Struct, tag="query_result", kw_only=True, frozen=True)
     """
 
     id: str = ""
-    response_output: str | None = None
+    response_output: str | tuple[str, ...] | None = None
     metadata: dict[str, Any] = msgspec.field(default_factory=dict)
     error: str | None = None
     completed_at: float = msgspec.UNSET
@@ -118,6 +123,13 @@ class QueryResult(msgspec.Struct, tag="query_result", kw_only=True, frozen=True)
         # Disallow user setting completed_at time to prevent cheating.
         # Timestamp must be generated internally
         msgspec.structs.force_setattr(self, "completed_at", time.monotonic_ns())
+
+        # A list can be passed on, but we need to convert it to a tuple to maintain immutability,
+        # and for serialization to work properly.
+        if isinstance(self.response_output, list):
+            msgspec.structs.force_setattr(
+                self, "response_output", tuple(self.response_output)
+            )
 
 
 class StreamChunk(msgspec.Struct, tag="stream_chunk", kw_only=True):
