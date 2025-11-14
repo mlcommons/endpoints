@@ -684,7 +684,7 @@ class MetricsReporter:
         WHERE event_type = '{SessionEvent.ERROR.value}'
         """).fetchone()[0]
 
-    def read_output_rows(self) -> Iterator[tuple[str, str]]:
+    def iter_output_rows(self) -> Iterator[tuple[str, str]]:
         """Iterator to load and read lines from the outputs file, decoding each line as JSON and yielding the sample_uuid and output.
 
         Returns:
@@ -715,7 +715,7 @@ class MetricsReporter:
             return None
 
         rows = []
-        for sample_uuid, output in self.read_output_rows():
+        for sample_uuid, output in self.iter_output_rows():
             if isinstance(output, list):
                 output = "".join(output)
             output_tokens = tokenizer.tokenize(output)
@@ -772,7 +772,7 @@ class MetricsReporter:
         else:
             repeats = None
 
-        for sample_uuid, output in self.read_output_rows():
+        for sample_uuid, output in self.iter_output_rows():
             if not isinstance(output, list):  # JSON always deserializes to list
                 continue
             elif len(output) < 2:
