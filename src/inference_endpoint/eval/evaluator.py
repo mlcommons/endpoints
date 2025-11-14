@@ -21,48 +21,48 @@ from typing import Any
 
 class Evaluator(ABC):
     """Base class for dataset-specific evaluators.
-    
+
     Evaluators implement dataset-specific logic for:
     1. Extracting answers from model responses
     2. Scoring answers against ground truth
     3. Batch evaluation of multiple responses
-    
+
     Evaluator implementations auto-register via __init_subclass__ by specifying
     the name parameter. This enables runtime selection of evaluators:
-    
+
         evaluator_cls = Evaluator.get_evaluator("gpqa")
         evaluator = evaluator_cls()
         results = evaluator.evaluate_batch(responses, ground_truths)
-    
+
     Built-in evaluators: see evaluators/__init__.py
-    
+
     Attributes:
         _IMPL_MAP: Class-level registry mapping evaluator names (str) to Evaluator classes.
-    
+
     Example:
         class GPQAEvaluator(Evaluator, name="gpqa"):
             def extract_answer(self, response):
                 return extract_multiple_choice(response)
-            
+
             def score(self, extracted, ground_truth):
                 return exact_match_score(extracted, ground_truth)
     """
-    
+
     # Registry for evaluator implementations (populated via __init_subclass__)
     # Uses string keys instead of enums to avoid cyclic imports
     _IMPL_MAP: dict[str, type["Evaluator"]] = {}
-    
+
     def __init_subclass__(cls, name: str | None = None, **kwargs):
         """Auto-register evaluator implementations.
-        
+
         Args:
             name: Evaluator name to register (e.g., "gpqa", "aime", "livecodebench")
-        
+
         Raises:
             ValueError: If name already registered
         """
         super().__init_subclass__(**kwargs)
-        
+
         if name is not None:
             if name in Evaluator._IMPL_MAP:
                 raise ValueError(
@@ -70,17 +70,17 @@ class Evaluator(ABC):
                     f"Already registered to {Evaluator._IMPL_MAP[name].__name__}"
                 )
             Evaluator._IMPL_MAP[name] = cls
-    
+
     @classmethod
     def get_evaluator(cls, name: str) -> type["Evaluator"]:
         """Get evaluator implementation by name.
-        
+
         Args:
             name: Evaluator name (e.g., "gpqa", "aime", "livecodebench")
-        
+
         Returns:
             Evaluator subclass
-        
+
         Raises:
             KeyError: If evaluator name not found in registry
         """
@@ -90,42 +90,39 @@ class Evaluator(ABC):
                 f"Evaluator '{name}' not found. Available evaluators: {available}"
             )
         return cls._IMPL_MAP[name]
-    
+
     @classmethod
     def get_available_evaluators(cls) -> list[str]:
         """Get list of registered evaluator names.
-        
+
         Returns:
             Sorted list of available evaluator names
         """
         return sorted(cls._IMPL_MAP.keys())
-    
+
     @abstractmethod
     def extract_answer(self, response: str) -> str | None:
         """Extract answer from model response.
-        
+
         Args:
             response: Raw model response text
-        
+
         Returns:
             Extracted answer string, or None if extraction failed
         """
         raise NotImplementedError
-    
+
     @abstractmethod
     def score(
-        self,
-        extracted_answer: str | None,
-        ground_truth: str,
-        k: int = 1
+        self, extracted_answer: str | None, ground_truth: str, k: int = 1
     ) -> dict[str, Any]:
         """Score extracted answer against ground truth.
-        
+
         Args:
             extracted_answer: Extracted answer from response (or None if extraction failed)
             ground_truth: Ground truth answer
             k: k value for pass@k (default: 1)
-        
+
         Returns:
             Dictionary with score information:
             - "correct": bool (for binary scorers) or float (for similarity scorers)
@@ -134,29 +131,26 @@ class Evaluator(ABC):
             - Additional scorer-specific fields
         """
         raise NotImplementedError
-    
+
     def evaluate_batch(
-        self,
-        responses: list[str],
-        ground_truths: list[str],
-        k: int = 1
+        self, responses: list[str], ground_truths: list[str], k: int = 1
     ) -> dict[str, Any]:
         """Evaluate a batch of responses.
-        
+
         NOTE: Subclasses should override this for efficient batch processing.
-        
+
         Args:
             responses: List of model responses
             ground_truths: List of unique ground truth answers
             k: k value for pass@k (default: 1)
-        
+
         Returns:
             Dictionary with evaluation results:
             - "metrics": dict of metric names to values
             - "metadata": dict of evaluation settings
             - "per_sample": list of per-response details
             - "total": total number of responses
-        
+
         Raises:
             ValueError: If responses not divisible by ground_truths
         """
@@ -164,4 +158,3 @@ class Evaluator(ABC):
         raise NotImplementedError(
             "Subclasses must implement evaluate_batch for efficient batch processing"
         )
-

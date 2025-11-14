@@ -17,24 +17,32 @@
 
 import argparse
 import logging
-import pickle
-import tempfile
-from pathlib import Path
 
-from ..config.schema import BenchmarkConfig, ClientSettings, Dataset, DatasetType, EndpointConfig, LoadPattern, LoadPatternType, ModelParams, RuntimeConfig, Settings, StreamingMode, TestMode, TestType
+from ..config.schema import (
+    BenchmarkConfig,
+    ClientSettings,
+    Dataset,
+    DatasetType,
+    EndpointConfig,
+    LoadPattern,
+    LoadPatternType,
+    ModelParams,
+    RuntimeConfig,
+    Settings,
+    StreamingMode,
+    TestType,
+)
 from ..exceptions import InputValidationError
-from ..eval.evaluate import evaluate_results
-from .benchmark import _run_benchmark
 
 logger = logging.getLogger(__name__)
 
 
 def _build_eval_config_from_cli(args: argparse.Namespace) -> BenchmarkConfig:
     """Build BenchmarkConfig for eval command from CLI arguments.
-    
+
     Args:
         args: Parsed CLI arguments
-    
+
     Returns:
         BenchmarkConfig for running eval benchmark
     """
@@ -73,16 +81,13 @@ def _build_eval_config_from_cli(args: argparse.Namespace) -> BenchmarkConfig:
             max_new_tokens=2048,
             streaming=StreamingMode.OFF,  # Disable streaming for eval
         ),
-        endpoint_config=EndpointConfig(
-            endpoint=args.endpoint,
-            api_key=args.api_key
-        ),
+        endpoint_config=EndpointConfig(endpoint=args.endpoint, api_key=args.api_key),
     )
 
 
 async def run_eval_command(args: argparse.Namespace) -> None:
     """Run benchmark + accuracy evaluation.
-    
+
     This command:
     1. Validates input parameters
     2. Runs benchmark in accuracy mode (TestMode.ACC)
@@ -90,7 +95,7 @@ async def run_eval_command(args: argparse.Namespace) -> None:
     4. Evaluates responses using specified evaluator
     5. Reports accuracy metrics
     6. Prints repro command for re-evaluation
-    
+
     Args:
         args: Command line arguments with:
             - endpoint: Endpoint URL
@@ -103,51 +108,42 @@ async def run_eval_command(args: argparse.Namespace) -> None:
             - workers: Optional worker count
             - output: Optional output path
             - timeout: Timeout in seconds
-    
+
     Raises:
         InputValidationError: If parameters invalid
         SetupError: If benchmark setup fails
         ExecutionError: If benchmark or evaluation fails
     """
     logger.info("Running benchmark + accuracy evaluation")
-    
+
     # Get k value (default: 1 if not specified)
     k = args.pass_k if args.pass_k is not None else 1
-    
+
     # Validate dataset exists
     if not args.dataset.exists():
         raise InputValidationError(f"Dataset not found: {args.dataset}")
-    
+
     logger.info(f"Endpoint: {args.endpoint}")
     logger.info(f"Model: {args.model}")
     logger.info(f"Dataset: {args.dataset}")
     logger.info(f"Evaluator: {args.evaluator}")
     logger.info(f"Repeats: {args.repeats}")
     logger.info(f"Pass@k: {k}")
-    
-    # Build benchmark config from CLI args
-    config = _build_eval_config_from_cli(args)
-    
-    # Create temporary file for results
-    with tempfile.NamedTemporaryFile(mode='wb', suffix='.pkl', delete=False) as tmp_file:
-        tmp_results_path = Path(tmp_file.name)
-    
-    try:
-        # Run benchmark with TestMode.ACC to collect responses
-        # TODO: Modify _run_benchmark to return results instead of using ResponseCollector
-        # For now, we need to implement the benchmark run and collect responses
-        
-        logger.error("Eval command not yet fully implemented")
-        logger.info("TODO: Integrate with benchmark command to collect responses")
-        logger.info("TODO: Call evaluate_results() with collected responses")
-        logger.info("TODO: Print repro command for eval-results")
-        
-        raise NotImplementedError(
-            "Eval command requires benchmark integration. "
-            "Will be implemented in next phase."
-        )
-    
-    finally:
-        # Clean up temporary file
-        if tmp_results_path.exists():
-            tmp_results_path.unlink()
+
+    # Build benchmark config from CLI args (will be used in next phase)
+    # config = _build_eval_config_from_cli(args)  # noqa: F841
+
+    # TODO: Run benchmark with TestMode.ACC to collect responses
+    # TODO: Integrate with benchmark command to collect responses
+    # TODO: Call evaluate_results() with collected responses
+    # TODO: Print repro command for eval-results
+
+    logger.error("Eval command not yet fully implemented")
+    logger.info("TODO: Integrate with benchmark command to collect responses")
+    logger.info("TODO: Call evaluate_results() with collected responses")
+    logger.info("TODO: Print repro command for eval-results")
+
+    raise NotImplementedError(
+        "Eval command requires benchmark integration. "
+        "Will be implemented in next phase."
+    )

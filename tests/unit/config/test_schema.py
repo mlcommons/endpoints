@@ -19,6 +19,7 @@ from inference_endpoint.config.schema import (
     BenchmarkConfig,
     Dataset,
     DatasetType,
+    EvalConfig,
     ModelParams,
     OSLDistribution,
     OSLDistributionType,
@@ -91,11 +92,12 @@ class TestDataset:
             type=DatasetType.ACCURACY,
             path="datasets/gpqa.pkl",
             samples=500,
-            eval_config={"evaluator_name": "gpqa", "repeats": 1, "pass_k": 1},
+            eval_config=EvalConfig(evaluator_name="gpqa", repeats=1, k=1),
         )
         assert dataset.type == DatasetType.ACCURACY
         assert dataset.eval_config is not None
-        assert dataset.eval_config["evaluator_name"] == "gpqa"
+        assert dataset.eval_config.evaluator_name == "gpqa"
+        assert dataset.eval_config.k == 1
 
 
 class TestBenchmarkConfig:
@@ -133,7 +135,7 @@ class TestBenchmarkConfig:
                     "type": "accuracy",
                     "path": "gpqa.pkl",
                     "samples": 500,
-                    "eval_config": {"evaluator_name": "gpqa", "repeats": 1},
+                    "eval_config": {"evaluator_name": "gpqa", "repeats": 1, "k": 1},
                 },
             ],
         )
@@ -152,13 +154,13 @@ class TestBenchmarkConfig:
                     "name": "gpqa",
                     "type": "accuracy",
                     "path": "gpqa.pkl",
-                    "eval_config": {"evaluator_name": "gpqa", "repeats": 1},
+                    "eval_config": {"evaluator_name": "gpqa", "repeats": 1, "k": 1},
                 },
                 {
                     "name": "aime",
                     "type": "accuracy",
                     "path": "aime.pkl",
-                    "eval_config": {"evaluator_name": "aime", "repeats": 1},
+                    "eval_config": {"evaluator_name": "aime", "repeats": 1, "k": 1},
                 },
             ],
         )

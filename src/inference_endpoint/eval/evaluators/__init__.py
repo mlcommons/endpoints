@@ -16,9 +16,8 @@
 """Dataset-specific evaluator implementations."""
 
 # Import evaluators to trigger registration
-from .gpqa_evaluator import GPQAEvaluator
 from .aime_evaluator import AIMEEvaluator
+from .gpqa_evaluator import GPQAEvaluator
 from .livecodebench_evaluator import LiveCodeBenchEvaluator
 
 __all__ = ["GPQAEvaluator", "AIMEEvaluator", "LiveCodeBenchEvaluator"]
-

@@ -95,7 +95,7 @@ inference-endpoint probe \
 
 See `docs/LOCAL_TESTING.md` for complete testing guide.
 
-## `gpqa_sample.pkl`
+## `gpqa_10.pkl`
 
 **Purpose:** Sample GPQA dataset for testing evaluation pipeline.
 
@@ -106,15 +106,16 @@ See `docs/LOCAL_TESTING.md` for complete testing guide.
 **Columns:** `question`, `text_input`, `ground_truth`, `dataset`, `domain`, `subdomain`
 
 **Content:**
+
 - Graduate-level multiple choice questions (A/B/C/D)
-- Questions formatted with shuffled options
+- Questions formatted with shuffled options (following OpenAI GPT-OSS pattern)
 - Ground truth as single letter (A/B/C/D)
 
 **Generation:**
 
 ```bash
 python -m inference_endpoint.eval.dataset_generation.generate_gpqa \
-  --output tests/datasets/gpqa_sample.pkl \
+  --output tests/datasets/gpqa_10.pkl \
   --variant diamond \
   --num-samples 10 \
   --seed 42
@@ -123,10 +124,13 @@ python -m inference_endpoint.eval.dataset_generation.generate_gpqa \
 **Note:** Requires HuggingFace authentication (`huggingface-cli login`) to access the gated GPQA dataset.
 
 **Use Cases:**
+
 - Testing GPQA evaluator
-- Testing eval command
-- Testing pass@k calculation
+- Testing eval and eval-results commands
+- Testing pass@k calculation with repeats
 - Unit and integration tests
+
+**Naming Convention:** Include sample count in filename (e.g., `gpqa_10.pkl`, `gpqa_50.pkl`, `gpqa_198.pkl`)
 
 ### Candidates
 

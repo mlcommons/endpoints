@@ -138,17 +138,17 @@ class ModelParams(BaseModel):
 
 class EvalConfig(BaseModel):
     """Evaluation configuration for accuracy datasets.
-    
+
     Attributes:
         evaluator_name: Name of evaluator to use (from registry: "gpqa", "aime", "livecodebench")
         repeats: Number of times to run each sample in dataset (must be >= 1)
         k: k value for pass@k calculation (must be in [1, repeats], default: 1)
-    
+
     Note:
         Validation of k bounds happens in BenchmarkConfig.validate_datasets(),
         not in the schema itself.
     """
-    
+
     evaluator_name: str
     repeats: int = 1
     k: int = 1
@@ -523,20 +523,20 @@ class BenchmarkConfig(BaseModel):
 
     def validate_datasets(self) -> None:
         """Validate dataset configuration.
-        
+
         Raises:
             ValueError: If dataset configuration is invalid
         """
         if not self.datasets:
             # Empty datasets is OK for CLI-based benchmarks
             return
-        
+
         # Check for duplicate dataset names
         names = [d.name for d in self.datasets]
         duplicates = [name for name in set(names) if names.count(name) > 1]
         if duplicates:
             raise ValueError(f"Duplicate dataset names: {duplicates}")
-        
+
         # Validate eval_config for accuracy datasets
         for dataset in self.datasets:
             if dataset.eval_config:

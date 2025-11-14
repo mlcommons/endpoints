@@ -15,8 +15,7 @@
 
 """Evaluation module for accuracy testing of inference endpoints."""
 
-from .evaluator import Evaluator
 from .evaluate import evaluate_results
+from .evaluator import Evaluator
 
 __all__ = ["Evaluator", "evaluate_results"]
-

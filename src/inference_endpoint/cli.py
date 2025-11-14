@@ -122,7 +122,7 @@ def create_parser() -> argparse.ArgumentParser:
         "eval",
         help="Run benchmark + accuracy evaluation",
         description="Run benchmark with accuracy evaluation. "
-        "Collects responses and automatically evaluates them using the specified evaluator."
+        "Collects responses and automatically evaluates them using the specified evaluator.",
     )
     eval_parser.add_argument(
         "--endpoint", "-e", type=str, required=True, help="Endpoint URL"
@@ -138,46 +138,44 @@ def create_parser() -> argparse.ArgumentParser:
         "--evaluator",
         type=str,
         required=True,
-        help="Evaluator to use (choices populated at runtime from registry)"
+        help="Evaluator to use (choices populated at runtime from registry)",
     )
     eval_parser.add_argument(
         "--repeats",
         type=int,
         default=1,
-        help="Run dataset N times for pass@k calculation (default: 1)"
+        help="Run dataset N times for pass@k calculation (default: 1)",
     )
     eval_parser.add_argument(
-        "--pass-k",
-        type=int,
-        help="Calculate pass@k metric (must be in [1, repeats])"
+        "--pass-k", type=int, help="Calculate pass@k metric (must be in [1, repeats])"
     )
     eval_parser.add_argument("--api-key", type=str, help="API key")
     eval_parser.add_argument("--workers", type=int, help="HTTP workers (default: 4)")
     _add_auxiliary_args(eval_parser)
-    
+
     # ===== Eval-results command =====
     eval_results_parser = subparsers.add_parser(
         "eval-results",
         help="Evaluate existing benchmark results",
         description="Post-process evaluation of existing benchmark results. "
-        "Useful for debugging evaluators or experimenting with different pass@k values."
+        "Useful for debugging evaluators or experimenting with different pass@k values.",
     )
     eval_results_parser.add_argument(
         "--results",
         type=Path,
         required=True,
-        help="Results file from previous benchmark/eval run"
+        help="Results file from previous benchmark/eval run",
     )
     eval_results_parser.add_argument(
         "--evaluator",
         type=str,
         required=True,
-        help="Evaluator to use (choices populated at runtime from registry)"
+        help="Evaluator to use (choices populated at runtime from registry)",
     )
     eval_results_parser.add_argument(
         "--pass-k",
         type=int,
-        help="Calculate pass@k metric (must match repeats used during collection)"
+        help="Calculate pass@k metric (must match repeats used during collection)",
     )
     _add_auxiliary_args(eval_results_parser)
 
