@@ -336,12 +336,11 @@ class RandomDataLoader(DataLoader):
         input_seq_length: int = 1024,
         range_ratio: float = 1.0,
         random_seed: int = 42,
-        vocab_size: int = 1024,
-        tokenizer: PreTrainedTokenizerBase = None,
+        tokenizer: PreTrainedTokenizerBase,
         save_tokenized_data: bool = False,
+        metadata: dict | None = None,
     ):
         super().__init__()
-        assert tokenizer is not None, "Tokenizer is required for random data loader."
         self.data = []
         self.max_memory_usage_bytes = max_memory_usage_bytes
         self.input_seq_length = input_seq_length
@@ -350,18 +349,17 @@ class RandomDataLoader(DataLoader):
         assert 0 < self.range_ratio <= 1, "Range ratio must be between 0 and 1"
         self.random_seed = random_seed
         self.rng = np.random.default_rng(random_seed)
-        self.vocab_size = vocab_size
         self.tokenizer = tokenizer
-        self.data = []
         self.input_tokens = []
         self.save_tokenized_data = save_tokenized_data
+        self.metadata = metadata
         # Now generate the tokens
         self._generate_random_sequence()
 
     def _generate_random_sequence(self):
         # Generate the input sequence lengths given the range ration
         input_seq_length = self.rng.integers(
-            self.input_seq_length * self.range_ratio,
+            int(self.input_seq_length * self.range_ratio),
             self.input_seq_length + 1,
             self.num_sequences,
         )
@@ -374,23 +372,23 @@ class RandomDataLoader(DataLoader):
         for i in range(self.num_sequences):
             # Generate the input sequence by adding the input starts to the input sequence lengths and modding by the vocab size
             input_sequence = [
-                (input_starts[i] + j) % self.vocab_size
+                (input_starts[i] + j) % self.tokenizer.vocab_size
                 for j in range(input_seq_length[i])
             ]
-            # Decode the input sequence to get the prompt
+            # Decode the input sequence to get the text prompt
             prompt = self.tokenizer.decode(input_sequence, add_special_tokens=False)
-            # Encode the prompt to get the input tokens
+            # Encode the prompt to get the input tokens back
             input_tokens = self.tokenizer.encode(prompt, add_special_tokens=False)
             # Append the input tokens to the data
-            self.data.append(input_tokens)
+            self.data.append(prompt)
             # If we are saving the tokenized data, append the input sequence to the input tokens
             # This can be useful for debugging or for other purposes
             if self.save_tokenized_data:
-                self.input_tokens.append(input_sequence)
+                self.input_tokens.append(input_tokens)
 
     def load_sample(self, index: int) -> Any:
         assert index < self.num_samples(), "Index is out of range."
-        return self.data[index]
+        return {"prompt": self.data[index]} | self.metadata
 
     def num_samples(self):
         return len(self.data)

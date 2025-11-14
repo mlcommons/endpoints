@@ -95,7 +95,6 @@ def test_random_data_loader(range_ratio):
     num_sequences = 1024
     input_seq_length = 1024
     random_seed = 42
-    vocab_size = 1024
     tokenizer = AutoTokenizer.from_pretrained("TinyLlama/TinyLlama-1.1B-Chat-v1.0")
     save_tokenized_data = True
     random_data_loader = RandomDataLoader(
@@ -103,7 +102,6 @@ def test_random_data_loader(range_ratio):
         input_seq_length=input_seq_length,
         range_ratio=range_ratio,
         random_seed=random_seed,
-        vocab_size=vocab_size,
         tokenizer=tokenizer,
         save_tokenized_data=save_tokenized_data,
     )
@@ -117,16 +115,18 @@ def test_random_data_loader(range_ratio):
     # Go over the data and check the input tokens and the data length
     for i in range(len(random_data_loader.data)):
         assert isinstance(
-            random_data_loader.data[i], list
-        ), f"Expected list, got {type(random_data_loader.data[i])}"
+            random_data_loader.data[i], str
+        ), f"Expected string, got {type(random_data_loader.data[i])}"
         # Note that the number of tokens can be smaller than the input_seq_length * range ration due to
         # the decoding-encoding which may coalesce some sequences to newer tokens. We use a 0.8 factor to allow for this.
+        # And we allow for a 20% overhead due to the decoding-encoding.
         assert (
             len(random_data_loader.input_tokens[i])
             > input_seq_length * range_ratio * 0.8
-            and len(random_data_loader.input_tokens[i]) <= input_seq_length
-        ), f"Expected {input_seq_length*range_ratio} to {input_seq_length} input tokens, got {len(random_data_loader.input_tokens[i])}"
+            and len(random_data_loader.input_tokens[i]) <= input_seq_length * 1.2
+        ), f"Expected {input_seq_length*range_ratio*0.8} to {input_seq_length*0.2} input tokens, got {len(random_data_loader.input_tokens[i])}"
+
         assert (
             len(random_data_loader.data[i]) >= 1024 * range_ratio * 0.5
-            and len(random_data_loader.data[i]) <= 1024
+            and len(random_data_loader.data[i]) <= 7 * 1024
         ), f"Expected length between 1024*range_ratio*0.5 and 1024, got {len(random_data_loader.data[i])}"
