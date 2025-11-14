@@ -90,6 +90,7 @@ def test_custom_parser_hf_squad_dataset(hf_squad_dataset_path):
     assert sample["title"] == "Egypt"
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("range_ratio", [0.5, 0.8, 1.0])
 def test_random_data_loader(range_ratio):
     num_sequences = 1024
