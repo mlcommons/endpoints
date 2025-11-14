@@ -693,7 +693,7 @@ class TestWorkerErrorHandling:
 
                 # Malformed JSON is skipped, so we get an empty response, not an error
                 assert response.error is None
-                assert response.response_output == ""
+                assert response.response_output == ()
 
                 # Shutdown
                 worker._shutdown = True

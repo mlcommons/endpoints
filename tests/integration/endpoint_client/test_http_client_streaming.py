@@ -176,7 +176,7 @@ class TestHTTPEndpointClientStreaming:
 
         # Verify we got the complete response
         assert result1.id == "test-stream-1"
-        assert result1.response_output == "Hello"
+        assert "".join(result1.response_output) == "Hello"
 
         # Test 2: Multi-word response
         query2 = Query(
@@ -193,7 +193,10 @@ class TestHTTPEndpointClientStreaming:
 
         # Verify complete response
         assert result2.id == "test-stream-2"
-        assert result2.response_output == "This is a longer streaming test message"
+        assert (
+            "".join(result2.response_output)
+            == "This is a longer streaming test message"
+        )
 
         # Test 3: Empty response
         query3 = Query(
@@ -209,7 +212,7 @@ class TestHTTPEndpointClientStreaming:
         result3 = await future3
 
         assert result3.id == "test-stream-3"
-        assert result3.response_output == ""
+        assert "".join(result3.response_output) == ""
 
         # Verify callback received messages
         # Note: The callback receives first StreamChunk and final QueryResult
@@ -238,14 +241,14 @@ class TestHTTPEndpointClientStreaming:
             # Verify final content
             final_response = query_results[0]
             if sample_id == "test-stream-1":
-                assert final_response["content"] == "Hello"
+                assert final_response["content"] == ("Hello", "")
             elif sample_id == "test-stream-2":
-                assert (
-                    final_response["content"]
-                    == "This is a longer streaming test message"
+                assert final_response["content"] == (
+                    "This",
+                    " is a longer streaming test message",
                 )
             elif sample_id == "test-stream-3":
-                assert final_response["content"] == ""
+                assert final_response["content"] == ("",)
 
     @pytest.mark.asyncio
     async def test_mixed_streaming_non_streaming(self, futures_http_client):
@@ -303,7 +306,7 @@ class TestHTTPEndpointClientStreaming:
                 ]
             else:
                 # Streaming response
-                assert result.response_output == "Streaming response test"
+                assert "".join(result.response_output) == "Streaming response test"
 
     @pytest.mark.asyncio
     async def test_concurrent_streaming_requests(self, futures_http_client):
@@ -333,7 +336,8 @@ class TestHTTPEndpointClientStreaming:
         for idx, result in results:
             assert result.id == f"concurrent-stream-{idx}"
             assert (
-                result.response_output == f"Concurrent streaming request number {idx}"
+                "".join(result.response_output)
+                == f"Concurrent streaming request number {idx}"
             )
             assert result.error is None
 
@@ -373,9 +377,9 @@ class TestHTTPEndpointClientStreaming:
         assert resolution_count == 1
         assert resolved_result is not None
         assert resolved_result.id == "test-single-resolution"
-        assert (
-            resolved_result.response_output
-            == "Test single future resolution with multiple words"
+        assert resolved_result.response_output == (
+            "Test",
+            " single future resolution with multiple words",
         )
 
         # Verify future is done and can't be resolved again
@@ -411,7 +415,8 @@ class TestHTTPEndpointClientStreaming:
 
         # Get complete response
         result = await future
-        assert result.response_output == "Test first chunk access functionality"
+        assert result.response_output[0] == "Test"
+        assert result.response_output[1] == " first chunk access functionality"
 
         # Test 2: Check if first chunk is ready after awaiting
         query2 = Query(
@@ -454,7 +459,8 @@ class TestHTTPEndpointClientStreaming:
 
         # Complete response should be the same
         result = await future
-        assert result.response_output == "Hi"
+        assert result.response_output[0] == "Hi"
+        assert result.response_output[1] == ""
 
     @pytest.mark.asyncio
     async def test_streaming_race_first_chunks(self, futures_http_client):
@@ -497,7 +503,8 @@ class TestHTTPEndpointClientStreaming:
         # Get first complete
         winner = done.pop().result()
         assert winner.id.startswith("race-")
-        assert "Query number" in winner.response_output
+        assert winner.response_output[0] == "Query"
+        assert winner.response_output[1].startswith(" number")
 
         # Clean up remaining
         for f in pending:
@@ -531,7 +538,7 @@ class TestHTTPEndpointClientStreaming:
 
         # Wait for completion
         result = await future
-        assert result.response_output == "Test metadata propagation"
+        assert "".join(result.response_output) == "Test metadata propagation"
 
         # Give callback time to process
         await asyncio.sleep(0.1)
@@ -649,4 +656,4 @@ class TestHTTPEndpointClientStreaming:
                 assert first == prompt.split()[0] if prompt else ""
 
             result = await future
-            assert result.response_output == prompt
+            assert "".join(result.response_output) == prompt

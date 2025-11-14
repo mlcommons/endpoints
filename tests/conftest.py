@@ -263,12 +263,15 @@ def events_db(tmp_path, sample_uuids):
         (uuid3, SessionEvent.LOADGEN_ISSUE_CALLED.value, 10202),
         (uuid1, SampleEvent.NON_FIRST_CHUNK.value, 10203),
         (uuid2, SampleEvent.NON_FIRST_CHUNK.value, 10210),
+        (uuid3, SessionEvent.ERROR.value, 10211),
         (uuid1, SampleEvent.NON_FIRST_CHUNK.value, 10211),
         (uuid1, SampleEvent.COMPLETE.value, 10211),
         (uuid2, SampleEvent.NON_FIRST_CHUNK.value, 10214),
+        (uuid3, SessionEvent.ERROR.value, 10216),
         (uuid2, SampleEvent.NON_FIRST_CHUNK.value, 10217),
         (uuid2, SampleEvent.NON_FIRST_CHUNK.value, 10219),
         (uuid2, SampleEvent.COMPLETE.value, 10219),
+        (uuid3, SessionEvent.ERROR.value, 10225),
         ("", SessionEvent.TEST_ENDED.value, 10300),
     ]
     cur.executemany(
@@ -282,6 +285,16 @@ def events_db(tmp_path, sample_uuids):
     conn.close()
     Path(test_db).unlink()
     logger.info(f"Events database at {test_db} deleted")
+
+
+class CharacterTokenizer:
+    def tokenize(self, text: str) -> list[str]:
+        return list(text)
+
+
+@pytest.fixture
+def tokenizer():
+    return CharacterTokenizer()
 
 
 @pytest.fixture
@@ -298,8 +311,8 @@ def fake_outputs(tmp_path, sample_uuids):
 
     output_path = tmp_path / "outputs.jsonl"
     fake_outputs = FakeOutputs(output_path)
-    fake_outputs[uuid1] = "Hello, world"
-    fake_outputs[uuid2] = "And goodbye."
+    fake_outputs[uuid1] = ["Hello, ", "world"]
+    fake_outputs[uuid2] = ["And ", "goodbye."]
 
     # Generate test outputs file
     with output_path.open("w") as f:

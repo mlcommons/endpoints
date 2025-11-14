@@ -18,7 +18,8 @@ from __future__ import annotations
 import argparse
 import threading
 
-import inference_endpoint.rulesets.mlcommons.models as mlcommons_models
+import inference_endpoint.config.rulesets.mlcommons.models as mlcommons_models
+from inference_endpoint.config.rulesets.mlcommons.rules import CURRENT
 from inference_endpoint.config.user_config import UserConfig
 from inference_endpoint.core.types import QueryResult, StreamChunk
 from inference_endpoint.dataset_manager.dataloader import DataLoader
@@ -30,7 +31,6 @@ from inference_endpoint.load_generator import (
     SampleIssuer,
     WithoutReplacementSampleOrder,
 )
-from inference_endpoint.rulesets.mlcommons.rules import CURRENT
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer, TextIteratorStreamer
 from transformers.utils import logging
@@ -167,7 +167,7 @@ class SerialSampleIssuer(SampleIssuer):
                 )
                 SampleEventHandler.stream_chunk_complete(stream_chunk)
                 first = False
-            query_result = QueryResult(id=sample.uuid, response_output="".join(chunks))
+            query_result = QueryResult(id=sample.uuid, response_output=chunks)
         else:
             response = self.compute_func(sample.data)
             query_result = QueryResult(id=sample.uuid, response_output=response)

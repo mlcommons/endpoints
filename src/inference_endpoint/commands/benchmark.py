@@ -28,6 +28,7 @@ import time
 from pathlib import Path
 from urllib.parse import urljoin
 
+from tqdm import tqdm
 from transformers import AutoTokenizer
 from transformers.utils import logging as transformers_logging
 
@@ -100,7 +101,7 @@ class ResponseCollector:
         count: Total number of completed queries (success + failure).
     """
 
-    def __init__(self, collect_responses: bool = False):
+    def __init__(self, collect_responses: bool = False, pbar: tqdm | None = None):
         """Initialize response collector.
 
         Args:
@@ -111,6 +112,8 @@ class ResponseCollector:
         self.responses: dict[str, str] = {}
         self.errors: list[str] = []
         self.count = 0
+
+        self.pbar = pbar
 
     def on_complete_hook(self, result: QueryResult):
         """Callback invoked when a query completes (success or failure).
@@ -127,6 +130,9 @@ class ResponseCollector:
             self.errors.append(f"Sample {result.id}: {result.error}")
         elif self.collect_responses:
             self.responses[result.id] = result.response_output
+
+        if self.pbar:
+            self.pbar.update(1)
 
 
 async def run_benchmark_command(args: argparse.Namespace) -> None:
@@ -531,7 +537,12 @@ def _run_benchmark(
         raise SetupError(str(e)) from e
 
     # Setup response collector
-    response_collector = ResponseCollector(collect_responses=collect_responses)
+    pbar = tqdm(
+        desc=f"{model_name} (Streaming: {enable_streaming})", total=total_samples
+    )
+    response_collector = ResponseCollector(
+        collect_responses=collect_responses, pbar=pbar
+    )
     SampleEventHandler.register_hook(
         SampleEvent.COMPLETE, response_collector.on_complete_hook
     )
@@ -669,6 +680,7 @@ def _run_benchmark(
         # Cleanup - always execute
         logger.info("Cleaning up...")
         try:
+            pbar.close()
             sample_issuer.shutdown()
             http_client.shutdown()
             shutil.rmtree(tmp_dir, ignore_errors=True)
