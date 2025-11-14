@@ -373,6 +373,19 @@ class Report:
         return float(self.n_samples_completed / (self.duration_ns / 1e9))
 
     @functools.cached_property
+    def tps(self) -> float | None:
+        """Calculates the tokens per second based on the output sequence lengths and duration.
+
+        Returns:
+            The tokens per second or None if duration is 0.
+        """
+        if not self.duration_ns:
+            return None
+        if not self.output_sequence_lengths:
+            return None
+        return float(self.output_sequence_lengths["total"] / (self.duration_ns / 1e9))
+
+    @functools.cached_property
     def e2e_sample_latency_sec(self) -> float:
         """Calculates the end-to-end total latency across all samples in the test in seconds.
 
@@ -392,6 +405,7 @@ class Report:
         """
         d = dataclasses.asdict(self)
         d["qps"] = self.qps
+        d["tps"] = self.tps
         d["e2e_sample_latency_sec"] = self.e2e_sample_latency_sec
         json_str = orjson.dumps(d).decode("utf-8")
         if save_to is not None:
@@ -477,6 +491,10 @@ class Report:
                 f"Total time spent waiting on samples: {self.e2e_sample_latency_sec} seconds"
             )
         fn(f"QPS: {self.qps:.2f}")
+
+        if self.tps is not None:
+            fn(f"TPS: {self.tps:.2f}")
+
         fn("\n\n------------------- Latency Breakdowns -------------------")
         if len(self.latency) > 0 and self.ttft == 0:
             fn(

@@ -204,7 +204,9 @@ def test_rollup_summarize(events_db):
         assert summary["percentiles"][s] == latencies.percentile(percentile)
 
 
-def test_reporter_create_report(events_db_reporter_with_fake_outputs, tokenizer):
+def test_reporter_create_report(
+    events_db_reporter_with_fake_outputs, fake_outputs, tokenizer
+):
     reporter = events_db_reporter_with_fake_outputs
 
     report = reporter.create_report(tokenizer)
@@ -239,6 +241,14 @@ def test_reporter_create_report(events_db_reporter_with_fake_outputs, tokenizer)
     # QPS should be: completed_samples / (duration_ns / 1e9)
     expected_qps = report.n_samples_completed / (report.duration_ns / 1e9)
     assert report.qps == expected_qps
+
+    expected_total_tokens = 0
+    for output in fake_outputs.values():
+        for chunk in output:
+            expected_total_tokens += len(tokenizer.tokenize(chunk))
+    expected_tps = expected_total_tokens / ((10300 - 5000) / 1e9)
+    assert report.tps == expected_tps
+
     assert report.e2e_sample_latency_sec == expected_e2e_latency_ns / 1e9
 
 
@@ -260,6 +270,7 @@ def test_reporter_json(events_db):
         "output_sequence_lengths",
         "tpot_reporting_mode",
         "qps",
+        "tps",
         "e2e_sample_latency_sec",
     ]
     assert set(json_dict.keys()) == set(expected_keys)
@@ -267,6 +278,7 @@ def test_reporter_json(events_db):
     assert json_dict["n_samples_completed"] == report.n_samples_completed
     assert json_dict["duration_ns"] == report.duration_ns
     assert json_dict["qps"] == report.qps
+    assert json_dict["tps"] == report.tps
     assert json_dict["e2e_sample_latency_sec"] == report.e2e_sample_latency_sec
 
     # For ttft, tpot, and latency, JSON decode will only decode as lists, not tuples
