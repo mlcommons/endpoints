@@ -266,6 +266,7 @@ class EventRecorder:
                     should_commit = True
                 else:
                     # Regular event - add to buffer
+                    # Format: (sample_uuid, event_type, timestamp_ns, output)
                     event_buffer.append(item[:-1])
                     if item[-1] is not None:
                         if item[1] == SampleEvent.FIRST_CHUNK.value:

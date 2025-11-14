@@ -778,6 +778,11 @@ class MetricsReporter:
             elif len(output) < 2:
                 continue
 
+            # Output can be in one of two formats depending on the issuer:
+            # 1. A list of all chunks (i.e. ['chunk1', 'chunk2', ...])
+            # 2. A 2 item list of ['chunk1', 'chunk2chunk3...']
+            # Both of these are valid as we only need to distinguish the first chunk for the purposes of TPOT calculation.
+            # The choice is up to the issuer implementation depending on performance considerations.
             if len(output) > 2:
                 non_first_chunk = "".join(output[1:])
             else:
