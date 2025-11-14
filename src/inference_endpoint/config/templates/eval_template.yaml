@@ -13,7 +13,10 @@ datasets:
     path: "datasets/gpqa.pkl"
     format: "pkl"
     samples: 500
-    eval_method: "exact_match"
+    eval_config:
+      evaluator_name: "gpqa"
+      repeats: 5
+      k: 1
 
 settings:
   runtime:

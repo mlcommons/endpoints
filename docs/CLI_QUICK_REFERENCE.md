@@ -230,7 +230,10 @@ datasets:
   - name: "gpqa"
     type: "accuracy"
     path: "gpqa.pkl"
-    eval_method: "exact_match"
+    eval_config:
+      evaluator_name: "gpqa"
+      repeats: 1
+      k: 1
 
 settings:
   runtime:

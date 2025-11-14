@@ -32,6 +32,7 @@ from inference_endpoint import __version__
 from inference_endpoint.commands import (
     run_benchmark_command,
     run_eval_command,
+    run_eval_results_command,
     run_info_command,
     run_init_command,
     run_probe_command,
@@ -118,18 +119,67 @@ def create_parser() -> argparse.ArgumentParser:
 
     # ===== Eval command =====
     eval_parser = subparsers.add_parser(
-        "eval", help="Run accuracy evaluation (CLI-only)"
-    )
-    eval_parser.add_argument(
-        "--dataset", type=str, help="Dataset name(s) or path (comma-separated)"
+        "eval",
+        help="Run benchmark + accuracy evaluation",
+        description="Run benchmark with accuracy evaluation. "
+        "Collects responses and automatically evaluates them using the specified evaluator."
     )
     eval_parser.add_argument(
         "--endpoint", "-e", type=str, required=True, help="Endpoint URL"
     )
+    eval_parser.add_argument(
+        "--model", type=str, required=True, help="Model name (e.g., llama-2-70b)"
+    )
+    eval_parser.add_argument(
+        "--dataset", "-d", type=Path, required=True, help="Dataset file"
+    )
+    # Evaluator choices will be populated dynamically after evaluators are imported
+    eval_parser.add_argument(
+        "--evaluator",
+        type=str,
+        required=True,
+        help="Evaluator to use (choices populated at runtime from registry)"
+    )
+    eval_parser.add_argument(
+        "--repeats",
+        type=int,
+        default=1,
+        help="Run dataset N times for pass@k calculation (default: 1)"
+    )
+    eval_parser.add_argument(
+        "--pass-k",
+        type=int,
+        help="Calculate pass@k metric (must be in [1, repeats])"
+    )
     eval_parser.add_argument("--api-key", type=str, help="API key")
-    # Note: --config removed - eval is CLI-only for simplicity
-    eval_parser.add_argument("--output", "-o", type=Path, help="Output file")
-    eval_parser.add_argument("--judge", type=str, help="Judge model (future)")
+    eval_parser.add_argument("--workers", type=int, help="HTTP workers (default: 4)")
+    _add_auxiliary_args(eval_parser)
+    
+    # ===== Eval-results command =====
+    eval_results_parser = subparsers.add_parser(
+        "eval-results",
+        help="Evaluate existing benchmark results",
+        description="Post-process evaluation of existing benchmark results. "
+        "Useful for debugging evaluators or experimenting with different pass@k values."
+    )
+    eval_results_parser.add_argument(
+        "--results",
+        type=Path,
+        required=True,
+        help="Results file from previous benchmark/eval run"
+    )
+    eval_results_parser.add_argument(
+        "--evaluator",
+        type=str,
+        required=True,
+        help="Evaluator to use (choices populated at runtime from registry)"
+    )
+    eval_results_parser.add_argument(
+        "--pass-k",
+        type=int,
+        help="Calculate pass@k metric (must match repeats used during collection)"
+    )
+    _add_auxiliary_args(eval_results_parser)
 
     # ===== Probe command =====
     probe_parser = subparsers.add_parser("probe", help="Test endpoint connectivity")
@@ -315,6 +365,8 @@ async def main() -> None:
             await run_benchmark_command(args)
         elif args.command == "eval":
             await run_eval_command(args)
+        elif args.command == "eval-results":
+            await run_eval_results_command(args)
         elif args.command == "probe":
             await run_probe_command(args)
         elif args.command == "info":

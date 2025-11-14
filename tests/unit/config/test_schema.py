@@ -19,7 +19,6 @@ from inference_endpoint.config.schema import (
     BenchmarkConfig,
     Dataset,
     DatasetType,
-    EvalMethod,
     ModelParams,
     OSLDistribution,
     OSLDistributionType,
@@ -83,7 +82,7 @@ class TestDataset:
             samples=5000,
         )
         assert dataset.type == DatasetType.PERFORMANCE
-        assert dataset.eval_method is None
+        assert dataset.eval_config is None
 
     def test_accuracy_dataset(self):
         """Test accuracy dataset config."""
@@ -92,10 +91,11 @@ class TestDataset:
             type=DatasetType.ACCURACY,
             path="datasets/gpqa.pkl",
             samples=500,
-            eval_method=EvalMethod.EXACT_MATCH,
+            eval_config={"evaluator_name": "gpqa", "repeats": 1, "pass_k": 1},
         )
         assert dataset.type == DatasetType.ACCURACY
-        assert dataset.eval_method == EvalMethod.EXACT_MATCH
+        assert dataset.eval_config is not None
+        assert dataset.eval_config["evaluator_name"] == "gpqa"
 
 
 class TestBenchmarkConfig:
@@ -133,7 +133,7 @@ class TestBenchmarkConfig:
                     "type": "accuracy",
                     "path": "gpqa.pkl",
                     "samples": 500,
-                    "eval_method": "exact_match",
+                    "eval_config": {"evaluator_name": "gpqa", "repeats": 1},
                 },
             ],
         )
@@ -152,13 +152,13 @@ class TestBenchmarkConfig:
                     "name": "gpqa",
                     "type": "accuracy",
                     "path": "gpqa.pkl",
-                    "eval_method": "exact_match",
+                    "eval_config": {"evaluator_name": "gpqa", "repeats": 1},
                 },
                 {
                     "name": "aime",
                     "type": "accuracy",
                     "path": "aime.pkl",
-                    "eval_method": "exact_match",
+                    "eval_config": {"evaluator_name": "aime", "repeats": 1},
                 },
             ],
         )

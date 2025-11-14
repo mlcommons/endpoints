@@ -34,14 +34,20 @@ datasets:
     path: "datasets/gpqa.pkl"
     format: "pkl"
     samples: 500
-    eval_method: "exact_match"
+    eval_config:
+      evaluator_name: "gpqa"
+      repeats: 1
+      k: 1
 
   - name: "aime-accuracy"
     type: "accuracy"
     path: "datasets/aime.pkl"
     format: "pkl"
     samples: 300
-    eval_method: "exact_match"
+    eval_config:
+      evaluator_name: "aime"
+      repeats: 1
+      k: 1
 
 settings:
   runtime:

@@ -95,6 +95,39 @@ inference-endpoint probe \
 
 See `docs/LOCAL_TESTING.md` for complete testing guide.
 
+## `gpqa_sample.pkl`
+
+**Purpose:** Sample GPQA dataset for testing evaluation pipeline.
+
+**Samples:** 10 (from gpqa_diamond variant)
+
+**Format:** Pickle (pandas DataFrame)
+
+**Columns:** `question`, `text_input`, `ground_truth`, `dataset`, `domain`, `subdomain`
+
+**Content:**
+- Graduate-level multiple choice questions (A/B/C/D)
+- Questions formatted with shuffled options
+- Ground truth as single letter (A/B/C/D)
+
+**Generation:**
+
+```bash
+python -m inference_endpoint.eval.dataset_generation.generate_gpqa \
+  --output tests/datasets/gpqa_sample.pkl \
+  --variant diamond \
+  --num-samples 10 \
+  --seed 42
+```
+
+**Note:** Requires HuggingFace authentication (`huggingface-cli login`) to access the gated GPQA dataset.
+
+**Use Cases:**
+- Testing GPQA evaluator
+- Testing eval command
+- Testing pass@k calculation
+- Unit and integration tests
+
 ### Candidates
 
 - CNN / DailyMail v3.0.0

@@ -13,20 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Command implementations for the CLI."""
+"""Evaluation module for accuracy testing of inference endpoints."""
 
-from .benchmark import run_benchmark_command
-from .eval import run_eval_command
-from .eval_results import run_eval_results_command
-from .probe import run_probe_command
-from .utils import run_info_command, run_init_command, run_validate_command
+from .evaluator import Evaluator
+from .evaluate import evaluate_results
 
-__all__ = [
-    "run_benchmark_command",
-    "run_eval_command",
-    "run_eval_results_command",
-    "run_probe_command",
-    "run_info_command",
-    "run_init_command",
-    "run_validate_command",
-]
+__all__ = ["Evaluator", "evaluate_results"]
+
