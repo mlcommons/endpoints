@@ -20,6 +20,7 @@ from urllib.parse import urljoin
 import pytest
 from inference_endpoint import metrics
 from inference_endpoint.config.runtime_settings import RuntimeSettings
+from inference_endpoint.config.schema import LoadPattern, LoadPatternType
 from inference_endpoint.core.types import QueryResult
 from inference_endpoint.dataset_manager.dataloader import (
     DeepSeekR1ChatCompletionDataLoader,
@@ -30,7 +31,7 @@ from inference_endpoint.endpoint_client.configs import (
     ZMQConfig,
 )
 from inference_endpoint.endpoint_client.http_client import HTTPEndpointClient
-from inference_endpoint.endpoint_client.loadgen import HttpClientSampleIssuer
+from inference_endpoint.endpoint_client.http_sample_issuer import HttpClientSampleIssuer
 from inference_endpoint.load_generator import (
     BenchmarkSession,
     MaxThroughputScheduler,
@@ -136,6 +137,7 @@ async def _run_load_generator_full_run_url(
         n_samples_to_issue=dummy_dataloader.num_samples(),
         rng_sched=random.Random(1234),
         rng_sample_index=random.Random(1234),
+        load_pattern=LoadPattern(type=LoadPatternType.MAX_THROUGHPUT),
     )
 
     scheduler = MaxThroughputScheduler(
@@ -198,6 +200,7 @@ async def test_load_generator_full_run_mock_http_oracle_server(
         min_sample_count=1,
         rng_sched=random.Random(1234),
         rng_sample_index=random.Random(1234),
+        load_pattern=LoadPattern(type=LoadPatternType.MAX_THROUGHPUT),
     )
 
     scheduler = MaxThroughputScheduler(

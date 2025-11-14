@@ -24,6 +24,7 @@ from .events import Event, SampleEvent, SessionEvent
 from .load_generator import LoadGenerator, SampleIssuer, SchedulerBasedLoadGenerator
 from .sample import IssuedSample, Sample, SampleEventHandler
 from .scheduler import (
+    ConcurrencyScheduler,
     MaxThroughputScheduler,
     PoissonDistributionScheduler,
     SampleOrder,
@@ -41,6 +42,7 @@ __all__ = [
     "SampleEventHandler",
     "IssuedSample",
     "Scheduler",
+    "ConcurrencyScheduler",
     "MaxThroughputScheduler",
     "PoissonDistributionScheduler",
     "SampleOrder",

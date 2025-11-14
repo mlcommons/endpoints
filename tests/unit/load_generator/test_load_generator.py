@@ -19,6 +19,7 @@ from unittest.mock import patch
 
 import inference_endpoint.metrics as metrics
 from inference_endpoint.config.runtime_settings import RuntimeSettings
+from inference_endpoint.config.schema import LoadPattern, LoadPatternType
 from inference_endpoint.core.types import QueryResult, StreamChunk
 from inference_endpoint.load_generator.events import SampleEvent
 from inference_endpoint.load_generator.load_generator import (
@@ -106,6 +107,7 @@ def test_full_run(record_event_mock):
         min_sample_count=100,
         rng_sched=random.Random(1234),
         rng_sample_index=random.Random(1234),
+        load_pattern=LoadPattern(type=LoadPatternType.MAX_THROUGHPUT),
     )
 
     def compute_digits_of_square(n: int):

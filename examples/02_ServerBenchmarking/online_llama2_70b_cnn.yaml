@@ -1,0 +1,44 @@
+# Online Latency Benchmark
+name: "online-llama2-70b-cnn-benchmark"
+version: "1.0"
+type: "online"
+
+model_params:
+  name: "meta-llama/Llama-2-70b-chat-hf"
+  temperature: 0.7
+  top_p: 0.9
+  max_new_tokens: 1024
+
+datasets:
+  - name: "perf-test"
+    type: "performance"
+    path: "cnn_dailymail_train.json"
+    samples: 1000
+    parser:
+      prompt: "article"
+
+settings:
+  runtime:
+    min_duration_ms: 60000 # 1 minute
+    max_duration_ms: 180000 # 3 minutes
+    scheduler_random_seed: 42 # For Poisson/distribution sampling
+    dataloader_random_seed: 42 # For dataset shuffling
+
+  load_pattern:
+    type: "max_throughput"
+    target_qps: 10
+
+  client:
+    workers: 4
+    max_concurrency: -1 # -1 = unlimited
+
+metrics:
+  collect:
+    - "throughput"
+    - "latency"
+    - "ttft"
+    - "tpot"
+
+endpoint_config:
+  endpoint: "http://localhost:8000"
+  api_key: null

@@ -46,11 +46,12 @@ inference-endpoint benchmark offline \
   --model Qwen/Qwen3-8B \
   --dataset tests/datasets/dummy_1k.pkl
 
-# Run online benchmark (sustained QPS - requires --target-qps)
+# Run online benchmark (sustained QPS - requires --target-qps, --load-pattern)
 inference-endpoint benchmark online \
   --endpoint http://your-endpoint:8000 \
   --model Qwen/Qwen3-8B \
   --dataset tests/datasets/dummy_1k.pkl \
+  --load-pattern poisson \
   --target-qps 100
 
 # With explicit sample count

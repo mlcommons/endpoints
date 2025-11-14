@@ -59,7 +59,7 @@ from inference_endpoint.endpoint_client.configs import (
     ZMQConfig,
 )
 from inference_endpoint.endpoint_client.http_client import HTTPEndpointClient
-from inference_endpoint.endpoint_client.loadgen import HttpClientSampleIssuer
+from inference_endpoint.endpoint_client.http_sample_issuer import HttpClientSampleIssuer
 from inference_endpoint.exceptions import (
     ExecutionError,
     InputValidationError,
@@ -254,15 +254,16 @@ def _build_config_from_cli(
         InputValidationError: If required params missing
     """
     # Determine load pattern (CLI override or mode default)
-    load_pattern_arg = getattr(args, "load_pattern", None)
-    if load_pattern_arg:
+    if load_pattern_arg := getattr(args, "load_pattern", None):
         load_pattern_type = LoadPatternType(load_pattern_arg)
     else:
-        load_pattern_type = (
-            LoadPatternType.MAX_THROUGHPUT
-            if benchmark_mode == "offline"
-            else LoadPatternType.POISSON
-        )
+        match benchmark_mode:
+            case "offline":
+                load_pattern_type = LoadPatternType.MAX_THROUGHPUT
+            case "online" if getattr(args, "concurrency", None):
+                load_pattern_type = LoadPatternType.CONCURRENCY
+            case "online":
+                load_pattern_type = LoadPatternType.POISSON
 
     # Build BenchmarkConfig from CLI params
     return BenchmarkConfig(
@@ -280,7 +281,8 @@ def _build_config_from_cli(
         settings=Settings(
             load_pattern=LoadPattern(
                 type=load_pattern_type,
-                target_qps=args.target_qps if args.target_qps else None,
+                target_qps=getattr(args, "target_qps", None),
+                target_concurrency=getattr(args, "concurrency", None),
             ),
             runtime=RuntimeConfig(
                 min_duration_ms=args.duration * 1000
@@ -295,7 +297,7 @@ def _build_config_from_cli(
             ),
             client=ClientSettings(
                 workers=args.workers if args.workers else 4,
-                max_concurrency=args.concurrency if args.concurrency else -1,
+                max_concurrency=-1,  # client uses unlimited concurrency by default
             ),
         ),
         model_params=ModelParams(
@@ -551,6 +553,9 @@ def _run_benchmark(
     max_concurrency = config.settings.client.max_concurrency
 
     logger.info(f"Connecting: {endpoint}")
+    logger.info(
+        f"Client config: workers={num_workers}, max_concurrency={max_concurrency if max_concurrency > 0 else 'unlimited'}"
+    )
 
     tmp_dir = tempfile.mkdtemp(prefix="inference_endpoint_")
 

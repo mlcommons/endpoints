@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from .ruleset_base import BenchmarkSuiteRuleset
-    from .schema import BenchmarkConfig
+    from .schema import BenchmarkConfig, LoadPattern
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +80,9 @@ class RuntimeSettings:
 
     rng_sample_index: random.Random
     """Random number generator for sample indexing"""
+
+    load_pattern: LoadPattern | None
+    """Load pattern configuration"""
 
     @classmethod
     def from_config(
@@ -155,6 +158,7 @@ class RuntimeSettings:
             "min_sample_count": 1,
             "rng_sched": random.Random(runtime_cfg.scheduler_random_seed),
             "rng_sample_index": random.Random(runtime_cfg.dataloader_random_seed),
+            "load_pattern": load_pattern_cfg,
         }
 
         # Apply overrides
