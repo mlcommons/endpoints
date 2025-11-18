@@ -110,7 +110,7 @@ def setup_logging(level: str | None = None, format_string: str | None = None) ->
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(ColoredFormatter(fmt=format_string, use_color=use_color))
 
-    logging.basicConfig(level=getattr(logging, level.upper()), handlers=[handler])
+    logging.basicConfig(level=getattr(logging, level.upper()), handlers=[handler], force=True)
 
     # Set specific logger levels
     logging.getLogger("asyncio").setLevel(logging.WARNING)
