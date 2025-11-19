@@ -235,7 +235,7 @@ async def run_benchmark_command(args: argparse.Namespace) -> None:
     collect_responses = test_mode in [TestMode.ACC, TestMode.BOTH]
 
     # Run benchmark
-    _run_benchmark(args, effective_config, collect_responses, test_mode, benchmark_mode)
+    _run_benchmark(effective_config, collect_responses, test_mode, benchmark_mode)
 
 
 def _build_config_from_cli(
@@ -264,7 +264,10 @@ def _build_config_from_cli(
                 load_pattern_type = LoadPatternType.CONCURRENCY
             case "online":
                 load_pattern_type = LoadPatternType.POISSON
-
+    report_path = getattr(args, "report_path", None)
+    timeout = getattr(args, "timeout", None)
+    verbose = getattr(args, "verbose", False)
+    output = getattr(args, "output", None)
     # Build BenchmarkConfig from CLI params
     return BenchmarkConfig(
         name=f"cli_{benchmark_mode}",
@@ -315,6 +318,10 @@ def _build_config_from_cli(
         endpoint_config=EndpointConfig(endpoint=args.endpoint, api_key=args.api_key),
         metrics=Metrics(),
         baseline=None,  # CLI mode doesn't use baseline
+        report_path=report_path,
+        output=output,
+        timeout=timeout,
+        verbose=verbose,
     )
 
 
@@ -391,7 +398,7 @@ def _get_dataset_format(config: BenchmarkConfig, dataset_path: Path) -> str:
 
 
 def _run_benchmark(
-    args: argparse.Namespace,
+    # args: argparse.Namespace,
     config: BenchmarkConfig,
     collect_responses: bool,
     test_mode: TestMode,
@@ -440,11 +447,13 @@ def _run_benchmark(
     # Load tokenizer if model name is provided
     # Priority: CLI args (offline/online modes) > config submission_ref (from-config mode)
     tokenizer = None
-    model_name = getattr(args, "model", None)
+    model_name = config.model_params.name
     if not model_name and config.submission_ref:
         model_name = config.submission_ref.model
     if not model_name and config.model_params.name:
         model_name = config.model_params.name
+
+    max_tokens = config.model_params.max_new_tokens
 
     if model_name:
         try:
@@ -461,17 +470,18 @@ def _run_benchmark(
         raise InputValidationError("No model name provided")
 
     # Get report path if specified
-    report_path = getattr(args, "report_path", None)
-    if report_path:
-        logger.info(f"Report will be saved to: {report_path}")
+    # report_path = getattr(args, "report_path", None)
+    # if report_path:
+    #     logger.info(f"Report will be saved to: {report_path}")
 
     # Get dataset - from CLI or from config
     # TODO: Dataset Logic is not yet fully implemented
-    dataset_path = _get_dataset_path(args, config)
+    # dataset_path = _get_dataset_path(args, config)
+    dataset_path = config.datasets[0].path
 
     # Load dataset using factory
     dataset_format = _get_dataset_format(config, dataset_path)
-    logger.info(f"Loading: {dataset_path.name} (format: {dataset_format})")
+    logger.info(f"Loading: {dataset_path} (format: {dataset_format})")
 
     # Determine if streaming should be enabled based on config
     streaming_mode = config.model_params.streaming
@@ -500,10 +510,17 @@ def _run_benchmark(
             dataset_path,
             format=dataset_format,
             key_maps=key_maps,
-            metadata={"model": model_name, "stream": enable_streaming},
+            metadata={
+                "model": model_name,
+                "stream": enable_streaming,
+                "max_completion_tokens": max_tokens,
+            },
         )
         dataloader.load()
         logger.info(f"Loaded {dataloader.num_samples()} samples")
+    except FileNotFoundError as e:
+        logger.error(f"Dataset file not found: {dataset_path}")
+        raise InputValidationError(f"Dataset file not found: {dataset_path}") from e
     except NotImplementedError as e:
         logger.error(f"Dataset format not supported: {dataset_format}")
         raise SetupError(str(e)) from e
@@ -595,9 +612,9 @@ def _run_benchmark(
             scheduler,
             name="cli_benchmark",
             stop_sample_issuer_on_test_end=False,
-            report_path=report_path,
+            report_path=config.report_path,
             tokenizer_override=tokenizer,
-            max_shutdown_timeout_s=args.timeout if args.timeout else None,
+            max_shutdown_timeout_s=config.timeout if config.timeout else None,
         )
 
         # Wait for test end with ability to interrupt
@@ -629,14 +646,14 @@ def _run_benchmark(
 
         if response_collector.errors:
             logger.warning(f"Errors: {len(response_collector.errors)}")
-            if args.verbose:
+            if config.verbose:
                 for error in response_collector.errors[:3]:
                     logger.warning(f"  {error}")
                 if len(response_collector.errors) > 3:
                     logger.warning(f"  ... +{len(response_collector.errors) - 3} more")
 
         # Save results if requested
-        if hasattr(args, "output") and args.output:
+        if config.output:
             try:
                 results = {
                     "config": {
@@ -660,9 +677,9 @@ def _run_benchmark(
                 if response_collector.errors:
                     results["errors"] = response_collector.errors
 
-                with open(args.output, "w") as f:
+                with open(config.output, "w") as f:
                     json.dump(results, f, indent=2)
-                logger.info(f"Saved: {args.output}")
+                logger.info(f"Saved: {config.output}")
             except Exception as e:
                 logger.error(f"Save failed: {e}")
 
@@ -685,5 +702,5 @@ def _run_benchmark(
             http_client.shutdown()
             shutil.rmtree(tmp_dir, ignore_errors=True)
         except Exception as e:
-            if args.verbose:
+            if config.verbose:
                 logger.warning(f"Cleanup error: {e}")

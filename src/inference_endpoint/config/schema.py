@@ -321,6 +321,10 @@ class BenchmarkConfig(BaseModel):
     settings: Settings = Field(default_factory=Settings)
     metrics: Metrics = Field(default_factory=Metrics)
     endpoint_config: EndpointConfig = Field(default_factory=EndpointConfig)
+    output:Path | None = None
+    report_path:Path | None = None
+    timeout: int | None = None
+    verbose: bool = False
 
     @classmethod
     def from_yaml_file(cls, path: Path) -> BenchmarkConfig:
