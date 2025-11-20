@@ -32,37 +32,37 @@ from .openai_adapter import SSEMessage
 # ============================================================================
 
 
-class ChatMessage(msgspec.Struct, kw_only=True):
+class ChatMessage(msgspec.Struct, kw_only=True, omit_defaults=True):
     """Chat message in OpenAI format."""
 
     role: str
     content: str
-    name: str | None = None
+    name: str
 
 
 class ChatCompletionRequest(msgspec.Struct, kw_only=True, omit_defaults=True):
-    """OpenAI chat completion request (msgspec version)."""
+    """OpenAI chat completion request."""
 
     model: str
     messages: list[ChatMessage]
-    temperature: float = 0.7
-    max_completion_tokens: int = 100
-    stream: bool = False
-    top_p: float = 1.0
-    n: int = 1
-    stop: str | list[str] | None = None
-    presence_penalty: float = 0.0
-    frequency_penalty: float = 0.0
-    logit_bias: dict[str, float] | None = None
-    user: str | None = None
+    temperature: float
+    max_completion_tokens: int
+    stream: bool
+    top_p: float
+    n: int
+    stop: str | list[str]
+    presence_penalty: float
+    frequency_penalty: float
+    logit_bias: dict[str, float]
+    user: str
 
 
 class ChatCompletionResponseMessage(msgspec.Struct, kw_only=True, omit_defaults=True):
     """Response message from OpenAI."""
 
     role: str
-    content: str | None = None
-    refusal: str | None = None
+    content: str | None
+    refusal: str | None
 
 
 class ChatCompletionChoice(msgspec.Struct, kw_only=True, omit_defaults=True):
@@ -70,15 +70,15 @@ class ChatCompletionChoice(msgspec.Struct, kw_only=True, omit_defaults=True):
 
     index: int
     message: ChatCompletionResponseMessage
-    finish_reason: str | None = None
+    finish_reason: str | None
 
 
 class CompletionUsage(msgspec.Struct, kw_only=True, omit_defaults=True):
     """Token usage statistics."""
 
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
-    total_tokens: int = 0
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
 
 
 class ChatCompletionResponse(msgspec.Struct, kw_only=True, omit_defaults=True):
@@ -89,8 +89,8 @@ class ChatCompletionResponse(msgspec.Struct, kw_only=True, omit_defaults=True):
     created: int
     model: str
     choices: list[ChatCompletionChoice]
-    usage: CompletionUsage | None = None
-    system_fingerprint: str | None = None
+    usage: CompletionUsage | None
+    system_fingerprint: str | None
 
 
 # ============================================================================
@@ -101,7 +101,7 @@ class ChatCompletionResponse(msgspec.Struct, kw_only=True, omit_defaults=True):
 class OpenAIMsgspecAdapter(HttpRequestAdapter):
     """OpenAI adapter using msgspec for serialization/deserialization."""
 
-    # Reusable encoders/decoders for maximum performance
+    # Reusable encoders/decoders
     _request_encoder: msgspec.json.Encoder = msgspec.json.Encoder()
     _response_encoder: msgspec.json.Encoder = msgspec.json.Encoder()
     _response_decoder: msgspec.json.Decoder = msgspec.json.Decoder(
@@ -148,15 +148,22 @@ class OpenAIMsgspecAdapter(HttpRequestAdapter):
         return ChatCompletionRequest(
             model=query.data.get("model", "no-model-name"),
             messages=[
-                ChatMessage(role="user", content=query.data["prompt"]),
+                ChatMessage(
+                    role="user",
+                    content=query.data["prompt"],
+                    name=query.data.get("name"),
+                ),
             ],
-            stream=query.data.get("stream", False),
-            max_completion_tokens=query.data.get("max_completion_tokens", 100),
-            temperature=query.data.get("temperature", 0.7),
-            top_p=query.data.get("top_p", 1.0),
-            n=query.data.get("n", 1),
-            presence_penalty=query.data.get("presence_penalty", 0.0),
-            frequency_penalty=query.data.get("frequency_penalty", 0.0),
+            stream=query.data.get("stream"),
+            max_completion_tokens=query.data.get("max_completion_tokens"),
+            temperature=query.data.get("temperature"),
+            top_p=query.data.get("top_p"),
+            n=query.data.get("n"),
+            presence_penalty=query.data.get("presence_penalty"),
+            frequency_penalty=query.data.get("frequency_penalty"),
+            stop=query.data.get("stop"),
+            logit_bias=query.data.get("logit_bias"),
+            user=query.data.get("user"),
         )
 
     @classmethod

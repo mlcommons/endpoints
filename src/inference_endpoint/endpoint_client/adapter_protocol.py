@@ -32,9 +32,7 @@ class HttpRequestAdapter(ABC):
     # SSE (Server-Sent Events) is an HTTP standard
     # Pre-compiled regex for extracting SSE data fields with JSON content
     # Matches "data: {json content}" and captures the JSON part
-    SSE_DATA_PATTERN: re.Pattern[bytes] = re.compile(
-        rb"data:\s*(\{[^\n]+\})", re.MULTILINE
-    )
+    SSE_DATA_PATTERN: re.Pattern[bytes] = re.compile(rb"data:\s*(\{[^\n]+\})")
 
     @staticmethod
     @abstractmethod

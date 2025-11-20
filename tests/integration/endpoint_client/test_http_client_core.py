@@ -1349,7 +1349,6 @@ class TestHTTPEndpointClientCoverage:
             except Exception as e:
                 # If we get an exception, that's also fine
                 print(f"Got expected exception: {e}")
-                pass  # This is the expected behavior
 
         finally:
             await client.async_shutdown()
