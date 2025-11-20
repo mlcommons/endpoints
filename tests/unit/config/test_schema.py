@@ -53,7 +53,7 @@ class TestModelParams:
     def test_default_params(self):
         """Test default model parameters."""
         params = ModelParams()
-        assert params.temperature == 0.7
+        assert params.temperature is None
         assert params.max_new_tokens == 1024
 
     def test_with_osl_distribution(self):

@@ -325,7 +325,8 @@ class JsonlReader(DataLoader):
     def load(self):
         with open(self.file_path) as file:
             for line in file:
-                self.data.append(self.parser(json.loads(line)))
+                if line := line.strip():
+                    self.data.append(self.parser(json.loads(line)))
 
     def load_sample(self, index: int) -> Any:
         return self.data[index]

@@ -513,6 +513,10 @@ def _run_benchmark(
                 "model": model_name,
                 "stream": enable_streaming,
                 "max_completion_tokens": max_tokens,
+                "temperature": config.model_params.temperature,
+                "top_p": config.model_params.top_p,
+                "top_k": config.model_params.top_k,
+                "repetition_penalty": config.model_params.repetition_penalty,
             },
         )
         dataloader.load()

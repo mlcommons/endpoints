@@ -18,7 +18,6 @@
 import asyncio
 import logging
 import threading
-from typing import Any
 
 from inference_endpoint.core.types import Query, QueryResult, StreamChunk
 from inference_endpoint.endpoint_client.http_client import HTTPEndpointClient
@@ -103,7 +102,18 @@ class HttpClientSampleIssuer(SampleIssuer):
         if self.n_inflight == 0:
             self._client_idle_event.clear()
         self.n_inflight += 1
-        self.http_client.issue_query(Query(id=sample.uuid, data=sample.data))
+        self.http_client.issue_query(
+            Query(
+                id=sample.uuid,
+                data=sample.data,
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "text/event-stream"
+                    if sample.data.get("stream", False)
+                    else "application/json",
+                },
+            )
+        )
 
     def wait_for_all_complete(self, timeout: float | None = None):
         """Wait (blocking) for all pending queries to complete.
@@ -123,8 +133,3 @@ class HttpClientSampleIssuer(SampleIssuer):
 
         if self.response_task:
             self.response_task.cancel()
-
-    def process_sample_data(self, s_uuid: int, sample_data: Any):
-        raise NotImplementedError(
-            "HttpClientSampleIssuer does not implement process_sample_data"
-        )

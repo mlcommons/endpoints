@@ -74,7 +74,8 @@ where = ["src"]
 [tool.setuptools.package-dir]
 "" = "src"
 
-
+[tool.autopep8]
+max_line_length = 88
 
 [tool.ruff]
 target-version = "py312"
