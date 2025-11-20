@@ -187,12 +187,15 @@ class PickleReader(DataLoader):
             self.logger.debug(
                 f"Loading data from {self.file_path} with columns: {self.data.columns}"
             )
-            assert "text_input" in self.data.columns
-            self.text_inputs = [None] * len(self.data)
+
+            self.text_inputs = []
             # this preloads the  data in source
-            for idx, data in self.data.iterrows():
+            for _, data in self.data.iterrows():
                 # idx is not passed to the parser since it should _not_ be used in the parser
-                self.text_inputs[idx] = self.parser(data)
+                # note that while we are appending, which is slower, the data may not be sequential and may
+                # have gaps
+                self.text_inputs.append(self.parser(data.to_dict()))
+                
         self.loaded = True
 
     def num_samples(self):
