@@ -193,10 +193,7 @@ def ds_pickle_reader(ds_pickle_dataset_path):
     """
 
     def parser(row):
-        ret = {}
-        for column in row.index.to_list():
-            ret[column] = row[column]
-        return ret
+        return row
 
     return PickleReader(ds_pickle_dataset_path, parser=parser)
 
@@ -358,7 +355,7 @@ class OracleServer(EchoServer):
             Returns:
                 dict: A dictionary with 'prompt' and 'output' keys derived from the input sample.
             """
-            return {"prompt": x.text_input, "output": x.ref_output}
+            return {"prompt": x["text_input"], "output": x["ref_output"]}
 
         self.parser = parser
         data_loader = DeepSeekR1ChatCompletionDataLoader(

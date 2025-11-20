@@ -40,7 +40,7 @@ async def test_ds_chat_completion_data_loader_with_oracle_server(
     """
 
     def parser(x):
-        return {"prompt": x.text_input, "output": x.ref_output}
+        return {"prompt": x["text_input"], "output": x["ref_output"]}
 
     ds_chat_completion_data_loader = DeepSeekR1ChatCompletionDataLoader(
         ds_pickle_dataset_path, parser=parser

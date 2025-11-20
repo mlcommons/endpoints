@@ -163,7 +163,7 @@ class PickleReader(DataLoader):
         if parser is None:
             # TODO : remove this default implementation
             def extract_text_input(row):
-                return row.text_input
+                return {"prompt": row["text_input"]} | (self.metadata or {})
 
             self.parser = extract_text_input
 
@@ -195,7 +195,7 @@ class PickleReader(DataLoader):
                 # note that while we are appending, which is slower, the data may not be sequential and may
                 # have gaps
                 self.text_inputs.append(self.parser(data.to_dict()))
-                
+
         self.loaded = True
 
     def num_samples(self):
