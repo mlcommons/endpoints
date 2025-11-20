@@ -230,14 +230,12 @@ class LoadPattern(BaseModel):
 class ClientSettings(BaseModel):
     """HTTP client configuration.
 
-    Only workers and max_concurrency are required to configure the client.
+    Only workers are required to configure the client.
     Timeout is handled by the HTTP client internally.
 
-    Note: max_concurrency = -1 means unlimited (no semaphore limit).
     """
 
     workers: int = 4
-    max_concurrency: int = -1  # -1 = unlimited (default for CLI and YAML)
 
 
 class Settings(BaseModel):
@@ -322,7 +320,7 @@ class BenchmarkConfig(BaseModel):
     metrics: Metrics = Field(default_factory=Metrics)
     endpoint_config: EndpointConfig = Field(default_factory=EndpointConfig)
     output: Path | None = None
-    report_path: Path | None = None
+    report_dir: Path | None = None
     timeout: int | None = None
     verbose: bool = False
 
@@ -474,27 +472,6 @@ class BenchmarkConfig(BaseModel):
                 f"workers must be >= 1, got {self.settings.client.workers}"
             )
 
-        # max_concurrency: -1 means unlimited, otherwise must be >= 1
-        if (
-            self.settings.client.max_concurrency < -1
-            or self.settings.client.max_concurrency == 0
-        ):
-            raise ValueError(
-                f"max_concurrency must be -1 (unlimited) or >= 1, got {self.settings.client.max_concurrency}"
-            )
-
-        # Ensure max_concurrency can handle target_concurrency if set
-        target_concurrency = self.settings.load_pattern.target_concurrency
-        max_concurrency = self.settings.client.max_concurrency
-
-        if (
-            target_concurrency is not None and max_concurrency > 0
-        ):  # Skip check if unlimited (-1)
-            if max_concurrency < target_concurrency:
-                raise ValueError(
-                    f"max_concurrency ({max_concurrency}) must be >= target_concurrency ({target_concurrency})"
-                )
-
     def validate_runtime_settings(self) -> None:
         """Validate runtime settings are reasonable.
 
@@ -583,7 +560,7 @@ class BenchmarkConfig(BaseModel):
                         scheduler_random_seed=42,
                         dataloader_random_seed=42,
                     ),
-                    client=ClientSettings(workers=4, max_concurrency=-1),
+                    client=ClientSettings(workers=4),
                 ),
                 model_params=ModelParams(temperature=0.7, max_new_tokens=1024),
                 metrics=Metrics(),
@@ -605,7 +582,7 @@ class BenchmarkConfig(BaseModel):
                         scheduler_random_seed=42,
                         dataloader_random_seed=42,
                     ),
-                    client=ClientSettings(workers=4, max_concurrency=-1),
+                    client=ClientSettings(workers=4),
                 ),
                 model_params=ModelParams(temperature=0.7, max_new_tokens=1024),
                 metrics=Metrics(),

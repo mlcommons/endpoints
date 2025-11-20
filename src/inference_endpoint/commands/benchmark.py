@@ -264,7 +264,7 @@ def _build_config_from_cli(
                 load_pattern_type = LoadPatternType.CONCURRENCY
             case "online":
                 load_pattern_type = LoadPatternType.POISSON
-    report_path = getattr(args, "report_path", None)
+    report_dir = getattr(args, "report_dir", None)
     timeout = getattr(args, "timeout", None)
     verbose = getattr(args, "verbose", False)
     output = getattr(args, "output", None)
@@ -318,7 +318,7 @@ def _build_config_from_cli(
         endpoint_config=EndpointConfig(endpoint=args.endpoint, api_key=args.api_key),
         metrics=Metrics(),
         baseline=None,  # CLI mode doesn't use baseline
-        report_path=report_path,
+        report_dir=report_dir,
         output=output,
         timeout=timeout,
         verbose=verbose,
@@ -453,6 +453,11 @@ def _run_benchmark(
     if not model_name and config.model_params.name:
         model_name = config.model_params.name
 
+    if config.report_dir:
+        report_dir = Path(config.report_dir)
+        report_dir.mkdir(parents=True, exist_ok=True)
+        config.to_yaml_file(report_dir / "config.yaml")
+
     max_tokens = config.model_params.max_new_tokens
 
     if model_name:
@@ -567,12 +572,9 @@ def _run_benchmark(
     # Create endpoint client
     endpoint = config.endpoint_config.endpoint
     num_workers = config.settings.client.workers
-    max_concurrency = config.settings.client.max_concurrency
 
     logger.info(f"Connecting: {endpoint}")
-    logger.info(
-        f"Client config: workers={num_workers}, max_concurrency={max_concurrency if max_concurrency > 0 else 'unlimited'}"
-    )
+    logger.info(f"Client config: workers={num_workers}")
 
     tmp_dir = tempfile.mkdtemp(prefix="inference_endpoint_")
 
@@ -580,7 +582,7 @@ def _run_benchmark(
         http_config = HTTPClientConfig(
             endpoint_url=urljoin(endpoint, "/v1/chat/completions"),
             num_workers=num_workers,
-            max_concurrency=max_concurrency,
+            max_concurrency=-1,  # unlimited
         )
         aiohttp_config = AioHttpConfig()
         zmq_config = ZMQConfig(
@@ -612,7 +614,7 @@ def _run_benchmark(
             scheduler,
             name="cli_benchmark",
             stop_sample_issuer_on_test_end=False,
-            report_path=config.report_path,
+            report_dir=config.report_dir,
             tokenizer_override=tokenizer,
             max_shutdown_timeout_s=config.timeout if config.timeout else None,
         )

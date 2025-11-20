@@ -213,7 +213,7 @@ def _add_shared_benchmark_args(parser):
     parser.add_argument("--min-output-tokens", type=int, help="Min output tokens")
     parser.add_argument("--max-output-tokens", type=int, help="Max output tokens")
     parser.add_argument(
-        "--report-path", type=Path, help="Path to save detailed benchmark report"
+        "--report-dir", type=Path, help="Path to save detailed benchmark report"
     )
 
 

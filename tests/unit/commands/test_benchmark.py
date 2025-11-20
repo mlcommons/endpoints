@@ -111,7 +111,6 @@ class TestBuildConfigFromCLI:
         assert config.settings.load_pattern.type.value == "max_throughput"
         assert config.settings.load_pattern.target_qps is None
         assert config.settings.client.workers == 4  # Default
-        assert config.settings.client.max_concurrency == -1  # Default: unlimited
         assert (
             config.settings.runtime.min_duration_ms == 0
         )  # Default: 0 - use dataset samples
@@ -140,7 +139,6 @@ class TestBuildConfigFromCLI:
         assert config.settings.load_pattern.type.value == "poisson"
         assert config.settings.load_pattern.target_qps == 100.0
         assert config.settings.client.workers == 8
-        assert config.settings.client.max_concurrency == -1
         assert config.settings.runtime.min_duration_ms == 600000
 
     # Note: Tests for missing endpoint/dataset/model removed
