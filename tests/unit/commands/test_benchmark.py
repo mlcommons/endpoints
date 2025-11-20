@@ -67,7 +67,7 @@ def _create_mock_args(**overrides):
         "min_output_tokens": None,
         "max_output_tokens": None,
         "mode": "perf",
-        "report_path": None,
+        "report_dir": None,
         "timeout": None,
         "output": None,
         "verbose": 0,
