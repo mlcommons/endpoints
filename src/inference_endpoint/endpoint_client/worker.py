@@ -477,6 +477,8 @@ class WorkerManager:
         )
 
         try:
+            logger.info(f"Starting {self.http_config.num_workers} worker processes")
+
             # Spawn worker processes
             for i in range(self.http_config.num_workers):
                 worker = self._spawn_worker(i)
@@ -492,7 +494,7 @@ class WorkerManager:
                     worker_id = await readiness_socket.receive()
                     if worker_id is not None:
                         ready_count += 1
-                        logger.info(
+                        logger.debug(
                             f"Worker {worker_id} is ready ({ready_count}/{self.http_config.num_workers})"
                         )
 
@@ -502,7 +504,7 @@ class WorkerManager:
                 wait_for_all_workers(),
                 timeout=self.http_config.worker_initialization_timeout,
             )
-            logger.info(f"All {ready_count} workers are ready")
+            logger.info(f"{ready_count}/{self.http_config.num_workers} workers ready")
         except TimeoutError as e:
             raise TimeoutError(
                 f"Workers failed to initialize within {self.http_config.worker_initialization_timeout} seconds."
