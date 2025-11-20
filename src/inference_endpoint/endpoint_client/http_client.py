@@ -89,7 +89,7 @@ class HTTPEndpointClient:
         self._concurrency_semaphore: asyncio.Semaphore | None = None
 
         logger.info(
-            f"HTTP endpoint client using adapter: {self.config.adapter_type.__name__}"
+            f"HTTP endpoint client using adapter: {self.config.adapter.__name__}"
         )
 
     def start(self):

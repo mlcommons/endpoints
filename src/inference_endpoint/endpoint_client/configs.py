@@ -58,16 +58,16 @@ class HTTPClientConfig:
     streaming_buffer_size: int = 128 * 1024  # 128KB buffer for streaming tokens
 
     # Request adapter for Query/Response <-> Payload/Response bytes
-    adapter_type: type[HttpRequestAdapter] | None = field(default=None, init=False)
+    adapter: type[HttpRequestAdapter] | None = field(default=None, init=False)
 
     def __post_init__(self):
         # set default adapter in __post_init__ to avoid circular dependency
-        if self.adapter_type is None:
+        if self.adapter is None:
             from inference_endpoint.openai.openai_msgspec_adapter import (
                 OpenAIMsgspecAdapter,
             )
 
-            self.adapter_type = OpenAIMsgspecAdapter
+            self.adapter = OpenAIMsgspecAdapter
 
 
 @dataclass

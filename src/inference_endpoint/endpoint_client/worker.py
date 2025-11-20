@@ -139,7 +139,7 @@ class Worker:
         self._active_tasks: set[asyncio.Task] = set()
 
         # Use adapter type from config
-        self._adapter = self.http_config.adapter_type
+        self._adapter = self.http_config.adapter
 
     async def run(self) -> None:
         """Main worker loop - pull requests, execute, push responses."""
