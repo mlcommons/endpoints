@@ -46,7 +46,7 @@ class HttpRequestAdapter(ABC):
         Returns:
             Encoded request bytes ready for HTTP POST
         """
-        ...
+        raise NotImplementedError("encode_query not implemented")
 
     @staticmethod
     @abstractmethod
@@ -61,7 +61,7 @@ class HttpRequestAdapter(ABC):
         Returns:
             QueryResult with extracted content
         """
-        ...
+        raise NotImplementedError("decode_response not implemented")
 
     @staticmethod
     @abstractmethod
@@ -75,4 +75,4 @@ class HttpRequestAdapter(ABC):
         Returns:
             Content string from the SSE message
         """
-        ...
+        raise NotImplementedError("decode_sse_message not implemented")
