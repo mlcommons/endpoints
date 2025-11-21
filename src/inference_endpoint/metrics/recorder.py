@@ -272,7 +272,11 @@ class EventRecorder:
                         if item[1] == SampleEvent.FIRST_CHUNK.value:
                             # In post-processing, we use this to validate that the first chunk is the response output is the same as the data in the FIRST_CHUNK_RECEIVED event
                             output_buffer.append(
-                                {"s_uuid": item[0], "first_chunk": item[-1]}
+                                {
+                                    "timestamp_ns": item[2],
+                                    "s_uuid": item[0],
+                                    "first_chunk": item[-1],
+                                }
                             )
                         elif item[1] == SampleEvent.COMPLETE.value:
                             output_data = item[-1]
@@ -282,6 +286,7 @@ class EventRecorder:
                                 )
                             output_buffer.append(
                                 {
+                                    "timestamp_ns": item[2],
                                     "s_uuid": item[0],
                                     "output": output_data,
                                 }
@@ -289,6 +294,7 @@ class EventRecorder:
                         elif item[1] == SessionEvent.ERROR.value:
                             output_buffer.append(
                                 {
+                                    "timestamp_ns": item[2],
                                     "s_uuid": item[0],
                                     "error_type": item[1],
                                     "error_message": item[-1],

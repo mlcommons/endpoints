@@ -184,6 +184,11 @@ if __name__ == "__main__":
         action="store_true",
         help="Enable streaming mode for TTFT metrics",
     )
+    parser.add_argument(
+        "--dump-events-csv",
+        action="store_true",
+        help="Dump the events to a CSV file",
+    )
     args = parser.parse_args()
 
     # Set up progress bar hook to monitor sample completion
@@ -238,6 +243,7 @@ if __name__ == "__main__":
             stop_sample_issuer_on_test_end=False,
             report_path="tinyllm_benchmark_report",
             tokenizer_override=model_runner.tokenizer,
+            dump_events_csv=args.dump_events_csv,
         )
         sess.wait_for_test_end()
 

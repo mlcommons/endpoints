@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import csv
 import dataclasses
 import functools
 import importlib
@@ -831,6 +832,41 @@ class MetricsReporter:
         if self.cur_ is not self.conn:
             self.cur_.close()
         self.conn.close()
+
+    def dump_to_csv(self, csv_path: Path):
+        output_values = defaultdict(dict)
+        with self.outputs_path.open("r") as outputs:
+            for line in outputs:
+                if line.strip() == "":
+                    continue
+
+                data = orjson.loads(line)
+                if "s_uuid" not in data:
+                    continue
+
+                if "first_chunk" in data:
+                    output_values[data["s_uuid"]]["first_chunk"] = data["first_chunk"]
+                elif "output" in data:
+                    output_values[data["s_uuid"]]["output"] = data["output"]
+                elif "error_message" in data:
+                    output_values[data["s_uuid"]]["error_message"] = data[
+                        "error_message"
+                    ]
+
+        with csv_path.open("w") as f:
+            writer = csv.writer(f)
+            writer.writerow(["sample_uuid", "event_type", "timestamp_ns", "value"])
+
+            rows = self.cur_.execute("SELECT * FROM events").fetchall()
+            for row in rows:
+                value = ""
+                if row[1] == SampleEvent.FIRST_CHUNK.value:
+                    value = output_values[row[0]].get("first_chunk", "<NOT_FOUND>")
+                elif row[1] == SampleEvent.COMPLETE.value:
+                    value = output_values[row[0]].get("output", "<NOT_FOUND>")
+                elif row[1] == SessionEvent.ERROR.value:
+                    value = output_values[row[0]].get("error_message", "<NOT_FOUND>")
+                writer.writerow([row[0], row[1], row[2], value])
 
     def __enter__(self):
         if self.is_closed:

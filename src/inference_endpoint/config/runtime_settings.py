@@ -213,4 +213,9 @@ class RuntimeSettings:
         logger.debug(
             f"Sample count: {result} (calculated from duration={self.min_duration_ms}ms × target_qps={self.metric_target.target} × padding={padding_factor})"
         )
+
+        # Pad to multiples of dataset size
+        if (rem := result % self.n_samples_from_dataset) != 0:
+            result += self.n_samples_from_dataset - rem
+            logger.debug(f"Padded sample count: {result}")
         return result
