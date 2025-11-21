@@ -143,8 +143,8 @@ class TestSetupLogging:
 
     def test_setup_logging_configures_root_logger(self, monkeypatch):
         """Test that setup_logging configures the root logger with a handler."""
-        # Remove NO_COLOR to ensure colors are enabled
-        monkeypatch.delenv("NO_COLOR", raising=False)
+        # Remove FORCE_COLOR_LOGGING to ensure colors are disabled by default
+        monkeypatch.delenv("FORCE_COLOR_LOGGING", raising=False)
 
         # Clear existing handlers
         root_logger = logging.getLogger()
@@ -155,9 +155,9 @@ class TestSetupLogging:
         # Verify root logger has at least one handler
         assert len(root_logger.handlers) > 0
 
-    def test_setup_logging_colors_disabled_with_no_color_env(self, monkeypatch):
-        """Test that NO_COLOR env var disables colors by testing output directly."""
-        monkeypatch.setenv("NO_COLOR", "1")
+    def test_setup_logging_colors_enabled_with_force_color_env(self, monkeypatch):
+        """Test that FORCE_COLOR_LOGGING env var enables colors by testing output directly."""
+        monkeypatch.setenv("FORCE_COLOR_LOGGING", "1")
 
         # Clear existing handlers
         root_logger = logging.getLogger()
@@ -180,40 +180,40 @@ class TestSetupLogging:
         handler = root_logger.handlers[0]
         formatted = handler.formatter.format(record)
 
-        # Verify no color codes in output when NO_COLOR is set
-        assert Fore.GREEN not in formatted
-
-    def test_setup_logging_colors_enabled_by_default(self, monkeypatch):
-        """Test that colors are enabled by default when NO_COLOR is not set."""
-        monkeypatch.delenv("NO_COLOR", raising=False)
-
-        # Clear existing handlers
-        root_logger = logging.getLogger()
-        root_logger.handlers.clear()
-
-        setup_logging()
-
-        # Create a log record and format it
-        record = logging.LogRecord(
-            name="test",
-            level=logging.INFO,
-            pathname="test.py",
-            lineno=1,
-            msg="test",
-            args=(),
-            exc_info=None,
-        )
-
-        # Get the first handler's formatter
-        handler = root_logger.handlers[0]
-        formatted = handler.formatter.format(record)
-
-        # Verify color codes are present in output by default
+        # Verify color codes are present in output when FORCE_COLOR_LOGGING is set
         assert Fore.GREEN in formatted
+
+    def test_setup_logging_colors_disabled_by_default(self, monkeypatch):
+        """Test that colors are disabled by default when FORCE_COLOR_LOGGING is not set."""
+        monkeypatch.delenv("FORCE_COLOR_LOGGING", raising=False)
+
+        # Clear existing handlers
+        root_logger = logging.getLogger()
+        root_logger.handlers.clear()
+
+        setup_logging()
+
+        # Create a log record and format it
+        record = logging.LogRecord(
+            name="test",
+            level=logging.INFO,
+            pathname="test.py",
+            lineno=1,
+            msg="test",
+            args=(),
+            exc_info=None,
+        )
+
+        # Get the first handler's formatter
+        handler = root_logger.handlers[0]
+        formatted = handler.formatter.format(record)
+
+        # Verify no color codes in output when FORCE_COLOR_LOGGING is not set
+        assert Fore.GREEN not in formatted
 
     def test_setup_logging_asyncio_logger_level(self, monkeypatch):
         """Test that asyncio logger is set to WARNING level after calling setup_logging()."""
-        monkeypatch.delenv("NO_COLOR", raising=False)
+        monkeypatch.delenv("FORCE_COLOR_LOGGING", raising=False)
 
         setup_logging()
 
@@ -222,7 +222,7 @@ class TestSetupLogging:
 
     def test_setup_logging_urllib3_logger_level(self, monkeypatch):
         """Test that urllib3 logger is set to WARNING level after calling setup_logging()."""
-        monkeypatch.delenv("NO_COLOR", raising=False)
+        monkeypatch.delenv("FORCE_COLOR_LOGGING", raising=False)
 
         setup_logging()
 

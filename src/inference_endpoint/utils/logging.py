@@ -50,7 +50,7 @@ class ColoredFormatter(logging.Formatter):
         fmt: str | None = None,
         datefmt: str | None = None,
         style: str = "%",
-        use_color: bool = True,
+        use_color: bool = False,
     ):
         """Initialize the formatter.
 
@@ -58,7 +58,8 @@ class ColoredFormatter(logging.Formatter):
             fmt: Log format string.
             datefmt: Date format string.
             style: Format style (% or {).
-            use_color: Whether to apply colors to levelname.
+            use_color: Whether to apply colors to levelname. Defaults to False.
+                      Enable by setting FORCE_COLOR_LOGGING environment variable.
         """
         super().__init__(fmt=fmt, datefmt=datefmt, style=style)
         self.use_color = use_color
@@ -103,9 +104,10 @@ def setup_logging(level: str | None = None, format_string: str | None = None) ->
     # Default format
     if format_string is None:
         format_string = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-    # Enable colors by default; only disable if NO_COLOR is set.
+    # Disable colors by default to avoid potential formatting overhead during benchmarking.
+    # Colors can be explicitly enabled via FORCE_COLOR_LOGGING environment variable.
     # This respects the NO_COLOR standard (https://no-color.org/)
-    use_color = os.getenv("NO_COLOR") is None
+    use_color = os.getenv("FORCE_COLOR_LOGGING") is not None
 
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(ColoredFormatter(fmt=format_string, use_color=use_color))
