@@ -26,6 +26,7 @@ import sqlite3
 import threading
 import time
 import uuid
+from datetime import datetime
 from functools import partial
 from pathlib import Path
 from typing import ClassVar
@@ -37,6 +38,29 @@ from ..profiling import profile
 from ..utils import byte_quantity_to_str
 
 logger = logging.getLogger(__name__)
+
+
+_G_MONOTIME_DELTA = time.time_ns() - time.monotonic_ns()
+"""Approximate delta between monotonic and wall-clock time in nanoseconds. See
+monotime_to_datetime() for more details.
+"""
+
+
+def monotime_to_datetime(monotime_ns: int) -> datetime:
+    """Monotonic clock has an undefined starting point. To convert to human readable timestamp,
+    we can add a constant delta to any monotonic timestamp to get an approximate equivalent wall-clock
+    timestamp. Note that the result will not be completely accurate, but it will be a consistent
+    offset from the real time, as long as this function is called in the same process. Any durations
+    and deltas calculated from resulting datetimes will be accurate, but absolute times will not be.
+
+    Args:
+        monotime_ns: The monotonic timestamp in nanoseconds.
+
+    Returns:
+        The datetime object corresponding to the approximate wall-clock timestamp.
+    """
+    wall_time = (monotime_ns + _G_MONOTIME_DELTA) / 1e9
+    return datetime.fromtimestamp(wall_time)
 
 
 @contextlib.contextmanager
@@ -273,7 +297,7 @@ class EventRecorder:
                             # In post-processing, we use this to validate that the first chunk is the response output is the same as the data in the FIRST_CHUNK_RECEIVED event
                             output_buffer.append(
                                 {
-                                    "timestamp_ns": item[2],
+                                    "timestamp": str(monotime_to_datetime(item[2])),
                                     "s_uuid": item[0],
                                     "first_chunk": item[-1],
                                 }
@@ -286,7 +310,7 @@ class EventRecorder:
                                 )
                             output_buffer.append(
                                 {
-                                    "timestamp_ns": item[2],
+                                    "timestamp": str(monotime_to_datetime(item[2])),
                                     "s_uuid": item[0],
                                     "output": output_data,
                                 }
@@ -294,7 +318,7 @@ class EventRecorder:
                         elif item[1] == SessionEvent.ERROR.value:
                             output_buffer.append(
                                 {
-                                    "timestamp_ns": item[2],
+                                    "timestamp": str(monotime_to_datetime(item[2])),
                                     "s_uuid": item[0],
                                     "error_type": item[1],
                                     "error_message": item[-1],
