@@ -219,7 +219,11 @@ class RuntimeSettings:
         )
 
         # Pad to multiples of dataset size
-        if align_to_dataset_size and (rem := result % self.n_samples_from_dataset) != 0:
+        if (
+            align_to_dataset_size
+            and self.n_samples_from_dataset > 0
+            and (rem := result % self.n_samples_from_dataset) != 0
+        ):
             result += self.n_samples_from_dataset - rem
             logger.debug(f"Padded sample count: {result}")
         return result

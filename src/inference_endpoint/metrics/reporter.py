@@ -835,30 +835,33 @@ class MetricsReporter:
 
     def dump_to_csv(self, csv_path: Path):
         output_values = defaultdict(dict)
-        with self.outputs_path.open("r") as outputs:
-            for line in outputs:
-                if line.strip() == "":
-                    continue
 
-                data = orjson.loads(line)
-                if "s_uuid" not in data:
-                    continue
+        if self.outputs_path.exists():
+            with self.outputs_path.open("r") as outputs:
+                for line in outputs:
+                    if line.strip() == "":
+                        continue
 
-                if "first_chunk" in data:
-                    output_values[data["s_uuid"]]["first_chunk"] = data["first_chunk"]
-                elif "output" in data:
-                    output_values[data["s_uuid"]]["output"] = data["output"]
-                elif "error_message" in data:
-                    output_values[data["s_uuid"]]["error_message"] = data[
-                        "error_message"
-                    ]
+                    data = orjson.loads(line)
+                    if "s_uuid" not in data:
+                        continue
+
+                    if "first_chunk" in data:
+                        output_values[data["s_uuid"]]["first_chunk"] = data[
+                            "first_chunk"
+                        ]
+                    elif "output" in data:
+                        output_values[data["s_uuid"]]["output"] = data["output"]
+                    elif "error_message" in data:
+                        output_values[data["s_uuid"]]["error_message"] = data[
+                            "error_message"
+                        ]
 
         with csv_path.open("w") as f:
             writer = csv.writer(f)
             writer.writerow(["sample_uuid", "event_type", "timestamp_ns", "value"])
 
-            rows = self.cur_.execute("SELECT * FROM events").fetchall()
-            for row in rows:
+            for row in self.cur_.execute("SELECT * FROM events"):
                 value = ""
                 if row[1] == SampleEvent.FIRST_CHUNK.value:
                     value = output_values[row[0]].get("first_chunk", "<NOT_FOUND>")
