@@ -60,7 +60,16 @@ def test_apply_user_config():
     )
 
     # Metric type should be throughput
-    expected_sample_count = 1234.5 * (rt_settings.min_duration_ms / 1000)
+    expected_sample_count = int(1234.5 * 10 * 60)
+    assert (
+        rt_settings.total_samples_to_issue(
+            padding_factor=1.0, align_to_dataset_size=False
+        )
+        == expected_sample_count
+    )
+
+    if (rem := expected_sample_count % rt_settings.n_samples_from_dataset) != 0:
+        expected_sample_count += rt_settings.n_samples_from_dataset - rem
     assert (
         rt_settings.total_samples_to_issue(padding_factor=1.0) == expected_sample_count
     )
@@ -73,7 +82,15 @@ def test_apply_user_config_insufficient_qps():
         user_config=user_config,
         opt_prio=OptimizationPriority.LOW_LATENCY_INTERACTIVE,
     )
-    assert rt_settings.total_samples_to_issue(padding_factor=1.0) == 270336
+
+    # Expected is 270336 padded up to multiple of dataset size, which is 13368
+    assert rt_settings.total_samples_to_issue(padding_factor=1.0) == 280728
+    assert (
+        rt_settings.total_samples_to_issue(
+            padding_factor=1.0, align_to_dataset_size=False
+        )
+        == 270336
+    )
 
 
 def test_apply_user_config_min_sample_count_override():
@@ -83,4 +100,10 @@ def test_apply_user_config_min_sample_count_override():
         user_config=user_config,
         opt_prio=OptimizationPriority.LOW_LATENCY_INTERACTIVE,
     )
-    assert rt_settings.total_samples_to_issue(padding_factor=1.0) == 2 * 10 * 60
+    assert rt_settings.total_samples_to_issue(padding_factor=1.0) == 13368
+    assert (
+        rt_settings.total_samples_to_issue(
+            padding_factor=1.0, align_to_dataset_size=False
+        )
+        == 2 * 10 * 60
+    )

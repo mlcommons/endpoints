@@ -65,6 +65,7 @@ class BenchmarkSession:
         max_shutdown_timeout_s: float = 300.0,
         report_dir: os.PathLike | None = None,
         tokenizer_override: AutoTokenizer | None = None,
+        dump_events_csv: bool = False,
     ):
         with self.event_recorder:
             try:
@@ -157,6 +158,9 @@ class BenchmarkSession:
                     with (Path(report_dir) / "runtime_settings.json").open("w") as f:
                         f.write(orjson.dumps(rt_settings_data).decode("utf-8"))
 
+                    if dump_events_csv:
+                        reporter.dump_to_csv(Path(report_path) / "events.csv")
+
                 # Print summary
                 report.display()
 
@@ -186,6 +190,7 @@ class BenchmarkSession:
         max_shutdown_timeout_s: float = 300.0,
         report_dir: os.PathLike | None = None,
         tokenizer_override: AutoTokenizer | None = None,
+        dump_events_csv: bool = False,
     ) -> BenchmarkSession:
         """Start a new BenchmarkSession in a thread.
 
@@ -201,6 +206,8 @@ class BenchmarkSession:
             report_dir: The path to save the report to. If None, no report will be saved.
             tokenizer_override: The tokenizer to use for the session. If None, a tokenizer will be automatically selected
                                 based on the model name in the runtime settings.
+            dump_events_csv: Whether to dump the events to a CSV file. Only use for debugging
+                             purposes, as the events database can get quite large.
 
         Returns:
             The new BenchmarkSession.
@@ -215,6 +222,7 @@ class BenchmarkSession:
                 max_shutdown_timeout_s,
                 report_dir,
                 tokenizer_override,
+                dump_events_csv,
             ),
         )
         session.thread.start()
