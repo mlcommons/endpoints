@@ -398,7 +398,6 @@ def _get_dataset_format(config: BenchmarkConfig, dataset_path: Path) -> str:
 
 
 def _run_benchmark(
-    # args: argparse.Namespace,
     config: BenchmarkConfig,
     collect_responses: bool,
     test_mode: TestMode,
