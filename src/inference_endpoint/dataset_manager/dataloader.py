@@ -190,11 +190,12 @@ class PickleReader(DataLoader):
 
             self.text_inputs = []
             # this preloads the data in source
-            for _, data in self.data.iterrows():
+            # convert the dataframe to list of dictionaries
+            for data in self.data.to_dict(orient="records"):
                 # idx is not passed to the parser since it should _not_ be used in the parser
                 # note that while we are appending, which is slower, the data may not be sequential and may
                 # have gaps
-                self.text_inputs.append(self.parser(data.to_dict()))
+                self.text_inputs.append(self.parser(data))
             self.text_inputs = np.ascontiguousarray(self.text_inputs)
         self.loaded = True
 
@@ -273,6 +274,7 @@ class HFDataLoader(DataLoader):
         else:
             # huggingface uses a different method to load local arrow datasets
             self.data = load_from_disk(self.dataset_name)
+        self.text_inputs = []  # reset the text inputs
         for d in self.data[self.split]:
             self.text_inputs.append(self.parser(d))
 
