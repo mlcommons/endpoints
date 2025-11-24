@@ -474,11 +474,6 @@ def _run_benchmark(
         # Throw exception if no model name is provided
         raise InputValidationError("No model name provided")
 
-    # Get report path if specified
-    # report_path = getattr(args, "report_path", None)
-    # if report_path:
-    #     logger.info(f"Report will be saved to: {report_path}")
-
     # Get dataset - from CLI or from config
     # TODO: Dataset Logic is not yet fully implemented
     # dataset_path = _get_dataset_path(args, config)

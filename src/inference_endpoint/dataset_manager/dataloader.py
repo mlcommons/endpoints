@@ -189,13 +189,13 @@ class PickleReader(DataLoader):
             )
 
             self.text_inputs = []
-            # this preloads the  data in source
+            # this preloads the data in source
             for _, data in self.data.iterrows():
                 # idx is not passed to the parser since it should _not_ be used in the parser
                 # note that while we are appending, which is slower, the data may not be sequential and may
                 # have gaps
                 self.text_inputs.append(self.parser(data.to_dict()))
-
+            self.text_inputs = np.ascontiguousarray(self.text_inputs)
         self.loaded = True
 
     def num_samples(self):
