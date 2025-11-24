@@ -301,22 +301,6 @@ class Worker:
             await self._handle_error(query.id, e)
 
     @profile
-    def _parse_sse_chunk(self, buffer: bytes, end_pos: int) -> list[str]:
-        """Parse SSE chunk and extract content using adapter's decoder."""
-        json_docs = self._adapter.SSE_DATA_PATTERN.findall(buffer[:end_pos])
-        parsed_contents = []
-
-        try:
-            for json_doc in json_docs:
-                content = self._adapter.decode_sse_message(json_doc)
-                parsed_contents.append(content)
-        except Exception:
-            # Normal for non-content SSE messages (role, finish_reason, etc)
-            pass
-
-        return parsed_contents
-
-    @profile
     async def _iter_sse_lines(
         self, response: aiohttp.ClientResponse
     ) -> AsyncGenerator[list[str], None]:
@@ -347,12 +331,12 @@ class Worker:
             incomplete_chunk = buffer[last_delimiter + 2 :]
 
             # Yield batch if any content found
-            if parsed_contents := self._parse_sse_chunk(buffer, last_delimiter):
+            if parsed_contents := self._adapter.parse_sse_chunk(buffer, last_delimiter):
                 yield parsed_contents
 
         # After stream ends, parse any remaining incomplete chunk
         if incomplete_chunk:
-            if parsed_contents := self._parse_sse_chunk(
+            if parsed_contents := self._adapter.parse_sse_chunk(
                 incomplete_chunk, len(incomplete_chunk)
             ):
                 yield parsed_contents

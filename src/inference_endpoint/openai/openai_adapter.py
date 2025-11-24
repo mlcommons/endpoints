@@ -59,20 +59,20 @@ class SSEMessage(msgspec.Struct):
 class OpenAIAdapter(HttpRequestAdapter):
     """Adapter for OpenAI API."""
 
-    @staticmethod
-    def encode_query(query: Query) -> bytes:
+    @classmethod
+    def encode_query(cls, query: Query) -> bytes:
         """Encode a Query to bytes for HTTP transmission."""
-        request = OpenAIAdapter.to_endpoint_request(query)
-        return OpenAIAdapter.encode_request(request)
+        request = cls.to_endpoint_request(query)
+        return cls.encode_request(request)
 
-    @staticmethod
-    def decode_response(response_bytes: bytes, query_id: str) -> QueryResult:
+    @classmethod
+    def decode_response(cls, response_bytes: bytes, query_id: str) -> QueryResult:
         """Decode HTTP response bytes to QueryResult."""
-        openai_response = OpenAIAdapter.decode_endpoint_response(response_bytes)
-        return OpenAIAdapter.from_endpoint_response(openai_response, result_id=query_id)
+        openai_response = cls.decode_endpoint_response(response_bytes)
+        return cls.from_endpoint_response(openai_response, result_id=query_id)
 
-    @staticmethod
-    def decode_sse_message(json_bytes: bytes) -> str:
+    @classmethod
+    def decode_sse_message(cls, json_bytes: bytes) -> str:
         """Decode SSE message and extract content string."""
         msg = msgspec.json.decode(json_bytes, type=SSEMessage)
         return msg.choices[0].delta.content
@@ -81,8 +81,8 @@ class OpenAIAdapter(HttpRequestAdapter):
     # Internal APIs
     # ========================================================================
 
-    @staticmethod
-    def to_endpoint_request(query: Query) -> CreateChatCompletionRequest:
+    @classmethod
+    def to_endpoint_request(cls, query: Query) -> CreateChatCompletionRequest:
         """Convert a Query to an OpenAI request."""
         if "prompt" not in query.data:
             raise ValueError("prompt not found in json_value")
@@ -104,8 +104,9 @@ class OpenAIAdapter(HttpRequestAdapter):
         )
         return request
 
-    @staticmethod
+    @classmethod
     def from_endpoint_response(
+        cls,
         response: CreateChatCompletionResponse,
         result_id: str | None = None,
     ) -> QueryResult:
@@ -121,8 +122,8 @@ class OpenAIAdapter(HttpRequestAdapter):
             response_output=response.choices[0].message.content,
         )
 
-    @staticmethod
-    def to_endpoint_response(result: QueryResult) -> CreateChatCompletionResponse:
+    @classmethod
+    def to_endpoint_response(cls, result: QueryResult) -> CreateChatCompletionResponse:
         """Convert a QueryResult to an OpenAI response."""
         return CreateChatCompletionResponse(
             id=result.id,
@@ -142,13 +143,15 @@ class OpenAIAdapter(HttpRequestAdapter):
             service_tier=ServiceTier.auto,
         )
 
-    @staticmethod
-    def encode_request(request: CreateChatCompletionRequest) -> bytes:
+    @classmethod
+    def encode_request(cls, request: CreateChatCompletionRequest) -> bytes:
         """Encode request to JSON bytes using orjson."""
         return orjson.dumps(request.model_dump(mode="json"))
 
-    @staticmethod
-    def decode_endpoint_response(response_bytes: bytes) -> CreateChatCompletionResponse:
+    @classmethod
+    def decode_endpoint_response(
+        cls, response_bytes: bytes
+    ) -> CreateChatCompletionResponse:
         """Decode response from JSON bytes using orjson."""
         response_dict = orjson.loads(response_bytes)
 

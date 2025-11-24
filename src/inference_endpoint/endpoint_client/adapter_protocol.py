@@ -34,9 +34,9 @@ class HttpRequestAdapter(ABC):
     # Matches "data: {json content}" and captures the JSON part
     SSE_DATA_PATTERN: re.Pattern[bytes] = re.compile(rb"data:\s*(\{[^\n]+\})")
 
-    @staticmethod
+    @classmethod
     @abstractmethod
-    def encode_query(query: Query) -> bytes:
+    def encode_query(cls, query: Query) -> bytes:
         """
         Encode a Query to bytes for HTTP transmission.
 
@@ -48,9 +48,9 @@ class HttpRequestAdapter(ABC):
         """
         raise NotImplementedError("encode_query not implemented")
 
-    @staticmethod
+    @classmethod
     @abstractmethod
-    def decode_response(response_bytes: bytes, query_id: str) -> QueryResult:
+    def decode_response(cls, response_bytes: bytes, query_id: str) -> QueryResult:
         """
         Decode HTTP response bytes to QueryResult.
 
@@ -63,9 +63,9 @@ class HttpRequestAdapter(ABC):
         """
         raise NotImplementedError("decode_response not implemented")
 
-    @staticmethod
+    @classmethod
     @abstractmethod
-    def decode_sse_message(json_bytes: bytes) -> str:
+    def decode_sse_message(cls, json_bytes: bytes) -> str:
         """
         Decode SSE message and extract content string.
 
@@ -76,3 +76,31 @@ class HttpRequestAdapter(ABC):
             Content string from the SSE message
         """
         raise NotImplementedError("decode_sse_message not implemented")
+
+    @classmethod
+    def parse_sse_chunk(cls, buffer: bytes, end_pos: int) -> list[str]:
+        """
+        Parse SSE chunk and extract all content strings.
+
+        Extracts JSON documents from SSE stream and decodes them to content strings.
+        Silently ignores non-content SSE messages (role, finish_reason, etc).
+
+        Args:
+            buffer: Byte buffer containing SSE data
+            end_pos: End position in buffer to parse up to
+
+        Returns:
+            List of content strings extracted from the SSE chunk
+        """
+        json_docs = cls.SSE_DATA_PATTERN.findall(buffer[:end_pos])
+        parsed_contents = []
+
+        try:
+            for json_doc in json_docs:
+                content = cls.decode_sse_message(json_doc)
+                parsed_contents.append(content)
+        except Exception:
+            # Normal for non-content SSE messages (role, finish_reason, etc)
+            pass
+
+        return parsed_contents
