@@ -861,15 +861,27 @@ class MetricsReporter:
             writer = csv.writer(f)
             writer.writerow(["sample_uuid", "event_type", "timestamp_ns", "value"])
 
-            for row in self.cur_.execute("SELECT * FROM events").fetchall():
-                value = ""
-                if row[1] == SampleEvent.FIRST_CHUNK.value:
-                    value = output_values[row[0]].get("first_chunk", "<NOT_FOUND>")
-                elif row[1] == SampleEvent.COMPLETE.value:
-                    value = output_values[row[0]].get("output", "<NOT_FOUND>")
-                elif row[1] == SessionEvent.ERROR.value:
-                    value = output_values[row[0]].get("error_message", "<NOT_FOUND>")
-                writer.writerow([row[0], row[1], row[2], value])
+            query_result = self.cur_.execute("SELECT * FROM events")
+            while True:
+                if hasattr(query_result, "fetchmany"):
+                    rows = query_result.fetchmany(1000)
+                else:
+                    rows = query_result.fetchall()
+
+                if not rows:
+                    break
+
+                for row in rows:
+                    value = ""
+                    if row[1] == SampleEvent.FIRST_CHUNK.value:
+                        value = output_values[row[0]].get("first_chunk", "<NOT_FOUND>")
+                    elif row[1] == SampleEvent.COMPLETE.value:
+                        value = output_values[row[0]].get("output", "<NOT_FOUND>")
+                    elif row[1] == SessionEvent.ERROR.value:
+                        value = output_values[row[0]].get(
+                            "error_message", "<NOT_FOUND>"
+                        )
+                    writer.writerow([row[0], row[1], row[2], value])
 
     def __enter__(self):
         if self.is_closed:
