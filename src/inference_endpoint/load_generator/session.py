@@ -159,7 +159,7 @@ class BenchmarkSession:
                         f.write(orjson.dumps(rt_settings_data).decode("utf-8"))
 
                     if dump_events_csv:
-                        reporter.dump_to_csv(Path(report_path) / "events.csv")
+                        reporter.dump_to_csv(Path(report_dir) / "events.csv")
 
                 # Print summary
                 report.display()

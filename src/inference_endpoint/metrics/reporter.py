@@ -861,7 +861,7 @@ class MetricsReporter:
             writer = csv.writer(f)
             writer.writerow(["sample_uuid", "event_type", "timestamp_ns", "value"])
 
-            for row in self.cur_.execute("SELECT * FROM events"):
+            for row in self.cur_.execute("SELECT * FROM events").fetchall():
                 value = ""
                 if row[1] == SampleEvent.FIRST_CHUNK.value:
                     value = output_values[row[0]].get("first_chunk", "<NOT_FOUND>")

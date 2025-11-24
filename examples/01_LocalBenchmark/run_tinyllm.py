@@ -241,7 +241,7 @@ if __name__ == "__main__":
             scheduler,
             name="tinyllm_benchmark",
             stop_sample_issuer_on_test_end=False,
-            report_path="tinyllm_benchmark_report",
+            report_dir="tinyllm_benchmark_report",
             tokenizer_override=model_runner.tokenizer,
             dump_events_csv=args.dump_events_csv,
         )
