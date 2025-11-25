@@ -40,7 +40,7 @@ async def test_ds_chat_completion_data_loader_with_oracle_server(
     """
 
     def parser(x):
-        return {"prompt": x.text_input, "output": x.ref_output}
+        return {"prompt": x["text_input"], "output": x["ref_output"]}
 
     ds_chat_completion_data_loader = DeepSeekR1ChatCompletionDataLoader(
         ds_pickle_dataset_path, parser=parser
@@ -50,7 +50,7 @@ async def test_ds_chat_completion_data_loader_with_oracle_server(
     for i in range(ds_chat_completion_data_loader.num_samples()):
         sample = ds_chat_completion_data_loader.load_sample(i)
         async with aiohttp.ClientSession() as session:
-            payload = OpenAIAdapter.to_openai_request(
+            payload = OpenAIAdapter.to_endpoint_request(
                 Query(
                     id="test-chat-completions",
                     data={"prompt": str(sample["prompt"]), "model": "test-model"},
@@ -64,7 +64,7 @@ async def test_ds_chat_completion_data_loader_with_oracle_server(
 
                 response_data = await response.json()
                 assert (
-                    OpenAIAdapter.from_openai_response(
+                    OpenAIAdapter.from_endpoint_response(
                         CreateChatCompletionResponse(**response_data)
                     ).response_output
                     == sample["output"]

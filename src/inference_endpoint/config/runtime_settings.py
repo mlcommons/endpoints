@@ -166,7 +166,9 @@ class RuntimeSettings:
 
         return cls(**kwargs)
 
-    def total_samples_to_issue(self, padding_factor: float = 1.1) -> int:
+    def total_samples_to_issue(
+        self, padding_factor: float = 1.1, align_to_dataset_size: bool = True
+    ) -> int:
         """Calculate the total number of samples to issue to the SUT throughout the course of the test run.
 
         Priority:
@@ -177,6 +179,8 @@ class RuntimeSettings:
         Args:
             padding_factor (float): Factor to multiply the expected number of samples by to account for variance.
                                     Use 1.0 for no padding. (Default: 1.1)
+            align_to_dataset_size (bool): Whether to pad the total number of samples up to the nearest multiple of
+                                          dataset size. (Default: True)
 
         Returns:
             int: The total number of samples to issue to the SUT throughout the course of the test run.
@@ -213,4 +217,13 @@ class RuntimeSettings:
         logger.debug(
             f"Sample count: {result} (calculated from duration={self.min_duration_ms}ms × target_qps={self.metric_target.target} × padding={padding_factor})"
         )
+
+        # Pad to multiples of dataset size
+        if (
+            align_to_dataset_size
+            and self.n_samples_from_dataset > 0
+            and (rem := result % self.n_samples_from_dataset) != 0
+        ):
+            result += self.n_samples_from_dataset - rem
+            logger.debug(f"Padded sample count: {result}")
         return result

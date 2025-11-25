@@ -235,7 +235,7 @@ async def run_benchmark_command(args: argparse.Namespace) -> None:
     collect_responses = test_mode in [TestMode.ACC, TestMode.BOTH]
 
     # Run benchmark
-    _run_benchmark(args, effective_config, collect_responses, test_mode, benchmark_mode)
+    _run_benchmark(effective_config, collect_responses, test_mode, benchmark_mode)
 
 
 def _build_config_from_cli(
@@ -264,7 +264,10 @@ def _build_config_from_cli(
                 load_pattern_type = LoadPatternType.CONCURRENCY
             case "online":
                 load_pattern_type = LoadPatternType.POISSON
-
+    report_dir = getattr(args, "report_dir", None)
+    timeout = getattr(args, "timeout", None)
+    verbose = getattr(args, "verbose", False)
+    output = getattr(args, "output", None)
     # Build BenchmarkConfig from CLI params
     return BenchmarkConfig(
         name=f"cli_{benchmark_mode}",
@@ -315,6 +318,10 @@ def _build_config_from_cli(
         endpoint_config=EndpointConfig(endpoint=args.endpoint, api_key=args.api_key),
         metrics=Metrics(),
         baseline=None,  # CLI mode doesn't use baseline
+        report_dir=report_dir,
+        output=output,
+        timeout=timeout,
+        verbose=verbose,
     )
 
 
@@ -391,7 +398,6 @@ def _get_dataset_format(config: BenchmarkConfig, dataset_path: Path) -> str:
 
 
 def _run_benchmark(
-    args: argparse.Namespace,
     config: BenchmarkConfig,
     collect_responses: bool,
     test_mode: TestMode,
@@ -440,11 +446,18 @@ def _run_benchmark(
     # Load tokenizer if model name is provided
     # Priority: CLI args (offline/online modes) > config submission_ref (from-config mode)
     tokenizer = None
-    model_name = getattr(args, "model", None)
+    model_name = config.model_params.name
     if not model_name and config.submission_ref:
         model_name = config.submission_ref.model
     if not model_name and config.model_params.name:
         model_name = config.model_params.name
+
+    if config.report_dir:
+        report_dir = Path(config.report_dir)
+        report_dir.mkdir(parents=True, exist_ok=True)
+        config.to_yaml_file(report_dir / "config.yaml")
+
+    max_tokens = config.model_params.max_new_tokens
 
     if model_name:
         try:
@@ -460,18 +473,14 @@ def _run_benchmark(
         # Throw exception if no model name is provided
         raise InputValidationError("No model name provided")
 
-    # Get report path if specified
-    report_path = getattr(args, "report_path", None)
-    if report_path:
-        logger.info(f"Report will be saved to: {report_path}")
-
     # Get dataset - from CLI or from config
     # TODO: Dataset Logic is not yet fully implemented
-    dataset_path = _get_dataset_path(args, config)
+    # dataset_path = _get_dataset_path(args, config)
+    dataset_path = config.datasets[0].path
 
     # Load dataset using factory
     dataset_format = _get_dataset_format(config, dataset_path)
-    logger.info(f"Loading: {dataset_path.name} (format: {dataset_format})")
+    logger.info(f"Loading: {dataset_path} (format: {dataset_format})")
 
     # Determine if streaming should be enabled based on config
     streaming_mode = config.model_params.streaming
@@ -500,10 +509,17 @@ def _run_benchmark(
             dataset_path,
             format=dataset_format,
             key_maps=key_maps,
-            metadata={"model": model_name, "stream": enable_streaming},
+            metadata={
+                "model": model_name,
+                "stream": enable_streaming,
+                "max_completion_tokens": max_tokens,
+            },
         )
         dataloader.load()
         logger.info(f"Loaded {dataloader.num_samples()} samples")
+    except FileNotFoundError as e:
+        logger.error(f"Dataset file not found: {dataset_path}")
+        raise InputValidationError(f"Dataset file not found: {dataset_path}") from e
     except NotImplementedError as e:
         logger.error(f"Dataset format not supported: {dataset_format}")
         raise SetupError(str(e)) from e
@@ -550,12 +566,9 @@ def _run_benchmark(
     # Create endpoint client
     endpoint = config.endpoint_config.endpoint
     num_workers = config.settings.client.workers
-    max_concurrency = config.settings.client.max_concurrency
 
     logger.info(f"Connecting: {endpoint}")
-    logger.info(
-        f"Client config: workers={num_workers}, max_concurrency={max_concurrency if max_concurrency > 0 else 'unlimited'}"
-    )
+    logger.info(f"Client config: workers={num_workers}")
 
     tmp_dir = tempfile.mkdtemp(prefix="inference_endpoint_")
 
@@ -563,7 +576,7 @@ def _run_benchmark(
         http_config = HTTPClientConfig(
             endpoint_url=urljoin(endpoint, "/v1/chat/completions"),
             num_workers=num_workers,
-            max_concurrency=max_concurrency,
+            max_concurrency=-1,  # unlimited
         )
         aiohttp_config = AioHttpConfig()
         zmq_config = ZMQConfig(
@@ -595,9 +608,9 @@ def _run_benchmark(
             scheduler,
             name="cli_benchmark",
             stop_sample_issuer_on_test_end=False,
-            report_path=report_path,
+            report_dir=config.report_dir,
             tokenizer_override=tokenizer,
-            max_shutdown_timeout_s=args.timeout if args.timeout else None,
+            max_shutdown_timeout_s=config.timeout if config.timeout else None,
         )
 
         # Wait for test end with ability to interrupt
@@ -629,14 +642,14 @@ def _run_benchmark(
 
         if response_collector.errors:
             logger.warning(f"Errors: {len(response_collector.errors)}")
-            if args.verbose:
+            if config.verbose:
                 for error in response_collector.errors[:3]:
                     logger.warning(f"  {error}")
                 if len(response_collector.errors) > 3:
                     logger.warning(f"  ... +{len(response_collector.errors) - 3} more")
 
         # Save results if requested
-        if hasattr(args, "output") and args.output:
+        if config.output:
             try:
                 results = {
                     "config": {
@@ -660,9 +673,9 @@ def _run_benchmark(
                 if response_collector.errors:
                     results["errors"] = response_collector.errors
 
-                with open(args.output, "w") as f:
+                with open(config.output, "w") as f:
                     json.dump(results, f, indent=2)
-                logger.info(f"Saved: {args.output}")
+                logger.info(f"Saved: {config.output}")
             except Exception as e:
                 logger.error(f"Save failed: {e}")
 
@@ -685,5 +698,5 @@ def _run_benchmark(
             http_client.shutdown()
             shutil.rmtree(tmp_dir, ignore_errors=True)
         except Exception as e:
-            if args.verbose:
+            if config.verbose:
                 logger.warning(f"Cleanup error: {e}")

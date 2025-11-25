@@ -13,11 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import re
 import time
 
 import msgspec
+import orjson
 from inference_endpoint.core.types import Query, QueryResult
+from inference_endpoint.endpoint_client.adapter_protocol import HttpRequestAdapter
 
 from .openai_types_gen import (
     ChatCompletionResponseMessage,
@@ -55,15 +56,33 @@ class SSEMessage(msgspec.Struct):
     choices: list[SSEChoice] = msgspec.field(default_factory=list)
 
 
-class OpenAIAdapter:
+class OpenAIAdapter(HttpRequestAdapter):
     """Adapter for OpenAI API."""
 
-    # Pre-compiled regex for extracting SSE data fields with JSON content
-    # Matches "data: {json content}" and captures the JSON part
-    SSE_DATA_PATTERN = re.compile(rb"data:\s*(\{[^\n]+\})", re.MULTILINE)
+    @classmethod
+    def encode_query(cls, query: Query) -> bytes:
+        """Encode a Query to bytes for HTTP transmission."""
+        request = cls.to_endpoint_request(query)
+        return cls.encode_request(request)
 
-    @staticmethod
-    def to_openai_request(query: Query) -> CreateChatCompletionRequest:
+    @classmethod
+    def decode_response(cls, response_bytes: bytes, query_id: str) -> QueryResult:
+        """Decode HTTP response bytes to QueryResult."""
+        openai_response = cls.decode_endpoint_response(response_bytes)
+        return cls.from_endpoint_response(openai_response, result_id=query_id)
+
+    @classmethod
+    def decode_sse_message(cls, json_bytes: bytes) -> str:
+        """Decode SSE message and extract content string."""
+        msg = msgspec.json.decode(json_bytes, type=SSEMessage)
+        return msg.choices[0].delta.content
+
+    # ========================================================================
+    # Internal APIs
+    # ========================================================================
+
+    @classmethod
+    def to_endpoint_request(cls, query: Query) -> CreateChatCompletionRequest:
         """Convert a Query to an OpenAI request."""
         if "prompt" not in query.data:
             raise ValueError("prompt not found in json_value")
@@ -85,34 +104,13 @@ class OpenAIAdapter:
         )
         return request
 
-    @staticmethod
-    def from_openai_request(request: CreateChatCompletionRequest) -> Query:
-        """Convert an OpenAI request to a Query."""
-        if not request.messages or len(request.messages) == 0:
-            raise ValueError("Request must contain at least one message")
-        return Query(
-            data={
-                "prompt": request.messages[0].root.content,
-                "model": request.model,
-                "stream": request.stream,
-            },
-        )
-
-    @staticmethod
-    def from_openai_response(
+    @classmethod
+    def from_endpoint_response(
+        cls,
         response: CreateChatCompletionResponse,
         result_id: str | None = None,
     ) -> QueryResult:
-        """Convert an OpenAI response to a QueryResult.
-        Args:
-            response: The OpenAI response to convert.
-            result_id: If provided, use this as the ID for the QueryResult. Otherwise,
-                       uses the response ID from the OpenAI response. This is useful
-                       since QueryResult is a frozen dataclass, and `id` cannot be changed
-                       after creation. (Default: None)
-        Returns:
-            A QueryResult object.
-        """
+        """Convert an OpenAI response to a QueryResult."""
         if not response.choices:
             raise ValueError("Response must contain at least one choice")
 
@@ -124,27 +122,8 @@ class OpenAIAdapter:
             response_output=response.choices[0].message.content,
         )
 
-    @staticmethod
-    def from_json_response(query_id, response: dict) -> QueryResult:
-        """Convert an OpenAI response data to a QueryResult.
-        Note that this function fixes the fields to be compatible with
-        OpenAI pydantic definitions. This includes updating the refusal and
-        logprobs fields to be compatible with the OpenAI pydantic definitions.
-        Args:
-            query_id: The ID of the query.
-            response: The OpenAI response data to convert.
-        Returns:
-            A QueryResult object.
-        """
-        response["choices"][0]["message"]["refusal"] = "None"
-        response["choices"][0]["logprobs"] = {"content": [], "refusal": []}
-        return OpenAIAdapter.from_openai_response(
-            CreateChatCompletionResponse(**response, ignore_extra=True),
-            result_id=query_id,
-        )
-
-    @staticmethod
-    def to_openai_response(result: QueryResult) -> CreateChatCompletionResponse:
+    @classmethod
+    def to_endpoint_response(cls, result: QueryResult) -> CreateChatCompletionResponse:
         """Convert a QueryResult to an OpenAI response."""
         return CreateChatCompletionResponse(
             id=result.id,
@@ -163,3 +142,20 @@ class OpenAIAdapter:
             object=Object7.chat_completion,
             service_tier=ServiceTier.auto,
         )
+
+    @classmethod
+    def encode_request(cls, request: CreateChatCompletionRequest) -> bytes:
+        """Encode request to JSON bytes using orjson."""
+        return orjson.dumps(request.model_dump(mode="json"))
+
+    @classmethod
+    def decode_endpoint_response(
+        cls, response_bytes: bytes
+    ) -> CreateChatCompletionResponse:
+        """Decode response from JSON bytes using orjson."""
+        response_dict = orjson.loads(response_bytes)
+
+        # Set default values for optional fields if missing
+        response_dict["choices"][0]["message"]["refusal"] = "None"
+        response_dict["choices"][0]["logprobs"] = {"content": [], "refusal": []}
+        return CreateChatCompletionResponse(**response_dict, ignore_extra=True)

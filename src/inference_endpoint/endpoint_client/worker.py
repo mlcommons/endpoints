@@ -27,8 +27,6 @@ from multiprocessing import Process
 from typing import Any
 
 import aiohttp
-import msgspec
-import orjson
 import zmq
 import zmq.asyncio
 
@@ -43,7 +41,6 @@ from inference_endpoint.endpoint_client.configs import (
     ZMQConfig,
 )
 from inference_endpoint.endpoint_client.zmq_utils import ZMQPullSocket, ZMQPushSocket
-from inference_endpoint.openai.openai_adapter import OpenAIAdapter, SSEMessage
 from inference_endpoint.profiling import profile
 
 logger = logging.getLogger(__name__)
@@ -141,8 +138,8 @@ class Worker:
         # Track active request tasks
         self._active_tasks: set[asyncio.Task] = set()
 
-        # Reusable typed decoder for SSE chunk parsing (struct access faster than dict)
-        self._sse_decoder: msgspec.json.Decoder = msgspec.json.Decoder(SSEMessage)
+        # Use adapter type from config
+        self._adapter = self.http_config.adapter
 
     async def run(self) -> None:
         """Main worker loop - pull requests, execute, push responses."""
@@ -176,7 +173,6 @@ class Worker:
                 connector=self.tcp_connector,
                 connector_owner=False,  # owned by Worker
                 skip_auto_headers=self.aiohttp_config.skip_auto_headers,
-                json_serialize=lambda obj: orjson.dumps(obj).decode("utf-8"),
             )
 
             # Signal handlers for graceful shutdown
@@ -271,15 +267,18 @@ class Worker:
 
         url = self.http_config.endpoint_url
         headers = query.headers if hasattr(query, "headers") else {}
-        payload = OpenAIAdapter.to_openai_request(query).model_dump(
-            mode="json", exclude_unset=True
+
+        logging.debug(
+            f"Making HTTP request to {url} with payload: {query} and headers: {headers}"
         )
 
-        # Issue the request
-        logging.debug(
-            f"Making HTTP request to {url} with payload: {payload} and headers: {headers}"
-        )
-        async with self._session.post(url, json=payload, headers=headers) as response:
+        # Encode query to bytes using adapter
+        payload_bytes = self._adapter.encode_query(query)
+
+        # Issue the request with pre-encoded bytes
+        async with self._session.post(
+            url, data=payload_bytes, headers=headers
+        ) as response:
             if response.status != 200:
                 error_text = await response.text()
                 await self._handle_error(
@@ -300,22 +299,6 @@ class Worker:
 
         except Exception as e:
             await self._handle_error(query.id, e)
-
-    @profile
-    def _parse_sse_chunk(self, buffer: bytes, end_pos: int) -> list[str]:
-        """Parse SSE chunk and extract content using msgspec typed decode."""
-        json_docs = OpenAIAdapter.SSE_DATA_PATTERN.findall(buffer[:end_pos])
-
-        parsed_contents = []
-        try:
-            for json_doc in json_docs:
-                msg = self._sse_decoder.decode(json_doc)
-                parsed_contents.append(msg.choices[0].delta.content)
-        except Exception:
-            # Normal for non-content SSE messages (role, finish_reason, etc)
-            pass
-
-        return parsed_contents
 
     @profile
     async def _iter_sse_lines(
@@ -348,12 +331,12 @@ class Worker:
             incomplete_chunk = buffer[last_delimiter + 2 :]
 
             # Yield batch if any content found
-            if parsed_contents := self._parse_sse_chunk(buffer, last_delimiter):
+            if parsed_contents := self._adapter.parse_sse_chunk(buffer, last_delimiter):
                 yield parsed_contents
 
         # After stream ends, parse any remaining incomplete chunk
         if incomplete_chunk:
-            if parsed_contents := self._parse_sse_chunk(
+            if parsed_contents := self._adapter.parse_sse_chunk(
                 incomplete_chunk, len(incomplete_chunk)
             ):
                 yield parsed_contents
@@ -413,10 +396,8 @@ class Worker:
         """Handle non-streaming response."""
         async for response in self._make_http_request(query):
             response_bytes = await response.read()
-            response_data = orjson.loads(response_bytes)
-            response_obj = OpenAIAdapter.from_json_response(query.id, response_data)
-            # Send response back to the main process
-            await self._response_socket.send(response_obj)
+            result = self._adapter.decode_response(response_bytes, query.id)
+            await self._response_socket.send(result)
 
     def shutdown(self, signum: int | None = None, frame: Any | None = None) -> None:
         """Trigger shutdown of worker process."""
@@ -480,6 +461,8 @@ class WorkerManager:
         )
 
         try:
+            logger.info(f"Starting {self.http_config.num_workers} worker processes")
+
             # Spawn worker processes
             for i in range(self.http_config.num_workers):
                 worker = self._spawn_worker(i)
@@ -495,7 +478,7 @@ class WorkerManager:
                     worker_id = await readiness_socket.receive()
                     if worker_id is not None:
                         ready_count += 1
-                        logger.info(
+                        logger.debug(
                             f"Worker {worker_id} is ready ({ready_count}/{self.http_config.num_workers})"
                         )
 
@@ -505,7 +488,7 @@ class WorkerManager:
                 wait_for_all_workers(),
                 timeout=self.http_config.worker_initialization_timeout,
             )
-            logger.info(f"All {ready_count} workers are ready")
+            logger.info(f"{ready_count}/{self.http_config.num_workers} workers ready")
         except TimeoutError as e:
             raise TimeoutError(
                 f"Workers failed to initialize within {self.http_config.worker_initialization_timeout} seconds."

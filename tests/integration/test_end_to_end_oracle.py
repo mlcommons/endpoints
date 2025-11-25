@@ -121,7 +121,11 @@ async def _run_load_generator_full_run_url(
     url, dataset_path, tmp_path, clean_sample_event_hooks, hf_model_name
 ):
     def parser(x):
-        res = {"prompt": x.text_input, "output": x.ref_output, "model": hf_model_name}
+        res = {
+            "prompt": x["text_input"],
+            "output": x["ref_output"],
+            "model": hf_model_name,
+        }
         return res
 
     dummy_dataloader = DeepSeekR1ChatCompletionDataLoader(dataset_path, parser)
@@ -181,7 +185,11 @@ async def test_load_generator_full_run_mock_http_oracle_server(
     hf_model_name,
 ):
     def parser(x):
-        res = {"prompt": x.text_input, "output": x.ref_output, "model": hf_model_name}
+        res = {
+            "prompt": x["text_input"],
+            "output": x["ref_output"],
+            "model": hf_model_name,
+        }
         return res
 
     dummy_dataloader = DeepSeekR1ChatCompletionDataLoader(

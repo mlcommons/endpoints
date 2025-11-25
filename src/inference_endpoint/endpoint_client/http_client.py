@@ -88,7 +88,9 @@ class HTTPEndpointClient:
         self._response_socket: ZMQPullSocket | None = None
         self._concurrency_semaphore: asyncio.Semaphore | None = None
 
-        self.logger = logging.getLogger(__name__)
+        logger.info(
+            f"HTTP endpoint client using adapter: {self.config.adapter.__name__}"
+        )
 
     def start(self):
         """Start event loop thread and initialize client."""

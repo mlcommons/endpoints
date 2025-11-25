@@ -63,8 +63,9 @@ class BenchmarkSession:
         load_generator: LoadGenerator,
         stop_sample_issuer_on_test_end: bool = True,
         max_shutdown_timeout_s: float = 300.0,
-        report_path: os.PathLike | None = None,
+        report_dir: os.PathLike | None = None,
         tokenizer_override: AutoTokenizer | None = None,
+        dump_events_csv: bool = False,
     ):
         with self.event_recorder:
             try:
@@ -124,14 +125,14 @@ class BenchmarkSession:
                 report = reporter.create_report(tokenizer)
 
                 # Save to report directory if provided
-                if report_path:
-                    Path(report_path).mkdir(parents=True, exist_ok=True)
-                    report.to_json(save_to=Path(report_path) / "result_summary.json")
+                if report_dir:
+                    Path(report_dir).mkdir(parents=True, exist_ok=True)
+                    report.to_json(save_to=Path(report_dir) / "result_summary.json")
 
                     # Copy over outputs for validation
                     shutil.copy(
                         self.event_recorder.outputs_path,
-                        Path(report_path) / "outputs.jsonl",
+                        Path(report_dir) / "outputs.jsonl",
                     )
 
                     # Dump runtime settings to report directory
@@ -154,8 +155,11 @@ class BenchmarkSession:
 
                     # TODO: After Zhihan's MR is merged, grab the scheduler class and other LG init settings
                     # from the runtime settings object
-                    with (Path(report_path) / "runtime_settings.json").open("w") as f:
+                    with (Path(report_dir) / "runtime_settings.json").open("w") as f:
                         f.write(orjson.dumps(rt_settings_data).decode("utf-8"))
+
+                    if dump_events_csv:
+                        reporter.dump_to_csv(Path(report_dir) / "events.csv")
 
                 # Print summary
                 report.display()
@@ -184,8 +188,9 @@ class BenchmarkSession:
         name: str | None = None,
         stop_sample_issuer_on_test_end: bool = True,
         max_shutdown_timeout_s: float = 300.0,
-        report_path: os.PathLike | None = None,
+        report_dir: os.PathLike | None = None,
         tokenizer_override: AutoTokenizer | None = None,
+        dump_events_csv: bool = False,
     ) -> BenchmarkSession:
         """Start a new BenchmarkSession in a thread.
 
@@ -198,9 +203,11 @@ class BenchmarkSession:
             stop_sample_issuer_on_test_end: Whether to stop the sample issuer on test end.
             max_shutdown_timeout_s: The maximum timeout to wait for the test to complete after all samples have been issued.
                                     If None, wait indefinitely. (Default: 300.0 seconds)
-            report_path: The path to save the report to. If None, no report will be saved.
+            report_dir: The path to save the report to. If None, no report will be saved.
             tokenizer_override: The tokenizer to use for the session. If None, a tokenizer will be automatically selected
                                 based on the model name in the runtime settings.
+            dump_events_csv: Whether to dump the events to a CSV file. Only use for debugging
+                             purposes, as the events database can get quite large.
 
         Returns:
             The new BenchmarkSession.
@@ -213,8 +220,9 @@ class BenchmarkSession:
                 load_generator,
                 stop_sample_issuer_on_test_end,
                 max_shutdown_timeout_s,
-                report_path,
+                report_dir,
                 tokenizer_override,
+                dump_events_csv,
             ),
         )
         session.thread.start()

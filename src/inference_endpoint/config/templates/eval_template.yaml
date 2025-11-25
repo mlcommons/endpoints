@@ -25,7 +25,6 @@ settings:
 
   client:
     workers: 4
-    max_concurrency: -1 # -1 = unlimited
 
 metrics:
   collect:
