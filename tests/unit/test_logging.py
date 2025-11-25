@@ -143,7 +143,7 @@ class TestSetupLogging:
 
     def test_setup_logging_configures_root_logger(self, monkeypatch):
         """Test that setup_logging configures the root logger with a handler."""
-        # Remove FORCE_COLOR_LOGGING to ensure colors are disabled by default
+        # Ensure FORCE_COLOR_LOGGING is not set to ensure colors are disabled by default
         monkeypatch.delenv("FORCE_COLOR_LOGGING", raising=False)
 
         # Clear existing handlers

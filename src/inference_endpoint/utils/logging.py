@@ -106,7 +106,6 @@ def setup_logging(level: str | None = None, format_string: str | None = None) ->
         format_string = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     # Disable colors by default to avoid potential formatting overhead during benchmarking.
     # Colors can be explicitly enabled via FORCE_COLOR_LOGGING environment variable.
-    # This respects the NO_COLOR standard (https://no-color.org/)
     use_color = os.getenv("FORCE_COLOR_LOGGING") is not None
 
     handler = logging.StreamHandler(sys.stdout)
