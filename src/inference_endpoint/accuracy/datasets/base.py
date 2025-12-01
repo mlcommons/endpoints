@@ -127,3 +127,17 @@ class AccuracyDataset(ABC):
             The dataset in the format specified by the FORMAT class variable.
         """
         raise NotImplementedError
+
+    @abstractmethod
+    def get_ground_truth(self, index: int, loaded_dataset: Any) -> str:
+        """Get the ground truth for a sample at the given index. This must be implemented
+        for use in Evaluators, as each dataset can be loaded as different types of objects.
+
+        Args:
+            index: The index of the sample.
+            loaded_dataset: The loaded dataset returned by self.load()
+
+        Returns:
+            The ground truth for the sample.
+        """
+        raise NotImplementedError

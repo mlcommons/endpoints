@@ -153,6 +153,9 @@ class GPQA(
                 raise FileNotFoundError(f"Dataset file {ds_path} does not exist")
         return pd.read_pickle(ds_path)
 
+    def get_ground_truth(self, index: int, loaded_dataset: pd.DataFrame) -> str:
+        return loaded_dataset.iloc[index]["ground_truth"]
+
 
 class GPQADataLoader(DataLoader):
     def __init__(

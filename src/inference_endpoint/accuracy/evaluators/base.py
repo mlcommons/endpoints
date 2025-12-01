@@ -14,12 +14,15 @@
 # limitations under the License.
 
 import csv
+import numbers
 import re
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import ClassVar
 
 import orjson
+
+from ..datasets.base import AccuracyDataset
 
 
 class Extractor(ABC):
@@ -180,8 +183,23 @@ class Evaluator(ABC):
             raise ValueError(f"Evaluator with name {name} already exists")
         Evaluator.IMPLEMENTATIONS[name] = cls
 
-    def __init__(self, extractor: Extractor):
+    def __init__(
+        self, extractor: Extractor, accuracy_dataset: AccuracyDataset, dataset_dir: Path
+    ):
+        """
+        Args:
+            extractor: The Extractor to use to extract the output from the model's response.
+            accuracy_dataset: The AccuracyDataset to use to get the ground truth for the samples.
+            dataset_dir: The directory containing the dataset.
+        """
         self.extractor = extractor
+        self.accuracy_dataset = accuracy_dataset
+        self.dataset_dir = dataset_dir
+
+        self.ds = self.accuracy_dataset.load(dataset_dir)
+
+    def get_ground_truth(self, index: int) -> str:
+        return self.accuracy_dataset.get_ground_truth(index, self.ds)
 
     def extract_outputs(
         self,
@@ -221,13 +239,6 @@ class Evaluator(ABC):
                 extracted = self.extractor.extract(data["output"])
                 if extracted is None:
                     extracted = ""
-                else:
-                    # Normalize to single uppercase letter
-                    # Strip whitespace and common punctuation
-                    extracted = extracted.strip().strip("()[]").strip(".")
-
-                    # Convert to uppercase
-                    extracted = extracted.upper()
 
                 writer.writerow([uuid_map[data["s_uuid"]], extracted])
                 rows_written += 1
@@ -238,5 +249,17 @@ class Evaluator(ABC):
             )
 
     @abstractmethod
-    def invoke_run_sh(self):
+    def evaluate_sample(self, sample_output: str, ground_truth: str) -> numbers.Number:
+        """
+        Evaluate the accuracy of a single sample output against the ground truth. This method
+        can launch a subprocess to invoke a script in a container for cases such as running
+        generated code for code-gen tasks.
+
+
+        Args:
+            sample_output: The output from the model for a single sample.
+            ground_truth: The ground truth for the sample.
+        Returns:
+            The accuracy of the sample output against the ground truth.
+        """
         pass
