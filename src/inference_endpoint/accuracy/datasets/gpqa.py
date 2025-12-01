@@ -20,6 +20,7 @@ from pathlib import Path
 import datasets as hf_datasets
 import pandas as pd
 
+from ...dataset_manager.dataloader import DataLoader
 from .base import AccuracyDataset, DatasetFormat
 
 logger = logging.getLogger(__name__)
@@ -151,3 +152,41 @@ class GPQA(
             else:
                 raise FileNotFoundError(f"Dataset file {ds_path} does not exist")
         return pd.read_pickle(ds_path)
+
+
+class GPQADataLoader(DataLoader):
+    def __init__(
+        self,
+        datasets_dir: Path,
+        user_prompt_format: str,
+        *args,
+        variant: str = "diamond",
+        seed: int = 0,
+        max_samples: int | None = None,
+        **kwargs,
+    ):
+        """
+        Args:
+            datasets_dir: The directory containing the dataset.
+            user_prompt_format: The format of the user prompt. The keys in the format string
+                must match the column names in the dataset.
+            variant: The variant of the dataset to load.
+            seed: The seed to use for the random number generator.
+            max_samples: The maximum number of samples to load. If None, all samples will be loaded.
+        """
+        super().__init__(*args, **kwargs)
+
+        self.datasets_dir = datasets_dir
+
+        # Load the dataset
+        self.df = GPQA(variant=variant, seed=seed, max_samples=max_samples).load(
+            datasets_dir
+        )
+        self.user_prompt_format = user_prompt_format
+
+    def load_sample(self, index: int) -> str:
+        d = self.df.iloc[index]
+        return self.user_prompt_format.format(**d.to_dict())
+
+    def num_samples(self) -> int:
+        return len(self.df)
