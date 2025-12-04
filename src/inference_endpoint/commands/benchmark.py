@@ -128,7 +128,8 @@ class ResponseCollector:
         self.count += 1
         if result.error:
             self.errors.append(f"Sample {result.id}: {result.error}")
-            self.pbar.set_postfix(refresh=True, errors=len(self.errors))
+            if self.pbar:
+                self.pbar.set_postfix(refresh=True, errors=len(self.errors))
         elif self.collect_responses:
             self.responses[result.id] = result.response_output
 

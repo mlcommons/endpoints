@@ -408,7 +408,9 @@ class Report:
         d["qps"] = self.qps
         d["tps"] = self.tps
         d["e2e_sample_latency_sec"] = self.e2e_sample_latency_sec
-        json_str = orjson.dumps(d).decode("utf-8")
+        json_str = orjson.dumps(
+            d, option=orjson.OPT_INDENT_2 | orjson.OPT_SORT_KEYS
+        ).decode("utf-8")
         if save_to is not None:
             with Path(save_to).open("w") as f:
                 f.write(json_str)
