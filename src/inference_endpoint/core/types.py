@@ -60,19 +60,16 @@ class Query(msgspec.Struct, kw_only=True):
     Attributes:
         id: Unique identifier for this query (auto-generated UUID).
         data: Request payload as a dictionary (typically contains prompt, model, etc.).
-        headers: HTTP headers to include in the request (e.g., authorization).
         created_at: Timestamp when query was created (seconds since epoch).
 
     Example:
         >>> query = Query(
         ...     data={"prompt": "Hello", "model": "Qwen/Qwen3-8B", "max_tokens": 100},
-        ...     headers={"Authorization": "Bearer token123"}
         ... )
     """
 
     id: str = msgspec.field(default_factory=lambda: str(uuid.uuid4()))
     data: dict[str, Any] = msgspec.field(default_factory=dict)
-    headers: dict[str, str] = msgspec.field(default_factory=dict)
     created_at: float = msgspec.field(default_factory=time.time)
 
 
