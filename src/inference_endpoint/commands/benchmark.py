@@ -577,6 +577,7 @@ def _run_benchmark(
             endpoint_url=urljoin(endpoint, "/v1/chat/completions"),
             num_workers=num_workers,
             max_concurrency=-1,  # unlimited
+            http_logging=config.settings.client.http_logging,
         )
         aiohttp_config = AioHttpConfig()
         zmq_config = ZMQConfig(
@@ -629,9 +630,7 @@ def _run_benchmark(
 
         elapsed_time = time.time() - start_time
         success_count = response_collector.count - len(response_collector.errors)
-        estimated_qps = (
-            response_collector.count / elapsed_time if elapsed_time > 0 else 0
-        )
+        estimated_qps = success_count / elapsed_time if elapsed_time > 0 else 0
 
         # Report results
         logger.info(f"Completed in {elapsed_time:.1f}s")

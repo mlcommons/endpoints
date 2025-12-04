@@ -37,7 +37,7 @@ class ChatMessage(msgspec.Struct, kw_only=True, omit_defaults=True):
 
     role: str
     content: str
-    name: str
+    name: str | None = None
 
 
 class ChatCompletionRequest(msgspec.Struct, kw_only=True, omit_defaults=True):
@@ -45,16 +45,16 @@ class ChatCompletionRequest(msgspec.Struct, kw_only=True, omit_defaults=True):
 
     model: str
     messages: list[ChatMessage]
-    temperature: float
-    max_completion_tokens: int
-    stream: bool
-    top_p: float
-    n: int
-    stop: str | list[str]
-    presence_penalty: float
-    frequency_penalty: float
-    logit_bias: dict[str, float]
-    user: str
+    temperature: float | None = None
+    max_completion_tokens: int | None = None
+    stream: bool | None = None
+    top_p: float | None = None
+    n: int | None = None
+    stop: str | list[str] | None = None
+    presence_penalty: float | None = None
+    frequency_penalty: float | None = None
+    logit_bias: dict[str, float] | None = None
+    user: str | None = None
 
 
 class ChatCompletionResponseMessage(msgspec.Struct, kw_only=True, omit_defaults=True):
@@ -145,7 +145,7 @@ class OpenAIMsgspecAdapter(HttpRequestAdapter):
         if "prompt" not in query.data:
             raise ValueError("prompt not found in query.data")
 
-        return ChatCompletionRequest(
+        request = ChatCompletionRequest(
             model=query.data.get("model", "no-model-name"),
             messages=[
                 ChatMessage(
@@ -165,6 +165,8 @@ class OpenAIMsgspecAdapter(HttpRequestAdapter):
             logit_bias=query.data.get("logit_bias"),
             user=query.data.get("user"),
         )
+        # logging.info(f"OpenAIMsgspecAdapter: Request: {request}")
+        return request
 
     @classmethod
     def encode_request(cls, request: ChatCompletionRequest) -> bytes:

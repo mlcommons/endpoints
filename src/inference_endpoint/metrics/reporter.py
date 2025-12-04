@@ -601,6 +601,39 @@ class MetricsReporter:
             "ttft",
         )
 
+    def dump_all_to_csv(self, csv_path: Path):
+        logging.info(f"Dumping to CSV at {csv_path}")
+        with csv_path.open("w") as f:
+            res = self.derive_metric(
+                f"""
+            SELECT
+                sample_uuid,
+                timestamp_ns
+            FROM events
+            where event_type in ('{SampleEvent.REQUEST_SENT.value}')""",
+                "",
+            )
+            for row in res:
+                # logging.info(f"Dumping row: {row}")
+                f.write(
+                    f"{row.sample_uuid},{row.metric_value},{SampleEvent.REQUEST_SENT.value}\n"
+                )
+            res = self.derive_metric(
+                f"""
+            SELECT
+                sample_uuid,
+                timestamp_ns
+            FROM events
+            where event_type in ('{SampleEvent.REQUEST_COMPLETED.value}')""",
+                "",
+            )
+            logging.info(f"Number of rows: {len(res)}")
+            for row in res:
+                # logging.info(f"Dumping row: {row}")
+                f.write(
+                    f"{row.sample_uuid},{row.metric_value},{SampleEvent.REQUEST_COMPLETED.value}\n"
+                )
+
     def derive_duration(self) -> float:
         """Calculates the total test duration as the difference between TEST_ENDED and TEST_STARTED events.
 

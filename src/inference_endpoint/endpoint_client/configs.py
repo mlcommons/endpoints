@@ -35,6 +35,7 @@ class HTTPClientConfig:
     max_concurrency: int = (
         -1
     )  # -1: unlimited, else: limit concurrent requests via semaphore
+    http_logging: bool = False
 
     # WARNING: Use with caution
     # Can cause large performance overhead on main-thread (user / Loadgen)

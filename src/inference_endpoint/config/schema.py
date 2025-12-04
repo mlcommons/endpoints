@@ -236,6 +236,7 @@ class ClientSettings(BaseModel):
     """
 
     workers: int = 4
+    http_logging: bool = False
 
 
 class Settings(BaseModel):

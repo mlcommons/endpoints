@@ -298,6 +298,7 @@ class EventRecorder:
                             output_buffer.append(
                                 {
                                     "timestamp": str(monotime_to_datetime(item[2])),
+                                    "timestamp_ns": item[2],
                                     "s_uuid": item[0],
                                     "first_chunk": item[-1],
                                 }
@@ -311,6 +312,7 @@ class EventRecorder:
                             output_buffer.append(
                                 {
                                     "timestamp": str(monotime_to_datetime(item[2])),
+                                    "timestamp_ns": item[2],
                                     "s_uuid": item[0],
                                     "output": output_data,
                                 }
@@ -319,6 +321,7 @@ class EventRecorder:
                             output_buffer.append(
                                 {
                                     "timestamp": str(monotime_to_datetime(item[2])),
+                                    "timestamp_ns": item[2],
                                     "s_uuid": item[0],
                                     "error_type": item[1],
                                     "error_message": item[-1],

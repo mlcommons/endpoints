@@ -19,8 +19,10 @@ import asyncio
 import logging
 import multiprocessing
 import os
+import pathlib
 import signal
 import sys
+import time
 import traceback
 from collections.abc import AsyncGenerator
 from multiprocessing import Process
@@ -41,6 +43,9 @@ from inference_endpoint.endpoint_client.configs import (
     ZMQConfig,
 )
 from inference_endpoint.endpoint_client.zmq_utils import ZMQPullSocket, ZMQPushSocket
+from inference_endpoint.load_generator.events import SampleEvent
+from inference_endpoint.metrics.recorder import EventRecorder
+from inference_endpoint.metrics.reporter import MetricsReporter
 from inference_endpoint.profiling import profile
 
 logger = logging.getLogger(__name__)
@@ -195,7 +200,27 @@ class Worker:
 
         try:
             # Run main processing loop
-            await self._main_loop()
+            if self.http_config.http_logging:
+                pid = os.getpid()
+                worker_db_name = f"worker_report_{self.worker_id}_{pid}"
+                report_path = pathlib.Path(f"{worker_db_name}.csv")
+                logger.info(f"About to generate report {self.worker_id}")
+                with EventRecorder(session_id=worker_db_name) as event_recorder:
+                    await self._main_loop()
+                    event_recorder.wait_for_writes(force_commit=True)
+                    with MetricsReporter(event_recorder.connection_name) as reporter:
+                        logger.info(f"About to dump worker report to {report_path}")
+                        reporter.dump_all_to_csv(report_path)
+                        logger.info(f"Worker report dumped to {report_path}")
+            else:
+                # No logging, just run the main loop
+                await self._main_loop()
+        except Exception as e:
+            logger.error(
+                f"Error in worker {self.worker_id}: {type(e).__name__}: {str(e)}"
+            )
+            traceback.print_exc()
+
         finally:
             # Cleanup
             await self._cleanup()
@@ -276,6 +301,15 @@ class Worker:
         payload_bytes = self._adapter.encode_query(query)
 
         # Issue the request with pre-encoded bytes
+        # TODO replace with debug mode recorder
+        if self.http_config.http_logging:
+            EventRecorder.record_event(
+                SampleEvent.REQUEST_SENT,
+                time.monotonic_ns(),
+                sample_uuid=query.id,
+                assert_active=True,
+            )
+
         async with self._session.post(
             url, data=payload_bytes, headers=headers
         ) as response:
@@ -288,6 +322,15 @@ class Worker:
                 return
             logger.debug(f"HTTP Response: {response}")
             yield response
+
+        # TODO replace with debug mode recorder
+        if self.http_config.http_logging:
+            EventRecorder.record_event(
+                SampleEvent.REQUEST_COMPLETED,
+                time.monotonic_ns(),
+                sample_uuid=query.id,
+                assert_active=True,
+            )
 
     async def _process_request(self, query: Query) -> None:
         """Process a single query."""

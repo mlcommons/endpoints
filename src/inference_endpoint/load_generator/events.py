@@ -33,3 +33,5 @@ class SampleEvent(Event):
     COMPLETE = "complete"
     FIRST_CHUNK = "first_chunk_received"
     NON_FIRST_CHUNK = "non_first_chunk_received"
+    REQUEST_SENT = "request_sent"
+    REQUEST_COMPLETED = "request_completed"
