@@ -577,7 +577,7 @@ def _run_benchmark(
             endpoint_url=urljoin(endpoint, "/v1/chat/completions"),
             num_workers=num_workers,
             max_concurrency=-1,  # unlimited
-            http_logging=config.settings.client.http_logging,
+            record_worker_events=config.settings.client.record_worker_events,
         )
         aiohttp_config = AioHttpConfig()
         zmq_config = ZMQConfig(

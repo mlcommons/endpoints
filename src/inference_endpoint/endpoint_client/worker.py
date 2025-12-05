@@ -200,7 +200,7 @@ class Worker:
 
         try:
             # Run main processing loop
-            if self.http_config.http_logging:
+            if self.http_config.record_worker_events:
                 pid = os.getpid()
                 worker_db_name = f"worker_report_{self.worker_id}_{pid}"
                 report_path = pathlib.Path(f"{worker_db_name}.csv")
@@ -237,6 +237,13 @@ class Worker:
                 if query is None:
                     continue
 
+                if self.http_config.record_worker_events:
+                    EventRecorder.record_event(
+                        SampleEvent.ZMQ_REQUEST_RECEIVED,
+                        time.monotonic_ns(),
+                        sample_uuid=query.id,
+                        assert_active=True,
+                    )
                 # Process query asynchronously and track the task
                 task = asyncio.create_task(self._process_request(query))
                 self._active_tasks.add(task)
@@ -267,6 +274,13 @@ class Worker:
             error=error_message,
         )
         await self._response_socket.send(error_response)
+        if self.http_config.record_worker_events:
+            EventRecorder.record_event(
+                SampleEvent.ZMQ_RESPONSE_SENT,
+                time.monotonic_ns(),
+                sample_uuid=query_id,
+                assert_active=True,
+            )
 
     @profile
     async def _make_http_request(self, query: Query):
@@ -291,7 +305,11 @@ class Worker:
             return
 
         url = self.http_config.endpoint_url
-        headers = query.headers if hasattr(query, "headers") else {}
+        headers = (
+            query.headers
+            if hasattr(query, "headers") and len(query.headers) > 0
+            else {"content-type": "application/json"}
+        )
 
         logging.debug(
             f"Making HTTP request to {url} with payload: {query} and headers: {headers}"
@@ -302,9 +320,9 @@ class Worker:
 
         # Issue the request with pre-encoded bytes
         # TODO replace with debug mode recorder
-        if self.http_config.http_logging:
+        if self.http_config.record_worker_events:
             EventRecorder.record_event(
-                SampleEvent.REQUEST_SENT,
+                SampleEvent.HTTP_REQUEST_ISSUED,
                 time.monotonic_ns(),
                 sample_uuid=query.id,
                 assert_active=True,
@@ -324,9 +342,9 @@ class Worker:
             yield response
 
         # TODO replace with debug mode recorder
-        if self.http_config.http_logging:
+        if self.http_config.record_worker_events:
             EventRecorder.record_event(
-                SampleEvent.REQUEST_COMPLETED,
+                SampleEvent.HTTP_RESPONSE_COMPLETED,
                 time.monotonic_ns(),
                 sample_uuid=query.id,
                 assert_active=True,
@@ -418,6 +436,13 @@ class Worker:
                         )
                     )
                     first_chunk_sent = True
+                    if self.http_config.record_worker_events:
+                        EventRecorder.record_event(
+                            SampleEvent.ZMQ_RESPONSE_SENT,
+                            time.monotonic_ns(),
+                            sample_uuid=query.id,
+                            assert_active=True,
+                        )
 
             # Send final complete response
             response_output = []
@@ -433,6 +458,13 @@ class Worker:
                     metadata={"first_chunk": not first_chunk_sent, "final_chunk": True},
                 )
             )
+            if self.http_config.record_worker_events:
+                EventRecorder.record_event(
+                    SampleEvent.ZMQ_RESPONSE_SENT,
+                    time.monotonic_ns(),
+                    sample_uuid=query.id,
+                    assert_active=True,
+                )
 
     @profile
     async def _handle_non_streaming_request(self, query: Query) -> None:
@@ -441,6 +473,13 @@ class Worker:
             response_bytes = await response.read()
             result = self._adapter.decode_response(response_bytes, query.id)
             await self._response_socket.send(result)
+            if self.http_config.record_worker_events:
+                EventRecorder.record_event(
+                    SampleEvent.ZMQ_RESPONSE_SENT,
+                    time.monotonic_ns(),
+                    sample_uuid=query.id,
+                    assert_active=True,
+                )
 
     def shutdown(self, signum: int | None = None, frame: Any | None = None) -> None:
         """Trigger shutdown of worker process."""
