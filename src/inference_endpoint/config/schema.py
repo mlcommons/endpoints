@@ -136,7 +136,7 @@ class ModelParams(BaseModel):
     """Model generation parameters."""
 
     name: str | None = None
-    temperature: float = None
+    temperature: float | None = None
     top_k: int | None = None
     top_p: float | None = None
     repetition_penalty: float | None = None
