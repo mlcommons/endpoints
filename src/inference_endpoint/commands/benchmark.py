@@ -24,7 +24,6 @@ import logging
 import shutil
 import signal
 import tempfile
-import time
 from pathlib import Path
 from urllib.parse import urljoin
 
