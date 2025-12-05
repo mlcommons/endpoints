@@ -17,7 +17,6 @@
 
 import asyncio
 import logging
-import threading
 
 from inference_endpoint.core.types import Query, QueryResult, StreamChunk
 from inference_endpoint.endpoint_client.http_client import HTTPEndpointClient
@@ -29,11 +28,19 @@ logger = logging.getLogger(__name__)
 
 
 class HttpClientSampleIssuer(SampleIssuer):
-    """SampleIssuer using HTTPEndpointClient with async response handling.
+    """
+    SampleIssuer interface for HTTPEndpointClient.
+    Routes completed responses to SampleEventHandler.
 
-    Responsibilities:
-    - Send queries via HTTP client
-    - Route responses to appropriate sample callbacks
+    Usage:
+        # Create HTTP client and sample issuer - auto-initializes
+        client = HTTPEndpointClient(config, aiohttp_config, zmq_config)
+        issuer = HttpClientSampleIssuer(client)
+
+        # Issue samples
+        issuer.issue(sample)
+
+        # shutdown() is optional - only needed for early exit
     """
 
     def __init__(
@@ -43,34 +50,17 @@ class HttpClientSampleIssuer(SampleIssuer):
         super().__init__()
         self.http_client = http_client
 
-        # Task for handling responses
-        self.response_task: asyncio.Task | None = None
-
-        # Signals when all pending queries complete
-        self._client_idle_event = threading.Event()
-
-        # Shutdown flag for response handler
-        self._shutdown = False
-
-        self.n_inflight = 0
-
-    def start(self):
-        """Start response handler on the HTTP client's event loop."""
-        self.response_task = asyncio.run_coroutine_threadsafe(
-            self.handle_responses(), self.http_client.loop
+        # Start response handler task to route completed responses back to SampleEventHandler
+        self._response_task = asyncio.run_coroutine_threadsafe(
+            self._handle_responses(), self.http_client.loop
         )
 
     @profile
-    async def handle_responses(self):
-        """Handle all responses in async loop. Routes responses to sample callbacks."""
-        while not self._shutdown:
+    async def _handle_responses(self):
+        """Route completed responses to SampleEventHandler."""
+        while True:
             try:
-                response = await self.http_client.get_ready_responses_async()
-                if response is None:  # timed out without a response
-                    continue
-
-                # Route to appropriate callback based on response type
-                match response:
+                match response := await self.http_client.recv_response_or_none():
                     case StreamChunk(is_complete=False):
                         # NOTE(vir): is_complete=True should not be received, QueryResult is expected instead
                         SampleEventHandler.stream_chunk_complete(response)
@@ -80,14 +70,15 @@ class HttpClientSampleIssuer(SampleIssuer):
                         if err is not None:
                             logger.error(f"Error in request {response.id}: {err}")
 
-                        self.n_inflight -= 1
-                        if self.n_inflight == 0:
-                            self._client_idle_event.set()
+                    case None:
+                        # No response available, yield to event loop
+                        continue
 
                     case _:
                         raise ValueError(f"Unexpected response type: {type(response)}")
 
             except asyncio.CancelledError:
+                # Handle shutdown signal
                 break
             except Exception as e:
                 logger.error(f"Error in response handler: {e}", exc_info=True)
@@ -96,12 +87,6 @@ class HttpClientSampleIssuer(SampleIssuer):
     @profile
     def issue(self, sample: Sample):
         """Issue sample to HTTP endpoint."""
-        # TODO(vir):
-        # we were paying idle-event cost on every issue
-        # Q&D fix for now, move idle-check into HttpClient itself
-        if self.n_inflight == 0:
-            self._client_idle_event.clear()
-        self.n_inflight += 1
         self.http_client.issue_query(
             Query(
                 id=sample.uuid,
@@ -115,21 +100,9 @@ class HttpClientSampleIssuer(SampleIssuer):
             )
         )
 
-    def wait_for_all_complete(self, timeout: float | None = None):
-        """Wait (blocking) for all pending queries to complete.
-
-        Args:
-            timeout: Maximum time to wait in seconds. None = wait forever.
-
-        Returns:
-            True if all complete, False if timeout
-        """
-        result = self._client_idle_event.wait(timeout=timeout)
-        return result
-
     def shutdown(self):
-        """Shutdown issuer response handler."""
-        self._shutdown = True
-
-        if self.response_task:
-            self.response_task.cancel()
+        """
+        Gracefully shutdown sample issuer.
+        Will cancel the response-handler task.
+        """
+        self._response_task.cancel()

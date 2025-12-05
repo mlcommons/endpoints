@@ -48,7 +48,6 @@ class DeepSeekR1SampleIssuer(HttpClientSampleIssuer):
         self.http_config = HTTPClientConfig(
             endpoint_url=urljoin(url, "/v1/chat/completions"),
             num_workers=16,
-            max_concurrency=10,
         )
         self.aiohttp_config = AioHttpConfig()
         self.zmq_config = ZMQConfig(
@@ -87,8 +86,6 @@ async def run_benchmark(server_url, dataloader, tmp_path, rt_settings):
     try:
         # Step 3. Create the sample issuer.
         sample_issuer = DeepSeekR1SampleIssuer(tmp_path, server_url)
-        sample_issuer.http_client.start()
-        sample_issuer.start()
 
         # Step 4. Create the benchmark session.
         sess = BenchmarkSession.start(
@@ -97,7 +94,6 @@ async def run_benchmark(server_url, dataloader, tmp_path, rt_settings):
             sample_issuer,
             scheduler,
             name="pytest_run_benchmark",
-            stop_sample_issuer_on_test_end=False,
             max_shutdown_timeout_s=3 * 60,
         )
 

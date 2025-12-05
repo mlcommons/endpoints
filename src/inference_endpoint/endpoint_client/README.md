@@ -1,193 +1,101 @@
 # HTTP Endpoint Client
 
-A high-performance HTTP client for the MLPerf Inference Endpoint Benchmarking System that leverages multiprocessing, async I/O, and ZMQ for efficient request handling.
+HTTP client for LLM inference with multiprocessing workers and ZMQ communication.
 
-## Architecture Overview
+## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                    HTTPEndpointClient                           │
-│              (implements EndpointClient ABC)                    │
-│  ┌─────────────────┐                                            │
-│  │  issue_query    │                                            │
-│  └────────┬────────┘                                            │
-│           │                                                     │
-│           ├─────ZMQ PUSH (Query)────▶ Worker 1 Queue            │
-│           ├─────ZMQ PUSH (Query)────▶ Worker 2 Queue            │
-│           └─────ZMQ PUSH (Query)────▶ Worker N Queue            │
-└─────────────────────────────────────────────────────────────────┘
-                                      │
-                                 ZMQ PULL (per worker)
-                                      ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                        WorkerManager                            │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐           │
-│  │   Worker 1   │  │   Worker 2   │  │   Worker N   │  ...      │
-│  │   (uvloop)   │  │   (uvloop)   │  │   (uvloop)   │           │
-│  │   aiohttp    │  │   aiohttp    │  │   aiohttp    │           │
-│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘           │
-│         │                 │                 │                   │
-│         └─────────────────┴─────────────────┘                   │
-│                           │                                     │
-│                    ZMQ PUSH (QueryResult)                       │
-│                           ▼                                     │
-│                    ┌────────────────┐                           │
-│                    │ Response Queue │ (Shared)                  │
-│                    └────────────────┘                           │
-└─────────────────────────────────────────────────────────────────┘
-                             │
-                    ZMQ PULL (blocking)
-                             ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                    Response Handler                             │
-│                 (calls complete_callback)                       │
-└─────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────────────────┐
+│                                   HTTPEndpointClient                                    │
+│  ┌─────────────────┐                                                                    │
+│  │  issue_query    │                                                                    │
+│  └────────┬────────┘                                                                    │
+│           │                                                         ┌────────────────┐  │
+│           ├─────ZMQ PUSH────▶ Worker 1 ───HTTP POST───────────────▶ │                │  │
+│           ├─────ZMQ PUSH────▶ Worker 2 ───HTTP POST───────────────▶ │    Endpoint    │  │
+│           └─────ZMQ PUSH────▶ Worker N ───HTTP POST───────────────▶ │                │  │
+│                                    │                                └────────────────┘  │
+│                                    │ ◀─────────HTTP Response─────────────────┘          │
+│                                    │                                                    │
+│  ┌───────────────────────┐         │                                                    │
+│  │ recv_response_or_none │◀────────┴ ZMQ PULL                                           │
+│  │      (poll API)       │                                                              │
+│  └───────────────────────┘                                                              │
+└─────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-## Installation
-
-```bash
-# Required dependencies
-pip install aiohttp zmq orjson
-
-# Optional for better performance
-pip install uvloop
-```
-
-## Configuration
-
-Main configuration for the HTTP client:
+## Usage
 
 ```python
-from inference_endpoint.endpoint_client import HTTPClientConfig
-
-config = HTTPClientConfig(
-    endpoint_url="https://api.openai.com/v1/chat/completions",
-    num_workers=4,  # Number of worker processes
-    max_concurrency=-1  # -1 for unlimited, or positive int to limit concurrent requests
-)
-```
-
-Recommended to use defaults for the remaining:
-
-```python
-from inference_endpoint.endpoint_client import AioHttpConfig
-from inference_endpoint.endpoint_client import ZMQConfig
-
-aiohttp_config = AioHttpConfig() # Socket, TCP Connection, HTTP configs
-zmq_config = ZMQConfig() # IPC, worker configs
-```
-
-## Usage Examples
-
-### Basic Usage - Direct API
-
-The `HTTPEndpointClient` manages its own event loop in a background thread. Use this when you don't need futures or callbacks.
-
-```python
-import asyncio
 from inference_endpoint.endpoint_client import (
     HTTPEndpointClient,
     HTTPClientConfig,
     AioHttpConfig,
-    ZMQConfig
+    ZMQConfig,
 )
 from inference_endpoint.core.types import Query
 
-# Create client (manages its own event loop)
-http_config = HTTPClientConfig(
-    endpoint_url="https://api.openai.com/v1/chat/completions",
-    num_workers=4,
-    max_concurrency=-1  # unlimited
+client = HTTPEndpointClient(
+    HTTPClientConfig(endpoint_url="http://localhost:8000/v1/completions", num_workers=2),
+    AioHttpConfig(),
+    ZMQConfig(),
 )
-client = HTTPEndpointClient(http_config, AioHttpConfig(), ZMQConfig())
-client.start()
 
-# Issue queries (synchronous calls)
-queries = [
-    Query(id=i, data={"prompt": f"Request {i}", "model": "gpt-4"})
-    for i in range(10)
-]
+# Sync issue (fire-and-forget)
+client.issue_query(Query(
+    id="q-1",
+    data={"prompt": "Hello", "stream": False},
+    headers={"Content-Type": "application/json"},
+))
 
-for query in queries:
-    client.issue_query(query)
-
-# Poll for responses
-responses_received = 0
-while responses_received < len(queries):
-    response = client.get_ready_responses()
-
-    if response:
-        print(f"Response {response.id}: {response.response_output}")
-        responses_received += 1
-
-client.shutdown()
+# Async receive (non-blocking, returns None on timeout)
+response = await client.recv_response_or_none()
+if response:
+    print(f"Response for {response.id}: {response}")
 ```
 
-### Advanced Usage - Futures API
-
-The `FuturesHttpClient` integrates with your existing event loop and provides futures for easier async handling.
-
-- `FuturesHttpClient` uses your current event loop (no separate thread)
-- Returns `asyncio.Future` objects for each query
-- Supports optional callbacks for response handling
+### With HttpClientSampleIssuer
 
 ```python
-import asyncio
 from inference_endpoint.endpoint_client import (
-    FuturesHttpClient,
+    HTTPEndpointClient,
     HTTPClientConfig,
     AioHttpConfig,
-    ZMQConfig
+    ZMQConfig,
 )
-from inference_endpoint.core.types import Query
+from inference_endpoint.endpoint_client.http_sample_issuer import HttpClientSampleIssuer
+from inference_endpoint.load_generator.sample import Sample
 
-async def main():
-    # Create futures client (integrates with current async context)
-    http_config = HTTPClientConfig(
-        endpoint_url="https://api.openai.com/v1/chat/completions",
-        num_workers=4
-    )
+client = HTTPEndpointClient(
+    HTTPClientConfig(endpoint_url="http://localhost:8000/v1/completions", num_workers=4),
+    AioHttpConfig(),
+    ZMQConfig(),
+)
+issuer = HttpClientSampleIssuer(client)
 
-    # Optional: Define callback for responses
-    def handle_response(response):
-        print(f"Callback received: {response.id}")
+issuer.issue(Sample(
+    uuid="req-1",
+    data={"prompt": "Hello", "stream": False},
+))
+```
 
-    client = FuturesHttpClient(
-        http_config,
-        AioHttpConfig(),
-        ZMQConfig(),
-        complete_callback=handle_response  # optional
-    )
+## Configuration
 
-    # IMPORTANT: Use async_start(), not start()
-    await client.async_start()
+```python
+HTTPClientConfig(
+    endpoint_url="http://localhost:8000/v1/completions",
+    num_workers=4,  # Number of worker processes
+)
 
-    try:
-        # Issue queries and collect futures
-        futures = []
-        for i in range(10):
-            query = Query(
-                id=f"req-{i}",
-                data={
-                    "prompt": f"Request {i}",
-                    "model": "gpt-4",
-                    "stream": False
-                }
-            )
-            # issue_query() returns a future
-            future = await client.issue_query(query)
-            futures.append(future)
+AioHttpConfig()  # Socket, TCP, HTTP configs (use defaults)
+ZMQConfig()      # IPC configs (use defaults)
+```
 
-        # Wait for all responses
-        results = await asyncio.gather(*futures)
+## Shutdown
 
-        for result in results:
-            print(f"Result {result.id}: {result.response_output}")
+Shutdown is optional. Workers and event loop thread are daemons - they terminate automatically with the main process.
 
-    finally:
-        # IMPORTANT: Use async_shutdown(), not shutdown()
-        await client.async_shutdown()
-
-asyncio.run(main())
+```python
+# Optional: graceful shutdown for early exit
+client.shutdown()
 ```

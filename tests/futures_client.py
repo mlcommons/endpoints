@@ -13,186 +13,87 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Futures-based wrapper for HTTPEndpointClient - Test Infrastructure."""
+"""Futures-based wrapper for testing HTTPEndpointClient."""
 
 import asyncio
+import concurrent.futures
 import logging
 
 from inference_endpoint.core.types import Query, QueryResult, StreamChunk
+from inference_endpoint.endpoint_client.configs import (
+    AioHttpConfig,
+    HTTPClientConfig,
+    ZMQConfig,
+)
 from inference_endpoint.endpoint_client.http_client import HTTPEndpointClient
 
 logger = logging.getLogger(__name__)
 
 
-class StreamingFuture(asyncio.Future):
-    """Future that also exposes first chunk for streaming responses."""
-
-    def __init__(self):
-        super().__init__()
-        self.first = asyncio.Future()
-
-
 class FuturesHttpClient(HTTPEndpointClient):
     """
-    HTTP client with futures-based API for async contexts.
-    FuturesHttpClient will run on the current event loop.
-
-    This is a test utility that wraps HTTPEndpointClient to provide
-    a simpler futures-based interface for testing purposes.
-
-    Final result is available via the future object.
+    HTTPEndpointClient with futures-based API for testing.
+    Returns thread-safe futures from issue_query() that can be awaited from any context.
     """
 
-    def __init__(self, *args, **kwargs):
-        """Initialize FuturesHttpClient.
+    def __init__(
+        self,
+        config: HTTPClientConfig,
+        aiohttp_config: AioHttpConfig,
+        zmq_config: ZMQConfig,
+    ):
+        # Auto-starts with own event loop thread (loop=None)
+        super().__init__(config, aiohttp_config, zmq_config)
 
-        Args:
-            *args: Passed to HTTPEndpointClient.
-            **kwargs: Passed to HTTPEndpointClient.
-        """
-        super().__init__(*args, **kwargs)
-        self._pending_futures: dict[str | int, asyncio.Future] = {}
-        self._response_handler_task: asyncio.Task | None = None
-
-    async def async_start(self):
-        """Start HTTP client and response handler."""
-        try:
-            # Set loop to current running loop
-            self.loop = asyncio.get_running_loop()
-            await super().async_start()
-
-            # Schedule response handler on current loop
-            self._response_handler_task = asyncio.create_task(self._handle_responses())
-        except Exception as e:
-            logger.exception(f"Failed to start FuturesHttpClient: {e}")
-
-            # Cleanup on failure
-            await self.async_shutdown()
-            raise e
-
-    async def issue_query(self, query: Query) -> asyncio.Future:
-        """Issue query and return future for response."""
-        future = (
-            StreamingFuture() if query.data.get("stream", False) else asyncio.Future()
+        # Start response handler on client's loop
+        self._pending: dict[str | int, concurrent.futures.Future] = {}
+        self._handler_future = asyncio.run_coroutine_threadsafe(
+            self._handle_responses(), self.loop
         )
-        self._pending_futures[query.id] = future
+        self._is_shutting_down = False
 
-        try:
-            await super().issue_query_async(query)
-        except Exception as e:
-            # Set exception on future and clean up on failure
-            logger.exception(f"Failed to send query {query.id}: {e}")
-            self._set_future_exception(future, e)
-            self._pending_futures.pop(query.id, None)
-            raise
+    def issue_query(self, query: Query) -> concurrent.futures.Future[QueryResult]:
+        """Issue query and return a future for the result."""
+        if self._is_shutting_down:
+            raise RuntimeError("Cannot issue query: client is shutting down")
 
+        future: concurrent.futures.Future[QueryResult] = concurrent.futures.Future()
+        self._pending[query.id] = future
+        super().issue_query(query)
         return future
 
-    def _set_future_exception(self, future: asyncio.Future, exception: Exception):
-        """Set exception on future and streaming first chunk if applicable."""
-        if not future.done():
-            future.set_exception(exception)
-        if isinstance(future, StreamingFuture) and not future.first.done():
-            future.first.set_exception(exception)
-
     async def _handle_responses(self):
-        """Handle responses and complete futures."""
+        """Route responses to their corresponding futures."""
         while True:
             try:
-                response = await self.get_ready_responses_async()
-
-                # Handle timeout (no response available)
+                response = await self.recv_response_or_none()
                 if response is None:
                     continue
 
-                future = self._pending_futures.get(response.id)
-                if not future:
-                    logger.warning(
-                        f"Received response for unknown query: {response.id}"
-                    )
-                    continue
-
-                if future.done():
-                    logger.warning(
-                        f"Received duplicate response for query: {response.id}"
-                    )
-                    continue
-
-                # Handle different response types
+                future = self._pending[response.id]
                 match response:
-                    case StreamChunk(response_chunk=chunk, is_complete=False):
-                        future.first.set_result(chunk)
-
-                    case StreamChunk(is_complete=True):
-                        raise NotImplementedError(
-                            "StreamChunk(is_complete=True) should not be received, QueryResult is expected instead"
-                        )
-
-                    case QueryResult(error=err) if err is not None:
-                        self._set_future_exception(future, Exception(err))
-                        self._pending_futures.pop(response.id)
-
+                    case StreamChunk(is_complete=False):
+                        pass  # Ignore intermediate stream chunks
+                    case QueryResult(error=err) if err:
+                        future.set_exception(Exception(err))
+                        del self._pending[response.id]
                     case QueryResult():
                         future.set_result(response)
-                        if (
-                            isinstance(future, StreamingFuture)
-                            and not future.first.done()
-                        ):
-                            # For streaming futures with no first chunk, set first chunk to empty string
-                            future.first.set_result("")
-
-                        self._pending_futures.pop(response.id)
-
-                    case _:
-                        logger.error(f"Unexpected response type: {type(response)}")
+                        del self._pending[response.id]
 
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.exception(f"Error in response handler: {e}")
 
-    async def async_shutdown(self):
-        """Async shutdown for external loop usage."""
-        # Cancel response handler task first
-        if self._response_handler_task:
-            self._response_handler_task.cancel()
-            try:
-                await asyncio.wait_for(self._response_handler_task, timeout=0.2)
-            except (TimeoutError, asyncio.CancelledError):
-                pass
+    def shutdown(self):
+        """Shutdown handler and HTTP client."""
+        self._is_shutting_down = True
+        self._handler_future.cancel()
 
-        # Cancel any pending futures
-        for future in self._pending_futures.values():
+        while self._pending:
+            _, future = self._pending.popitem()
             if not future.done():
                 future.cancel()
-        self._pending_futures.clear()
 
-        await super().async_shutdown()
-
-    def start(self):
-        """Synchronous start is not supported for FuturesHttpClient.
-
-        Raises:
-            RuntimeError: Always raised to prevent improper usage.
-
-        Use async_start() instead:
-            await client.async_start()
-        """
-        raise RuntimeError(
-            "FuturesHttpClient does not support synchronous start(). "
-            "Use 'await client.async_start()' instead."
-        )
-
-    def shutdown(self):
-        """Synchronous shutdown is not supported for FuturesHttpClient.
-
-        Raises:
-            RuntimeError: Always raised to prevent improper usage.
-
-        Use async_shutdown() instead:
-            await client.async_shutdown()
-        """
-        raise RuntimeError(
-            "FuturesHttpClient does not support synchronous shutdown(). "
-            "Use 'await client.async_shutdown()' instead."
-        )
+        super().shutdown()

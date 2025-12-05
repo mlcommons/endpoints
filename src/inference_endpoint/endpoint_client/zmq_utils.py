@@ -15,14 +15,19 @@
 
 """ZMQ utilities for endpoint client communication."""
 
+import asyncio
 from typing import Any
 
 import msgspec
+import uvloop
 import zmq
 import zmq.asyncio
 
 from inference_endpoint.endpoint_client.configs import ZMQConfig
 from inference_endpoint.profiling import profile
+
+# required for ZMQ context to work with uvloop
+asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
 
 class ZMQSocket:

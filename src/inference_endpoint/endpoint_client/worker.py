@@ -478,9 +478,7 @@ class Worker:
                 resp_output = [output_chunks[0]]
                 if len(output_chunks) > 1:
                     resp_output.append("".join(output_chunks[1:]))
-                response_output = {
-                    "output": resp_output,
-                }
+                response_output = {"output": resp_output}
             else:
                 response_output = {"output": []}
 

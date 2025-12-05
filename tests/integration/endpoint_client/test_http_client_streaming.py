@@ -39,7 +39,6 @@ class TestHTTPEndpointClientStreaming:
         http_config = HTTPClientConfig(
             endpoint_url=f"{mock_http_echo_server.url}/v1/chat/completions",
             num_workers=2,
-            max_concurrency=10,
         )
         aiohttp_config = AioHttpConfig()
         zmq_config = ZMQConfig(
@@ -61,14 +60,12 @@ class TestHTTPEndpointClientStreaming:
         tmp_path,
         prefix,
         num_workers=1,
-        max_concurrency=-1,
         aiohttp_config=None,
     ):
         """Helper to create client with specific config."""
         http_config = HTTPClientConfig(
             endpoint_url=url,
             num_workers=num_workers,
-            max_concurrency=max_concurrency,
         )
         zmq_config = ZMQConfig(
             zmq_request_queue_prefix=get_test_socket_path(tmp_path, prefix, "_req"),
@@ -78,127 +75,6 @@ class TestHTTPEndpointClientStreaming:
         return FuturesHttpClient(
             http_config, aiohttp_config or AioHttpConfig(), zmq_config
         )
-
-    @pytest.mark.asyncio
-    async def test_streaming_with_futures(self, mock_http_echo_server, tmp_path):
-        """Test streaming responses with future handling from concurrency tests."""
-        # Create client directly since we need custom config
-        client = self.create_client_with_configs(
-            f"{mock_http_echo_server.url}/v1/chat/completions",
-            tmp_path,
-            "test_stream_fut",
-            num_workers=2,
-        )
-
-        await client.async_start()
-
-        try:
-            # Send both streaming and non-streaming requests
-            futures = []
-
-            # Non-streaming
-            for i in range(5):
-                query = Query(
-                    id=f"non-stream-{i}",
-                    data={
-                        "prompt": f"Non-streaming request {i}",
-                        "model": "gpt-3.5-turbo",
-                        "stream": False,
-                    },
-                )
-                future = await client.issue_query(query)
-                futures.append(("non-stream", i, future))
-
-            # Streaming
-            for i in range(5):
-                query = Query(
-                    id=f"stream-{i}",
-                    data={
-                        "prompt": f"Streaming request {i}",
-                        "model": "gpt-3.5-turbo",
-                        "stream": True,
-                    },
-                )
-                future = await client.issue_query(query)
-                futures.append(("stream", i, future))
-
-            # Wait for all
-            for req_type, idx, future in futures:
-                result = await future
-                if req_type == "non-stream":
-                    assert result.id == f"non-stream-{idx}"
-                    assert result.response_output == f"Non-streaming request {idx}"
-                else:
-                    assert result.id == f"stream-{idx}"
-                    assert list(result.response_output.keys()) == ["output"]
-                    assert (
-                        "".join(result.response_output["output"])
-                        == f"Streaming request {idx}"
-                    )
-
-        finally:
-            await client.async_shutdown()
-
-    @pytest.mark.asyncio
-    async def test_mixed_streaming_non_streaming(self, futures_http_client):
-        """Test that mixed streaming and non-streaming requests work correctly."""
-        # Send mixed requests
-        futures = []
-
-        # Non-streaming request
-        query_non_stream = Query(
-            id="non-stream-1",
-            data={
-                "prompt": "Non-streaming response",
-                "model": "gpt-3.5-turbo",
-                "stream": False,
-            },
-        )
-        futures.append(
-            ("non-stream", await futures_http_client.issue_query(query_non_stream))
-        )
-
-        # Streaming request
-        query_stream = Query(
-            id="stream-1",
-            data={
-                "prompt": "Streaming response test",
-                "model": "gpt-3.5-turbo",
-                "stream": True,
-            },
-        )
-        futures.append(("stream", await futures_http_client.issue_query(query_stream)))
-
-        # Another non-streaming
-        query_non_stream2 = Query(
-            id="non-stream-2",
-            data={
-                "prompt": "Another non-streaming",
-                "model": "gpt-3.5-turbo",
-                "stream": False,
-            },
-        )
-        futures.append(
-            ("non-stream", await futures_http_client.issue_query(query_non_stream2))
-        )
-
-        # Wait for all and verify
-        for req_type, future in futures:
-            result = await future
-
-            if req_type == "non-stream":
-                # Non-streaming should not have chunk metadata
-                assert result.metadata is None or "first_chunk" not in result.metadata
-                assert result.response_output in [
-                    "Non-streaming response",
-                    "Another non-streaming",
-                ]
-            else:
-                # Streaming response
-                assert (
-                    "".join(result.response_output["output"])
-                    == "Streaming response test"
-                )
 
     @pytest.mark.asyncio
     async def test_concurrent_streaming_requests(self, futures_http_client):
@@ -214,12 +90,12 @@ class TestHTTPEndpointClientStreaming:
                     "stream": True,
                 },
             )
-            futures.append((i, await futures_http_client.issue_query(query)))
+            futures.append((i, futures_http_client.issue_query(query)))
 
         # Wait for all to complete
         results = []
         for idx, future in futures:
-            result = await future
+            result = await asyncio.wrap_future(future)
             results.append((idx, result))
 
         # Verify all completed with correct content
@@ -234,110 +110,36 @@ class TestHTTPEndpointClientStreaming:
             assert result.error is None
 
     @pytest.mark.asyncio
-    async def test_streaming_future_only_resolves_with_final_content(
-        self, futures_http_client
-    ):
-        """Test that futures are only resolved once with final complete response, not intermediate chunks."""
-        # Track when future is resolved
-        resolution_count = 0
-        resolved_result = None
-
-        async def track_resolution(future):
-            nonlocal resolution_count, resolved_result
-            result = await future
-            resolution_count += 1
-            resolved_result = result
-
+    async def test_streaming_complete_response(self, futures_http_client):
+        """Test streaming response returns complete result."""
         query = Query(
-            id="test-single-resolution",
+            id="test-streaming",
             data={
-                "prompt": "Test single future resolution with multiple words",
+                "prompt": "Test streaming response",
                 "model": "gpt-3.5-turbo",
                 "stream": True,
             },
         )
 
-        future = await futures_http_client.issue_query(query)
+        future = futures_http_client.issue_query(query)
+        result = await asyncio.wrap_future(future)
 
-        # Start tracking task
-        track_task = asyncio.create_task(track_resolution(future))
-
-        # Wait for completion
-        await track_task
-
-        # Verify future was only resolved once
-        assert resolution_count == 1
-        assert resolved_result is not None
-        assert resolved_result.id == "test-single-resolution"
-        assert resolved_result.response_output["output"] == (
-            "Test",
-            " single future resolution with multiple words",
-        )
-
-        # Verify future is done and can't be resolved again
-        assert future.done()
-        assert future.result() == resolved_result
-
-    @pytest.mark.asyncio
-    async def test_streaming_future_first_chunk_access(self, futures_http_client):
-        """Test StreamingFuture.first property for early chunk access."""
-
-        # Test 1: Access first chunk before completion
-        query = Query(
-            id="test-first-chunk",
-            data={
-                "prompt": "Test first chunk access functionality",
-                "model": "gpt-3.5-turbo",
-                "stream": True,
-            },
-        )
-
-        future = await futures_http_client.issue_query(query)
-
-        # Future should be StreamingFuture
-        assert hasattr(future, "first")
-
-        # Get first chunk
-        first_chunk = await future.first
-        assert first_chunk == "Test"  # Echo server returns first word
-
-        # First chunk should still be accessible
-        first_chunk_again = await future.first
-        assert first_chunk_again == "Test"
-
-        # Get complete response
-        result = await future
-        assert result.response_output["output"][0] == "Test"
+        assert result.id == "test-streaming"
         assert (
-            result.response_output["output"][1] == " first chunk access functionality"
+            "".join(result.response_output["output"]) == "Test streaming response"
         )
 
-        # Test 2: Check if first chunk is ready after awaiting
-        query2 = Query(
-            id="test-first-ready",
-            data={
-                "prompt": "Quick response",
-                "model": "gpt-3.5-turbo",
-                "stream": True,
-            },
-        )
-
-        future2 = await futures_http_client.issue_query(query2)
-
-        # Await the first chunk
-        first_chunk2 = await future2.first
-        assert first_chunk2 == "Quick"
-
-        # Should be ready now since we already awaited it
-        assert future2.first.done()
-        assert future2.first.result() == "Quick"
+        # Check first chunk is properly separated for streaming (word-by-word from echo server)
+        assert isinstance(result.response_output["output"], tuple)
+        assert len(result.response_output["output"]) == 2
+        assert result.response_output["output"][0] == "Test"
+        assert result.response_output["output"][1] == " streaming response"
 
     @pytest.mark.asyncio
-    async def test_streaming_single_chunk_complete(self, futures_http_client):
-        """Test handling of single-chunk responses marked as complete."""
-        # Test single-word response
+    async def test_streaming_single_word(self, futures_http_client):
+        """Test streaming with single-word response."""
         query = Query(
-            id="test-single-chunk",
+            id="test-single-word",
             data={
                 "prompt": "Hi",
                 "model": "gpt-3.5-turbo",
@@ -345,90 +147,20 @@ class TestHTTPEndpointClientStreaming:
             },
         )
 
-        future = await futures_http_client.issue_query(query)
+        future = futures_http_client.issue_query(query)
+        result = await asyncio.wrap_future(future)
 
-        # Get first chunk
-        first = await future.first
-        assert first == "Hi"
+        assert result.id == "test-single-word"
+        assert "".join(result.response_output["output"]) == "Hi"
 
-        # Complete response should be the same
-        result = await future
-        assert result.response_output["output"] == ("Hi",)
-
-    @pytest.mark.asyncio
-    async def test_streaming_race_first_chunks(self, futures_http_client):
-        """Test racing multiple streaming queries for first chunk."""
-        # Create multiple streaming queries
-        queries = [
-            Query(
-                id=f"race-{i}",
-                data={
-                    "prompt": f"Query number {i} with different content",
-                    "model": "gpt-3.5-turbo",
-                    "stream": True,
-                },
-            )
-            for i in range(5)
-        ]
-
-        # Issue all queries
-        futures = []
-        for q in queries:
-            futures.append(await futures_http_client.issue_query(q))
-
-        # Race for first chunk
-        first_chunks = [f.first for f in futures]
-        done, pending = await asyncio.wait(
-            first_chunks, return_when=asyncio.FIRST_COMPLETED
-        )
-
-        # Get winning chunk
-        first_result = done.pop().result()
-        assert first_result in ["Query"]  # All start with "Query"
-
-        # Cancel pending first chunks
-        for task in pending:
-            task.cancel()
-
-        # Race for first complete response
-        done, pending = await asyncio.wait(futures, return_when=asyncio.FIRST_COMPLETED)
-
-        # Get first complete
-        winner = done.pop().result()
-        assert winner.id.startswith("race-")
-        assert winner.response_output["output"][0] == "Query"
-        assert winner.response_output["output"][1].startswith(" number")
-
-        # Clean up remaining
-        for f in pending:
-            f.cancel()
+        # Single word: only one chunk (no second element when there's only 1 chunk)
+        assert isinstance(result.response_output["output"], tuple)
+        assert len(result.response_output["output"]) == 1
+        assert result.response_output["output"][0] == "Hi"
 
     @pytest.mark.asyncio
-    async def test_non_streaming_returns_regular_future(self, futures_http_client):
-        """Test that non-streaming queries return regular Future without .first property."""
-        # Non-streaming query
-        query = Query(
-            id="test-non-stream",
-            data={
-                "prompt": "Regular non-streaming response",
-                "model": "gpt-3.5-turbo",
-                "stream": False,
-            },
-        )
-
-        future = await futures_http_client.issue_query(query)
-
-        # Should not have .first property
-        assert not hasattr(future, "first")
-
-        # Should work as regular future
-        result = await future
-        assert result.id == "test-non-stream"
-        assert result.response_output == "Regular non-streaming response"
-
-    @pytest.mark.asyncio
-    async def test_streaming_error_handling(self, tmp_path):
-        """Test error handling in streaming responses."""
+    async def test_streaming_error_propagation(self, tmp_path):
+        """Test error propagation in streaming responses."""
         # Use invalid endpoint to trigger errors
         client = self.create_client_with_configs(
             "http://invalid-endpoint-12345:9999/v1/chat/completions",
@@ -439,8 +171,6 @@ class TestHTTPEndpointClientStreaming:
         )
 
         try:
-            await client.async_start()
-
             query = Query(
                 id="test-error",
                 data={
@@ -450,19 +180,14 @@ class TestHTTPEndpointClientStreaming:
                 },
             )
 
-            future = await client.issue_query(query)
+            future = client.issue_query(query)
 
-            # Should be StreamingFuture
-            assert hasattr(future, "first")
-
-            # Both first chunk and complete response should fail
+            # Complete response should fail
             with pytest.raises(Exception):  # noqa: B017 Worker wraps errors in generic Exception
-                await asyncio.wait_for(future.first, timeout=2.0)
-            with pytest.raises(Exception):  # noqa: B017
-                await asyncio.wait_for(future, timeout=2.0)
+                await asyncio.wait_for(asyncio.wrap_future(future), timeout=5.0)
 
         finally:
-            await client.async_shutdown()
+            client.shutdown()
 
     @pytest.mark.asyncio
     async def test_streaming_concurrent_mixed_lengths(self, futures_http_client):
@@ -493,14 +218,9 @@ class TestHTTPEndpointClientStreaming:
                     "stream": True,
                 },
             )
-            futures.append((name, prompt, await futures_http_client.issue_query(query)))
+            futures.append((name, prompt, futures_http_client.issue_query(query)))
 
         # Check all complete correctly
         for _, prompt, future in futures:
-            if prompt:  # Non-empty
-                first = await future.first
-                # Should get first word
-                assert first == prompt.split()[0] if prompt else ""
-
-            result = await future
+            result = await asyncio.wrap_future(future)
             assert "".join(result.response_output["output"]) == prompt

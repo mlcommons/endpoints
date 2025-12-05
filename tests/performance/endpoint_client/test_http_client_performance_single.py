@@ -179,7 +179,6 @@ def run_performance_test(
             sample_issuer,
             scheduler,
             name=f"perf_test_{stream}_{target_qps}qps_{uuid.uuid4().hex}",
-            stop_sample_issuer_on_test_end=False,  # We'll handle shutdown manually
             tokenizer_override=tokenizer,
         )
 
