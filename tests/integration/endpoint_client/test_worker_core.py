@@ -651,7 +651,6 @@ class TestWorkerBasicFunctionality:
         await asyncio.wait_for(worker_task, timeout=2.0)
 
     @pytest.mark.asyncio
-    @pytest.mark.skip(reason="Headers have been moved from the Query class")
     async def test_worker_headers_passthrough(
         self, mock_http_echo_server, worker_config, zmq_config
     ):

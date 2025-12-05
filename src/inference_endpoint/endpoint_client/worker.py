@@ -203,7 +203,6 @@ class Worker:
     @profile
     async def _main_loop(self) -> None:
         """Main processing loop - continuously pull and process requests."""
-        headers = {"content-type": "application/json", "accept": "application/json"}
         while not self._shutdown:
             try:
                 # Pull query from queue with timeout
@@ -214,7 +213,7 @@ class Worker:
                     continue
 
                 # Process query asynchronously and track the task
-                task = asyncio.create_task(self._process_request(query, headers))
+                task = asyncio.create_task(self._process_request(query))
                 self._active_tasks.add(task)
 
                 # Remove task from active set when it completes
@@ -245,7 +244,7 @@ class Worker:
         await self._response_socket.send(error_response)
 
     @profile
-    async def _make_http_request(self, query: Query, headers: dict[str, str]):
+    async def _make_http_request(self, query: Query):
         """
         Common HTTP request setup and execution as async generator.
 
@@ -267,6 +266,11 @@ class Worker:
             return
 
         url = self.http_config.endpoint_url
+        headers = (
+            query.headers
+            if hasattr(query, "headers") and len(query.headers)
+            else {"content-type": "application/json", "accept": "application/json"}
+        )
 
         logging.debug(
             f"Making HTTP request to {url} with payload: {query} and headers: {headers}"
@@ -289,13 +293,13 @@ class Worker:
             logger.debug(f"HTTP Response: {response}")
             yield response
 
-    async def _process_request(self, query: Query, headers: dict[str, str]) -> None:
+    async def _process_request(self, query: Query) -> None:
         """Process a single query."""
         try:
             if query.data.get("stream", False):
-                await self._handle_streaming_request(query, headers)
+                await self._handle_streaming_request(query)
             else:
-                await self._handle_non_streaming_request(query, headers)
+                await self._handle_non_streaming_request(query)
 
         except Exception as e:
             await self._handle_error(query.id, e)
@@ -342,11 +346,9 @@ class Worker:
                 yield parsed_contents
 
     @profile
-    async def _handle_streaming_request(
-        self, query: Query, headers: dict[str, str]
-    ) -> None:
+    async def _handle_streaming_request(self, query: Query) -> None:
         """Handle streaming response."""
-        async for response in self._make_http_request(query, headers):
+        async for response in self._make_http_request(query):
             accumulated_content = []
             first_chunk_sent = False
 
@@ -394,11 +396,9 @@ class Worker:
             )
 
     @profile
-    async def _handle_non_streaming_request(
-        self, query: Query, headers: dict[str, str]
-    ) -> None:
+    async def _handle_non_streaming_request(self, query: Query) -> None:
         """Handle non-streaming response."""
-        async for response in self._make_http_request(query, headers):
+        async for response in self._make_http_request(query):
             response_bytes = await response.read()
             result = self._adapter.decode_response(response_bytes, query.id)
             await self._response_socket.send(result)
