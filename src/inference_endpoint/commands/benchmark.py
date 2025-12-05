@@ -601,7 +601,6 @@ def _run_benchmark(
 
     # Run benchmark
     logger.info("Running...")
-    start_time = time.time()
 
     sess = None
     try:
@@ -631,17 +630,29 @@ def _run_benchmark(
             # Always restore original handler
             signal.signal(signal.SIGINT, old_handler)
 
-        elapsed_time = time.time() - start_time
-        success_count = response_collector.count - len(response_collector.errors)
+        # Prefer authoritative metrics from the session report
+        report = getattr(sess, "report", None)
+        if report is None:
+            logger.error(
+                "Session report missing — benchmark reporter failed to produce results"
+            )
+            raise ExecutionError(
+                "Session report missing — cannot produce benchmark results"
+            )
+
+        elapsed_time = float(report.duration_ns) / 1e9
+        total = int(report.n_samples_issued)
+        success_count = int(report.n_samples_completed)
+        # qps may be None if duration was 0; fall back to computed value using report values
         estimated_qps = (
-            response_collector.count / elapsed_time if elapsed_time > 0 else 0
+            float(report.qps)
+            if getattr(report, "qps", None) is not None
+            else ((success_count / elapsed_time) if elapsed_time > 0 else 0)
         )
 
         # Report results
         logger.info(f"Completed in {elapsed_time:.1f}s")
-        logger.info(
-            f"Results: {success_count}/{scheduler.total_samples_to_issue} successful"
-        )
+        logger.info(f"Results: {success_count}/{total} successful")
         logger.info(f"Estimated QPS: {estimated_qps:.1f}")
 
         if response_collector.errors:
@@ -662,7 +673,7 @@ def _run_benchmark(
                         "target_qps": target_qps,
                     },
                     "results": {
-                        "total": scheduler.total_samples_to_issue,
+                        "total": total,
                         "successful": success_count,
                         "failed": len(response_collector.errors),
                         "elapsed_time": elapsed_time,

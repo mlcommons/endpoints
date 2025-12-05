@@ -53,6 +53,8 @@ class BenchmarkSession:
         self.event_recorder = EventRecorder(
             session_id=self.session_id, notify_idle=self.end_event
         )
+        # Will be populated after the test finishes by _run_test
+        self.report = None
 
     @property
     def is_running(self):
@@ -123,7 +125,8 @@ class BenchmarkSession:
                             )
                             tokenizer = None
                 report = reporter.create_report(tokenizer)
-
+                # Store report on session so external callers can use it
+                self.report = report
                 # Save to report directory if provided
                 if report_dir:
                     Path(report_dir).mkdir(parents=True, exist_ok=True)
