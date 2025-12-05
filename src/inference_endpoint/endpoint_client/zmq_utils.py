@@ -76,7 +76,13 @@ class ZMQSocket:
 class ZMQPushSocket(ZMQSocket):
     """Async wrapper for ZMQ PUSH socket."""
 
-    def __init__(self, context: zmq.asyncio.Context, address: str, config: ZMQConfig):
+    def __init__(
+        self,
+        context: zmq.asyncio.Context,
+        address: str,
+        config: ZMQConfig,
+        bind: bool = False,
+    ):
         """
         Initialize ZMQ push socket.
 
@@ -84,8 +90,9 @@ class ZMQPushSocket(ZMQSocket):
             context: ZMQ context
             address: Socket address
             config: ZMQ configuration
+            bind: Whether to bind (True) or connect (False) to the address
         """
-        super().__init__(context, zmq.PUSH, address, config, bind=False)
+        super().__init__(context, zmq.PUSH, address, config, bind=bind)
         self._encoder = msgspec.msgpack.Encoder()
 
     def _set_socket_options(self, config: ZMQConfig) -> None:
@@ -93,10 +100,13 @@ class ZMQPushSocket(ZMQSocket):
         self.socket.setsockopt(zmq.SNDHWM, config.zmq_high_water_mark)
         self.socket.setsockopt(zmq.SNDBUF, config.zmq_send_buffer_size)
         self.socket.setsockopt(zmq.SNDTIMEO, config.zmq_send_timeout)
+        self.socket.setsockopt(zmq.IMMEDIATE, config.zmq_immediate)
 
     @profile
     async def send(self, data: Any) -> None:
-        """Serialize to msgspec and send data through push socket."""
+        """
+        Serialize to msgspec and send data through push socket.
+        """
         serialized = self._encoder.encode(data)
         await self.socket.send(serialized, flags=zmq.NOBLOCK, copy=False)
 

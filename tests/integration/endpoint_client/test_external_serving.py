@@ -24,8 +24,8 @@ from inference_endpoint.endpoint_client.configs import (
     HTTPClientConfig,
     ZMQConfig,
 )
-from inference_endpoint.endpoint_client.futures_client import FuturesHttpClient
 
+from tests.futures_client import FuturesHttpClient
 from tests.test_helpers import get_test_socket_path
 
 

@@ -16,7 +16,8 @@
 """Shared fixtures for endpoint client integration tests."""
 
 import pytest_asyncio
-from inference_endpoint.endpoint_client.futures_client import FuturesHttpClient
+
+from tests.futures_client import FuturesHttpClient
 
 
 @pytest_asyncio.fixture

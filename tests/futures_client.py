@@ -13,17 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Futures-based wrapper for HTTPEndpointClient."""
+"""Futures-based wrapper for HTTPEndpointClient - Test Infrastructure."""
 
 import asyncio
 import logging
 
-import zmq.asyncio
-
 from inference_endpoint.core.types import Query, QueryResult, StreamChunk
 from inference_endpoint.endpoint_client.http_client import HTTPEndpointClient
-from inference_endpoint.endpoint_client.worker import WorkerManager
-from inference_endpoint.endpoint_client.zmq_utils import ZMQPullSocket, ZMQPushSocket
 
 logger = logging.getLogger(__name__)
 
@@ -41,79 +37,50 @@ class FuturesHttpClient(HTTPEndpointClient):
     HTTP client with futures-based API for async contexts.
     FuturesHttpClient will run on the current event loop.
 
-    complete_callback is called with on all responses (chunks and final result).
-    Final result is also available via the future object.
+    This is a test utility that wraps HTTPEndpointClient to provide
+    a simpler futures-based interface for testing purposes.
+
+    Final result is available via the future object.
     """
 
-    def __init__(self, *args, complete_callback=None, **kwargs):
+    def __init__(self, *args, **kwargs):
         """Initialize FuturesHttpClient.
 
         Args:
-            complete_callback: Optional callback function that receives responses.
-                              For streaming: called with first StreamChunk, then final QueryResult.
-                              For non-streaming: called with QueryResult.
             *args: Passed to HTTPEndpointClient.
             **kwargs: Passed to HTTPEndpointClient.
         """
         super().__init__(*args, **kwargs)
         self._pending_futures: dict[str | int, asyncio.Future] = {}
         self._response_handler_task: asyncio.Task | None = None
-        self.complete_callback = complete_callback
 
     async def async_start(self):
         """Start HTTP client and response handler."""
         try:
             # Set loop to current running loop
             self.loop = asyncio.get_running_loop()
+            await super().async_start()
 
-            # Initialize ZMQ, workers, and sockets (parent's async_start without loop creation)
-            self.zmq_context = zmq.asyncio.Context(
-                io_threads=self.zmq_config.zmq_io_threads
-            )
-            self._shutdown_event = asyncio.Event()
-
-            if self.config.max_concurrency > 0:
-                self._concurrency_semaphore = asyncio.Semaphore(
-                    self.config.max_concurrency
-                )
-
-            for i in range(self.config.num_workers):
-                address = f"{self.zmq_config.zmq_request_queue_prefix}_{i}_requests"
-                push_socket = ZMQPushSocket(self.zmq_context, address, self.zmq_config)
-                self.worker_push_sockets.append(push_socket)
-
-            self.worker_manager = WorkerManager(
-                self.config, self.aiohttp_config, self.zmq_config, self.zmq_context
-            )
-            await self.worker_manager.initialize()
-
-            self._response_socket = ZMQPullSocket(
-                self.zmq_context,
-                self.zmq_config.zmq_response_queue_addr,
-                self.zmq_config,
-                bind=True,
-                decoder_type=QueryResult | StreamChunk,
-            )
-
-            # Schedule response handler in current loop
+            # Schedule response handler on current loop
             self._response_handler_task = asyncio.create_task(self._handle_responses())
         except Exception as e:
             logger.exception(f"Failed to start FuturesHttpClient: {e}")
+
+            # Cleanup on failure
+            await self.async_shutdown()
             raise e
 
     async def issue_query(self, query: Query) -> asyncio.Future:
         """Issue query and return future for response."""
-        # Create appropriate future type based on streaming flag
         future = (
             StreamingFuture() if query.data.get("stream", False) else asyncio.Future()
         )
         self._pending_futures[query.id] = future
 
-        # Issue query via base class with error handling
         try:
             await super().issue_query_async(query)
         except Exception as e:
-            # If send fails, set exception on future and clean up
+            # Set exception on future and clean up on failure
             logger.exception(f"Failed to send query {query.id}: {e}")
             self._set_future_exception(future, e)
             self._pending_futures.pop(query.id, None)
@@ -155,8 +122,6 @@ class FuturesHttpClient(HTTPEndpointClient):
                 match response:
                     case StreamChunk(response_chunk=chunk, is_complete=False):
                         future.first.set_result(chunk)
-                        if self.complete_callback:
-                            self.complete_callback(response)
 
                     case StreamChunk(is_complete=True):
                         raise NotImplementedError(
@@ -176,9 +141,6 @@ class FuturesHttpClient(HTTPEndpointClient):
                             # For streaming futures with no first chunk, set first chunk to empty string
                             future.first.set_result("")
 
-                        if self.complete_callback:
-                            self.complete_callback(response)
-
                         self._pending_futures.pop(response.id)
 
                     case _:
@@ -195,7 +157,7 @@ class FuturesHttpClient(HTTPEndpointClient):
         if self._response_handler_task:
             self._response_handler_task.cancel()
             try:
-                await asyncio.wait_for(self._response_handler_task, timeout=1.0)
+                await asyncio.wait_for(self._response_handler_task, timeout=0.2)
             except (TimeoutError, asyncio.CancelledError):
                 pass
 
@@ -205,7 +167,6 @@ class FuturesHttpClient(HTTPEndpointClient):
                 future.cancel()
         self._pending_futures.clear()
 
-        # Call parent's shutdown to handle all cleanup
         await super().async_shutdown()
 
     def start(self):
