@@ -86,6 +86,7 @@ class TestProbeCommandIntegration:
             await run_probe_command(args)
 
         log_text = caplog.text
+        print(log_text)
         # Should show up to 10 responses
         assert "Sample responses (15 collected)" in log_text
         assert "[probe-0]" in log_text

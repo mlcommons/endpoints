@@ -114,8 +114,8 @@ async def run_probe_command(args: argparse.Namespace) -> None:
                 continue
 
             # Simple progress indicator
-            if (i + 1) % max(1, num_requests // 10) == 0 or i == num_requests - 1:
-                logger.info(f"  Issued {i + 1}/{num_requests} requests")
+            # if (i + 1) % max(1, num_requests // 10) == 0 or i == num_requests - 1:
+            logger.info(f"Issued {i}/{num_requests} requests")
 
         # Wait for all responses
         latencies: list[float] = []
@@ -174,13 +174,13 @@ async def run_probe_command(args: argparse.Namespace) -> None:
                     responses.append((query_id, result.response_output))
 
                 # Simple progress indicator
-                if (
-                    len(received_ids) % max(1, num_expected // 10) == 0
-                    or len(received_ids) == num_expected
-                ):
-                    logger.info(
-                        f"  Processed {len(received_ids)}/{num_expected} responses"
-                    )
+                # if (
+                #     len(received_ids) % max(1, num_expected // 10) == 0
+                #     or len(received_ids) == num_expected
+                # ):
+                logger.info(
+                    f"  Processed {len(received_ids)}/{num_expected} responses : {query_id} : {result.response_output[:100]}"
+                )
 
             except Exception as e:
                 logger.warning(f"Error receiving response: {str(e)[:50]}")
