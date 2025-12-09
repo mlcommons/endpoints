@@ -312,7 +312,7 @@ class Worker:
         )
 
         logging.debug(
-            f"Making HTTP request to {url} with query: {query} and headers: {query.headers}"
+            f"Making HTTP request to {url} with query: {query} and headers: {headers}"
         )
 
         # Encode query to bytes using adapter
@@ -329,7 +329,7 @@ class Worker:
             )
 
         async with self._session.post(
-            url, data=payload_bytes, headers=query.headers
+            url, data=payload_bytes, headers=headers
         ) as response:
             if response.status != 200:
                 error_text = await response.text()
