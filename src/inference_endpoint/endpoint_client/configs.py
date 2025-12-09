@@ -206,8 +206,8 @@ class ZMQConfig:
     """Configuration for ZMQ sockets and communication."""
 
     # Main ZMQ settings
-    zmq_io_threads: int = 4  # Number of ZMQ IO threads
-    zmq_high_water_mark: int = 10_000  # max msg queue size
+    zmq_io_threads: int = 4  # Number of ZMQ IO threads ; TODO(vir): needs to scale?
+    zmq_high_water_mark: int = 0  # Max queue size per socket (0=unlimited)
 
     # ZMQ addresses (use None for auto-generated prefixes using PID)
     zmq_request_queue_prefix: str | None = None
@@ -215,11 +215,13 @@ class ZMQConfig:
     zmq_readiness_queue_addr: str | None = None
 
     # ZMQ socket options
-    zmq_linger: int = 0  # Don't block on close
-    zmq_send_timeout: int = -1  # Non-blocking send
-    zmq_recv_timeout: int = 100  # Timeout on receive() call
-    zmq_recv_buffer_size: int = 10 * 1024 * 1024  # 10MB receive buffer
-    zmq_send_buffer_size: int = 10 * 1024 * 1024  # 10MB send buffer
+    zmq_linger: int = 0  # 0 = Don't block on close
+    zmq_immediate: int = 1  # ensure messages only enqueued on READY connections
+    zmq_send_timeout: int = -1  # -1 = Non-blocking send
+    zmq_recv_timeout: int = 1  # Timeout on receive() in ms
+
+    zmq_recv_buffer_size: int = 10 * 1024 * 1024  # 10MB receive buffer (OS level)
+    zmq_send_buffer_size: int = 10 * 1024 * 1024  # 10MB send buffer (OS level)
 
     def __post_init__(self):
         """Generate portable ZMQ socket paths if not provided."""

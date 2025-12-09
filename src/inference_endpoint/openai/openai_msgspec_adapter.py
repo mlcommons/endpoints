@@ -37,7 +37,7 @@ class ChatMessage(msgspec.Struct, kw_only=True, omit_defaults=True):
 
     role: str
     content: str
-    name: str
+    name: str | None = None
 
 
 class ChatCompletionRequest(msgspec.Struct, kw_only=True, omit_defaults=True):
@@ -45,16 +45,18 @@ class ChatCompletionRequest(msgspec.Struct, kw_only=True, omit_defaults=True):
 
     model: str
     messages: list[ChatMessage]
-    temperature: float
-    max_completion_tokens: int
-    stream: bool
-    top_p: float
-    n: int
-    stop: str | list[str]
-    presence_penalty: float
-    frequency_penalty: float
-    logit_bias: dict[str, float]
-    user: str
+    temperature: float | None = None
+    max_completion_tokens: int | None = None
+    stream: bool | None = None
+    top_p: float | None = None
+    top_k: int | None = None
+    repetition_penalty: float | None = None
+    n: int | None = None
+    stop: str | list[str] | None = None
+    presence_penalty: float | None = None
+    frequency_penalty: float | None = None
+    logit_bias: dict[str, float] | None = None
+    user: str | None = None
 
 
 class ChatCompletionResponseMessage(msgspec.Struct, kw_only=True, omit_defaults=True):
@@ -158,6 +160,8 @@ class OpenAIMsgspecAdapter(HttpRequestAdapter):
             max_completion_tokens=query.data.get("max_completion_tokens"),
             temperature=query.data.get("temperature"),
             top_p=query.data.get("top_p"),
+            top_k=query.data.get("top_k"),
+            repetition_penalty=query.data.get("repetition_penalty"),
             n=query.data.get("n"),
             presence_penalty=query.data.get("presence_penalty"),
             frequency_penalty=query.data.get("frequency_penalty"),
