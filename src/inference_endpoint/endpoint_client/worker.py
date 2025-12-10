@@ -219,7 +219,6 @@ class Worker:
             logger.error(
                 f"Error in worker {self.worker_id}: {type(e).__name__}: {str(e)}"
             )
-            traceback.print_exc()
 
         finally:
             # Cleanup

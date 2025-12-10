@@ -47,13 +47,13 @@ class TestProbeCommandIntegration:
             # Should complete successfully
             await run_probe_command(args)
 
-        log_text = caplog.text
-        # Verify success indicators
-        assert "✓ Completed: 5/5 successful" in log_text
-        assert "✓ Avg latency:" in log_text
-        assert "✓ Sample responses" in log_text
-        assert "Test probe message" in log_text
-        assert "✓ Probe successful" in log_text
+            log_text = caplog.text
+            # Verify success indicators
+            assert "✓ Completed: 5/5 successful" in log_text
+            assert "✓ Avg latency:" in log_text
+            assert "✓ Sample responses" in log_text
+            assert "Test probe message" in log_text
+            assert "✓ Probe successful" in log_text
 
     @pytest.mark.asyncio
     async def test_probe_with_default_prompt(self, mock_http_echo_server, caplog):
@@ -68,9 +68,9 @@ class TestProbeCommandIntegration:
         with caplog.at_level("INFO"):
             await run_probe_command(args)
 
-        log_text = caplog.text
-        assert "✓ Completed: 3/3 successful" in log_text
-        assert "joke in 30 words" in log_text
+            log_text = caplog.text
+            assert "✓ Completed: 3/3 successful" in log_text
+            assert "joke in 30 words" in log_text
 
     @pytest.mark.asyncio
     async def test_probe_shows_multiple_responses(self, mock_http_echo_server, caplog):
@@ -85,11 +85,10 @@ class TestProbeCommandIntegration:
         with caplog.at_level("INFO"):
             await run_probe_command(args)
 
-        log_text = caplog.text
-        # Should show up to 10 responses
-        assert "Sample responses (15 collected)" in log_text
-        assert "[probe-0]" in log_text
-        assert "Sample response text" in log_text
+            # Should show up to 10 responses
+            assert "Sample responses (15 collected)" in caplog.text
+            assert "[probe-0]" in caplog.text
+            assert "Sample response text" in caplog.text
 
     @pytest.mark.asyncio
     async def test_probe_with_invalid_endpoint(self, caplog):
@@ -120,7 +119,7 @@ class TestProbeCommandIntegration:
         with caplog.at_level("INFO"):
             await run_probe_command(args)
 
-        log_text = caplog.text
-        # Echo server should return the prompt
-        assert custom_prompt in log_text
-        assert "✓ Probe successful" in log_text
+            log_text = caplog.text
+            # Echo server should return the prompt
+            assert custom_prompt in log_text
+            assert "✓ Probe successful" in log_text
