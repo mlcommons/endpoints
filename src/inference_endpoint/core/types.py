@@ -66,7 +66,7 @@ class Query(msgspec.Struct, kw_only=True):
     Example:
         >>> query = Query(
         ...     data={"prompt": "Hello", "model": "Qwen/Qwen3-8B", "max_tokens": 100},
-        ...     headers={"X-Custom-Header": "test-value", "Authorization": "Bearer test-token"}
+        ...     headers={"Authorization": "Bearer token123"},
         ... )
     """
 
