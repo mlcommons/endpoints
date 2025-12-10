@@ -136,9 +136,10 @@ class ModelParams(BaseModel):
     """Model generation parameters."""
 
     name: str | None = None
-    temperature: float = 0.7
+    temperature: float | None = None
     top_k: int | None = None
     top_p: float | None = None
+    repetition_penalty: float | None = None
     max_new_tokens: int = 1024
     osl_distribution: OSLDistribution | None = None
     streaming: StreamingMode = StreamingMode.AUTO

@@ -25,6 +25,7 @@ import shutil
 import signal
 import tempfile
 import time
+import uuid
 from pathlib import Path
 from urllib.parse import urljoin
 
@@ -515,6 +516,10 @@ def _run_benchmark(
                 "model": model_name,
                 "stream": enable_streaming,
                 "max_completion_tokens": max_tokens,
+                "temperature": config.model_params.temperature,
+                "top_p": config.model_params.top_p,
+                "top_k": config.model_params.top_k,
+                "repetition_penalty": config.model_params.repetition_penalty,
             },
         )
         dataloader.load()
@@ -608,7 +613,7 @@ def _run_benchmark(
             dataloader,
             sample_issuer,
             scheduler,
-            name="cli_benchmark",
+            name=f"cli_benchmark_{uuid.uuid4().hex[0:8]}",
             stop_sample_issuer_on_test_end=False,
             report_dir=config.report_dir,
             tokenizer_override=tokenizer,

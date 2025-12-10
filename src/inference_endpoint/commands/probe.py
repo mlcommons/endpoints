@@ -23,13 +23,13 @@ import tempfile
 import time
 from urllib.parse import urljoin
 
-from inference_endpoint.core.types import Query
+from inference_endpoint.core.types import Query, QueryResult
 from inference_endpoint.endpoint_client.configs import (
     AioHttpConfig,
     HTTPClientConfig,
     ZMQConfig,
 )
-from inference_endpoint.endpoint_client.futures_client import FuturesHttpClient
+from inference_endpoint.endpoint_client.http_client import HTTPEndpointClient
 from inference_endpoint.exceptions import (
     ExecutionError,
     InputValidationError,
@@ -80,19 +80,21 @@ async def run_probe_command(args: argparse.Namespace) -> None:
             zmq_readiness_queue_addr=f"ipc://{tmp_dir}/ready",
         )
 
-        client = FuturesHttpClient(http_config, aiohttp_config, zmq_config)
+        client = HTTPEndpointClient(http_config, aiohttp_config, zmq_config)
         await client.async_start()
 
         logger.info(f"Sending {num_requests} requests...")
 
-        # Send test requests and collect futures
-        futures = []
-        start_times = {}
+        # Send test requests
+        start_times: dict[str, float] = {}
+        sent_query_ids: list[str] = []
+        issue_errors: list[str] = []
 
         # TODO: this might not work with a real vLLM/SGLang endpoint, fix this.
         for i in range(num_requests):
+            query_id = f"probe-{i}"
             query = Query(
-                id=f"probe-{i}",
+                id=query_id,
                 data={
                     "prompt": test_prompt,
                     "model": model_name,
@@ -100,55 +102,98 @@ async def run_probe_command(args: argparse.Namespace) -> None:
                     "stream": False,
                 },
             )
-            start_times[f"probe-{i}"] = time.time()
 
             try:
-                future = await client.issue_query(query)
-                futures.append((f"probe-{i}", future))
-                # Simple progress indicator
-                if (i + 1) % max(1, num_requests // 10) == 0 or i == num_requests - 1:
-                    logger.info(f"  Issued {i + 1}/{num_requests} requests")
+                start_times[query_id] = time.time()
+                await client.issue_query_async(query)
+                # Only track successfully issued queries
+                sent_query_ids.append(query_id)
             except Exception as e:
+                issue_errors.append(f"{query_id}: Failed to issue - {str(e)[:50]}")
                 logger.warning(f"Failed to issue request {i}: {str(e)[:50]}")
+                continue
+
+            # Simple progress indicator
+            if (i + 1) % max(1, num_requests // 10) == 0 or i == num_requests - 1:
+                logger.info(f"  Issued {i + 1}/{num_requests} requests")
 
         # Wait for all responses
-        latencies = []
-        errors = []
-        responses = []
+        latencies: list[float] = []
+        errors: list[str] = issue_errors  # Include any issue errors
+        responses: list[tuple[str, str]] = []
+
+        # Only count successfully issued queries
+        num_expected = len(sent_query_ids)
+        if num_expected == 0:
+            logger.error("✗ No queries were successfully issued")
+            raise ExecutionError("Probe failed: no queries could be issued")
 
         # Wait for all responses with generous timeout (probe queries can be slow)
-        # Default HTTP client timeout is 30s, give extra buffer for processing
-        probe_timeout = 60.0  # 60 seconds per query
+        probe_timeout = 60.0  # 60 seconds total
+        start_wait = time.time()
 
-        logger.info(f"Waiting for {len(futures)} responses...")
+        logger.info(f"Waiting for {num_expected} responses...")
 
-        for idx, (query_id, future) in enumerate(futures):
+        received_ids: set[str] = set()
+
+        while (
+            len(received_ids) < num_expected
+            and (time.time() - start_wait) < probe_timeout
+        ):
             try:
-                result = await asyncio.wait_for(future, timeout=probe_timeout)
-                # Calculate latency - should always be in start_times
-                assert (
-                    query_id in start_times
-                ), f"Query {query_id} not found in start_times"
+                result = await client.get_ready_responses_async()
+
+                if result is None:
+                    await asyncio.sleep(0.01)
+                    continue
+
+                # Skip non-final streaming chunks
+                if not isinstance(result, QueryResult):
+                    continue
+
+                query_id = result.id
+
+                if query_id in received_ids:
+                    logger.warning(f"Received duplicate response for {query_id}")
+                    continue
+
+                received_ids.add(query_id)
+
+                # Calculate latency - should always be in start_times for issued queries
+                if query_id not in start_times:
+                    logger.warning(
+                        f"Received response for unknown query_id: {query_id}, skipping"
+                    )
+                    continue
                 latency_ms = (time.time() - start_times[query_id]) * 1000
-                latencies.append(latency_ms)
 
                 if result.error:
                     errors.append(f"{query_id}: {result.error}")
                 else:
-                    # Store successful response for sanity check
+                    latencies.append(latency_ms)
                     responses.append((query_id, result.response_output))
-            except TimeoutError:
-                errors.append(f"{query_id}: Timeout (>{probe_timeout}s)")
-            except Exception as e:
-                errors.append(f"{query_id}: {str(e)[:50]}")
 
-            # Simple progress indicator
-            if (idx + 1) % max(1, len(futures) // 10) == 0 or idx == len(futures) - 1:
-                logger.info(f"  Processed {idx + 1}/{len(futures)} responses")
+                # Simple progress indicator
+                if (
+                    len(received_ids) % max(1, num_expected // 10) == 0
+                    or len(received_ids) == num_expected
+                ):
+                    logger.info(
+                        f"  Processed {len(received_ids)}/{num_expected} responses : {query_id} : {result.response_output[:100]}"
+                    )
+
+            except Exception as e:
+                logger.warning(f"Error receiving response: {str(e)[:50]}")
+                await asyncio.sleep(0.01)
+
+        # Mark any issued but not received as timeout
+        for query_id in sent_query_ids:
+            if query_id not in received_ids:
+                errors.append(f"{query_id}: Timeout (>{probe_timeout}s)")
 
         # Report results
         success_count = len(latencies)
-        logger.info(f"✓ Completed: {success_count}/{num_requests} successful")
+        logger.info(f"✓ Completed: {success_count}/{num_expected} successful")
 
         if latencies:
             avg_latency = sum(latencies) / len(latencies)
