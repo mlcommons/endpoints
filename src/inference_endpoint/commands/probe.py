@@ -179,7 +179,7 @@ async def run_probe_command(args: argparse.Namespace) -> None:
                     or len(received_ids) == num_expected
                 ):
                     logger.info(
-                        f"  Processed {len(received_ids)}/{num_expected} responses"
+                        f"  Processed {len(received_ids)}/{num_expected} responses : {query_id} : {result.response_output[:100]}"
                     )
 
             except Exception as e:
