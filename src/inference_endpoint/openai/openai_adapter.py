@@ -41,6 +41,7 @@ class SSEDelta(msgspec.Struct):
     """SSE delta object containing content."""
 
     content: str = ""
+    reasoning_content: str = ""
 
 
 class SSEChoice(msgspec.Struct):
@@ -75,7 +76,11 @@ class OpenAIAdapter(HttpRequestAdapter):
     def decode_sse_message(cls, json_bytes: bytes) -> str:
         """Decode SSE message and extract content string."""
         msg = msgspec.json.decode(json_bytes, type=SSEMessage)
-        return msg.choices[0].delta.content
+        return (
+            msg.choices[0].delta.content
+            if msg.choices[0].delta.content
+            else msg.choices[0].delta.reasoning_content
+        )
 
     # ========================================================================
     # Internal APIs
