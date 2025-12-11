@@ -52,6 +52,8 @@ class BenchmarkSession:
             session_id=self.session_id, notify_idle=self.end_event
         )
 
+        self.sample_uuid_map = None
+
     @property
     def is_running(self):
         return self.thread is not None and self.thread.is_alive()
@@ -131,6 +133,15 @@ class BenchmarkSession:
                             tokenizer = None
                 report = reporter.create_report(tokenizer)
 
+                # Consolidate UUID->index mappings
+                sample_idx_map = {
+                    "performance": perf_test_generator.uuid_to_index_map,
+                }
+                if accuracy_test_generators:
+                    for name, generator in accuracy_test_generators.items():
+                        sample_idx_map[name] = generator.uuid_to_index_map
+                self.sample_uuid_map = sample_idx_map
+
                 # Save to report directory if provided
                 if report_dir:
                     Path(report_dir).mkdir(parents=True, exist_ok=True)
@@ -166,13 +177,7 @@ class BenchmarkSession:
 
                     # Save the UUID mapping for output verification
                     with (Path(report_dir) / "sample_idx_map.json").open("w") as f:
-                        sample_idx_map = {
-                            "performance": perf_test_generator.uuid_to_index_map,
-                        }
-                        if accuracy_test_generators:
-                            for name, generator in accuracy_test_generators.items():
-                                sample_idx_map[name] = generator.uuid_to_index_map
-                        f.write(orjson.dumps(sample_idx_map).decode("utf-8"))
+                        f.write(orjson.dumps(self.sample_uuid_map).decode("utf-8"))
 
                     if dump_events_csv:
                         reporter.dump_to_csv(Path(report_dir) / "events.csv")
