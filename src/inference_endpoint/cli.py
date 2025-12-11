@@ -165,7 +165,6 @@ def create_parser() -> argparse.ArgumentParser:
         required=True,
         help="Template type",
     )
-    init_parser.add_argument("--output", "-o", type=str, help="Output filename")
 
     return parser
 
