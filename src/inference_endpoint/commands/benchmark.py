@@ -608,7 +608,7 @@ def _run_benchmark(
             dataloader,
             sample_issuer,
             scheduler,
-            name="cli_benchmark",
+            name=f"cli_benchmark_{uuid.uuid4().hex[0:8]}",
             stop_sample_issuer_on_test_end=False,
             report_dir=config.report_dir,
             tokenizer_override=tokenizer,
