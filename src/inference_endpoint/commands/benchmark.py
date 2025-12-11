@@ -21,11 +21,10 @@ Benchmark command implementation."""
 import argparse
 import json
 import logging
-import os
 import shutil
-import uuid
 import signal
 import tempfile
+import uuid
 from pathlib import Path
 from urllib.parse import urljoin
 
@@ -679,9 +678,13 @@ def _run_benchmark(
             # Always save all errors (useful for debugging)
             if response_collector.errors:
                 results["errors"] = response_collector.errors
-            with open(os.path.join(config.report_dir, "results.json"), "w") as f:
-                json.dump(results, f, indent=2)
-            logger.info(f"Saved: {os.path.join(config.report_dir, 'results.json')}")
+            if config.report_dir is not None:
+                results_path = report_dir / "results.json"
+                with open(results_path, "w") as f:
+                    json.dump(results, f, indent=2)
+                logger.info(f"Saved: {results_path}")
+            else:
+                logger.error("No report-dir specified; results not saved to file.")
         except Exception as e:
             logger.error(f"Save failed: {e}")
 
