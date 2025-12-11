@@ -82,7 +82,7 @@ class BenchmarkSession:
                 )
 
                 if accuracy_test_generators:
-                    for _, generator in accuracy_test_generators:
+                    for _, generator in accuracy_test_generators.items():
                         for _ in generator:
                             pass
 

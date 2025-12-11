@@ -92,7 +92,7 @@ class EventRow:
         placeholders = ", ".join(["?"] * len(fields))
         return f"INSERT INTO events ({names_str}) VALUES ({placeholders})"
 
-    def to_insert_params(self) -> tuple[str, str, int, str]:
+    def to_insert_params(self) -> tuple[str, str, int, bytes]:
         return (
             self.sample_uuid,
             self.event_type.value,

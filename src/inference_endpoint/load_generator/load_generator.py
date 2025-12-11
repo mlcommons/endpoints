@@ -308,5 +308,4 @@ class SchedulerBasedLoadGenerator(LoadGenerator):
                 "SchedulerBasedLoadGenerator can only be iterated over once"
             )
         self._iterator = iter(self.scheduler)
-        self.uuid_to_index_map = {}
-        return self
+        return super().__iter__()
