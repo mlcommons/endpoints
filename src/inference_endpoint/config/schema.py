@@ -320,7 +320,6 @@ class BenchmarkConfig(BaseModel):
     settings: Settings = Field(default_factory=Settings)
     metrics: Metrics = Field(default_factory=Metrics)
     endpoint_config: EndpointConfig = Field(default_factory=EndpointConfig)
-    output: Path | None = None
     report_dir: Path | None = None
     timeout: int | None = None
     verbose: bool = False

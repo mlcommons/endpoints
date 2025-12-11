@@ -21,7 +21,9 @@ Benchmark command implementation."""
 import argparse
 import json
 import logging
+import os
 import shutil
+import uuid
 import signal
 import tempfile
 from pathlib import Path
@@ -266,7 +268,6 @@ def _build_config_from_cli(
     report_dir = getattr(args, "report_dir", None)
     timeout = getattr(args, "timeout", None)
     verbose = getattr(args, "verbose", False)
-    output = getattr(args, "output", None)
     # Build BenchmarkConfig from CLI params
     return BenchmarkConfig(
         name=f"cli_{benchmark_mode}",
@@ -318,7 +319,6 @@ def _build_config_from_cli(
         metrics=Metrics(),
         baseline=None,  # CLI mode doesn't use baseline
         report_dir=report_dir,
-        output=output,
         timeout=timeout,
         verbose=verbose,
     )
@@ -659,36 +659,31 @@ def _run_benchmark(
                 if len(response_collector.errors) > 3:
                     logger.warning(f"  ... +{len(response_collector.errors) - 3} more")
 
-        # Save results if requested
-        if config.output:
-            try:
-                results = {
-                    "config": {
-                        "endpoint": endpoint,
-                        "mode": test_mode,
-                        "target_qps": target_qps,
-                    },
-                    "results": {
-                        "total": total,
-                        "successful": success_count,
-                        "failed": len(response_collector.errors),
-                        "elapsed_time": elapsed_time,
-                        "qps": estimated_qps,
-                    },
-                }
-
-                if collect_responses:
-                    results["responses"] = response_collector.responses
-
-                # Always save all errors (useful for debugging)
-                if response_collector.errors:
-                    results["errors"] = response_collector.errors
-
-                with open(config.output, "w") as f:
-                    json.dump(results, f, indent=2)
-                logger.info(f"Saved: {config.output}")
-            except Exception as e:
-                logger.error(f"Save failed: {e}")
+        try:
+            results = {
+                "config": {
+                    "endpoint": endpoint,
+                    "mode": test_mode,
+                    "target_qps": target_qps,
+                },
+                "results": {
+                    "total": total,
+                    "successful": success_count,
+                    "failed": len(response_collector.errors),
+                    "elapsed_time": elapsed_time,
+                    "qps": estimated_qps,
+                },
+            }
+            if collect_responses:
+                results["responses"] = response_collector.responses
+            # Always save all errors (useful for debugging)
+            if response_collector.errors:
+                results["errors"] = response_collector.errors
+            with open(os.path.join(config.report_dir, "results.json"), "w") as f:
+                json.dump(results, f, indent=2)
+            logger.info(f"Saved: {os.path.join(config.report_dir, 'results.json')}")
+        except Exception as e:
+            logger.error(f"Save failed: {e}")
 
     except KeyboardInterrupt:
         logger.warning("Benchmark interrupted by user")
