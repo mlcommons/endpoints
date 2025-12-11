@@ -149,7 +149,7 @@ class _SampleEventHandler:
                 SampleEvent.FIRST_CHUNK,
                 timestamp_ns,
                 sample_uuid=chunk.id,
-                output=chunk.response_chunk,
+                data=chunk.response_chunk,
             )
             hooks = self.first_chunk_hooks
         else:
@@ -186,7 +186,7 @@ class _SampleEventHandler:
             SampleEvent.COMPLETE,
             timestamp_ns,
             sample_uuid=result.id,
-            output=result.response_output,
+            data={"output": result.response_output},
         )
 
         for hook in self.complete_hooks:

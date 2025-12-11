@@ -24,7 +24,7 @@ import numbers
 import os
 import sqlite3
 from collections import defaultdict
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -34,6 +34,7 @@ import orjson
 
 from ..load_generator.events import SampleEvent, SessionEvent
 from ..profiling import profile
+from ..utils import monotime_to_datetime
 
 if TYPE_CHECKING:
     from transformers import Tokenizer
@@ -522,6 +523,83 @@ class Report:
             fn("\n")
 
 
+def output_sequence_from_data(
+    data_bytes: bytes,
+    join_chunks: bool = True,
+) -> tuple[str | list[str] | None, str | list[str] | None]:
+    """Parse the data column from a COMPLETE event and extract output and reasoning sequences.
+
+    The data column is expected to be a JSON-encoded byte string. The decoded value can be:
+    - A string: treated as the output sequence directly
+    - A dictionary with 'output' key (required) and optionally 'reasoning' key
+      - Both 'output' and 'reasoning' can be either strings or lists of strings
+      - If a list of strings, they will be joined together
+
+    Args:
+        data_bytes: The raw bytes from the database 'data' column
+        join_chunks: Whether to join the chunks into a single string if the data values are lists of strings
+                    (Default: True)
+    Returns:
+        A tuple of (output_sequence, reasoning_sequence), where each is a string (if join_chunks is True),
+        list of strings (if join_chunks is False) or None.
+        If the data cannot be decoded or is invalid, returns (None, None).
+    """
+    if data_bytes is None or len(data_bytes) == 0:
+        return None, None
+
+    try:
+        decoded_data = orjson.loads(data_bytes)
+    except (orjson.JSONDecodeError, TypeError):
+        logging.warning("Failed to decode data bytes")
+        return None, None
+
+    output_sequence = None
+    reasoning_sequence = None
+
+    if isinstance(decoded_data, str):
+        # If decoded value is a string, it's the output sequence
+        output_sequence = decoded_data
+    elif isinstance(decoded_data, dict):
+        # If decoded value is a dict, extract 'output' and optionally 'reasoning'
+        if "output" not in decoded_data:
+            logging.warning("Dictionary data missing required 'output' key")
+            return None, None
+
+        # Extract output - can be string or list of strings
+        output = decoded_data["output"]
+        if isinstance(output, list):
+            if join_chunks:
+                output_sequence = "".join(output)
+            else:
+                output_sequence = output
+        elif isinstance(output, str):
+            output_sequence = output
+        else:
+            logging.warning(f"Output field has unexpected type: {type(output)}")
+            return None, None
+
+        # Extract reasoning if present - can be string or list of strings
+        if "reasoning" in decoded_data:
+            reasoning = decoded_data["reasoning"]
+            if isinstance(reasoning, list):
+                if join_chunks:
+                    reasoning_sequence = "".join(reasoning)
+                else:
+                    reasoning_sequence = reasoning
+            elif isinstance(reasoning, str):
+                reasoning_sequence = reasoning
+            else:
+                logging.warning(
+                    f"Reasoning field has unexpected type: {type(reasoning)}"
+                )
+                # Continue with output_sequence, reasoning is optional
+    else:
+        logging.warning(f"Decoded data has unexpected type: {type(decoded_data)}")
+        return None, None
+
+    return output_sequence, reasoning_sequence
+
+
 class MetricsReporter:
     """Derives metrics from events via rollup queries. This is a *read only* client."""
 
@@ -538,7 +616,6 @@ class MetricsReporter:
             client_type: The client type to use to connect to the database. Choices: ["duckdb", "sqlite"] (Default: "duckdb")
         """
         self.connection_name = Path(connection_name)
-        self.outputs_path = self.connection_name.with_suffix(".outputs.jsonl")
         self.client_type = client_type
         self.is_closed = True
 
@@ -582,6 +659,27 @@ class MetricsReporter:
             raise ValueError(f"Invalid client type: {self.client_type}")
         self.is_closed = False
 
+    @functools.cached_property
+    def stop_performance_tracking_timestamp_ns(self) -> float:
+        """Returns the timestamp_ns of the STOP_PERFORMANCE_TRACKING event.
+
+        This method is cached to prevent re-derivation. If the event is not found,
+        returns positive infinity.
+
+        Returns:
+            float: The timestamp_ns of STOP_PERFORMANCE_TRACKING event, or float('inf') if not found.
+        """
+        result = self.cur_.execute(f"""
+        SELECT timestamp_ns
+        FROM events
+        WHERE event_type = '{SessionEvent.STOP_PERFORMANCE_TRACKING.value}'
+        LIMIT 1
+        """).fetchone()
+
+        if result is None:
+            return float("inf")
+        return float(result[0])
+
     @profile
     def derive_metric(self, query: str, metric_type: str) -> RollupQueryTable:
         res = self.cur_.execute(query)
@@ -589,6 +687,19 @@ class MetricsReporter:
         return RollupQueryTable(metric_type, query, res.fetchall())
 
     def derive_TTFT(self) -> RollupQueryTable:
+        stop_ts = self.stop_performance_tracking_timestamp_ns
+
+        # Build the HAVING clause conditionally to handle infinity
+        if stop_ts != float("inf"):
+            having_clause = f"""
+            HAVING COUNT(DISTINCT event_type) = 2
+                AND MAX(CASE WHEN event_type = '{SessionEvent.LOADGEN_ISSUE_CALLED.value}' THEN timestamp_ns END) < {stop_ts}
+            """
+        else:
+            having_clause = """
+            HAVING COUNT(DISTINCT event_type) = 2
+            """
+
         return self.derive_metric(
             f"""
             SELECT
@@ -598,7 +709,7 @@ class MetricsReporter:
             FROM events
             WHERE event_type IN ('{SessionEvent.LOADGEN_ISSUE_CALLED.value}', '{SampleEvent.FIRST_CHUNK.value}')
             GROUP BY sample_uuid
-            HAVING COUNT(DISTINCT event_type) = 2
+            {having_clause}
             """,
             "ttft",
         )
@@ -619,7 +730,10 @@ class MetricsReporter:
             logging.debug(f"Written rows {len(rows)} to {csv_path}")
 
     def derive_duration(self) -> float:
-        """Calculates the total test duration as the difference between TEST_ENDED and TEST_STARTED events.
+        """Calculates the total test duration.
+
+        If STOP_PERFORMANCE_TRACKING event exists, uses STOP_PERFORMANCE_TRACKING - TEST_STARTED.
+        Otherwise, defaults to TEST_ENDED - TEST_STARTED.
 
         Returns:
             float: The duration in nanoseconds.
@@ -635,24 +749,42 @@ class MetricsReporter:
                 f"Multiple TEST_STARTED or TEST_ENDED events found - {n_time_bounds[0]} START events, {n_time_bounds[1]} END events"
             )
 
-        # Must have a dummy sample_uuid column, as RollupQueryTable uses it as a primary key
-        rollup = self.derive_metric(
-            f"""
+        # Check if STOP_PERFORMANCE_TRACKING event exists
+        stop_ts = self.stop_performance_tracking_timestamp_ns
+
+        if stop_ts != float("inf"):
+            # Use STOP_PERFORMANCE_TRACKING - TEST_STARTED
+            result = self.cur_.execute(f"""
             SELECT
-                '' as sample_uuid,
-                MAX(CASE WHEN event_type = '{SessionEvent.TEST_ENDED.value}' THEN timestamp_ns END) -
-                MAX(CASE WHEN event_type = '{SessionEvent.TEST_STARTED.value}' THEN timestamp_ns END) AS duration
+                MAX(CASE WHEN event_type = '{SessionEvent.TEST_STARTED.value}' THEN timestamp_ns END) AS start_ts
             FROM events
-            WHERE event_type IN ('{SessionEvent.TEST_STARTED.value}', '{SessionEvent.TEST_ENDED.value}')
-            HAVING COUNT(DISTINCT event_type) = 2
-            """,
-            "duration",
-        )
-        if len(rollup) == 0:
-            return None  # Test did not complete, return None
-        elif len(rollup) > 1:
-            raise RuntimeError("Malformed query result - Only 1 row expected")
-        return rollup[0].metric_value
+            WHERE event_type = '{SessionEvent.TEST_STARTED.value}'
+            """).fetchone()
+
+            if result is None or result[0] is None:
+                return None  # Test did not start, return None
+
+            return float(stop_ts - result[0])
+        else:
+            # Default to TEST_ENDED - TEST_STARTED
+            # Must have a dummy sample_uuid column, as RollupQueryTable uses it as a primary key
+            rollup = self.derive_metric(
+                f"""
+                SELECT
+                    '' as sample_uuid,
+                    MAX(CASE WHEN event_type = '{SessionEvent.TEST_ENDED.value}' THEN timestamp_ns END) -
+                    MAX(CASE WHEN event_type = '{SessionEvent.TEST_STARTED.value}' THEN timestamp_ns END) AS duration
+                FROM events
+                WHERE event_type IN ('{SessionEvent.TEST_STARTED.value}', '{SessionEvent.TEST_ENDED.value}')
+                HAVING COUNT(DISTINCT event_type) = 2
+                """,
+                "duration",
+            )
+            if len(rollup) == 0:
+                return None  # Test did not complete, return None
+            elif len(rollup) > 1:
+                raise RuntimeError("Malformed query result - Only 1 row expected")
+            return rollup[0].metric_value
 
     def derive_sample_latency(self) -> RollupQueryTable:
         """Calculates the end-to-end latency for each sample from issue to completion.
@@ -660,6 +792,19 @@ class MetricsReporter:
         Returns:
             RollupQueryTable: A table containing per-sample latencies in nanoseconds.
         """
+        stop_ts = self.stop_performance_tracking_timestamp_ns
+
+        # HAVING clause is different if there is a STOP_PERFORMANCE_TRACKING event
+        if stop_ts != float("inf"):
+            having_clause = f"""
+            HAVING COUNT(DISTINCT event_type) = 2
+                AND MAX(CASE WHEN event_type = '{SessionEvent.LOADGEN_ISSUE_CALLED.value}' THEN timestamp_ns END) < {stop_ts}
+            """
+        else:
+            having_clause = """
+            HAVING COUNT(DISTINCT event_type) = 2
+            """
+
         return self.derive_metric(
             f"""
             SELECT
@@ -669,7 +814,7 @@ class MetricsReporter:
             FROM events
             WHERE event_type IN ('{SessionEvent.LOADGEN_ISSUE_CALLED.value}', '{SampleEvent.COMPLETE.value}')
             GROUP BY sample_uuid
-            HAVING COUNT(DISTINCT event_type) = 2
+            {having_clause}
             """,
             "sample_latency",
         )
@@ -681,11 +826,25 @@ class MetricsReporter:
         - "completed" (int): The number of samples completed
         - "in_flight" (int): The number of samples in flight
         """
+        stop_ts = self.stop_performance_tracking_timestamp_ns
+
+        # Build WHERE clause to filter samples issued before stop_ts
+        where_clause = ""
+        if stop_ts != float("inf"):
+            where_clause = f"""
+            WHERE sample_uuid IN (
+                SELECT sample_uuid FROM events
+                WHERE event_type = '{SessionEvent.LOADGEN_ISSUE_CALLED.value}'
+                AND timestamp_ns < {stop_ts}
+            )
+            """
+
         statuses = self.cur_.execute(f"""
         SELECT
             COUNT(DISTINCT CASE WHEN event_type = '{SessionEvent.LOADGEN_ISSUE_CALLED.value}' THEN sample_uuid END) AS request_sent_count,
             COUNT(DISTINCT CASE WHEN event_type = '{SampleEvent.COMPLETE.value}' THEN sample_uuid END) AS complete_count
         FROM events
+        {where_clause}
         """).fetchone()
 
         return {
@@ -702,18 +861,41 @@ class MetricsReporter:
         WHERE event_type = '{SessionEvent.ERROR.value}'
         """).fetchone()[0]
 
-    def iter_output_rows(self) -> Iterator[tuple[str, str]]:
-        """Iterator to load and read lines from the outputs file, decoding each line as JSON and yielding the sample_uuid and output.
+    def get_sample_outputs(
+        self, performance_only: bool = True
+    ) -> list[tuple[str, bytes]]:
+        """Query for COMPLETE events with their data column.
+
+        Args:
+            performance_only: Whether to only include samples that are in the performance window. (Default: True)
 
         Returns:
-            Iterator[tuple[str, str]]: An iterator of tuples containing the sample_uuid and output.
+            A list of tuples containing (sample_uuid, data_bytes) for each COMPLETE event.
+            Returns an empty list if no COMPLETE events are found.
         """
-        with self.outputs_path.open("r") as outputs:
-            for line in outputs:
-                data = orjson.loads(line)
-                if "output" not in data:
-                    continue
-                yield data["s_uuid"], data["output"]
+        stop_ts = self.stop_performance_tracking_timestamp_ns
+
+        # Build WHERE clause to filter samples issued before STOP_PERFORMANCE_TRACKING
+        if performance_only and stop_ts != float("inf"):
+            where_clause = f"""
+            AND sample_uuid IN (
+                SELECT sample_uuid FROM events
+                WHERE event_type = '{SessionEvent.LOADGEN_ISSUE_CALLED.value}'
+                AND timestamp_ns < {stop_ts}
+            )
+            """
+        else:
+            where_clause = ""
+
+        # Query for COMPLETE events with their data column
+        query_result = self.cur_.execute(f"""
+            SELECT sample_uuid, data
+            FROM events
+            WHERE event_type = '{SampleEvent.COMPLETE.value}'
+            {where_clause}
+        """).fetchall()
+
+        return query_result
 
     @profile
     def get_output_sequence_lengths(
@@ -721,23 +903,36 @@ class MetricsReporter:
     ) -> RollupQueryTable | None:
         """Returns a RollupQueryTable representing per-sample output sequence lengths based on a Tokenizer.
 
-        If no outputs file is found, returns None.
+        Reads output data from the 'data' column of COMPLETE events in the database.
 
         Args:
             tokenizer: A Tokenizer object from HuggingFace
 
         Returns:
-            RollupQueryTable: A table containing per-sample output sequence lengths.
+            RollupQueryTable: A table containing per-sample output sequence lengths, or None if no complete events found.
         """
-        if not self.outputs_path.exists():
-            return None
+        query_result = self.get_sample_outputs()
 
         rows = []
-        for sample_uuid, output in self.iter_output_rows():
-            if isinstance(output, list):
-                output = "".join(output)
-            output_tokens = tokenizer.tokenize(output)
+        for sample_uuid, data_bytes in query_result:
+            output_sequence, reasoning_sequence = output_sequence_from_data(data_bytes)
+
+            if output_sequence is None:
+                continue
+
+            # Concatenate reasoning and output if reasoning exists
+            if reasoning_sequence is not None:
+                full_sequence = f"{reasoning_sequence} {output_sequence}"
+            else:
+                full_sequence = output_sequence
+
+            # Tokenize and calculate length
+            output_tokens = tokenizer.tokenize(full_sequence)
             rows.append((sample_uuid, len(output_tokens)))
+
+        if not rows:
+            return None
+
         return RollupQueryTable("output_sequence_length", None, rows)
 
     @profile
@@ -771,9 +966,6 @@ class MetricsReporter:
                             If reporting_mode is REQUEST_WEIGHTED, each sample only contributes one entry to the table. (Default: True)
             reporting_mode: TPOT reporting mode (REQUEST_WEIGHTED or TOKEN_WEIGHTED). (Default: REQUEST_WEIGHTED)
         """
-        if not self.outputs_path.exists():
-            return None
-
         if ttft_rollup is None:
             ttft_rollup = self.derive_TTFT()
 
@@ -784,16 +976,41 @@ class MetricsReporter:
         if sample_latency_rollup is None:
             sample_latency_rollup = self.derive_sample_latency()
 
+        # Query for COMPLETE events with their data column
+        query_result = self.get_sample_outputs()
+
+        if not query_result:
+            return None
+
         rows = []
         if condense_table and reporting_mode == TPOTReportingMode.TOKEN_WEIGHTED:
             repeats = []
         else:
             repeats = None
 
-        for sample_uuid, output in self.iter_output_rows():
-            if not isinstance(output, list):  # JSON always deserializes to list
+        for sample_uuid, data_bytes in query_result:
+            if data_bytes is None or len(data_bytes) == 0:
                 continue
-            elif len(output) < 2:
+
+            # Extract output from decoded data
+            # For TPOT calculation, we need the output to be a list of chunks (streaming mode) with at least 2
+            # elements
+            output_sequence, reasoning_sequence = output_sequence_from_data(
+                data_bytes, join_chunks=False
+            )
+            if not isinstance(output_sequence, list):
+                continue
+
+            all_chunks = output_sequence
+            if isinstance(reasoning_sequence, list):
+                all_chunks.extend(reasoning_sequence)
+
+            # For TPOT, we need streaming data (list of chunks with at least 2 elements)
+            if len(all_chunks) < 2:
+                continue
+
+            # Skip samples that are not in the filtered rollups (i.e., issued after STOP_PERFORMANCE_TRACKING)
+            if sample_uuid not in sample_latency_rollup:
                 continue
 
             # Output can be in one of two formats depending on the issuer:
@@ -801,10 +1018,12 @@ class MetricsReporter:
             # 2. A 2 item list of ['chunk1', 'chunk2chunk3...']
             # Both of these are valid as we only need to distinguish the first chunk for the purposes of TPOT calculation.
             # The choice is up to the issuer implementation depending on performance considerations.
-            if len(output) > 2:
-                non_first_chunk = "".join(output[1:])
+
+            # Join list elements to get the non-first chunk text
+            if len(all_chunks) > 2:
+                non_first_chunk = "".join(str(chunk) for chunk in all_chunks[1:])
             else:
-                non_first_chunk = output[1]
+                non_first_chunk = str(all_chunks[1])
 
             if len(non_first_chunk) == 0:
                 # Possible malformed output data where empty string is included as a non-first chunk
@@ -838,6 +1057,10 @@ class MetricsReporter:
                     else n_non_first_tokens
                 )
                 rows.extend([(sample_uuid, avg_tpot)] * repeat_fac)
+
+        if not rows:
+            return None
+
         return RollupQueryTable("tpot", None, rows, repeats=repeats)
 
     def close(self):
@@ -851,34 +1074,22 @@ class MetricsReporter:
         self.conn.close()
 
     def dump_to_csv(self, csv_path: Path):
-        output_values = defaultdict(dict)
-
-        if self.outputs_path.exists():
-            with self.outputs_path.open("r") as outputs:
-                for line in outputs:
-                    if line.strip() == "":
-                        continue
-
-                    data = orjson.loads(line)
-                    if "s_uuid" not in data:
-                        continue
-
-                    if "first_chunk" in data:
-                        output_values[data["s_uuid"]]["first_chunk"] = data[
-                            "first_chunk"
-                        ]
-                    elif "output" in data:
-                        output_values[data["s_uuid"]]["output"] = data["output"]
-                    elif "error_message" in data:
-                        output_values[data["s_uuid"]]["error_message"] = data[
-                            "error_message"
-                        ]
-
+        """Dumps all events to a CSV file, including decoded output data from the 'data' column."""
         with csv_path.open("w") as f:
             writer = csv.writer(f)
-            writer.writerow(["sample_uuid", "event_type", "timestamp_ns", "value"])
+            writer.writerow(
+                [
+                    "sample_uuid",
+                    "event_type",
+                    "timestamp_ns",
+                    "approx_datetime_str",
+                    "value",
+                ]
+            )
 
-            query_result = self.cur_.execute("SELECT * FROM events")
+            query_result = self.cur_.execute(
+                "SELECT sample_uuid, event_type, timestamp_ns, data FROM events"
+            )
             while True:
                 if hasattr(query_result, "fetchmany"):
                     rows = query_result.fetchmany(1000)
@@ -888,17 +1099,43 @@ class MetricsReporter:
                 if not rows:
                     break
 
-                for row in rows:
+                for sample_uuid, event_type, timestamp_ns, data_bytes in rows:
                     value = ""
-                    if row[1] == SampleEvent.FIRST_CHUNK.value:
-                        value = output_values[row[0]].get("first_chunk", "<NOT_FOUND>")
-                    elif row[1] == SampleEvent.COMPLETE.value:
-                        value = output_values[row[0]].get("output", "<NOT_FOUND>")
-                    elif row[1] == SessionEvent.ERROR.value:
-                        value = output_values[row[0]].get(
-                            "error_message", "<NOT_FOUND>"
-                        )
-                    writer.writerow([row[0], row[1], row[2], value])
+
+                    # For events with data, decode and extract the relevant value
+                    if data_bytes is not None and len(data_bytes) > 0:
+                        if event_type == SampleEvent.COMPLETE.value:
+                            # For COMPLETE, use helper method to extract output sequence
+                            output_seq, reasoning_seq = output_sequence_from_data(
+                                data_bytes
+                            )
+                            if output_seq is not None:
+                                if reasoning_seq is not None:
+                                    value = f"[reasoning: {reasoning_seq}] {output_seq}"
+                                else:
+                                    value = output_seq
+                        elif event_type in (
+                            SampleEvent.FIRST_CHUNK.value,
+                            SessionEvent.ERROR.value,
+                        ):
+                            # For other event types, just decode and stringify
+                            try:
+                                decoded_data = orjson.loads(data_bytes)
+                                value = str(decoded_data) if decoded_data else ""
+                            except (orjson.JSONDecodeError, TypeError) as e:
+                                value = f"<DECODE_ERROR: {e}>"
+
+                    approx_datetime_str = monotime_to_datetime(timestamp_ns).isoformat()
+
+                    writer.writerow(
+                        [
+                            sample_uuid,
+                            event_type,
+                            timestamp_ns,
+                            approx_datetime_str,
+                            value,
+                        ]
+                    )
 
     def __enter__(self):
         if self.is_closed:
