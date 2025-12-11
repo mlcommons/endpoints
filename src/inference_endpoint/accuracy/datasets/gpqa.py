@@ -18,9 +18,8 @@ import logging
 import random
 from pathlib import Path
 
-import pandas as pd
-
 import datasets as hf_datasets
+import pandas as pd
 
 from ...dataset_manager.dataloader import DataLoader
 from .base import AccuracyDataset, DatasetFormat
