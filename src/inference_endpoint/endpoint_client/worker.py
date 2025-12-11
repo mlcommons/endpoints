@@ -19,7 +19,6 @@ import asyncio
 import logging
 import multiprocessing
 import os
-import pathlib
 import signal
 import sys
 import time
@@ -203,7 +202,7 @@ class Worker:
             if self.http_config.record_worker_events:
                 pid = os.getpid()
                 worker_db_name = f"worker_report_{self.worker_id}_{pid}"
-                report_path = pathlib.Path(f"{worker_db_name}.csv")
+                report_path = self.http_config.event_logs_dir / f"{worker_db_name}.csv"
                 logger.info(f"About to generate report {self.worker_id}")
                 with EventRecorder(session_id=worker_db_name) as event_recorder:
                     await self._main_loop()

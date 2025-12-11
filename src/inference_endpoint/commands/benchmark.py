@@ -26,6 +26,7 @@ import signal
 import tempfile
 import time
 import uuid
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import urljoin
 
@@ -265,7 +266,11 @@ def _build_config_from_cli(
                 load_pattern_type = LoadPatternType.CONCURRENCY
             case "online":
                 load_pattern_type = LoadPatternType.POISSON
-    report_dir = getattr(args, "report_dir", None)
+    report_dir = getattr(
+        args,
+        "report_dir",
+        Path(f"./reports_{datetime.now().strftime('%Y%m%d_%H%M%S')}"),
+    )
     timeout = getattr(args, "timeout", None)
     verbose = getattr(args, "verbose", False)
     output = getattr(args, "output", None)
@@ -453,10 +458,13 @@ def _run_benchmark(
     if not model_name and config.model_params.name:
         model_name = config.model_params.name
 
-    if config.report_dir:
+    if not config.report_dir:
+        report_dir = Path(f"./reports_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+    else:
         report_dir = Path(config.report_dir)
-        report_dir.mkdir(parents=True, exist_ok=True)
-        config.to_yaml_file(report_dir / "config.yaml")
+
+    report_dir.mkdir(parents=True, exist_ok=True)
+    config.to_yaml_file(report_dir / "config.yaml")
 
     max_tokens = config.model_params.max_new_tokens
 
@@ -583,6 +591,7 @@ def _run_benchmark(
             num_workers=num_workers,
             max_concurrency=-1,  # unlimited
             record_worker_events=config.settings.client.record_worker_events,
+            event_logs_dir=report_dir,
         )
         aiohttp_config = AioHttpConfig()
         zmq_config = ZMQConfig(
@@ -614,7 +623,7 @@ def _run_benchmark(
             scheduler,
             name=f"cli_benchmark_{uuid.uuid4().hex[0:8]}",
             stop_sample_issuer_on_test_end=False,
-            report_dir=config.report_dir,
+            report_dir=report_dir,
             tokenizer_override=tokenizer,
             max_shutdown_timeout_s=config.timeout if config.timeout else None,
         )
