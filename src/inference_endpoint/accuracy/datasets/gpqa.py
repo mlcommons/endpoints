@@ -13,12 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import argparse
 import logging
 import random
 from pathlib import Path
 
-import datasets as hf_datasets
 import pandas as pd
+
+import datasets as hf_datasets
 
 from ...dataset_manager.dataloader import DataLoader
 from .base import AccuracyDataset, DatasetFormat
@@ -193,3 +195,56 @@ class GPQADataLoader(DataLoader):
 
     def num_samples(self) -> int:
         return len(self.df)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Generate GPQA dataset for accuracy evaluation"
+    )
+    parser.add_argument(
+        "--variant",
+        type=str,
+        default="diamond",
+        choices=["diamond", "extended", "main"],
+        help="The variant of the dataset to generate (default: diamond)",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path("./datasets"),
+        help="Output directory for the dataset (default: ./datasets)",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="Random seed for shuffling choices (default: 0)",
+    )
+    parser.add_argument(
+        "--max-samples",
+        type=int,
+        default=None,
+        help="Maximum number of samples to generate (default: all samples)",
+    )
+
+    args = parser.parse_args()
+
+    # Configure logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
+
+    # Create GPQA dataset instance
+    gpqa = GPQA(variant=args.variant, seed=args.seed, max_samples=args.max_samples)
+
+    # Generate the dataset
+    logger.info(f"Generating GPQA {args.variant} dataset...")
+    logger.info(f"Output directory: {args.output_dir}")
+    logger.info(f"Seed: {args.seed}")
+    if args.max_samples:
+        logger.info(f"Max samples: {args.max_samples}")
+
+    gpqa.generate(args.output_dir)
+
+    logger.info(f"✓ Successfully generated dataset: {args.output_dir / gpqa.filename}")
