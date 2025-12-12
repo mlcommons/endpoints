@@ -237,6 +237,7 @@ class ClientSettings(BaseModel):
     """
 
     workers: int = 4
+    record_worker_events: bool = False
 
 
 class Settings(BaseModel):
