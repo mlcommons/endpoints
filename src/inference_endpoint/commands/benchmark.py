@@ -26,7 +26,6 @@ import signal
 import tempfile
 import time
 import uuid
-from datetime import datetime
 from pathlib import Path
 from urllib.parse import urljoin
 
@@ -34,6 +33,7 @@ from tqdm import tqdm
 from transformers import AutoTokenizer
 from transformers.utils import logging as transformers_logging
 
+from inference_endpoint.commands.utils import get_default_report_path
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import (
     BenchmarkConfig,
@@ -269,7 +269,7 @@ def _build_config_from_cli(
     report_dir = getattr(
         args,
         "report_dir",
-        Path(f"./reports_{datetime.now().strftime('%Y%m%d_%H%M%S')}"),
+        get_default_report_path(),
     )
     timeout = getattr(args, "timeout", None)
     verbose = getattr(args, "verbose", False)
@@ -458,10 +458,10 @@ def _run_benchmark(
     if not model_name and config.model_params.name:
         model_name = config.model_params.name
 
-    if not config.report_dir:
-        report_dir = Path(f"./reports_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
-    else:
+    if config.report_dir:
         report_dir = Path(config.report_dir)
+    else:
+        report_dir = get_default_report_path()
 
     report_dir.mkdir(parents=True, exist_ok=True)
     config.to_yaml_file(report_dir / "config.yaml")

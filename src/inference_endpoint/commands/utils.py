@@ -16,12 +16,14 @@
 """Utility commands: info, validate, init."""
 
 import argparse
+import datetime
 import logging
 import os
 import platform
 import shutil
 import socket
 import sys
+import tempfile
 from pathlib import Path
 
 import psutil
@@ -301,3 +303,14 @@ async def run_init_command(args: argparse.Namespace) -> None:
     except Exception as e:
         logger.error(f"✗ Failed to generate config: {e}")
         _fallback_to_template(template_file, output_path)
+
+
+def get_default_report_path() -> Path:
+    """Get the default report path.
+
+    Returns:
+        The default report path as a Path object.
+    """
+    return Path(
+        f"{tempfile.gettempdir()}/reports_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    )
