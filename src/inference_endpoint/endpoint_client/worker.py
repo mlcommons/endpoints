@@ -404,50 +404,80 @@ class Worker:
     async def _handle_streaming_request(self, query: Query) -> None:
         """Handle streaming response."""
         async for response in self._make_http_request(query):
-            accumulated_content = []
+            output_chunks = []
+            reasoning_chunks = []
             first_chunk_sent = False
 
             # Process SSE stream - yields batches of chunks
             async for chunk_batch in self._iter_sse_lines(response):
-                accumulated_content.extend(chunk_batch)
+                output_delta = []
+                reasoning_delta = []
+                for delta in chunk_batch:
+                    if delta.content:
+                        output_delta.append(delta.content)
+                    elif delta.reasoning:
+                        reasoning_delta.append(delta.reasoning)
+                    else:
+                        logger.debug("empty SSE delta")
+                        continue
 
-                # Determine which chunks to send: all or just first
-                chunks_to_send = (
-                    chunk_batch
-                    if self.http_config.stream_all_chunks
-                    else chunk_batch[:1]
-                    if not first_chunk_sent
-                    else []
-                )
+                for delta_batch, accumulator in (
+                    (reasoning_delta, reasoning_chunks),
+                    (output_delta, output_chunks),
+                ):
+                    if not delta_batch:
+                        continue
+                    accumulator.extend(delta_batch)
 
-                # Send chunks
-                for content in chunks_to_send:
-                    await self._response_socket.send(
-                        StreamChunk(
-                            id=query.id,
-                            response_chunk=content,
-                            is_complete=False,
-                            metadata={
-                                "first_chunk": not first_chunk_sent,
-                                "final_chunk": False,
-                            },
-                        )
+                    # Determine which chunks to send: all or just first
+                    chunks_to_send = (
+                        delta_batch
+                        if self.http_config.stream_all_chunks
+                        else delta_batch[:1]
+                        if not first_chunk_sent
+                        else []
                     )
-                    first_chunk_sent = True
-                    if self.http_config.record_worker_events:
-                        EventRecorder.record_event(
-                            SampleEvent.ZMQ_RESPONSE_SENT,
-                            time.monotonic_ns(),
-                            sample_uuid=query.id,
-                            assert_active=True,
+
+                    # Send chunks
+                    for content in chunks_to_send:
+                        await self._response_socket.send(
+                            StreamChunk(
+                                id=query.id,
+                                response_chunk=content,
+                                is_complete=False,
+                                metadata={
+                                    "first_chunk": not first_chunk_sent,
+                                    "final_chunk": False,
+                                },
+                            )
                         )
+                        first_chunk_sent = True
+                        if self.http_config.record_worker_events:
+                            EventRecorder.record_event(
+                                SampleEvent.ZMQ_RESPONSE_SENT,
+                                time.monotonic_ns(),
+                                sample_uuid=query.id,
+                                assert_active=True,
+                            )
 
             # Send final complete response
-            response_output = []
-            if accumulated_content:
-                response_output.append(accumulated_content[0])
-                if len(accumulated_content) > 1:
-                    response_output.append("".join(accumulated_content[1:]))
+            if reasoning_chunks:
+                resp_reasoning = [reasoning_chunks[0]]
+                if len(reasoning_chunks) > 1:
+                    resp_reasoning.append("".join(reasoning_chunks[1:]))
+                response_output = {
+                    "output": "".join(output_chunks),
+                    "reasoning": resp_reasoning,
+                }
+            elif output_chunks:
+                resp_output = [output_chunks[0]]
+                if len(output_chunks) > 1:
+                    resp_output.append("".join(output_chunks[1:]))
+                response_output = {
+                    "output": resp_output,
+                }
+            else:
+                response_output = {"output": []}
 
             await self._response_socket.send(
                 QueryResult(
