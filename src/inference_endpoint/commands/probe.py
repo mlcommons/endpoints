@@ -202,8 +202,8 @@ async def run_probe_command(args: argparse.Namespace) -> None:
             # Show sample responses for sanity check
             if responses:
                 logger.info(f"✓ Sample responses ({len(responses)} collected):")
-                # Show first 10 responses
-                for query_id, response in responses[:10]:
+                # Show all responses - can be overwhelming, but useful for debugging
+                for query_id, response in responses:
                     # Truncate long responses
                     response_preview = (
                         response[:100] + "..." if len(response) > 100 else response
