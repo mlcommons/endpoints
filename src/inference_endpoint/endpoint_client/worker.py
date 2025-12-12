@@ -462,6 +462,9 @@ class Worker:
 
             # Send final complete response
             if reasoning_chunks:
+                # If there are reasoning chunks, then the first chunk received
+                # is the first reasoning chunk. The rest of the reasoning chunks,
+                # as well as the output chunks can be joined together.
                 resp_reasoning = [reasoning_chunks[0]]
                 if len(reasoning_chunks) > 1:
                     resp_reasoning.append("".join(reasoning_chunks[1:]))
@@ -470,6 +473,8 @@ class Worker:
                     "reasoning": resp_reasoning,
                 }
             elif output_chunks:
+                # If there are only output chunks, the first chunk is the used for
+                # TTFT calculations. The rest are joined together.
                 resp_output = [output_chunks[0]]
                 if len(output_chunks) > 1:
                     resp_output.append("".join(output_chunks[1:]))

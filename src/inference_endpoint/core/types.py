@@ -48,6 +48,10 @@ class QueryStatus(Enum):
     CANCELLED = "cancelled"
 
 
+_OUTPUT_DICT_TYPE = dict[str, str | list[str]]
+_OUTPUT_RESULT_TYPE = str | tuple[str, ...] | _OUTPUT_DICT_TYPE | None
+
+
 class Query(msgspec.Struct, kw_only=True):
     """Represents a single inference query to be sent to an endpoint.
 
@@ -105,10 +109,10 @@ class QueryResult(msgspec.Struct, tag="query_result", kw_only=True, frozen=True)
     """
 
     id: str = ""
-    response_output: str | tuple[str, ...] | None = None
+    response_output: _OUTPUT_RESULT_TYPE = None
     metadata: dict[str, Any] = msgspec.field(default_factory=dict)
     error: str | None = None
-    completed_at: float = msgspec.UNSET
+    completed_at: int = msgspec.UNSET
 
     def __post_init__(self):
         """Set completion timestamp automatically.
@@ -122,6 +126,9 @@ class QueryResult(msgspec.Struct, tag="query_result", kw_only=True, frozen=True)
         """
         # Disallow user setting completed_at time to prevent cheating.
         # Timestamp must be generated internally
+        # Note that this will also be regenerated during encode+decode. This is
+        # intentional, since timestamps in child and parent processes may be different
+        # due to how monotonic_ns works.
         msgspec.structs.force_setattr(self, "completed_at", time.monotonic_ns())
 
         # A list can be passed on, but we need to convert it to a tuple to maintain immutability,
