@@ -696,7 +696,9 @@ def _run_benchmark(
                     json.dump(results, f, indent=2)
                 logger.info(f"Saved: {results_path}")
             else:
-                logger.error("No report-dir specified; results.json not saved, but summary may be available in the default report directory.")
+                logger.error(
+                    "No report-dir specified; results.json not saved, but summary may be available in the default report directory."
+                )
         except Exception as e:
             logger.error(f"Save failed: {e}")
 
