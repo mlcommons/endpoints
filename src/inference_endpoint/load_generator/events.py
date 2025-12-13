@@ -33,3 +33,7 @@ class SampleEvent(Event):
     COMPLETE = "complete"
     FIRST_CHUNK = "first_chunk_received"
     NON_FIRST_CHUNK = "non_first_chunk_received"
+    HTTP_REQUEST_ISSUED = "http_request_issued"
+    HTTP_RESPONSE_COMPLETED = "http_response_completed"
+    ZMQ_REQUEST_RECEIVED = "zmq_request_received"
+    ZMQ_RESPONSE_SENT = "zmq_response_sent"

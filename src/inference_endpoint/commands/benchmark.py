@@ -32,6 +32,7 @@ from tqdm import tqdm
 from transformers import AutoTokenizer
 from transformers.utils import logging as transformers_logging
 
+from inference_endpoint.commands.utils import get_default_report_path
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import (
     BenchmarkConfig,
@@ -128,6 +129,8 @@ class ResponseCollector:
         self.count += 1
         if result.error:
             self.errors.append(f"Sample {result.id}: {result.error}")
+            if self.pbar:
+                self.pbar.set_postfix(refresh=True, errors=len(self.errors))
         elif self.collect_responses:
             self.responses[result.id] = result.response_output
 
@@ -264,7 +267,11 @@ def _build_config_from_cli(
                 load_pattern_type = LoadPatternType.CONCURRENCY
             case "online":
                 load_pattern_type = LoadPatternType.POISSON
-    report_dir = getattr(args, "report_dir", None)
+    report_dir = getattr(
+        args,
+        "report_dir",
+        get_default_report_path(),
+    )
     timeout = getattr(args, "timeout", None)
     verbose = getattr(args, "verbose", False)
     # Build BenchmarkConfig from CLI params
@@ -452,8 +459,11 @@ def _run_benchmark(
 
     if config.report_dir:
         report_dir = Path(config.report_dir)
-        report_dir.mkdir(parents=True, exist_ok=True)
-        config.to_yaml_file(report_dir / "config.yaml")
+    else:
+        report_dir = get_default_report_path()
+
+    report_dir.mkdir(parents=True, exist_ok=True)
+    config.to_yaml_file(report_dir / "config.yaml")
 
     max_tokens = config.model_params.max_new_tokens
 
@@ -579,6 +589,8 @@ def _run_benchmark(
             endpoint_url=urljoin(endpoint, "/v1/chat/completions"),
             num_workers=num_workers,
             max_concurrency=-1,  # unlimited
+            record_worker_events=config.settings.client.record_worker_events,
+            event_logs_dir=report_dir,
         )
         aiohttp_config = AioHttpConfig()
         zmq_config = ZMQConfig(
@@ -609,7 +621,7 @@ def _run_benchmark(
             scheduler,
             name=f"cli_benchmark_{uuid.uuid4().hex[0:8]}",
             stop_sample_issuer_on_test_end=False,
-            report_dir=config.report_dir,
+            report_dir=report_dir,
             tokenizer_override=tokenizer,
             max_shutdown_timeout_s=config.timeout if config.timeout else None,
         )

@@ -159,7 +159,12 @@ class BenchmarkSession:
                     # TODO: After Zhihan's MR is merged, grab the scheduler class and other LG init settings
                     # from the runtime settings object
                     with (Path(report_dir) / "runtime_settings.json").open("w") as f:
-                        f.write(orjson.dumps(rt_settings_data).decode("utf-8"))
+                        f.write(
+                            orjson.dumps(
+                                rt_settings_data,
+                                option=orjson.OPT_INDENT_2 | orjson.OPT_SORT_KEYS,
+                            ).decode("utf-8")
+                        )
 
                     if dump_events_csv:
                         reporter.dump_to_csv(Path(report_dir) / "events.csv")

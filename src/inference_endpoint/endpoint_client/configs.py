@@ -18,6 +18,7 @@
 import os
 import socket
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import aiohttp
@@ -35,6 +36,8 @@ class HTTPClientConfig:
     max_concurrency: int = (
         -1
     )  # -1: unlimited, else: limit concurrent requests via semaphore
+    record_worker_events: bool = False
+    event_logs_dir: Path | None = None
 
     # WARNING: Use with caution
     # Can cause large performance overhead on main-thread (user / Loadgen)
