@@ -137,6 +137,10 @@ class QueryResult(msgspec.Struct, tag="query_result", kw_only=True, frozen=True)
             msgspec.structs.force_setattr(
                 self, "response_output", tuple(self.response_output)
             )
+        elif isinstance(self.response_output, dict):
+            for k, v in self.response_output.items():
+                if isinstance(v, list):
+                    self.response_output[k] = tuple(v)
 
 
 class StreamChunk(msgspec.Struct, tag="stream_chunk", kw_only=True):
