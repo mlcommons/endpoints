@@ -75,6 +75,7 @@ class BenchmarkSession:
                 )
 
                 for _ in perf_test_generator:
+                    # Actual issue is done during next(generator). Nothing else to do here, just pass.
                     pass
 
                 EventRecorder.record_event(
@@ -84,6 +85,7 @@ class BenchmarkSession:
                 if accuracy_test_generators:
                     for _, generator in accuracy_test_generators.items():
                         for _ in generator:
+                            # Actual issue is done during next(generator). Nothing else to do here, just pass.
                             pass
 
                 self.event_recorder.should_check_idle = True
@@ -134,11 +136,17 @@ class BenchmarkSession:
                 report = reporter.create_report(tokenizer)
 
                 # Consolidate UUID->index mappings
+                perf_name = (
+                    perf_test_generator.name
+                    if perf_test_generator.name
+                    else "performance"
+                )
                 sample_idx_map = {
-                    "performance": perf_test_generator.uuid_to_index_map,
+                    perf_name: perf_test_generator.uuid_to_index_map,
                 }
                 if accuracy_test_generators:
-                    for name, generator in accuracy_test_generators.items():
+                    for default_name, generator in accuracy_test_generators.items():
+                        name = generator.name if generator.name else default_name
                         sample_idx_map[name] = generator.uuid_to_index_map
                 self.sample_uuid_map = sample_idx_map
 

@@ -523,6 +523,15 @@ class Report:
             fn("\n")
 
 
+def _output_sequence_to_str(output_sequence: str | list[str]) -> str | None:
+    if isinstance(output_sequence, list):
+        return "".join(output_sequence)
+    elif isinstance(output_sequence, str):
+        return output_sequence
+    else:
+        return None
+
+
 def output_sequence_from_data(
     data_bytes: bytes,
     join_chunks: bool = True,
@@ -553,12 +562,10 @@ def output_sequence_from_data(
         logging.warning("Failed to decode data bytes")
         return None, None
 
-    output_sequence = None
-    reasoning_sequence = None
-
+    output, reasoning = None, None
     if isinstance(decoded_data, str):
         # If decoded value is a string, it's the output sequence
-        output_sequence = decoded_data
+        output = decoded_data
     elif isinstance(decoded_data, dict):
         # If decoded value is a dict, extract 'output' and optionally 'reasoning'
         if "output" not in decoded_data:
@@ -566,38 +573,26 @@ def output_sequence_from_data(
             return None, None
 
         # Extract output - can be string or list of strings
-        output = decoded_data["output"]
-        if isinstance(output, list):
-            if join_chunks:
-                output_sequence = "".join(output)
-            else:
-                output_sequence = output
-        elif isinstance(output, str):
-            output_sequence = output
-        else:
+        output = (
+            _output_sequence_to_str(decoded_data["output"])
+            if join_chunks
+            else decoded_data["output"]
+        )
+        if output is None:
             logging.warning(f"Output field has unexpected type: {type(output)}")
             return None, None
 
         # Extract reasoning if present - can be string or list of strings
         if "reasoning" in decoded_data:
-            reasoning = decoded_data["reasoning"]
-            if isinstance(reasoning, list):
-                if join_chunks:
-                    reasoning_sequence = "".join(reasoning)
-                else:
-                    reasoning_sequence = reasoning
-            elif isinstance(reasoning, str):
-                reasoning_sequence = reasoning
-            else:
-                logging.warning(
-                    f"Reasoning field has unexpected type: {type(reasoning)}"
-                )
-                # Continue with output_sequence, reasoning is optional
+            reasoning = (
+                _output_sequence_to_str(decoded_data["reasoning"])
+                if join_chunks
+                else decoded_data["reasoning"]
+            )
     else:
         logging.warning(f"Decoded data has unexpected type: {type(decoded_data)}")
         return None, None
-
-    return output_sequence, reasoning_sequence
+    return output, reasoning
 
 
 class MetricsReporter:
@@ -664,7 +659,8 @@ class MetricsReporter:
         """Returns the timestamp_ns of the STOP_PERFORMANCE_TRACKING event.
 
         This method is cached to prevent re-derivation. If the event is not found,
-        returns positive infinity.
+        returns positive infinity, since this indicates that the performance run is probably still
+        running, or the test was killed before it could complete.
 
         Returns:
             float: The timestamp_ns of STOP_PERFORMANCE_TRACKING event, or float('inf') if not found.
@@ -677,6 +673,9 @@ class MetricsReporter:
         """).fetchone()
 
         if result is None:
+            logging.warning(
+                "No STOP_PERFORMANCE_TRACKING event found, performance run not yet complete"
+            )
             return float("inf")
         return float(result[0])
 

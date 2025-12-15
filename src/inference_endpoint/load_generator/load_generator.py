@@ -124,6 +124,7 @@ class LoadGenerator(ABC):
         self,
         sample_issuer: SampleIssuer,
         dataloader: DataLoader,
+        name: str | None = None,
     ):
         """Initialize load generator with required dependencies.
 
@@ -133,7 +134,7 @@ class LoadGenerator(ABC):
         """
         self.sample_issuer = sample_issuer
         self.dataloader = dataloader
-
+        self.name = name
         self.uuid_to_index_map = {}
 
     @abstractmethod
