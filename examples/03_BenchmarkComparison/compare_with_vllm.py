@@ -768,8 +768,9 @@ def main():
     args = parse_args()
 
     # Set logging level based on verbose flag
+    # Use ERROR level when not verbose to suppress INFO and WARNING messages
     if not args.verbose:
-        logging.getLogger().setLevel(logging.WARNING)
+        logging.getLogger().setLevel(logging.ERROR)
 
     if args.verbose:
         logger.info(f"Model: {args.model}")
