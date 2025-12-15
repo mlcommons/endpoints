@@ -236,7 +236,7 @@ class TestQueryResultSerialization:
         decoded = msgspec.msgpack.decode(encoded, type=QueryResult)
 
         assert isinstance(decoded.response_output, dict)
-        assert decoded.response_output["output"] == ["First chunk", "rest of output"]
+        assert decoded.response_output["output"] == ("First chunk", "rest of output")
         assert "reasoning" not in decoded.response_output
 
     def test_query_result_with_dict_response_output_and_reasoning(self):
@@ -254,10 +254,10 @@ class TestQueryResultSerialization:
 
         assert isinstance(decoded.response_output, dict)
         assert decoded.response_output["output"] == "Final output text"
-        assert decoded.response_output["reasoning"] == [
+        assert decoded.response_output["reasoning"] == (
             "First reasoning chunk",
             "rest of reasoning",
-        ]
+        )
 
     def test_query_result_with_dict_response_empty_output(self):
         """Test QueryResult with dict response output (empty output)."""
@@ -267,7 +267,7 @@ class TestQueryResultSerialization:
         decoded = msgspec.msgpack.decode(encoded, type=QueryResult)
 
         assert isinstance(decoded.response_output, dict)
-        assert decoded.response_output["output"] == []
+        assert decoded.response_output["output"] == ()
 
     def test_query_result_with_metadata(self):
         """Test QueryResult with comprehensive metadata."""
@@ -573,10 +573,10 @@ class TestQueryResultWorkerPatterns:
         decoded = msgspec.msgpack.decode(encoded, type=QueryResult)
 
         assert decoded.response_output["output"] == "The answer is 42"
-        assert decoded.response_output["reasoning"] == [
+        assert decoded.response_output["reasoning"] == (
             "Let me think...",
             " step by step to solve this",
-        ]
+        )
         assert len(decoded.response_output["reasoning"]) == 2
 
     def test_query_result_output_only_pattern(self):
@@ -602,7 +602,7 @@ class TestQueryResultWorkerPatterns:
         encoded = msgspec.msgpack.encode(result)
         decoded = msgspec.msgpack.decode(encoded, type=QueryResult)
 
-        assert decoded.response_output["output"] == ["Hello", " world!"]
+        assert decoded.response_output["output"] == ("Hello", " world!")
         assert len(decoded.response_output["output"]) == 2
         assert "reasoning" not in decoded.response_output
 
@@ -620,7 +620,7 @@ class TestQueryResultWorkerPatterns:
         encoded = msgspec.msgpack.encode(result)
         decoded = msgspec.msgpack.decode(encoded, type=QueryResult)
 
-        assert decoded.response_output["output"] == []
+        assert decoded.response_output["output"] == ()
         assert "reasoning" not in decoded.response_output
 
     def test_query_result_single_reasoning_chunk(self):
@@ -643,7 +643,7 @@ class TestQueryResultWorkerPatterns:
         encoded = msgspec.msgpack.encode(result)
         decoded = msgspec.msgpack.decode(encoded, type=QueryResult)
 
-        assert decoded.response_output["reasoning"] == ["Quick thought"]
+        assert decoded.response_output["reasoning"] == ("Quick thought",)
         assert len(decoded.response_output["reasoning"]) == 1
 
     def test_query_result_single_output_chunk(self):
@@ -662,7 +662,7 @@ class TestQueryResultWorkerPatterns:
         encoded = msgspec.msgpack.encode(result)
         decoded = msgspec.msgpack.decode(encoded, type=QueryResult)
 
-        assert decoded.response_output["output"] == ["SingleResponse"]
+        assert decoded.response_output["output"] == ("SingleResponse",)
         assert len(decoded.response_output["output"]) == 1
 
 
@@ -748,8 +748,8 @@ class TestMixedTypeSerialization:
         assert decoded.metadata["model_info"]["parameters"]["temperature"] == 0.7
         assert decoded.metadata["usage"]["breakdown"] == [5, 5, 10, 10]
         assert "production" in decoded.metadata["tags"]
-        assert decoded.response_output["output"] == ["First chunk", "remaining output"]
-        assert decoded.response_output["reasoning"] == ["Reasoning process"]
+        assert decoded.response_output["output"] == ("First chunk", "remaining output")
+        assert decoded.response_output["reasoning"] == ("Reasoning process",)
 
     def test_query_with_none_values_in_data(self):
         """Test Query with None values in data dict."""
