@@ -4,10 +4,17 @@ Compare `inference-endpoint` with vLLM's benchmarking tool using identical promp
 
 ## Prerequisites
 
-**Install vLLM**:
+**Setup vLLM virtualenv** (isolates vLLM dependencies from inference-endpoint):
 
 ```bash
-pip install vllm
+cd examples/03_BenchmarkComparison
+./setup_vllm_venv.sh
+```
+
+This creates a `vllm_venv` directory with vLLM installed. You can specify a custom location:
+
+```bash
+./setup_vllm_venv.sh /path/to/custom/venv
 ```
 
 **Running inference server** (OpenAI-compatible):
@@ -35,6 +42,7 @@ python compare_with_vllm.py --model "Qwen/Qwen2.5-0.5B-Instruct" --endpoint http
 | `--workers`           | Number of workers                | 1                       |
 | `--verbose`, `-v`     | Show full output from each run   | -                       |
 | `--dry`               | Print commands without executing | -                       |
+| `--vllm-venv-dir`     | Path to vLLM virtualenv          | `./vllm_venv`           |
 
 ### Example
 

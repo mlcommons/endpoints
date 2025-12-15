@@ -59,12 +59,35 @@ DEFAULT_ENDPOINT = "http://localhost:8000"
 DEFAULT_NUM_PROMPTS = 100
 DEFAULT_MAX_OUTPUT_TOKENS = 2000
 DEFAULT_WARMUP_TIMEOUT = 300
+SCRIPT_DIR = Path(__file__).parent.resolve()
+DEFAULT_VLLM_VENV_DIR = SCRIPT_DIR / "vllm_venv"
 
 # Configure logging
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+
+def get_vllm_executable(venv_dir: Path) -> Path:
+    """Get the vllm executable path from the virtualenv.
+
+    Args:
+        venv_dir: Path to the vLLM virtualenv directory
+
+    Returns:
+        Path to the vllm executable
+
+    Raises:
+        FileNotFoundError: If the venv or vllm executable doesn't exist
+    """
+    vllm_bin = venv_dir / "bin" / "vllm"
+    if not vllm_bin.exists():
+        raise FileNotFoundError(
+            f"vLLM executable not found at {vllm_bin}. "
+            f"Please run setup_vllm_venv.sh to create the vLLM virtualenv."
+        )
+    return vllm_bin
 
 
 @contextmanager
@@ -222,6 +245,12 @@ def parse_args() -> argparse.Namespace:
         "-v",
         action="store_true",
         help="Show detailed output from benchmark commands (default: only show final results)",
+    )
+    parser.add_argument(
+        "--vllm-venv-dir",
+        type=Path,
+        default=DEFAULT_VLLM_VENV_DIR,
+        help=f"Path to vLLM virtualenv directory (default: {DEFAULT_VLLM_VENV_DIR})",
     )
     return parser.parse_args()
 
@@ -411,6 +440,7 @@ def run_vllm_benchmark(
     num_requests: int,
     max_output_tokens: int,
     temp_dir: Path,
+    venv_dir: Path,
     dry_run: bool = False,
     verbose: bool = False,
 ) -> dict[str, Any]:
@@ -423,6 +453,7 @@ def run_vllm_benchmark(
         num_requests: Number of requests to send
         max_output_tokens: Maximum output tokens per request
         temp_dir: Temporary directory to save detailed results
+        venv_dir: Path to the vLLM virtualenv directory
         dry_run: If True, print command without executing it
         verbose: If True, print command output to stdout
 
@@ -432,13 +463,16 @@ def run_vllm_benchmark(
     if verbose:
         logger.info("Running vLLM benchmark...")
 
+    # Get vllm executable from the virtualenv
+    vllm_bin = get_vllm_executable(venv_dir)
+
     # Generate result filename with timestamp
     timestamp = time.strftime("%Y%m%d-%H%M%S")
     result_filename = f"vllm_benchmark_{timestamp}.json"
     result_path = temp_dir / result_filename
 
     cmd = [
-        "vllm",
+        str(vllm_bin),
         "bench",
         "serve",
         "--backend",
@@ -777,6 +811,7 @@ def main():
         logger.info(f"Endpoint: {args.endpoint}")
         logger.info(f"Number of prompts: {args.num_prompts}")
         logger.info(f"Max output tokens: {args.max_output_tokens}")
+        logger.info(f"vLLM venv: {args.vllm_venv_dir}")
     if args.dry:
         print("DRY RUN MODE: Commands will be printed but not executed")
 
@@ -802,6 +837,7 @@ def main():
             args.num_prompts,
             args.max_output_tokens,
             temp_dir,
+            args.vllm_venv_dir,
             dry_run=args.dry,
             verbose=args.verbose,
         )
