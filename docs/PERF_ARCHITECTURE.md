@@ -1,6 +1,6 @@
 # Benchmark Hot-Path
 
-This document describes the performance-critical data flow during benchmark execution. The architecture uses three concurrent execution contexts that work together to achieve precise timing control while maximizing throughput.
+This document describes the performance-critical data flow during benchmark execution.
 
 ---
 
@@ -16,16 +16,16 @@ This document describes the performance-critical data flow during benchmark exec
    ────────────────          ────────────────               ─────────────────────────────
 
    ┌─────────────┐           ┌─────────────────┐            │              ┌───────────────────────────┐         │           ┌──────────────────┐
-   │   LOOP 1    │           │     LOOP 2      │            │            ┌─┤         LOOP 3            │         │           │                  │
-   │  Metronome  │           │   Dispatcher    │            │          ┌─┤ │         Engine            │TCP/HTTP │           │  ENDPOINT / SUT  │
-   │ (LoadGen)   │──────────▶│ (SampleIssuer)  │────────────┼─────────▶│ │ │    (HTTP Executor)        │─────────┼──────────▶│ (vLLM / TGI etc) │
+   │   LoadGen   │           │  SampleIssuer   │            │            ┌─┤      HTTP Executor        │         │           │                  │
+   │ (Metronome) │           │  (Dispatcher)   │            │          ┌─┤ │        (Engine)           │TCP/HTTP │           │  ENDPOINT / SUT  │
+   │             │──────────▶│                 │────────────┼─────────▶│ │ │                           │─────────┼──────────▶│ (vLLM / TGI etc) │
    └──────┬──────┘  issue()  └────────┬────────┘  IPC(reqs) │          │ └─┴───────────────────────────┘         │           └──────────────────┘
           │                           │                     │          └────────────────────────────┘            │
      (t0: Start)                      │◀────────────────────┼────────────────────────────┘                       │
                                       │           IPC(resps)│                                                    │
                               ┌───────▼────────┐            │                                                    │
-                              │ Sample Handler │            │                                                    │
-                              │   (Metrics)    │            │                                                    │
+                              │    Metrics     │            │                                                    │
+                              │(Sample Handler)│            │                                                    │
                               └───────┬────────┘            │                                                    │
                                   (t1: Stop)                │                                                    │
 ```
@@ -40,13 +40,13 @@ SESSION THREAD (MAIN-PROC)
 │  1. Scheduler yields (sample, delay)
 │  2. Busy-wait until target time
 │  3. Record Start Time (t0)
-│  4. Issue query (handoff to Loop 2) ─────┐
-│  5. Continue to next sample              │
-│                                          │
-                                           │
-EVENT LOOP THREAD (MAIN-PROC)              │
-│                                          │
-│  6. Dispatch to Worker X (Round-robin) ◄─┘
+│  4. Issue query (to EVENT LOOP THREAD) ────────┐
+│  5. Continue to next sample                    │
+│                                                │
+                                                 │
+EVENT LOOP THREAD (MAIN-PROC)                    │
+│                                                │
+│  6. Dispatch Query to WORKER X (round-robin) ◄─┘
 │  7. Push to ZMQ Queue ──────────────────────────┐
 │                                                 │
 │  11. Receive response from ZMQ ◄────────────────┼────────────────────────┐
@@ -56,8 +56,8 @@ EVENT LOOP THREAD (MAIN-PROC)              │
                                                   │                        │
 WORKER PROCESS X (SCALE-OUT)                      │                        │           ENDPOINT
 │                                                 │                        │              │
-│  8. Pull query from IPC ◄───────────────────────┘                        │              │
-│  9. HTTP POST ───────────────────────────────────────────────────────────┼─────────────►│
+│  8. Recv. Requests to Run ◄─────────────────────┘                        │              │
+│  9. HTTP POST Request ───────────────────────────────────────────────────┼─────────────►│
 │                                                                          │              │
 │  10. Push response to IPC ───────────────────────────────────────────────┘              │
 │
