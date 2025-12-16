@@ -160,7 +160,6 @@ class OpenAIMsgspecAdapter(HttpRequestAdapter):
                 ChatMessage(
                     role="system",
                     content=query.data["system"],
-                    name=query.data.get("name"),
                 ),
             )
 

@@ -40,5 +40,5 @@ metrics:
     - "tpot"
 
 endpoint_config:
-  endpoint: "http://127.0.0.1:8001"
+  endpoint: "http://localhost:8000"
   api_key: null
