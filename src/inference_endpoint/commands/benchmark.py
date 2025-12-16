@@ -624,7 +624,6 @@ def _run_benchmark(
             sample_issuer,
             scheduler,
             name=f"cli_benchmark_{uuid.uuid4().hex[0:8]}",
-            stop_sample_issuer_on_test_end=False,
             report_dir=report_dir,
             tokenizer_override=tokenizer,
             max_shutdown_timeout_s=config.timeout if config.timeout else None,

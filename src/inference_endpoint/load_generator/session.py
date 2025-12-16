@@ -61,7 +61,6 @@ class BenchmarkSession:
     def _run_test(
         self,
         load_generator: LoadGenerator,
-        stop_sample_issuer_on_test_end: bool = True,
         max_shutdown_timeout_s: float = 300.0,
         report_dir: os.PathLike | None = None,
         tokenizer_override: AutoTokenizer | None = None,
@@ -98,8 +97,6 @@ class BenchmarkSession:
                 logger.error(f"Error running benchmark session: {e}")
                 raise e
             finally:
-                if stop_sample_issuer_on_test_end:
-                    load_generator.sample_issuer.shutdown()
                 EventRecorder.record_event(SessionEvent.TEST_ENDED, time.monotonic_ns())
 
             self.event_recorder.wait_for_writes()
@@ -191,7 +188,6 @@ class BenchmarkSession:
         *args,
         load_generator_cls: type[LoadGenerator] = SchedulerBasedLoadGenerator,
         name: str | None = None,
-        stop_sample_issuer_on_test_end: bool = True,
         max_shutdown_timeout_s: float = 300.0,
         report_dir: os.PathLike | None = None,
         tokenizer_override: AutoTokenizer | None = None,
@@ -205,7 +201,6 @@ class BenchmarkSession:
             sample_issuer: The sample issuer to use for the session.
             load_generator_cls: The load generator class to use for the session.
             name: The name of the session.
-            stop_sample_issuer_on_test_end: Whether to stop the sample issuer on test end.
             max_shutdown_timeout_s: The maximum timeout to wait for the test to complete after all samples have been issued.
                                     If None, wait indefinitely. (Default: 300.0 seconds)
             report_dir: The path to save the report to. If None, no report will be saved.
@@ -223,7 +218,6 @@ class BenchmarkSession:
             target=session._run_test,
             args=(
                 load_generator,
-                stop_sample_issuer_on_test_end,
                 max_shutdown_timeout_s,
                 report_dir,
                 tokenizer_override,

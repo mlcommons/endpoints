@@ -97,7 +97,6 @@ async def run_benchmark(server_url, dataloader, tmp_path, rt_settings):
             sample_issuer,
             scheduler,
             name="pytest_run_benchmark",
-            stop_sample_issuer_on_test_end=False,
             max_shutdown_timeout_s=3 * 60,
         )
 
