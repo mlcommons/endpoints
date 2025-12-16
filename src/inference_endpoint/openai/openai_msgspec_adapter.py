@@ -43,20 +43,52 @@ class ChatMessage(msgspec.Struct, kw_only=True, omit_defaults=True):
 class ChatCompletionRequest(msgspec.Struct, kw_only=True, omit_defaults=True):
     """OpenAI chat completion request."""
 
+    # Required fields
     model: str
-    messages: list[ChatMessage]
+
+    # Input: Messages/Prompt
+    messages: list[ChatMessage] | None = None
+    prompt: str | None = None
+
+    # Sampling/Decoding params
     temperature: float | None = None
-    max_completion_tokens: int | None = None
-    stream: bool | None = None
-    top_p: float | None = None
-    top_k: int | None = None
+    top_p: float | None = 1.0
+    top_k: int | None = 0
+    min_p: float | None = 0.0
+    seed: int | None = None
+
+    # Penalties
     repetition_penalty: float | None = None
-    n: int | None = None
-    stop: str | list[str] | None = None
-    presence_penalty: float | None = None
-    frequency_penalty: float | None = None
+    presence_penalty: float | None = 0.0
+    frequency_penalty: float | None = 0.0
+
+    # Generation and output controls
+    n: int | None = 1
+    stop: list[str] | None = []
+    stop_token_ids: list[int] | None = []
+
+    max_tokens: int | None = None
+    max_completion_tokens: int | None = None
+
+    truncate_prompt_tokens: int | None = None
+
+    # Output formatting and advanced controls
+    skip_special_tokens: bool | None = True
+    spaces_between_special_tokens: bool | None = True
     logit_bias: dict[str, float] | None = None
+    logprobs: int | None = 0
+
+    # User/contextual information
     user: str | None = None
+
+    # Streaming
+    stream: bool | None = None
+    stream_options: dict[str, str] | None = None
+    """
+    SamplingParams(n=1, presence_penalty=0.0, frequency_penalty=0.0, repetition_penalty=1.0, temperature=0.0,
+    top_p=1.0, top_k=0, min_p=0.0, seed=None, stop=[], stop_token_ids=[], bad_words=[],
+    include_stop_str_in_output=False, ignore_eos=False, max_tokens=2000, min_tokens=0, logprobs=None, prompt_logprobs=None, skip_special_tokens=True, spaces_between_special_tokens=True, truncate_prompt_tokens=None, structured_outputs=None, extra_args=None), lora_request: None.
+    """
 
 
 class ChatCompletionResponseMessage(msgspec.Struct, kw_only=True, omit_defaults=True):
@@ -72,6 +104,7 @@ class ChatCompletionChoice(msgspec.Struct, kw_only=True, omit_defaults=True):
 
     index: int
     message: ChatCompletionResponseMessage
+    text: str | None = None
     finish_reason: str | None
 
 
@@ -127,11 +160,13 @@ class OpenAIMsgspecAdapter(HttpRequestAdapter):
     def decode_sse_message(cls, json_bytes: bytes) -> str:
         """Decode SSE message and extract content string."""
         msg = cls._sse_decoder.decode(json_bytes)
-        return (
-            msg.choices[0].delta.content
-            if msg.choices[0].delta.content
-            else msg.choices[0].delta.reasoning_content
-        )
+        # logger.info(f"SSE message: \n{json_bytes}\n decoded to \n{msg}\n")
+        return msg.choices[0].text
+        # return (
+        #     msg.choices[0].delta.content
+        #     if msg.choices[0].delta.content and len(msg.choices[0].delta.content) > 0
+        #     else msg.choices[0].delta.reasoning_content
+        # )
 
     # ========================================================================
     # Internal APIs
@@ -153,25 +188,32 @@ class OpenAIMsgspecAdapter(HttpRequestAdapter):
 
         return ChatCompletionRequest(
             model=query.data.get("model", "no-model-name"),
-            messages=[
-                ChatMessage(
-                    role="user",
-                    content=query.data["prompt"],
-                    name=query.data.get("name"),
-                ),
-            ],
+            # messages=[
+            #     ChatMessage(
+            #         role="user",
+            #         content=query.data["prompt"],
+            #         name=query.data.get("name"),
+            #     ),
+            # ],
+            temperature=query.data.get("temperature", None),
+            repetition_penalty=query.data.get("repetition_penalty", None),
+            stream_options={"include_usage": True},
+            # log_probs=query.data.get("log_probs", None),
+            prompt=query.data["prompt"],
             stream=query.data.get("stream"),
-            max_completion_tokens=query.data.get("max_completion_tokens"),
-            temperature=query.data.get("temperature"),
-            top_p=query.data.get("top_p"),
-            top_k=query.data.get("top_k"),
-            repetition_penalty=query.data.get("repetition_penalty"),
-            n=query.data.get("n"),
-            presence_penalty=query.data.get("presence_penalty"),
-            frequency_penalty=query.data.get("frequency_penalty"),
-            stop=query.data.get("stop"),
-            logit_bias=query.data.get("logit_bias"),
-            user=query.data.get("user"),
+            max_tokens=query.data.get("max_completion_tokens", None),
+            logprobs=query.data.get("logprobs", None),
+            # max_completion_tokens=query.data.get("max_completion_tokens", 2000),
+            # temperature=query.data.get("temperature"),
+            # top_p=query.data.get("top_p"),
+            # top_k=query.data.get("top_k"),
+            # repetition_penalty=query.data.get("repetition_penalty"),
+            # n=query.data.get("n"),
+            # presence_penalty=query.data.get("presence_penalty"),
+            # frequency_penalty=query.data.get("frequency_penalty"),
+            # stop=query.data.get("stop"),
+            # logit_bias=query.data.get("logit_bias"),
+            # user=query.data.get("user"),
         )
 
     @classmethod

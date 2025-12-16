@@ -468,8 +468,6 @@ def _run_benchmark(
     report_dir.mkdir(parents=True, exist_ok=True)
     config.to_yaml_file(report_dir / "config.yaml")
 
-    max_tokens = config.model_params.max_new_tokens
-
     if model_name:
         try:
             logger.info(f"Loading tokenizer for model: {model_name}")
@@ -523,7 +521,7 @@ def _run_benchmark(
             metadata={
                 "model": model_name,
                 "stream": enable_streaming,
-                "max_completion_tokens": max_tokens,
+                "max_completion_tokens": config.model_params.max_new_tokens,
                 "temperature": config.model_params.temperature,
                 "top_p": config.model_params.top_p,
                 "top_k": config.model_params.top_k,
@@ -589,7 +587,7 @@ def _run_benchmark(
 
     try:
         http_config = HTTPClientConfig(
-            endpoint_url=urljoin(endpoint, "/v1/chat/completions"),
+            endpoint_url=urljoin(endpoint, "/v1/completions"),
             num_workers=num_workers,
             max_concurrency=-1,  # unlimited
             record_worker_events=config.settings.client.record_worker_events,

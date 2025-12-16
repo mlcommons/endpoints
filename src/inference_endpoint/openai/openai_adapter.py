@@ -19,6 +19,7 @@ import msgspec
 import orjson
 from inference_endpoint.core.types import Query, QueryResult
 from inference_endpoint.endpoint_client.adapter_protocol import HttpRequestAdapter
+from inference_endpoint.main import logger
 
 from .openai_types_gen import (
     ChatCompletionResponseMessage,
@@ -48,6 +49,7 @@ class SSEChoice(msgspec.Struct):
     """SSE choice object containing delta."""
 
     delta: SSEDelta = msgspec.field(default_factory=SSEDelta)
+    text: str | None = None
     finish_reason: str | None = None
 
 
@@ -91,7 +93,7 @@ class OpenAIAdapter(HttpRequestAdapter):
         """Convert a Query to an OpenAI request."""
         if "prompt" not in query.data:
             raise ValueError("prompt not found in json_value")
-
+        logger.info(f"Converting query to OpenAI request: \n{query}\n")
         request = CreateChatCompletionRequest(
             model=ModelIdsShared(query.data.get("model", "no-model-name")),
             reasoning_effort=ReasoningEffort.medium,
@@ -104,7 +106,8 @@ class OpenAIAdapter(HttpRequestAdapter):
                 # },
             ],
             stream=query.data.get("stream", False),
-            max_completion_tokens=query.data.get("max_completion_tokens", 100),
+            # max_completion_tokens=query.data.get("max_completion_tokens", 100),
+            max_tokens=query.data.get("max_tokens", 2000),
             temperature=query.data.get("temperature", 0.7),
         )
         return request

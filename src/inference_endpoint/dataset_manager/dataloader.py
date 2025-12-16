@@ -184,6 +184,7 @@ class PickleReader(DataLoader):
             return
         with open(self.file_path, "rb") as file:
             self.data = pickle.load(file)
+            # self.data = self.data[:2]
             self.logger.debug(
                 f"Loading data from {self.file_path} with columns: {self.data.columns}"
             )
