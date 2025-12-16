@@ -690,12 +690,12 @@ class MetricsReporter:
 
         # Build the HAVING clause conditionally to handle infinity
         if stop_ts != float("inf"):
-            having_clause = f"""
+            before_stop_ts_clause = f"""
             HAVING COUNT(DISTINCT event_type) = 2
                 AND MAX(CASE WHEN event_type = '{SessionEvent.LOADGEN_ISSUE_CALLED.value}' THEN timestamp_ns END) < {stop_ts}
             """
         else:
-            having_clause = """
+            before_stop_ts_clause = """
             HAVING COUNT(DISTINCT event_type) = 2
             """
 
@@ -708,7 +708,7 @@ class MetricsReporter:
             FROM events
             WHERE event_type IN ('{SessionEvent.LOADGEN_ISSUE_CALLED.value}', '{SampleEvent.FIRST_CHUNK.value}')
             GROUP BY sample_uuid
-            {having_clause}
+            {before_stop_ts_clause}
             """,
             "ttft",
         )
@@ -795,12 +795,12 @@ class MetricsReporter:
 
         # HAVING clause is different if there is a STOP_PERFORMANCE_TRACKING event
         if stop_ts != float("inf"):
-            having_clause = f"""
+            before_stop_ts_clause = f"""
             HAVING COUNT(DISTINCT event_type) = 2
                 AND MAX(CASE WHEN event_type = '{SessionEvent.LOADGEN_ISSUE_CALLED.value}' THEN timestamp_ns END) < {stop_ts}
             """
         else:
-            having_clause = """
+            before_stop_ts_clause = """
             HAVING COUNT(DISTINCT event_type) = 2
             """
 
@@ -813,7 +813,7 @@ class MetricsReporter:
             FROM events
             WHERE event_type IN ('{SessionEvent.LOADGEN_ISSUE_CALLED.value}', '{SampleEvent.COMPLETE.value}')
             GROUP BY sample_uuid
-            {having_clause}
+            {before_stop_ts_clause}
             """,
             "sample_latency",
         )
@@ -876,7 +876,7 @@ class MetricsReporter:
 
         # Build WHERE clause to filter samples issued before STOP_PERFORMANCE_TRACKING
         if performance_only and stop_ts != float("inf"):
-            where_clause = f"""
+            before_stop_ts_clause = f"""
             AND sample_uuid IN (
                 SELECT sample_uuid FROM events
                 WHERE event_type = '{SessionEvent.LOADGEN_ISSUE_CALLED.value}'
@@ -884,14 +884,14 @@ class MetricsReporter:
             )
             """
         else:
-            where_clause = ""
+            before_stop_ts_clause = ""
 
         # Query for COMPLETE events with their data column
         query_result = self.cur_.execute(f"""
             SELECT sample_uuid, data
             FROM events
             WHERE event_type = '{SampleEvent.COMPLETE.value}'
-            {where_clause}
+            {before_stop_ts_clause}
         """).fetchall()
 
         return query_result
