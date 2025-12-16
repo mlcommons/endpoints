@@ -20,7 +20,8 @@ This creates a `vllm_venv` directory with vLLM installed. You can specify a cust
 **Running inference server** (OpenAI-compatible):
 
 ```bash
-vllm serve Qwen/Qwen2.5-0.5B-Instruct --port 8000
+/path/to/custom/venv/bin/vllm serve Qwen/Qwen2.5-0.5B-Instruct --port 8000
+# default: examples/03_BenchmarkComparison/vllm_venv
 ```
 
 ## Usage
