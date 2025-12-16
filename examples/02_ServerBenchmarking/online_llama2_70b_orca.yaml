@@ -4,7 +4,7 @@ version: "1.0"
 type: "online"
 
 model_params:
-  name: "/model/Llama-2-70b-chat-hf-gptq-w4g-1kv"
+  name: "meta-llama/Llama-2-70b-chat-hf"
   temperature: 0
   top_p: 1
   max_new_tokens: 1024
@@ -12,8 +12,8 @@ model_params:
 datasets:
   - name: "perf-test"
     type: "performance"
-    path: "/data/dataset/open_orca/open_orca_gpt4_tokenized_llama.calibration_1000.pkl"
-    samples: 1000
+    path: "open_orca_gpt4_tokenized_llama.sampled_24576.pkl"
+    samples: 24576
     parser:
       prompt: "question"
       system: "system_prompt"
@@ -26,8 +26,8 @@ settings:
     dataloader_random_seed: 42 # For dataset shuffling
 
   load_pattern:
-    type: "concurrency"
-    target_concurrency: 1024
+    type: "max_throughput"
+    target_qps: 10
 
   client:
     workers: 4
