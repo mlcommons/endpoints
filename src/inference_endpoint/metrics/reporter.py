@@ -556,6 +556,12 @@ class MetricsReporter:
             self.conn = duckdb.connect()
 
             logging.debug("Installing sqlite extension for duckdb")
+            # duckdb doesn't inherit proxy variables from environment
+            # Try setting proxy explicitly if environment variables are not enough
+            proxy = os.environ.get("http_proxy") or os.environ.get("HTTP_PROXY")
+            if proxy:
+                logging.debug(f"Setting http_proxy to {proxy} for duckdb")
+                self.conn.execute(f"SET http_proxy='{proxy}'")
             self.conn.install_extension("sqlite")
             self.conn.load_extension("sqlite")
 

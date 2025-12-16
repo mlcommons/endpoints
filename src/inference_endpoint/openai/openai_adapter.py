@@ -30,6 +30,7 @@ from .openai_types_gen import (
     ModelIdsShared,
     Object7,
     ReasoningEffort,
+    Role3,
     Role5,
     Role6,
     ServiceTier,
@@ -87,17 +88,16 @@ class OpenAIAdapter(HttpRequestAdapter):
         if "prompt" not in query.data:
             raise ValueError("prompt not found in json_value")
 
+        messages = [{"role": Role5.user.value, "content": query.data["prompt"]}]
+        if "system" in query.data:
+            messages.insert(
+                0, {"role": Role3.system.value, "content": query.data["system"]}
+            )
+
         request = CreateChatCompletionRequest(
             model=ModelIdsShared(query.data.get("model", "no-model-name")),
             reasoning_effort=ReasoningEffort.medium,
-            messages=[
-                {"role": Role5.user.value, "content": query.data["prompt"]},
-                # TODO remove this once we have a way to handle the assistant message
-                # {
-                #     "role": Role.assistant.value,
-                #     "content": "You are a helpful assistant.",
-                # },
-            ],
+            messages=messages,
             stream=query.data.get("stream", False),
             max_completion_tokens=query.data.get("max_completion_tokens", 100),
             temperature=query.data.get("temperature", 0.7),

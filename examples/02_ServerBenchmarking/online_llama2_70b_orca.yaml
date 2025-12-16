@@ -1,0 +1,44 @@
+# Online Latency Benchmark
+name: "online-llama2-70b-cnn-benchmark"
+version: "1.0"
+type: "online"
+
+model_params:
+  name: "/model/Llama-2-70b-chat-hf-gptq-w4g-1kv"
+  temperature: 0
+  top_p: 1
+  max_new_tokens: 1024
+
+datasets:
+  - name: "perf-test"
+    type: "performance"
+    path: "/data/dataset/open_orca/open_orca_gpt4_tokenized_llama.calibration_1000.pkl"
+    samples: 1000
+    parser:
+      prompt: "question"
+      system: "system_prompt"
+
+settings:
+  runtime:
+    min_duration_ms: 60000 # 1 minute
+    max_duration_ms: 600000 # 10 minutes
+    scheduler_random_seed: 42 # For Poisson/distribution sampling
+    dataloader_random_seed: 42 # For dataset shuffling
+
+  load_pattern:
+    type: "concurrency"
+    target_concurrency: 1024
+
+  client:
+    workers: 4
+
+metrics:
+  collect:
+    - "throughput"
+    - "latency"
+    - "ttft"
+    - "tpot"
+
+endpoint_config:
+  endpoint: "http://127.0.0.1:8001"
+  api_key: null
