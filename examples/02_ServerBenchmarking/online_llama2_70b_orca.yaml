@@ -1,5 +1,5 @@
 # Online Latency Benchmark
-name: "online-llama2-70b-cnn-benchmark"
+name: "online-llama2-70b-orca-benchmark"
 version: "1.0"
 type: "online"
 
