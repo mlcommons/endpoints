@@ -33,3 +33,6 @@ colorama==0.4.6
 # We don't necessarily need to install torch, but if needed, uncomment this:
 # --extra-index-url https://download.pytorch.org/whl/cpu
 # torch==2.9.0+cpu
+
+# Fix pytz-2024 import warning
+pytz==2025.2
