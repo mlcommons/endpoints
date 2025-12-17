@@ -25,6 +25,7 @@ from .dataloader import (
     DataLoader,
     HFDataLoader,
     JsonlReader,
+    ParquetReader,
     PickleReader,
 )
 
@@ -35,8 +36,9 @@ class DataLoaderFactory:
     """Factory for creating dataset loaders based on format.
 
     Supports:
-    - pkl: Pickle format (DeepSeekR1ChatCompletionDataLoader)
-    - jsonl: JSON Lines format (TODO)
+    - pkl: Pickle format (PickleReader)
+    - parquet: Parquet format (ParquetReader)
+    - jsonl: JSON Lines format (JsonlReader)
     - hf: HuggingFace datasets (HFDataLoader)
     """
 
@@ -74,6 +76,10 @@ class DataLoaderFactory:
         if format == "pkl" or format == "pickle":
             logger.info(f"Creating pickle dataset loader for {dataset_path}")
             return PickleReader(dataset_path, parser=parser)
+
+        elif format == "parquet" or format == "pq":
+            logger.info(f"Creating parquet dataset loader for {dataset_path}")
+            return ParquetReader(dataset_path, parser=parser)
 
         elif format == "jsonl" or format == "json":
             # JSON Lines format
@@ -120,6 +126,8 @@ class DataLoaderFactory:
         suffix = path.suffix.lower()
         if suffix == ".pkl" or suffix == ".pickle":
             return "pkl"
+        elif suffix == ".parquet" or suffix == ".pq":
+            return "parquet"
         elif suffix == ".jsonl" or suffix == ".json":
             return "jsonl"
         else:

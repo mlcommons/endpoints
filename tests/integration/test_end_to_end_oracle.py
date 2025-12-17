@@ -22,9 +22,7 @@ from inference_endpoint import metrics
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import LoadPattern, LoadPatternType
 from inference_endpoint.core.types import QueryResult
-from inference_endpoint.dataset_manager.dataloader import (
-    DeepSeekR1ChatCompletionDataLoader,
-)
+from inference_endpoint.dataset_manager import PickleReader
 from inference_endpoint.endpoint_client.configs import (
     AioHttpConfig,
     HTTPClientConfig,
@@ -128,7 +126,7 @@ async def _run_load_generator_full_run_url(
         }
         return res
 
-    dummy_dataloader = DeepSeekR1ChatCompletionDataLoader(dataset_path, parser)
+    dummy_dataloader = PickleReader(dataset_path, parser)
     dummy_dataloader.load()
     assert dummy_dataloader.num_samples() > 0
 
@@ -192,9 +190,7 @@ async def test_load_generator_full_run_mock_http_oracle_server(
         }
         return res
 
-    dummy_dataloader = DeepSeekR1ChatCompletionDataLoader(
-        ds_pickle_dataset_path, parser
-    )
+    dummy_dataloader = PickleReader(ds_pickle_dataset_path, parser)
     dummy_dataloader.load()
     assert dummy_dataloader.num_samples() > 0
 

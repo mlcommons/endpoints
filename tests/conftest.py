@@ -35,7 +35,6 @@ from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import LoadPattern, LoadPatternType
 from inference_endpoint.dataset_manager.dataloader import (
     DataLoader,
-    DeepSeekR1ChatCompletionDataLoader,
     HFDataLoader,
     PickleReader,
 )
@@ -346,9 +345,7 @@ class OracleServer(EchoServer):
             return {"prompt": x["text_input"], "output": x["ref_output"]}
 
         self.parser = parser
-        data_loader = DeepSeekR1ChatCompletionDataLoader(
-            self.file_path, parser=self.parser
-        )
+        data_loader = PickleReader(self.file_path, parser=self.parser)
         data_loader.load()
         self.data = {}
         for i in range(data_loader.num_samples()):

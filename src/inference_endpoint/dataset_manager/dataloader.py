@@ -21,7 +21,7 @@ from logging import getLogger
 from typing import Any
 
 import numpy as np
-import pandas
+import pandas as pd
 from datasets import load_dataset, load_from_disk
 from transformers import PreTrainedTokenizerBase
 
@@ -141,6 +141,7 @@ class PickleReader(DataLoader):
         self,
         file_path,
         parser: Callable[[Any], Any] = None,
+        metadata: dict | None = None,
         max_memory_usage_bytes: int | None = None,
     ):
         """Initialize PickleReader for a pickle dataset file.
@@ -151,6 +152,7 @@ class PickleReader(DataLoader):
             file_path: Path to the pickle file containing the dataset.
             parser: Optional function to extract/transform data from each row.
                    If None, uses default parser that extracts 'text_input' attribute.
+            metadata: Optional metadata to add to the data.
             max_memory_usage_bytes: Optional memory limit (currently unused).
         """
         super().__init__(max_memory_usage_bytes)
@@ -160,6 +162,7 @@ class PickleReader(DataLoader):
         self.loaded = False
         self.parser = parser
         self.logger = getLogger(__name__)
+        self.metadata = metadata
         if parser is None:
             # TODO : remove this default implementation
             def extract_text_input(row):
@@ -221,10 +224,10 @@ class PickleReader(DataLoader):
         Utility function - writes the unique samples to a pickle file.
         """
         dataset_sources = {"math500", "aime1983", "livecodebench", "gpqa", "mmlu_pro"}
-        samples = pandas.DataFrame(columns=self.data.columns)
+        samples = pd.DataFrame(columns=self.data.columns)
         for dataset_source in dataset_sources:
             filtered = self.data[self.data["dataset"] == dataset_source]
-            samples = pandas.concat([samples, filtered.iloc[[0]]], ignore_index=True)
+            samples = pd.concat([samples, filtered.iloc[[0]]], ignore_index=True)
 
         with open(file_path, "wb") as file:
             # for sample in samples:
@@ -243,6 +246,118 @@ class PickleReader(DataLoader):
         return self.data.columns
 
 
+class ParquetReader(DataLoader):
+    """DataLoader implementation for parquet (.parquet) format datasets.
+
+    Loads Apache Parquet files containing tabular data (typically via pandas DataFrame).
+    Supports optional parsing functions to transform raw data into
+    the format needed by the benchmark system.
+
+    The default parser extracts the 'text_input' attribute from each row,
+    which is compatible with common benchmark dataset formats.
+
+    Usage:
+        >>> reader = ParquetReader("dataset.parquet", parser=lambda x: x.text_input)
+        >>> reader.load()
+        >>> sample = reader.load_sample(0)
+
+    Attributes:
+        file_path: Path to the parquet file.
+        parser: Function to transform raw rows into usable format.
+        data: Loaded dataset (empty until load() is called).
+        loaded: Whether the dataset has been loaded into memory.
+    """
+
+    def __init__(
+        self,
+        file_path,
+        parser: Callable[[Any], Any] = None,
+        metadata: dict | None = None,
+        max_memory_usage_bytes: int | None = None,
+    ):
+        """Initialize ParquetReader for a parquet dataset file.
+
+        Note: This does not load the data immediately. Call load() to load.
+
+        Args:
+            file_path: Path to the parquet file containing the dataset.
+            parser: Optional function to extract/transform data from each row.
+                   If None, uses default parser that extracts 'text_input' attribute.
+            metadata: Optional metadata to add to the data.
+            max_memory_usage_bytes: Optional memory limit (currently unused).
+        """
+        super().__init__(max_memory_usage_bytes)
+        self.file_path = file_path
+        self.data = []
+        self.loaded = False
+        self.parser = parser
+        self.logger = getLogger(__name__)
+        self.metadata = metadata
+        if parser is None:
+            # Default parser for parquet, similar to PickleReader
+            def extract_text_input(row):
+                return {"prompt": row["text_input"]} | (self.metadata or {})
+
+            self.parser = extract_text_input
+
+    def load(self, force: bool = False):
+        """Load the dataset from the parquet file into memory.
+
+        This method reads the entire parquet file and stores it in memory.
+        Subsequent load_sample() calls will be served from memory.
+
+        Args:
+            force: If True, reloads even if already loaded (for refreshing data).
+
+        Raises:
+            FileNotFoundError: If parquet file doesn't exist.
+            ValueError: If the file cannot be loaded properly.
+        """
+        if self.loaded and not force:
+            return
+
+        self.data = pd.read_parquet(self.file_path)
+        self.logger.debug(
+            f"Loading data from {self.file_path} with columns: {self.data.columns}"
+        )
+
+        self.text_inputs = []
+        # Convert the dataframe to list of dictionaries
+        for row in self.data.to_dict(orient="records"):
+            self.text_inputs.append(self.parser(row))
+        self.text_inputs = np.ascontiguousarray(self.text_inputs)
+        self.loaded = True
+
+    def num_samples(self):
+        """
+        Returns the number of samples in the dataset.
+        """
+        return len(self.data)
+
+    def write_samples(self, file_path: str, indices: list[int]):
+        """
+        Utility function - writes the samples to a parquet file.
+        """
+        if not self.loaded:
+            self.load()
+        samples = self.data.iloc[indices]
+        samples.to_parquet(file_path)
+
+    def load_sample(self, index: int) -> Any:
+        """
+        Loads a sample from the data.
+        """
+        assert self.loaded, "Data is not loaded. Call load() to load the data."
+        x = self.text_inputs[index]
+        self.logger.debug(
+            f"Loaded sample from parquet file at {index} with result: {x}"
+        )
+        return x
+
+    def get_column_names(self):
+        return self.data.columns
+
+
 class HFDataLoader(DataLoader):
     def __init__(
         self,
@@ -251,8 +366,20 @@ class HFDataLoader(DataLoader):
         parser: Callable[[Any], Any] = None,
         split: str = "train",
         format: str | None = None,
+        metadata: dict | None = None,
         max_memory_usage_bytes: int | None = None,
     ):
+        """
+        Initialize HFDataLoader for a HuggingFace dataset.
+        Args:
+            dataset_name: Name of the HuggingFace dataset.
+            parser: Optional function to extract/transform data from each row.
+                   If None, uses default parser that extracts the row.
+            split: Name of the dataset split to load.
+            format: Format of the dataset.
+            metadata: Optional metadata to add to the data.
+            max_memory_usage_bytes: Optional memory limit (currently unused).
+        """
         super().__init__(max_memory_usage_bytes)
         self.logger = getLogger(__name__)
         self.dataset_name = dataset_name
@@ -261,10 +388,13 @@ class HFDataLoader(DataLoader):
         self.parser = parser
         self.split = split
         self.format = format
+        self.metadata = metadata
         if parser is None:
 
             def extract_row(row):
-                return row  # by default, return the training data which is a dictionary
+                return row | (
+                    self.metadata or {}
+                )  # by default, return the training data which is a dictionary
 
             self.parser = extract_row
 
@@ -291,33 +421,37 @@ class HFDataLoader(DataLoader):
         return len(self.data[self.split])
 
 
-class DeepSeekR1ChatCompletionDataLoader(PickleReader):
-    def __init__(self, file_path, parser: Callable[[Any], Any] = None):
-        """
-        Initialize a DeepSeekR1ChatCompletionDataLoader for loading chat completion datasets from a pickle file.
-
-        Args:
-            file_path (str): Path to the pickle file containing chat completion data.
-            parser (Callable[[Any], Any], optional): Callable to parse individual data samples. If not provided, defaults to the parent class's parsing mechanism.
-        """
-        super().__init__(file_path, parser=parser)
-
-
 class JsonlReader(DataLoader):
+    """
+    DataLoader implementation for JSON Lines format datasets.
+    This is useful for loading datasets that are stored in JSON Lines format.
+    The data is loaded by reading the file line by line and parsing the JSON object.
+    The parser is a function that takes a JSON object and returns a dictionary.
+    The default parser extracts the 'article' key from the JSON object and returns a dictionary with the 'prompt' key.
+    """
+
     def __init__(
         self,
         file_path,
         parser: Callable[[Any], Any] = None,
         metadata: dict | None = None,
     ):
+        """
+        Initialize JsonlReader for a JSON Lines dataset file.
+        Args:
+            file_path: Path to the JSON Lines file containing the dataset.
+            parser: Optional function to extract/transform data from each row.
+                   If None, uses default parser that extracts the 'article' key from the JSON object and returns a dictionary with the 'prompt' key.
+            metadata: Optional metadata to add to the data.
+        """
+        super().__init__()
         if parser is None:
             # TODO: Implement a parser interface where yaml files specify the fields to pars
             def default_parser(x):
                 # Use cnn/daily mail dataset as an example for now.
-                return {"prompt": x["article"]} | metadata
+                return {"prompt": x["article"]} | (metadata or {})
 
             parser = default_parser
-        super().__init__()
         self.file_path = file_path
         self.data = []
         self.parser = parser

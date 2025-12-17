@@ -21,7 +21,6 @@ This module handles dataset loading, preprocessing, and management.
 
 from .dataloader import (
     DataLoader,
-    DeepSeekR1ChatCompletionDataLoader,
     HFDataLoader,
     PickleReader,
 )
@@ -30,7 +29,6 @@ from .factory import DataLoaderFactory
 __all__ = [
     "DataLoader",
     "DataLoaderFactory",
-    "DeepSeekR1ChatCompletionDataLoader",
     "HFDataLoader",
     "PickleReader",
 ]
