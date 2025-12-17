@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import logging
 import os
-import shutil
 import threading
 import time
 import uuid
@@ -49,10 +48,11 @@ class BenchmarkSession:
         self.end_event = threading.Event()
         self.thread = None
 
-        self.sample_uuid_map = {}
         self.event_recorder = EventRecorder(
             session_id=self.session_id, notify_idle=self.end_event
         )
+
+        self.sample_uuid_map = None
 
     @property
     def is_running(self):
@@ -60,7 +60,8 @@ class BenchmarkSession:
 
     def _run_test(
         self,
-        load_generator: LoadGenerator,
+        perf_test_generator: LoadGenerator,
+        accuracy_test_generators: dict[str, LoadGenerator] | None = None,
         stop_sample_issuer_on_test_end: bool = True,
         max_shutdown_timeout_s: float = 300.0,
         report_dir: os.PathLike | None = None,
@@ -72,10 +73,20 @@ class BenchmarkSession:
                 EventRecorder.record_event(
                     SessionEvent.TEST_STARTED, time.monotonic_ns()
                 )
-                for issued_sample in load_generator:
-                    # In the future, we'll want to push this to some thread or process that
-                    # performs output verification / accuracy checks.
-                    self.sample_uuid_map[issued_sample.sample.uuid] = issued_sample
+
+                for _ in perf_test_generator:
+                    # Actual issue is done during next(generator). Nothing else to do here, just pass.
+                    pass
+
+                EventRecorder.record_event(
+                    SessionEvent.STOP_PERFORMANCE_TRACKING, time.monotonic_ns()
+                )
+
+                if accuracy_test_generators:
+                    for _, generator in accuracy_test_generators.items():
+                        for _ in generator:
+                            # Actual issue is done during next(generator). Nothing else to do here, just pass.
+                            pass
 
                 self.event_recorder.should_check_idle = True
                 EventRecorder.record_event(
@@ -99,7 +110,7 @@ class BenchmarkSession:
                 raise e
             finally:
                 if stop_sample_issuer_on_test_end:
-                    load_generator.sample_issuer.shutdown()
+                    perf_test_generator.sample_issuer.shutdown()
                 EventRecorder.record_event(SessionEvent.TEST_ENDED, time.monotonic_ns())
 
             self.event_recorder.wait_for_writes()
@@ -124,16 +135,25 @@ class BenchmarkSession:
                             tokenizer = None
                 report = reporter.create_report(tokenizer)
 
+                # Consolidate UUID->index mappings
+                perf_name = (
+                    perf_test_generator.name
+                    if perf_test_generator.name
+                    else "performance"
+                )
+                sample_idx_map = {
+                    perf_name: perf_test_generator.uuid_to_index_map,
+                }
+                if accuracy_test_generators:
+                    for default_name, generator in accuracy_test_generators.items():
+                        name = generator.name if generator.name else default_name
+                        sample_idx_map[name] = generator.uuid_to_index_map
+                self.sample_uuid_map = sample_idx_map
+
                 # Save to report directory if provided
                 if report_dir:
                     Path(report_dir).mkdir(parents=True, exist_ok=True)
                     report.to_json(save_to=Path(report_dir) / "result_summary.json")
-
-                    # Copy over outputs for validation
-                    shutil.copy(
-                        self.event_recorder.outputs_path,
-                        Path(report_dir) / "outputs.jsonl",
-                    )
 
                     # Dump runtime settings to report directory
                     rt_settings_data = {
@@ -162,6 +182,10 @@ class BenchmarkSession:
                                 option=orjson.OPT_INDENT_2 | orjson.OPT_SORT_KEYS,
                             ).decode("utf-8")
                         )
+
+                    # Save the UUID mapping for output verification
+                    with (Path(report_dir) / "sample_idx_map.json").open("w") as f:
+                        f.write(orjson.dumps(self.sample_uuid_map).decode("utf-8"))
 
                     if dump_events_csv:
                         reporter.dump_to_csv(Path(report_dir) / "events.csv")
@@ -221,14 +245,14 @@ class BenchmarkSession:
         load_generator = load_generator_cls(sample_issuer, dataloader, *args)
         session.thread = threading.Thread(
             target=session._run_test,
-            args=(
-                load_generator,
-                stop_sample_issuer_on_test_end,
-                max_shutdown_timeout_s,
-                report_dir,
-                tokenizer_override,
-                dump_events_csv,
-            ),
+            args=(load_generator,),
+            kwargs={
+                "stop_sample_issuer_on_test_end": stop_sample_issuer_on_test_end,
+                "max_shutdown_timeout_s": max_shutdown_timeout_s,
+                "report_dir": report_dir,
+                "tokenizer_override": tokenizer_override,
+                "dump_events_csv": dump_events_csv,
+            },
         )
         session.thread.start()
         return session

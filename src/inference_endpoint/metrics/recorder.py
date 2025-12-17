@@ -26,10 +26,9 @@ import sqlite3
 import threading
 import time
 import uuid
-from datetime import datetime
 from functools import partial
 from pathlib import Path
-from typing import ClassVar
+from typing import Any, ClassVar
 
 import orjson
 
@@ -38,29 +37,6 @@ from ..profiling import profile
 from ..utils import byte_quantity_to_str
 
 logger = logging.getLogger(__name__)
-
-
-_G_MONOTIME_DELTA = time.time_ns() - time.monotonic_ns()
-"""Approximate delta between monotonic and wall-clock time in nanoseconds. See
-monotime_to_datetime() for more details.
-"""
-
-
-def monotime_to_datetime(monotime_ns: int) -> datetime:
-    """Monotonic clock has an undefined starting point. To convert to human readable timestamp,
-    we can add a constant delta to any monotonic timestamp to get an approximate equivalent wall-clock
-    timestamp. Note that the result will not be completely accurate, but it will be a consistent
-    offset from the real time, as long as this function is called in the same process. Any durations
-    and deltas calculated from resulting datetimes will be accurate, but absolute times will not be.
-
-    Args:
-        monotime_ns: The monotonic timestamp in nanoseconds.
-
-    Returns:
-        The datetime object corresponding to the approximate wall-clock timestamp.
-    """
-    wall_time = (monotime_ns + _G_MONOTIME_DELTA) / 1e9
-    return datetime.fromtimestamp(wall_time)
 
 
 @contextlib.contextmanager
@@ -84,23 +60,44 @@ def sqlite3_cursor(path: Path):
 
 @dataclasses.dataclass
 class EventRow:
-    sample_uuid: str
-    event_type: Event
-    timestamp_ns: int
+    sample_uuid: str = dataclasses.field(metadata={"sql_type": "TEXT"})
+    """UUID string identifier for the sample"""
+
+    event_type: Event = dataclasses.field(metadata={"sql_type": "TEXT"})
+    """The type of event to record"""
+
+    timestamp_ns: int = dataclasses.field(metadata={"sql_type": "INTEGER"})
+    """The timestamp of the event in nanoseconds. Note that this is a monotonic timestamp, so the value itself
+    is not meaningful, but the differences between timestamps are accurate."""
+
+    data: bytes = dataclasses.field(default=b"", metadata={"sql_type": "BLOB"})
+    """The data, if any, associated with the event, encoded as JSON bytes."""
 
     @staticmethod
     def to_table_query() -> str:
-        return "CREATE TABLE IF NOT EXISTS events (sample_uuid VARCHAR(32), event_type VARCHAR(32), timestamp_ns INTEGER)"
+        # Dynamically construct table query based on the dataclass fields
+        fields = []
+        for field in dataclasses.fields(EventRow):
+            sql_type = field.metadata.get("sql_type", "BLOB")
+            fields.append(f"{field.name} {sql_type}")
+
+        field_str = ", ".join(fields)
+        return f"CREATE TABLE IF NOT EXISTS events ({field_str})"
 
     @staticmethod
     def insert_query() -> str:
-        return "INSERT INTO events (sample_uuid, event_type, timestamp_ns) VALUES (?, ?, ?)"
+        fields = dataclasses.fields(EventRow)
+        names = [field.name for field in fields]
+        names_str = ", ".join(names)
+        placeholders = ", ".join(["?"] * len(fields))
+        return f"INSERT INTO events ({names_str}) VALUES ({placeholders})"
 
-    def to_insert_params(self) -> tuple[str, str, int]:
+    def to_insert_params(self) -> tuple[str, str, int, bytes]:
         return (
             self.sample_uuid,
             self.event_type.value,
             self.timestamp_ns,
+            self.data,
         )
 
 
@@ -166,7 +163,6 @@ class EventRecorder:
 
         if self.connection_name not in EventRecorder._created_session_dbs:
             register_cleanup(self.connection_name)
-            register_cleanup(self.outputs_path)
             EventRecorder._created_session_dbs.add(self.connection_name)
 
         if not Path(self.connection_name).parent.exists():
@@ -213,10 +209,6 @@ class EventRecorder:
         # Otherwise, using mode=memory&cache=shared only works within the same process
         return EventRecorder.db_path(self.session_id)
 
-    @property
-    def outputs_path(self) -> Path:
-        return Path(self.connection_name).with_suffix(".outputs.jsonl")
-
     @staticmethod
     def db_path(session_id: str) -> Path:
         """Helper method to figure out the path of a session's database without creating an EventRecorder instance.
@@ -237,16 +229,12 @@ class EventRecorder:
         """
         logging.debug(f"Writer thread started for {self.connection_name}")
 
-        with (
-            sqlite3_cursor(self.connection_name) as (cur, conn),
-            self.outputs_path.open("w") as outputs,
-        ):
+        with sqlite3_cursor(self.connection_name) as (cur, conn):
             # Initialize the database table
             cur.execute(EventRow.to_table_query())
             conn.commit()
 
             event_buffer = []
-            output_buffer = []
 
             insert_query = EventRow.insert_query()
 
@@ -256,13 +244,6 @@ class EventRecorder:
                     cur.executemany(insert_query, event_buffer)
                     conn.commit()
                     event_buffer.clear()
-
-                    # Write outputs to JSONL
-                    if output_buffer:
-                        for output in output_buffer:
-                            outputs.write(orjson.dumps(output).decode("utf-8") + "\n")
-                        output_buffer.clear()
-                        outputs.flush()
 
             while True:
                 try:
@@ -290,43 +271,7 @@ class EventRecorder:
                     should_commit = True
                 else:
                     # Regular event - add to buffer
-                    # Format: (sample_uuid, event_type, timestamp_ns, output)
-                    event_buffer.append(item[:-1])
-                    if item[-1] is not None:
-                        if item[1] == SampleEvent.FIRST_CHUNK.value:
-                            # In post-processing, we use this to validate that the first chunk is the response output is the same as the data in the FIRST_CHUNK_RECEIVED event
-                            output_buffer.append(
-                                {
-                                    "timestamp": str(monotime_to_datetime(item[2])),
-                                    "timestamp_ns": item[2],
-                                    "s_uuid": item[0],
-                                    "first_chunk": item[-1],
-                                }
-                            )
-                        elif item[1] == SampleEvent.COMPLETE.value:
-                            output_data = item[-1]
-                            if not isinstance(output_data, list | tuple | str):
-                                raise TypeError(
-                                    f"QueryResult.response_output should be a list or tuple or str, but got {type(output_data)}"
-                                )
-                            output_buffer.append(
-                                {
-                                    "timestamp": str(monotime_to_datetime(item[2])),
-                                    "timestamp_ns": item[2],
-                                    "s_uuid": item[0],
-                                    "output": output_data,
-                                }
-                            )
-                        elif item[1] == SessionEvent.ERROR.value:
-                            output_buffer.append(
-                                {
-                                    "timestamp": str(monotime_to_datetime(item[2])),
-                                    "timestamp_ns": item[2],
-                                    "s_uuid": item[0],
-                                    "error_type": item[1],
-                                    "error_message": item[-1],
-                                }
-                            )
+                    event_buffer.append(item)
                     should_commit = len(event_buffer) >= self.txn_buffer_size
 
                 # Commit if buffer is full
@@ -392,7 +337,7 @@ class EventRecorder:
         sample_uuid: str = "",
         force_commit: bool = False,
         assert_active: bool = True,
-        output: str | None = None,
+        data: Any = None,
     ) -> bool:
         """Records an event by pushing it to the queue for the writer thread to process.
 
@@ -406,8 +351,8 @@ class EventRecorder:
             force_commit (bool): Whether to force commit the current buffer immediately.
             assert_active (bool): Whether to raise an exception if no EventRecorder is active.
                                   If False, this method will return False. (Default: True)
-            output (str): The output to record associated with the event. Should only be used
-                          for SampleEvent.COMPLETE events. (Default: None)
+            data (Any): The data to record associated with the event. Must be JSON serializable.
+                        (Default: None)
         Returns:
             bool: True if the event was recorded, False otherwise. If assert_active is True,
             this method will always return True or raise an exception.
@@ -438,7 +383,28 @@ class EventRecorder:
             )
 
         # Push event to queue for writer thread to process
-        rec_inst.event_queue.put((sample_uuid, ev_type.value, timestamp_ns, output))
+        encoded_bytes: bytes = b""
+        try:
+            if data is not None:
+                encoded_bytes = orjson.dumps(data)
+        except orjson.JSONEncodeError as e:
+            rec_inst.event_queue.put(
+                (
+                    sample_uuid,
+                    SessionEvent.ERROR.value,
+                    time.monotonic_ns(),
+                    orjson.dumps(
+                        {
+                            "error_type": "JSONEncodeError",
+                            "error_message": str(e),
+                        }
+                    ),
+                )
+            )
+        finally:
+            rec_inst.event_queue.put(
+                (sample_uuid, ev_type.value, timestamp_ns, encoded_bytes)
+            )
 
         # If force commit requested, send sentinel
         if force_commit:
@@ -510,6 +476,9 @@ def record_exception(
         SessionEvent.ERROR,
         time.monotonic_ns(),
         sample_uuid=sample_uuid,
-        output=str(exc_value),
+        data={
+            "error_type": exc_value.__class__.__name__,
+            "error_message": str(exc_value),
+        },
         force_commit=True,
     )

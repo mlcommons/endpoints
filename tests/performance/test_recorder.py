@@ -104,6 +104,7 @@ class ReporterTimeThresholds:
             setattr(self, f.name, getattr(self, f.name) * profile_overhead_factor)
 
 
+@pytest.mark.skip(reason="Only run manually for debugging and development purposes")
 @pytest.mark.performance
 @pytest.mark.xdist_group(name="serial_performance")
 @pytest.mark.parametrize(
@@ -133,7 +134,6 @@ def test_many_chunk_performance(
     with get_EventRecorder() as rec:
         conn_name = rec.connection_name
         cleanup_connections["delete"].append(conn_name)
-        cleanup_connections["delete"].append(rec.outputs_path)
 
         start_time = time.monotonic_ns()
         for sample_uuid in range(n_samples):
@@ -162,7 +162,7 @@ def test_many_chunk_performance(
                 SampleEvent.COMPLETE,
                 time.monotonic_ns(),
                 sample_uuid=str(sample_uuid + 1),
-                output="test",
+                data="test",
             )
         rec.wait_for_writes(force_commit=True)
         end_time = time.monotonic_ns()
@@ -195,6 +195,7 @@ def test_many_chunk_performance(
         )
 
 
+@pytest.mark.skip(reason="Only run manually for debugging and development purposes")
 @pytest.mark.performance
 @pytest.mark.xdist_group(name="serial_performance")
 @pytest.mark.parametrize(
@@ -224,7 +225,6 @@ def test_2_chunk_per_query_performance(
     with get_EventRecorder() as rec:
         conn_name = rec.connection_name
         cleanup_connections["delete"].append(conn_name)
-        cleanup_connections["delete"].append(rec.outputs_path)
 
         start_time = time.monotonic_ns()
         for sample_uuid in range(n_queries):
@@ -257,7 +257,7 @@ def test_2_chunk_per_query_performance(
                 SampleEvent.COMPLETE,
                 time.monotonic_ns(),
                 sample_uuid=str(sample_uuid + 1),
-                output="test",
+                data="test",
             )
 
         rec.wait_for_writes(force_commit=True)

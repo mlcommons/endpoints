@@ -237,7 +237,7 @@ async def test_load_generator_full_run_mock_http_oracle_server(
     ), "Number of samples in dataset and number of samples in request data should be the same"
 
     for sample_uuid, resp in response_cache.items():
-        sample_index = sample_uuid_map[sample_uuid].index
+        sample_index = sample_uuid_map["performance"][sample_uuid]
         logging.info(
             f"Sample {sample_uuid} should have been response {vals[sample_index][0:30]}, but was response {resp[0:30]}"
         )

@@ -26,6 +26,7 @@ class SessionEvent(Event):
     LOADGEN_ISSUE_CALLED = "loadgen_issue_called"
     LOADGEN_STOP = "loadgen_stop"
     LOADGEN_DATA_LOAD = "loadgen_data_load"
+    STOP_PERFORMANCE_TRACKING = "stop_performance_tracking"
     ERROR = "error"
 
 
