@@ -19,7 +19,7 @@ import aiohttp
 import pytest
 from inference_endpoint.core.types import Query
 from inference_endpoint.dataset_manager.dataloader import (
-    DeepSeekR1ChatCompletionDataLoader,
+    PickleReader,
 )
 from inference_endpoint.openai.openai_adapter import OpenAIAdapter
 from inference_endpoint.openai.openai_types_gen import CreateChatCompletionResponse
@@ -30,7 +30,7 @@ async def test_ds_chat_completion_data_loader_with_oracle_server(
     ds_pickle_dataset_path, mock_http_oracle_server
 ):
     """
-    Test the DeepSeekR1ChatCompletionDataLoader by performing a roundtrip request through a mock HTTP Oracle server.
+    Test the PickleReader by performing a roundtrip request through a mock HTTP Oracle server.
 
     Validates the end-to-end flow of loading dataset samples, transforming requests to OpenAI format,
     sending requests to a mock server, and verifying the server's responses match expected outputs.
@@ -42,9 +42,7 @@ async def test_ds_chat_completion_data_loader_with_oracle_server(
     def parser(x):
         return {"prompt": x["text_input"], "output": x["ref_output"]}
 
-    ds_chat_completion_data_loader = DeepSeekR1ChatCompletionDataLoader(
-        ds_pickle_dataset_path, parser=parser
-    )
+    ds_chat_completion_data_loader = PickleReader(ds_pickle_dataset_path, parser=parser)
     ds_chat_completion_data_loader.load()
     assert ds_chat_completion_data_loader.num_samples() == 5
     for i in range(ds_chat_completion_data_loader.num_samples()):
