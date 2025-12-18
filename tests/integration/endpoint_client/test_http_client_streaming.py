@@ -125,9 +125,7 @@ class TestHTTPEndpointClientStreaming:
         result = await asyncio.wrap_future(future)
 
         assert result.id == "test-streaming"
-        assert (
-            "".join(result.response_output["output"]) == "Test streaming response"
-        )
+        assert "".join(result.response_output["output"]) == "Test streaming response"
 
         # Check first chunk is properly separated for streaming (word-by-word from echo server)
         assert isinstance(result.response_output["output"], tuple)
