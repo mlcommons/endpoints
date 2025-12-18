@@ -42,3 +42,6 @@ metrics:
 endpoint_config:
   endpoint: "http://localhost:8000"
   api_key: null
+
+output: results/llama2_70b_orca_output.json
+report_dir: results/llama2_70b_orca_benchmark_mlperf/
