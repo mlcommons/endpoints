@@ -18,7 +18,7 @@ HTTP client for LLM inference with multiprocessing workers and ZMQ communication
 │                                    │ ◀─────────HTTP Response─────────────────┘          │
 │                                    │                                                    │
 │  ┌───────────────────────┐         │                                                    │
-│  │ recv_response_or_none │◀────────┴ ZMQ PULL                                           │
+│  │     try_receive       │◀────────┴ ZMQ PULL                                           │
 │  │      (poll API)       │                                                              │
 │  └───────────────────────┘                                                              │
 └─────────────────────────────────────────────────────────────────────────────────────────┘
@@ -49,7 +49,7 @@ client.issue_query(Query(
 ))
 
 # Async receive (non-blocking, returns None on timeout)
-response = await client.recv_response_or_none()
+response = await client.try_receive()
 if response:
     print(f"Response for {response.id}: {response}")
 ```

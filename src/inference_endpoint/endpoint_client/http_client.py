@@ -47,7 +47,7 @@ class AsyncHttpEndpointClient:
     Usage:
         client = AsyncHttpEndpointClient(config, aiohttp_config, zmq_config)
         await client.issue_query(query)
-        response_if_any = await client.recv_response_or_none()
+        response_if_any = await client.try_receive()
     """
 
     def __init__(
@@ -127,7 +127,7 @@ class AsyncHttpEndpointClient:
             self.worker_push_sockets
         )
 
-    async def recv_response_or_none(self) -> QueryResult | StreamChunk | None:
+    async def try_receive(self) -> QueryResult | StreamChunk | None:
         """Receive next ready response if available, else return None."""
         return await self._response_socket.receive()
 
@@ -160,7 +160,7 @@ class HTTPEndpointClient(AsyncHttpEndpointClient):
     Usage:
         client = HTTPEndpointClient(config, aiohttp_config, zmq_config)
         client.issue_query(query)
-        response = await client.recv_response_or_none()
+        response = await client.try_receive()
     """
 
     def issue_query(self, query: Query) -> None:  # type: ignore[override]

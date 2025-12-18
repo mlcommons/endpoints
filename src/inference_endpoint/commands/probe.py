@@ -138,7 +138,7 @@ async def run_probe_command(args: argparse.Namespace) -> None:
                 and (time.time() - start_wait) < probe_timeout
             ):
                 try:
-                    result = await client.recv_response_or_none()
+                    result = await client.try_receive()
 
                     if result is None:
                         await asyncio.sleep(0.01)

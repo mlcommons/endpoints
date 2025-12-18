@@ -60,7 +60,7 @@ class HttpClientSampleIssuer(SampleIssuer):
         """Route completed responses to SampleEventHandler."""
         while True:
             try:
-                match response := await self.http_client.recv_response_or_none():
+                match response := await self.http_client.try_receive():
                     case StreamChunk(is_complete=False):
                         # NOTE(vir): is_complete=True should not be received, QueryResult is expected instead
                         SampleEventHandler.stream_chunk_complete(response)

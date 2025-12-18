@@ -66,7 +66,7 @@ class FuturesHttpClient(HTTPEndpointClient):
         """Route responses to their corresponding futures."""
         while True:
             try:
-                response = await self.recv_response_or_none()
+                response = await self.try_receive()
                 if response is None:
                     continue
 
