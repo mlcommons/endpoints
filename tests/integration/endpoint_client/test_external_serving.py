@@ -33,17 +33,14 @@ from tests.test_helpers import get_test_socket_path
 @pytest.mark.slow
 @pytest.mark.run_explicitly
 @pytest.mark.parametrize("streaming", [False, True])
-@pytest.mark.parametrize("max_concurrency", [100])
-async def test_external_serving(
-    vllm_docker_server, tmp_path, streaming, max_concurrency
-):
+@pytest.mark.parametrize("num_requests", [100])
+async def test_external_serving(vllm_docker_server, tmp_path, streaming, num_requests):
     """Test high concurrent requests with proper connection management in streaming mode."""
 
     def _create_custom_client(
         vllm_docker_server,
         tmp_path,
         num_workers=1,
-        max_concurrency=-1,
         zmq_high_water_mark=10000,
         zmq_io_threads=None,
         aiohttp_config=None,
@@ -52,7 +49,6 @@ async def test_external_serving(
         http_config = HTTPClientConfig(
             endpoint_url=f"{vllm_docker_server['url']}/v1/chat/completions",
             num_workers=num_workers,
-            max_concurrency=max_concurrency,
         )
 
         zmq_config_kwargs = {
@@ -98,16 +94,10 @@ async def test_external_serving(
         vllm_docker_server,
         tmp_path,
         num_workers=1,
-        max_concurrency=-1,
-        zmq_high_water_mark=max_concurrency,
         aiohttp_config=aiohttp_config,
     )
 
-    await client.async_start()
-
     try:
-        num_requests = max_concurrency
-
         # Collect futures
         start_time = time.time()
         futures = []
@@ -120,11 +110,11 @@ async def test_external_serving(
                     "stream": streaming,
                 },
             )
-            future = await client.issue_query(query)
+            future = client.issue_query(query)
             futures.append(future)
 
         # Wait for all futures to complete
-        results = await asyncio.gather(*futures)
+        results = await asyncio.gather(*[asyncio.wrap_future(f) for f in futures])
         end_time = time.time()
 
         # Verify results
@@ -140,4 +130,4 @@ async def test_external_serving(
             f"\nStreaming mode performance: {num_requests} requests in {duration:.2f}s = {rps:.0f} RPS"
         )
     finally:
-        await client.async_shutdown()
+        client.shutdown()
