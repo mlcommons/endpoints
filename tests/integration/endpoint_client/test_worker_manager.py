@@ -13,16 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""
-Tests for WorkerManager functionality.
-
-These tests verify proper worker lifecycle management including:
-- Worker spawning and initialization
-- Graceful shutdown with SIGTERM
-- Force kill with SIGKILL
-- Interrupt with SIGINT
-- Zombie process reaping (worker died before main process can call join())
-"""
+"""Integration tests for HttpClient worker manager functionality."""
 
 import asyncio
 import os
@@ -40,6 +31,9 @@ from inference_endpoint.endpoint_client.configs import (
 from inference_endpoint.endpoint_client.worker import WorkerManager
 
 from ...test_helpers import get_test_socket_path
+
+# timeout for OS to handle process signals
+TEST_WORKER_POST_KILL_DELAY_S = 0.5
 
 
 def check_for_zombies(pids: list[int], timeout: float = 1.0) -> list[int]:
@@ -212,7 +206,7 @@ class TestWorkerLifecycle:
                 os.kill(worker_pid, signal_method)  # SIGINT or other
 
             # Give time for signal to be processed
-            await asyncio.sleep(0.5 if signal_method == "kill" else 1.0)
+            await asyncio.sleep(TEST_WORKER_POST_KILL_DELAY_S)
 
             # Check zombie state before shutdown
             zombies_before = check_for_zombies([worker_pid])
@@ -263,7 +257,8 @@ class TestWorkerLifecycle:
             manager.workers[1].terminate()  # SIGTERM - graceful
             os.kill(manager.workers[2].pid, signal.SIGINT)  # SIGINT - interrupt
 
-            await asyncio.sleep(1.0)
+            # Give time for signal to be processed
+            await asyncio.sleep(TEST_WORKER_POST_KILL_DELAY_S)
 
             # Check which became zombies
             zombies_before = check_for_zombies(worker_pids)
@@ -333,8 +328,8 @@ class TestWorkerDeathScenarios:
             for worker in manager.workers:
                 worker.kill()
 
-            # Wait for workers to become zombies
-            await asyncio.sleep(0.5)
+            # Give time for signal to be processed
+            await asyncio.sleep(TEST_WORKER_POST_KILL_DELAY_S)
 
             # Verify all workers are dead
             for worker in manager.workers:
@@ -400,8 +395,8 @@ class TestWorkerDeathScenarios:
             # Kill first worker
             manager.workers[0].terminate()
 
-            # Small delay to let worker die
-            await asyncio.sleep(0.5)
+            # Give time for signal to be processed
+            await asyncio.sleep(TEST_WORKER_POST_KILL_DELAY_S)
 
             # Check for zombies before shutdown
             zombies_before = check_for_zombies([dead_pid])
