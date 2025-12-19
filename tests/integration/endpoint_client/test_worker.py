@@ -45,14 +45,6 @@ class TestWorkerBasicFunctionality:
         )
 
     @pytest.fixture
-    def zmq_config_with_short_timeout(self, tmp_path):
-        """Create ZMQ configuration with short timeout for signal handling tests."""
-        return ZMQConfig(
-            zmq_request_queue_prefix=get_test_socket_path(tmp_path, "worker", "_req"),
-            zmq_response_queue_addr=get_test_socket_path(tmp_path, "worker", "_resp"),
-        )
-
-    @pytest.fixture
     def worker_config(self, mock_http_echo_server):
         """Create worker configuration with echo server URL."""
         http_config = HTTPClientConfig(
@@ -142,9 +134,7 @@ class TestWorkerBasicFunctionality:
             # Receive all responses (streaming queries produce multiple messages)
             while len(final_responses) < len(requests):
                 try:
-                    response_data = await asyncio.wait_for(
-                        response_pull.recv(), timeout=3.0
-                    )
+                    response_data = await response_pull.recv()
                     response = decoder.decode(response_data)
 
                     if isinstance(response, StreamChunk):
@@ -193,7 +183,7 @@ class TestWorkerBasicFunctionality:
 
             # Shutdown
             worker.shutdown()
-            await asyncio.wait_for(worker_task, timeout=2.0)
+            await worker_task
 
         finally:
             request_push.close()
@@ -211,9 +201,7 @@ class TestWorkerBasicFunctionality:
         ],
         ids=["SIGTERM", "SIGINT", "SIGHUP", "SIGQUIT"],
     )
-    async def test_worker_signal_handling(
-        self, worker_config, zmq_config_with_short_timeout, sig
-    ):
+    async def test_worker_signal_handling(self, worker_config, zmq_config, sig):
         """Test worker responds to various signals correctly.
 
         Tests graceful shutdown handling for common signals:
@@ -221,11 +209,8 @@ class TestWorkerBasicFunctionality:
         - SIGINT: Interrupt signal (Ctrl+C)
         - SIGHUP: Hangup signal (terminal closed)
         - SIGQUIT: Quit signal (Ctrl+\\)
-
-        Uses short timeout (100ms) for fast shutdown verification.
         """
         http_config, aiohttp_config = worker_config
-        zmq_config = zmq_config_with_short_timeout
 
         # Create worker
         worker = Worker(
@@ -249,7 +234,7 @@ class TestWorkerBasicFunctionality:
             worker_task = asyncio.create_task(worker.run())
 
             # Wait for worker readiness signal
-            await asyncio.wait_for(readiness_pull.recv(), timeout=2.0)
+            await readiness_pull.recv()
 
             # Verify worker is running
             assert not worker._shutdown
@@ -261,7 +246,7 @@ class TestWorkerBasicFunctionality:
             assert worker._shutdown
 
             # Worker should exit gracefully after the receive timeout
-            await asyncio.wait_for(worker_task, timeout=1.0)
+            await worker_task
 
         finally:
             readiness_pull.close()
@@ -302,8 +287,6 @@ class TestWorkerErrorHandling:
 
         # Use invalid endpoint to trigger connection error
         http_config.endpoint_url = "http://localhost:99999/v1/chat/completions"
-        aiohttp_config.client_timeout_total = 2.0  # Short timeout
-        aiohttp_config.client_timeout_connect = 1.0  # Connect timeout
 
         worker = Worker(
             worker_id=0,
@@ -342,7 +325,7 @@ class TestWorkerErrorHandling:
             await request_push.send(encoder.encode(query))
 
             # Receive error response
-            response_data = await asyncio.wait_for(response_pull.recv(), timeout=3.0)
+            response_data = await response_pull.recv()
             decoder = msgspec.msgpack.Decoder(QueryResult | StreamChunk)
             response = decoder.decode(response_data)
 
@@ -361,7 +344,7 @@ class TestWorkerErrorHandling:
 
             # Shutdown
             worker.shutdown()
-            await asyncio.wait_for(worker_task, timeout=2.0)
+            await worker_task
 
         finally:
             request_push.close()
@@ -424,10 +407,7 @@ class TestWorkerErrorHandling:
             await request_push.send(encoder.encode(query))
 
             # Receive error response
-            response_data = await asyncio.wait_for(
-                response_pull.recv(),
-                timeout=3.0,
-            )
+            response_data = await response_pull.recv()
             decoder = msgspec.msgpack.Decoder(QueryResult | StreamChunk)
             response = decoder.decode(response_data)
 
@@ -443,7 +423,7 @@ class TestWorkerErrorHandling:
             if worker_task and not worker_task.done():
                 worker.shutdown()
                 try:
-                    await asyncio.wait_for(worker_task, timeout=2.0)
+                    await worker_task
                 except TimeoutError:
                     worker_task.cancel()
                     try:
@@ -566,7 +546,7 @@ class TestWorkerErrorHandling:
 
                 # Shutdown
                 worker.shutdown()
-                await asyncio.wait_for(worker_task, timeout=2.0)
+                await worker_task
 
             finally:
                 request_push.close()

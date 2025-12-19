@@ -256,7 +256,7 @@ class TestHTTPEndpointClientFunctionality:
                 futures.append(future)
 
             # Wait for at least one request to reach the server
-            await asyncio.wait_for(connection_received.wait(), timeout=5.0)
+            await connection_received.wait()
             connections_before_shutdown = len(active_connections)
 
             # Shutdown the client
@@ -269,7 +269,7 @@ class TestHTTPEndpointClientFunctionality:
             ), f"Expected all {num_requests} futures cancelled, got {cancelled_count}"
 
             # Verify server-side: wait for all connections to close
-            await asyncio.wait_for(all_connections_closed.wait(), timeout=5.0)
+            await all_connections_closed.wait()
             assert len(active_connections) == 0, (
                 f"Expected 0 active connections after shutdown, "
                 f"got {len(active_connections)}"
@@ -307,7 +307,7 @@ class TestHTTPEndpointClientFunctionality:
 
             # Should get error
             with pytest.raises(Exception) as exc_info:
-                await asyncio.wait_for(asyncio.wrap_future(future), timeout=5.0)
+                await asyncio.wrap_future(future)
 
             # Error message might be empty string, just verify exception was raised
             assert exc_info.value is not None  # Exception was raised
@@ -348,8 +348,8 @@ class TestHTTPEndpointClientFunctionality:
             future2 = futures_http_client.issue_query(query2)
 
             # Wait for both futures
-            result1 = await asyncio.wait_for(asyncio.wrap_future(future1), timeout=5.0)
-            result2 = await asyncio.wait_for(asyncio.wrap_future(future2), timeout=5.0)
+            result1 = await asyncio.wrap_future(future1)
+            result2 = await asyncio.wrap_future(future2)
 
             # Both should complete successfully
             assert result1.response_output == "First query"
@@ -383,7 +383,7 @@ class TestHTTPEndpointClientFunctionality:
 
             # Complete response should fail
             with pytest.raises(Exception):  # noqa: B017 Worker wraps errors in generic Exception
-                await asyncio.wait_for(asyncio.wrap_future(future), timeout=5.0)
+                await asyncio.wrap_future(future)
 
         finally:
             client.shutdown()

@@ -34,7 +34,7 @@ from .load_generator import LoadGenerator, SampleIssuer, SchedulerBasedLoadGener
 
 logger = logging.getLogger(__name__)
 
-# poll interval for checking if Test should end
+# poll interval for checking if test-session should end
 SHUTDOWN_POLL_INTERVAL_S = 10.0
 
 

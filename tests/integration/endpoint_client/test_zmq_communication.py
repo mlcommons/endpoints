@@ -45,8 +45,7 @@ class TestZMQPushPullIntegration:
     @pytest.fixture
     def zmq_config(self):
         """Create a ZMQ config for testing."""
-        # NOTE(vir): larger timeout to allow running tests in parallel
-        return ZMQConfig(zmq_recv_timeout=1000)
+        return ZMQConfig()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
