@@ -69,9 +69,6 @@ def worker_main(
     http_config: HTTPClientConfig,
     aiohttp_config: AioHttpConfig,
     zmq_config: ZMQConfig,
-    request_queue_addr: str,
-    response_queue_addr: str,
-    readiness_queue_addr: str,
 ):
     """Entry point for worker process."""
     worker_log_format = f"%(asctime)s - %(name)s[W{worker_id}/%(process)d] - %(funcName)s - %(levelname)s - %(message)s"
@@ -89,9 +86,6 @@ def worker_main(
             http_config=http_config,
             aiohttp_config=aiohttp_config,
             zmq_config=zmq_config,
-            request_socket_addr=request_queue_addr,
-            response_socket_addr=response_queue_addr,
-            readiness_socket_addr=readiness_queue_addr,
         )
 
         # Run event loop
@@ -111,18 +105,12 @@ class Worker:
         http_config: HTTPClientConfig,
         aiohttp_config: AioHttpConfig,
         zmq_config: ZMQConfig,
-        request_socket_addr: str,
-        response_socket_addr: str,
-        readiness_socket_addr: str,
     ):
-        """Initialize worker with configurations and ZMQ addresses."""
+        """Initialize worker with configurations."""
         self.worker_id = worker_id
         self.http_config = http_config
         self.aiohttp_config = aiohttp_config
         self.zmq_config = zmq_config
-        self.request_socket_addr = request_socket_addr
-        self.response_socket_addr = response_socket_addr
-        self.readiness_socket_addr = readiness_socket_addr
         self._shutdown = False
 
         self._zmq_context: zmq.asyncio.Context | None = None
@@ -142,20 +130,30 @@ class Worker:
     async def run(self) -> None:
         """Main worker loop - pull requests, execute, push responses."""
         try:
+            # Derive socket addresses from zmq_config
+            request_socket_addr = (
+                f"{self.zmq_config.zmq_request_queue_prefix}_{self.worker_id}_requests"
+            )
+            logger.debug("Request Socket Addr: %s", request_socket_addr)
+            response_socket_addr = self.zmq_config.zmq_response_queue_addr
+            logger.debug("Response Socket Addr: %s", response_socket_addr)
+            readiness_socket_addr = self.zmq_config.zmq_readiness_queue_addr
+            logger.debug("Readiness Socket Addr: %s", readiness_socket_addr)
+
             # Initialize ZMQ context and sockets
             self._zmq_context = zmq.asyncio.Context()
             self._request_socket = ZMQPullSocket(
                 self._zmq_context,
-                self.request_socket_addr,
+                request_socket_addr,
                 self.zmq_config,
                 bind=True,
                 decoder_type=Query,
             )
             self._response_socket = ZMQPushSocket(
-                self._zmq_context, self.response_socket_addr, self.zmq_config
+                self._zmq_context, response_socket_addr, self.zmq_config
             )
             self._readiness_socket = ZMQPushSocket(
-                self._zmq_context, self.readiness_socket_addr, self.zmq_config
+                self._zmq_context, readiness_socket_addr, self.zmq_config
             )
 
             # Create TCP connector
@@ -218,6 +216,7 @@ class Worker:
         """Main processing loop - continuously pull and process requests."""
         while not self._shutdown:
             try:
+                # TODO(vir): re-do work-consumer loop to leverage built-in zmq load-balancing
                 # Pull query from queue with timeout
                 query = await self._request_socket.receive()
 
@@ -412,9 +411,6 @@ class Worker:
                         output_delta.append(delta.content)
                     elif delta.reasoning:
                         reasoning_delta.append(delta.reasoning)
-                    else:
-                        logger.debug("empty SSE delta")
-                        continue
 
                 for delta_batch, accumulator in (
                     (reasoning_delta, reasoning_chunks),
@@ -567,6 +563,7 @@ class WorkerManager:
             bind=True,
         )
 
+        initialization_succeeded = False
         try:
             logger.debug(f"Starting {self.http_config.num_workers} worker processes")
 
@@ -596,6 +593,7 @@ class WorkerManager:
                 timeout=self.http_config.worker_initialization_timeout,
             )
             logger.debug(f"{ready_count}/{self.http_config.num_workers} workers ready")
+            initialization_succeeded = True
         except TimeoutError as e:
             raise TimeoutError(
                 f"Workers failed to initialize within {self.http_config.worker_initialization_timeout} seconds."
@@ -603,19 +601,12 @@ class WorkerManager:
         finally:
             # Close readiness socket
             readiness_socket.close()
+            # Shutdown any spawned workers on error/interrupt
+            if not initialization_succeeded and self.workers:
+                await self.shutdown()
 
     def _spawn_worker(self, worker_id: int) -> Process:
         """Spawn a single worker process."""
-        # Specific to each worker
-        # TODO(vir): re-do work-consumer loop to leverage built-in zmq load-balancing
-        request_queue_addr = (
-            f"{self.zmq_config.zmq_request_queue_prefix}_{worker_id}_requests"
-        )
-
-        # Shared among all workers
-        response_queue_addr = self.zmq_config.zmq_response_queue_addr
-        readiness_queue_addr = self.zmq_config.zmq_readiness_queue_addr
-
         # Create worker process as daemon.
         # 1. Automatic Termination: No need to manually join/reap worker processes
         # 2. Zombie Prevention: Relies on multiprocessing's internal atexit handler
@@ -626,9 +617,6 @@ class WorkerManager:
                 self.http_config,
                 self.aiohttp_config,
                 self.zmq_config,
-                request_queue_addr,
-                response_queue_addr,
-                readiness_queue_addr,
             ),
             daemon=True,
         )
