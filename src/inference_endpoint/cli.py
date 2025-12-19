@@ -165,7 +165,7 @@ def create_parser() -> argparse.ArgumentParser:
         required=True,
         help="Template type",
     )
-
+    init_parser.add_argument("--output", "-o", type=str, help="Output filename")
     return parser
 
 
@@ -259,12 +259,6 @@ def _add_auxiliary_args(parser):
     Args:
         parser: The argument parser to add arguments to.
     """
-    parser.add_argument(
-        "--output",
-        "-o",
-        type=Path,
-        help="Path to save additional output data (not benchmark report)",
-    )
     parser.add_argument(
         "--timeout", type=float, help="Timeout in seconds (default: 300)", default=300
     )

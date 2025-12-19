@@ -684,15 +684,11 @@ def _run_benchmark(
             # Always save all errors (useful for debugging)
             if response_collector.errors:
                 results["errors"] = response_collector.errors
-            if config.report_dir is not None:
-                results_path = report_dir / "results.json"
-                with open(results_path, "w") as f:
-                    json.dump(results, f, indent=2)
-                logger.info(f"Saved: {results_path}")
-            else:
-                logger.error(
-                    "No report-dir specified; results.json not saved, but summary may be available in the default report directory."
-                )
+            # Save results to JSON file
+            results_path = report_dir / "results.json"
+            with open(results_path, "w") as f:
+                json.dump(results, f, indent=2)
+            logger.info(f"Saved: {results_path}")
         except Exception as e:
             logger.error(f"Save failed: {e}")
 
