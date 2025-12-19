@@ -70,7 +70,6 @@ async def run_probe_command(args: argparse.Namespace) -> None:
             http_config = HTTPClientConfig(
                 endpoint_url=urljoin(endpoint, "/v1/chat/completions"),
                 num_workers=1,
-                max_concurrency=num_requests,
             )
             aiohttp_config = AioHttpConfig()
             zmq_config = ZMQConfig(
@@ -80,7 +79,6 @@ async def run_probe_command(args: argparse.Namespace) -> None:
             )
 
             client = HTTPEndpointClient(http_config, aiohttp_config, zmq_config)
-            await client.async_start()
 
             logger.info(f"Sending {num_requests} requests...")
 
@@ -104,7 +102,7 @@ async def run_probe_command(args: argparse.Namespace) -> None:
 
                 try:
                     start_times[query_id] = time.time()
-                    await client.issue_query_async(query)
+                    client.issue_query(query)
                     # Only track successfully issued queries
                     sent_query_ids.append(query_id)
                 except Exception as e:
@@ -140,7 +138,7 @@ async def run_probe_command(args: argparse.Namespace) -> None:
                 and (time.time() - start_wait) < probe_timeout
             ):
                 try:
-                    result = await client.get_ready_responses_async()
+                    result = await client.try_receive()
 
                     if result is None:
                         await asyncio.sleep(0.01)
@@ -236,4 +234,4 @@ async def run_probe_command(args: argparse.Namespace) -> None:
         finally:
             # Cleanup
             if client is not None:
-                await client.async_shutdown()
+                client.shutdown()
