@@ -41,7 +41,7 @@ def download_cnndm(
     output_file_tag = split
     calibration_ids = set()
     if calibration_ids_file:
-        with open(calibration_ids_file) as id_file:
+        with open(calibration_ids_file, "r", encoding="utf-8") as id_file:
             for line in id_file:
                 calibration_ids.add(line.strip())
         output_file_tag = "calibration"
@@ -87,7 +87,7 @@ if __name__ == "__main__":
         type=str,
         default=None,
         help="Path to a file containing calibration IDs (one per line)."
-        " If provided and available, 'split' must be 'train' and only examples with these IDs will be saved.",
+        " If provided, 'split' must be 'train' and only examples with these IDs will be saved.",
     )
 
     args = parser.parse_args()
@@ -100,7 +100,7 @@ if __name__ == "__main__":
 
     if args.calibration_ids_file and not os.path.isfile(args.calibration_ids_file):
         raise FileNotFoundError(
-            f"Provided Calibration IDs file not found: {args.calibration_ids_file}"
+            f"Provided calibration IDs file not found: {args.calibration_ids_file}"
         )
 
     download_cnndm(

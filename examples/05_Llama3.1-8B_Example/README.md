@@ -12,7 +12,7 @@ python download_cnndm.py --save-dir data --split validation
 - To generate calibration dataset, users can use the [cnn-dailymail-calibration-list](https://github.com/mlcommons/inference/blob/master/calibration/CNNDailyMail/calibration-list.txt)
 
 ```
-curl -OL https://raw.githubusercontent.com/mlcommons/inference/refs/heads/master/calibration/CNNDailyMail/calibration-list.txt
+curl -OL https://raw.githubusercontent.com/mlcommons/inference/v4.0/calibration/CNNDailyMail/calibration-list.txt
 python download_cnndm.py --save-dir data --calibration-ids-file calibration-list.txt --split train
 ```
 
