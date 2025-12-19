@@ -124,6 +124,7 @@ class LoadGenerator(ABC):
         self,
         sample_issuer: SampleIssuer,
         dataloader: DataLoader,
+        name: str | None = None,
     ):
         """Initialize load generator with required dependencies.
 
@@ -133,6 +134,8 @@ class LoadGenerator(ABC):
         """
         self.sample_issuer = sample_issuer
         self.dataloader = dataloader
+        self.name = name
+        self.uuid_to_index_map = {}
 
     @abstractmethod
     def __next__(self) -> tuple[Sample, int]:
@@ -160,6 +163,7 @@ class LoadGenerator(ABC):
 
     def __iter__(self):
         """Return self as an iterator."""
+        self.uuid_to_index_map = {}
         return self
 
     def load_sample_data(self, sample_index: int, sample_uuid: str) -> Any:
@@ -291,6 +295,8 @@ class SchedulerBasedLoadGenerator(LoadGenerator):
         sample = Sample(None)  # Create sample object first to generate uuid
         sample.data = self.load_sample_data(s_idx, sample.uuid)
 
+        self.uuid_to_index_map[sample.uuid] = s_idx
+
         scheduled_issue_timestamp_ns = self.last_issue_timestamp_ns + delay_ns
         while (now := time.monotonic_ns()) < scheduled_issue_timestamp_ns:
             sleep_ns(scheduled_issue_timestamp_ns - now)
@@ -303,4 +309,4 @@ class SchedulerBasedLoadGenerator(LoadGenerator):
                 "SchedulerBasedLoadGenerator can only be iterated over once"
             )
         self._iterator = iter(self.scheduler)
-        return self
+        return super().__iter__()

@@ -12,6 +12,10 @@ Local model benchmarking with a small HuggingFace model, demonstrating custom Da
 
 Benchmarking a real-world model served via open-source serving systems such as [vLLM](https://github.com/vllm-project/vllm) and [SGLang](https://github.com/sgl-project/sglang).
 
+### [03_BenchmarkComparison](03_BenchmarkComparison/)
+
+Compare `inference-endpoint` with [vLLM's](https://github.com/vllm-project/vllm) benchmarking tool.
+
 ## Getting Help
 
 - For general usage: See main [README](../README.md)

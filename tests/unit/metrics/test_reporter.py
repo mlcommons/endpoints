@@ -16,8 +16,9 @@
 import json
 import math
 
+import orjson
 import pytest
-from inference_endpoint.load_generator.events import SessionEvent
+from inference_endpoint.load_generator.events import SampleEvent, SessionEvent
 from inference_endpoint.metrics.recorder import sqlite3_cursor
 from inference_endpoint.metrics.reporter import (
     MetricsReporter,
@@ -58,7 +59,6 @@ def test_derive_tpot(events_db, sample_uuids, fake_outputs, tokenizer):
     uuid2 = sample_uuids(2)
 
     with MetricsReporter(events_db) as reporter:
-        reporter.outputs_path = fake_outputs.path
         tpot_rows = reporter.derive_TPOT(
             tokenizer, reporting_mode=TPOTReportingMode.TOKEN_WEIGHTED
         )
@@ -103,15 +103,15 @@ def test_derive_duration_malformed(tmp_path):
     test_db_path = str(tmp_path / "bad_events.db")
     with sqlite3_cursor(test_db_path) as (cursor, _):
         cursor.execute(
-            "CREATE TABLE IF NOT EXISTS events (sample_uuid VARCHAR(32), event_type VARCHAR(32), timestamp_ns INTEGER)"
+            "CREATE TABLE IF NOT EXISTS events (sample_uuid VARCHAR(32), event_type VARCHAR(32), timestamp_ns INTEGER, data BLOB)"
         )
         cursor.executemany(
-            "INSERT INTO events (sample_uuid, event_type, timestamp_ns) VALUES (?, ?, ?)",
+            "INSERT INTO events (sample_uuid, event_type, timestamp_ns, data) VALUES (?, ?, ?, ?)",
             [
-                ("", SessionEvent.TEST_STARTED.value, 5000),
-                ("", SessionEvent.TEST_ENDED.value, 10300),
-                ("", SessionEvent.TEST_STARTED.value, 11000),
-                ("", SessionEvent.TEST_ENDED.value, 12000),
+                ("", SessionEvent.TEST_STARTED.value, 5000, b""),
+                ("", SessionEvent.TEST_ENDED.value, 10300, b""),
+                ("", SessionEvent.TEST_STARTED.value, 11000, b""),
+                ("", SessionEvent.TEST_ENDED.value, 12000, b""),
             ],
         )
 
@@ -122,9 +122,7 @@ def test_derive_duration_malformed(tmp_path):
             reporter.derive_duration()
 
 
-def test_tpot_to_histogram(
-    events_db_reporter_with_fake_outputs, fake_outputs, tokenizer, sample_uuids
-):
+def test_tpot_to_histogram(events_db, fake_outputs, tokenizer, sample_uuids):
     uuid1 = sample_uuids(1)
     uuid2 = sample_uuids(2)
 
@@ -146,10 +144,10 @@ def test_tpot_to_histogram(
         expected[1]["tpot"] + 1,
     ]
 
-    reporter = events_db_reporter_with_fake_outputs
-    tpot_rows = reporter.derive_TPOT(
-        tokenizer, reporting_mode=TPOTReportingMode.TOKEN_WEIGHTED
-    )
+    with MetricsReporter(events_db) as reporter:
+        tpot_rows = reporter.derive_TPOT(
+            tokenizer, reporting_mode=TPOTReportingMode.TOKEN_WEIGHTED
+        )
 
     # This isn't documented since it's an internal detail and should not be relied on, but `n_buckets`
     # is passed directly to np.histogram, so we can specify exact buckets to use
@@ -204,21 +202,18 @@ def test_rollup_summarize(events_db):
         assert summary["percentiles"][s] == latencies.percentile(percentile)
 
 
-def test_reporter_create_report(
-    events_db_reporter_with_fake_outputs, fake_outputs, tokenizer
-):
-    reporter = events_db_reporter_with_fake_outputs
+def test_reporter_create_report(events_db, fake_outputs, tokenizer):
+    with MetricsReporter(events_db) as reporter:
+        report = reporter.create_report(tokenizer)
 
-    report = reporter.create_report(tokenizer)
-
-    # Expected
-    ttft_rollup = reporter.derive_TTFT()
-    sample_latency_rollup = reporter.derive_sample_latency()
-    tpot_rollup = reporter.derive_TPOT(
-        tokenizer,
-        ttft_rollup=ttft_rollup,
-        sample_latency_rollup=sample_latency_rollup,
-    )
+        # Expected
+        ttft_rollup = reporter.derive_TTFT()
+        sample_latency_rollup = reporter.derive_sample_latency()
+        tpot_rollup = reporter.derive_TPOT(
+            tokenizer,
+            ttft_rollup=ttft_rollup,
+            sample_latency_rollup=sample_latency_rollup,
+        )
 
     assert report.n_samples_issued == 3
     assert report.n_samples_completed == 2
@@ -323,3 +318,433 @@ def test_display_report(events_db):
 
     assert "- Summary -" in lines[0]
     assert lines[1].startswith("Total samples issued:")
+
+
+def test_stop_performance_tracking_timestamp_property(tmp_path, sample_uuids):
+    """Test that stop_performance_tracking_timestamp_ns returns correct value when event exists."""
+    test_db = str(tmp_path / "test_stop_perf_tracking.db")
+    with sqlite3_cursor(test_db) as (cursor, conn):
+        cursor.execute(
+            "CREATE TABLE IF NOT EXISTS events (sample_uuid VARCHAR(32), event_type VARCHAR(32), timestamp_ns INTEGER, data BLOB)"
+        )
+        cursor.executemany(
+            "INSERT INTO events (sample_uuid, event_type, timestamp_ns, data) VALUES (?, ?, ?, ?)",
+            [
+                ("", SessionEvent.TEST_STARTED.value, 5000, b""),
+                ("", SessionEvent.STOP_PERFORMANCE_TRACKING.value, 10100, b""),
+                ("", SessionEvent.TEST_ENDED.value, 10300, b""),
+            ],
+        )
+        conn.commit()
+
+    with MetricsReporter(test_db) as reporter:
+        assert reporter.stop_performance_tracking_timestamp_ns == 10100
+
+
+def test_stop_performance_tracking_timestamp_missing(tmp_path):
+    """Test that stop_performance_tracking_timestamp_ns returns infinity when event is missing."""
+    test_db = str(tmp_path / "test_no_stop_perf_tracking.db")
+    with sqlite3_cursor(test_db) as (cursor, conn):
+        cursor.execute(
+            "CREATE TABLE IF NOT EXISTS events (sample_uuid VARCHAR(32), event_type VARCHAR(32), timestamp_ns INTEGER, data BLOB)"
+        )
+        cursor.executemany(
+            "INSERT INTO events (sample_uuid, event_type, timestamp_ns, data) VALUES (?, ?, ?, ?)",
+            [
+                ("", SessionEvent.TEST_STARTED.value, 5000, b""),
+                ("", SessionEvent.TEST_ENDED.value, 10300, b""),
+            ],
+        )
+        conn.commit()
+
+    with MetricsReporter(test_db) as reporter:
+        assert reporter.stop_performance_tracking_timestamp_ns == float("inf")
+
+
+def test_derive_ttft_with_stop_performance_tracking(tmp_path, sample_uuids):
+    """Test that derive_TTFT excludes samples issued after STOP_PERFORMANCE_TRACKING."""
+    test_db = str(tmp_path / "test_ttft_stop_perf.db")
+    uuid1 = sample_uuids(1)
+    uuid2 = sample_uuids(2)
+    uuid3 = sample_uuids(3)
+
+    with sqlite3_cursor(test_db) as (cursor, conn):
+        cursor.execute(
+            "CREATE TABLE IF NOT EXISTS events (sample_uuid VARCHAR(32), event_type VARCHAR(32), timestamp_ns INTEGER, data BLOB)"
+        )
+        cursor.executemany(
+            "INSERT INTO events (sample_uuid, event_type, timestamp_ns, data) VALUES (?, ?, ?, ?)",
+            [
+                ("", SessionEvent.TEST_STARTED.value, 5000, b""),
+                (uuid1, SessionEvent.LOADGEN_ISSUE_CALLED.value, 10000, b""),
+                (uuid2, SessionEvent.LOADGEN_ISSUE_CALLED.value, 10003, b""),
+                (uuid1, SampleEvent.FIRST_CHUNK.value, 10010, b""),
+                (uuid2, SampleEvent.FIRST_CHUNK.value, 10190, b""),
+                (
+                    "",
+                    SessionEvent.STOP_PERFORMANCE_TRACKING.value,
+                    10150,
+                    b"",
+                ),  # Before uuid3 issued
+                (uuid3, SessionEvent.LOADGEN_ISSUE_CALLED.value, 10200, b""),
+                (uuid3, SampleEvent.FIRST_CHUNK.value, 10220, b""),
+                (uuid1, SampleEvent.COMPLETE.value, 10211, b""),
+                (uuid2, SampleEvent.COMPLETE.value, 10219, b""),
+                (uuid3, SampleEvent.COMPLETE.value, 10250, b""),
+                ("", SessionEvent.TEST_ENDED.value, 10300, b""),
+            ],
+        )
+        conn.commit()
+
+    with MetricsReporter(test_db) as reporter:
+        ttft_rows = reporter.derive_TTFT()
+
+    # Should only include uuid1 and uuid2, not uuid3 (issued after STOP_PERFORMANCE_TRACKING)
+    assert len(ttft_rows) == 2
+    assert ttft_rows.filter_uuid(uuid1, only_first=True) == 10
+    assert ttft_rows.filter_uuid(uuid2, only_first=True) == 187
+    assert ttft_rows.filter_uuid(uuid3, only_first=True) is None
+
+
+def test_derive_sample_latency_with_stop_performance_tracking(tmp_path, sample_uuids):
+    """Test that derive_sample_latency excludes samples issued after STOP_PERFORMANCE_TRACKING."""
+    test_db = str(tmp_path / "test_latency_stop_perf.db")
+    uuid1 = sample_uuids(1)
+    uuid2 = sample_uuids(2)
+    uuid3 = sample_uuids(3)
+
+    with sqlite3_cursor(test_db) as (cursor, conn):
+        cursor.execute(
+            "CREATE TABLE IF NOT EXISTS events (sample_uuid VARCHAR(32), event_type VARCHAR(32), timestamp_ns INTEGER, data BLOB)"
+        )
+        cursor.executemany(
+            "INSERT INTO events (sample_uuid, event_type, timestamp_ns, data) VALUES (?, ?, ?, ?)",
+            [
+                ("", SessionEvent.TEST_STARTED.value, 5000, b""),
+                (uuid1, SessionEvent.LOADGEN_ISSUE_CALLED.value, 10000, b""),
+                (uuid2, SessionEvent.LOADGEN_ISSUE_CALLED.value, 10003, b""),
+                (uuid1, SampleEvent.COMPLETE.value, 10211, b""),
+                (uuid2, SampleEvent.COMPLETE.value, 10219, b""),
+                ("", SessionEvent.STOP_PERFORMANCE_TRACKING.value, 10150, b""),
+                (uuid3, SessionEvent.LOADGEN_ISSUE_CALLED.value, 10200, b""),
+                (uuid3, SampleEvent.COMPLETE.value, 10250, b""),
+                ("", SessionEvent.TEST_ENDED.value, 10300, b""),
+            ],
+        )
+        conn.commit()
+
+    with MetricsReporter(test_db) as reporter:
+        latency_rows = reporter.derive_sample_latency()
+
+    # Should only include uuid1 and uuid2
+    assert len(latency_rows) == 2
+    assert latency_rows.filter_uuid(uuid1, only_first=True) == 10211 - 10000
+    assert latency_rows.filter_uuid(uuid2, only_first=True) == 10219 - 10003
+    assert latency_rows.filter_uuid(uuid3, only_first=True) is None
+
+
+def test_derive_duration_with_stop_performance_tracking(tmp_path):
+    """Test that derive_duration uses STOP_PERFORMANCE_TRACKING timestamp when present."""
+    test_db = str(tmp_path / "test_duration_stop_perf.db")
+    with sqlite3_cursor(test_db) as (cursor, conn):
+        cursor.execute(
+            "CREATE TABLE IF NOT EXISTS events (sample_uuid VARCHAR(32), event_type VARCHAR(32), timestamp_ns INTEGER, data BLOB)"
+        )
+        cursor.executemany(
+            "INSERT INTO events (sample_uuid, event_type, timestamp_ns, data) VALUES (?, ?, ?, ?)",
+            [
+                ("", SessionEvent.TEST_STARTED.value, 5000, b""),
+                ("", SessionEvent.STOP_PERFORMANCE_TRACKING.value, 10100, b""),
+                ("", SessionEvent.TEST_ENDED.value, 10300, b""),
+            ],
+        )
+        conn.commit()
+
+    with MetricsReporter(test_db) as reporter:
+        duration = reporter.derive_duration()
+
+    # Should use STOP_PERFORMANCE_TRACKING - TEST_STARTED (not TEST_ENDED - TEST_STARTED)
+    assert duration == 10100 - 5000
+
+
+def test_derive_duration_without_stop_performance_tracking(tmp_path):
+    """Test that derive_duration uses TEST_ENDED when STOP_PERFORMANCE_TRACKING is absent."""
+    test_db = str(tmp_path / "test_duration_no_stop_perf.db")
+    with sqlite3_cursor(test_db) as (cursor, conn):
+        cursor.execute(
+            "CREATE TABLE IF NOT EXISTS events (sample_uuid VARCHAR(32), event_type VARCHAR(32), timestamp_ns INTEGER, data BLOB)"
+        )
+        cursor.executemany(
+            "INSERT INTO events (sample_uuid, event_type, timestamp_ns, data) VALUES (?, ?, ?, ?)",
+            [
+                ("", SessionEvent.TEST_STARTED.value, 5000, b""),
+                ("", SessionEvent.TEST_ENDED.value, 10300, b""),
+            ],
+        )
+        conn.commit()
+
+    with MetricsReporter(test_db) as reporter:
+        duration = reporter.derive_duration()
+
+    # Should use TEST_ENDED - TEST_STARTED
+    assert duration == 10300 - 5000
+
+
+def test_get_sample_statuses_with_stop_performance_tracking(tmp_path, sample_uuids):
+    """Test that get_sample_statuses excludes samples issued after STOP_PERFORMANCE_TRACKING.
+
+    This test verifies:
+    1. Samples issued before stop_ts are counted in total_sent
+    2. Samples issued after stop_ts are NOT counted in total_sent
+    3. Completed samples are only counted if they were issued before stop_ts
+    4. Samples issued before stop_ts but completing after stop_ts ARE still counted as completed
+    """
+    test_db = str(tmp_path / "test_statuses_stop_perf.db")
+    uuid1 = sample_uuids(1)
+    uuid2 = sample_uuids(2)
+    uuid3 = sample_uuids(3)
+
+    with sqlite3_cursor(test_db) as (cursor, conn):
+        cursor.execute(
+            "CREATE TABLE IF NOT EXISTS events (sample_uuid VARCHAR(32), event_type VARCHAR(32), timestamp_ns INTEGER, data BLOB)"
+        )
+        cursor.executemany(
+            "INSERT INTO events (sample_uuid, event_type, timestamp_ns, data) VALUES (?, ?, ?, ?)",
+            [
+                ("", SessionEvent.TEST_STARTED.value, 5000, b""),
+                (
+                    uuid1,
+                    SessionEvent.LOADGEN_ISSUE_CALLED.value,
+                    10000,
+                    b"",
+                ),  # Issued before stop_ts
+                (
+                    uuid2,
+                    SessionEvent.LOADGEN_ISSUE_CALLED.value,
+                    10003,
+                    b"",
+                ),  # Issued before stop_ts
+                (
+                    uuid1,
+                    SampleEvent.COMPLETE.value,
+                    10100,
+                    b"",
+                ),  # Completed before stop_ts
+                (
+                    "",
+                    SessionEvent.STOP_PERFORMANCE_TRACKING.value,
+                    10150,
+                    b"",
+                ),  # STOP marker
+                (
+                    uuid3,
+                    SessionEvent.LOADGEN_ISSUE_CALLED.value,
+                    10200,
+                    b"",
+                ),  # Issued AFTER stop_ts
+                (
+                    uuid2,
+                    SampleEvent.COMPLETE.value,
+                    10219,
+                    b"",
+                ),  # Issued before but completed AFTER stop_ts
+                (uuid3, SampleEvent.COMPLETE.value, 10250, b""),  # Issued after stop_ts
+                ("", SessionEvent.TEST_ENDED.value, 10300, b""),
+            ],
+        )
+        conn.commit()
+
+    with MetricsReporter(test_db) as reporter:
+        stats = reporter.get_sample_statuses()
+        assert reporter.stop_performance_tracking_timestamp_ns == 10150
+
+    # Should only count uuid1 and uuid2 as issued (uuid3 issued after cutoff)
+    # Both uuid1 and uuid2 should be counted as completed even though uuid2 completed after stop_ts
+    assert stats["total_sent"] == 2
+    assert (
+        stats["completed"] == 2
+    )  # uuid1 and uuid2 (uuid3 not counted because it was issued after stop_ts)
+    assert stats["in_flight"] == 0
+
+
+def test_get_sample_statuses_excludes_late_issued_completions(tmp_path, sample_uuids):
+    """Test that completed samples issued after STOP_PERFORMANCE_TRACKING are not counted.
+
+    This specifically tests the edge case where a sample is issued after stop_ts and completes,
+    ensuring it's not included in the completed count.
+    """
+    test_db = str(tmp_path / "test_late_completion.db")
+    uuid1 = sample_uuids(1)
+    uuid2 = sample_uuids(2)
+    uuid3 = sample_uuids(3)
+    uuid4 = sample_uuids(4)
+
+    with sqlite3_cursor(test_db) as (cursor, conn):
+        cursor.execute(
+            "CREATE TABLE IF NOT EXISTS events (sample_uuid VARCHAR(32), event_type VARCHAR(32), timestamp_ns INTEGER, data BLOB)"
+        )
+        cursor.executemany(
+            "INSERT INTO events (sample_uuid, event_type, timestamp_ns, data) VALUES (?, ?, ?, ?)",
+            [
+                ("", SessionEvent.TEST_STARTED.value, 5000, b""),
+                (uuid1, SessionEvent.LOADGEN_ISSUE_CALLED.value, 10000, b""),
+                (uuid2, SessionEvent.LOADGEN_ISSUE_CALLED.value, 10003, b""),
+                (uuid1, SampleEvent.COMPLETE.value, 10100, b""),
+                ("", SessionEvent.STOP_PERFORMANCE_TRACKING.value, 10150, b""),
+                # uuid2 still in flight when stop_ts happens
+                (
+                    uuid3,
+                    SessionEvent.LOADGEN_ISSUE_CALLED.value,
+                    10200,
+                    b"",
+                ),  # Issued after stop_ts
+                (
+                    uuid4,
+                    SessionEvent.LOADGEN_ISSUE_CALLED.value,
+                    10205,
+                    b"",
+                ),  # Issued after stop_ts
+                (
+                    uuid3,
+                    SampleEvent.COMPLETE.value,
+                    10250,
+                    b"",
+                ),  # Completes but was issued after stop_ts
+                (
+                    uuid4,
+                    SampleEvent.COMPLETE.value,
+                    10260,
+                    b"",
+                ),  # Completes but was issued after stop_ts
+                ("", SessionEvent.TEST_ENDED.value, 10300, b""),
+            ],
+        )
+        conn.commit()
+
+    with MetricsReporter(test_db) as reporter:
+        stats = reporter.get_sample_statuses()
+
+    # Only uuid1 and uuid2 should be counted (issued before stop_ts)
+    assert stats["total_sent"] == 2
+    # Only uuid1 completed (uuid2 never completed, uuid3 and uuid4 don't count)
+    assert stats["completed"] == 1
+    assert stats["in_flight"] == 1  # uuid2 is still in flight
+
+
+def test_get_output_sequence_lengths_with_stop_performance_tracking(
+    tmp_path, sample_uuids, tokenizer
+):
+    """Test that get_output_sequence_lengths excludes samples issued after STOP_PERFORMANCE_TRACKING."""
+    test_db = str(tmp_path / "test_osl_stop_perf.db")
+    uuid1 = sample_uuids(1)
+    uuid2 = sample_uuids(2)
+    uuid3 = sample_uuids(3)
+
+    with sqlite3_cursor(test_db) as (cursor, conn):
+        cursor.execute(
+            "CREATE TABLE IF NOT EXISTS events (sample_uuid VARCHAR(32), event_type VARCHAR(32), timestamp_ns INTEGER, data BLOB)"
+        )
+        cursor.executemany(
+            "INSERT INTO events (sample_uuid, event_type, timestamp_ns, data) VALUES (?, ?, ?, ?)",
+            [
+                ("", SessionEvent.TEST_STARTED.value, 5000, b""),
+                (uuid1, SessionEvent.LOADGEN_ISSUE_CALLED.value, 10000, b""),
+                (uuid2, SessionEvent.LOADGEN_ISSUE_CALLED.value, 10003, b""),
+                (
+                    uuid1,
+                    SampleEvent.COMPLETE.value,
+                    10211,
+                    orjson.dumps({"output": ["Hello, ", "world"]}),
+                ),
+                (
+                    uuid2,
+                    SampleEvent.COMPLETE.value,
+                    10219,
+                    orjson.dumps({"output": ["And ", "goodbye."]}),
+                ),
+                ("", SessionEvent.STOP_PERFORMANCE_TRACKING.value, 10150, b""),
+                (uuid3, SessionEvent.LOADGEN_ISSUE_CALLED.value, 10200, b""),
+                (
+                    uuid3,
+                    SampleEvent.COMPLETE.value,
+                    10250,
+                    orjson.dumps({"output": ["Extra ", "sample"]}),
+                ),
+                ("", SessionEvent.TEST_ENDED.value, 10300, b""),
+            ],
+        )
+        conn.commit()
+
+    with MetricsReporter(test_db) as reporter:
+        osl_rollup = reporter.get_output_sequence_lengths(tokenizer)
+
+    # Should only include uuid1 and uuid2 (uuid3 issued after STOP_PERFORMANCE_TRACKING)
+    assert len(osl_rollup) == 2
+    assert uuid1 in osl_rollup
+    assert uuid2 in osl_rollup
+    assert uuid3 not in osl_rollup
+
+
+def test_create_report_with_stop_performance_tracking(
+    tmp_path, sample_uuids, tokenizer
+):
+    """Test that create_report respects STOP_PERFORMANCE_TRACKING for all metrics."""
+    test_db = str(tmp_path / "test_report_stop_perf.db")
+    uuid1 = sample_uuids(1)
+    uuid2 = sample_uuids(2)
+    uuid3 = sample_uuids(3)
+
+    with sqlite3_cursor(test_db) as (cursor, conn):
+        cursor.execute(
+            "CREATE TABLE IF NOT EXISTS events (sample_uuid VARCHAR(32), event_type VARCHAR(32), timestamp_ns INTEGER, data BLOB)"
+        )
+        cursor.executemany(
+            "INSERT INTO events (sample_uuid, event_type, timestamp_ns, data) VALUES (?, ?, ?, ?)",
+            [
+                ("", SessionEvent.TEST_STARTED.value, 5000, b""),
+                (uuid1, SessionEvent.LOADGEN_ISSUE_CALLED.value, 10000, b""),
+                (uuid2, SessionEvent.LOADGEN_ISSUE_CALLED.value, 10003, b""),
+                (uuid1, SampleEvent.FIRST_CHUNK.value, 10010, b""),
+                (uuid2, SampleEvent.FIRST_CHUNK.value, 10190, b""),
+                (
+                    uuid1,
+                    SampleEvent.COMPLETE.value,
+                    10211,
+                    orjson.dumps({"output": ["Hello, ", "world"]}),
+                ),
+                (
+                    uuid2,
+                    SampleEvent.COMPLETE.value,
+                    10219,
+                    orjson.dumps({"output": ["And ", "goodbye."]}),
+                ),
+                ("", SessionEvent.STOP_PERFORMANCE_TRACKING.value, 10150, b""),
+                (uuid3, SessionEvent.LOADGEN_ISSUE_CALLED.value, 10200, b""),
+                (uuid3, SampleEvent.FIRST_CHUNK.value, 10220, b""),
+                (
+                    uuid3,
+                    SampleEvent.COMPLETE.value,
+                    10250,
+                    orjson.dumps({"output": ["Extra ", "sample"]}),
+                ),
+                ("", SessionEvent.TEST_ENDED.value, 10300, b""),
+            ],
+        )
+        conn.commit()
+
+    with MetricsReporter(test_db) as reporter:
+        report = reporter.create_report(tokenizer)
+
+    # Verify that only uuid1 and uuid2 are counted
+    assert report.n_samples_issued == 2  # Only uuid1 and uuid2
+    assert report.n_samples_completed == 2
+    assert (
+        report.duration_ns == 10150 - 5000
+    )  # STOP_PERFORMANCE_TRACKING - TEST_STARTED
+
+    # Verify QPS is based on the truncated duration
+    expected_qps = 2 / ((10150 - 5000) / 1e9)
+    assert report.qps == expected_qps
+
+    # Verify latency includes only uuid1 and uuid2
+    assert report.latency["total"] == (10211 - 10000) + (10219 - 10003)

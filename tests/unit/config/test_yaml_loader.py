@@ -18,14 +18,7 @@
 from pathlib import Path
 
 import pytest
-from inference_endpoint.config.schema import (
-    BenchmarkConfig,
-    ClientSettings,
-    EndpointConfig,
-    LoadPattern,
-    LoadPatternType,
-    Settings,
-)
+from inference_endpoint.config.schema import BenchmarkConfig, LoadPatternType
 from inference_endpoint.config.schema import TestType as BenchmarkTestType
 from inference_endpoint.config.yaml_loader import ConfigError, ConfigLoader
 
@@ -132,49 +125,3 @@ endpoint_config:
         # Verify it loads back
         loaded = BenchmarkConfig.from_yaml_file(nested_path)
         assert loaded.name == config.name
-
-    @pytest.mark.skip(reason="Refactor to use the concurrency from the load pattern")
-    def test_validate_concurrency_error_when_insufficient(self):
-        """Test error raised when max_concurrency < target_concurrency."""
-        # Create a BenchmarkConfig with insufficient max_concurrency
-        config = BenchmarkConfig(
-            name="test",
-            type=BenchmarkTestType.ONLINE,
-            datasets=[],
-            endpoint_config=EndpointConfig(endpoint="http://test:8000"),
-            settings=Settings(
-                load_pattern=LoadPattern(
-                    type=LoadPatternType.CONCURRENCY,
-                    target_qps=None,
-                    target_concurrency=64,
-                ),
-                client=ClientSettings(workers=4, max_concurrency=32),  # Too small
-            ),
-        )
-
-        # Should raise ConfigError
-        with pytest.raises(ConfigError) as exc_info:
-            ConfigLoader.validate_config(config, benchmark_mode="online")
-
-        assert "max_concurrency" in str(exc_info.value)
-        assert "32" in str(exc_info.value)
-        assert "64" in str(exc_info.value)
-
-    @pytest.mark.skip(reason="Refactor to use the concurrency from the load pattern")
-    def test_validate_concurrency_sufficient(self):
-        """Test validation passes when max_concurrency >= target_concurrency."""
-        config = BenchmarkConfig(
-            name="test",
-            type=BenchmarkTestType.ONLINE,
-            datasets=[],
-            endpoint_config=EndpointConfig(endpoint="http://test:8000"),
-            settings=Settings(
-                load_pattern=LoadPattern(
-                    type=LoadPatternType.POISSON, target_qps=10.0, target_concurrency=32
-                ),
-                client=ClientSettings(workers=4, max_concurrency=64),  # OK
-            ),
-        )
-
-        # Should not raise error
-        ConfigLoader.validate_config(config, benchmark_mode="online")

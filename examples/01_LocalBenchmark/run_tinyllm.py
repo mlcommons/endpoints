@@ -189,6 +189,11 @@ if __name__ == "__main__":
         action="store_true",
         help="Dump the events to a CSV file",
     )
+    parser.add_argument(
+        "--total-sample-count",
+        type=int,
+        help="Total number of samples to issue (Debug only)",
+    )
     args = parser.parse_args()
 
     # Set up progress bar hook to monitor sample completion
@@ -205,6 +210,7 @@ if __name__ == "__main__":
         min_sample_count=100,  # Minimum samples to issue
         min_duration_ms=10 * 1000,  # 10 seconds minimum
         max_duration_ms=5 * 60 * 1000,  # 5 minutes maximum
+        total_sample_count=args.total_sample_count if args.total_sample_count else None,
         ds_subset_size=dataloader.num_samples(),  # Use all available samples
     )
 
@@ -240,7 +246,6 @@ if __name__ == "__main__":
             issuer,
             scheduler,
             name="tinyllm_benchmark",
-            stop_sample_issuer_on_test_end=False,
             report_dir="tinyllm_benchmark_report",
             tokenizer_override=model_runner.tokenizer,
             dump_events_csv=args.dump_events_csv,

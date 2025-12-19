@@ -22,6 +22,7 @@ This module contains common utilities used throughout the system.
 import ctypes
 import time
 import warnings
+from datetime import datetime
 
 try:
     libc = ctypes.CDLL("libc.so.6")
@@ -68,3 +69,26 @@ def byte_quantity_to_str(
     n_bytes = int(n_bytes)
     suffix = suffixes[suffix_idx]
     return f"{n_bytes}{suffix}"
+
+
+_G_MONOTIME_DELTA = time.time_ns() - time.monotonic_ns()
+"""Approximate delta between monotonic and wall-clock time in nanoseconds. See
+monotime_to_datetime() for more details.
+"""
+
+
+def monotime_to_datetime(monotime_ns: int) -> datetime:
+    """Monotonic clock has an undefined starting point. To convert to human readable timestamp,
+    we can add a constant delta to any monotonic timestamp to get an approximate equivalent wall-clock
+    timestamp. Note that the result will not be completely accurate, but it will be a consistent
+    offset from the real time, as long as this function is called in the same process. Any durations
+    and deltas calculated from resulting datetimes will be accurate, but absolute times will not be.
+
+    Args:
+        monotime_ns: The monotonic timestamp in nanoseconds.
+
+    Returns:
+        The datetime object corresponding to the approximate wall-clock timestamp.
+    """
+    wall_time = (monotime_ns + _G_MONOTIME_DELTA) / 1e9
+    return datetime.fromtimestamp(wall_time)

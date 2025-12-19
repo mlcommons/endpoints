@@ -19,30 +19,27 @@ Benchmarking System.
 This file provides shared fixtures and configuration for all tests.
 """
 
-import json
 import logging
 import os
 import random
 import sqlite3
 import sys
 import uuid
-from collections import UserDict
 from pathlib import Path
 from typing import Any
 
+import orjson
 import pytest
 from inference_endpoint import metrics
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import LoadPattern, LoadPatternType
 from inference_endpoint.dataset_manager.dataloader import (
     DataLoader,
-    DeepSeekR1ChatCompletionDataLoader,
     HFDataLoader,
     PickleReader,
 )
 from inference_endpoint.load_generator.events import SampleEvent, SessionEvent
 from inference_endpoint.load_generator.sample import SampleEventHandler
-from inference_endpoint.metrics.reporter import MetricsReporter
 from inference_endpoint.testing.docker_server import DockerServer
 from inference_endpoint.testing.echo_server import EchoServer, HTTPServer
 
@@ -233,7 +230,21 @@ def sample_uuids():
 
 
 @pytest.fixture
-def events_db(tmp_path, sample_uuids):
+def fake_outputs(sample_uuids):
+    """Returns the fake output data structure used in tests.
+
+    Maps sample UUIDs to their output chunks (list of strings).
+    """
+    uuid1 = sample_uuids(1)
+    uuid2 = sample_uuids(2)
+    return {
+        uuid1: ["Hello, ", "world"],
+        uuid2: ["And ", "goodbye."],
+    }
+
+
+@pytest.fixture
+def events_db(tmp_path, sample_uuids, fake_outputs):
     """Returns a sample in-memory sqlite database for events.
     This database contains events for 3 sent queries, but only 2 are completed. The 3rd query has no 'received' events.
     """
@@ -242,7 +253,7 @@ def events_db(tmp_path, sample_uuids):
     conn = sqlite3.connect(test_db)
     cur = conn.cursor()
     cur.execute(
-        "CREATE TABLE IF NOT EXISTS events (sample_uuid VARCHAR(32), event_type VARCHAR(32), timestamp_ns INTEGER)"
+        "CREATE TABLE IF NOT EXISTS events (sample_uuid VARCHAR(32), event_type VARCHAR(32), timestamp_ns INTEGER, data BLOB)"
     )
 
     # Use deterministic UUIDs for testing
@@ -250,29 +261,40 @@ def events_db(tmp_path, sample_uuids):
     uuid2 = sample_uuids(2)
     uuid3 = sample_uuids(3)
 
+    # Define output data for COMPLETE events
     events = [
-        ("", SessionEvent.TEST_STARTED.value, 5000),
-        (uuid1, SessionEvent.LOADGEN_ISSUE_CALLED.value, 10000),
-        (uuid2, SessionEvent.LOADGEN_ISSUE_CALLED.value, 10003),
-        (uuid1, SampleEvent.FIRST_CHUNK.value, 10010),
-        (uuid2, SampleEvent.FIRST_CHUNK.value, 10190),
-        (uuid1, SampleEvent.NON_FIRST_CHUNK.value, 10201),
-        (uuid3, SessionEvent.LOADGEN_ISSUE_CALLED.value, 10202),
-        (uuid1, SampleEvent.NON_FIRST_CHUNK.value, 10203),
-        (uuid2, SampleEvent.NON_FIRST_CHUNK.value, 10210),
-        (uuid3, SessionEvent.ERROR.value, 10211),
-        (uuid1, SampleEvent.NON_FIRST_CHUNK.value, 10211),
-        (uuid1, SampleEvent.COMPLETE.value, 10211),
-        (uuid2, SampleEvent.NON_FIRST_CHUNK.value, 10214),
-        (uuid3, SessionEvent.ERROR.value, 10216),
-        (uuid2, SampleEvent.NON_FIRST_CHUNK.value, 10217),
-        (uuid2, SampleEvent.NON_FIRST_CHUNK.value, 10219),
-        (uuid2, SampleEvent.COMPLETE.value, 10219),
-        (uuid3, SessionEvent.ERROR.value, 10225),
-        ("", SessionEvent.TEST_ENDED.value, 10300),
+        ("", SessionEvent.TEST_STARTED.value, 5000, b""),
+        (uuid1, SessionEvent.LOADGEN_ISSUE_CALLED.value, 10000, b""),
+        (uuid2, SessionEvent.LOADGEN_ISSUE_CALLED.value, 10003, b""),
+        (uuid1, SampleEvent.FIRST_CHUNK.value, 10010, b""),
+        (uuid2, SampleEvent.FIRST_CHUNK.value, 10190, b""),
+        (uuid1, SampleEvent.NON_FIRST_CHUNK.value, 10201, b""),
+        (uuid3, SessionEvent.LOADGEN_ISSUE_CALLED.value, 10202, b""),
+        (uuid1, SampleEvent.NON_FIRST_CHUNK.value, 10203, b""),
+        (uuid2, SampleEvent.NON_FIRST_CHUNK.value, 10210, b""),
+        (uuid3, SessionEvent.ERROR.value, 10211, b""),
+        (uuid1, SampleEvent.NON_FIRST_CHUNK.value, 10211, b""),
+        (
+            uuid1,
+            SampleEvent.COMPLETE.value,
+            10211,
+            orjson.dumps({"output": fake_outputs[uuid1]}),
+        ),
+        (uuid2, SampleEvent.NON_FIRST_CHUNK.value, 10214, b""),
+        (uuid3, SessionEvent.ERROR.value, 10216, b""),
+        (uuid2, SampleEvent.NON_FIRST_CHUNK.value, 10217, b""),
+        (uuid2, SampleEvent.NON_FIRST_CHUNK.value, 10219, b""),
+        (
+            uuid2,
+            SampleEvent.COMPLETE.value,
+            10219,
+            orjson.dumps({"output": fake_outputs[uuid2]}),
+        ),
+        (uuid3, SessionEvent.ERROR.value, 10225, b""),
+        ("", SessionEvent.TEST_ENDED.value, 10300, b""),
     ]
     cur.executemany(
-        "INSERT INTO events (sample_uuid, event_type, timestamp_ns) VALUES (?, ?, ?)",
+        "INSERT INTO events (sample_uuid, event_type, timestamp_ns, data) VALUES (?, ?, ?, ?)",
         events,
     )
     conn.commit()
@@ -292,41 +314,6 @@ class CharacterTokenizer:
 @pytest.fixture
 def tokenizer():
     return CharacterTokenizer()
-
-
-@pytest.fixture
-def fake_outputs(tmp_path, sample_uuids):
-    """Returns the path to a temporary file, containing fake outputs for the events_db fixture."""
-    uuid1 = sample_uuids(1)
-    uuid2 = sample_uuids(2)
-
-    class FakeOutputs(UserDict):
-        def __init__(self, path: Path):
-            super().__init__()
-
-            self.path = path
-
-    output_path = tmp_path / "outputs.jsonl"
-    fake_outputs = FakeOutputs(output_path)
-    fake_outputs[uuid1] = ["Hello, ", "world"]
-    fake_outputs[uuid2] = ["And ", "goodbye."]
-
-    # Generate test outputs file
-    with output_path.open("w") as f:
-        for s_uuid, output in fake_outputs.items():
-            f.write(json.dumps({"s_uuid": s_uuid, "output": output}) + "\n")
-
-    yield fake_outputs
-
-    output_path.unlink()
-
-
-@pytest.fixture
-def events_db_reporter_with_fake_outputs(events_db, fake_outputs):
-    """Returns a MetricsReporter object with the fake outputs path set."""
-    with MetricsReporter(events_db) as reporter:
-        reporter.outputs_path = fake_outputs.path
-        yield reporter
 
 
 class OracleServer(EchoServer):
@@ -358,9 +345,7 @@ class OracleServer(EchoServer):
             return {"prompt": x["text_input"], "output": x["ref_output"]}
 
         self.parser = parser
-        data_loader = DeepSeekR1ChatCompletionDataLoader(
-            self.file_path, parser=self.parser
-        )
+        data_loader = PickleReader(self.file_path, parser=self.parser)
         data_loader.load()
         self.data = {}
         for i in range(data_loader.num_samples()):

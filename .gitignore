@@ -186,5 +186,8 @@ data/
 results/
 outputs/
 
+# Example vLLM virtualenv
+examples/03_BenchmarkComparison/vllm_venv/
+
 # Cursor artifacts (local development only)
 .cursor_artifacts/

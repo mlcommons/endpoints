@@ -33,9 +33,7 @@ class HTTPClientConfig:
 
     endpoint_url: str
     num_workers: int = 4
-    max_concurrency: int = (
-        -1
-    )  # -1: unlimited, else: limit concurrent requests via semaphore
+
     record_worker_events: bool = False
     event_logs_dir: Path | None = None
 

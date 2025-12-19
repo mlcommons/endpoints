@@ -210,7 +210,7 @@ class TestWorkerBasicFunctionality:
             assert responses[0].id == "test-streaming"
 
             # Verify final response
-            assert final_content == ("Stream", " this response please")
+            assert final_content == {"output": ("Stream", " this response please")}
 
             # Shutdown
             worker._shutdown = True
@@ -435,7 +435,9 @@ class TestWorkerBasicFunctionality:
             # Verify final result metadata
             assert final_result.metadata.get("final_chunk") is True
             assert final_result.id == "test-first-last-token"
-            assert final_result.response_output == ("Hello", " world this is a test")
+            assert final_result.response_output == {
+                "output": ("Hello", " world this is a test")
+            }
 
             # Verify intermediate chunks (if any) don't have first_chunk set to True
             for chunk in stream_chunks[1:]:
@@ -520,7 +522,7 @@ class TestWorkerBasicFunctionality:
             final_response = responses[-1]
             assert final_response.metadata.get("final_chunk") is True
             assert final_response.id == "test-empty-chunks"
-            assert final_response.response_output == ("",)  # Empty content
+            assert final_response.response_output["output"] == ()  # Empty content
 
             # Shutdown
             worker._shutdown = True
@@ -884,7 +886,7 @@ class TestWorkerBasicFunctionality:
             assert not isinstance(
                 last_response, StreamChunk
             ), "Last response should not be a StreamChunk"
-            assert last_response.response_output == ("Hi", "")
+            assert last_response.response_output == {"output": ("Hi",)}
             assert last_response.metadata.get("final_chunk") is True
             assert last_response.id == "test-single-word-order"
 
@@ -947,7 +949,7 @@ class TestWorkerBasicFunctionality:
             assert not isinstance(
                 last_empty, StreamChunk
             ), "Last response should not be a StreamChunk"
-            assert last_empty.response_output == ("",)
+            assert last_empty.response_output == {"output": ()}
             assert last_empty.id == "test-empty-order"
 
             # Shutdown

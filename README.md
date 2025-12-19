@@ -62,7 +62,7 @@ inference-endpoint benchmark offline \
   --num-samples 5000
 ```
 
-### Local Testing
+### Running Locally
 
 ```bash
 # Start local echo server
@@ -80,6 +80,18 @@ pkill -f echo_server
 
 See [Local Testing Guide](docs/LOCAL_TESTING.md) for detailed instructions.
 
+### Running Tests and Examples
+
+```bash
+# Install tests/ and examples/ dependencies
+pip install -r requirements/test.txt
+
+# Run tests (excluding performance and explicit-run tests)
+pytest -m "not performance and not run_explicitly"
+
+# Run examples: follow instructions in examples/*/README.md
+```
+
 ## 📚 Documentation
 
 - [CLI Quick Reference](docs/CLI_QUICK_REFERENCE.md) - Command-line interface guide
@@ -93,14 +105,14 @@ The system follows a modular, event-driven architecture:
 
 ```
 ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   Dataset      │    │   Load          │    │   Endpoint      │
-│   Manager      │───▶│   Generator     │───▶│   Client        │
+│   Dataset       │    │   Load          │    │   Endpoint      │
+│   Manager       │───▶│   Generator     │───▶│   Client        │
 └─────────────────┘    └─────────────────┘    └─────────────────┘
          │                       │                       │
          ▼                       ▼                       ▼
 ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   Metrics      │    │   Configuration │    │   Endpoint      │
-│   Collector    │◄───│   Manager       │    │   (External)    │
+│   Metrics       │    │   Configuration │    │   Endpoint      │
+│   Collector     │◄───│   Manager       │    │   (External)    │
 └─────────────────┘    └─────────────────┘    └─────────────────┘
 ```
 

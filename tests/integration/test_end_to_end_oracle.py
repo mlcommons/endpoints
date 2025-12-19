@@ -22,9 +22,7 @@ from inference_endpoint import metrics
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import LoadPattern, LoadPatternType
 from inference_endpoint.core.types import QueryResult
-from inference_endpoint.dataset_manager.dataloader import (
-    DeepSeekR1ChatCompletionDataLoader,
-)
+from inference_endpoint.dataset_manager import PickleReader
 from inference_endpoint.endpoint_client.configs import (
     AioHttpConfig,
     HTTPClientConfig,
@@ -48,7 +46,6 @@ class DeepSeekR1SampleIssuer(HttpClientSampleIssuer):
         self.http_config = HTTPClientConfig(
             endpoint_url=urljoin(url, "/v1/chat/completions"),
             num_workers=16,
-            max_concurrency=10,
         )
         self.aiohttp_config = AioHttpConfig()
         self.zmq_config = ZMQConfig(
@@ -87,8 +84,6 @@ async def run_benchmark(server_url, dataloader, tmp_path, rt_settings):
     try:
         # Step 3. Create the sample issuer.
         sample_issuer = DeepSeekR1SampleIssuer(tmp_path, server_url)
-        sample_issuer.http_client.start()
-        sample_issuer.start()
 
         # Step 4. Create the benchmark session.
         sess = BenchmarkSession.start(
@@ -97,7 +92,6 @@ async def run_benchmark(server_url, dataloader, tmp_path, rt_settings):
             sample_issuer,
             scheduler,
             name="pytest_run_benchmark",
-            stop_sample_issuer_on_test_end=False,
             max_shutdown_timeout_s=3 * 60,
         )
 
@@ -128,7 +122,7 @@ async def _run_load_generator_full_run_url(
         }
         return res
 
-    dummy_dataloader = DeepSeekR1ChatCompletionDataLoader(dataset_path, parser)
+    dummy_dataloader = PickleReader(dataset_path, parser)
     dummy_dataloader.load()
     assert dummy_dataloader.num_samples() > 0
 
@@ -192,9 +186,7 @@ async def test_load_generator_full_run_mock_http_oracle_server(
         }
         return res
 
-    dummy_dataloader = DeepSeekR1ChatCompletionDataLoader(
-        ds_pickle_dataset_path, parser
-    )
+    dummy_dataloader = PickleReader(ds_pickle_dataset_path, parser)
     dummy_dataloader.load()
     assert dummy_dataloader.num_samples() > 0
 
@@ -237,7 +229,7 @@ async def test_load_generator_full_run_mock_http_oracle_server(
     ), "Number of samples in dataset and number of samples in request data should be the same"
 
     for sample_uuid, resp in response_cache.items():
-        sample_index = sample_uuid_map[sample_uuid].index
+        sample_index = sample_uuid_map["performance"][sample_uuid]
         logging.info(
             f"Sample {sample_uuid} should have been response {vals[sample_index][0:30]}, but was response {resp[0:30]}"
         )

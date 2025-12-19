@@ -127,7 +127,7 @@ class OpenAIMsgspecAdapter(HttpRequestAdapter):
     def decode_sse_message(cls, json_bytes: bytes) -> str:
         """Decode SSE message and extract content string."""
         msg = cls._sse_decoder.decode(json_bytes)
-        return msg.choices[0].delta.content
+        return msg.choices[0].delta
 
     # ========================================================================
     # Internal APIs

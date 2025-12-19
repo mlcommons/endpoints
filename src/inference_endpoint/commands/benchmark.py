@@ -306,7 +306,6 @@ def _build_config_from_cli(
             ),
             client=ClientSettings(
                 workers=args.workers if args.workers else 4,
-                max_concurrency=-1,  # client uses unlimited concurrency by default
             ),
         ),
         model_params=ModelParams(
@@ -422,7 +421,7 @@ def _run_benchmark(
     Architecture notes:
     - This is a SYNCHRONOUS function (not async) because HTTPEndpointClient
       manages its own event loop in a separate thread
-    - Uses blocking operations: http_client.start(), sess.wait_for_test_end()
+    - Uses blocking operations: sess.wait_for_test_end()
     - Signal handling: SIGINT (Ctrl+C) gracefully stops benchmark
     - Cleanup: Always executes via finally block
 
@@ -588,7 +587,6 @@ def _run_benchmark(
         http_config = HTTPClientConfig(
             endpoint_url=urljoin(endpoint, "/v1/chat/completions"),
             num_workers=num_workers,
-            max_concurrency=-1,  # unlimited
             record_worker_events=config.settings.client.record_worker_events,
             event_logs_dir=report_dir,
         )
@@ -601,9 +599,6 @@ def _run_benchmark(
 
         http_client = HTTPEndpointClient(http_config, aiohttp_config, zmq_config)
         sample_issuer = HttpClientSampleIssuer(http_client)
-
-        http_client.start()
-        sample_issuer.start()
 
     except Exception as e:
         logger.error("Connection failed")
@@ -620,7 +615,6 @@ def _run_benchmark(
             sample_issuer,
             scheduler,
             name=f"cli_benchmark_{uuid.uuid4().hex[0:8]}",
-            stop_sample_issuer_on_test_end=False,
             report_dir=report_dir,
             tokenizer_override=tokenizer,
             max_shutdown_timeout_s=config.timeout if config.timeout else None,

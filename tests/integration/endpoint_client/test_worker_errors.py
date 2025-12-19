@@ -205,7 +205,7 @@ class TestWorkerErrorHandling:
 
     @pytest.mark.asyncio
     async def test_worker_non_streaming_exception_handling(self, basic_config):
-        """Test worker handles exceptions in _process_request for non-streaming requests."""
+        """Test worker handles exceptions for non-streaming requests."""
         http_config, aiohttp_config, zmq_config = basic_config
 
         # Use ZMQPushSocket to send request
@@ -307,7 +307,7 @@ class TestWorkerErrorHandling:
 
     @pytest.mark.asyncio
     async def test_worker_streaming_exception_handling(self, basic_config):
-        """Test worker handles exceptions in _process_request for streaming requests."""
+        """Test worker handles exceptions for streaming requests."""
         http_config, aiohttp_config, zmq_config = basic_config
 
         context = zmq.asyncio.Context()
@@ -693,7 +693,7 @@ class TestWorkerErrorHandling:
 
                 # Malformed JSON is skipped, so we get an empty response, not an error
                 assert response.error is None
-                assert response.response_output == ()
+                assert response.response_output == {"output": ()}
 
                 # Shutdown
                 worker._shutdown = True
