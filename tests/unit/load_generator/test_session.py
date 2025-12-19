@@ -141,7 +141,6 @@ def test_session_start(clean_sample_event_hooks):
             sample_issuer,
             sched,
             name="pytest_test_session_start",
-            stop_sample_issuer_on_test_end=False,  # Do this manually at the end
         )
         events_db_path = sess.event_recorder.connection_name
         sess.wait_for_test_end()
