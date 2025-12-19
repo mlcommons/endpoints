@@ -633,9 +633,8 @@ class MetricsReporter:
             proxy = os.environ.get("http_proxy") or os.environ.get("HTTP_PROXY")
             if proxy:
                 logging.debug(f"Setting http_proxy to {proxy} for duckdb")
-                # Escape single quotes to prevent SQL injection
-                safe_proxy = proxy.replace("'", "''")
-                self.conn.execute(f"SET http_proxy='{safe_proxy}'")
+                # Use parameterized query to safely set http_proxy
+                self.conn.execute("SET http_proxy=?", [proxy])
             self.conn.install_extension("sqlite")
             self.conn.load_extension("sqlite")
 
