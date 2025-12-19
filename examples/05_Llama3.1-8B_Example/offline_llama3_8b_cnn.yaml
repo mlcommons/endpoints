@@ -1,0 +1,42 @@
+# Offline Throughput Benchmark
+name: "offline-llama3.1-8b-cnn-benchmark"
+version: "1.0"
+type: "offline"
+
+model_params:
+  name: "meta-llama/Llama-3.1-8B-Instruct" # Path to the model
+  temperature: 0.7
+  top_p: 0.9
+  max_new_tokens: 128
+
+datasets:
+  - name: "perf-test"
+    type: "performance"
+    path: "data/cnn_dailymail_validation.json" # Path to the dataset. Note: This should be the file generated with download_cnndm.py
+    samples: 13368 # Number of samples in the dataset (validation has 13.3k samples, while training has 26k samples)
+    parser:
+      prompt: "input"
+
+settings:
+  runtime:
+    min_duration_ms: 6000 # 6 seconds
+    max_duration_ms: 60000 # 1 minute
+    scheduler_random_seed: 137 # For Poisson/distribution sampling
+    dataloader_random_seed: 111 # For dataset shuffling
+
+  load_pattern:
+    type: "max_throughput"
+
+  client:
+    workers: 1 # Number of client workers
+
+metrics:
+  collect:
+    - "throughput"
+    - "latency"
+    - "ttft"
+    - "tpot"
+
+endpoint_config:
+  endpoint: "http://localhost:8000"
+  api_key: null
