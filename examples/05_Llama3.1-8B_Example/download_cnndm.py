@@ -41,7 +41,7 @@ def download_cnndm(
     output_file_tag = split
     calibration_ids = set()
     if calibration_ids_file:
-        with open(calibration_ids_file, "r", encoding="utf-8") as id_file:
+        with open(calibration_ids_file, encoding="utf-8") as id_file:
             for line in id_file:
                 calibration_ids.add(line.strip())
         output_file_tag = "calibration"
