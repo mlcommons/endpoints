@@ -1,6 +1,7 @@
 # Running Endpoints with [Llama3.1-8B](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct)
 
 ## Download dataset
+
 The Llama3.1-8B benchmark uses the [cnn/dailymail](https://huggingface.co/datasets/abisee/cnn_dailymail) dataset (for summarization). Download, modify the input prompt and save
 
 ```
@@ -8,7 +9,8 @@ python download_cnndm.py --save-dir data --split validation
 # Processed data will be saved at data/cnn_dailymail_validation.json
 ```
 
-+ To generate calibration dataset, users can use the [cnn-dailymail-calibration-list](https://github.com/mlcommons/inference/blob/master/calibration/CNNDailyMail/calibration-list.txt)
+- To generate calibration dataset, users can use the [cnn-dailymail-calibration-list](https://github.com/mlcommons/inference/blob/master/calibration/CNNDailyMail/calibration-list.txt)
+
 ```
 curl -OL https://raw.githubusercontent.com/mlcommons/inference/refs/heads/master/calibration/CNNDailyMail/calibration-list.txt
 python download_cnndm.py --save-dir data --calibration-ids-file calibration-list.txt --split train
@@ -36,17 +38,21 @@ docker run --runtime nvidia --gpus all -v ${HF_HOME}:/root/.cache/huggingface --
 ```
 
 ### To run Offline mode
+
 **Note** Double-check the config file for correct parameters
 
-+ Launch the benchmark with config yaml
+- Launch the benchmark with config yaml
+
 ```
 inference-endpoint benchmark from-config -c offline_llama3_8b_cnn.yaml --timeout 600
 ```
 
 ### To run Online mode
+
 **Note** Double-check the config file for correct parameters
 
-+ Launch the benchmark with config yaml
+- Launch the benchmark with config yaml
+
 ```
 inference-endpoint benchmark from-config -c online_llama3_8b_cnn.yaml --timeout 600
 ```
