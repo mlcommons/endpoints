@@ -13,7 +13,7 @@ datasets:
   - name: "perf-test"
     type: "performance"
     path: "data/cnn_dailymail_validation.json" # Path to the dataset. Note: This should be the file generated with download_cnndm.py
-    samples: 13368 # Number of samples in the dataset (validation has 13.3k samples, while training has 26k samples)
+    samples: 13368 # Number of samples in the dataset (validation has ~13.3k samples, while training has ~287k samples)
     parser:
       prompt: "input"
 
