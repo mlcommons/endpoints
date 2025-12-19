@@ -37,7 +37,7 @@ from inference_endpoint.dataset_manager.dataloader import (
     DataLoader,
     DeepSeekR1ChatCompletionDataLoader,
     HFDataLoader,
-    PickleReader,
+    PandasDataFrameLoader,
 )
 from inference_endpoint.load_generator.events import SampleEvent, SessionEvent
 from inference_endpoint.load_generator.sample import SampleEventHandler
@@ -187,13 +187,13 @@ def ds_pickle_dataset_path():
 @pytest.fixture
 def ds_pickle_reader(ds_pickle_dataset_path):
     """
-    Returns a PickleReader object for the ds_samples.pkl file.
+    Returns a PandasDataFrameLoader object for the ds_samples.pkl file.
     """
 
     def parser(row):
         return row
 
-    return PickleReader(ds_pickle_dataset_path, parser=parser)
+    return PandasDataFrameLoader(ds_pickle_dataset_path, parser=parser)
 
 
 @pytest.fixture

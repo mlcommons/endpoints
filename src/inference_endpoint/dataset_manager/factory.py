@@ -25,7 +25,7 @@ from .dataloader import (
     DataLoader,
     HFDataLoader,
     JsonlReader,
-    PickleReader,
+    PandasDataFrameLoader,
 )
 
 logger = logging.getLogger(__name__)
@@ -73,7 +73,7 @@ class DataLoaderFactory:
         format = format.lower()
         if format == "pkl" or format == "pickle":
             logger.info(f"Creating pickle dataset loader for {dataset_path}")
-            return PickleReader(dataset_path, parser=parser)
+            return PandasDataFrameLoader(dataset_path, parser=parser)
 
         elif format == "jsonl" or format == "json":
             # JSON Lines format

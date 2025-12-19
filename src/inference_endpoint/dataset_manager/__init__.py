@@ -23,7 +23,7 @@ from .dataloader import (
     DataLoader,
     DeepSeekR1ChatCompletionDataLoader,
     HFDataLoader,
-    PickleReader,
+    PandasDataFrameLoader,
 )
 from .factory import DataLoaderFactory
 
@@ -32,5 +32,5 @@ __all__ = [
     "DataLoaderFactory",
     "DeepSeekR1ChatCompletionDataLoader",
     "HFDataLoader",
-    "PickleReader",
+    "PandasDataFrameLoader",
 ]

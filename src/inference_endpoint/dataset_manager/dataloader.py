@@ -13,21 +13,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import csv
 import json
-import pickle
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from logging import getLogger
-from typing import Any
+from pathlib import Path
+from typing import Any, ClassVar
 
 import numpy as np
 import pandas
-from datasets import load_dataset, load_from_disk
 from transformers import PreTrainedTokenizerBase
+
+from .dataset import Dataset, DatasetFormat
 
 
 class DataLoader(ABC):
     """Abstract base class for loading and managing benchmark datasets.
+    It is expected that datasets are stored in a tabular format.
 
     DataLoaders handle:
     - Loading datasets from various formats (pickle, HuggingFace, CSV, etc.)
@@ -43,14 +46,71 @@ class DataLoader(ABC):
         max_memory_usage_bytes: Optional memory limit. If None, no artificial limit.
     """
 
-    def __init__(self, max_memory_usage_bytes: int | None = None):
+    IMPLEMENTATIONS: ClassVar[dict[str, list[type["DataLoader"]]]] = {}
+
+    # Only used by subclasses
+    FORMAT: ClassVar[DatasetFormat | None] = None
+
+    def __init_subclass__(cls, format: DatasetFormat | None = None, **kwargs):
+        super().__init_subclass__(**kwargs)
+        if format is not None:
+            cls.FORMAT = format
+        else:
+            raise ValueError("Must specify 'format' when subclassing DataLoader")
+
+        if format in DataLoader.IMPLEMENTATIONS:
+            DataLoader.IMPLEMENTATIONS[format].append(cls)
+        else:
+            DataLoader.IMPLEMENTATIONS[format] = [cls]
+
+    @classmethod
+    def get_loader_for_format(
+        cls, format: DatasetFormat, option: int = 0
+    ) -> type["DataLoader"]:
+        """Get the loader for a given format. By default, the first registered loader
+        for the format is returned. If option is specified, the option-th loader is returned instead.
+
+        Args:
+            format: The format of the dataloader to get.
+            option: The option-th loader to get.
+
+        Returns:
+            The loader for the given format.
+
+        Raises:
+            ValueError: If the format is not registered, or if option is out of range.
+        """
+        if format not in DataLoader.IMPLEMENTATIONS:
+            raise ValueError(f"No loader registered for format: {format}")
+        if option >= len(DataLoader.IMPLEMENTATIONS[format]):
+            raise ValueError(f"Option {option} is out of range for format {format}")
+        return DataLoader.IMPLEMENTATIONS[format][option]
+
+    def __init__(
+        self,
+        dataset: Dataset,
+        datasets_dir: Path = Path("datasets"),
+        process_row: Callable[[dict[str, Any]], Any] | None = None,
+        max_memory_usage_bytes: int | None = None,
+    ):
         """Initialize the dataloader with optional memory constraints.
 
         Args:
+            dataset: The dataset to load.
+            datasets_dir: Directory to load the dataset from. (Default: "$CWD/datasets")
+            process_row: Optional function applied to each row of the dataset right before
+                returning it. This can be used to filter columns, add metadata, etc.
             max_memory_usage_bytes: Maximum memory to use for dataset caching.
-                                   If None, loads entire dataset into memory.
+                                    If None, loads entire dataset into memory.
         """
+        self.dataset = dataset
+        self.datasets_dir = datasets_dir
+        self.process_row = process_row
         self.max_memory_usage_bytes = max_memory_usage_bytes
+
+        self.data = None  # Used by subclasses to store the loaded dataset
+        self.loaded = False
+        self.logger = getLogger(__name__)
 
     def load(self, force: bool = False):  # noqa: B027
         """Load the dataset into memory for eager loading.
@@ -115,183 +175,113 @@ class DataLoader(ABC):
         raise NotImplementedError
 
 
-class PickleReader(DataLoader):
-    """DataLoader implementation for pickle (.pkl) format datasets.
+class RowToPrompt:
+    """Utility callable class that converts a row of a dataset (in the form of a dictionary)
+    to a prompt string given a format string. Meant to be used as the 'process_row' argument
+    in the DataLoader constructor.
 
-    Loads Python pickle files containing lists or arrays of samples.
-    Supports optional parsing functions to transform raw data into
-    the format needed by the benchmark system.
+    The keys used in format tags must match the column names of the dataset it is used with.
+    """
 
-    The default parser extracts the 'text_input' attribute from each row,
-    which is compatible with common benchmark dataset formats.
+    def __init__(self, prompt_format: str):
+        self.prompt_format = prompt_format
 
-    Usage:
-        >>> reader = PickleReader("dataset.pkl", parser=lambda x: x.text_input)
-        >>> reader.load()
-        >>> sample = reader.load_sample(0)
+    def __call__(self, row: dict[str, Any]) -> str:
+        return self.prompt_format.format(**row)
+
+
+class CSVLoader(DataLoader, format=DatasetFormat.CSV):
+    """Dataloader implementation for CSV format datasets.
+
+    Loads CSV files using csv.DictReader, where each row is represented
+    as a dictionary with column names as keys.
 
     Attributes:
-        file_path: Path to the pickle file.
-        parser: Function to transform raw rows into usable format.
-        data: Loaded dataset (empty until load() is called).
+        data: List of dictionaries, where each dictionary represents a row.
         loaded: Whether the dataset has been loaded into memory.
     """
 
-    def __init__(
-        self,
-        file_path,
-        parser: Callable[[Any], Any] = None,
-        max_memory_usage_bytes: int | None = None,
-    ):
-        """Initialize PickleReader for a pickle dataset file.
-
-        Note: This does not load the data immediately. Call load() to load.
-
-        Args:
-            file_path: Path to the pickle file containing the dataset.
-            parser: Optional function to extract/transform data from each row.
-                   If None, uses default parser that extracts 'text_input' attribute.
-            max_memory_usage_bytes: Optional memory limit (currently unused).
-        """
-        super().__init__(max_memory_usage_bytes)
-        self.file_path = file_path
-        self.data = []
-        # self.text_inputs = []
-        self.loaded = False
-        self.parser = parser
-        self.logger = getLogger(__name__)
-        if parser is None:
-            # TODO : remove this default implementation
-            def extract_text_input(row):
-                return {"prompt": row["text_input"]} | (self.metadata or {})
-
-            self.parser = extract_text_input
-
     def load(self, force: bool = False):
-        """Load the dataset from the pickle file into memory.
+        """Load the dataset from the CSV file into memory.
 
-        This method reads the entire pickle file and stores it in memory.
-        Subsequent load_sample() calls will be served from memory.
+        This method reads the entire CSV file using csv.DictReader and stores
+        it in memory as a list of dictionaries. Each dictionary represents a row
+        with column names as keys.
 
         Args:
             force: If True, reloads even if already loaded (for refreshing data).
 
         Raises:
-            FileNotFoundError: If pickle file doesn't exist.
-            pickle.UnpicklingError: If file is corrupted or not a valid pickle.
+            FileNotFoundError: If CSV file doesn't exist.
+            csv.Error: If file is corrupted or not a valid CSV.
         """
         if self.loaded and not force:
             return
-        with open(self.file_path, "rb") as file:
-            self.data = pickle.load(file)
-            self.logger.debug(
-                f"Loading data from {self.file_path} with columns: {self.data.columns}"
-            )
 
-            self.text_inputs = []
-            # this preloads the data in source
-            # convert the dataframe to list of dictionaries
-            for data in self.data.to_dict(orient="records"):
-                # idx is not passed to the parser since it should _not_ be used in the parser
-                # note that while we are appending, which is slower, the data may not be sequential and may
-                # have gaps
-                self.text_inputs.append(self.parser(data))
-            self.text_inputs = np.ascontiguousarray(self.text_inputs)
+        file_path = self.datasets_dir / self.dataset.filename
+        self.logger.debug(f"Loading CSV data from {file_path}")
+
+        with open(file_path, newline="", encoding="utf-8") as csvfile:
+            reader = csv.DictReader(csvfile)
+            if self.process_row is None:
+                self.data = list(reader)
+            else:
+                self.data = [self.process_row(row) for row in reader]
+
+        self.logger.debug(f"Loaded {len(self.data)} samples from {file_path}")
         self.loaded = True
 
-    def num_samples(self):
+    def load_sample(self, index: int) -> dict[str, Any]:
+        """Load a single sample from the dataset by index.
+
+        Args:
+            index: Sample index (0 to num_samples()-1).
+
+        Returns:
+            A dictionary with column names as keys (as returned by csv.DictReader).
+
+        Raises:
+            AssertionError: If data is not loaded.
+            IndexError: If index is out of range.
         """
-        Returns the number of samples in the dataset.
+        assert self.loaded, "Data is not loaded. Call load() to load the data."
+        return self.data[index]
+
+    def num_samples(self) -> int:
+        """Get the total number of samples in the dataset.
+
+        Returns:
+            Total sample count (positive integer).
         """
         return len(self.data)
 
-    def write_samples(self, file_path: str, indices: list[int]):
-        """
-        Utility function - writes the samples to a pickle file.
-        """
-        if not self.loaded:
-            self.load()
-        samples = self.data.iloc[indices]
-        with open(file_path, "wb") as file:
-            # for index in indices:
-            pickle.dump(samples, file)
 
-    def write_unique_samples(self, file_path: str):
-        """ "
-        Utility function - writes the unique samples to a pickle file.
-        """
-        dataset_sources = {"math500", "aime1983", "livecodebench", "gpqa", "mmlu_pro"}
-        samples = pandas.DataFrame(columns=self.data.columns)
-        for dataset_source in dataset_sources:
-            filtered = self.data[self.data["dataset"] == dataset_source]
-            samples = pandas.concat([samples, filtered.iloc[[0]]], ignore_index=True)
+class PandasDataFrameLoader(DataLoader, format=DatasetFormat.PANDAS_DF):
+    """Dataloader implementation for Pandas DataFrame format datasets.
 
-        with open(file_path, "wb") as file:
-            # for sample in samples:
-            pickle.dump(samples, file)
+    Loads files that were saved via pandas.DataFrame.to_pickle().
+    """
 
-    def load_sample(self, index: int) -> Any:
-        """
-        Loads a sample from the data.
-        """
-        assert self.loaded, "Data is not loaded. Call load() to load the data."
-        x = self.text_inputs[index]
-        self.logger.debug(f"Loaded sample from pickle file at {index} with result: {x}")
-        return x
+    def load(self, force: bool = False):
+        if self.loaded and not force:
+            return
+        self.data = pandas.read_pickle(self.datasets_dir / self.dataset.filename)
+        self.logger.debug(
+            f"Loaded {len(self.data)} samples from {self.datasets_dir / self.dataset.filename}"
+        )
+        self.loaded = True
 
-    def get_column_names(self):
-        return self.data.columns
+    def load_sample(self, index: int) -> dict[str, Any]:
+        row = self.data.iloc[index].to_dict()
+        if self.process_row:
+            return self.process_row(row)
+        return row
+
+    def num_samples(self) -> int:
+        return len(self.data)
 
 
-class HFDataLoader(DataLoader):
-    def __init__(
-        self,
-        dataset_name,
-        *,
-        parser: Callable[[Any], Any] = None,
-        split: str = "train",
-        format: str | None = None,
-        max_memory_usage_bytes: int | None = None,
-    ):
-        super().__init__(max_memory_usage_bytes)
-        self.logger = getLogger(__name__)
-        self.dataset_name = dataset_name
-        self.data = []
-        self.text_inputs = []
-        self.parser = parser
-        self.split = split
-        self.format = format
-        if parser is None:
-
-            def extract_row(row):
-                return row  # by default, return the training data which is a dictionary
-
-            self.parser = extract_row
-
-    def load(self):
-        if self.format is None:
-            self.data = load_dataset(self.dataset_name)
-        else:
-            # huggingface uses a different method to load local arrow datasets
-            self.data = load_from_disk(self.dataset_name)
-        self.text_inputs = []  # reset the text inputs
-        for d in self.data[self.split]:
-            self.text_inputs.append(self.parser(d))
-
-    def load_sample(self, index: int) -> Any:
-        return self.text_inputs[index]
-
-    def num_samples(self):
-        """
-        Returns the total number of samples in the specified dataset split.
-
-        Returns:
-            int: Number of samples in the current dataset split.
-        """
-        return len(self.data[self.split])
-
-
-class DeepSeekR1ChatCompletionDataLoader(PickleReader):
+class DeepSeekR1ChatCompletionDataLoader(PandasDataFrameLoader):
     def __init__(self, file_path, parser: Callable[[Any], Any] = None):
         """
         Initialize a DeepSeekR1ChatCompletionDataLoader for loading chat completion datasets from a pickle file.

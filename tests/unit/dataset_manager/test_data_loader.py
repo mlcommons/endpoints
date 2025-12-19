@@ -16,7 +16,7 @@
 import pytest
 from inference_endpoint.dataset_manager.dataloader import (
     HFDataLoader,
-    PickleReader,
+    PandasDataFrameLoader,
     RandomDataLoader,
 )
 from transformers import AutoTokenizer
@@ -49,7 +49,7 @@ def test_custom_parser_pickle_reader(ds_pickle_dataset_path):
         # custom parser to only return dataset and text_input
         return {"dataset": row["dataset"], "text_input": row["text_input"]}
 
-    data_loader = PickleReader(ds_pickle_dataset_path, parser=parser)
+    data_loader = PandasDataFrameLoader(ds_pickle_dataset_path, parser=parser)
     data_loader.load()
     # check number of samples
     assert data_loader.num_samples() == 5

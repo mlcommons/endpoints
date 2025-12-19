@@ -21,14 +21,13 @@ from pathlib import Path
 import datasets as hf_datasets
 import pandas as pd
 
-from ...dataset_manager.dataloader import DataLoader
-from .base import AccuracyDataset, DatasetFormat
+from ..dataset import Dataset, DatasetFormat
 
 logger = logging.getLogger(__name__)
 
 
 class GPQA(
-    AccuracyDataset,
+    Dataset,
     columns=[
         "question",
         "choice1",
@@ -40,6 +39,7 @@ class GPQA(
         "subdomain",
     ],
     format=DatasetFormat.PANDAS_DF,
+    ground_truth_column="ground_truth",
 ):
     """GPQA: A Graduate-Level Google-Proof Q&A Benchmark
     Reference: https://arxiv.org/abs/2311.12022
@@ -138,62 +138,6 @@ class GPQA(
             datasets_dir.mkdir(parents=True, exist_ok=True)
         df.to_pickle(datasets_dir / self.filename)
         logger.info(f"Saved {len(df)} samples to {datasets_dir / self.filename}")
-
-    def load(
-        self, datasets_dir: Path, create_if_not_exists: bool = False
-    ) -> pd.DataFrame:
-        """Load the dataset from the datasets_dir."""
-        ds_path = datasets_dir / self.filename
-        if not ds_path.exists():
-            if create_if_not_exists:
-                logger.info(
-                    f"Attempted to load missing dataset file {ds_path}. Generating..."
-                )
-                self.generate(datasets_dir)
-            else:
-                raise FileNotFoundError(f"Dataset file {ds_path} does not exist")
-        return pd.read_pickle(ds_path)
-
-    def get_ground_truth(self, index: int, loaded_dataset: pd.DataFrame) -> str:
-        return loaded_dataset.iloc[index]["ground_truth"]
-
-
-class GPQADataLoader(DataLoader):
-    def __init__(
-        self,
-        datasets_dir: Path,
-        user_prompt_format: str,
-        *args,
-        variant: str = "diamond",
-        seed: int = 0,
-        max_samples: int | None = None,
-        **kwargs,
-    ):
-        """
-        Args:
-            datasets_dir: The directory containing the dataset.
-            user_prompt_format: The format of the user prompt. The keys in the format string
-                must match the column names in the dataset.
-            variant: The variant of the dataset to load.
-            seed: The seed to use for the random number generator.
-            max_samples: The maximum number of samples to load. If None, all samples will be loaded.
-        """
-        super().__init__(*args, **kwargs)
-
-        self.datasets_dir = datasets_dir
-
-        # Load the dataset
-        self.df = GPQA(variant=variant, seed=seed, max_samples=max_samples).load(
-            datasets_dir
-        )
-        self.user_prompt_format = user_prompt_format
-
-    def load_sample(self, index: int) -> str:
-        d = self.df.iloc[index]
-        return self.user_prompt_format.format(**d.to_dict())
-
-    def num_samples(self) -> int:
-        return len(self.df)
 
 
 if __name__ == "__main__":
