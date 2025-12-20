@@ -291,14 +291,8 @@ class Worker:
             return
 
         url = self.http_config.endpoint_url
-        headers = (
-            query.headers
-            if hasattr(query, "headers") and len(query.headers) > 0
-            else {"content-type": "application/json"}
-        )
-
         logger.debug(
-            f"Making HTTP request to {url} with query: {query} and headers: {headers}"
+            f"Making HTTP request to {url} with query: {query} and headers: {query.headers}"
         )
 
         # Encode query to bytes using adapter
@@ -315,7 +309,7 @@ class Worker:
             )
 
         async with self._session.post(
-            url, data=payload_bytes, headers=headers
+            url, data=payload_bytes, headers=query.headers
         ) as response:
             if response.status != 200:
                 error_text = await response.text()
