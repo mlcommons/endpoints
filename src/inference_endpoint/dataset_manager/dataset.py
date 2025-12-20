@@ -19,8 +19,9 @@ from logging import getLogger
 from pathlib import Path
 from typing import Any, ClassVar
 
-import datasets as hf_datasets
 import pandas as pd
+
+import datasets as hf_datasets
 
 logger = getLogger(__name__)
 
@@ -158,6 +159,11 @@ def load_from_huggingface(
     cache_options: dict[str, Any] | None = None,
 ) -> pd.DataFrame:
     """Load a dataset from HuggingFace"""
+    if load_options is None:
+        load_options = {}
+    if cache_options is None:
+        cache_options = {}
+
     if cache_dir is not None and cache_dir.exists():
         try:
             ds = hf_datasets.load_from_disk(str(cache_dir), **load_options)
@@ -168,6 +174,7 @@ def load_from_huggingface(
     ds = hf_datasets.load_dataset(dataset_path, name=dataset_name)
     if cache_dir is not None:
         try:
+            cache_dir.mkdir(parents=True, exist_ok=True)
             ds.save_to_disk(str(cache_dir), **cache_options)
         except Exception as e:
             logger.warning(f"Error caching dataset: {e}")

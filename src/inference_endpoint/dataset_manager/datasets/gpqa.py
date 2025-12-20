@@ -17,11 +17,11 @@ import argparse
 import logging
 import random
 from pathlib import Path
+from typing import Any
 
-import datasets as hf_datasets
 import pandas as pd
 
-from ..dataset import Dataset, DatasetFormat
+from ..dataset import Dataset, DatasetFormat, load_from_huggingface
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +38,7 @@ class GPQA(
         "domain",
         "subdomain",
     ],
-    format=DatasetFormat.PANDAS_DF,
+    format=DatasetFormat.PARQUET,
     ground_truth_column="ground_truth",
 ):
     """GPQA: A Graduate-Level Google-Proof Q&A Benchmark
@@ -74,17 +74,21 @@ class GPQA(
             # Update the variant tag to also include the number of samples
             self.variant = f"{self._variant_name}_{max_samples}"
 
-    def generate(self, datasets_dir: Path):
+    def generate(self, datasets_dir: Path) -> pd.DataFrame:
         # Load the variant from HuggingFace
         try:
-            raw_ds = hf_datasets.load_dataset("Idavidrein/gpqa", f"gpqa_{self.variant}")
+            df = load_from_huggingface(
+                "Idavidrein/gpqa",
+                dataset_name=f"gpqa_{self.variant}",
+                split="train",
+                cache_dir=datasets_dir / "hf_cache" / f"gpqa_{self.variant}",
+            )
         except Exception as e:
             print(f"Error loading dataset: {e}")
             print("Note: This dataset may require HuggingFace authentication.")
             print("Run: huggingface-cli login")
             raise
 
-        df = raw_ds["train"].to_pandas()
         logger.info(f"Loaded {len(df)} samples from {self.variant} variant of GPQA")
 
         # If max_samples is specified, sample 'max_samples' rows from the dataset
@@ -136,8 +140,66 @@ class GPQA(
         # Save to pickle file
         if not datasets_dir.exists():
             datasets_dir.mkdir(parents=True, exist_ok=True)
-        df.to_pickle(datasets_dir / self.filename)
+        df.to_parquet(datasets_dir / self.filename)
         logger.info(f"Saved {len(df)} samples to {datasets_dir / self.filename}")
+
+        return df
+
+
+class RowToSGLangHarmony:
+    def __init__(self, tokenizer_name: str = "openai/gpt-oss-120b"):
+        self.tokenizer_name = tokenizer_name
+        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+        self.harmony = load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
+
+        self.system_message = (
+            SystemContent.new()
+            .with_reasoning_effort(ReasoningEffort.HIGH)
+            .with_conversation_start_date(
+                "2025-09-30"
+            )  # Same as in official MLCommons GPT-OSS implementation
+        )
+        self.user_prompt_format = (
+            "{question}\n\n"
+            "(A) {choice1}\n"
+            "(B) {choice2}\n"
+            "(C) {choice3}\n"
+            "(D) {choice4}\n\n"
+            "Express your final answer as the corresponding option 'A', 'B', 'C', or 'D'."
+        )
+
+    def __call__(self, row: dict[str, Any]) -> dict[str, Any]:
+        """Convert a row of the Inference Endpoints GPQA dataset to the format that is compatible with
+        the SGLang implementation of GPT-OSS for legacy LoadGen.
+        """
+        # First generate the user prompt
+        user_prompt = self.user_prompt_format.format(**row)
+        gt = {
+            "choice1": "A",
+            "choice2": "B",
+            "choice3": "C",
+            "choice4": "D",
+        }[row["ground_truth"]]
+
+        # Harmonize with OpenAI Harmony
+        conv = Conversation.from_messages(
+            [
+                Message.from_role_and_content(Role.SYSTEM, self.system_message),
+                Message.from_role_and_content(Role.USER, user_prompt),
+            ]
+        )
+
+        toks = self.harmony.render_conversation_for_completion(conv, Role.ASSISTANT)
+        harmonized_text = self.tokenizer.decode(toks, skip_special_tokens=False)
+
+        return {
+            "input_tokens": toks,
+            "num_tokens": len(toks),
+            "text_input": harmonized_text,
+            "original_prompt": user_prompt,
+            "ground_truth": gt,
+            "dataset": "gpqa_diamond",
+        }
 
 
 if __name__ == "__main__":
@@ -169,6 +231,17 @@ if __name__ == "__main__":
         default=None,
         help="Maximum number of samples to generate (default: all samples)",
     )
+    parser.add_argument(
+        "--make-legacy-lg-compat",
+        action="store_true",
+        help="Make the dataset compatible with the legacy LG format",
+    )
+    parser.add_argument(
+        "--tokenizer-name",
+        type=str,
+        default="openai/gpt-oss-120b",
+        help="The name of the tokenizer to use for the dataset (default: openai/gpt-oss-120b)",
+    )
 
     args = parser.parse_args()
 
@@ -188,6 +261,50 @@ if __name__ == "__main__":
     if args.max_samples:
         logger.info(f"Max samples: {args.max_samples}")
 
-    gpqa.generate(args.output_dir)
+    df = gpqa.generate(args.output_dir)
 
     logger.info(f"✓ Successfully generated dataset: {args.output_dir / gpqa.filename}")
+
+    if args.make_legacy_lg_compat:
+        # Legacy LG dataset file uses the GPT-OSS tokenizer, and pre-harmonizes the input text
+        # The output columns are:
+        # - question: The original question as plaintext
+        # - ground_truth: The ABCD letter choice for the correct answer
+        # - dataset: This is always "gpqa" for GPQA
+        # - tok_input: The tokenized input text as a list of integers
+        # - tok_input_len: The length of the tokenized input text
+        # - text_input: The harmonized input text as a string
+        from openai_harmony import (
+            Conversation,
+            HarmonyEncodingName,
+            Message,
+            ReasoningEffort,
+            Role,
+            SystemContent,
+            load_harmony_encoding,
+        )
+        from transformers import AutoTokenizer
+
+        from ..dataloader import ParquetLoader
+
+        loader = ParquetLoader(
+            gpqa,
+            datasets_dir=Path(args.output_dir),
+            process_row=RowToSGLangHarmony(tokenizer_name=args.tokenizer_name),
+        )
+        # Use existing dataframe instead of re-reading it
+        loader.data = df
+        loader.loaded = True
+
+        new_rows = []
+        n_repeats = 5
+        for _ in range(n_repeats):
+            for i in range(loader.num_samples()):
+                row = loader.load_sample(i)
+                new_rows.append(row)
+
+        new_df = pd.DataFrame(new_rows)
+        new_df.to_parquet(args.output_dir / "gpqa_diamond_legacy_lg_compat.parquet")
+        logger.info(
+            f"Saved {len(new_df)} samples to {args.output_dir / "gpqa_diamond_legacy_lg_compat.parquet"}"
+        )

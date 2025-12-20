@@ -25,6 +25,8 @@ numpy==2.3.4
 datasets==4.1.1
 sentencepiece==0.2.1
 protobuf==6.33.0
+# For GPT-OSS
+openai-harmony==0.0.8
 
 # Color support for cross-platform terminals
 colorama==0.4.6
