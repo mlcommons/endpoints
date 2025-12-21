@@ -155,12 +155,15 @@ class TestRunInitCommand:
 
         output_file = Path(f"{args.template}_template.yaml")
 
-        await run_init_command(args)
+        try:
+            await run_init_command(args)
 
-        assert output_file.exists()
-        content = output_file.read_text()
-        assert "offline-benchmark" in content
-        assert "max_throughput" in content
+            assert output_file.exists()
+            content = output_file.read_text()
+            assert "offline-benchmark" in content
+            assert "max_throughput" in content
+        finally:
+            output_file.unlink(missing_ok=True)
 
     @pytest.mark.asyncio
     async def test_init_warns_on_overwrite(self, caplog):
@@ -172,11 +175,14 @@ class TestRunInitCommand:
         output_file = Path(f"{args.template}_template.yaml")
         output_file.write_text("existing content")
 
-        await run_init_command(args)
+        try:
+            await run_init_command(args)
 
-        assert "will be overwritten" in caplog.text
-        # File should be replaced
-        assert "online-benchmark" in output_file.read_text()
+            assert "will be overwritten" in caplog.text
+            # File should be replaced
+            assert "online-benchmark" in output_file.read_text()
+        finally:
+            output_file.unlink(missing_ok=True)
 
     @pytest.mark.asyncio
     async def test_init_all_templates(self):
@@ -188,7 +194,10 @@ class TestRunInitCommand:
             args = MagicMock()
             args.template = template_type
 
-            await run_init_command(args)
+            try:
+                await run_init_command(args)
 
-            assert output_file.exists()
-            assert output_file.stat().st_size > 0
+                assert output_file.exists()
+                assert output_file.stat().st_size > 0
+            finally:
+                output_file.unlink(missing_ok=True)
