@@ -12,7 +12,7 @@ model_params:
 datasets:
   - name: "perf-test"
     type: "performance"
-    path: "open_orca_gpt4_tokenized_llama.sampled_24576.pkl"
+    path: "open_orca/open_orca_gpt4_tokenized_llama.sampled_24576.pkl"
     samples: 24576
     parser:
       prompt: "question"
