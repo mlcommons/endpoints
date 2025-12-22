@@ -76,6 +76,7 @@ from inference_endpoint.load_generator import (
     WithoutReplacementSampleOrder,
 )
 from inference_endpoint.load_generator.scheduler import Scheduler
+from inference_endpoint.utils.cpu_affinity import get_fastest_cpu, set_loadgen_cpu
 
 # Suppress HuggingFace warnings about missing PyTorch/TensorFlow
 transformers_logging.set_verbosity_error()
@@ -424,6 +425,13 @@ def _run_benchmark(
         ExecutionError: If benchmark execution fails after successful setup.
         KeyboardInterrupt: If user interrupts with Ctrl+C (re-raised for CLI handler).
     """
+    # Pin loadgen process to configured or fastest CPU for stable timing
+    loadgen_cpu = (
+        config.loadgen_cpu_affinity
+        if config.loadgen_cpu_affinity is not None
+        else get_fastest_cpu()
+    )
+    set_loadgen_cpu(loadgen_cpu)
 
     # Load tokenizer if model name is provided
     # Priority: CLI args (offline/online modes) > config submission_ref (from-config mode)
@@ -612,6 +620,7 @@ def _run_benchmark(
             record_worker_events=config.settings.client.record_worker_events,
             event_logs_dir=report_dir,
             log_level=config.settings.client.log_level,
+            cpu_affinity=config.settings.client.cpu_affinity,
         )
         aiohttp_config = AioHttpConfig()
         zmq_config = ZMQConfig(

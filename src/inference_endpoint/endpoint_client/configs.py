@@ -57,6 +57,9 @@ class HTTPClientConfig:
     #   - At end of stream, QueryResult is returned with the entire response content
     stream_all_chunks: bool = False
 
+    # CPU affinity: None (disabled), "auto" (1 core per worker), or list[int] (specific cores)
+    cpu_affinity: list[int] | str | None = "auto"
+
     # Worker lifecycle timeouts
     worker_initialization_timeout: float = 40.0  # init
     worker_graceful_shutdown_wait: float = 0.5  # post-run

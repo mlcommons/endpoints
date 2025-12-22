@@ -272,6 +272,10 @@ class ClientSettings(BaseModel):
     record_worker_events: bool = False
     log_level: str = "INFO"
 
+    # CPU affinity for worker processes to reduce latency jitter
+    # None = disabled, list[int] = specific cores, "auto" = auto-assign
+    cpu_affinity: list[int] | str | None = "auto"
+
 
 class Settings(BaseModel):
     """Test settings (can be overridden by CLI)."""
@@ -360,6 +364,7 @@ class BenchmarkConfig(BaseModel):
     report_dir: Path | None = None
     timeout: int | None = None
     verbose: bool = False
+    loadgen_cpu_affinity: int | None = None  # None = auto-detect fastest core
 
     @classmethod
     def from_yaml_file(cls, path: Path) -> BenchmarkConfig:

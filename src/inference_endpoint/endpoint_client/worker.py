@@ -49,6 +49,7 @@ from inference_endpoint.metrics.reporter import MetricsReporter
 from inference_endpoint.openai.types import SSEDelta as OpenAISSEDelta
 from inference_endpoint.profiling import profile
 from inference_endpoint.sglang.types import SGLangSSEDelta
+from inference_endpoint.utils.cpu_affinity import AVAILABLE_CPUS, set_cpu_affinity
 from inference_endpoint.utils.logging import setup_logging
 
 logger = logging.getLogger(__name__)
@@ -646,6 +647,9 @@ class WorkerManager:
                 self.workers.append(worker)
                 self.worker_pids[i] = worker.pid
 
+            # Apply CPU affinity after all workers are started
+            self._pin_workers()
+
             # Wait for all workers to signal readiness
             async def wait_for_all_workers():
                 ready_count = 0
@@ -695,6 +699,37 @@ class WorkerManager:
         )
         process.start()
         return process
+
+    def _pin_workers(self) -> None:
+        """
+        Pin workers to CPU cores based on config:
+         - "auto": distribute workers across all available CPUs (excluding CPU 0)
+         - list[int]: pin workers to specified cores (round-robin)
+         - None or falsy: disable CPU affinity override
+        """
+        if not self.http_config.cpu_affinity:
+            return
+
+        try:
+            match self.http_config.cpu_affinity:
+                case "auto":
+                    # NOTE(vir):
+                    # AVAILABLE_CPUS already excludes loadgen CPU (see: cpu_affinity.py)
+                    cpu_list = sorted(AVAILABLE_CPUS)
+                case list():
+                    cpu_list = sorted(
+                        set(self.http_config.cpu_affinity) & AVAILABLE_CPUS
+                    )
+                case _:
+                    return
+
+            # assign CPU affinity round-robin among available CPUs
+            for worker_id, pid in self.worker_pids.items():
+                cpus = {cpu_list[worker_id % len(cpu_list)]}
+                set_cpu_affinity(pid=pid, cpus=cpus)
+
+        except (OSError, AttributeError):
+            logger.warning("Failed to set CPU affinity for workers")
 
     async def shutdown(self) -> None:
         """Graceful shutdown of all workers."""
