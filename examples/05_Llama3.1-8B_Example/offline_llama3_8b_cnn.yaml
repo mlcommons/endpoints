@@ -19,10 +19,10 @@ datasets:
 
 settings:
   runtime:
-    min_duration_ms: 6000 # 6 seconds
-    max_duration_ms: 60000 # 1 minute
+    min_duration_ms: 600000 # 10 minutes
+    max_duration_ms: 3600000 # 60 minutes (Arbitrary here, and doesn't have counterpart in legacy loadgen)
     scheduler_random_seed: 137 # For Poisson/distribution sampling
-    dataloader_random_seed: 111 # For dataset shuffling
+    dataloader_random_seed: 111 # For dataset shuffling (Will be updated after rng seeds are finalized for submission)
 
   load_pattern:
     type: "max_throughput"
