@@ -2,7 +2,7 @@
 
 ## Download dataset
 
-The Llama3.1-8B benchmark uses the [cnn/dailymail](https://huggingface.co/datasets/abisee/cnn_dailymail) dataset (for summarization). Download, modify the input prompt and save
+The Llama3.1-8B benchmark uses the [cnn/dailymail](https://huggingface.co/datasets/abisee/cnn_dailymail) dataset (for summarization). Download, modify the input prompt and save it using the following command:
 
 ```
 python download_cnndm.py --save-dir data --split validation
