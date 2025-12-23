@@ -484,6 +484,8 @@ class Report:
 
         if self.qps is not None:
             fn(f"QPS: {self.qps:.2f}")
+        else:
+            fn("QPS: N/A (no performance samples were issued)")
 
         if self.tps is not None:
             fn(f"TPS: {self.tps:.2f}")
