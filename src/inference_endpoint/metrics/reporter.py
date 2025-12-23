@@ -760,13 +760,16 @@ class MetricsReporter:
         n_test_started = test_started_result[0]
         test_started_ts = test_started_result[1]
 
-        if check_malformed:
-            if n_test_started == 0:
+        # Return None early if no TEST_STARTED event to avoid errors in duration calculations
+        if test_started_ts is None or n_test_started == 0:
+            if check_malformed:
                 raise RuntimeError("TEST_STARTED event not found in database")
-            elif n_test_started > 1:
-                raise RuntimeError(
-                    f"Multiple TEST_STARTED events found - {n_test_started} events"
-                )
+            return None
+
+        if check_malformed and n_test_started > 1:
+            raise RuntimeError(
+                f"Multiple TEST_STARTED events found - {n_test_started} events"
+            )
 
         # Check if STOP_PERFORMANCE_TRACKING event exists
         stop_ts = self.stop_performance_tracking_timestamp_ns
