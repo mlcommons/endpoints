@@ -43,7 +43,16 @@ def run() -> None:
     setup_logging()
 
     try:
-        asyncio.run(main())
+
+        def _create_eager_loop() -> asyncio.AbstractEventLoop:
+            loop = asyncio.new_event_loop()
+            loop.set_task_factory(asyncio.eager_task_factory)
+            return loop
+
+        # Use asyncio.Runner with eager_task_factory,
+        # which immediately starts task execution rather than scheduling
+        with asyncio.Runner(loop_factory=_create_eager_loop) as runner:
+            runner.run(main())
     except KeyboardInterrupt:
         logger.info("Application interrupted by user")
         sys.exit(130)  # 128 + SIGINT
