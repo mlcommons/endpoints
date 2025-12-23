@@ -20,6 +20,8 @@ This module contains common utilities used throughout the system.
 """
 
 import ctypes
+import importlib.util
+import sys
 import time
 import warnings
 from datetime import datetime
@@ -92,3 +94,20 @@ def monotime_to_datetime(monotime_ns: int) -> datetime:
     """
     wall_time = (monotime_ns + _G_MONOTIME_DELTA) / 1e9
     return datetime.fromtimestamp(wall_time)
+
+
+def lazy_import(module_name: str):
+    """Taken from the official Python documentation:
+    https://docs.python.org/3.12/library/importlib.html#implementing-lazy-imports
+
+    A very rudimentary lazy loader implementation for pre-Python 3.15 before PEP-810 is implemented.
+
+    If we move to Python 3.15+ this can be removed and replaced with the built-in 'lazy import' keyword.
+    """
+    spec = importlib.util.find_spec(module_name)
+    loader = importlib.util.LazyLoader(spec.loader)
+    spec.loader = loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    loader.exec_module(module)
+    return module
