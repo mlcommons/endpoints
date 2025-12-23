@@ -35,9 +35,9 @@ from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import LoadPattern, LoadPatternType
 from inference_endpoint.dataset_manager.dataloader import (
     DataLoader,
-    HFDataLoader,
-    PickleReader,
+    RowProcessor,
 )
+from inference_endpoint.dataset_manager.dataset import DatasetFormat
 from inference_endpoint.load_generator.events import SampleEvent, SessionEvent
 from inference_endpoint.load_generator.sample import SampleEventHandler
 from inference_endpoint.testing.docker_server import DockerServer
@@ -189,10 +189,16 @@ def ds_pickle_reader(ds_pickle_dataset_path):
     Returns a PickleReader object for the ds_samples.pkl file.
     """
 
-    def parser(row):
-        return row
+    class PickleRowProcessor(RowProcessor):
+        def __init__(self):
+            super().__init__()
 
-    return PickleReader(ds_pickle_dataset_path, parser=parser)
+        def __call__(self, row: dict[str, Any]) -> Any:
+            return row
+
+    return DataLoader.load_from_file(
+        file_path=ds_pickle_dataset_path, row_processor=PickleRowProcessor()
+    )
 
 
 @pytest.fixture
@@ -208,7 +214,19 @@ def hf_squad_dataset(hf_squad_dataset_path):
     """
     Returns a HFDataLoader object for the squad dataset.
     """
-    return HFDataLoader(hf_squad_dataset_path, format="arrow")
+
+    class HfSquadRowProcessor(RowProcessor):
+        def __init__(self):
+            super().__init__()
+
+        def __call__(self, row: dict[str, Any]) -> Any:
+            return row
+
+    return DataLoader.load_from_file(
+        file_path=hf_squad_dataset_path,
+        row_processor=HfSquadRowProcessor(),
+        format=DatasetFormat.HF,
+    )
 
 
 @pytest.fixture
@@ -332,7 +350,16 @@ class OracleServer(EchoServer):
         self.logger = logging.getLogger(__name__)
         self.file_path = file_path
 
-        def parser(x):
+        class OracleRowProcessor(RowProcessor):
+            def __init__(self):
+                super().__init__()
+
+            def __call__(self, row: dict[str, Any]) -> Any:
+                return {
+                    "prompt": row["text_input"],
+                    "output": row["ref_output"],
+                }
+
             """
             Extract the prompt and reference output from a dataset sample object.
 
@@ -342,10 +369,10 @@ class OracleServer(EchoServer):
             Returns:
                 dict: A dictionary with 'prompt' and 'output' keys derived from the input sample.
             """
-            return {"prompt": x["text_input"], "output": x["ref_output"]}
 
-        self.parser = parser
-        data_loader = PickleReader(self.file_path, parser=self.parser)
+        data_loader = DataLoader.load_from_file(
+            self.file_path, row_processor=OracleRowProcessor()
+        )
         data_loader.load()
         self.data = {}
         for i in range(data_loader.num_samples()):

@@ -14,13 +14,13 @@
 # limitations under the License.
 
 import logging
+from typing import Any
 
 import aiohttp
 import pytest
 from inference_endpoint.core.types import Query
-from inference_endpoint.dataset_manager.dataloader import (
-    PickleReader,
-)
+from inference_endpoint.dataset_manager import DataLoader
+from inference_endpoint.dataset_manager.dataloader import RowProcessor
 from inference_endpoint.openai.openai_adapter import OpenAIAdapter
 from inference_endpoint.openai.openai_types_gen import CreateChatCompletionResponse
 
@@ -39,10 +39,13 @@ async def test_ds_chat_completion_data_loader_with_oracle_server(
     and checks that the server returns a response matching the sample's reference output.
     """
 
-    def parser(x):
-        return {"prompt": x["text_input"], "output": x["ref_output"]}
+    class TestRowProcessor(RowProcessor):
+        def __call__(self, row: dict[str, Any]) -> Any:
+            return {"prompt": row["text_input"], "output": row["ref_output"]}
 
-    ds_chat_completion_data_loader = PickleReader(ds_pickle_dataset_path, parser=parser)
+    ds_chat_completion_data_loader = DataLoader.load_from_file(
+        ds_pickle_dataset_path, row_processor=TestRowProcessor()
+    )
     ds_chat_completion_data_loader.load()
     assert ds_chat_completion_data_loader.num_samples() == 5
     for i in range(ds_chat_completion_data_loader.num_samples()):

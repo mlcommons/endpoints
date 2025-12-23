@@ -375,35 +375,6 @@ def _get_dataset_path(args: argparse.Namespace, config: BenchmarkConfig) -> Path
     return dataset_path
 
 
-def _get_dataset_format(config: BenchmarkConfig, dataset_path: Path) -> str:
-    """Get or infer dataset format.
-
-    CURRENT LIMITATION: Only supports single dataset.
-
-    Args:
-        config: BenchmarkConfig
-        dataset_path: Path to dataset file
-
-    Returns:
-        Dataset format string (e.g., "pkl", "hf")
-
-    TODO: Multi-dataset support
-    When implemented, this should:
-    1. Return dict[Path, str] mapping dataset paths to formats
-    2. Validate format compatibility across datasets
-    """
-    # Try to get format from config
-    # TODO: Multi-dataset - currently just uses single dataset format
-    single_dataset = config.get_single_dataset()
-    if single_dataset and single_dataset.format:
-        return single_dataset.format
-
-    # Infer from file extension
-    format_str = DataLoaderFactory.infer_format(dataset_path)
-    logger.info(f"Inferred dataset format: {format_str}")
-    return format_str
-
-
 def _run_benchmark(
     config: BenchmarkConfig,
     collect_responses: bool,
@@ -485,12 +456,7 @@ def _run_benchmark(
 
     # Get dataset - from CLI or from config
     # TODO: Dataset Logic is not yet fully implemented
-    # dataset_path = _get_dataset_path(args, config)
     dataset_path = config.datasets[0].path
-
-    # Load dataset using factory
-    dataset_format = _get_dataset_format(config, dataset_path)
-    logger.info(f"Loading: {dataset_path} (format: {dataset_format})")
 
     # Determine if streaming should be enabled based on config
     streaming_mode = config.model_params.streaming
@@ -517,7 +483,7 @@ def _run_benchmark(
 
         dataloader = DataLoaderFactory.create_loader(
             dataset_path,
-            format=dataset_format,
+            format=config.datasets[0].format,
             key_maps=key_maps,
             metadata={
                 "model": model_name,
@@ -534,9 +500,6 @@ def _run_benchmark(
     except FileNotFoundError as e:
         logger.error(f"Dataset file not found: {dataset_path}")
         raise InputValidationError(f"Dataset file not found: {dataset_path}") from e
-    except NotImplementedError as e:
-        logger.error(f"Dataset format not supported: {dataset_format}")
-        raise SetupError(str(e)) from e
     except Exception as e:
         logger.error("Dataset load failed")
         raise SetupError(f"Failed to load dataset: {e}") from e
