@@ -65,7 +65,7 @@ class BenchmarkSession:
         max_shutdown_timeout_s: float = 300.0,
         report_dir: os.PathLike | None = None,
         tokenizer_override: AutoTokenizer | None = None,
-        dump_events_csv: bool = False,
+        dump_events_log: bool = False,
     ):
         with self.event_recorder:
             try:
@@ -184,8 +184,8 @@ class BenchmarkSession:
                     with (Path(report_dir) / "sample_idx_map.json").open("w") as f:
                         f.write(orjson.dumps(self.sample_uuid_map).decode("utf-8"))
 
-                    if dump_events_csv:
-                        reporter.dump_to_csv(Path(report_dir) / "events.csv")
+                    if dump_events_log:
+                        reporter.dump_to_json(Path(report_dir) / "events.json")
 
                 # Print summary
                 report.display()
@@ -215,7 +215,7 @@ class BenchmarkSession:
         max_shutdown_timeout_s: float = 300.0,
         report_dir: os.PathLike | None = None,
         tokenizer_override: AutoTokenizer | None = None,
-        dump_events_csv: bool = False,
+        dump_events_log: bool = False,
     ) -> BenchmarkSession:
         """Start a new BenchmarkSession in a thread.
 
@@ -245,7 +245,7 @@ class BenchmarkSession:
                 "max_shutdown_timeout_s": max_shutdown_timeout_s,
                 "report_dir": report_dir,
                 "tokenizer_override": tokenizer_override,
-                "dump_events_csv": dump_events_csv,
+                "dump_events_log": dump_events_log,
             },
         )
         session.thread.start()

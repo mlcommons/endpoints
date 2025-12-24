@@ -622,6 +622,7 @@ def _run_benchmark(
             report_dir=report_dir,
             tokenizer_override=tokenizer,
             max_shutdown_timeout_s=config.timeout if config.timeout else None,
+            dump_events_log=True,
         )
 
         # Wait for test end with ability to interrupt

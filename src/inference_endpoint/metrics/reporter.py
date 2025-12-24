@@ -1120,20 +1120,13 @@ class MetricsReporter:
             self.cur_.close()
         self.conn.close()
 
-    def dump_to_csv(self, csv_path: Path):
-        """Dumps all events to a CSV file, including decoded output data from the 'data' column."""
-        with csv_path.open("w") as f:
-            writer = csv.writer(f)
-            writer.writerow(
-                [
-                    "sample_uuid",
-                    "event_type",
-                    "timestamp_ns",
-                    "approx_datetime_str",
-                    "value",
-                ]
-            )
+    def dump_to_json(self, json_path: Path):
+        """
+        Dumps all events to a JSONL file, including decoded output data from the 'data' column.
+        Each line in the output file is a valid JSON object.
+        """
 
+        with json_path.open("w", encoding="utf-8") as f:
             query_result = self.cur_.execute(
                 "SELECT sample_uuid, event_type, timestamp_ns, data FROM events"
             )
@@ -1174,14 +1167,19 @@ class MetricsReporter:
 
                     approx_datetime_str = monotime_to_datetime(timestamp_ns).isoformat()
 
-                    writer.writerow(
-                        [
-                            sample_uuid,
-                            event_type,
-                            timestamp_ns,
-                            approx_datetime_str,
-                            value,
-                        ]
+                    json_obj = {
+                        "sample_uuid": sample_uuid,
+                        "event_type": event_type,
+                        "timestamp_ns": timestamp_ns,
+                        "approx_datetime_str": approx_datetime_str,
+                        "value": value,
+                    }
+                    # Use json.dumps for each line
+                    f.write(
+                        orjson.dumps(
+                            json_obj, option=orjson.OPT_INDENT_2 | orjson.OPT_SORT_KEYS
+                        ).decode("utf-8")
+                        + "\n"
                     )
 
     def __enter__(self):
