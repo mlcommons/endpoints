@@ -46,6 +46,7 @@ from inference_endpoint.load_generator.events import SampleEvent
 from inference_endpoint.metrics.recorder import EventRecorder
 from inference_endpoint.metrics.reporter import MetricsReporter
 from inference_endpoint.profiling import profile
+from inference_endpoint.utils.logging import setup_logging
 
 logger = logging.getLogger(__name__)
 
@@ -68,18 +69,10 @@ def worker_main(
     http_config: HTTPClientConfig,
     aiohttp_config: AioHttpConfig,
     zmq_config: ZMQConfig,
-    request_queue_addr: str,
-    response_queue_addr: str,
-    readiness_queue_addr: str,
 ):
     """Entry point for worker process."""
-    # Configure logging for worker process
-    logging.basicConfig(
-        level=logging.INFO,
-        format=f"[Worker-{worker_id}-{os.getpid()}] %(levelname)-5s - %(message)s (%(module)s:%(lineno)d)",
-        force=True,
-    )
-    logger = logging.getLogger(__name__)
+    worker_log_format = f"%(asctime)s - %(name)s[W{worker_id}/%(process)d] - %(funcName)s - %(levelname)s - %(message)s"
+    setup_logging(level=http_config.log_level, format_string=worker_log_format)
 
     # Install uvloop which also enables it
     import uvloop
@@ -93,18 +86,13 @@ def worker_main(
             http_config=http_config,
             aiohttp_config=aiohttp_config,
             zmq_config=zmq_config,
-            request_socket_addr=request_queue_addr,
-            response_socket_addr=response_queue_addr,
-            readiness_socket_addr=readiness_queue_addr,
         )
 
         # Run event loop
         uvloop.run(worker.run())
 
     except Exception as e:
-        logger.error(
-            f"Worker {worker_id} crashed: {type(e).__name__}: {str(e)}\n{traceback.format_exc()}"
-        )
+        logger.error(f"Crashed: {type(e).__name__}: {str(e)}\n{traceback.format_exc()}")
         sys.exit(1)
 
 
@@ -117,18 +105,12 @@ class Worker:
         http_config: HTTPClientConfig,
         aiohttp_config: AioHttpConfig,
         zmq_config: ZMQConfig,
-        request_socket_addr: str,
-        response_socket_addr: str,
-        readiness_socket_addr: str,
     ):
-        """Initialize worker with configurations and ZMQ addresses."""
+        """Initialize worker with configurations."""
         self.worker_id = worker_id
         self.http_config = http_config
         self.aiohttp_config = aiohttp_config
         self.zmq_config = zmq_config
-        self.request_socket_addr = request_socket_addr
-        self.response_socket_addr = response_socket_addr
-        self.readiness_socket_addr = readiness_socket_addr
         self._shutdown = False
 
         self._zmq_context: zmq.asyncio.Context | None = None
@@ -148,20 +130,30 @@ class Worker:
     async def run(self) -> None:
         """Main worker loop - pull requests, execute, push responses."""
         try:
+            # Derive socket addresses from zmq_config
+            request_socket_addr = (
+                f"{self.zmq_config.zmq_request_queue_prefix}_{self.worker_id}_requests"
+            )
+            logger.debug("Request Socket Addr: %s", request_socket_addr)
+            response_socket_addr = self.zmq_config.zmq_response_queue_addr
+            logger.debug("Response Socket Addr: %s", response_socket_addr)
+            readiness_socket_addr = self.zmq_config.zmq_readiness_queue_addr
+            logger.debug("Readiness Socket Addr: %s", readiness_socket_addr)
+
             # Initialize ZMQ context and sockets
             self._zmq_context = zmq.asyncio.Context()
             self._request_socket = ZMQPullSocket(
                 self._zmq_context,
-                self.request_socket_addr,
+                request_socket_addr,
                 self.zmq_config,
                 bind=True,
                 decoder_type=Query,
             )
             self._response_socket = ZMQPushSocket(
-                self._zmq_context, self.response_socket_addr, self.zmq_config
+                self._zmq_context, response_socket_addr, self.zmq_config
             )
             self._readiness_socket = ZMQPushSocket(
-                self._zmq_context, self.readiness_socket_addr, self.zmq_config
+                self._zmq_context, readiness_socket_addr, self.zmq_config
             )
 
             # Create TCP connector
@@ -185,12 +177,10 @@ class Worker:
 
             # Send readiness signal only after successful initialization
             await self._readiness_socket.send(self.worker_id)
-            logger.info(f"Worker {self.worker_id} started and ready")
+            logger.debug("Started and ready")
 
         except Exception as e:
-            logger.error(
-                f"Worker {self.worker_id} failed to initialize: {type(e).__name__}: {str(e)}"
-            )
+            logger.error(f"Failed to initialize: {type(e).__name__}: {str(e)}")
             # Exit with error code to signal failure to parent process
             sys.exit(1)
         finally:
@@ -203,21 +193,19 @@ class Worker:
                 pid = os.getpid()
                 worker_db_name = f"worker_report_{self.worker_id}_{pid}"
                 report_path = self.http_config.event_logs_dir / f"{worker_db_name}.csv"
-                logger.info(f"About to generate report {self.worker_id}")
+                logger.debug("About to generate report")
                 with EventRecorder(session_id=worker_db_name) as event_recorder:
                     await self._main_loop()
                     event_recorder.wait_for_writes(force_commit=True)
                     with MetricsReporter(event_recorder.connection_name) as reporter:
-                        logger.info(f"About to dump worker report to {report_path}")
+                        logger.debug(f"About to dump report to {report_path}")
                         reporter.dump_all_to_csv(report_path)
-                        logger.info(f"Worker report dumped to {report_path}")
+                        logger.debug(f"Report dumped to {report_path}")
             else:
                 # No logging, just run the main loop
                 await self._main_loop()
         except Exception as e:
-            logger.error(
-                f"Error in worker {self.worker_id}: {type(e).__name__}: {str(e)}"
-            )
+            logger.error(f"Error: {type(e).__name__}: {str(e)}")
 
         finally:
             # Cleanup
@@ -228,6 +216,7 @@ class Worker:
         """Main processing loop - continuously pull and process requests."""
         while not self._shutdown:
             try:
+                # TODO(vir): re-do work-consumer loop to leverage built-in zmq load-balancing
                 # Pull query from queue with timeout
                 query = await self._request_socket.receive()
 
@@ -242,21 +231,20 @@ class Worker:
                         sample_uuid=query.id,
                         assert_active=True,
                     )
-                # Process query asynchronously and track the task
-                task = asyncio.create_task(self._process_request(query))
-                self._active_tasks.add(task)
 
-                # Remove task from active set when it completes
-                task.add_done_callback(self._active_tasks.discard)
+                # Create async-task to process request concurrently
+                task = asyncio.create_task(self._process_request(query))
+
+                # Record task to prevent garbage collection during execution
+                # Task removes itself from set in _process_request's finally block
+                self._active_tasks.add(task)
 
             except asyncio.CancelledError:
                 break
 
             except Exception as e:
                 # Don't exit on errors in the main loop, just log and continue
-                logger.error(
-                    f"Worker {self.worker_id} error in main loop: {type(e).__name__}: {str(e)}"
-                )
+                logger.error(f"Error in main loop: {type(e).__name__}: {str(e)}")
 
     async def _handle_error(self, query_id: str, error: Exception | str) -> None:
         """Send error response for a query."""
@@ -265,7 +253,7 @@ class Worker:
         if self._shutdown or not self._response_socket:
             return
 
-        error_message = str(error) if isinstance(error, Exception) else error
+        error_message = repr(error) if isinstance(error, Exception) else error
         error_response = QueryResult(
             id=query_id,
             response_output=None,
@@ -303,14 +291,8 @@ class Worker:
             return
 
         url = self.http_config.endpoint_url
-        headers = (
-            query.headers
-            if hasattr(query, "headers") and len(query.headers) > 0
-            else {"content-type": "application/json"}
-        )
-
-        logging.debug(
-            f"Making HTTP request to {url} with query: {query} and headers: {headers}"
+        logger.debug(
+            f"Making HTTP request to {url} with query: {query} and headers: {query.headers}"
         )
 
         # Encode query to bytes using adapter
@@ -327,14 +309,14 @@ class Worker:
             )
 
         async with self._session.post(
-            url, data=payload_bytes, headers=headers
+            url, data=payload_bytes, headers=query.headers
         ) as response:
             if response.status != 200:
                 error_text = await response.text()
                 await self._handle_error(
                     query.id, f"HTTP {response.status}: {error_text}"
                 )
-                logger.error(f"Request {query.id} failed with HTTP Error: {error_text}")
+                logger.error(f"Request {query.id} failed: HTTP {error_text}")
                 return
             logger.debug(f"HTTP Response: {response}")
             yield response
@@ -358,6 +340,12 @@ class Worker:
 
         except Exception as e:
             await self._handle_error(query.id, e)
+
+        finally:
+            # Clean up task reference to prevent memory leak (~850 MB per 1M tasks).
+            # This is faster than using add_done_callback to remove from set
+            # since it avoids an extra yield -> function-call per task
+            self._active_tasks.discard(asyncio.current_task())
 
     @profile
     async def _iter_sse_lines(
@@ -417,9 +405,6 @@ class Worker:
                         output_delta.append(delta.content)
                     elif delta.reasoning:
                         reasoning_delta.append(delta.reasoning)
-                    else:
-                        logger.debug("empty SSE delta")
-                        continue
 
                 for delta_batch, accumulator in (
                     (reasoning_delta, reasoning_chunks),
@@ -518,23 +503,22 @@ class Worker:
 
     async def _cleanup(self) -> None:
         """Clean up resources."""
+        # Cancel pending tasks to drop HTTP requests
+        if not_done := len(self._active_tasks):
+            [task.cancel() for task in self._active_tasks]
+            await asyncio.gather(*self._active_tasks, return_exceptions=True)
+            self._active_tasks.clear()
+            logger.debug(f"Cancelled {not_done} pending requests.")
+
         # Close aiohttp session
         if self._session:
             await self._session.close()
-
-        # Cancel and clear active tasks
-        logger.info(
-            f"Worker {self.worker_id} will cancel {len(self._active_tasks)} tasks and cleanup."
-        )
-        for task in self._active_tasks:
-            task.cancel()
-        self._active_tasks.clear()
 
         # Close TCP connector
         if self.tcp_connector:
             await self.tcp_connector.close()
 
-        # Close ZMQ sockets (readiness socket already closed after initialization)
+        # Close ZMQ sockets
         for socket in (self._request_socket, self._response_socket):
             if socket:
                 socket.close()
@@ -573,8 +557,9 @@ class WorkerManager:
             bind=True,
         )
 
+        initialization_succeeded = False
         try:
-            logger.info(f"Starting {self.http_config.num_workers} worker processes")
+            logger.debug(f"Starting {self.http_config.num_workers} worker processes")
 
             # Spawn worker processes
             for i in range(self.http_config.num_workers):
@@ -601,7 +586,8 @@ class WorkerManager:
                 wait_for_all_workers(),
                 timeout=self.http_config.worker_initialization_timeout,
             )
-            logger.info(f"{ready_count}/{self.http_config.num_workers} workers ready")
+            logger.debug(f"{ready_count}/{self.http_config.num_workers} workers ready")
+            initialization_succeeded = True
         except TimeoutError as e:
             raise TimeoutError(
                 f"Workers failed to initialize within {self.http_config.worker_initialization_timeout} seconds."
@@ -609,16 +595,15 @@ class WorkerManager:
         finally:
             # Close readiness socket
             readiness_socket.close()
+            # Shutdown any spawned workers on error/interrupt
+            if not initialization_succeeded and self.workers:
+                await self.shutdown()
 
     def _spawn_worker(self, worker_id: int) -> Process:
         """Spawn a single worker process."""
-        request_queue_addr = (
-            f"{self.zmq_config.zmq_request_queue_prefix}_{worker_id}_requests"
-        )
-        response_queue_addr = self.zmq_config.zmq_response_queue_addr
-        readiness_queue_addr = self.zmq_config.zmq_readiness_queue_addr
-
-        # Create worker process
+        # Create worker process as daemon.
+        # 1. Automatic Termination: No need to manually join/reap worker processes
+        # 2. Zombie Prevention: Relies on multiprocessing's internal atexit handler
         process = Process(
             target=worker_main,
             args=(
@@ -626,47 +611,35 @@ class WorkerManager:
                 self.http_config,
                 self.aiohttp_config,
                 self.zmq_config,
-                request_queue_addr,
-                response_queue_addr,
-                readiness_queue_addr,
             ),
-            daemon=False,
+            daemon=True,
         )
         process.start()
         return process
 
     async def shutdown(self) -> None:
-        """
-        Graceful shutdown of all workers with proper zombie reaping.
-
-        Zombie processes occur when a child dies but parent hasn't called join().
-        Without proper reaping, dead workers remain in the process table as zombies
-        with state 'Z'.
-        """
+        """Graceful shutdown of all workers."""
         self._shutdown_event.set()
 
-        # Send SIGTERM to alive workers
+        # Send SIGTERM to alive workers for graceful shutdown
         for worker in self.workers:
             if worker.is_alive():
-                worker.terminate()  # Send SIGTERM for graceful shutdown
-            else:
-                # Worker is already dead (possibly zombie) - reap immediately
-                worker.join(timeout=0.1)
+                worker.terminate()
 
-        # Wait for graceful shutdown to complete
+        # Wait for graceful shutdown
         await asyncio.sleep(self.http_config.worker_graceful_shutdown_wait)
 
-        # Force kill any remaining workers and ensure all are reaped
-        loop = asyncio.get_event_loop()
+        # Force kill any remaining workers
         for worker in self.workers:
             if worker.is_alive():
-                # Worker didn't respond to SIGTERM - force kill with SIGKILL
                 worker.kill()
-                # Run blocking join() in thread pool to avoid blocking event loop
-                # This reaps the forcefully killed worker
-                await loop.run_in_executor(
-                    None, worker.join, self.http_config.worker_force_kill_timeout
+
+        # Join all workers to ensure termination
+        await asyncio.gather(
+            *(
+                asyncio.to_thread(
+                    worker.join, timeout=self.http_config.worker_force_kill_timeout
                 )
-            else:
-                # Worker died during graceful shutdown - reap to prevent zombie
-                worker.join(timeout=0.1)
+                for worker in self.workers
+            )
+        )

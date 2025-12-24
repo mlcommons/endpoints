@@ -274,8 +274,9 @@ def _build_config_from_cli(
         get_default_report_path(),
     )
     timeout = getattr(args, "timeout", None)
-    verbose = getattr(args, "verbose", False)
+    verbose_level = getattr(args, "verbose", 0)
     output = getattr(args, "output", None)
+
     # Build BenchmarkConfig from CLI params
     return BenchmarkConfig(
         name=f"cli_{benchmark_mode}",
@@ -308,6 +309,7 @@ def _build_config_from_cli(
             ),
             client=ClientSettings(
                 workers=args.workers if args.workers else 4,
+                log_level="DEBUG" if verbose_level >= 2 else "INFO",
             ),
         ),
         model_params=ModelParams(
@@ -328,7 +330,7 @@ def _build_config_from_cli(
         report_dir=report_dir,
         output=output,
         timeout=timeout,
-        verbose=verbose,
+        verbose=verbose_level > 0,
     )
 
 
@@ -582,8 +584,6 @@ def _run_benchmark(
     num_workers = config.settings.client.workers
 
     logger.info(f"Connecting: {endpoint}")
-    logger.info(f"Client config: workers={num_workers}")
-
     tmp_dir = tempfile.mkdtemp(prefix="inference_endpoint_")
 
     try:
@@ -592,6 +592,7 @@ def _run_benchmark(
             num_workers=num_workers,
             record_worker_events=config.settings.client.record_worker_events,
             event_logs_dir=report_dir,
+            log_level=config.settings.client.log_level,
         )
         aiohttp_config = AioHttpConfig()
         zmq_config = ZMQConfig(
@@ -691,7 +692,6 @@ def _run_benchmark(
 
     except KeyboardInterrupt:
         logger.warning("Benchmark interrupted by user")
-        # Will be re-raised by CLI main() for proper exit
         raise
     except ExecutionError:
         # Re-raise our own exceptions
@@ -703,6 +703,8 @@ def _run_benchmark(
         # Cleanup - always execute
         logger.info("Cleaning up...")
         try:
+            if sess is not None:
+                sess.stop()
             pbar.close()
             sample_issuer.shutdown()
             http_client.shutdown()
