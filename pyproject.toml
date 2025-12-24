@@ -33,6 +33,7 @@ dependencies = [
     "pyzmq==27.0.2",
     "uvloop==0.21.0",
     "msgspec==0.19.0",
+    "granian>=1.6.0",
 ]
 
 [project.optional-dependencies]
