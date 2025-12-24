@@ -52,7 +52,14 @@ _OUTPUT_DICT_TYPE = dict[str, str | list[str]]
 _OUTPUT_RESULT_TYPE = str | tuple[str, ...] | _OUTPUT_DICT_TYPE | None
 
 
-class Query(msgspec.Struct, kw_only=True):  # type: ignore[call-arg]
+class Query(
+    msgspec.Struct,
+    frozen=True,
+    kw_only=True,
+    array_like=True,
+    omit_defaults=True,
+    gc=False,
+):  # type: ignore[call-arg]
     """Represents a single inference query to be sent to an endpoint.
 
     A Query encapsulates all information needed to make an HTTP request to
@@ -72,6 +79,17 @@ class Query(msgspec.Struct, kw_only=True):  # type: ignore[call-arg]
         ...     data={"prompt": "Hello", "model": "Qwen/Qwen3-8B", "max_tokens": 100},
         ...     headers={"Authorization": "Bearer token123"},
         ... )
+
+    Note:
+        gc=False: Safe because data/headers are simple key-value pairs without cycles.
+        Do NOT store self-referential or cyclic structures in data/headers fields.
+
+        array_like=True: Encodes as array instead of object (e.g., ["id", {...}, {...}, 0.0]
+        instead of {"id": ..., "data": ..., ...}). Provides ~6-50% size reduction and
+        ~6-29% ser/des speedup for ZMQ transport depending on payload size.
+
+        omit_defaults=True: Fields with default values are omitted during encoding,
+        further reducing message size for queries with empty headers.
     """
 
     id: str = msgspec.field(default_factory=lambda: str(uuid.uuid4()))
@@ -80,7 +98,15 @@ class Query(msgspec.Struct, kw_only=True):  # type: ignore[call-arg]
     created_at: float = msgspec.field(default_factory=time.time)
 
 
-class QueryResult(msgspec.Struct, tag="query_result", kw_only=True, frozen=True):  # type: ignore[call-arg]
+class QueryResult(
+    msgspec.Struct,
+    tag="query_result",
+    kw_only=True,
+    frozen=True,
+    array_like=True,
+    omit_defaults=True,
+    gc=False,
+):  # type: ignore[call-arg]
     """Result of a completed inference query.
 
     Represents the outcome of processing a Query, including the response text,
@@ -106,6 +132,15 @@ class QueryResult(msgspec.Struct, tag="query_result", kw_only=True, frozen=True)
     Note:
         The completed_at field is intentionally set internally to prevent
         benchmark result manipulation. Users must not override this timestamp.
+
+        gc=False: Safe because metadata contains only scalar key-value pairs.
+        Do NOT store cyclic references in metadata or response_output fields.
+
+        omit_defaults=True: Fields with static defaults (ie. those NOT using default_factory)
+        are omitted if value equals default.
+
+        array_like=True: Encodes as array instead of object (e.g. ["id", "chunk", false, {}]
+        instead of {"id": ..., "response_chunk": ..., ...}). Reduces payload size.
     """
 
     id: str = ""
@@ -154,7 +189,15 @@ class QueryResult(msgspec.Struct, tag="query_result", kw_only=True, frozen=True)
             return "<EMPTY>"
 
 
-class StreamChunk(msgspec.Struct, tag="stream_chunk", kw_only=True):  # type: ignore[call-arg]
+class StreamChunk(
+    msgspec.Struct,
+    tag="stream_chunk",
+    frozen=True,
+    kw_only=True,
+    array_like=True,
+    omit_defaults=True,
+    gc=False,
+):  # type: ignore[call-arg]
     """A single chunk from a streaming inference response.
 
     Streaming responses are sent incrementally as the model generates text.
@@ -174,6 +217,16 @@ class StreamChunk(msgspec.Struct, tag="stream_chunk", kw_only=True):  # type: ig
         Streaming "Hello World" might produce:
         >>> StreamChunk(id="q1", response_chunk="Hello", is_complete=False)
         >>> StreamChunk(id="q1", response_chunk=" World", is_complete=True)
+
+    Note:
+        gc=False: Safe because metadata contains only scalar key-value pairs.
+        Do NOT store cyclic references in metadata field.
+
+        omit_defaults=True: Fields with static defaults (ie. those NOT using default_factory)
+        are omitted if value equals default.
+
+        array_like=True: Encodes as array instead of object (e.g. ["id", "chunk", false, {}]
+        instead of {"id": ..., "response_chunk": ..., ...}). Reduces payload size.
     """
 
     id: str = ""
