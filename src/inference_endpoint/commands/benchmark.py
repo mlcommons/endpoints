@@ -33,7 +33,10 @@ from tqdm import tqdm
 from transformers import AutoTokenizer
 from transformers.utils import logging as transformers_logging
 
-from inference_endpoint.commands.utils import get_default_report_path
+from inference_endpoint.commands.utils import (
+    generate_user_conf_submission_checker,
+    get_default_report_path,
+)
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import (
     BenchmarkConfig,
@@ -687,6 +690,11 @@ def _run_benchmark(
                 logger.info(f"Saved: {config.output}")
             except Exception as e:
                 logger.error(f"Save failed: {e}")
+
+        if config.ensure_submission_checker_compatibility:
+            # convert the runtime_settings.json to user.conf format and
+            # result_summary.json to mlperf_log_details.txt format(TODO)
+            generate_user_conf_submission_checker(report_dir)
 
     except KeyboardInterrupt:
         logger.warning("Benchmark interrupted by user")

@@ -31,6 +31,7 @@ import yaml
 from pydantic import ValidationError as PydanticValidationError
 
 from .. import __version__
+from ..config.constants import ENDPOINTS_TO_LOADGEN_KEY_MAPPING
 from ..config.schema import TEMPLATE_TYPE_MAP, BenchmarkConfig
 from ..config.yaml_loader import ConfigError, ConfigLoader
 from ..exceptions import InputValidationError, SetupError
@@ -314,3 +315,38 @@ def get_default_report_path() -> Path:
     return Path(
         f"{tempfile.gettempdir()}/reports_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
     )
+
+
+def generate_user_conf_submission_checker(report_dir: Path) -> None:
+    """Generate user.conf file for submission checker from runtime_settings.json.
+
+    Converts endpoints runtime_settings keys to loadgen keys using the mapping
+    defined in config.constants.ENDPOINTS_TO_LOADGEN_KEY_MAPPING.
+
+    Args:
+        report_dir: Path to the report directory containing runtime_settings.json.
+
+    Raises:
+        FileNotFoundError: If runtime_settings.json does not exist in report_dir.
+    """
+
+    runtime_settings_path = report_dir / "runtime_settings.json"
+    user_conf_path = report_dir / "user.conf"
+
+    if not runtime_settings_path.exists():
+        logger.error(f"runtime_settings.json not found in {report_dir}")
+        raise FileNotFoundError(f"runtime_settings.json not found in {report_dir}")
+    try:
+        with open(runtime_settings_path) as f:
+            runtime_settings = yaml.safe_load(f)
+
+        with open(user_conf_path, "w") as f:
+            for key, value in runtime_settings.items():
+                # Map endpoints key to loadgen key if mapping exists, otherwise use same key
+                loadgen_key = ENDPOINTS_TO_LOADGEN_KEY_MAPPING.get(key, key)
+                f.write(f"*.*.{loadgen_key}={value}\n")
+
+        logger.info(f"Generated user.conf at {user_conf_path}")
+
+    except Exception as e:
+        logger.error(f"Failed to generate user.conf: {e}")
