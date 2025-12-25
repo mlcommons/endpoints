@@ -679,6 +679,27 @@ class MetricsReporter:
             return float("inf")
         return float(result[0])
 
+    @functools.cached_property
+    def max_duration_timestamp_ns(self) -> float:
+        """Returns the timestamp_ns of the MAX_DURATION_REACHED event.
+
+        This event is emitted when the benchmark stops due to max_duration_ms being exceeded.
+        If the event is not found, returns positive infinity.
+
+        Returns:
+            float: The timestamp_ns of MAX_DURATION_REACHED event, or float('inf') if not found.
+        """
+        result = self.cur_.execute(f"""
+        SELECT timestamp_ns
+        FROM events
+        WHERE event_type = '{SessionEvent.MAX_DURATION_REACHED.value}'
+        LIMIT 1
+        """).fetchone()
+
+        if result is None:
+            return float("inf")
+        return float(result[0])
+
     @profile
     def derive_metric(self, query: str, metric_type: str) -> RollupQueryTable:
         res = self.cur_.execute(query)
@@ -731,8 +752,10 @@ class MetricsReporter:
     def derive_duration(self) -> float:
         """Calculates the total test duration.
 
-        If STOP_PERFORMANCE_TRACKING event exists, uses STOP_PERFORMANCE_TRACKING - TEST_STARTED.
-        Otherwise, defaults to TEST_ENDED - TEST_STARTED.
+        Priority order:
+        1. If MAX_DURATION_REACHED exists, uses MAX_DURATION_REACHED - TEST_STARTED (benchmark stopped due to timeout)
+        2. If STOP_PERFORMANCE_TRACKING exists, uses STOP_PERFORMANCE_TRACKING - TEST_STARTED
+        3. Otherwise, defaults to TEST_ENDED - TEST_STARTED
 
         Returns:
             float: The duration in nanoseconds.
@@ -748,42 +771,48 @@ class MetricsReporter:
                 f"Multiple TEST_STARTED or TEST_ENDED events found - {n_time_bounds[0]} START events, {n_time_bounds[1]} END events"
             )
 
-        # Check if STOP_PERFORMANCE_TRACKING event exists
+        # Get start timestamp
+        result = self.cur_.execute(f"""
+        SELECT
+            MAX(CASE WHEN event_type = '{SessionEvent.TEST_STARTED.value}' THEN timestamp_ns END) AS start_ts
+        FROM events
+        WHERE event_type = '{SessionEvent.TEST_STARTED.value}'
+        """).fetchone()
+
+        if result is None or result[0] is None:
+            return None  # Test did not start, return None
+
+        start_ts = result[0]
+
+        # Check for MAX_DURATION_REACHED event (highest priority)
+        max_duration_ts = self.max_duration_timestamp_ns
+        if max_duration_ts != float("inf"):
+            return float(max_duration_ts - start_ts)
+
+        # Check for STOP_PERFORMANCE_TRACKING event
         stop_ts = self.stop_performance_tracking_timestamp_ns
-
         if stop_ts != float("inf"):
-            # Use STOP_PERFORMANCE_TRACKING - TEST_STARTED
-            result = self.cur_.execute(f"""
+            return float(stop_ts - start_ts)
+
+        # Default to TEST_ENDED - TEST_STARTED
+        # Must have a dummy sample_uuid column, as RollupQueryTable uses it as a primary key
+        rollup = self.derive_metric(
+            f"""
             SELECT
-                MAX(CASE WHEN event_type = '{SessionEvent.TEST_STARTED.value}' THEN timestamp_ns END) AS start_ts
+                '' as sample_uuid,
+                MAX(CASE WHEN event_type = '{SessionEvent.TEST_ENDED.value}' THEN timestamp_ns END) -
+                MAX(CASE WHEN event_type = '{SessionEvent.TEST_STARTED.value}' THEN timestamp_ns END) AS duration
             FROM events
-            WHERE event_type = '{SessionEvent.TEST_STARTED.value}'
-            """).fetchone()
-
-            if result is None or result[0] is None:
-                return None  # Test did not start, return None
-
-            return float(stop_ts - result[0])
-        else:
-            # Default to TEST_ENDED - TEST_STARTED
-            # Must have a dummy sample_uuid column, as RollupQueryTable uses it as a primary key
-            rollup = self.derive_metric(
-                f"""
-                SELECT
-                    '' as sample_uuid,
-                    MAX(CASE WHEN event_type = '{SessionEvent.TEST_ENDED.value}' THEN timestamp_ns END) -
-                    MAX(CASE WHEN event_type = '{SessionEvent.TEST_STARTED.value}' THEN timestamp_ns END) AS duration
-                FROM events
-                WHERE event_type IN ('{SessionEvent.TEST_STARTED.value}', '{SessionEvent.TEST_ENDED.value}')
-                HAVING COUNT(DISTINCT event_type) = 2
-                """,
-                "duration",
-            )
-            if len(rollup) == 0:
-                return None  # Test did not complete, return None
-            elif len(rollup) > 1:
-                raise RuntimeError("Malformed query result - Only 1 row expected")
-            return rollup[0].metric_value
+            WHERE event_type IN ('{SessionEvent.TEST_STARTED.value}', '{SessionEvent.TEST_ENDED.value}')
+            HAVING COUNT(DISTINCT event_type) = 2
+            """,
+            "duration",
+        )
+        if len(rollup) == 0:
+            return None  # Test did not complete, return None
+        elif len(rollup) > 1:
+            raise RuntimeError("Malformed query result - Only 1 row expected")
+        return rollup[0].metric_value
 
     def derive_sample_latency(self) -> RollupQueryTable:
         """Calculates the end-to-end latency for each sample from issue to completion.

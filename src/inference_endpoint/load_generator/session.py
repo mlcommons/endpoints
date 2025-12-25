@@ -70,12 +70,39 @@ class BenchmarkSession:
         with self.event_recorder:
             try:
                 EventRecorder.record_event(
-                    SessionEvent.TEST_STARTED, time.monotonic_ns()
+                    SessionEvent.TEST_STARTED, test_start_ns := time.monotonic_ns()
                 )
 
-                for _ in perf_test_generator:
-                    # Actual issue is done during next(generator). Nothing else to do here, just pass.
-                    pass
+                max_duration_ns = self.runtime_settings.max_duration_ms * 1_000_000
+                deadline_event = threading.Event()
+                deadline_timer = None
+
+                if max_duration_ns > 0:
+
+                    def _deadline_reached():
+                        EventRecorder.record_event(
+                            SessionEvent.MAX_DURATION_REACHED, time.monotonic_ns()
+                        )
+                        deadline_event.set()
+                        self.logger.info(
+                            f"Maximum duration reached: {((time.monotonic_ns() - test_start_ns) / 1e9):.2f}s / {(max_duration_ns / 1e9):.2f}s. Stopping benchmark."
+                        )
+
+                    deadline_timer = threading.Timer(
+                        max_duration_ns / 1e9, _deadline_reached
+                    )
+                    deadline_timer.daemon = True
+                    deadline_timer.start()
+
+                # Stop issuing new samples as soon as the deadline is reached. Using an explicit
+                # iterator lets us check the deadline before pulling the next item, avoiding an
+                # extra issue after MAX_DURATION_REACHED is set.
+                perf_iter = iter(perf_test_generator)
+                while not deadline_event.is_set():
+                    try:
+                        next(perf_iter)
+                    except StopIteration:
+                        break
 
                 EventRecorder.record_event(
                     SessionEvent.STOP_PERFORMANCE_TRACKING, time.monotonic_ns()
@@ -92,7 +119,10 @@ class BenchmarkSession:
                     SessionEvent.LOADGEN_STOP, time.monotonic_ns()
                 )
                 start_time = time.monotonic()
-                while self.event_recorder.n_inflight_samples != 0:
+                while (
+                    self.event_recorder.n_inflight_samples != 0
+                    and not deadline_event.is_set()
+                ):
                     if (
                         max_shutdown_timeout_s is not None
                         and time.monotonic() - start_time > max_shutdown_timeout_s
@@ -108,6 +138,8 @@ class BenchmarkSession:
                 logger.error(f"Error running benchmark session: {e}")
                 raise e
             finally:
+                if "deadline_timer" in locals() and deadline_timer is not None:
+                    deadline_timer.cancel()
                 EventRecorder.record_event(SessionEvent.TEST_ENDED, time.monotonic_ns())
 
             self.event_recorder.wait_for_writes()

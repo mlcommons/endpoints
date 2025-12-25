@@ -23,6 +23,7 @@ class Event(Enum):
 class SessionEvent(Event):
     TEST_STARTED = "test_started"
     TEST_ENDED = "test_ended"
+    MAX_DURATION_REACHED = "max_duration_reached"
     LOADGEN_ISSUE_CALLED = "loadgen_issue_called"
     LOADGEN_STOP = "loadgen_stop"
     LOADGEN_DATA_LOAD = "loadgen_data_load"
