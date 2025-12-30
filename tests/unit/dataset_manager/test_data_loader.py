@@ -108,16 +108,16 @@ def test_random_data_loader(range_ratio):
     random_seed = 42
     tokenizer = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
     save_tokenized_data = True
-    random_data_loader = Dataset(
-        RandomDataGenerator(
-            num_sequences=num_sequences,
-            input_seq_length=input_seq_length,
-            range_ratio=range_ratio,
-            random_seed=random_seed,
-            tokenizer=tokenizer,
-            save_tokenized_data=save_tokenized_data,
-        ).get_dataframe()
+    datagen = RandomDataGenerator(
+        num_sequences=num_sequences,
+        input_seq_length=input_seq_length,
+        range_ratio=range_ratio,
+        random_seed=random_seed,
+        tokenizer=tokenizer,
+        save_tokenized_data=save_tokenized_data,
     )
+    datagen.read()
+    random_data_loader = Dataset(datagen.get_dataframe())
     random_data_loader.load()
     assert (
         len(random_data_loader.data) == num_sequences

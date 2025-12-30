@@ -106,6 +106,10 @@ class DatafileLoader(ABC):
         super().__init__(*args, **kwargs)
         self.dataframe: pd.DataFrame | None = None
 
+    def read(self) -> None:
+        """Read the dataset from the file."""
+        raise NotImplementedError("Subclasses must implement this method.")
+
     def get_dataframe(self) -> pd.DataFrame:
         """Get the dataset as a pandas dataframe."""
         return self.dataframe
@@ -139,23 +143,34 @@ class ParquetLoader(DatafileLoader, format=DatasetFormat.PARQUET):
     ):
         super().__init__(*args, **kwargs)
         self.parquet_path = Path(file_path)
+
+    def read(self) -> None:
         self.dataframe = pd.read_parquet(self.parquet_path)
 
 
 class HuggingFaceLoader(DatafileLoader, format=DatasetFormat.HF):
     def __init__(
         self,
-        file_path: Path | str,
+        file_path: Path | str | None = None,
         *args,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
-        self.file_path = str(file_path)
+        self.file_path = file_path
+        self.dataset_name = kwargs.get("dataset_name", None)
+        if not self.file_path and not self.dataset_name:
+            raise ValueError("Either dataset_path or dataset_name must be provided")
         self.split = kwargs.get("split", "train")
 
-        self.dataframe = load_from_huggingface(
-            dataset_path=self.file_path, split=self.split
-        )
+    def read(self) -> None:
+        if self.file_path:
+            ds = load_from_disk(self.file_path)
+            self.dataframe = ds[self.split].to_pandas()
+        else:
+            ds = load_dataset(
+                path=self.file_path, name=self.dataset_name, split=self.split
+            )
+            self.dataframe = ds.to_pandas()
 
 
 class CSVLoader(DatafileLoader, format=DatasetFormat.CSV):
@@ -167,6 +182,8 @@ class CSVLoader(DatafileLoader, format=DatasetFormat.CSV):
     ):
         super().__init__(*args, **kwargs)
         self.csv_path = Path(csv_path)
+
+    def read(self) -> None:
         self.dataframe = pd.read_csv(self.csv_path)
 
 
@@ -179,6 +196,8 @@ class PickleListLoader(DatafileLoader, format=DatasetFormat.PICKLE):
     ):
         super().__init__(*args, **kwargs)
         self.pickle_path = Path(file_path)
+
+    def read(self) -> None:
         self.dataframe = pd.read_pickle(self.pickle_path)
 
 
@@ -191,6 +210,8 @@ class JsonlLoader(DatafileLoader, format=DatasetFormat.JSONL):
     ):
         super().__init__(*args, **kwargs)
         self.jsonl_path = Path(jsonl_path)
+
+    def read(self) -> None:
         self.dataframe = pd.read_json(self.jsonl_path, lines=True)
 
 
@@ -203,6 +224,8 @@ class JsonLoader(DatafileLoader, format=DatasetFormat.JSON):
     ):
         super().__init__(*args, **kwargs)
         self.json_path = Path(json_path)
+
+    def read(self) -> None:
         self.dataframe = pd.read_json(self.json_path)
 
 
@@ -228,6 +251,8 @@ class RandomDataGenerator(DatafileLoader, format=DatasetFormat.RANDOM):
             self.tokenizer = tokenizer
         self.save_tokenized_data = save_tokenized_data
         self.rng = np.random.default_rng(random_seed)
+
+    def read(self) -> None:
         self.dataframe = self._generate_random_sequence()
 
     def _generate_random_sequence(self) -> pd.DataFrame:
@@ -351,8 +376,10 @@ class Dataset:
         ), "Format must be a DatasetFormat"
         # TODO add arguments to the loader class
         LoaderClass = DatafileLoader.get_loader(file_path, format=format)
+        loader = LoaderClass(file_path)
+        loader.read()
         return Dataset(
-            LoaderClass(file_path).get_dataframe(),
+            loader.get_dataframe(),
             row_processor=row_processor or RowProcessor(),
         )
 

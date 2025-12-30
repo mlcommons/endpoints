@@ -215,16 +215,9 @@ def hf_squad_dataset(hf_squad_dataset_path):
     Returns a HFDataset object for the squad dataset.
     """
 
-    class HfSquadRowProcessor(RowProcessor):
-        def __init__(self):
-            super().__init__()
-
-        def __call__(self, row: dict[str, Any]) -> Any:
-            return row
-
     return Dataset.load_from_file(
         file_path=hf_squad_dataset_path,
-        row_processor=HfSquadRowProcessor(),
+        row_processor=lambda x: x,
         format=DatasetFormat.HF,
     )
 
