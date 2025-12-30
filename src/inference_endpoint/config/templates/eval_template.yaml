@@ -33,3 +33,4 @@ metrics:
 endpoint_config:
   endpoint: "http://localhost:8000"
   api_key: null
+  api_type: "openai" # Options: "openai" or "sglang"

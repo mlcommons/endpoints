@@ -27,6 +27,7 @@ import yaml
 from pydantic import BaseModel, Field
 
 from .. import metrics
+from ..endpoint_client.configs import APIType
 from .ruleset_base import BenchmarkSuiteRuleset
 
 
@@ -294,11 +295,12 @@ class Metrics(BaseModel):
 class EndpointConfig(BaseModel):
     """Endpoint connection configuration.
 
-    Contains endpoint URL and authentication settings.
+    Contains endpoint URL, authentication settings, and API type.
     """
 
     endpoint: str | None = None
     api_key: str | None = None
+    api_type: APIType = APIType.OPENAI
 
 
 class BenchmarkConfig(BaseModel):

@@ -39,6 +39,7 @@ class SamplingParams(msgspec.Struct, kw_only=True, omit_defaults=True):
 class SGLangGenerateRequest(msgspec.Struct, kw_only=True, omit_defaults=True):
     input_ids: list[int]
     sampling_params: SamplingParams
+    stream: bool = True
 
 
 class MetaInfo(msgspec.Struct, kw_only=True, omit_defaults=True):
@@ -128,6 +129,7 @@ class SGLangGenerateAdapter(HttpRequestAdapter):
             SGLangGenerateRequest(
                 input_ids=input_tokens,
                 sampling_params=sampling_params,
+                stream=query.data.get("stream", False),
             )
         )
 

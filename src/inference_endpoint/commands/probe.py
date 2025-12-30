@@ -25,6 +25,7 @@ from urllib.parse import urljoin
 from inference_endpoint.core.types import Query, QueryResult
 from inference_endpoint.endpoint_client.configs import (
     AioHttpConfig,
+    APIType,
     HTTPClientConfig,
     ZMQConfig,
 )
@@ -50,6 +51,8 @@ async def run_probe_command(args: argparse.Namespace) -> None:
     endpoint = args.endpoint
     num_requests = args.requests
     test_prompt = args.prompt
+    api_type_str = getattr(args, "api_type", "openai")
+    api_type = APIType(api_type_str)
 
     # Model: use provided or default to valid OpenAI model name
     model_name = getattr(args, "model", None)
@@ -68,7 +71,8 @@ async def run_probe_command(args: argparse.Namespace) -> None:
         try:
             # Setup HTTP client with futures support
             http_config = HTTPClientConfig(
-                endpoint_url=urljoin(endpoint, "/v1/chat/completions"),
+                endpoint_url=urljoin(endpoint, api_type.default_route()),
+                api_type=api_type,
                 num_workers=1,
                 max_concurrency=num_requests,
             )

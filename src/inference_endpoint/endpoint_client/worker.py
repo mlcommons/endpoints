@@ -38,6 +38,7 @@ from inference_endpoint.core.types import (
 )
 from inference_endpoint.endpoint_client.configs import (
     AioHttpConfig,
+    APIType,
     HTTPClientConfig,
     ZMQConfig,
 )
@@ -539,8 +540,7 @@ class Worker:
     @profile
     async def _handle_streaming_request(self, query: Query) -> None:
         """Handle streaming response."""
-        url = self.http_config.endpoint_url
-        if url.endswith("/generate"):
+        if self.http_config.api_type == APIType.SGLANG:
             accumulator_type = SGLangSSEAccumulator
         else:
             # Default to OpenAI compatible adapter

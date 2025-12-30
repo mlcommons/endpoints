@@ -57,6 +57,7 @@ def _create_mock_args(**overrides):
         "dataset": Path("test.pkl"),
         "model": "llama-2-70b",
         "api_key": None,
+        "api_type": "openai",
         "load_pattern": None,
         "target_qps": None,
         "concurrency": None,
@@ -95,6 +96,7 @@ class TestBuildConfigFromCLI:
             dataset=Path("test.pkl"),
             model="llama-2-70b",  # Required
             api_key=None,
+            api_type="openai",
             target_qps=None,
             concurrency=None,  # Now in shared args
             workers=None,
@@ -124,6 +126,7 @@ class TestBuildConfigFromCLI:
             dataset=Path("dataset.pkl"),
             model="gpt-4",  # Required
             api_key="key123",
+            api_type="openai",
             target_qps=100.0,
             workers=8,
             concurrency=64,  # Online-specific
@@ -152,6 +155,7 @@ class TestBuildConfigFromCLI:
             dataset=Path("test.pkl"),
             model="llama-2-70b",
             api_key=None,
+            api_type="openai",
             target_qps=None,
             concurrency=None,
             workers=None,
