@@ -16,9 +16,12 @@
 from typing import Any
 
 import pytest
-from inference_endpoint.dataset_manager import DataLoader
-from inference_endpoint.dataset_manager.dataloader import RowProcessor
-from inference_endpoint.dataset_manager.dataset import DatasetFormat, RandomDataset
+from inference_endpoint.dataset_manager import Dataset
+from inference_endpoint.dataset_manager.dataset import (
+    DatasetFormat,
+    RandomDataGenerator,
+    RowProcessor,
+)
 
 
 def test_ds_pickle_reader(ds_pickle_reader):
@@ -52,7 +55,7 @@ def test_custom_parser_pickle_reader(ds_pickle_dataset_path):
             # custom parser to only return dataset and text_input
             return {"dataset": row["dataset"], "text_input": row["text_input"]}
 
-    data_loader = DataLoader.load_from_file(
+    data_loader = Dataset.load_from_file(
         ds_pickle_dataset_path, row_processor=TestRowProcessor()
     )
     data_loader.load()
@@ -86,12 +89,12 @@ def test_custom_parser_hf_squad_dataset(hf_squad_dataset_path):
             "answers": row["answers"],
         }
 
-    dataloader = DataLoader.load_from_file(
+    dataset = Dataset.load_from_file(
         file_path=hf_squad_dataset_path, row_processor=parser, format=DatasetFormat.HF
     )
-    dataloader.load()
-    assert dataloader.num_samples() == 50
-    sample = dataloader.load_sample(0)
+    dataset.load()
+    assert dataset.num_samples() == 50
+    sample = dataset.load_sample(0)
     assert "id" not in sample
     assert all(k in sample for k in ["title", "context", "question", "answers"])
     assert sample["title"] == "Egypt"
@@ -105,15 +108,15 @@ def test_random_data_loader(range_ratio):
     random_seed = 42
     tokenizer = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
     save_tokenized_data = True
-    random_data_loader = DataLoader(
-        RandomDataset(
+    random_data_loader = Dataset(
+        RandomDataGenerator(
             num_sequences=num_sequences,
             input_seq_length=input_seq_length,
             range_ratio=range_ratio,
             random_seed=random_seed,
             tokenizer=tokenizer,
             save_tokenized_data=save_tokenized_data,
-        )
+        ).get_dataframe()
     )
     random_data_loader.load()
     assert (

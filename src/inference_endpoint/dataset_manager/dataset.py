@@ -18,14 +18,14 @@ import os
 from abc import ABC
 from enum import Enum
 from logging import getLogger
+from os import PathLike
 from pathlib import Path
 from typing import Any, ClassVar
 
-import datasets as hf_datasets
 import numpy as np
 import pandas as pd
 from datasets import load_dataset, load_from_disk
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, PreTrainedTokenizer
 
 logger = getLogger(__name__)
 
@@ -66,17 +66,15 @@ class DatasetFormat(Enum):
     """Random dataset. This is a dataset that is generated randomly."""
 
 
-class Dataset(ABC):
-    """Base class for datasets. Each dataset must define a static set of columns that defines the schema of the
-    dataset. It is assumed that after preprocessing, the dataset will be stored in a tabular format with the
-    specified columns.
+class DatafileLoader(ABC):
+    """Base class for dataset loaders. It is assumed that after preprocessing, the dataset will be stored in a tabular format as a pandas dataframe.
 
     The format of the dataset that is saved to disk is fixed and determined by the 'format' class parameter. If
     other formats are needed, new subclasses should be created with their own unique names. This is to prevent
     ambiguity and discrepancies when specifying a dataset name in a benchmark config file.
     """
 
-    IMPLEMENTATIONS: ClassVar[dict[str, type["Dataset"]]] = {}
+    IMPLEMENTATIONS: ClassVar[dict[str, type["DatafileLoader"]]] = {}
 
     # Only used by subclasses
     FORMAT: ClassVar[DatasetFormat | None] = None
@@ -98,7 +96,7 @@ class Dataset(ABC):
         else:
             raise ValueError("Must specify 'format' when subclassing Dataset")
 
-        Dataset.IMPLEMENTATIONS[cls.FORMAT.value] = cls
+        DatafileLoader.IMPLEMENTATIONS[cls.FORMAT.value] = cls
 
     def __init__(
         self,
@@ -119,20 +117,20 @@ class Dataset(ABC):
     @classmethod
     def get_loader(
         cls, file_path: os.PathLike, format: DatasetFormat | None = None
-    ) -> "Dataset":
+    ) -> "DatafileLoader":
         """Get the loader for the dataset."""
 
         if format is not None:
-            return Dataset.IMPLEMENTATIONS[format.value]
+            return DatafileLoader.IMPLEMENTATIONS[format.value]
         else:
             ext = Path(file_path).suffix
-        if Dataset.IMPLEMENTATIONS.get(ext):
-            return Dataset.IMPLEMENTATIONS[ext]
+        if DatafileLoader.IMPLEMENTATIONS.get(ext):
+            return DatafileLoader.IMPLEMENTATIONS[ext]
         else:
             raise ValueError(f"Unsupported file extension: {ext}")
 
 
-class ParquetDataset(Dataset, format=DatasetFormat.PARQUET):
+class ParquetLoader(DatafileLoader, format=DatasetFormat.PARQUET):
     def __init__(
         self,
         file_path: Path | str,
@@ -144,7 +142,7 @@ class ParquetDataset(Dataset, format=DatasetFormat.PARQUET):
         self.dataframe = pd.read_parquet(self.parquet_path)
 
 
-class HuggingFaceDataset(Dataset, format=DatasetFormat.HF):
+class HuggingFaceLoader(DatafileLoader, format=DatasetFormat.HF):
     def __init__(
         self,
         file_path: Path | str,
@@ -152,19 +150,15 @@ class HuggingFaceDataset(Dataset, format=DatasetFormat.HF):
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
-        self.file_path = Path(file_path)
-        self.hf_format = kwargs.get("hf_format", "arrow")
+        self.file_path = str(file_path)
         self.split = kwargs.get("split", "train")
 
-        if self.hf_format is None:
-            self.data = load_dataset(self.file_path)
-        else:
-            # huggingface uses a different method to load local arrow datasets
-            self.data = load_from_disk(self.file_path)
-        self.dataframe = self.data[self.split].to_pandas()
+        self.dataframe = load_from_huggingface(
+            dataset_path=self.file_path, split=self.split
+        )
 
 
-class CSVDataset(Dataset, format=DatasetFormat.CSV):
+class CSVLoader(DatafileLoader, format=DatasetFormat.CSV):
     def __init__(
         self,
         csv_path: Path | str,
@@ -176,7 +170,7 @@ class CSVDataset(Dataset, format=DatasetFormat.CSV):
         self.dataframe = pd.read_csv(self.csv_path)
 
 
-class PickleListDataset(Dataset, format=DatasetFormat.PICKLE):
+class PickleListLoader(DatafileLoader, format=DatasetFormat.PICKLE):
     def __init__(
         self,
         file_path: Path | str,
@@ -188,7 +182,7 @@ class PickleListDataset(Dataset, format=DatasetFormat.PICKLE):
         self.dataframe = pd.read_pickle(self.pickle_path)
 
 
-class JsonlDataset(Dataset, format=DatasetFormat.JSONL):
+class JsonlLoader(DatafileLoader, format=DatasetFormat.JSONL):
     def __init__(
         self,
         jsonl_path: Path | str,
@@ -200,7 +194,7 @@ class JsonlDataset(Dataset, format=DatasetFormat.JSONL):
         self.dataframe = pd.read_json(self.jsonl_path, lines=True)
 
 
-class JsonDataset(Dataset, format=DatasetFormat.JSON):
+class JsonLoader(DatafileLoader, format=DatasetFormat.JSON):
     def __init__(
         self,
         json_path: Path | str,
@@ -212,7 +206,7 @@ class JsonDataset(Dataset, format=DatasetFormat.JSON):
         self.dataframe = pd.read_json(self.json_path)
 
 
-class RandomDataset(Dataset, format=DatasetFormat.RANDOM):
+class RandomDataGenerator(DatafileLoader, format=DatasetFormat.RANDOM):
     def __init__(
         self,
         *,
@@ -221,14 +215,17 @@ class RandomDataset(Dataset, format=DatasetFormat.RANDOM):
         range_ratio: float = 1.0,
         random_seed: int = 42,
         save_tokenized_data: bool = False,
-        tokenizer: str,
+        tokenizer: str | PreTrainedTokenizer,
     ):
         super().__init__()
         self.input_seq_length = input_seq_length
         self.num_sequences = num_sequences
         self.range_ratio = range_ratio
         self.random_seed = random_seed
-        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer)
+        if isinstance(tokenizer, str):
+            self.tokenizer = AutoTokenizer.from_pretrained(tokenizer)
+        else:
+            self.tokenizer = tokenizer
         self.save_tokenized_data = save_tokenized_data
         self.rng = np.random.default_rng(random_seed)
         self.dataframe = self._generate_random_sequence()
@@ -274,7 +271,7 @@ class RandomDataset(Dataset, format=DatasetFormat.RANDOM):
 
 
 def load_from_huggingface(
-    dataset_path: str,
+    dataset_path: str | None = None,
     dataset_name: str | None = None,
     split: str = "train",
     cache_dir: Path | None = None,
@@ -282,17 +279,113 @@ def load_from_huggingface(
     cache_options: dict[str, Any] | None = None,
 ) -> pd.DataFrame:
     """Load a dataset from HuggingFace"""
+
+    # If the dataset path is a local directory, load the dataset from the disk
+    if dataset_path is not None:
+        ds = load_from_disk(dataset_path)
+        return ds[split].to_pandas()
+
+    # else load the dataset from the HuggingFace hub, and cache it if cache_dir is provided
+    load_options = load_options or {}
+    cache_options = cache_options or {}
     if cache_dir is not None and cache_dir.exists():
         try:
-            ds = hf_datasets.load_from_disk(str(cache_dir), **load_options)
+            ds = load_from_disk(str(cache_dir), **cache_options)
             return ds[split].to_pandas()
         except Exception as e:
             logger.warning(f"Error loading dataset from cache: {e}")
+    ds = load_dataset(dataset_path, dataset_name, **load_options)
 
-    ds = hf_datasets.load_dataset(dataset_path, name=dataset_name)
     if cache_dir is not None:
         try:
             ds.save_to_disk(str(cache_dir), **cache_options)
         except Exception as e:
             logger.warning(f"Error caching dataset: {e}")
     return ds[split].to_pandas()
+
+
+class RowProcessor:
+    """Class for processing rows of a dataframe."""
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def __call__(self, row: dict[str, Any]) -> Any:
+        """Process a row of a dataframe."""
+        return row
+
+
+class Dataset:
+    """Class for loading and managing benchmark datasets.
+
+    DataLoaders handle:
+    - Loading datasets from various formats (pickle, HuggingFace, CSV, etc.)
+    - Memory management for large datasets
+    - Random-access sample retrieval by index
+    - Optional memory-constrained caching/unloading
+
+    The DataLoader is responsible for raw data loading only. Parsing and
+    transformation (e.g., converting to request format) is handled separately
+    by parser functions.
+
+    """
+
+    def __init__(
+        self,
+        dataframe: pd.DataFrame | None = None,
+        row_processor: RowProcessor | None = None,
+    ):
+        self.dataframe = dataframe
+        self.logger = getLogger(__name__)
+        self.row_processor = row_processor or RowProcessor()
+
+    @classmethod
+    def load_from_file(
+        cls,
+        file_path: PathLike,
+        row_processor: RowProcessor | None = None,
+        format: DatasetFormat | None = None,
+    ) -> "Dataset":
+        assert format is None or isinstance(
+            format, DatasetFormat
+        ), "Format must be a DatasetFormat"
+        # TODO add arguments to the loader class
+        LoaderClass = DatafileLoader.get_loader(file_path, format=format)
+        return Dataset(
+            LoaderClass(file_path).get_dataframe(),
+            row_processor=row_processor or RowProcessor(),
+        )
+
+    def load(self):
+        """Load the dataset into memory for pre-processing.
+
+        Args:
+            force: If True, reloads even if already loaded (for refreshing data).
+        """
+        self.data = []
+        for row in self.dataframe.to_dict(orient="records"):
+            self.data.append(self.row_processor(row))
+        self.data = np.ascontiguousarray(self.data)
+
+    def load_sample(self, index: int) -> Any:
+        """Load a single sample from the dataset by index.
+
+        This method must support random access and may be called multiple times
+        for the same index. Implementations should cache samples in memory when
+        possible for performance.
+
+        Args:
+            index: Sample index (0 to num_samples()-1).
+
+        Returns:
+            Sample data in format specific to the dataset type.
+            Typically a dict, dataclass, or custom object.
+
+        Raises:
+            IndexError: If index is out of range.
+            IOError: If data cannot be loaded from disk.
+        """
+        return self.data[index]
+
+    def num_samples(self) -> int:
+        return len(self.data)

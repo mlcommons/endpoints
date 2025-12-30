@@ -19,8 +19,8 @@ from typing import Any
 import aiohttp
 import pytest
 from inference_endpoint.core.types import Query
-from inference_endpoint.dataset_manager import DataLoader
-from inference_endpoint.dataset_manager.dataloader import RowProcessor
+from inference_endpoint.dataset_manager import Dataset
+from inference_endpoint.dataset_manager.dataset import RowProcessor
 from inference_endpoint.openai.openai_adapter import OpenAIAdapter
 from inference_endpoint.openai.openai_types_gen import CreateChatCompletionResponse
 
@@ -43,7 +43,7 @@ async def test_ds_chat_completion_data_loader_with_oracle_server(
         def __call__(self, row: dict[str, Any]) -> Any:
             return {"prompt": row["text_input"], "output": row["ref_output"]}
 
-    ds_chat_completion_data_loader = DataLoader.load_from_file(
+    ds_chat_completion_data_loader = Dataset.load_from_file(
         ds_pickle_dataset_path, row_processor=TestRowProcessor()
     )
     ds_chat_completion_data_loader.load()

@@ -23,8 +23,8 @@ from inference_endpoint import metrics
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import LoadPattern, LoadPatternType
 from inference_endpoint.core.types import QueryResult
-from inference_endpoint.dataset_manager import DataLoader
-from inference_endpoint.dataset_manager.dataloader import RowProcessor
+from inference_endpoint.dataset_manager import Dataset
+from inference_endpoint.dataset_manager.dataset import RowProcessor
 from inference_endpoint.endpoint_client.configs import (
     AioHttpConfig,
     HTTPClientConfig,
@@ -127,7 +127,7 @@ async def _run_load_generator_full_run_url(
                 "model": hf_model_name,
             }
 
-    dummy_dataloader = DataLoader.load_from_file(
+    dummy_dataloader = Dataset.load_from_file(
         dataset_path, row_processor=TestRowProcessor()
     )
     dummy_dataloader.load()
@@ -196,7 +196,7 @@ async def test_load_generator_full_run_mock_http_oracle_server(
                 "model": hf_model_name,
             }
 
-    dummy_dataloader = DataLoader.load_from_file(
+    dummy_dataloader = Dataset.load_from_file(
         ds_pickle_dataset_path, row_processor=TestRowProcessor()
     )
     dummy_dataloader.load()

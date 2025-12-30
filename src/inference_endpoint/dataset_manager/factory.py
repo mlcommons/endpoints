@@ -24,8 +24,8 @@ from typing import Any
 
 from inference_endpoint.dataset_manager.dataset import DatasetFormat
 
-from .dataloader import (
-    DataLoader,
+from .dataset import (
+    Dataset,
     RowProcessor,
 )
 
@@ -49,7 +49,7 @@ class DataLoaderFactory:
         key_maps: list[dict[str, str]] | None = None,
         metadata: dict | None = None,
         **kwargs,
-    ) -> DataLoader:
+    ) -> Dataset:
         """Create appropriate dataset loader based on format.
 
         Args:
@@ -80,6 +80,6 @@ class DataLoaderFactory:
 
         if format is not None:
             format = DatasetFormat(format)
-        return DataLoader.load_from_file(
+        return Dataset.load_from_file(
             dataset_path, row_processor=KeyMapRowProcessor(), format=format
         )

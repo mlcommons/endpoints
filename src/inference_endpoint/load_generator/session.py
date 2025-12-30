@@ -26,7 +26,7 @@ import orjson
 from transformers import AutoTokenizer
 
 from ..config.runtime_settings import RuntimeSettings
-from ..dataset_manager.dataloader import DataLoader
+from ..dataset_manager.dataset import Dataset
 from ..metrics.recorder import EventRecorder
 from ..metrics.reporter import MetricsReporter
 from .events import SessionEvent
@@ -207,7 +207,7 @@ class BenchmarkSession:
     def start(
         cls,
         runtime_settings: RuntimeSettings,
-        dataloader: DataLoader,
+        dataset: Dataset,
         sample_issuer: SampleIssuer,
         *args,
         load_generator_cls: type[LoadGenerator] = SchedulerBasedLoadGenerator,
@@ -221,7 +221,7 @@ class BenchmarkSession:
 
         Args:
             runtime_settings: The runtime settings to use for the session.
-            dataloader: The dataloader to use for the session.
+            dataset: The dataset to use for the session.
             sample_issuer: The sample issuer to use for the session.
             load_generator_cls: The load generator class to use for the session.
             name: The name of the session.
@@ -237,7 +237,7 @@ class BenchmarkSession:
             The new BenchmarkSession.
         """
         session = cls(runtime_settings, session_id=name)
-        load_generator = load_generator_cls(sample_issuer, dataloader, *args)
+        load_generator = load_generator_cls(sample_issuer, dataset, *args)
         session.thread = threading.Thread(
             target=session._run_test,
             args=(load_generator,),

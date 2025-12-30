@@ -24,7 +24,7 @@ import pytest
 from inference_endpoint import metrics
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import LoadPattern, LoadPatternType
-from inference_endpoint.dataset_manager.dataloader import DataLoader
+from inference_endpoint.dataset_manager.dataset import Dataset
 from inference_endpoint.endpoint_client.http_sample_issuer import HttpClientSampleIssuer
 from inference_endpoint.load_generator.scheduler import (
     MaxThroughputScheduler,
@@ -65,7 +65,7 @@ PERFORMANCE_CONFIG = {
 
 
 # Helper dataloader for Query objects
-class QueryDataLoader(DataLoader):
+class QueryDataLoader(Dataset):
     """Dataloader that extracts .data from Query objects."""
 
     def __init__(self, queries):

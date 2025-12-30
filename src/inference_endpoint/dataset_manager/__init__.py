@@ -19,12 +19,10 @@ Dataset Manager for the MLPerf Inference Endpoint Benchmarking System.
 This module handles dataset loading, preprocessing, and management.
 """
 
-from .dataloader import (
-    DataLoader,
-)
+from .dataset import Dataset
 from .factory import DataLoaderFactory
 
 __all__ = [
-    "DataLoader",
+    "Dataset",
     "DataLoaderFactory",
 ]

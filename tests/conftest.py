@@ -33,11 +33,11 @@ import pytest
 from inference_endpoint import metrics
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import LoadPattern, LoadPatternType
-from inference_endpoint.dataset_manager.dataloader import (
-    DataLoader,
+from inference_endpoint.dataset_manager.dataset import (
+    Dataset,
+    DatasetFormat,
     RowProcessor,
 )
-from inference_endpoint.dataset_manager.dataset import DatasetFormat
 from inference_endpoint.load_generator.events import SampleEvent, SessionEvent
 from inference_endpoint.load_generator.sample import SampleEventHandler
 from inference_endpoint.testing.docker_server import DockerServer
@@ -140,15 +140,15 @@ def mock_http_external_server():
 
 
 @pytest.fixture
-def dummy_dataloader():
+def dummy_dataset():
     """
-    Returns a DummyDataLoader object which just returns the sample index.
+    Returns a DummyDataset object which just returns the sample index.
     """
 
-    class DummyDataLoader(DataLoader):
+    class DummyDataset(Dataset):
         def __init__(self, n_samples: int = 100):
             """
-            Initialize the DummyDataLoader.
+            Initialize the DummyDataset.
 
             Args:
                 n_samples (int): The number of samples to load.
@@ -172,7 +172,7 @@ def dummy_dataloader():
             """
             return self.n_samples
 
-    return DummyDataLoader()
+    return DummyDataset()
 
 
 @pytest.fixture
@@ -196,7 +196,7 @@ def ds_pickle_reader(ds_pickle_dataset_path):
         def __call__(self, row: dict[str, Any]) -> Any:
             return row
 
-    return DataLoader.load_from_file(
+    return Dataset.load_from_file(
         file_path=ds_pickle_dataset_path, row_processor=PickleRowProcessor()
     )
 
@@ -212,7 +212,7 @@ def hf_squad_dataset_path():
 @pytest.fixture
 def hf_squad_dataset(hf_squad_dataset_path):
     """
-    Returns a HFDataLoader object for the squad dataset.
+    Returns a HFDataset object for the squad dataset.
     """
 
     class HfSquadRowProcessor(RowProcessor):
@@ -222,7 +222,7 @@ def hf_squad_dataset(hf_squad_dataset_path):
         def __call__(self, row: dict[str, Any]) -> Any:
             return row
 
-    return DataLoader.load_from_file(
+    return Dataset.load_from_file(
         file_path=hf_squad_dataset_path,
         row_processor=HfSquadRowProcessor(),
         format=DatasetFormat.HF,
@@ -370,7 +370,7 @@ class OracleServer(EchoServer):
                 dict: A dictionary with 'prompt' and 'output' keys derived from the input sample.
             """
 
-        data_loader = DataLoader.load_from_file(
+        data_loader = Dataset.load_from_file(
             self.file_path, row_processor=OracleRowProcessor()
         )
         data_loader.load()
