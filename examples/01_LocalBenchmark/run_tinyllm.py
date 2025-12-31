@@ -22,7 +22,7 @@ import inference_endpoint.config.rulesets.mlcommons.models as mlcommons_models
 from inference_endpoint.config.rulesets.mlcommons.rules import CURRENT
 from inference_endpoint.config.user_config import UserConfig
 from inference_endpoint.core.types import QueryResult, StreamChunk
-from inference_endpoint.dataset_manager.dataloader import DataLoader
+from inference_endpoint.dataset_manager.dataset import Dataset
 from inference_endpoint.load_generator import (
     BenchmarkSession,
     MaxThroughputScheduler,
@@ -91,8 +91,8 @@ class TinyLLM:
         return generated_text
 
 
-class TinyDataLoader(DataLoader):
-    """Example DataLoader with hardcoded prompts for testing.
+class TinyDataset(Dataset):
+    """Example Dataset with hardcoded prompts for testing.
 
     In production, you would load prompts from a dataset file.
     """
@@ -200,8 +200,8 @@ if __name__ == "__main__":
     pbar_hook = ProgressBarHook()
     SampleEventHandler.register_hook(SampleEvent.COMPLETE, pbar_hook)
 
-    # Initialize dataloader with sample prompts
-    dataloader = TinyDataLoader()
+    # Initialize dataset with sample prompts
+    dataset = TinyDataset()
 
     # Configure benchmark runtime settings
     # Note: Using MLCommons ruleset for configuration
@@ -211,7 +211,7 @@ if __name__ == "__main__":
         min_duration_ms=10 * 1000,  # 10 seconds minimum
         max_duration_ms=5 * 60 * 1000,  # 5 minutes maximum
         total_sample_count=args.total_sample_count if args.total_sample_count else None,
-        ds_subset_size=dataloader.num_samples(),  # Use all available samples
+        ds_subset_size=dataset.num_samples(),  # Use all available samples
     )
 
     # Apply user config with model specifications
@@ -242,7 +242,7 @@ if __name__ == "__main__":
         pbar_hook.set_pbar(pbar)
         sess = BenchmarkSession.start(
             rt_settings,
-            dataloader,
+            dataset,
             issuer,
             scheduler,
             name="tinyllm_benchmark",

@@ -36,6 +36,7 @@ class HTTPClientConfig:
 
     record_worker_events: bool = False
     event_logs_dir: Path | None = None
+    log_level: str = "INFO"
 
     # WARNING: Use with caution
     # Can cause large performance overhead on main-thread (user / Loadgen)

@@ -273,7 +273,7 @@ def _build_config_from_cli(
         get_default_report_path(),
     )
     timeout = getattr(args, "timeout", None)
-    verbose = getattr(args, "verbose", False)
+    verbose_level = getattr(args, "verbose", 0)
     # Build BenchmarkConfig from CLI params
     return BenchmarkConfig(
         name=f"cli_{benchmark_mode}",
@@ -306,6 +306,7 @@ def _build_config_from_cli(
             ),
             client=ClientSettings(
                 workers=args.workers if args.workers else 4,
+                log_level="DEBUG" if verbose_level >= 2 else "INFO",
             ),
         ),
         model_params=ModelParams(
@@ -325,7 +326,7 @@ def _build_config_from_cli(
         baseline=None,  # CLI mode doesn't use baseline
         report_dir=report_dir,
         timeout=timeout,
-        verbose=verbose,
+        verbose=verbose_level > 0,
     )
 
 
@@ -370,35 +371,6 @@ def _get_dataset_path(args: argparse.Namespace, config: BenchmarkConfig) -> Path
         raise InputValidationError(f"Dataset not found: {dataset_path}")
 
     return dataset_path
-
-
-def _get_dataset_format(config: BenchmarkConfig, dataset_path: Path) -> str:
-    """Get or infer dataset format.
-
-    CURRENT LIMITATION: Only supports single dataset.
-
-    Args:
-        config: BenchmarkConfig
-        dataset_path: Path to dataset file
-
-    Returns:
-        Dataset format string (e.g., "pkl", "hf")
-
-    TODO: Multi-dataset support
-    When implemented, this should:
-    1. Return dict[Path, str] mapping dataset paths to formats
-    2. Validate format compatibility across datasets
-    """
-    # Try to get format from config
-    # TODO: Multi-dataset - currently just uses single dataset format
-    single_dataset = config.get_single_dataset()
-    if single_dataset and single_dataset.format:
-        return single_dataset.format
-
-    # Infer from file extension
-    format_str = DataLoaderFactory.infer_format(dataset_path)
-    logger.info(f"Inferred dataset format: {format_str}")
-    return format_str
 
 
 def _run_benchmark(
@@ -482,12 +454,7 @@ def _run_benchmark(
 
     # Get dataset - from CLI or from config
     # TODO: Dataset Logic is not yet fully implemented
-    # dataset_path = _get_dataset_path(args, config)
     dataset_path = config.datasets[0].path
-
-    # Load dataset using factory
-    dataset_format = _get_dataset_format(config, dataset_path)
-    logger.info(f"Loading: {dataset_path} (format: {dataset_format})")
 
     # Determine if streaming should be enabled based on config
     streaming_mode = config.model_params.streaming
@@ -514,7 +481,7 @@ def _run_benchmark(
 
         dataloader = DataLoaderFactory.create_loader(
             dataset_path,
-            format=dataset_format,
+            format=config.datasets[0].format,
             key_maps=key_maps,
             metadata={
                 "model": model_name,
@@ -531,9 +498,6 @@ def _run_benchmark(
     except FileNotFoundError as e:
         logger.error(f"Dataset file not found: {dataset_path}")
         raise InputValidationError(f"Dataset file not found: {dataset_path}") from e
-    except NotImplementedError as e:
-        logger.error(f"Dataset format not supported: {dataset_format}")
-        raise SetupError(str(e)) from e
     except Exception as e:
         logger.error("Dataset load failed")
         raise SetupError(f"Failed to load dataset: {e}") from e
@@ -579,8 +543,6 @@ def _run_benchmark(
     num_workers = config.settings.client.workers
 
     logger.info(f"Connecting: {endpoint}")
-    logger.info(f"Client config: workers={num_workers}")
-
     tmp_dir = tempfile.mkdtemp(prefix="inference_endpoint_")
 
     try:
@@ -589,6 +551,7 @@ def _run_benchmark(
             num_workers=num_workers,
             record_worker_events=config.settings.client.record_worker_events,
             event_logs_dir=report_dir,
+            log_level=config.settings.client.log_level,
         )
         aiohttp_config = AioHttpConfig()
         zmq_config = ZMQConfig(
@@ -694,7 +657,6 @@ def _run_benchmark(
 
     except KeyboardInterrupt:
         logger.warning("Benchmark interrupted by user")
-        # Will be re-raised by CLI main() for proper exit
         raise
     except ExecutionError:
         # Re-raise our own exceptions
@@ -706,6 +668,8 @@ def _run_benchmark(
         # Cleanup - always execute
         logger.info("Cleaning up...")
         try:
+            if sess is not None:
+                sess.stop()
             pbar.close()
             sample_issuer.shutdown()
             http_client.shutdown()
