@@ -29,7 +29,7 @@ from pathlib import Path
 
 import zmq
 from inference_endpoint.core.types import Query, QueryResult, StreamChunk
-from inference_endpoint.dataset_manager.dataloader import DataLoader
+from inference_endpoint.dataset_manager.dataset import Dataset
 from inference_endpoint.load_generator.load_generator import SampleIssuer
 from inference_endpoint.load_generator.sample import SampleEventHandler
 
@@ -116,7 +116,7 @@ def create_test_query(
     )
 
 
-class DummyDataLoader(DataLoader):
+class DummyDataLoader(Dataset):
     """Simple dataloader for testing that returns sample indices directly.
 
     This dataloader is useful for unit tests where you need a simple DataLoader
