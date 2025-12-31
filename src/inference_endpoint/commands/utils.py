@@ -268,7 +268,6 @@ async def run_init_command(args: argparse.Namespace) -> None:
 
     # Warn if file exists
     output_file = Path(output_path)
-
     if output_file.exists():
         logger.warning(f"⚠ File exists: {output_path} (will be overwritten)")
 
