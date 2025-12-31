@@ -56,6 +56,7 @@ from inference_endpoint.core.types import QueryResult
 from inference_endpoint.dataset_manager.factory import DataLoaderFactory
 from inference_endpoint.endpoint_client.configs import (
     AioHttpConfig,
+    APIType,
     HTTPClientConfig,
     ZMQConfig,
 )
@@ -274,6 +275,7 @@ def _build_config_from_cli(
     )
     timeout = getattr(args, "timeout", None)
     verbose_level = getattr(args, "verbose", 0)
+    api_type = APIType(getattr(args, "api_type", "openai"))
     # Build BenchmarkConfig from CLI params
     return BenchmarkConfig(
         name=f"cli_{benchmark_mode}",
@@ -321,7 +323,9 @@ def _build_config_from_cli(
             else None,
             streaming=StreamingMode(getattr(args, "streaming", "auto")),
         ),
-        endpoint_config=EndpointConfig(endpoint=args.endpoint, api_key=args.api_key),
+        endpoint_config=EndpointConfig(
+            endpoint=args.endpoint, api_key=args.api_key, api_type=api_type
+        ),
         metrics=Metrics(),
         baseline=None,  # CLI mode doesn't use baseline
         report_dir=report_dir,
@@ -547,7 +551,10 @@ def _run_benchmark(
 
     try:
         http_config = HTTPClientConfig(
-            endpoint_url=urljoin(endpoint, "/v1/chat/completions"),
+            endpoint_url=urljoin(
+                endpoint, config.endpoint_config.api_type.default_route()
+            ),
+            api_type=config.endpoint_config.api_type,
             num_workers=num_workers,
             record_worker_events=config.settings.client.record_worker_events,
             event_logs_dir=report_dir,

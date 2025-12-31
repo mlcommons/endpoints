@@ -127,6 +127,7 @@ def create_parser() -> argparse.ArgumentParser:
         "--endpoint", "-e", type=str, required=True, help="Endpoint URL"
     )
     eval_parser.add_argument("--api-key", type=str, help="API key")
+
     # Note: --config removed - eval is CLI-only for simplicity
     eval_parser.add_argument("--output", "-o", type=Path, help="Output file")
     eval_parser.add_argument("--judge", type=str, help="Judge model (future)")
@@ -137,6 +138,13 @@ def create_parser() -> argparse.ArgumentParser:
         "--endpoint", "-e", type=str, required=True, help="Endpoint URL"
     )
     probe_parser.add_argument("--api-key", type=str, help="API key")
+    probe_parser.add_argument(
+        "--api-type",
+        type=str,
+        choices=["openai", "sglang"],
+        default="openai",
+        help="API type: openai (default) or sglang",
+    )
     probe_parser.add_argument(
         "--model", type=str, required=True, help="Model name (e.g., llama-2-70b)"
     )
@@ -187,6 +195,13 @@ def _add_shared_benchmark_args(parser):
         "--dataset", "-d", type=Path, required=True, help="Dataset file"
     )
     parser.add_argument("--api-key", type=str, help="API key")
+    parser.add_argument(
+        "--api-type",
+        type=str,
+        choices=["openai", "sglang"],
+        default="openai",
+        help="API type: openai (default) or sglang",
+    )
     parser.add_argument("--workers", type=int, help="HTTP workers (default: 4)")
     parser.add_argument(
         "--duration",

@@ -27,6 +27,7 @@ import yaml
 from pydantic import BaseModel, Field
 
 from .. import metrics
+from ..endpoint_client.configs import APIType
 from .ruleset_base import BenchmarkSuiteRuleset
 
 
@@ -296,10 +297,13 @@ class EndpointConfig(BaseModel):
     """Endpoint connection configuration.
 
     Contains endpoint URL and authentication settings.
+    API type refers to the API implementation used on the endpoint based on industry standards.
+    The Default API type is APIType.OPENAI, which refers to the the /v1/chat/completions route.
     """
 
     endpoint: str | None = None
     api_key: str | None = None
+    api_type: APIType = APIType.OPENAI
 
 
 class BenchmarkConfig(BaseModel):
