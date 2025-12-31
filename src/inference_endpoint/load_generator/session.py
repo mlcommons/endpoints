@@ -34,6 +34,9 @@ from .load_generator import LoadGenerator, SampleIssuer, SchedulerBasedLoadGener
 
 logger = logging.getLogger(__name__)
 
+# poll interval for checking if test-session should end
+SHUTDOWN_POLL_INTERVAL_S = 10.0
+
 
 class BenchmarkSession:
     def __init__(
@@ -45,8 +48,12 @@ class BenchmarkSession:
         self.runtime_settings = runtime_settings
         self.session_id = session_id if session_id else uuid.uuid4().hex
 
+        # EventRecorder will set this when all samples complete, helps avoid busy-waiting
         self.end_event = threading.Event()
         self.thread = None
+
+        # CPython GIL provides atomic boolean writes, no need for threading.Event()
+        self.stop_requested = False
 
         self.event_recorder = EventRecorder(
             session_id=self.session_id, notify_idle=self.end_event
@@ -57,6 +64,12 @@ class BenchmarkSession:
     @property
     def is_running(self):
         return self.thread is not None and self.thread.is_alive()
+
+    def stop(self) -> None:
+        """Signal the session to stop early."""
+        self.stop_requested = True
+        # wakeup _run_test if needed, short-circuit SHUTDOWN_POLL_INTERVAL_S
+        self.end_event.set()
 
     def _run_test(
         self,
@@ -100,10 +113,18 @@ class BenchmarkSession:
                         raise TimeoutError(
                             f"Max shutdown timeout of {max_shutdown_timeout_s}s reached"
                         )
-                    self.end_event.wait(timeout=10.0)
+
+                    if self.stop_requested:
+                        self.logger.info(
+                            f"Early stop requested (pending={self.event_recorder.n_inflight_samples}), shutting down test..."
+                        )
+                        break
+
+                    self.end_event.wait(timeout=SHUTDOWN_POLL_INTERVAL_S)
                     self.logger.info(
                         f"Waiting for the test to end... {self.event_recorder.n_inflight_samples} samples remaining"
                     )
+
             except Exception as e:
                 logger.error(f"Error running benchmark session: {e}")
                 raise e

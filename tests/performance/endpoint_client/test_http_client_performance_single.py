@@ -169,8 +169,6 @@ def run_performance_test(
     sample_issuer = HttpClientSampleIssuer(http_client)
 
     try:
-        sample_issuer.start()
-
         # Start benchmark session with metrics-tracking sample factory
         # MetricsSampleFactory will store itself in _latest_instance for retrieval
         session = BenchmarkSession.start(
@@ -186,9 +184,6 @@ def run_performance_test(
 
         # Wait for test to complete
         session.wait_for_test_end()
-
-        # Wait for all pending responses to complete
-        sample_issuer.wait_for_all_complete()
     finally:
         # Shutdown
         sample_issuer.shutdown()

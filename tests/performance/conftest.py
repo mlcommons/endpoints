@@ -85,7 +85,6 @@ def http_client(perf_http_echo_server, tmp_path):
         aiohttp_config=AioHttpConfig(),
         zmq_config=zmq_config,
     )
-    client.start()
 
     try:
         yield client
