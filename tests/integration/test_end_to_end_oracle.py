@@ -15,6 +15,7 @@
 
 import logging
 import random
+from typing import Any
 from urllib.parse import urljoin
 
 import pytest
@@ -22,7 +23,8 @@ from inference_endpoint import metrics
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import LoadPattern, LoadPatternType
 from inference_endpoint.core.types import QueryResult
-from inference_endpoint.dataset_manager import PickleReader
+from inference_endpoint.dataset_manager import Dataset
+from inference_endpoint.dataset_manager.dataset import RowProcessor
 from inference_endpoint.endpoint_client.configs import (
     AioHttpConfig,
     HTTPClientConfig,
@@ -114,15 +116,20 @@ Test the load generator full run with a given URL.
 async def _run_load_generator_full_run_url(
     url, dataset_path, tmp_path, clean_sample_event_hooks, hf_model_name
 ):
-    def parser(x):
-        res = {
-            "prompt": x["text_input"],
-            "output": x["ref_output"],
-            "model": hf_model_name,
-        }
-        return res
+    class TestRowProcessor(RowProcessor):
+        def __init__(self):
+            super().__init__()
 
-    dummy_dataloader = PickleReader(dataset_path, parser)
+        def __call__(self, row: dict[str, Any]) -> Any:
+            return {
+                "prompt": row["text_input"],
+                "output": row["ref_output"],
+                "model": hf_model_name,
+            }
+
+    dummy_dataloader = Dataset.load_from_file(
+        dataset_path, row_processor=TestRowProcessor()
+    )
     dummy_dataloader.load()
     assert dummy_dataloader.num_samples() > 0
 
@@ -178,15 +185,20 @@ async def test_load_generator_full_run_mock_http_oracle_server(
     clean_sample_event_hooks,
     hf_model_name,
 ):
-    def parser(x):
-        res = {
-            "prompt": x["text_input"],
-            "output": x["ref_output"],
-            "model": hf_model_name,
-        }
-        return res
+    class TestRowProcessor(RowProcessor):
+        def __init__(self):
+            super().__init__()
 
-    dummy_dataloader = PickleReader(ds_pickle_dataset_path, parser)
+        def __call__(self, row: dict[str, Any]) -> Any:
+            return {
+                "prompt": row["text_input"],
+                "output": row["ref_output"],
+                "model": hf_model_name,
+            }
+
+    dummy_dataloader = Dataset.load_from_file(
+        ds_pickle_dataset_path, row_processor=TestRowProcessor()
+    )
     dummy_dataloader.load()
     assert dummy_dataloader.num_samples() > 0
 
