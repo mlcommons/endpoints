@@ -35,18 +35,7 @@ class SGLangGenerateAdapter(HttpRequestAdapter):
 
     @classmethod
     def encode_query(cls, query: Query) -> bytes:
-        """Encode a Query to bytes for HTTP transmission.
-
-        There are 2 ways to do this:
-        1. If "input_tokens" is present in query.data, we assume that the input is
-           already harmonized and tokenized, so we can use it directly. The sampling
-           parameters should be in query.data as well, either directly, or in a nested
-           'sampling_parameters' key.
-        2. If "prompt", "text_input", or "question" is present in query.data, we assume
-           that this is the user prompt as plaintext, which needs to be harmonized and then
-           tokenized. Likewise, here, the sampling parameters should be in query.data, or
-           in a nested 'sampling_parameters' key.
-        """
+        """Encode a Query to bytes for HTTP transmission."""
 
         # Get sampling parameters
         superset = query.data

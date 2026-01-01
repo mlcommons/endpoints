@@ -18,6 +18,7 @@
 import os
 import socket
 from dataclasses import dataclass, field
+from importlib import import_module
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,11 @@ import zmq
 
 from ..config.schema import APIType
 from .adapter_protocol import HttpRequestAdapter
+
+ADAPTER_MAP = {
+    APIType.OPENAI: "inference_endpoint.openai.openai_msgspec_adapter.OpenAIMsgspecAdapter",
+    APIType.SGLANG: "inference_endpoint.sglang.adapter.SGLangGenerateAdapter",
+}
 
 
 @dataclass
@@ -70,18 +76,13 @@ class HTTPClientConfig:
             self.api_type = APIType(self.api_type)
 
         if self.adapter is None:
-            if self.api_type == APIType.OPENAI:
-                from inference_endpoint.openai.openai_msgspec_adapter import (
-                    OpenAIMsgspecAdapter,
-                )
+            adapter_path = ADAPTER_MAP.get(self.api_type)
+            if not adapter_path:
+                raise ValueError(f"Invalid or unsupported API type: {self.api_type}")
 
-                self.adapter = OpenAIMsgspecAdapter
-            elif self.api_type == APIType.SGLANG:
-                from inference_endpoint.sglang.adapter import SGLangGenerateAdapter
-
-                self.adapter = SGLangGenerateAdapter
-            else:
-                raise ValueError(f"Invalid API type: {self.api_type}")
+            module_path, class_name = adapter_path.rsplit(".", 1)
+            module = import_module(module_path)
+            self.adapter = getattr(module, class_name)
 
 
 @dataclass

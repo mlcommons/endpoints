@@ -193,7 +193,7 @@ class SGLangSSEAccumulator:
         # In SGLang /generate, the .text field is the total accumulated text, not
         # a difference, so we'll need to compute the diff for the StreamChunk
         content_diff = ""
-        if (start_idx := len(delta.text)) > len(self.text):
+        if len(delta.text) > (start_idx := len(self.text)):
             content_diff = delta.text[start_idx:]
         self.text = delta.text
         self.token_ids.extend(delta.token_delta)
