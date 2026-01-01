@@ -19,12 +19,8 @@ This test assumes a server running GPT-OSS is available at localhost:30000.
 """
 
 import asyncio
-import random
 
 import pytest
-from inference_endpoint import metrics
-from inference_endpoint.config.runtime_settings import RuntimeSettings
-from inference_endpoint.config.schema import LoadPattern, LoadPatternType
 from inference_endpoint.core.types import Query
 from inference_endpoint.endpoint_client.configs import (
     AioHttpConfig,
@@ -39,24 +35,6 @@ from tests.test_helpers import get_test_socket_path
 SGLANG_SERVER_HOST = "localhost"
 SGLANG_SERVER_PORT = 30000
 SGLANG_ENDPOINT = f"http://{SGLANG_SERVER_HOST}:{SGLANG_SERVER_PORT}/generate"
-
-
-@pytest.fixture
-def sglang_runtime_settings():
-    """Create RuntimeSettings manually for SGLang adapter tests."""
-    random_seed = 42
-    return RuntimeSettings(
-        metric_target=metrics.Throughput(10),
-        reported_metrics=[metrics.Throughput(10)],
-        min_duration_ms=1000,
-        max_duration_ms=10000,
-        n_samples_from_dataset=100,
-        n_samples_to_issue=100,
-        min_sample_count=100,
-        rng_sched=random.Random(random_seed),
-        rng_sample_index=random.Random(random_seed),
-        load_pattern=LoadPattern(type=LoadPatternType.POISSON, target_qps=10.0),
-    )
 
 
 @pytest.fixture
@@ -95,6 +73,9 @@ def sglang_futures_client(tmp_path):
 class TestSGLangAdapterIntegration:
     """Integration tests for SGLang adapter with real GPT-OSS server."""
 
+    @pytest.mark.skip(
+        reason="Running this test requires a running GPT-OSS server at localhost:30000."
+    )
     @pytest.mark.asyncio
     @pytest.mark.run_explicitly
     @pytest.mark.integration
@@ -135,6 +116,9 @@ class TestSGLangAdapterIntegration:
         assert isinstance(result.metadata["token_ids"], list)
         assert isinstance(result.metadata["n_tokens"], int)
 
+    @pytest.mark.skip(
+        reason="Running this test requires a running GPT-OSS server at localhost:30000."
+    )
     @pytest.mark.asyncio
     @pytest.mark.run_explicitly
     @pytest.mark.integration
