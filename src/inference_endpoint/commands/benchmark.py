@@ -35,6 +35,7 @@ from transformers.utils import logging as transformers_logging
 from inference_endpoint.commands.utils import get_default_report_path
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import (
+    APIType,
     BenchmarkConfig,
     ClientSettings,
     Dataset,
@@ -56,7 +57,6 @@ from inference_endpoint.core.types import QueryResult
 from inference_endpoint.dataset_manager.factory import DataLoaderFactory
 from inference_endpoint.endpoint_client.configs import (
     AioHttpConfig,
-    APIType,
     HTTPClientConfig,
     ZMQConfig,
 )

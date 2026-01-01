@@ -22,10 +22,10 @@ import tempfile
 import time
 from urllib.parse import urljoin
 
+from inference_endpoint.config.schema import APIType
 from inference_endpoint.core.types import Query, QueryResult
 from inference_endpoint.endpoint_client.configs import (
     AioHttpConfig,
-    APIType,
     HTTPClientConfig,
     ZMQConfig,
 )

@@ -27,8 +27,21 @@ import yaml
 from pydantic import BaseModel, Field
 
 from .. import metrics
-from ..endpoint_client.configs import APIType
 from .ruleset_base import BenchmarkSuiteRuleset
+
+
+class APIType(str, Enum):
+    OPENAI = "openai"
+    SGLANG = "sglang"
+
+    def default_route(self) -> str:
+        match self:
+            case APIType.OPENAI:
+                return "/v1/chat/completions"
+            case APIType.SGLANG:
+                return "/generate"
+            case _:
+                raise ValueError(f"Invalid API type: {self}")
 
 
 class LoadPatternType(str, Enum):

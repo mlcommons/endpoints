@@ -18,28 +18,14 @@
 import os
 import socket
 from dataclasses import dataclass, field
-from enum import Enum
 from pathlib import Path
 from typing import Any
 
 import aiohttp
 import zmq
 
-from inference_endpoint.endpoint_client.adapter_protocol import HttpRequestAdapter
-
-
-class APIType(Enum):
-    OPENAI = "openai"
-    SGLANG = "sglang"
-
-    def default_route(self) -> str:
-        match self:
-            case APIType.OPENAI:
-                return "/v1/chat/completions"
-            case APIType.SGLANG:
-                return "/generate"
-            case _:
-                raise ValueError(f"Invalid API type: {self}")
+from ..config.schema import APIType
+from .adapter_protocol import HttpRequestAdapter
 
 
 @dataclass
@@ -80,6 +66,9 @@ class HTTPClientConfig:
 
     def __post_init__(self):
         # set default adapter in __post_init__ to avoid circular dependency
+        if isinstance(self.api_type, str):
+            self.api_type = APIType(self.api_type)
+
         if self.adapter is None:
             if self.api_type == APIType.OPENAI:
                 from inference_endpoint.openai.openai_msgspec_adapter import (

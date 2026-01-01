@@ -1,0 +1,181 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Integration tests for SGLang adapter with real GPT-OSS server.
+
+This test assumes a server running GPT-OSS is available at localhost:30000.
+To start a server, use:
+    python3 -m sglang.launch_server --model-path <model> --host 0.0.0.0 --port 30000
+"""
+
+import asyncio
+import random
+
+import pytest
+from inference_endpoint import metrics
+from inference_endpoint.config.runtime_settings import RuntimeSettings
+from inference_endpoint.config.schema import LoadPattern, LoadPatternType
+from inference_endpoint.core.types import Query
+from inference_endpoint.endpoint_client.configs import (
+    AioHttpConfig,
+    HTTPClientConfig,
+    ZMQConfig,
+)
+
+from tests.futures_client import FuturesHttpClient
+from tests.test_helpers import get_test_socket_path
+
+# Configuration for external GPT-OSS server
+SGLANG_SERVER_HOST = "localhost"
+SGLANG_SERVER_PORT = 30000
+SGLANG_ENDPOINT = f"http://{SGLANG_SERVER_HOST}:{SGLANG_SERVER_PORT}/generate"
+
+
+@pytest.fixture
+def sglang_runtime_settings():
+    """Create RuntimeSettings manually for SGLang adapter tests."""
+    random_seed = 42
+    return RuntimeSettings(
+        metric_target=metrics.Throughput(10),
+        reported_metrics=[metrics.Throughput(10)],
+        min_duration_ms=1000,
+        max_duration_ms=10000,
+        n_samples_from_dataset=100,
+        n_samples_to_issue=100,
+        min_sample_count=100,
+        rng_sched=random.Random(random_seed),
+        rng_sample_index=random.Random(random_seed),
+        load_pattern=LoadPattern(type=LoadPatternType.POISSON, target_qps=10.0),
+    )
+
+
+@pytest.fixture
+def sglang_futures_client(tmp_path):
+    """Create a FuturesHttpClient configured for SGLang endpoint.
+
+    This fixture creates a client that connects to a GPT-OSS server
+    running at localhost:30000.
+    """
+    http_config = HTTPClientConfig(
+        endpoint_url=SGLANG_ENDPOINT,
+        num_workers=4,
+        api_type="sglang",
+    )
+
+    zmq_kwargs = {
+        "zmq_request_queue_prefix": get_test_socket_path(
+            tmp_path, "sglang_test", "_req"
+        ),
+        "zmq_response_queue_addr": get_test_socket_path(
+            tmp_path, "sglang_test", "_resp"
+        ),
+        "zmq_readiness_queue_addr": get_test_socket_path(
+            tmp_path, "sglang_test", "_ready"
+        ),
+    }
+
+    zmq_config = ZMQConfig(**zmq_kwargs)
+    aiohttp_config = AioHttpConfig()
+
+    client = FuturesHttpClient(http_config, aiohttp_config, zmq_config)
+    yield client
+    client.shutdown()
+
+
+class TestSGLangAdapterIntegration:
+    """Integration tests for SGLang adapter with real GPT-OSS server."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.integration
+    async def test_sglang_non_streaming_request(self, sglang_futures_client):
+        """Test non-streaming request through SGLang adapter.
+
+        This test sends a single non-streaming request and verifies
+        the response is properly decoded.
+        """
+        # Tokens are gotten from tokenizing "What is the capital of France?"
+        # using the GPT-OSS-120b tokenizer from HuggingFace.
+        input_tokens = [4827, 382, 290, 9029, 328, 10128, 30]
+        query = Query(
+            id="sglang-test-1",
+            data={
+                "input_tokens": input_tokens,
+                "stream": False,
+            },
+        )
+
+        future = sglang_futures_client.issue_query(query)
+        result = await asyncio.wrap_future(future)
+
+        # Verify result structure
+        assert result.id == "sglang-test-1"
+        assert "response_output" in dir(result)
+        assert result.response_output is not None
+        assert len(result.response_output) > 0
+
+        # Verify metadata
+        assert "metadata" in dir(result)
+        assert result.metadata is not None
+        assert "token_ids" in result.metadata
+        assert "n_tokens" in result.metadata
+        assert isinstance(result.metadata["token_ids"], list)
+        assert isinstance(result.metadata["n_tokens"], int)
+
+        print(
+            f"\nNon-streaming response: {result.response_output[:100]}..."
+        )  # Print first 100 chars
+        print(f"Token count: {result.metadata['n_tokens']}")
+
+    @pytest.mark.asyncio
+    @pytest.mark.integration
+    async def test_sglang_streaming_request(self, sglang_futures_client):
+        """Test streaming request through SGLang adapter.
+
+        This test sends a streaming request and verifies the response
+        includes streaming chunks.
+        """
+        # Tokens are gotten from tokenizing "Tell me a short story about a robot."
+        # using the GPT-OSS-120b tokenizer from HuggingFace.
+        input_tokens = [60751, 668, 261, 4022, 4869, 1078, 261, 20808, 13]
+        query = Query(
+            id="sglang-test-stream-1",
+            data={
+                "input_tokens": input_tokens,
+                "max_new_tokens": 100,
+                "temperature": 0.8,
+                "stream": True,
+            },
+        )
+
+        future = sglang_futures_client.issue_query(query)
+        result = await asyncio.wrap_future(future)
+
+        # Verify result structure
+        assert result.id == "sglang-test-stream-1"
+        assert "response_output" in dir(result)
+        assert result.response_output is not None
+
+        # In streaming mode, response_output should contain accumulated output
+        assert "output" in result.response_output
+        output_chunks = result.response_output["output"]
+        assert isinstance(output_chunks, list)
+        assert len(output_chunks) > 0
+
+        # Reconstruct full text
+        full_text = "".join(output_chunks)
+        assert len(full_text) > 0
+
+        print(f"\nStreaming response: {full_text[:100]}...")  # Print first 100 chars
+        print(f"Number of chunks: {len(output_chunks)}")

@@ -13,63 +13,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any
-
 import msgspec
 
 from ..core.types import Query, QueryResult
 from ..endpoint_client.adapter_protocol import HttpRequestAdapter
-from ..openai.harmony import Harmonizer
-
-
-class SamplingParams(msgspec.Struct, kw_only=True, omit_defaults=True):
-    max_new_tokens: int = 32768
-    """int: Maximum number of tokens to generate per request (1-32768)"""
-
-    temperature: float = 1.0
-    """float: Sampling temperature (0.0 = deterministic, higher = more random). Typically 0.001-2."""
-
-    top_k: int = -1
-    """int: Top-k sampling (number of highest probability tokens to consider). -1 = disable"""
-
-    top_p: float = 1.0
-    """float: Top-p/nucleus sampling (cumulative probability threshold). 0.0-1.0, typically 1.0 for no filterin"""
-
-
-class SGLangGenerateRequest(msgspec.Struct, kw_only=True, omit_defaults=True):
-    input_ids: list[int]
-    sampling_params: SamplingParams
-    stream: bool = True
-
-
-class MetaInfo(msgspec.Struct, kw_only=True, omit_defaults=True):
-    id: str
-    finish_reason: dict[str, Any]
-    prompt_tokens: int
-    weight_version: str
-    total_retractions: int
-    completion_tokens: int
-    cached_tokens: int
-    e2e_latency: float
-
-
-class SGLangGenerateResponse(msgspec.Struct, kw_only=True, omit_defaults=True):
-    text: str
-    output_ids: list[int]
-    meta_info: MetaInfo
-
-
-class SGLangSSEDelta(msgspec.Struct):
-    text: str = ""
-    token_delta: int = 0
-    total_completion_tokens: int = 0
-    has_retractions: bool = False
+from .types import (
+    SamplingParams,
+    SGLangGenerateRequest,
+    SGLangGenerateResponse,
+    SGLangSSEDelta,
+)
 
 
 class SGLangGenerateAdapter(HttpRequestAdapter):
     """Adapter for the native SGLang /generate endpoint for text generation."""
 
-    _harmonizer: Harmonizer | None = None
     _request_encoder: msgspec.json.Encoder = msgspec.json.Encoder()
     _response_decoder: msgspec.json.Decoder = msgspec.json.Decoder(
         SGLangGenerateResponse
@@ -105,25 +63,9 @@ class SGLangGenerateAdapter(HttpRequestAdapter):
         )
 
         # Get the input tokens
-        if "input_tokens" in query.data:
-            input_tokens = query.data["input_tokens"]
-        else:
-            input_text = None
-            for key in ("prompt", "text_input", "question"):
-                if key in query.data:
-                    input_text = query.data[key]
-                    break
-            if input_text is None:
-                raise ValueError("No input text found in query.data")
-
-            harmony_parameters = query.metadata.get("harmony_parameters", {})
-            if cls._harmonizer is None:
-                # The tokenizer and harmony encoder are cached, so as long as
-                # they are pre-loaded before the benchmark starts, there will be
-                # no loading done on the hot-path of the benchmark session.
-                cls._harmonizer = Harmonizer(**harmony_parameters)
-
-            input_tokens = cls._harmonizer(input_text, tokenize=True)
+        if "input_tokens" not in query.data:
+            raise KeyError("input_tokens not found in query.data")
+        input_tokens = query.data["input_tokens"]
 
         return cls._request_encoder.encode(
             SGLangGenerateRequest(

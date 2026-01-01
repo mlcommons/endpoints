@@ -31,6 +31,7 @@ import aiohttp
 import zmq
 import zmq.asyncio
 
+from inference_endpoint.config.schema import APIType
 from inference_endpoint.core.types import (
     Query,
     QueryResult,
@@ -38,7 +39,6 @@ from inference_endpoint.core.types import (
 )
 from inference_endpoint.endpoint_client.configs import (
     AioHttpConfig,
-    APIType,
     HTTPClientConfig,
     ZMQConfig,
 )
@@ -46,9 +46,9 @@ from inference_endpoint.endpoint_client.zmq_utils import ZMQPullSocket, ZMQPushS
 from inference_endpoint.load_generator.events import SampleEvent
 from inference_endpoint.metrics.recorder import EventRecorder
 from inference_endpoint.metrics.reporter import MetricsReporter
-from inference_endpoint.openai.openai_adapter import SSEDelta as OpenAISSEDelta
+from inference_endpoint.openai.types import SSEDelta as OpenAISSEDelta
 from inference_endpoint.profiling import profile
-from inference_endpoint.sglang.adapter import SGLangSSEDelta
+from inference_endpoint.sglang.types import SGLangSSEDelta
 from inference_endpoint.utils.logging import setup_logging
 
 logger = logging.getLogger(__name__)
