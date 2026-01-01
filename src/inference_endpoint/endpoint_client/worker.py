@@ -187,7 +187,7 @@ class SGLangSSEAccumulator:
         if not isinstance(delta, SGLangSSEDelta):
             return None
 
-        if delta.total_tokens == self.total_tokens:
+        if delta.total_completion_tokens == self.total_tokens:
             return None
 
         # In SGLang /generate, the .text field is the total accumulated text, not
@@ -196,8 +196,8 @@ class SGLangSSEAccumulator:
         if (start_idx := len(delta.text)) > len(self.text):
             content_diff = delta.text[start_idx:]
         self.text = delta.text
-        self.token_ids.extend(delta.token_ids)
-        self.total_tokens = delta.total_tokens
+        self.token_ids.extend(delta.token_delta)
+        self.total_tokens = delta.total_completion_tokens
         if delta.has_retractions:
             # For now, we won't be handling retractions if they occur, but we will
             # report it as part of the metadata if it does happen.
@@ -228,7 +228,7 @@ class SGLangSSEAccumulator:
                 "final_chunk": True,
                 "retraction_occurred": self.retraction_occurred,
                 "n_tokens": self.total_tokens,
-                "output_tokens": self.token_ids,
+                "token_ids": self.token_ids,
             },
         )
 

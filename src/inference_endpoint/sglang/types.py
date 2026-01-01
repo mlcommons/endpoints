@@ -43,7 +43,7 @@ class SamplingParams(msgspec.Struct, kw_only=True, omit_defaults=True):
 class SGLangGenerateRequest(msgspec.Struct, kw_only=True, omit_defaults=True):
     input_ids: list[int]
     sampling_params: SamplingParams
-    stream: bool = True
+    stream: bool
 
 
 class MetaInfo(msgspec.Struct, kw_only=True, omit_defaults=True):
@@ -65,6 +65,6 @@ class SGLangGenerateResponse(msgspec.Struct, kw_only=True, omit_defaults=True):
 
 class SGLangSSEDelta(msgspec.Struct):
     text: str = ""
-    token_delta: int = 0
+    token_delta: list[int] = msgspec.field(default_factory=list)
     total_completion_tokens: int = 0
     has_retractions: bool = False

@@ -16,8 +16,6 @@
 """Integration tests for SGLang adapter with real GPT-OSS server.
 
 This test assumes a server running GPT-OSS is available at localhost:30000.
-To start a server, use:
-    python3 -m sglang.launch_server --model-path <model> --host 0.0.0.0 --port 30000
 """
 
 import asyncio
@@ -98,6 +96,7 @@ class TestSGLangAdapterIntegration:
     """Integration tests for SGLang adapter with real GPT-OSS server."""
 
     @pytest.mark.asyncio
+    @pytest.mark.run_explicitly
     @pytest.mark.integration
     async def test_sglang_non_streaming_request(self, sglang_futures_client):
         """Test non-streaming request through SGLang adapter.
@@ -114,6 +113,10 @@ class TestSGLangAdapterIntegration:
                 "input_tokens": input_tokens,
                 "stream": False,
             },
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
         )
 
         future = sglang_futures_client.issue_query(query)
@@ -126,19 +129,14 @@ class TestSGLangAdapterIntegration:
         assert len(result.response_output) > 0
 
         # Verify metadata
-        assert "metadata" in dir(result)
         assert result.metadata is not None
         assert "token_ids" in result.metadata
         assert "n_tokens" in result.metadata
         assert isinstance(result.metadata["token_ids"], list)
         assert isinstance(result.metadata["n_tokens"], int)
 
-        print(
-            f"\nNon-streaming response: {result.response_output[:100]}..."
-        )  # Print first 100 chars
-        print(f"Token count: {result.metadata['n_tokens']}")
-
     @pytest.mark.asyncio
+    @pytest.mark.run_explicitly
     @pytest.mark.integration
     async def test_sglang_streaming_request(self, sglang_futures_client):
         """Test streaming request through SGLang adapter.
@@ -157,6 +155,10 @@ class TestSGLangAdapterIntegration:
                 "temperature": 0.8,
                 "stream": True,
             },
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "text/event-stream",
+            },
         )
 
         future = sglang_futures_client.issue_query(query)
@@ -167,15 +169,18 @@ class TestSGLangAdapterIntegration:
         assert "response_output" in dir(result)
         assert result.response_output is not None
 
-        # In streaming mode, response_output should contain accumulated output
-        assert "output" in result.response_output
-        output_chunks = result.response_output["output"]
-        assert isinstance(output_chunks, list)
-        assert len(output_chunks) > 0
+        assert result.metadata is not None
+        assert "token_ids" in result.metadata
+        assert "n_tokens" in result.metadata
+        assert isinstance(result.metadata["token_ids"], list)
+        assert isinstance(result.metadata["n_tokens"], int)
 
-        # Reconstruct full text
-        full_text = "".join(output_chunks)
-        assert len(full_text) > 0
+        # Check that something was generated, but no more than max_new_tokens
+        assert 0 < result.metadata["n_tokens"] and result.metadata["n_tokens"] <= 100
 
-        print(f"\nStreaming response: {full_text[:100]}...")  # Print first 100 chars
-        print(f"Number of chunks: {len(output_chunks)}")
+        # The token IDs in the result should be at most n_tokens because of retractions
+        if result.metadata["retraction_occurred"]:
+            assert len(result.metadata["token_ids"]) <= result.metadata["n_tokens"]
+        else:
+            # STOP token is not included in the response, but counts towards generated
+            assert len(result.metadata["token_ids"]) + 1 == result.metadata["n_tokens"]
