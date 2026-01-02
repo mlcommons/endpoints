@@ -58,6 +58,8 @@ class BenchmarkSession:
         self.event_recorder = EventRecorder(
             session_id=self.session_id, notify_idle=self.end_event
         )
+        # Will be populated after the test finishes by _run_test
+        self.report = None
 
         self.sample_uuid_map = None
 
@@ -152,6 +154,9 @@ class BenchmarkSession:
                             )
                             tokenizer = None
                 report = reporter.create_report(tokenizer)
+
+                # Store report on session so external callers can use it
+                self.report = report
 
                 # Consolidate UUID->index mappings
                 perf_name = (

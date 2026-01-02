@@ -25,75 +25,14 @@ from inference_endpoint.core.types import Query, QueryResult
 # Import base class and shared SSE types
 from inference_endpoint.endpoint_client.adapter_protocol import HttpRequestAdapter
 
-from .openai_adapter import SSEMessage
-
-# ============================================================================
-# msgspec Structs for OpenAI API Types
-# ============================================================================
-
-
-class ChatMessage(msgspec.Struct, kw_only=True, omit_defaults=True):
-    """Chat message in OpenAI format."""
-
-    role: str
-    content: str
-    name: str | None = None
-
-
-class ChatCompletionRequest(msgspec.Struct, kw_only=True, omit_defaults=True):
-    """OpenAI chat completion request."""
-
-    model: str
-    messages: list[ChatMessage]
-    temperature: float | None = None
-    max_completion_tokens: int | None = None
-    stream: bool | None = None
-    top_p: float | None = None
-    top_k: int | None = None
-    repetition_penalty: float | None = None
-    n: int | None = None
-    stop: str | list[str] | None = None
-    presence_penalty: float | None = None
-    frequency_penalty: float | None = None
-    logit_bias: dict[str, float] | None = None
-    user: str | None = None
-
-
-class ChatCompletionResponseMessage(msgspec.Struct, kw_only=True, omit_defaults=True):
-    """Response message from OpenAI."""
-
-    role: str
-    content: str | None
-    refusal: str | None
-
-
-class ChatCompletionChoice(msgspec.Struct, kw_only=True, omit_defaults=True):
-    """A single choice in the completion response."""
-
-    index: int
-    message: ChatCompletionResponseMessage
-    finish_reason: str | None
-
-
-class CompletionUsage(msgspec.Struct, kw_only=True, omit_defaults=True):
-    """Token usage statistics."""
-
-    prompt_tokens: int
-    completion_tokens: int
-    total_tokens: int
-
-
-class ChatCompletionResponse(msgspec.Struct, kw_only=True, omit_defaults=True):
-    """OpenAI chat completion response (msgspec version)."""
-
-    id: str
-    object: str = "chat.completion"
-    created: int
-    model: str
-    choices: list[ChatCompletionChoice]
-    usage: CompletionUsage | None
-    system_fingerprint: str | None
-
+from .types import (
+    ChatCompletionChoice,
+    ChatCompletionRequest,
+    ChatCompletionResponse,
+    ChatCompletionResponseMessage,
+    ChatMessage,
+    SSEMessage,
+)
 
 # ============================================================================
 # msgspec-based OpenAI Adapter

@@ -31,6 +31,7 @@ import aiohttp
 import zmq
 import zmq.asyncio
 
+from inference_endpoint.config.schema import APIType
 from inference_endpoint.core.types import (
     Query,
     QueryResult,
@@ -45,7 +46,9 @@ from inference_endpoint.endpoint_client.zmq_utils import ZMQPullSocket, ZMQPushS
 from inference_endpoint.load_generator.events import SampleEvent
 from inference_endpoint.metrics.recorder import EventRecorder
 from inference_endpoint.metrics.reporter import MetricsReporter
+from inference_endpoint.openai.types import SSEDelta as OpenAISSEDelta
 from inference_endpoint.profiling import profile
+from inference_endpoint.sglang.types import SGLangSSEDelta
 from inference_endpoint.utils.logging import setup_logging
 
 logger = logging.getLogger(__name__)
@@ -94,6 +97,140 @@ def worker_main(
     except Exception as e:
         logger.error(f"Crashed: {type(e).__name__}: {str(e)}\n{traceback.format_exc()}")
         sys.exit(1)
+
+
+class OpenAISSEAccumulator:
+    def __init__(self, query_id: str, stream_all_chunks: bool):
+        self.output_chunks = []
+        self.reasoning_chunks = []
+
+        self.first_chunk_sent = False
+        self.query_id = query_id
+        self.stream_all_chunks = stream_all_chunks
+
+    def add_chunk(self, delta: OpenAISSEDelta) -> StreamChunk | None:
+        if not isinstance(delta, OpenAISSEDelta):
+            return None
+
+        content = None
+        if delta.content:
+            self.output_chunks.append(delta.content)
+            content = delta.content
+        elif delta.reasoning:
+            self.reasoning_chunks.append(delta.reasoning)
+            content = delta.reasoning
+        else:
+            logger.debug("empty SSE delta")
+            return None
+
+        if content is not None and (
+            self.stream_all_chunks or not self.first_chunk_sent
+        ):
+            return StreamChunk(
+                id=self.query_id,
+                response_chunk=content,
+                is_complete=False,
+                metadata={
+                    "first_chunk": not self.first_chunk_sent,
+                    "final_chunk": False,
+                },
+            )
+        else:
+            return None
+
+    def get_final_output(self) -> QueryResult:
+        response_output = {"output": []}
+        if self.reasoning_chunks:
+            # If there are reasoning chunks, then the first chunk received
+            # is the first reasoning chunk. The rest of the reasoning chunks,
+            # as well as the output chunks can be joined together.
+            resp_reasoning = [self.reasoning_chunks[0]]
+            if len(self.reasoning_chunks) > 1:
+                resp_reasoning.append("".join(self.reasoning_chunks[1:]))
+
+            response_output = {
+                "output": "".join(self.output_chunks),
+                "reasoning": resp_reasoning,
+            }
+        elif self.output_chunks:
+            # If there are only output chunks, the first chunk is the used for
+            # TTFT calculations. The rest are joined together.
+            resp_output = [self.output_chunks[0]]
+            if len(self.output_chunks) > 1:
+                resp_output.append("".join(self.output_chunks[1:]))
+
+            response_output = {
+                "output": resp_output,
+            }
+        return QueryResult(
+            id=self.query_id,
+            response_output=response_output,
+            metadata={
+                "first_chunk": not self.first_chunk_sent,
+                "final_chunk": True,
+            },
+        )
+
+
+class SGLangSSEAccumulator:
+    def __init__(self, query_id: str, stream_all_chunks: bool):
+        self.text = ""
+        self.token_ids = []
+        self.total_tokens = 0
+        self.retraction_occurred = False
+
+        self.first_chunk_sent = False
+        self.query_id = query_id
+        self.stream_all_chunks = stream_all_chunks
+
+    def add_chunk(self, delta: SGLangSSEDelta) -> StreamChunk | None:
+        if not isinstance(delta, SGLangSSEDelta):
+            return None
+
+        if delta.total_completion_tokens == self.total_tokens:
+            return None
+
+        # In SGLang /generate, the .text field is the total accumulated text, not
+        # a difference, so we'll need to compute the diff for the StreamChunk
+        content_diff = ""
+        if len(delta.text) > (start_idx := len(self.text)):
+            content_diff = delta.text[start_idx:]
+        self.text = delta.text
+        self.token_ids.extend(delta.token_delta)
+        self.total_tokens = delta.total_completion_tokens
+        if delta.has_retractions:
+            # For now, we won't be handling retractions if they occur, but we will
+            # report it as part of the metadata if it does happen.
+            self.retraction_occurred = True
+
+        if content_diff and (self.stream_all_chunks or not self.first_chunk_sent):
+            metadata = {
+                "first_chunk": not self.first_chunk_sent,
+                "final_chunk": False,
+                "retraction_occurred": delta.has_retractions,
+                "n_tokens": len(delta.token_ids),
+            }
+            return StreamChunk(
+                id=self.query_id,
+                response_chunk=content_diff,
+                is_complete=False,
+                metadata=metadata,
+            )
+        else:
+            return None
+
+    def get_final_output(self) -> QueryResult:
+        return QueryResult(
+            id=self.query_id,
+            response_output=self.text,
+            metadata={
+                "first_chunk": not self.first_chunk_sent,
+                "final_chunk": True,
+                "retraction_occurred": self.retraction_occurred,
+                "n_tokens": self.total_tokens,
+                "token_ids": self.token_ids,
+            },
+        )
 
 
 class Worker:
@@ -391,52 +528,22 @@ class Worker:
     @profile
     async def _handle_streaming_request(self, query: Query) -> None:
         """Handle streaming response."""
+        if self.http_config.api_type == APIType.SGLANG:
+            accumulator_type = SGLangSSEAccumulator
+        else:
+            # Default to OpenAI compatible adapter
+            accumulator_type = OpenAISSEAccumulator
+
         async for response in self._make_http_request(query):
-            output_chunks = []
-            reasoning_chunks = []
-            first_chunk_sent = False
+            accumulator = accumulator_type(query.id, self.http_config.stream_all_chunks)
 
             # Process SSE stream - yields batches of chunks
             async for chunk_batch in self._iter_sse_lines(response):
-                output_delta = []
-                reasoning_delta = []
                 for delta in chunk_batch:
-                    if delta.content:
-                        output_delta.append(delta.content)
-                    elif delta.reasoning:
-                        reasoning_delta.append(delta.reasoning)
+                    if stream_chunk := accumulator.add_chunk(delta):
+                        await self._response_socket.send(stream_chunk)
+                        accumulator.first_chunk_sent = True
 
-                for delta_batch, accumulator in (
-                    (reasoning_delta, reasoning_chunks),
-                    (output_delta, output_chunks),
-                ):
-                    if not delta_batch:
-                        continue
-                    accumulator.extend(delta_batch)
-
-                    # Determine which chunks to send: all or just first
-                    chunks_to_send = (
-                        delta_batch
-                        if self.http_config.stream_all_chunks
-                        else delta_batch[:1]
-                        if not first_chunk_sent
-                        else []
-                    )
-
-                    # Send chunks
-                    for content in chunks_to_send:
-                        await self._response_socket.send(
-                            StreamChunk(
-                                id=query.id,
-                                response_chunk=content,
-                                is_complete=False,
-                                metadata={
-                                    "first_chunk": not first_chunk_sent,
-                                    "final_chunk": False,
-                                },
-                            )
-                        )
-                        first_chunk_sent = True
                         if self.http_config.record_worker_events:
                             EventRecorder.record_event(
                                 SampleEvent.ZMQ_RESPONSE_SENT,
@@ -445,35 +552,7 @@ class Worker:
                                 assert_active=True,
                             )
 
-            # Send final complete response
-            if reasoning_chunks:
-                # If there are reasoning chunks, then the first chunk received
-                # is the first reasoning chunk. The rest of the reasoning chunks,
-                # as well as the output chunks can be joined together.
-                resp_reasoning = [reasoning_chunks[0]]
-                if len(reasoning_chunks) > 1:
-                    resp_reasoning.append("".join(reasoning_chunks[1:]))
-                response_output = {
-                    "output": "".join(output_chunks),
-                    "reasoning": resp_reasoning,
-                }
-            elif output_chunks:
-                # If there are only output chunks, the first chunk is the used for
-                # TTFT calculations. The rest are joined together.
-                resp_output = [output_chunks[0]]
-                if len(output_chunks) > 1:
-                    resp_output.append("".join(output_chunks[1:]))
-                response_output = {"output": resp_output}
-            else:
-                response_output = {"output": []}
-
-            await self._response_socket.send(
-                QueryResult(
-                    id=query.id,
-                    response_output=response_output,
-                    metadata={"first_chunk": not first_chunk_sent, "final_chunk": True},
-                )
-            )
+            await self._response_socket.send(accumulator.get_final_output())
             if self.http_config.record_worker_events:
                 EventRecorder.record_event(
                     SampleEvent.ZMQ_RESPONSE_SENT,

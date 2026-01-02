@@ -30,6 +30,20 @@ from .. import metrics
 from .ruleset_base import BenchmarkSuiteRuleset
 
 
+class APIType(str, Enum):
+    OPENAI = "openai"
+    SGLANG = "sglang"
+
+    def default_route(self) -> str:
+        match self:
+            case APIType.OPENAI:
+                return "/v1/chat/completions"
+            case APIType.SGLANG:
+                return "/generate"
+            case _:
+                raise ValueError(f"Invalid API type: {self}")
+
+
 class LoadPatternType(str, Enum):
     """Load pattern types."""
 
@@ -296,10 +310,13 @@ class EndpointConfig(BaseModel):
     """Endpoint connection configuration.
 
     Contains endpoint URL and authentication settings.
+    API type refers to the API implementation used on the endpoint based on industry standards.
+    The Default API type is APIType.OPENAI, which refers to the the /v1/chat/completions route.
     """
 
     endpoint: str | None = None
     api_key: str | None = None
+    api_type: APIType = APIType.OPENAI
 
 
 class BenchmarkConfig(BaseModel):
@@ -322,7 +339,6 @@ class BenchmarkConfig(BaseModel):
     settings: Settings = Field(default_factory=Settings)
     metrics: Metrics = Field(default_factory=Metrics)
     endpoint_config: EndpointConfig = Field(default_factory=EndpointConfig)
-    output: Path | None = None
     report_dir: Path | None = None
     timeout: int | None = None
     verbose: bool = False
