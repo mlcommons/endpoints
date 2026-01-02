@@ -1126,7 +1126,7 @@ class MetricsReporter:
         Each line in the output file is a valid JSON object.
         """
 
-        with json_path.open("w", encoding="utf-8") as f:
+        with json_path.open("w", encoding="utf-8", newline="") as f:
             query_result = self.cur_.execute(
                 "SELECT sample_uuid, event_type, timestamp_ns, data FROM events"
             )
