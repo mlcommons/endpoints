@@ -24,7 +24,6 @@ import logging
 import shutil
 import signal
 import tempfile
-import time
 import uuid
 from pathlib import Path
 from urllib.parse import urljoin
@@ -36,6 +35,7 @@ from transformers.utils import logging as transformers_logging
 from inference_endpoint.commands.utils import get_default_report_path
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import (
+    APIType,
     BenchmarkConfig,
     ClientSettings,
     Dataset,
@@ -274,8 +274,8 @@ def _build_config_from_cli(
         get_default_report_path(),
     )
     timeout = getattr(args, "timeout", None)
-    verbose = getattr(args, "verbose", False)
-    output = getattr(args, "output", None)
+    verbose_level = getattr(args, "verbose", 0)
+    api_type = APIType(getattr(args, "api_type", "openai"))
     # Build BenchmarkConfig from CLI params
     return BenchmarkConfig(
         name=f"cli_{benchmark_mode}",
@@ -308,7 +308,7 @@ def _build_config_from_cli(
             ),
             client=ClientSettings(
                 workers=args.workers if args.workers else 4,
-                max_concurrency=-1,  # client uses unlimited concurrency by default
+                log_level="DEBUG" if verbose_level >= 2 else "INFO",
             ),
         ),
         model_params=ModelParams(
@@ -323,13 +323,14 @@ def _build_config_from_cli(
             else None,
             streaming=StreamingMode(getattr(args, "streaming", "auto")),
         ),
-        endpoint_config=EndpointConfig(endpoint=args.endpoint, api_key=args.api_key),
+        endpoint_config=EndpointConfig(
+            endpoint=args.endpoint, api_key=args.api_key, api_type=api_type
+        ),
         metrics=Metrics(),
         baseline=None,  # CLI mode doesn't use baseline
         report_dir=report_dir,
-        output=output,
         timeout=timeout,
-        verbose=verbose,
+        verbose=verbose_level > 0,
     )
 
 
@@ -376,35 +377,6 @@ def _get_dataset_path(args: argparse.Namespace, config: BenchmarkConfig) -> Path
     return dataset_path
 
 
-def _get_dataset_format(config: BenchmarkConfig, dataset_path: Path) -> str:
-    """Get or infer dataset format.
-
-    CURRENT LIMITATION: Only supports single dataset.
-
-    Args:
-        config: BenchmarkConfig
-        dataset_path: Path to dataset file
-
-    Returns:
-        Dataset format string (e.g., "pkl", "hf")
-
-    TODO: Multi-dataset support
-    When implemented, this should:
-    1. Return dict[Path, str] mapping dataset paths to formats
-    2. Validate format compatibility across datasets
-    """
-    # Try to get format from config
-    # TODO: Multi-dataset - currently just uses single dataset format
-    single_dataset = config.get_single_dataset()
-    if single_dataset and single_dataset.format:
-        return single_dataset.format
-
-    # Infer from file extension
-    format_str = DataLoaderFactory.infer_format(dataset_path)
-    logger.info(f"Inferred dataset format: {format_str}")
-    return format_str
-
-
 def _run_benchmark(
     config: BenchmarkConfig,
     collect_responses: bool,
@@ -425,7 +397,7 @@ def _run_benchmark(
     Architecture notes:
     - This is a SYNCHRONOUS function (not async) because HTTPEndpointClient
       manages its own event loop in a separate thread
-    - Uses blocking operations: http_client.start(), sess.wait_for_test_end()
+    - Uses blocking operations: sess.wait_for_test_end()
     - Signal handling: SIGINT (Ctrl+C) gracefully stops benchmark
     - Cleanup: Always executes via finally block
 
@@ -486,12 +458,7 @@ def _run_benchmark(
 
     # Get dataset - from CLI or from config
     # TODO: Dataset Logic is not yet fully implemented
-    # dataset_path = _get_dataset_path(args, config)
     dataset_path = config.datasets[0].path
-
-    # Load dataset using factory
-    dataset_format = _get_dataset_format(config, dataset_path)
-    logger.info(f"Loading: {dataset_path} (format: {dataset_format})")
 
     # Determine if streaming should be enabled based on config
     streaming_mode = config.model_params.streaming
@@ -518,7 +485,7 @@ def _run_benchmark(
 
         dataloader = DataLoaderFactory.create_loader(
             dataset_path,
-            format=dataset_format,
+            format=config.datasets[0].format,
             key_maps=key_maps,
             metadata={
                 "model": model_name,
@@ -535,9 +502,6 @@ def _run_benchmark(
     except FileNotFoundError as e:
         logger.error(f"Dataset file not found: {dataset_path}")
         raise InputValidationError(f"Dataset file not found: {dataset_path}") from e
-    except NotImplementedError as e:
-        logger.error(f"Dataset format not supported: {dataset_format}")
-        raise SetupError(str(e)) from e
     except Exception as e:
         logger.error("Dataset load failed")
         raise SetupError(f"Failed to load dataset: {e}") from e
@@ -583,17 +547,18 @@ def _run_benchmark(
     num_workers = config.settings.client.workers
 
     logger.info(f"Connecting: {endpoint}")
-    logger.info(f"Client config: workers={num_workers}")
-
     tmp_dir = tempfile.mkdtemp(prefix="inference_endpoint_")
 
     try:
         http_config = HTTPClientConfig(
-            endpoint_url=urljoin(endpoint, "/v1/chat/completions"),
+            endpoint_url=urljoin(
+                endpoint, config.endpoint_config.api_type.default_route()
+            ),
+            api_type=config.endpoint_config.api_type,
             num_workers=num_workers,
-            max_concurrency=-1,  # unlimited
             record_worker_events=config.settings.client.record_worker_events,
             event_logs_dir=report_dir,
+            log_level=config.settings.client.log_level,
         )
         aiohttp_config = AioHttpConfig()
         zmq_config = ZMQConfig(
@@ -605,16 +570,12 @@ def _run_benchmark(
         http_client = HTTPEndpointClient(http_config, aiohttp_config, zmq_config)
         sample_issuer = HttpClientSampleIssuer(http_client)
 
-        http_client.start()
-        sample_issuer.start()
-
     except Exception as e:
         logger.error("Connection failed")
         raise SetupError(f"Failed to connect to endpoint: {e}") from e
 
     # Run benchmark
     logger.info("Running...")
-    start_time = time.time()
 
     sess = None
     try:
@@ -624,10 +585,10 @@ def _run_benchmark(
             sample_issuer,
             scheduler,
             name=f"cli_benchmark_{uuid.uuid4().hex[0:8]}",
-            stop_sample_issuer_on_test_end=False,
             report_dir=report_dir,
             tokenizer_override=tokenizer,
             max_shutdown_timeout_s=config.timeout if config.timeout else None,
+            dump_events_log=True,
         )
 
         # Wait for test end with ability to interrupt
@@ -644,15 +605,26 @@ def _run_benchmark(
             # Always restore original handler
             signal.signal(signal.SIGINT, old_handler)
 
-        elapsed_time = time.time() - start_time
-        success_count = response_collector.count - len(response_collector.errors)
-        estimated_qps = success_count / elapsed_time if elapsed_time > 0 else 0
+        # Prefer authoritative metrics from the session report
+        report = getattr(sess, "report", None)
+        if report is None:
+            logger.error(
+                "Session report missing — benchmark reporter failed to produce results"
+            )
+            raise ExecutionError(
+                "Session report missing — cannot produce benchmark results"
+            )
+
+        elapsed_time = report.duration_ns / 1e9
+        total = report.n_samples_issued
+        success_count = report.n_samples_completed
+
+        # qps will be None if duration was 0, so fall back to 0.0
+        estimated_qps = report.qps or 0.0
 
         # Report results
         logger.info(f"Completed in {elapsed_time:.1f}s")
-        logger.info(
-            f"Results: {success_count}/{scheduler.total_samples_to_issue} successful"
-        )
+        logger.info(f"Results: {success_count}/{total} successful")
         logger.info(f"Estimated QPS: {estimated_qps:.1f}")
 
         if response_collector.errors:
@@ -663,40 +635,36 @@ def _run_benchmark(
                 if len(response_collector.errors) > 3:
                     logger.warning(f"  ... +{len(response_collector.errors) - 3} more")
 
-        # Save results if requested
-        if config.output:
-            try:
-                results = {
-                    "config": {
-                        "endpoint": endpoint,
-                        "mode": test_mode,
-                        "target_qps": target_qps,
-                    },
-                    "results": {
-                        "total": scheduler.total_samples_to_issue,
-                        "successful": success_count,
-                        "failed": len(response_collector.errors),
-                        "elapsed_time": elapsed_time,
-                        "qps": estimated_qps,
-                    },
-                }
-
-                if collect_responses:
-                    results["responses"] = response_collector.responses
-
-                # Always save all errors (useful for debugging)
-                if response_collector.errors:
-                    results["errors"] = response_collector.errors
-
-                with open(config.output, "w") as f:
-                    json.dump(results, f, indent=2)
-                logger.info(f"Saved: {config.output}")
-            except Exception as e:
-                logger.error(f"Save failed: {e}")
+        try:
+            results = {
+                "config": {
+                    "endpoint": endpoint,
+                    "mode": test_mode,
+                    "target_qps": target_qps,
+                },
+                "results": {
+                    "total": total,
+                    "successful": success_count,
+                    "failed": total - success_count,
+                    "elapsed_time": elapsed_time,
+                    "qps": estimated_qps,
+                },
+            }
+            if collect_responses:
+                results["responses"] = response_collector.responses
+            # Always save all errors (useful for debugging)
+            if response_collector.errors:
+                results["errors"] = response_collector.errors
+            # Save results to JSON file
+            results_path = report_dir / "results.json"
+            with open(results_path, "w") as f:
+                json.dump(results, f, indent=2)
+            logger.info(f"Saved: {results_path}")
+        except Exception as e:
+            logger.error(f"Save failed: {e}")
 
     except KeyboardInterrupt:
         logger.warning("Benchmark interrupted by user")
-        # Will be re-raised by CLI main() for proper exit
         raise
     except ExecutionError:
         # Re-raise our own exceptions
@@ -708,6 +676,8 @@ def _run_benchmark(
         # Cleanup - always execute
         logger.info("Cleaning up...")
         try:
+            if sess is not None:
+                sess.stop()
             pbar.close()
             sample_issuer.shutdown()
             http_client.shutdown()

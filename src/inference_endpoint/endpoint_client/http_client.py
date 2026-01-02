@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""HTTP endpoint client implementation with multiprocessing and ZMQ."""
+"""HTTP endpoint client implementation."""
 
 import asyncio
 import logging
@@ -21,7 +21,6 @@ import threading
 import uuid
 
 import uvloop
-import zmq
 import zmq.asyncio
 
 from inference_endpoint.core.types import Query, QueryResult, StreamChunk
@@ -33,26 +32,22 @@ from inference_endpoint.endpoint_client.configs import (
 from inference_endpoint.endpoint_client.worker import WorkerManager
 from inference_endpoint.endpoint_client.zmq_utils import ZMQPullSocket, ZMQPushSocket
 
-# required for ZMQ context to work with uvloop
-asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
-
 logger = logging.getLogger(__name__)
 
 
-class HTTPEndpointClient:
+class AsyncHttpEndpointClient:
     """
-    HTTP endpoint client with multiprocessing workers and ZMQ communication.
-
-    This client provides high-performance HTTP request handling by:
-    - Using multiple worker processes to parallelize running concurrent HTTP requests
-    - ZMQ for inter-process communication for efficient message passing
-    - Round-robin load balancing across workers
+    Async HTTP client for LLM inference.
 
     Architecture:
     - Main process: Accepts requests, distributes to workers, handles responses
     - Worker processes: Make actual HTTP requests to the endpoint
+    - requests are distributed to workers ROUND-ROBIN
 
-    See README.md for detailed usage examples and configuration options.
+    Usage:
+        client = AsyncHttpEndpointClient(config, aiohttp_config, zmq_config)
+        await client.issue_query(query)
+        response_if_any = await client.try_receive()
     """
 
     def __init__(
@@ -60,70 +55,51 @@ class HTTPEndpointClient:
         config: HTTPClientConfig,
         aiohttp_config: AioHttpConfig,
         zmq_config: ZMQConfig,
+        loop: asyncio.AbstractEventLoop | None = None,
     ):
-        """
-        Initialize HTTP endpoint client.
-
-        Args:
-            config: HTTP client configuration
-            aiohttp_config: aiohttp configuration
-            zmq_config: ZMQ configuration
-        """
-        # Generate unique ID to avoid conflicts between multiple client instances
         self.client_id = uuid.uuid4().hex[:8]
-
         self.config = config
         self.aiohttp_config = aiohttp_config
         self.zmq_config = zmq_config
+        self._next_worker_idx = 0
 
-        self.loop: asyncio.AbstractEventLoop | None = None
-        self.loop_thread: threading.Thread | None = None
+        # Use provided loop or create own
+        self._owns_loop = loop is None
+        if loop is None:
+            self.loop = uvloop.new_event_loop()
+            self._loop_thread: threading.Thread = threading.Thread(
+                target=self.loop.run_forever,
+                daemon=True,  # no need for explicit join
+                name=f"HttpClient-{self.client_id}",
+            )
+            self._loop_thread.start()
+        else:
+            self.loop = loop
+            self._loop_thread = None
 
-        self.zmq_context: zmq.asyncio.Context | None = None
-        self.worker_push_sockets: list[ZMQPushSocket] = []
-        self.worker_manager: WorkerManager | None = None
-        self.current_worker_idx = 0
-
-        self._shutdown_event: asyncio.Event | None = None
-        self._response_socket: ZMQPullSocket | None = None
-        self._concurrency_semaphore: asyncio.Semaphore | None = None
+        # Initialize on event loop
+        asyncio.run_coroutine_threadsafe(self._initialize(), self.loop).result()
 
         logger.info(
-            f"HTTP endpoint client using adapter: {self.config.adapter.__name__}"
+            f"HTTPEndpointClient[{self.config.adapter.__name__}] initialized with num_workers={self.config.num_workers}"
         )
 
-    def start(self):
-        """Start event loop thread and initialize client."""
-        try:
-            self.loop = uvloop.new_event_loop()
-            asyncio.set_event_loop(self.loop)
+    async def _initialize(self) -> None:
+        """Initialize ZMQ context, sockets, and start workers."""
+        self._shutdown_event = asyncio.Event()
 
-            self.loop_thread = threading.Thread(
-                target=self.loop.run_forever,
-                daemon=True,
-                name=f"HttpClient-EventLoop-{self.client_id}",
-            )
-            self.loop_thread.start()
-
-            asyncio.run_coroutine_threadsafe(self.async_start(), self.loop).result()
-        except Exception as e:
-            logger.error(f"Failed to start HTTP endpoint client: {e}")
-            raise e
-
-    async def async_start(self):
-        """Initialize ZMQ, workers, and sockets."""
         self.zmq_context = zmq.asyncio.Context(
             io_threads=self.zmq_config.zmq_io_threads
         )
-        self._shutdown_event = asyncio.Event()
 
-        if self.config.max_concurrency > 0:
-            self._concurrency_semaphore = asyncio.Semaphore(self.config.max_concurrency)
-
-        for i in range(self.config.num_workers):
-            address = f"{self.zmq_config.zmq_request_queue_prefix}_{i}_requests"
-            push_socket = ZMQPushSocket(self.zmq_context, address, self.zmq_config)
-            self.worker_push_sockets.append(push_socket)
+        self.worker_push_sockets = [
+            ZMQPushSocket(
+                self.zmq_context,
+                f"{self.zmq_config.zmq_request_queue_prefix}_{i}_requests",
+                self.zmq_config,
+            )
+            for i in range(self.config.num_workers)
+        ]
 
         self.worker_manager = WorkerManager(
             self.config, self.aiohttp_config, self.zmq_config, self.zmq_context
@@ -138,87 +114,64 @@ class HTTPEndpointClient:
             decoder_type=QueryResult | StreamChunk,
         )
 
-    def issue_query(self, query: Query) -> None:
+    async def issue_query(self, query: Query) -> None:
         """
         Issue query to endpoint.
-        Synchronous wrapper for issue_query_async.
-
-        Args:
-            query: Query object containing request details
+        Query is assigned to a worker to process in round-robin fashion.
         """
-        self.loop.call_soon_threadsafe(
-            lambda: asyncio.create_task(self.issue_query_async(query))
-        )
-
-    async def issue_query_async(self, query: Query) -> None:
-        """
-        Issue query to endpoint.
-        Issue query to worker via ZMQ (non-blocking)
-
-        Args:
-            query: Query object containing request details
-        """
-        if self._concurrency_semaphore:
-            async with self._concurrency_semaphore:
-                await self._send_to_worker(query)
-        else:
-            await self._send_to_worker(query)
-
-    def get_ready_responses(self) -> QueryResult | StreamChunk | None:
-        """
-        Get next ready response from workers (synchronous wrapper).
-        Blocks until a response is available or timeout occurs.
-
-        Returns:
-            QueryResult or StreamChunk from worker, or None on timeout
-        """
-        future = asyncio.run_coroutine_threadsafe(
-            self.get_ready_responses_async(), self.loop
-        )
-        return future.result()
-
-    async def get_ready_responses_async(self) -> QueryResult | StreamChunk | None:
-        """
-        Get next ready response from any worker.
-
-        Returns:
-            QueryResult or StreamChunk from worker, or None on timeout
-        """
-        assert self._response_socket is not None
-        return await self._response_socket.receive()
-
-    async def _send_to_worker(self, query: Query) -> None:
-        """Send query to worker via ZMQ."""
-        worker_idx = self.current_worker_idx
-        self.current_worker_idx = (self.current_worker_idx + 1) % len(
+        assert (
+            not self._shutdown_event.is_set()
+        ), "Cannot issue query: client is shutting down"
+        await self.worker_push_sockets[self._next_worker_idx].send(query)
+        self._next_worker_idx = (self._next_worker_idx + 1) % len(
             self.worker_push_sockets
         )
-        await self.worker_push_sockets[worker_idx].send(query)
 
-    def shutdown(self):
-        """Shutdown client, stop event loop, and cleanup."""
-        if self.loop:
-            asyncio.run_coroutine_threadsafe(self.async_shutdown(), self.loop).result()
-            self.loop.call_soon_threadsafe(self.loop.stop)
+    async def try_receive(self) -> QueryResult | StreamChunk | None:
+        """Receive next ready response if available, else return None."""
+        return await self._response_socket.receive()
 
-        if self.loop_thread:
-            self.loop_thread.join(timeout=0.1)
+    async def shutdown(self) -> None:
+        """Gracefully shutdown client."""
+        logger.info(f"[{self.client_id}] Shutting down...")
+        self._shutdown_event.set()
 
-    async def async_shutdown(self):
-        """Shutdown async components."""
-        logger.info("Shutting down HTTP endpoint client...")
-        if self._shutdown_event:
-            self._shutdown_event.set()
-
-        if self._response_socket:
-            self._response_socket.close()
-
+        self._response_socket.close()
         for socket in self.worker_push_sockets:
             socket.close()
 
-        if self.worker_manager:
-            await self.worker_manager.shutdown()
+        await self.worker_manager.shutdown()
+        self.zmq_context.destroy(linger=0)
 
-        if self.zmq_context:
-            self.zmq_context.destroy(linger=0)
-        logger.info("HTTP endpoint client shutdown complete.")
+        # Stop event loop if we own it (scheduled to run after this coroutine completes)
+        if self._owns_loop:
+            self.loop.call_soon(self.loop.stop)
+
+        logger.info(f"[{self.client_id}] Shutdown complete.")
+
+
+class HTTPEndpointClient(AsyncHttpEndpointClient):
+    """
+    Sync HTTP client for LLM inference.
+    Inherits from AsyncHttpEndpointClient and provides sync interface.
+
+    TODO(vir): sync recv. API is not required/implemented yet
+
+    Usage:
+        client = HTTPEndpointClient(config, aiohttp_config, zmq_config)
+        client.issue_query(query)
+        response = await client.try_receive()
+    """
+
+    def issue_query(self, query: Query) -> None:  # type: ignore[override]
+        """Issue query."""
+        coro = super().issue_query(query)
+
+        # NOTE(vir):
+        # use call_soon_threadsafe directly to avoid concurrent.futures overhead in run_coroutine_threadsafe
+        # need this since issue_query might be called from any thread
+        self.loop.call_soon_threadsafe(lambda: asyncio.create_task(coro))
+
+    def shutdown(self) -> None:  # type: ignore[override]
+        """Sync shutdown wrapper - blocks until base class async shutdown completes."""
+        asyncio.run_coroutine_threadsafe(super().shutdown(), self.loop).result()

@@ -243,7 +243,6 @@ settings:
     target_qps: 10.0
   client:
     workers: 4
-    max_concurrency: -1 # -1 = unlimited
 
 metrics:
   collect: ["throughput", "latency", "ttft", "tpot"]

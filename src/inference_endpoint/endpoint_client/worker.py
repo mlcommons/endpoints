@@ -31,6 +31,7 @@ import aiohttp
 import zmq
 import zmq.asyncio
 
+from inference_endpoint.config.schema import APIType
 from inference_endpoint.core.types import (
     Query,
     QueryResult,
@@ -45,7 +46,10 @@ from inference_endpoint.endpoint_client.zmq_utils import ZMQPullSocket, ZMQPushS
 from inference_endpoint.load_generator.events import SampleEvent
 from inference_endpoint.metrics.recorder import EventRecorder
 from inference_endpoint.metrics.reporter import MetricsReporter
+from inference_endpoint.openai.types import SSEDelta as OpenAISSEDelta
 from inference_endpoint.profiling import profile
+from inference_endpoint.sglang.types import SGLangSSEDelta
+from inference_endpoint.utils.logging import setup_logging
 
 logger = logging.getLogger(__name__)
 
@@ -68,18 +72,10 @@ def worker_main(
     http_config: HTTPClientConfig,
     aiohttp_config: AioHttpConfig,
     zmq_config: ZMQConfig,
-    request_queue_addr: str,
-    response_queue_addr: str,
-    readiness_queue_addr: str,
 ):
     """Entry point for worker process."""
-    # Configure logging for worker process
-    logging.basicConfig(
-        level=logging.INFO,
-        format=f"[Worker-{worker_id}-{os.getpid()}] %(levelname)-5s - %(message)s (%(module)s:%(lineno)d)",
-        force=True,
-    )
-    logger = logging.getLogger(__name__)
+    worker_log_format = f"%(asctime)s - %(name)s[W{worker_id}/%(process)d] - %(funcName)s - %(levelname)s - %(message)s"
+    setup_logging(level=http_config.log_level, format_string=worker_log_format)
 
     # Install uvloop which also enables it
     import uvloop
@@ -93,19 +89,148 @@ def worker_main(
             http_config=http_config,
             aiohttp_config=aiohttp_config,
             zmq_config=zmq_config,
-            request_socket_addr=request_queue_addr,
-            response_socket_addr=response_queue_addr,
-            readiness_socket_addr=readiness_queue_addr,
         )
 
         # Run event loop
         uvloop.run(worker.run())
 
     except Exception as e:
-        logger.error(
-            f"Worker {worker_id} crashed: {type(e).__name__}: {str(e)}\n{traceback.format_exc()}"
-        )
+        logger.error(f"Crashed: {type(e).__name__}: {str(e)}\n{traceback.format_exc()}")
         sys.exit(1)
+
+
+class OpenAISSEAccumulator:
+    def __init__(self, query_id: str, stream_all_chunks: bool):
+        self.output_chunks = []
+        self.reasoning_chunks = []
+
+        self.first_chunk_sent = False
+        self.query_id = query_id
+        self.stream_all_chunks = stream_all_chunks
+
+    def add_chunk(self, delta: OpenAISSEDelta) -> StreamChunk | None:
+        if not isinstance(delta, OpenAISSEDelta):
+            return None
+
+        content = None
+        if delta.content:
+            self.output_chunks.append(delta.content)
+            content = delta.content
+        elif delta.reasoning:
+            self.reasoning_chunks.append(delta.reasoning)
+            content = delta.reasoning
+        else:
+            logger.debug("empty SSE delta")
+            return None
+
+        if content is not None and (
+            self.stream_all_chunks or not self.first_chunk_sent
+        ):
+            return StreamChunk(
+                id=self.query_id,
+                response_chunk=content,
+                is_complete=False,
+                metadata={
+                    "first_chunk": not self.first_chunk_sent,
+                    "final_chunk": False,
+                },
+            )
+        else:
+            return None
+
+    def get_final_output(self) -> QueryResult:
+        response_output = {"output": []}
+        if self.reasoning_chunks:
+            # If there are reasoning chunks, then the first chunk received
+            # is the first reasoning chunk. The rest of the reasoning chunks,
+            # as well as the output chunks can be joined together.
+            resp_reasoning = [self.reasoning_chunks[0]]
+            if len(self.reasoning_chunks) > 1:
+                resp_reasoning.append("".join(self.reasoning_chunks[1:]))
+
+            response_output = {
+                "output": "".join(self.output_chunks),
+                "reasoning": resp_reasoning,
+            }
+        elif self.output_chunks:
+            # If there are only output chunks, the first chunk is the used for
+            # TTFT calculations. The rest are joined together.
+            resp_output = [self.output_chunks[0]]
+            if len(self.output_chunks) > 1:
+                resp_output.append("".join(self.output_chunks[1:]))
+
+            response_output = {
+                "output": resp_output,
+            }
+        return QueryResult(
+            id=self.query_id,
+            response_output=response_output,
+            metadata={
+                "first_chunk": not self.first_chunk_sent,
+                "final_chunk": True,
+            },
+        )
+
+
+class SGLangSSEAccumulator:
+    def __init__(self, query_id: str, stream_all_chunks: bool):
+        self.text = ""
+        self.token_ids = []
+        self.total_tokens = 0
+        self.retraction_occurred = False
+
+        self.first_chunk_sent = False
+        self.query_id = query_id
+        self.stream_all_chunks = stream_all_chunks
+
+    def add_chunk(self, delta: SGLangSSEDelta) -> StreamChunk | None:
+        if not isinstance(delta, SGLangSSEDelta):
+            return None
+
+        if delta.total_completion_tokens == self.total_tokens:
+            return None
+
+        # In SGLang /generate, the .text field is the total accumulated text, not
+        # a difference, so we'll need to compute the diff for the StreamChunk
+        content_diff = ""
+        if len(delta.text) > (start_idx := len(self.text)):
+            content_diff = delta.text[start_idx:]
+        self.text = delta.text
+        self.token_ids.extend(delta.token_delta)
+        self.total_tokens = delta.total_completion_tokens
+        if delta.has_retractions:
+            # For now, we won't be handling retractions if they occur, but we will
+            # report it as part of the metadata if it does happen.
+            self.retraction_occurred = True
+
+        if content_diff and (self.stream_all_chunks or not self.first_chunk_sent):
+            metadata = {
+                "first_chunk": not self.first_chunk_sent,
+                "final_chunk": False,
+                "retraction_occurred": delta.has_retractions,
+                "n_tokens": len(delta.token_ids),
+            }
+            return StreamChunk(
+                id=self.query_id,
+                response_chunk=content_diff,
+                is_complete=False,
+                metadata=metadata,
+            )
+        else:
+            return None
+
+    def get_final_output(self) -> QueryResult:
+        return QueryResult(
+            id=self.query_id,
+            response_output=self.text,
+            metadata={
+                "first_chunk": not self.first_chunk_sent,
+                "final_chunk": True,
+                "retraction_occurred": self.retraction_occurred,
+                "n_tokens": self.total_tokens,
+                "token_ids": self.token_ids,
+            },
+        )
 
 
 class Worker:
@@ -117,18 +242,12 @@ class Worker:
         http_config: HTTPClientConfig,
         aiohttp_config: AioHttpConfig,
         zmq_config: ZMQConfig,
-        request_socket_addr: str,
-        response_socket_addr: str,
-        readiness_socket_addr: str,
     ):
-        """Initialize worker with configurations and ZMQ addresses."""
+        """Initialize worker with configurations."""
         self.worker_id = worker_id
         self.http_config = http_config
         self.aiohttp_config = aiohttp_config
         self.zmq_config = zmq_config
-        self.request_socket_addr = request_socket_addr
-        self.response_socket_addr = response_socket_addr
-        self.readiness_socket_addr = readiness_socket_addr
         self._shutdown = False
 
         self._zmq_context: zmq.asyncio.Context | None = None
@@ -148,20 +267,30 @@ class Worker:
     async def run(self) -> None:
         """Main worker loop - pull requests, execute, push responses."""
         try:
+            # Derive socket addresses from zmq_config
+            request_socket_addr = (
+                f"{self.zmq_config.zmq_request_queue_prefix}_{self.worker_id}_requests"
+            )
+            logger.debug("Request Socket Addr: %s", request_socket_addr)
+            response_socket_addr = self.zmq_config.zmq_response_queue_addr
+            logger.debug("Response Socket Addr: %s", response_socket_addr)
+            readiness_socket_addr = self.zmq_config.zmq_readiness_queue_addr
+            logger.debug("Readiness Socket Addr: %s", readiness_socket_addr)
+
             # Initialize ZMQ context and sockets
             self._zmq_context = zmq.asyncio.Context()
             self._request_socket = ZMQPullSocket(
                 self._zmq_context,
-                self.request_socket_addr,
+                request_socket_addr,
                 self.zmq_config,
                 bind=True,
                 decoder_type=Query,
             )
             self._response_socket = ZMQPushSocket(
-                self._zmq_context, self.response_socket_addr, self.zmq_config
+                self._zmq_context, response_socket_addr, self.zmq_config
             )
             self._readiness_socket = ZMQPushSocket(
-                self._zmq_context, self.readiness_socket_addr, self.zmq_config
+                self._zmq_context, readiness_socket_addr, self.zmq_config
             )
 
             # Create TCP connector
@@ -185,12 +314,10 @@ class Worker:
 
             # Send readiness signal only after successful initialization
             await self._readiness_socket.send(self.worker_id)
-            logger.info(f"Worker {self.worker_id} started and ready")
+            logger.debug("Started and ready")
 
         except Exception as e:
-            logger.error(
-                f"Worker {self.worker_id} failed to initialize: {type(e).__name__}: {str(e)}"
-            )
+            logger.error(f"Failed to initialize: {type(e).__name__}: {str(e)}")
             # Exit with error code to signal failure to parent process
             sys.exit(1)
         finally:
@@ -203,21 +330,19 @@ class Worker:
                 pid = os.getpid()
                 worker_db_name = f"worker_report_{self.worker_id}_{pid}"
                 report_path = self.http_config.event_logs_dir / f"{worker_db_name}.csv"
-                logger.info(f"About to generate report {self.worker_id}")
+                logger.debug("About to generate report")
                 with EventRecorder(session_id=worker_db_name) as event_recorder:
                     await self._main_loop()
                     event_recorder.wait_for_writes(force_commit=True)
                     with MetricsReporter(event_recorder.connection_name) as reporter:
-                        logger.info(f"About to dump worker report to {report_path}")
+                        logger.debug(f"About to dump report to {report_path}")
                         reporter.dump_all_to_csv(report_path)
-                        logger.info(f"Worker report dumped to {report_path}")
+                        logger.debug(f"Report dumped to {report_path}")
             else:
                 # No logging, just run the main loop
                 await self._main_loop()
         except Exception as e:
-            logger.error(
-                f"Error in worker {self.worker_id}: {type(e).__name__}: {str(e)}"
-            )
+            logger.error(f"Error: {type(e).__name__}: {str(e)}")
 
         finally:
             # Cleanup
@@ -228,6 +353,7 @@ class Worker:
         """Main processing loop - continuously pull and process requests."""
         while not self._shutdown:
             try:
+                # TODO(vir): re-do work-consumer loop to leverage built-in zmq load-balancing
                 # Pull query from queue with timeout
                 query = await self._request_socket.receive()
 
@@ -242,21 +368,20 @@ class Worker:
                         sample_uuid=query.id,
                         assert_active=True,
                     )
-                # Process query asynchronously and track the task
-                task = asyncio.create_task(self._process_request(query))
-                self._active_tasks.add(task)
 
-                # Remove task from active set when it completes
-                task.add_done_callback(self._active_tasks.discard)
+                # Create async-task to process request concurrently
+                task = asyncio.create_task(self._process_request(query))
+
+                # Record task to prevent garbage collection during execution
+                # Task removes itself from set in _process_request's finally block
+                self._active_tasks.add(task)
 
             except asyncio.CancelledError:
                 break
 
             except Exception as e:
                 # Don't exit on errors in the main loop, just log and continue
-                logger.error(
-                    f"Worker {self.worker_id} error in main loop: {type(e).__name__}: {str(e)}"
-                )
+                logger.error(f"Error in main loop: {type(e).__name__}: {str(e)}")
 
     async def _handle_error(self, query_id: str, error: Exception | str) -> None:
         """Send error response for a query."""
@@ -265,7 +390,7 @@ class Worker:
         if self._shutdown or not self._response_socket:
             return
 
-        error_message = str(error) if isinstance(error, Exception) else error
+        error_message = repr(error) if isinstance(error, Exception) else error
         error_response = QueryResult(
             id=query_id,
             response_output=None,
@@ -303,14 +428,8 @@ class Worker:
             return
 
         url = self.http_config.endpoint_url
-        headers = (
-            query.headers
-            if hasattr(query, "headers") and len(query.headers) > 0
-            else {"content-type": "application/json"}
-        )
-
-        logging.debug(
-            f"Making HTTP request to {url} with query: {query} and headers: {headers}"
+        logger.debug(
+            f"Making HTTP request to {url} with query: {query} and headers: {query.headers}"
         )
 
         # Encode query to bytes using adapter
@@ -327,14 +446,14 @@ class Worker:
             )
 
         async with self._session.post(
-            url, data=payload_bytes, headers=headers
+            url, data=payload_bytes, headers=query.headers
         ) as response:
             if response.status != 200:
                 error_text = await response.text()
                 await self._handle_error(
                     query.id, f"HTTP {response.status}: {error_text}"
                 )
-                logger.error(f"Request {query.id} failed with HTTP Error: {error_text}")
+                logger.error(f"Request {query.id} failed: HTTP {error_text}")
                 return
             logger.debug(f"HTTP Response: {response}")
             yield response
@@ -358,6 +477,12 @@ class Worker:
 
         except Exception as e:
             await self._handle_error(query.id, e)
+
+        finally:
+            # Clean up task reference to prevent memory leak (~850 MB per 1M tasks).
+            # This is faster than using add_done_callback to remove from set
+            # since it avoids an extra yield -> function-call per task
+            self._active_tasks.discard(asyncio.current_task())
 
     @profile
     async def _iter_sse_lines(
@@ -403,55 +528,22 @@ class Worker:
     @profile
     async def _handle_streaming_request(self, query: Query) -> None:
         """Handle streaming response."""
+        if self.http_config.api_type == APIType.SGLANG:
+            accumulator_type = SGLangSSEAccumulator
+        else:
+            # Default to OpenAI compatible adapter
+            accumulator_type = OpenAISSEAccumulator
+
         async for response in self._make_http_request(query):
-            output_chunks = []
-            reasoning_chunks = []
-            first_chunk_sent = False
+            accumulator = accumulator_type(query.id, self.http_config.stream_all_chunks)
 
             # Process SSE stream - yields batches of chunks
             async for chunk_batch in self._iter_sse_lines(response):
-                output_delta = []
-                reasoning_delta = []
                 for delta in chunk_batch:
-                    if delta.content:
-                        output_delta.append(delta.content)
-                    elif delta.reasoning:
-                        reasoning_delta.append(delta.reasoning)
-                    else:
-                        logger.debug("empty SSE delta")
-                        continue
+                    if stream_chunk := accumulator.add_chunk(delta):
+                        await self._response_socket.send(stream_chunk)
+                        accumulator.first_chunk_sent = True
 
-                for delta_batch, accumulator in (
-                    (reasoning_delta, reasoning_chunks),
-                    (output_delta, output_chunks),
-                ):
-                    if not delta_batch:
-                        continue
-                    accumulator.extend(delta_batch)
-
-                    # Determine which chunks to send: all or just first
-                    chunks_to_send = (
-                        delta_batch
-                        if self.http_config.stream_all_chunks
-                        else delta_batch[:1]
-                        if not first_chunk_sent
-                        else []
-                    )
-
-                    # Send chunks
-                    for content in chunks_to_send:
-                        await self._response_socket.send(
-                            StreamChunk(
-                                id=query.id,
-                                response_chunk=content,
-                                is_complete=False,
-                                metadata={
-                                    "first_chunk": not first_chunk_sent,
-                                    "final_chunk": False,
-                                },
-                            )
-                        )
-                        first_chunk_sent = True
                         if self.http_config.record_worker_events:
                             EventRecorder.record_event(
                                 SampleEvent.ZMQ_RESPONSE_SENT,
@@ -460,37 +552,7 @@ class Worker:
                                 assert_active=True,
                             )
 
-            # Send final complete response
-            if reasoning_chunks:
-                # If there are reasoning chunks, then the first chunk received
-                # is the first reasoning chunk. The rest of the reasoning chunks,
-                # as well as the output chunks can be joined together.
-                resp_reasoning = [reasoning_chunks[0]]
-                if len(reasoning_chunks) > 1:
-                    resp_reasoning.append("".join(reasoning_chunks[1:]))
-                response_output = {
-                    "output": "".join(output_chunks),
-                    "reasoning": resp_reasoning,
-                }
-            elif output_chunks:
-                # If there are only output chunks, the first chunk is the used for
-                # TTFT calculations. The rest are joined together.
-                resp_output = [output_chunks[0]]
-                if len(output_chunks) > 1:
-                    resp_output.append("".join(output_chunks[1:]))
-                response_output = {
-                    "output": resp_output,
-                }
-            else:
-                response_output = {"output": []}
-
-            await self._response_socket.send(
-                QueryResult(
-                    id=query.id,
-                    response_output=response_output,
-                    metadata={"first_chunk": not first_chunk_sent, "final_chunk": True},
-                )
-            )
+            await self._response_socket.send(accumulator.get_final_output())
             if self.http_config.record_worker_events:
                 EventRecorder.record_event(
                     SampleEvent.ZMQ_RESPONSE_SENT,
@@ -520,23 +582,22 @@ class Worker:
 
     async def _cleanup(self) -> None:
         """Clean up resources."""
+        # Cancel pending tasks to drop HTTP requests
+        if not_done := len(self._active_tasks):
+            [task.cancel() for task in self._active_tasks]
+            await asyncio.gather(*self._active_tasks, return_exceptions=True)
+            self._active_tasks.clear()
+            logger.debug(f"Cancelled {not_done} pending requests.")
+
         # Close aiohttp session
         if self._session:
             await self._session.close()
-
-        # Cancel and clear active tasks
-        logger.info(
-            f"Worker {self.worker_id} will cancel {len(self._active_tasks)} tasks and cleanup."
-        )
-        for task in self._active_tasks:
-            task.cancel()
-        self._active_tasks.clear()
 
         # Close TCP connector
         if self.tcp_connector:
             await self.tcp_connector.close()
 
-        # Close ZMQ sockets (readiness socket already closed after initialization)
+        # Close ZMQ sockets
         for socket in (self._request_socket, self._response_socket):
             if socket:
                 socket.close()
@@ -575,8 +636,9 @@ class WorkerManager:
             bind=True,
         )
 
+        initialization_succeeded = False
         try:
-            logger.info(f"Starting {self.http_config.num_workers} worker processes")
+            logger.debug(f"Starting {self.http_config.num_workers} worker processes")
 
             # Spawn worker processes
             for i in range(self.http_config.num_workers):
@@ -603,7 +665,8 @@ class WorkerManager:
                 wait_for_all_workers(),
                 timeout=self.http_config.worker_initialization_timeout,
             )
-            logger.info(f"{ready_count}/{self.http_config.num_workers} workers ready")
+            logger.debug(f"{ready_count}/{self.http_config.num_workers} workers ready")
+            initialization_succeeded = True
         except TimeoutError as e:
             raise TimeoutError(
                 f"Workers failed to initialize within {self.http_config.worker_initialization_timeout} seconds."
@@ -611,16 +674,15 @@ class WorkerManager:
         finally:
             # Close readiness socket
             readiness_socket.close()
+            # Shutdown any spawned workers on error/interrupt
+            if not initialization_succeeded and self.workers:
+                await self.shutdown()
 
     def _spawn_worker(self, worker_id: int) -> Process:
         """Spawn a single worker process."""
-        request_queue_addr = (
-            f"{self.zmq_config.zmq_request_queue_prefix}_{worker_id}_requests"
-        )
-        response_queue_addr = self.zmq_config.zmq_response_queue_addr
-        readiness_queue_addr = self.zmq_config.zmq_readiness_queue_addr
-
-        # Create worker process
+        # Create worker process as daemon.
+        # 1. Automatic Termination: No need to manually join/reap worker processes
+        # 2. Zombie Prevention: Relies on multiprocessing's internal atexit handler
         process = Process(
             target=worker_main,
             args=(
@@ -628,47 +690,35 @@ class WorkerManager:
                 self.http_config,
                 self.aiohttp_config,
                 self.zmq_config,
-                request_queue_addr,
-                response_queue_addr,
-                readiness_queue_addr,
             ),
-            daemon=False,
+            daemon=True,
         )
         process.start()
         return process
 
     async def shutdown(self) -> None:
-        """
-        Graceful shutdown of all workers with proper zombie reaping.
-
-        Zombie processes occur when a child dies but parent hasn't called join().
-        Without proper reaping, dead workers remain in the process table as zombies
-        with state 'Z'.
-        """
+        """Graceful shutdown of all workers."""
         self._shutdown_event.set()
 
-        # Send SIGTERM to alive workers
+        # Send SIGTERM to alive workers for graceful shutdown
         for worker in self.workers:
             if worker.is_alive():
-                worker.terminate()  # Send SIGTERM for graceful shutdown
-            else:
-                # Worker is already dead (possibly zombie) - reap immediately
-                worker.join(timeout=0.1)
+                worker.terminate()
 
-        # Wait for graceful shutdown to complete
+        # Wait for graceful shutdown
         await asyncio.sleep(self.http_config.worker_graceful_shutdown_wait)
 
-        # Force kill any remaining workers and ensure all are reaped
-        loop = asyncio.get_event_loop()
+        # Force kill any remaining workers
         for worker in self.workers:
             if worker.is_alive():
-                # Worker didn't respond to SIGTERM - force kill with SIGKILL
                 worker.kill()
-                # Run blocking join() in thread pool to avoid blocking event loop
-                # This reaps the forcefully killed worker
-                await loop.run_in_executor(
-                    None, worker.join, self.http_config.worker_force_kill_timeout
+
+        # Join all workers to ensure termination
+        await asyncio.gather(
+            *(
+                asyncio.to_thread(
+                    worker.join, timeout=self.http_config.worker_force_kill_timeout
                 )
-            else:
-                # Worker died during graceful shutdown - reap to prevent zombie
-                worker.join(timeout=0.1)
+                for worker in self.workers
+            )
+        )

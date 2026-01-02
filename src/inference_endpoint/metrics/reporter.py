@@ -387,15 +387,6 @@ class Report:
             return None
         return float(self.output_sequence_lengths["total"] / (self.duration_ns / 1e9))
 
-    @functools.cached_property
-    def e2e_sample_latency_sec(self) -> float:
-        """Calculates the end-to-end total latency across all samples in the test in seconds.
-
-        Returns:
-            The end-to-end total latency across all samples in the test in seconds.
-        """
-        return float(self.latency["total"] / 1e9)
-
     def to_json(self, save_to: os.PathLike | None = None) -> str:
         """Returns a JSON string representation of the report.
 
@@ -408,7 +399,6 @@ class Report:
         d = dataclasses.asdict(self)
         d["qps"] = self.qps
         d["tps"] = self.tps
-        d["e2e_sample_latency_sec"] = self.e2e_sample_latency_sec
         json_str = orjson.dumps(
             d, option=orjson.OPT_INDENT_2 | orjson.OPT_SORT_KEYS
         ).decode("utf-8")
@@ -477,24 +467,25 @@ class Report:
     def display(
         self,
         fn: Callable[[str], None] = print,
-        show_e2e_sample_latency: bool = False,
     ) -> None:
         """Displays the report in a human-readable format.
 
         Args:
             fn: The function to call to print a string, such as logging.info, file.write, etc. (Default: `print`)
-            show_e2e_sample_latency: Whether to show the end-to-end sample latency. (Default: False)
         """
 
         fn("----------------- Summary -----------------")
         fn(f"Total samples issued: {self.n_samples_issued}")
         fn(f"Total samples completed: {self.n_samples_completed}")
-        fn(f"Duration: {self.duration_ns / 1e9:.2f} seconds")
-        if show_e2e_sample_latency:
-            fn(
-                f"Total time spent waiting on samples: {self.e2e_sample_latency_sec} seconds"
-            )
-        fn(f"QPS: {self.qps:.2f}")
+        if self.duration_ns is not None:
+            fn(f"Duration: {self.duration_ns / 1e9:.2f} seconds")
+        else:
+            fn("Duration: N/A (no performance samples were issued)")
+
+        if self.qps is not None:
+            fn(f"QPS: {self.qps:.2f}")
+        else:
+            fn("QPS: N/A (no performance samples were issued)")
 
         if self.tps is not None:
             fn(f"TPS: {self.tps:.2f}")
@@ -728,62 +719,119 @@ class MetricsReporter:
             writer.writerows(rows)
             logging.debug(f"Written rows {len(rows)} to {csv_path}")
 
-    def derive_duration(self) -> float:
+    def derive_duration(self, check_malformed: bool = True) -> float | None:
         """Calculates the total test duration.
 
-        If STOP_PERFORMANCE_TRACKING event exists, uses STOP_PERFORMANCE_TRACKING - TEST_STARTED.
-        Otherwise, defaults to TEST_ENDED - TEST_STARTED.
+        If STOP_PERFORMANCE_TRACKING event exists:
+            - This method will return T_(last_perf_sample) - T_(test_started) where:
+                - T_(test_started) is the timestamp of the TEST_STARTED event and
+                - T_(last_perf_sample) is the timestamp of the latest COMPLETE event present
+                  whose sample_uuid has a corresponding LOADGEN_ISSUE_CALLED event before
+                  the STOP_PERFORMANCE_TRACKING event.
+            - If for some reason, no samples were issued before the STOP_PERFORMANCE_TRACKING event,
+              such as in the case of running an accuracy-only test, then this method will return None.
+
+        If STOP_PERFORMANCE_TRACKING does not exist:
+            - This method will return the max(timestamp_ns) - T_(test_started) where:
+                - T_(test_started) is the timestamp of the TEST_STARTED event and
+                - max(timestamp_ns) is the largest timestamp_ns in the events database.
+            - An error is raised if TEST_ENDED is present, but not the event associated with max(timestamp_ns)
+
+        If `check_malformed` is False, no checks for the error-conditions above are performed. This is useful
+        to in cases where the latency of this method matters, and we would like to avoid executing extra queries.
+        In this case, the caller can periodically set check_malformed to True to perform verification in intervals.
+
+        Args:
+            check_malformed: Whether to check for malformed events. (Default: True)
+
+        Raises:
+            RuntimeError: If TEST_STARTED is not present or occurs more than once
+            RuntimeError: If TEST_ENDED exists but is not the maximum timestamp_ns
+            RuntimeError: If more than one TEST_ENDED event exists
 
         Returns:
-            float: The duration in nanoseconds.
+            float: The duration in nanoseconds, None if no performance samples were issued.
         """
-        n_time_bounds = self.cur_.execute(f"""
-        SELECT
-            COUNT(DISTINCT CASE WHEN event_type = '{SessionEvent.TEST_STARTED.value}' THEN timestamp_ns END) AS n_starts,
-            COUNT(DISTINCT CASE WHEN event_type = '{SessionEvent.TEST_ENDED.value}' THEN timestamp_ns END) AS n_ends
+        # Validate TEST_STARTED exists exactly once
+        test_started_result = self.cur_.execute(f"""
+        SELECT COUNT(*) AS n_starts, MAX(timestamp_ns) AS start_ts
         FROM events
+        WHERE event_type = '{SessionEvent.TEST_STARTED.value}'
         """).fetchone()
-        if n_time_bounds != (1, 1):
+
+        n_test_started = test_started_result[0]
+        test_started_ts = test_started_result[1]
+
+        # Return None early if no TEST_STARTED event to avoid errors in duration calculations
+        if test_started_ts is None or n_test_started == 0:
+            if check_malformed:
+                raise RuntimeError("TEST_STARTED event not found in database")
+            return None
+
+        if check_malformed and n_test_started > 1:
             raise RuntimeError(
-                f"Multiple TEST_STARTED or TEST_ENDED events found - {n_time_bounds[0]} START events, {n_time_bounds[1]} END events"
+                f"Multiple TEST_STARTED events found - {n_test_started} events"
             )
 
         # Check if STOP_PERFORMANCE_TRACKING event exists
         stop_ts = self.stop_performance_tracking_timestamp_ns
 
         if stop_ts != float("inf"):
-            # Use STOP_PERFORMANCE_TRACKING - TEST_STARTED
-            result = self.cur_.execute(f"""
-            SELECT
-                MAX(CASE WHEN event_type = '{SessionEvent.TEST_STARTED.value}' THEN timestamp_ns END) AS start_ts
+            # Build list of sample_uuids with LOADGEN_ISSUE_CALLED before stop_ts
+            # Then find the max timestamp_ns of any event from those sample_uuids
+            max_perf_ts_result = self.cur_.execute(f"""
+            SELECT MAX(timestamp_ns) AS max_perf_ts
             FROM events
-            WHERE event_type = '{SessionEvent.TEST_STARTED.value}'
+            WHERE sample_uuid IN (
+                SELECT DISTINCT sample_uuid
+                FROM events
+                WHERE event_type = '{SessionEvent.LOADGEN_ISSUE_CALLED.value}'
+                AND timestamp_ns < {stop_ts}
+            )
+            AND event_type = '{SampleEvent.COMPLETE.value}'
             """).fetchone()
 
-            if result is None or result[0] is None:
-                return None  # Test did not start, return None
+            max_perf_ts = max_perf_ts_result[0]
+            if max_perf_ts is None:
+                # No samples were issued before stop_ts
+                return None
 
-            return float(stop_ts - result[0])
+            return float(max_perf_ts - test_started_ts)
         else:
-            # Default to TEST_ENDED - TEST_STARTED
-            # Must have a dummy sample_uuid column, as RollupQueryTable uses it as a primary key
-            rollup = self.derive_metric(
-                f"""
-                SELECT
-                    '' as sample_uuid,
-                    MAX(CASE WHEN event_type = '{SessionEvent.TEST_ENDED.value}' THEN timestamp_ns END) -
-                    MAX(CASE WHEN event_type = '{SessionEvent.TEST_STARTED.value}' THEN timestamp_ns END) AS duration
+            # No STOP_PERFORMANCE_TRACKING, use max timestamp_ns in database
+            # Get max timestamp in database
+            max_ts_result = self.cur_.execute("""
+            SELECT MAX(timestamp_ns) AS max_ts
+            FROM events
+            """).fetchone()
+            max_ts = max_ts_result[0]
+
+            if check_malformed:
+                # Validate TEST_ENDED constraints
+                test_ended_result = self.cur_.execute(f"""
+                SELECT COUNT(*) AS n_ends, MAX(timestamp_ns) AS end_ts
                 FROM events
-                WHERE event_type IN ('{SessionEvent.TEST_STARTED.value}', '{SessionEvent.TEST_ENDED.value}')
-                HAVING COUNT(DISTINCT event_type) = 2
-                """,
-                "duration",
-            )
-            if len(rollup) == 0:
-                return None  # Test did not complete, return None
-            elif len(rollup) > 1:
-                raise RuntimeError("Malformed query result - Only 1 row expected")
-            return rollup[0].metric_value
+                WHERE event_type = '{SessionEvent.TEST_ENDED.value}'
+                """).fetchone()
+
+                n_test_ended = test_ended_result[0]
+                test_ended_ts = test_ended_result[1]
+
+                if n_test_ended > 1:
+                    raise RuntimeError(
+                        f"Multiple TEST_ENDED events found - {n_test_ended} events"
+                    )
+
+                # If TEST_ENDED exists, it must be the maximum timestamp
+                if n_test_ended == 1 and test_ended_ts != max_ts:
+                    raise RuntimeError(
+                        f"TEST_ENDED exists (timestamp_ns={test_ended_ts}) but is not the maximum timestamp in database (max={max_ts})"
+                    )
+
+            if max_ts is None:
+                return None
+
+            return float(max_ts - test_started_ts)
 
     def derive_sample_latency(self) -> RollupQueryTable:
         """Calculates the end-to-end latency for each sample from issue to completion.
@@ -1072,20 +1120,13 @@ class MetricsReporter:
             self.cur_.close()
         self.conn.close()
 
-    def dump_to_csv(self, csv_path: Path):
-        """Dumps all events to a CSV file, including decoded output data from the 'data' column."""
-        with csv_path.open("w") as f:
-            writer = csv.writer(f)
-            writer.writerow(
-                [
-                    "sample_uuid",
-                    "event_type",
-                    "timestamp_ns",
-                    "approx_datetime_str",
-                    "value",
-                ]
-            )
+    def dump_to_json(self, json_path: Path):
+        """
+        Dumps all events to a JSONL file, including decoded output data from the 'data' column.
+        Each line in the output file is a valid JSON object.
+        """
 
+        with json_path.open("w", encoding="utf-8", newline="") as f:
             query_result = self.cur_.execute(
                 "SELECT sample_uuid, event_type, timestamp_ns, data FROM events"
             )
@@ -1126,14 +1167,19 @@ class MetricsReporter:
 
                     approx_datetime_str = monotime_to_datetime(timestamp_ns).isoformat()
 
-                    writer.writerow(
-                        [
-                            sample_uuid,
-                            event_type,
-                            timestamp_ns,
-                            approx_datetime_str,
-                            value,
-                        ]
+                    json_obj = {
+                        "sample_uuid": sample_uuid,
+                        "event_type": event_type,
+                        "timestamp_ns": timestamp_ns,
+                        "approx_datetime_str": approx_datetime_str,
+                        "value": value,
+                    }
+                    # Use orjson.dumps for each line
+                    f.write(
+                        orjson.dumps(json_obj, option=orjson.OPT_SORT_KEYS).decode(
+                            "utf-8"
+                        )
+                        + "\n"
                     )
 
     def __enter__(self):

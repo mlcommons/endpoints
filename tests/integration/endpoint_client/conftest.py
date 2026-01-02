@@ -15,40 +15,69 @@
 
 """Shared fixtures for endpoint client integration tests."""
 
-import pytest_asyncio
+from pathlib import Path
+
+import pytest
+from inference_endpoint.endpoint_client.configs import (
+    AioHttpConfig,
+    HTTPClientConfig,
+    ZMQConfig,
+)
 
 from tests.futures_client import FuturesHttpClient
+from tests.test_helpers import get_test_socket_path
 
 
-@pytest_asyncio.fixture
-async def futures_http_client(request):
-    """Fixture that creates, starts, and manages a FuturesHttpClient instance.
+def create_futures_client(
+    url: str,
+    tmp_path: Path,
+    prefix: str,
+    num_workers: int = 1,
+) -> FuturesHttpClient:
+    """Helper to create a FuturesHttpClient with specific config.
 
-    This fixture expects the test to provide configs via a `client_config` fixture
-    that returns (http_config, aiohttp_config, zmq_config).
+    Args:
+        url: The endpoint URL to connect to
+        tmp_path: pytest tmp_path fixture for creating unique socket paths
+        prefix: Unique prefix for socket paths (typically test name)
+        num_workers: Number of worker processes (default: 1)
 
-    Usage in test class:
-        @pytest.fixture
-        def client_config(self, mock_http_echo_server, tmp_path):
-            http_config = HTTPClientConfig(...)
-            aiohttp_config = AioHttpConfig()
-            zmq_config = ZMQConfig(...)
-            return http_config, aiohttp_config, zmq_config
-
-        async def test_something(self, futures_http_client):
-            # Client is already started and ready to use
-            future = await futures_http_client.issue_query(query)
+    Returns:
+        FuturesHttpClient: Configured client ready to use
     """
-    # Get the client_config fixture from the test
-    http_config, aiohttp_config, zmq_config = request.getfixturevalue("client_config")
+    http_config = HTTPClientConfig(
+        endpoint_url=url,
+        num_workers=num_workers,
+    )
 
-    # Create client with running event loop
-    client = FuturesHttpClient(http_config, aiohttp_config, zmq_config)
+    zmq_kwargs = {
+        "zmq_request_queue_prefix": get_test_socket_path(tmp_path, prefix, "_req"),
+        "zmq_response_queue_addr": get_test_socket_path(tmp_path, prefix, "_resp"),
+        "zmq_readiness_queue_addr": get_test_socket_path(tmp_path, prefix, "_ready"),
+    }
 
-    try:
-        # Start the client
-        await client.async_start()
-        # Yield to test
-        yield client
-    finally:
-        await client.async_shutdown()
+    zmq_config = ZMQConfig(**zmq_kwargs)
+    aiohttp_config = AioHttpConfig()
+
+    return FuturesHttpClient(http_config, aiohttp_config, zmq_config)
+
+
+@pytest.fixture
+def futures_http_client(mock_http_echo_server, tmp_path):
+    """Fixture that creates and manages a FuturesHttpClient instance.
+
+    Uses mock_http_echo_server with default configuration.
+    Automatically handles client shutdown after test completes.
+
+    Usage:
+        async def test_something(self, futures_http_client):
+            future = futures_http_client.issue_query(query)
+            result = await asyncio.wrap_future(future)
+    """
+    client = create_futures_client(
+        url=f"{mock_http_echo_server.url}/v1/chat/completions",
+        tmp_path=tmp_path,
+        prefix="futures_client",
+    )
+    yield client
+    client.shutdown()

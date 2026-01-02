@@ -42,6 +42,7 @@ metrics:
 endpoint_config:
   endpoint: "http://localhost:8000"
   api_key: null
+  api_type: "openai" # Options: openai or sglang
 # How this differs from Poisson mode:
 # - Poisson: Fixed QPS target, concurrency varies based on latency
 # - Concurrency: Fixed N requests in-flight, QPS varies based on latency

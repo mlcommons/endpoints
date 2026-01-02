@@ -101,7 +101,7 @@ def test_derive_duration(events_db):
 
 def test_derive_duration_malformed(tmp_path):
     test_db_path = str(tmp_path / "bad_events.db")
-    with sqlite3_cursor(test_db_path) as (cursor, _):
+    with sqlite3_cursor(test_db_path) as (cursor, conn):
         cursor.execute(
             "CREATE TABLE IF NOT EXISTS events (sample_uuid VARCHAR(32), event_type VARCHAR(32), timestamp_ns INTEGER, data BLOB)"
         )
@@ -114,12 +114,101 @@ def test_derive_duration_malformed(tmp_path):
                 ("", SessionEvent.TEST_ENDED.value, 12000, b""),
             ],
         )
+        conn.commit()
 
-    with MetricsReporter(test_db_path) as reporter:
-        with pytest.raises(
-            RuntimeError, match="Multiple TEST_STARTED or TEST_ENDED events found"
-        ):
+    with pytest.raises(
+        RuntimeError, match=r"Multiple .*TEST_.* events found - 2 events"
+    ):
+        with MetricsReporter(test_db_path) as reporter:
             reporter.derive_duration()
+
+
+def test_derive_duration_multiple_starts_check_malformed_false(tmp_path):
+    """Test that derive_duration doesn't raise error for multiple TEST_STARTED when check_malformed=False."""
+    test_db_path = str(tmp_path / "multiple_starts.db")
+    with sqlite3_cursor(test_db_path) as (cursor, conn):
+        cursor.execute(
+            "CREATE TABLE IF NOT EXISTS events (sample_uuid VARCHAR(32), event_type VARCHAR(32), timestamp_ns INTEGER, data BLOB)"
+        )
+        cursor.executemany(
+            "INSERT INTO events (sample_uuid, event_type, timestamp_ns, data) VALUES (?, ?, ?, ?)",
+            [
+                ("", SessionEvent.TEST_STARTED.value, 5000, b""),
+                ("", SessionEvent.TEST_STARTED.value, 6000, b""),  # Duplicate start
+                ("", SessionEvent.TEST_ENDED.value, 10300, b""),
+            ],
+        )
+        conn.commit()
+
+    # Should not raise when check_malformed=False
+    with MetricsReporter(test_db_path) as reporter:
+        duration = reporter.derive_duration(check_malformed=False)
+
+    # Should use max(TEST_STARTED) which is 6000
+    assert duration == 10300 - 6000
+
+
+def test_derive_duration_multiple_ends_check_malformed_false(tmp_path):
+    """Test that derive_duration doesn't raise error for multiple TEST_ENDED when check_malformed=False."""
+    test_db_path = str(tmp_path / "multiple_ends.db")
+    with sqlite3_cursor(test_db_path) as (cursor, conn):
+        cursor.execute(
+            "CREATE TABLE IF NOT EXISTS events (sample_uuid VARCHAR(32), event_type VARCHAR(32), timestamp_ns INTEGER, data BLOB)"
+        )
+        cursor.executemany(
+            "INSERT INTO events (sample_uuid, event_type, timestamp_ns, data) VALUES (?, ?, ?, ?)",
+            [
+                ("", SessionEvent.TEST_STARTED.value, 5000, b""),
+                ("", SessionEvent.TEST_ENDED.value, 10300, b""),
+                ("", SessionEvent.TEST_ENDED.value, 12000, b""),  # Duplicate end
+            ],
+        )
+        conn.commit()
+
+    # Should not raise when check_malformed=False
+    with MetricsReporter(test_db_path) as reporter:
+        duration = reporter.derive_duration(check_malformed=False)
+
+    # Should use max(timestamp_ns) which is 12000
+    assert duration == 12000 - 5000
+
+
+def test_derive_duration_test_ended_not_last_check_malformed_false(tmp_path):
+    """Test that derive_duration doesn't raise error when TEST_ENDED is not max timestamp and check_malformed=False."""
+    test_db_path = str(tmp_path / "test_ended_not_last.db")
+    with sqlite3_cursor(test_db_path) as (cursor, conn):
+        cursor.execute(
+            "CREATE TABLE IF NOT EXISTS events (sample_uuid VARCHAR(32), event_type VARCHAR(32), timestamp_ns INTEGER, data BLOB)"
+        )
+        cursor.executemany(
+            "INSERT INTO events (sample_uuid, event_type, timestamp_ns, data) VALUES (?, ?, ?, ?)",
+            [
+                ("", SessionEvent.TEST_STARTED.value, 5000, b""),
+                ("", SessionEvent.TEST_ENDED.value, 10300, b""),
+                (
+                    "some_uuid",
+                    SampleEvent.COMPLETE.value,
+                    15000,
+                    b"",
+                ),  # Event after TEST_ENDED
+            ],
+        )
+        conn.commit()
+
+    # Should raise when check_malformed=True (default)
+    with pytest.raises(
+        RuntimeError,
+        match=r"TEST_ENDED exists .* but is not the maximum timestamp in database",
+    ):
+        with MetricsReporter(test_db_path) as reporter:
+            reporter.derive_duration(check_malformed=True)
+
+    # Should not raise when check_malformed=False
+    with MetricsReporter(test_db_path) as reporter:
+        duration = reporter.derive_duration(check_malformed=False)
+
+    # Should use max(timestamp_ns) which is 15000
+    assert duration == 15000 - 5000
 
 
 def test_tpot_to_histogram(events_db, fake_outputs, tokenizer, sample_uuids):
@@ -232,7 +321,6 @@ def test_reporter_create_report(events_db, fake_outputs, tokenizer):
         assert k in report.tpot
         assert report.tpot[k] == expected
 
-    expected_e2e_latency_ns = (10211 - 10000) + (10219 - 10003)
     # QPS should be: completed_samples / (duration_ns / 1e9)
     expected_qps = report.n_samples_completed / (report.duration_ns / 1e9)
     assert report.qps == expected_qps
@@ -243,8 +331,6 @@ def test_reporter_create_report(events_db, fake_outputs, tokenizer):
             expected_total_tokens += len(tokenizer.tokenize(chunk))
     expected_tps = expected_total_tokens / ((10300 - 5000) / 1e9)
     assert report.tps == expected_tps
-
-    assert report.e2e_sample_latency_sec == expected_e2e_latency_ns / 1e9
 
 
 def test_reporter_json(events_db):
@@ -266,7 +352,6 @@ def test_reporter_json(events_db):
         "tpot_reporting_mode",
         "qps",
         "tps",
-        "e2e_sample_latency_sec",
     ]
     assert set(json_dict.keys()) == set(expected_keys)
     assert json_dict["n_samples_issued"] == report.n_samples_issued
@@ -274,7 +359,6 @@ def test_reporter_json(events_db):
     assert json_dict["duration_ns"] == report.duration_ns
     assert json_dict["qps"] == report.qps
     assert json_dict["tps"] == report.tps
-    assert json_dict["e2e_sample_latency_sec"] == report.e2e_sample_latency_sec
 
     # For ttft, tpot, and latency, JSON decode will only decode as lists, not tuples
     # This only matters in the histogram
@@ -359,6 +443,7 @@ def test_stop_performance_tracking_timestamp_missing(tmp_path):
 
     with MetricsReporter(test_db) as reporter:
         assert reporter.stop_performance_tracking_timestamp_ns == float("inf")
+        assert reporter.derive_duration() == 10300 - 5000
 
 
 def test_derive_ttft_with_stop_performance_tracking(tmp_path, sample_uuids):
@@ -443,7 +528,7 @@ def test_derive_sample_latency_with_stop_performance_tracking(tmp_path, sample_u
     assert latency_rows.filter_uuid(uuid3, only_first=True) is None
 
 
-def test_derive_duration_with_stop_performance_tracking(tmp_path):
+def test_derive_duration_with_stop_performance_tracking_no_samples(tmp_path):
     """Test that derive_duration uses STOP_PERFORMANCE_TRACKING timestamp when present."""
     test_db = str(tmp_path / "test_duration_stop_perf.db")
     with sqlite3_cursor(test_db) as (cursor, conn):
@@ -464,7 +549,120 @@ def test_derive_duration_with_stop_performance_tracking(tmp_path):
         duration = reporter.derive_duration()
 
     # Should use STOP_PERFORMANCE_TRACKING - TEST_STARTED (not TEST_ENDED - TEST_STARTED)
-    assert duration == 10100 - 5000
+    assert duration is None  # Default behavior - No perf test run.
+
+
+def test_derive_duration_with_stop_performance_tracking(tmp_path, sample_uuids):
+    """Test that derive_duration uses STOP_PERFORMANCE_TRACKING timestamp when present."""
+    test_db = str(tmp_path / "test_duration_stop_perf.db")
+    uuid1 = sample_uuids(1)
+    uuid2 = sample_uuids(2)
+    uuid3 = sample_uuids(3)
+
+    with sqlite3_cursor(test_db) as (cursor, conn):
+        cursor.execute(
+            "CREATE TABLE IF NOT EXISTS events (sample_uuid VARCHAR(32), event_type VARCHAR(32), timestamp_ns INTEGER, data BLOB)"
+        )
+        cursor.executemany(
+            "INSERT INTO events (sample_uuid, event_type, timestamp_ns, data) VALUES (?, ?, ?, ?)",
+            [
+                ("", SessionEvent.TEST_STARTED.value, 5000, b""),
+                (uuid1, SessionEvent.LOADGEN_ISSUE_CALLED.value, 10000, b""),
+                (uuid2, SessionEvent.LOADGEN_ISSUE_CALLED.value, 10003, b""),
+                (uuid1, SampleEvent.COMPLETE.value, 10211, b""),
+                (uuid3, SessionEvent.LOADGEN_ISSUE_CALLED.value, 10213, b""),
+                ("", SessionEvent.STOP_PERFORMANCE_TRACKING.value, 10216, b""),
+                (
+                    uuid2,
+                    SampleEvent.COMPLETE.value,
+                    10250,
+                    b"",
+                ),  # Intentionally out of order for test.
+                (uuid3, SampleEvent.COMPLETE.value, 10219, b""),
+                ("", SessionEvent.TEST_ENDED.value, 10300, b""),
+            ],
+        )
+        conn.commit()
+
+    with MetricsReporter(test_db) as reporter:
+        duration = reporter.derive_duration()
+
+    # Should use timestamp of uuid2's COMPLETE event - timestamp of TEST_STARTED event
+    assert duration == 10250 - 5000
+
+
+def test_derive_duration_all_samples_complete_after_stop_performance_tracking(
+    tmp_path, sample_uuids
+):
+    """Test derive_duration when samples are issued before but all complete after STOP_PERFORMANCE_TRACKING."""
+    test_db = str(tmp_path / "test_duration_all_complete_after_stop.db")
+    uuid1 = sample_uuids(1)
+    uuid2 = sample_uuids(2)
+    uuid3 = sample_uuids(3)
+
+    with sqlite3_cursor(test_db) as (cursor, conn):
+        cursor.execute(
+            "CREATE TABLE IF NOT EXISTS events (sample_uuid VARCHAR(32), event_type VARCHAR(32), timestamp_ns INTEGER, data BLOB)"
+        )
+        cursor.executemany(
+            "INSERT INTO events (sample_uuid, event_type, timestamp_ns, data) VALUES (?, ?, ?, ?)",
+            [
+                ("", SessionEvent.TEST_STARTED.value, 5000, b""),
+                (
+                    uuid1,
+                    SessionEvent.LOADGEN_ISSUE_CALLED.value,
+                    10000,
+                    b"",
+                ),  # Issued before stop
+                (
+                    uuid2,
+                    SessionEvent.LOADGEN_ISSUE_CALLED.value,
+                    10003,
+                    b"",
+                ),  # Issued before stop
+                (
+                    uuid3,
+                    SessionEvent.LOADGEN_ISSUE_CALLED.value,
+                    10010,
+                    b"",
+                ),  # Issued before stop
+                (
+                    "",
+                    SessionEvent.STOP_PERFORMANCE_TRACKING.value,
+                    10100,
+                    b"",
+                ),  # STOP marker
+                # All completions happen AFTER stop_ts
+                (
+                    uuid1,
+                    SampleEvent.COMPLETE.value,
+                    10211,
+                    b"",
+                ),  # Complete after stop
+                (
+                    uuid2,
+                    SampleEvent.COMPLETE.value,
+                    10252,
+                    b"",
+                ),  # Complete after stop
+                (
+                    uuid3,
+                    SampleEvent.COMPLETE.value,
+                    10219,
+                    b"",
+                ),  # Complete after stop
+                ("", SessionEvent.TEST_ENDED.value, 10300, b""),
+            ],
+        )
+        conn.commit()
+
+    with MetricsReporter(test_db) as reporter:
+        duration = reporter.derive_duration()
+
+    # Should use timestamp of the last COMPLETE event (uuid2 at 10250) - TEST_STARTED
+    # Since all samples were issued before STOP_PERFORMANCE_TRACKING, they all count,
+    # and duration is measured until the last one completes
+    assert duration == 10252 - 5000
 
 
 def test_derive_duration_without_stop_performance_tracking(tmp_path):
@@ -739,12 +937,53 @@ def test_create_report_with_stop_performance_tracking(
     assert report.n_samples_issued == 2  # Only uuid1 and uuid2
     assert report.n_samples_completed == 2
     assert (
-        report.duration_ns == 10150 - 5000
-    )  # STOP_PERFORMANCE_TRACKING - TEST_STARTED
+        report.duration_ns == 10219 - 5000
+    )  # timestamp of uuid2's COMPLETE event - timestamp of TEST_STARTED event
 
     # Verify QPS is based on the truncated duration
-    expected_qps = 2 / ((10150 - 5000) / 1e9)
+    expected_qps = 2 / ((10219 - 5000) / 1e9)
     assert report.qps == expected_qps
 
     # Verify latency includes only uuid1 and uuid2
     assert report.latency["total"] == (10211 - 10000) + (10219 - 10003)
+
+
+def test_create_report_with_zero_samples_before_stop_performance_tracking(tmp_path):
+    """Test that create_report shows 'Duration: N/A' when 0 samples issued before STOP_PERFORMANCE_TRACKING."""
+    test_db = str(tmp_path / "test_zero_samples_stop_perf.db")
+
+    with sqlite3_cursor(test_db) as (cursor, conn):
+        cursor.execute(
+            "CREATE TABLE IF NOT EXISTS events (sample_uuid VARCHAR(32), event_type VARCHAR(32), timestamp_ns INTEGER, data BLOB)"
+        )
+        cursor.executemany(
+            "INSERT INTO events (sample_uuid, event_type, timestamp_ns, data) VALUES (?, ?, ?, ?)",
+            [
+                ("", SessionEvent.TEST_STARTED.value, 5000, b""),
+                ("", SessionEvent.STOP_PERFORMANCE_TRACKING.value, 10100, b""),
+                ("", SessionEvent.TEST_ENDED.value, 10300, b""),
+            ],
+        )
+        conn.commit()
+
+    with MetricsReporter(test_db) as reporter:
+        report = reporter.create_report()
+
+    # Verify report values
+    assert report.n_samples_issued == 0
+    assert report.n_samples_completed == 0
+    assert report.duration_ns is None
+
+    # Verify display shows 'Duration: N/A'
+    import io
+
+    buf = io.StringIO()
+
+    def _write_with_newline(s):
+        buf.write(s + "\n")
+
+    report.display(fn=_write_with_newline)
+    display_output = buf.getvalue()
+
+    assert "Duration: N/A" in display_output
+    assert "(no performance samples were issued)" in display_output
