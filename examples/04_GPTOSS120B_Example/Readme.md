@@ -58,7 +58,7 @@ Note that it also renames the column from `text_input` to `prompt` as the custom
 We can launch the benchmarking command but it has to be pointed to the `completions` endpoint instead of the `chat-completions` endpoint as the prompt is preprocessed. While the numbers generated cannot be directly compared to inference-endpoint (which uses the `chat-completion` endpoint), it can provide a good reference for relative performance given the output token distribution.
 
 ```
-vllm bench serve   --backend vllm   --model ${MODEL_NAME}   --endpoint /v1/completions   --dataset-name custom --dataset-path /home/scratch.rkaleem_gpu/datasets/gpt-oss/v3/acc/acc_eval_inputs.jsonl  --custom-output-len 2000 --num-prompts 6396 --max-concurrency 512 --save-result --save-detailed
+vllm bench serve   --backend vllm   --model ${MODEL_NAME}   --endpoint /v1/completions   --dataset-name custom --dataset-path ${PATH_TO_DATASETS}/acc_eval_inputs.jsonl  --custom-output-len 2000 --num-prompts 6396 --max-concurrency 512 --save-result --save-detailed
 
 ```
 
