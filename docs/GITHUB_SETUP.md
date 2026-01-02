@@ -14,10 +14,6 @@ Runs pre-commit hooks (ruff, formatters) on every PR and push.
 
 Automatically requests code reviews on new PRs.
 
-### Branch Validator (`.github/workflows/branch-validator.yml`)
-
-Enforces branch naming: `feature/*`, `bugfix/*`, `hotfix/*`, `docs/*`, `test/*`, `refactor/*`, `chore/*`, `release/*`.
-
 ### Test Workflow (`.github/workflows/test.yml`)
 
 Runs pytest test suite and generates coverage reports.

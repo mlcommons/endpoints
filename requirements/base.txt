@@ -1,5 +1,9 @@
-# Base dependencies for the MLPerf Inference Endpoint Benchmarking System
-# These are the minimal dependencies required for the package to function
+# Dependencies for the MLPerf Inference Endpoint Benchmarking System
+# Install with: pip install -r requirements/base.txt
+
+# ============================================================================
+# Core Runtime Dependencies
+# ============================================================================
 
 # Core Python dependencies
 typing-extensions>=4.0.0
@@ -8,18 +12,19 @@ typing-extensions>=4.0.0
 psutil==6.1.1
 
 # Note: asyncio is part of Python 3.11+ standard library
-# Additional dependencies will be added as components are implemented
+# Async and networking
 aiohttp==3.12.15
-duckdb==1.4.0
-orjson==3.11.0
 pyzmq==27.0.2
 uvloop==0.21.0
-datasets==4.1.1
+
+# Data handling
+duckdb==1.4.0
+orjson==3.11.0
+msgspec==0.19.0
 pydantic==2.12.0
 pydantic_core==2.41.1
-msgspec==0.19.0
 
-# Needed to do tokenization for OSL reporting
+# Needed for tokenization and OSL reporting
 transformers==4.57.1
 numpy==2.3.4
 datasets==4.1.1
@@ -36,3 +41,31 @@ colorama==0.4.6
 
 # Fix pytz-2024 import warning
 pytz==2025.2
+
+# ============================================================================
+# Development Dependencies
+# ============================================================================
+
+# Testing
+pytest>=7.0.0
+pytest-asyncio>=0.21.0
+pytest-cov>=4.0.0
+pytest-benchmark>=4.0.0
+pytest-timeout==2.4.0
+pytest-xdist==3.8.0
+
+# Code quality
+ruff>=0.3.0
+
+# Development tools
+pre-commit>=3.0.0
+
+# Profiling tools
+line-profiler==5.0.0
+Pympler==1.1
+
+# Documentation
+sphinx>=7.0.0
+sphinx-rtd-theme>=2.0.0
+sphinx-autodoc-typehints>=1.25.0
+myst-parser>=2.0.0
