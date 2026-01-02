@@ -1174,11 +1174,11 @@ class MetricsReporter:
                         "approx_datetime_str": approx_datetime_str,
                         "value": value,
                     }
-                    # Use json.dumps for each line
+                    # Use orjson.dumps for each line
                     f.write(
-                        orjson.dumps(
-                            json_obj, option=orjson.OPT_INDENT_2 | orjson.OPT_SORT_KEYS
-                        ).decode("utf-8")
+                        orjson.dumps(json_obj, option=orjson.OPT_SORT_KEYS).decode(
+                            "utf-8"
+                        )
                         + "\n"
                     )
 
