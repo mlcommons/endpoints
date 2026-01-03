@@ -34,7 +34,7 @@ ADAPTER_MAP = {
 }
 
 
-@dataclass
+@dataclass(slots=True)
 class HTTPClientConfig:
     """Configuration for the HTTP endpoint client."""
 
@@ -105,7 +105,7 @@ class HTTPClientConfig:
             self.adapter = getattr(module, class_name)
 
 
-@dataclass
+@dataclass(slots=True)
 class SocketConfig:
     """Default values for socket options."""
 
@@ -241,7 +241,7 @@ class AioHttpConfig:
         return aiohttp.TCPConnector(**connector_kwargs)
 
 
-@dataclass
+@dataclass(slots=True)
 class ZMQConfig:
     """Configuration for ZMQ sockets and communication."""
 

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
@@ -128,26 +129,16 @@ class FileTimingPrinter:
     @classmethod
     def configure(
         cls, event_logs_dir: Path | None, worker_id: int
-    ) -> FileTimingPrinter | _NullContext:
+    ) -> FileTimingPrinter | nullcontext:
         """
         Factory to create a configured FileTimingPrinter context manager.
 
-        Returns a null context if event_logs_dir is None.
+        Returns a nullcontext if event_logs_dir is None.
         """
         if event_logs_dir is None:
-            return _NullContext()
+            return nullcontext()
         path = event_logs_dir / f"timing_worker_{worker_id}.jsonl"
         return cls(path, worker_id)
-
-
-class _NullContext:
-    """No-op context manager for when timing is disabled."""
-
-    def __enter__(self) -> None:
-        return None
-
-    def __exit__(self, *_: Any) -> None:
-        pass
 
 
 # Active printer - swap to change output destination
