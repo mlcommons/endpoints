@@ -17,17 +17,18 @@
 
 import asyncio
 
+import uvloop
+
 
 def create_eager_loop() -> asyncio.AbstractEventLoop:
-    """Create event loop with eager task factory for better performance.
+    """Create uvloop event loop with eager task factory.
 
-    The eager task factory immediately starts task execution rather than
-    scheduling it for later, which can provide better performance for
-    I/O-bound workloads.
+    The eager task factory immediately starts task execution rather than scheduling it for later,
+    which can provide better performance for I/O-bound workloads.
 
     Returns:
-        asyncio.AbstractEventLoop: A new event loop with eager task factory configured.
+        asyncio.AbstractEventLoop: A uvloop event loop with eager task factory configured.
     """
-    loop = asyncio.new_event_loop()
+    loop = uvloop.new_event_loop()
     loop.set_task_factory(asyncio.eager_task_factory)
     return loop
