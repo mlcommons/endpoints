@@ -52,7 +52,7 @@ _OUTPUT_DICT_TYPE = dict[str, str | list[str]]
 _OUTPUT_RESULT_TYPE = str | tuple[str, ...] | _OUTPUT_DICT_TYPE | None
 
 
-class Query(msgspec.Struct, kw_only=True):
+class Query(msgspec.Struct, kw_only=True):  # type: ignore[call-arg]
     """Represents a single inference query to be sent to an endpoint.
 
     A Query encapsulates all information needed to make an HTTP request to
@@ -80,7 +80,7 @@ class Query(msgspec.Struct, kw_only=True):
     created_at: float = msgspec.field(default_factory=time.time)
 
 
-class QueryResult(msgspec.Struct, tag="query_result", kw_only=True, frozen=True):
+class QueryResult(msgspec.Struct, tag="query_result", kw_only=True, frozen=True):  # type: ignore[call-arg]
     """Result of a completed inference query.
 
     Represents the outcome of processing a Query, including the response text,
@@ -112,7 +112,7 @@ class QueryResult(msgspec.Struct, tag="query_result", kw_only=True, frozen=True)
     response_output: _OUTPUT_RESULT_TYPE = None
     metadata: dict[str, Any] = msgspec.field(default_factory=dict)
     error: str | None = None
-    completed_at: int = msgspec.UNSET
+    completed_at: int | msgspec.UnsetType = msgspec.UNSET
 
     def __post_init__(self):
         """Set completion timestamp automatically.
@@ -142,8 +142,19 @@ class QueryResult(msgspec.Struct, tag="query_result", kw_only=True, frozen=True)
                 if isinstance(v, list):
                     self.response_output[k] = tuple(v)
 
+    def get_response_output_string(self) -> str:
+        """Get the response output as a string."""
+        if isinstance(self.response_output, tuple):
+            return "".join(self.response_output)
+        elif isinstance(self.response_output, dict):
+            return str(self.response_output)
+        elif isinstance(self.response_output, str):
+            return self.response_output
+        else:
+            return "<EMPTY>"
 
-class StreamChunk(msgspec.Struct, tag="stream_chunk", kw_only=True):
+
+class StreamChunk(msgspec.Struct, tag="stream_chunk", kw_only=True):  # type: ignore[call-arg]
     """A single chunk from a streaming inference response.
 
     Streaming responses are sent incrementally as the model generates text.

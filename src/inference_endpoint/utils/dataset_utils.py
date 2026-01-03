@@ -32,7 +32,7 @@ def tokenizer_stats(
     if end_index == -1:
         end_index = tokenizer.vocab_size
     token_to_text = {}  # dictionary from token ids to text
-    token_leng_counts = {}  # histogram of token lengths
+    token_leng_counts: dict[int, int] = {}  # histogram of token lengths
     for i in range(start_index, end_index):
         token_to_text[i] = tokenizer.decode([i])
         token_leng_counts[len(token_to_text[i])] = 1 + token_leng_counts.get(

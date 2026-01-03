@@ -49,7 +49,7 @@ class SSEMessage(msgspec.Struct):
 # ============================================================================
 
 
-class ChatMessage(msgspec.Struct, kw_only=True, omit_defaults=True):
+class ChatMessage(msgspec.Struct, kw_only=True, omit_defaults=True):  # type: ignore[call-arg]
     """Chat message in OpenAI format."""
 
     role: str
@@ -57,7 +57,7 @@ class ChatMessage(msgspec.Struct, kw_only=True, omit_defaults=True):
     name: str | None = None
 
 
-class ChatCompletionRequest(msgspec.Struct, kw_only=True, omit_defaults=True):
+class ChatCompletionRequest(msgspec.Struct, kw_only=True, omit_defaults=True):  # type: ignore[call-arg]
     """OpenAI chat completion request."""
 
     model: str
@@ -76,7 +76,7 @@ class ChatCompletionRequest(msgspec.Struct, kw_only=True, omit_defaults=True):
     user: str | None = None
 
 
-class ChatCompletionResponseMessage(msgspec.Struct, kw_only=True, omit_defaults=True):
+class ChatCompletionResponseMessage(msgspec.Struct, kw_only=True, omit_defaults=True):  # type: ignore[call-arg]
     """Response message from OpenAI."""
 
     role: str
@@ -84,7 +84,7 @@ class ChatCompletionResponseMessage(msgspec.Struct, kw_only=True, omit_defaults=
     refusal: str | None
 
 
-class ChatCompletionChoice(msgspec.Struct, kw_only=True, omit_defaults=True):
+class ChatCompletionChoice(msgspec.Struct, kw_only=True, omit_defaults=True):  # type: ignore[call-arg]
     """A single choice in the completion response."""
 
     index: int
@@ -92,7 +92,7 @@ class ChatCompletionChoice(msgspec.Struct, kw_only=True, omit_defaults=True):
     finish_reason: str | None
 
 
-class CompletionUsage(msgspec.Struct, kw_only=True, omit_defaults=True):
+class CompletionUsage(msgspec.Struct, kw_only=True, omit_defaults=True):  # type: ignore[call-arg]
     """Token usage statistics."""
 
     prompt_tokens: int
@@ -100,7 +100,7 @@ class CompletionUsage(msgspec.Struct, kw_only=True, omit_defaults=True):
     total_tokens: int
 
 
-class ChatCompletionResponse(msgspec.Struct, kw_only=True, omit_defaults=True):
+class ChatCompletionResponse(msgspec.Struct, kw_only=True, omit_defaults=True):  # type: ignore[call-arg]
     """OpenAI chat completion response (msgspec version)."""
 
     id: str

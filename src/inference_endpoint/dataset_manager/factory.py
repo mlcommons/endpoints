@@ -97,6 +97,7 @@ class DataLoaderFactory:
             transforms.append(ColumnRemap(remap))
         transforms.append(MakeAdapterCompatible())
 
+        assert dataset_path is not None
         return Dataset.load_from_file(
             dataset_path,
             transforms=transforms,

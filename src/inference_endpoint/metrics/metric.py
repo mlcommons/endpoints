@@ -39,8 +39,8 @@ class Metric:
 class Throughput(Metric):
     REL_TOL = 0.1  # Relative tolerance for throughput
 
-    def __init__(self, target: float):
-        super().__init__(target)
+    def __init__(self, target_qps: float):
+        super().__init__(target_qps)
 
     def is_valid(self, measurement: float) -> bool:
         return math.isclose(measurement, self.target, rel_tol=self.REL_TOL)
@@ -49,7 +49,9 @@ class Throughput(Metric):
 class QueryLatency(Metric):
     REL_TOL = 0.1  # Relative tolerance for query latency
 
-    def __init__(self, target_latency_ms: float = None, target_qps: float = None):
+    def __init__(
+        self, target_latency_ms: float | None = None, target_qps: float | None = None
+    ):
         """
         Args:
             target_latency_ms: The target latency in milliseconds
@@ -68,7 +70,8 @@ class QueryLatency(Metric):
 
 
 class TTFT(Metric):
-    def __init__(self, max_ttft_latency_ms: float):
+    def __init__(self, max_ttft_latency_ms: float | None):
+        assert max_ttft_latency_ms is not None
         super().__init__(max_ttft_latency_ms)
 
     def is_valid(self, measurement: float) -> bool:
@@ -76,7 +79,8 @@ class TTFT(Metric):
 
 
 class TPOT(Metric):
-    def __init__(self, max_tpot_latency_ms: float):
+    def __init__(self, max_tpot_latency_ms: float | None):
+        assert max_tpot_latency_ms is not None
         super().__init__(max_tpot_latency_ms)
 
     def is_valid(self, measurement: float) -> bool:

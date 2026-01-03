@@ -51,6 +51,7 @@ class HttpClientSampleIssuer(SampleIssuer):
         self.http_client = http_client
 
         # Start response handler task to route completed responses back to SampleEventHandler
+        assert self.http_client.loop is not None
         self._response_task = asyncio.run_coroutine_threadsafe(
             self._handle_responses(), self.http_client.loop
         )

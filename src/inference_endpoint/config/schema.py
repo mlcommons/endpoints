@@ -198,16 +198,22 @@ class Dataset(BaseModel):
     format: str | None = None
     samples: int | None = None
     eval_method: EvalMethod | None = None
-    parser: dict | None = None
+    parser: dict[str, str] | None = None
     accuracy_config: AccuracyConfig | None = None
 
 
 class AccuracyConfig(BaseModel):
     """Accuracy configuration.
-    The eval_method is the method to use to evaluate the accuracy of the model. Currently only "pass_at_1" is supported.
-    The ground_truth is the column in the dataset that contains the ground truth. Defaults to "ground_truth" if not specified.
-    The extractor is the extractor to use to extract the ground truth from the output. Currently "boxed_math_extractor" and "abcd_extractor" are supported.
-    The num_repeats is the number of times to repeat the dataset for evaluation. Defaults to 1 if not specified.
+
+    The eval_method is the method to use to evaluate the accuracy of the model.
+    Currently only "pass_at_1" is supported.
+    The ground_truth is the column in the dataset that contains the ground truth.
+    Defaults to "ground_truth" if not specified.
+    The extractor is the extractor to use to extract the ground truth from the output.
+    Currently "boxed_math_extractor" and "abcd_extractor" are supported.
+    The num_repeats is the number of times to repeat the dataset for evaluation.
+    Defaults to 1 if not specified.
+
     Example:
         accuracy_config:
           eval_method: "pass_at_1"
@@ -373,7 +379,7 @@ class BenchmarkConfig(BaseModel):
     # workers are assigned endpoints in a round-robin manner
     endpoint_config: EndpointConfig = Field(default_factory=EndpointConfig)
     report_dir: Path | None = None
-    timeout: int | None = None
+    timeout: float | None = None
     verbose: bool = False
     # CPU affinity for loadgen and worker processes:
     #   - True = auto (compute optimal NUMA-aware plan)

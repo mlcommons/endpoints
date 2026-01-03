@@ -18,6 +18,7 @@ import random
 import time
 from dataclasses import dataclass, fields
 from pathlib import Path
+from typing import TextIO
 
 import pytest
 from inference_endpoint.load_generator.events import SampleEvent, SessionEvent
@@ -41,7 +42,7 @@ class TimingLog:
         if log_file is None:
             log_file = Path("/tmp/recorder_timing_log.txt")
         self.log_file = Path(log_file)
-        self.f_obj = None
+        self.f_obj: TextIO | None = None
 
     def __enter__(self):
         if self.f_obj is not None:
@@ -50,10 +51,12 @@ class TimingLog:
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
+        assert self.f_obj is not None
         self.f_obj.close()
         self.f_obj = None
 
     def log(self, key: str, duration_sec: float, variant: str = "default"):
+        assert self.f_obj is not None
         self.f_obj.write(f"[{key}] {variant}: {duration_sec} sec.\n")
 
 

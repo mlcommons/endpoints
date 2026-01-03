@@ -36,6 +36,7 @@ from inference_endpoint.endpoint_client.http import (
     InFlightRequest,
     PooledConnection,
 )
+from inference_endpoint.endpoint_client.adapter_protocol import HttpRequestAdapter
 from inference_endpoint.endpoint_client.transport import (
     ReceiverTransport,
     SenderTransport,
@@ -164,7 +165,8 @@ class Worker:
         self._active_tasks: set[asyncio.Task] = set()
 
         # Use adapter type from config
-        self._adapter = self.http_config.adapter
+        assert self.http_config.adapter is not None
+        self._adapter: type[HttpRequestAdapter] = self.http_config.adapter
 
     async def run(self) -> None:
         """Main worker loop - pull requests, execute, push responses."""
@@ -249,7 +251,9 @@ class Worker:
 
             # Run main processing loop
             if self.http_config.record_worker_events:
-                worker_db_name = f"worker_report_{self.worker_id}_{os.getpid()}"
+                pid = os.getpid()
+                worker_db_name = f"worker_report_{self.worker_id}_{pid}"
+                assert self.http_config.event_logs_dir is not None
                 report_path = self.http_config.event_logs_dir / f"{worker_db_name}.csv"
 
                 with EventRecorder(session_id=worker_db_name) as event_recorder:

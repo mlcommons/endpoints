@@ -24,6 +24,7 @@ import hashlib
 import random
 import string
 import uuid
+from asyncio import Future
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -88,7 +89,7 @@ def create_test_query(
         query = create_test_query(prompt_size=500, seed=42)
     """
     # Use a local random instance for reproducibility if seed is provided
-    rng = random.Random(seed) if seed is not None else random
+    rng = random.Random(seed) if seed is not None else random.Random()
 
     # Generate prompt from random words until we reach approximately the target size
     words = []
@@ -223,7 +224,7 @@ class PooledSampleIssuer(SampleIssuer):
         else:
             self.compute_func = compute_func
         self.executor = ThreadPoolExecutor(max_workers=n_workers)
-        self.futures = []
+        self.futures: list[Future[None]] = []
 
     def shutdown(self, wait: bool = True):
         """Shutdown the executor and wait for all tasks to complete.

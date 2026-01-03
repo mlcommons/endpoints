@@ -28,6 +28,7 @@ import tempfile
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 from urllib.parse import urljoin
 
 from tqdm import tqdm
@@ -134,7 +135,7 @@ class ResponseCollector:
             if self.pbar:
                 self.pbar.set_postfix(refresh=True, errors=len(self.errors))
         elif self.collect_responses:
-            self.responses[result.id] = result.response_output
+            self.responses[result.id] = result.get_response_output_string()
 
         if self.pbar:
             self.pbar.update(1)
@@ -227,9 +228,7 @@ async def run_benchmark_command(args: argparse.Namespace) -> None:
     elif benchmark_mode_str in ("offline", "online"):
         # ===== CLI MODE - Build config from CLI params =====
         benchmark_mode = TestType(benchmark_mode_str)  # TestType values are lowercase
-        effective_config: BenchmarkConfig = _build_config_from_cli(
-            args, benchmark_mode_str
-        )
+        effective_config = _build_config_from_cli(args, benchmark_mode_str)
         test_mode = (
             TestMode(args.mode) if getattr(args, "mode", None) else TestMode.PERF
         )
@@ -343,7 +342,6 @@ def _build_config_from_cli(
             api_type=api_type,
         ),
         metrics=Metrics(),
-        baseline=None,  # CLI mode doesn't use baseline
         report_dir=report_dir,
         timeout=timeout,
         verbose=verbose_level > 0,
@@ -554,18 +552,21 @@ def _run_benchmark(
 
     # Create endpoint client
     endpoints = config.endpoint_config.endpoints
+    assert endpoints is not None
     num_workers = config.settings.client.workers
 
     logger.info(f"Connecting: {endpoints}")
     tmp_dir = tempfile.mkdtemp(prefix="inference_endpoint_")
 
     try:
+        api_type: APIType = config.endpoint_config.api_type
+        assert api_type is not None
         http_config = HTTPClientConfig(
             endpoint_urls=[
-                urljoin(e, config.endpoint_config.api_type.default_route())
+                urljoin(e, api_type.default_route())
                 for e in endpoints
             ],
-            api_type=config.endpoint_config.api_type,
+            api_type=api_type,
             num_workers=num_workers,
             record_worker_events=config.settings.client.record_worker_events,
             event_logs_dir=report_dir,
@@ -595,7 +596,7 @@ def _run_benchmark(
             report_dir=report_dir,
             tokenizer_override=tokenizer,
             accuracy_datasets=accuracy_datasets,
-            max_shutdown_timeout_s=config.timeout if config.timeout else None,
+            max_shutdown_timeout_s=config.timeout if config.timeout else 300.0,
             dump_events_log=True,
         )
 
@@ -665,7 +666,7 @@ def _run_benchmark(
                     logger.warning(f"  ... +{len(response_collector.errors) - 3} more")
 
         try:
-            results = {
+            results: dict[str, Any] = {
                 "config": {
                     "endpoint": endpoints,
                     "mode": test_mode,

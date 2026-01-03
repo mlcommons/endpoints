@@ -199,3 +199,9 @@ exclude_lines = [
     "class .*\\\\bProtocol\\):",
     "@(abc\\\\.)?abstractmethod",
 ]
+
+[tool.mypy]
+ignore_missing_imports = true
+exclude = [
+    "src/inference_endpoint/openai/openai_types_gen.py",
+    ]

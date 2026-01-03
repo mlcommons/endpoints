@@ -51,7 +51,7 @@ class BenchmarkSession:
 
         # EventRecorder will set this when all samples complete, helps avoid busy-waiting
         self.end_event = threading.Event()
-        self.thread = None
+        self.thread: threading.Thread | None = None
 
         # CPython GIL provides atomic boolean writes, no need for threading.Event()
         self.stop_requested = False
@@ -62,7 +62,7 @@ class BenchmarkSession:
         # Will be populated after the test finishes by _run_test
         self.report = None
 
-        self.sample_uuid_map = None
+        self.sample_uuid_map: dict[str, dict[str, int]] | None = None
 
     @property
     def is_running(self):
@@ -235,6 +235,8 @@ class BenchmarkSession:
         Returns:
             bool: True if the test thread has completed, False if it timed out.
         """
+        if not self.thread:
+            return False
         self.thread.join(timeout=timeout)
         return not self.thread.is_alive()
 

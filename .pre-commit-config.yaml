@@ -18,6 +18,15 @@ repos:
         args: [--fix, --exit-non-zero-on-fix]
       - id: ruff-format
 
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.9.0
+    hooks:
+      - id: mypy
+        args: [--config-file=./pyproject.toml]
+        exclude: ^(src/inference_endpoint/openai/openai_types_gen.py)$
+        verbose: true
+        entry: bash -c 'mypy "$@" || true' --
+
   - repo: https://github.com/pre-commit/mirrors-prettier
     rev: v3.1.0
     hooks:

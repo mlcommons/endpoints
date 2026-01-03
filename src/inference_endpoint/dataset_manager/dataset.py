@@ -118,12 +118,13 @@ class DatafileLoader(ABC):
 
     def get_num_samples(self) -> int:
         """Get the number of samples in the dataset."""
+        assert self.dataframe is not None
         return len(self.dataframe)
 
     @classmethod
     def get_loader(
         cls, file_path: os.PathLike, format: DatasetFormat | None = None
-    ) -> "DatafileLoader":
+    ) -> type["DatafileLoader"]:
         """Get the loader for the dataset."""
 
         if format is not None:

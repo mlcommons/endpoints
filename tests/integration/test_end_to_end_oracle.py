@@ -15,6 +15,7 @@
 
 import logging
 import random
+from pathlib import Path
 from urllib.parse import urljoin
 
 import pytest
@@ -40,7 +41,7 @@ from inference_endpoint.load_generator import (
 
 
 class DeepSeekR1SampleIssuer(HttpClientSampleIssuer):
-    def __init__(self, tmp_path: str, url: str):
+    def __init__(self, tmp_path: Path, url: str):
         self.http_config = HTTPClientConfig(
             endpoint_urls=[urljoin(url, "/v1/chat/completions")],
             warmup_connections=False,

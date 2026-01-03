@@ -240,8 +240,11 @@ def assert_performance_requirements(
         message_size: Optional message size for better error messages
     """
     achieved_qps = summary["qps"]
+    assert achieved_qps is not None and isinstance(achieved_qps, float)
     issued_qps = summary["issue_qps"]
+    assert issued_qps is not None and isinstance(issued_qps, float)
     min_achievement = PERFORMANCE_CONFIG["target_qps_tolerance"]
+    assert min_achievement is not None and isinstance(min_achievement, float)
 
     # Log results
     size_info = f" (size={message_size} characters)" if message_size else ""
@@ -335,7 +338,7 @@ class TestHTTPClientPerformanceSingleWorker:
 
     @pytest.mark.performance
     @pytest.mark.xdist_group(name="serial_performance")
-    @pytest.mark.parametrize("message_size", PERFORMANCE_CONFIG["message_sizes"])
+    @pytest.mark.parametrize("message_size", PERFORMANCE_CONFIG["message_sizes"])  # type: ignore[arg-type]
     def test_streaming_throughput_various_message_sizes(
         self, http_client, message_size
     ):
@@ -356,7 +359,7 @@ class TestHTTPClientPerformanceSingleWorker:
 
     @pytest.mark.performance
     @pytest.mark.xdist_group(name="serial_performance")
-    @pytest.mark.parametrize("message_size", PERFORMANCE_CONFIG["message_sizes"])
+    @pytest.mark.parametrize("message_size", PERFORMANCE_CONFIG["message_sizes"])  # type: ignore[arg-type]
     def test_offline_throughput_various_message_sizes(self, http_client, message_size):
         """Validate offline mode maintains max throughput across different message sizes."""
         summary = run_performance_test(

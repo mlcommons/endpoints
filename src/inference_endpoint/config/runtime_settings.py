@@ -164,7 +164,7 @@ class RuntimeSettings:
         # Apply overrides
         kwargs.update(overrides)
 
-        return cls(**kwargs)
+        return cls(**kwargs)  # type: ignore[arg-type]
 
     def total_samples_to_issue(
         self, padding_factor: float = 1.1, align_to_dataset_size: bool = True
