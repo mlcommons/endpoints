@@ -13,7 +13,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .bare_response_server import BareResponseServer, BareResponseServerProcess
-from .echo_server import EchoServer
+"""Asyncio utilities for the MLPerf Inference Endpoint Benchmarking System."""
 
-__all__ = ["BareResponseServer", "BareResponseServerProcess", "EchoServer"]
+import asyncio
+
+
+def create_eager_loop() -> asyncio.AbstractEventLoop:
+    """Create event loop with eager task factory for better performance.
+
+    The eager task factory immediately starts task execution rather than
+    scheduling it for later, which can provide better performance for
+    I/O-bound workloads.
+
+    Returns:
+        asyncio.AbstractEventLoop: A new event loop with eager task factory configured.
+    """
+    loop = asyncio.new_event_loop()
+    loop.set_task_factory(asyncio.eager_task_factory)
+    return loop

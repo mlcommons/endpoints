@@ -44,7 +44,8 @@ from inference_endpoint.exceptions import (
     SetupError,
 )
 from inference_endpoint.load_generator.scheduler import Scheduler
-from inference_endpoint.utils.logging import setup_logging
+from inference_endpoint.utils.asyncio import create_eager_loop
+from inference_endpoint.utils.logging import setup_logging, verbosity_to_log_level
 
 logger = logging.getLogger(__name__)
 
@@ -304,17 +305,9 @@ async def main() -> None:
     parser = create_parser()
     args = parser.parse_args()
 
-    # Setup logging based on verbosity
-    # Default to INFO so users see important execution info (duration, samples, results)
-    if args.verbose >= 2:
-        log_level = logging.DEBUG
-    elif args.verbose == 1:
-        log_level = logging.INFO
-    else:
-        log_level = logging.INFO  # Default: INFO (not WARNING) for user-facing info
-
+    # Setup logging based on verbosity (-v=INFO, -vv=DEBUG, -vvv=TRACE)
     setup_logging()
-    logging.getLogger().setLevel(log_level)
+    logging.getLogger().setLevel(verbosity_to_log_level(args.verbose, as_int=True))
 
     # Dispatch commands
     try:
@@ -373,14 +366,7 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-
-    def _create_eager_loop() -> asyncio.AbstractEventLoop:
-        """Create event loop with eager task factory for better performance."""
-        loop = asyncio.new_event_loop()
-        loop.set_task_factory(asyncio.eager_task_factory)
-        return loop
-
     # Use asyncio.Runner with eager_task_factory,
     # which immediately starts task execution rather than scheduling
-    with asyncio.Runner(loop_factory=_create_eager_loop) as runner:
+    with asyncio.Runner(loop_factory=create_eager_loop) as runner:
         runner.run(main())

@@ -16,6 +16,7 @@
 """Worker process implementation for HTTP endpoint client."""
 
 import asyncio
+import gc
 import logging
 import multiprocessing
 import os
@@ -24,8 +25,6 @@ import sys
 import time
 import traceback
 from collections.abc import AsyncGenerator
-from functools import partial
-from multiprocessing import Process
 from typing import Any
 
 import aiohttp
@@ -48,6 +47,7 @@ from inference_endpoint.endpoint_client.configs import (
     ZMQConfig,
 )
 from inference_endpoint.endpoint_client.types import PreparedRequest
+from inference_endpoint.endpoint_client.utils import get_ephemeral_port_limit
 from inference_endpoint.endpoint_client.zmq_utils import ZMQPullSocket, ZMQPushSocket
 from inference_endpoint.load_generator.events import SampleEvent
 from inference_endpoint.metrics.recorder import EventRecorder
@@ -82,6 +82,11 @@ def worker_main(
     """Entry point for worker process."""
     worker_log_format = f"%(asctime)s - %(name)s[W{worker_id}/%(process)d] - %(funcName)s - %(levelname)s - %(message)s"
     setup_logging(level=http_config.log_level, format_string=worker_log_format)
+
+    # Disable GC to reduce latency spikes from collection pauses
+    if http_config.disable_gc:
+        gc.disable()
+        logger.debug("Garbage collection disabled")
 
     # Install uvloop which also enables it
     import uvloop
@@ -274,9 +279,9 @@ class Worker:
         self._adapter: type[HttpRequestAdapter] = self.http_config.adapter
 
     async def run(self) -> None:
-        """Main worker loop - pull requests, execute, push responses."""
+        """Initialize worker and launch main loop."""
         try:
-            # Cache event loop reference (avoid get_running_loop() in hot path)
+            # Cache event loop reference
             self._loop = asyncio.get_running_loop()
 
             # Derive socket addresses from zmq_config
@@ -340,7 +345,10 @@ class Worker:
             signal.signal(signal.SIGTERM, self.shutdown)
             signal.signal(signal.SIGINT, self.shutdown)
 
-            # Send readiness signal only after successful initialization
+            # Warmup TCP connections before signaling readiness
+            await self._warmup_connections()
+
+            # Send readiness signal
             await self._readiness_socket.send(self.worker_id)
             logger.debug("Started and ready")
 
@@ -375,14 +383,114 @@ class Worker:
             # Cleanup
             await self._cleanup()
 
+    async def _warmup_connections(self) -> None:
+        """
+        Establish TCP connections to avoid cold-start connection delay.
+
+        During benchmarking, the first batch of requests can experience
+        significantly higher latency due to TCP connection establishment
+        overhead (DNS lookup, TCP handshake, TLS negotiation if applicable).
+        This "cold-start" penalty skews latency metrics and reduces
+        throughput during the initial phase.
+
+        This method pre-establishes TCP connections and adds them to
+        aiohttp's connection pool before the worker signals readiness.
+        Subsequent requests can then reuse these pooled connections,
+        avoiding the connection establishment overhead entirely.
+
+        The number of connections to warm up is determined by:
+        - "auto": Divides system ephemeral port limit by number of workers
+        - "auto-min": Uses 10% of "auto" value (minimum 10 connections)
+        - int: Uses the specified number directly
+        - Other values: Disables warmup
+        """
+        warmup_cfg = self.http_config.warmup_connections
+
+        # Determine number of connections to warm up
+        match warmup_cfg:
+            case "auto":
+                num_connections = max(
+                    get_ephemeral_port_limit() // self.http_config.num_workers, 1
+                )
+            case "auto-min":
+                num_connections = max(
+                    int(
+                        get_ephemeral_port_limit()
+                        // self.http_config.num_workers
+                        * 0.10
+                    ),
+                    10,
+                )
+            case int(n) if n > 0:
+                num_connections = n
+            case _:
+                logger.debug("TCP connection warmup disabled")
+                return
+
+        logger.debug(f"Warming up {num_connections} TCP connections")
+
+        # Create a dummy request just for connection establishment
+        dummy_request = ClientRequest(
+            method=hdrs.METH_GET,
+            url=self._url,
+            loop=self._loop,
+            response_class=ClientResponse,
+            session=self._session,
+            ssl=False,
+        )
+
+        # Establish all connections first, then release together (ensures no reuse)
+        connections: list = []
+
+        async def warmup_one():
+            conn = await self.tcp_connector.connect(
+                dummy_request, traces=[], timeout=self._timeout
+            )
+            connections.append(conn)
+
+        # Establish all connections concurrently
+        await asyncio.gather(
+            *[warmup_one() for _ in range(num_connections)],
+            return_exceptions=True,
+        )
+
+        # Release all connections to pool
+        for conn in connections:
+            conn.release()
+
+        idle_conns = sum(len(conns) for conns in self.tcp_connector._conns.values())
+        logger.debug(
+            f"Warmup Complete: {idle_conns}/{num_connections} connections pooled"
+        )
+
     @profile
     async def _main_loop(self) -> None:
-        """Main processing loop - pull requests, fire HTTP, send responses."""
+        """
+        Main processing loop:
+        1. recv Query from zmq (pushed by SampleIssuer)
+        2. prepare request (Query -> payload bytes)
+        3. fire request (POST request)
+        4. create async task to process further (ie. response headers, content)
+
+        Why create_task is needed?
+        -------------------------------------------------
+        Without create_task, the main loop would block on each request's full
+        lifecycle (send request -> wait for headers -> read response body).
+        This serial execution would limit throughput to one request at a time.
+
+        The pattern is:
+        - Main loop: ZMQ recv -> prepare -> fire (TCP connect + send POST)
+        - Background task: await headers -> read body -> send result via ZMQ
+
+        This separation allows the main loop to stay "hot" on ZMQ consumption,
+        while slow operations (server processing time, response streaming) are
+        handled concurrently in background tasks tracked by _active_tasks.
+        """
         while not self._shutdown:
             try:
                 # TODO(vir): re-do work-consumer loop to leverage built-in zmq load-balancing
                 query = await self._request_socket.receive()
-                t_recv = time.perf_counter_ns()
+                t_recv = time.monotonic_ns()
 
                 if query is None:
                     continue
@@ -390,7 +498,7 @@ class Worker:
                 if self.http_config.record_worker_events:
                     EventRecorder.record_event(
                         SampleEvent.ZMQ_REQUEST_RECEIVED,
-                        time.monotonic_ns(),
+                        t_recv,
                         sample_uuid=query.id,
                         assert_active=True,
                     )
@@ -401,178 +509,17 @@ class Worker:
                     continue
 
                 # Process response asynchronously
+                prepared.timing_ctx["t_task_created"] = time.monotonic_ns()
                 task = asyncio.create_task(self._process_response(prepared))
+
+                # Keep task alive to prevent GC
+                # Cleaned up in _process_response finally block
                 self._active_tasks.add(task)
 
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error(f"Error in main loop: {type(e).__name__}: {str(e)}")
-
-    async def _process_response(self, prepared: PreparedRequest) -> None:
-        """Process HTTP response and send result via ZMQ."""
-        try:
-            try:
-                await prepared.process()
-            finally:
-                # release connection back to TCP pool
-                prepared.response.close()
-
-                if self.http_config.record_worker_events:
-                    EventRecorder.record_event(
-                        SampleEvent.HTTP_RESPONSE_COMPLETED,
-                        time.monotonic_ns(),
-                        sample_uuid=prepared.query_id,
-                        assert_active=True,
-                    )
-        except Exception as e:
-            await self._handle_error(prepared.query_id, e)
-        finally:
-            self._active_tasks.discard(asyncio.current_task())
-
-    @profile
-    async def _fire_request(self, prepared: PreparedRequest) -> bool:
-        """Fire HTTP request. Returns True on success (response stored in prepared)."""
-        if self._shutdown:
-            await self._handle_error(prepared.query_id, "Worker is shutting down")
-            return False
-
-        try:
-            # Establish TCP connection (try-reuse connections from pool)
-            conn = await self.tcp_connector.connect(
-                prepared.client_request, traces=[], timeout=self._timeout
-            )
-            conn.protocol.set_response_params(**self._response_params)
-
-            # Record time just-before request is issued
-            prepared.timing_ctx["t_http"] = time.perf_counter_ns()
-            if self.http_config.record_worker_events:
-                EventRecorder.record_event(
-                    SampleEvent.HTTP_REQUEST_ISSUED,
-                    time.monotonic_ns(),
-                    sample_uuid=prepared.query_id,
-                    assert_active=True,
-                )
-
-            # Issue post request
-            resp = await prepared.client_request.send(conn)
-
-            # Log pre-overhead timing (before waiting for response)
-            prepared.log_timing_pre()
-
-            # Await for response headers
-            await resp.start(conn)
-            prepared.timing_ctx["t_headers"] = time.perf_counter_ns()
-
-            # Check response status
-            if resp.status != 200:
-                error_text = await resp.text()
-                await self._handle_error(
-                    prepared.query_id, f"HTTP {resp.status}: {error_text}"
-                )
-                logger.error(
-                    f"Request {prepared.query_id} failed: HTTP {resp.status}: {error_text}"
-                )
-                resp.close()
-                return False
-
-            # Store response in prepared for later processing
-            prepared.response = resp
-            return True
-
-        except Exception as e:
-            await self._handle_error(prepared.query_id, e)
-            logger.error(f"Request {prepared.query_id} failed: {type(e).__name__}: {e}")
-            return False
-
-    @profile
-    async def _handle_non_streaming_response(self, prepared: PreparedRequest) -> None:
-        """Handle non-streaming HTTP response."""
-        response_bytes = await prepared.response.read()
-        prepared.timing_ctx["t_response"] = time.perf_counter_ns()
-
-        result = self._adapter.decode_response(response_bytes, prepared.query_id)
-        await self._response_socket.send(result)
-
-        prepared.timing_ctx["t_zmq_sent"] = time.perf_counter_ns()
-        prepared.log_timing_post()
-
-        if self.http_config.record_worker_events:
-            EventRecorder.record_event(
-                SampleEvent.ZMQ_RESPONSE_SENT,
-                time.monotonic_ns(),
-                sample_uuid=prepared.query_id,
-                assert_active=True,
-            )
-
-    @profile
-    async def _handle_streaming_response(self, prepared: PreparedRequest) -> None:
-        """Handle streaming SSE HTTP response."""
-        query_id = prepared.query_id
-        first_chunk_received = False
-
-        # Select accumulator based on API type
-        match self.http_config.api_type:
-            case APIType.SGLANG:
-                accumulator = SGLangSSEAccumulator(
-                    query_id, self.http_config.stream_all_chunks
-                )
-
-            case _:
-                # Default to OpenAI compatible accumulator
-                accumulator = OpenAISSEAccumulator(
-                    query_id, self.http_config.stream_all_chunks
-                )
-
-        async for chunk_batch in self._iter_sse_lines(prepared.response):
-            if not first_chunk_received:
-                prepared.timing_ctx["t_first_chunk"] = time.perf_counter_ns()
-                first_chunk_received = True
-
-            for delta in chunk_batch:
-                if stream_chunk := accumulator.add_chunk(delta):
-                    await self._response_socket.send(stream_chunk)
-                    accumulator.first_chunk_sent = True
-
-                    if self.http_config.record_worker_events:
-                        EventRecorder.record_event(
-                            SampleEvent.ZMQ_RESPONSE_SENT,
-                            time.monotonic_ns(),
-                            sample_uuid=query_id,
-                            assert_active=True,
-                        )
-
-        # All chunks received
-        prepared.timing_ctx["t_response"] = time.perf_counter_ns()
-
-        # Send final complete response
-        await self._response_socket.send(accumulator.get_final_output())
-
-        prepared.timing_ctx["t_zmq_sent"] = time.perf_counter_ns()
-        prepared.log_timing_post()
-
-        if self.http_config.record_worker_events:
-            EventRecorder.record_event(
-                SampleEvent.ZMQ_RESPONSE_SENT,
-                time.monotonic_ns(),
-                sample_uuid=query_id,
-                assert_active=True,
-            )
-
-    async def _handle_error(self, query_id: str, error: Exception | str) -> None:
-        """Send error response for a query via ZMQ."""
-
-        # Skip if we're shutting down or response socket is not available
-        if self._shutdown or not self._response_socket:
-            return
-
-        error_message = repr(error) if isinstance(error, Exception) else error
-        error_response = QueryResult(
-            id=query_id,
-            response_output=None,
-            error=error_message,
-        )
-        await self._response_socket.send(error_response)
 
     @profile
     def _prepare_request(self, query: Query, t_recv: int) -> PreparedRequest:
@@ -601,16 +548,242 @@ class Worker:
             else self._handle_non_streaming_response
         )
 
-        # Build PreparedRequest
-        prepared = PreparedRequest(
+        # Build PreparedRequest via factory
+        prepared_request = PreparedRequest.create(
             query_id=query.id,
             client_request=client_request,
             timing_ctx={"t_recv": t_recv},
-            process=None,
+            handler=handler,
         )
-        prepared.process = partial(handler, prepared)
-        prepared.timing_ctx["t_prepare"] = time.perf_counter_ns()
-        return prepared
+        prepared_request.timing_ctx["t_prepare"] = time.monotonic_ns()
+        return prepared_request
+
+    @profile
+    async def _fire_request(self, prepared: PreparedRequest) -> bool:
+        """
+        Fire HTTP POST request:
+        1. establish / acquire TCP connection (from connection pool)
+        2. send POST request bytes
+        3. save resp, conn for process_response task to process concurrently
+
+        Returns True on success.
+        """
+        if self._shutdown:
+            await self._handle_error(prepared.query_id, "Worker is shutting down")
+            return False
+
+        try:
+            # Establish TCP connection (try-reuse connections from pool)
+            prepared.timing_ctx["t_conn_start"] = time.monotonic_ns()
+            conn = await self.tcp_connector.connect(
+                prepared.client_request, traces=[], timeout=self._timeout
+            )
+            # NOTE(vir): need to re-do this every request to recreate HttpResponseParser
+            conn.protocol.set_response_params(**self._response_params)
+            prepared.timing_ctx["t_conn_end"] = time.monotonic_ns()
+
+            # Record time just-before request is issued
+            if self.http_config.record_worker_events:
+                EventRecorder.record_event(
+                    SampleEvent.HTTP_REQUEST_ISSUED,
+                    time.monotonic_ns(),
+                    sample_uuid=prepared.query_id,
+                    assert_active=True,
+                )
+
+            # Issue post request
+            resp = await prepared.client_request.send(conn)
+            prepared.timing_ctx["t_http"] = time.monotonic_ns()
+
+            # Store response to resume processing in asyncio task
+            prepared.response = resp
+            prepared.connection = conn
+            prepared.log_timing_pre()
+            return True
+
+        except Exception as e:
+            await self._handle_error(prepared.query_id, e)
+            logger.error(f"Request {prepared.query_id} failed: {type(e).__name__}: {e}")
+            return False
+
+    @profile
+    async def _process_response(self, prepared: PreparedRequest) -> None:
+        """
+        Process HTTP response.
+        1. process response header/status/errors
+        2. process response data/errors
+        3. release TCP socket once response completed/errors
+
+        Header is awaited here instead of in _fire_request to overlap
+        asyncio create_task overhead with TCP/HTTP POST/ACK communication.
+        """
+        try:
+            # Record task awake time (asyncio scheduling delay measurement)
+            prepared.timing_ctx["t_task_awake"] = time.monotonic_ns()
+
+            # Await response headers (deferred from main loop to overlap with scheduling)
+            await prepared.response.start(prepared.connection)
+            prepared.timing_ctx["t_headers"] = time.monotonic_ns()
+
+            # Check response status
+            if prepared.response.status != 200:
+                error_text = await prepared.response.text()
+                await self._handle_error(
+                    prepared.query_id,
+                    f"HTTP {prepared.response.status}: {error_text}",
+                )
+                logger.error(
+                    f"Request {prepared.query_id} failed: "
+                    f"HTTP {prepared.response.status}: {error_text}"
+                )
+                return
+
+            await prepared.process()
+        except Exception as e:
+            await self._handle_error(prepared.query_id, e)
+        finally:
+            # release connection back to TCP pool
+            prepared.response.close()
+
+            if self.http_config.record_worker_events:
+                EventRecorder.record_event(
+                    SampleEvent.HTTP_RESPONSE_COMPLETED,
+                    time.monotonic_ns(),
+                    sample_uuid=prepared.query_id,
+                    assert_active=True,
+                )
+
+            self._active_tasks.discard(asyncio.current_task())
+
+    @profile
+    async def _fire_request(self, prepared: PreparedRequest) -> bool:
+        """
+        Fire HTTP POST request. Returns True on success.
+
+        Only establishes TCP connection and sends POST - header await is deferred
+        to background task so main loop can immediately resume ZMQ consumption.
+        """
+        if self._shutdown:
+            await self._handle_error(prepared.query_id, "Worker is shutting down")
+            return False
+
+        try:
+            # Establish TCP connection (try-reuse connections from pool)
+            prepared.timing_ctx["t_conn_start"] = time.monotonic_ns()
+            conn = await self.tcp_connector.connect(
+                prepared.client_request, traces=[], timeout=self._timeout
+            )
+            # NOTE(vir): need to re-do this every request to recreate HttpResponseParser
+            conn.protocol.set_response_params(**self._response_params)
+            prepared.timing_ctx["t_conn_end"] = time.monotonic_ns()
+
+            # Record time just-before request is issued
+            if self.http_config.record_worker_events:
+                EventRecorder.record_event(
+                    SampleEvent.HTTP_REQUEST_ISSUED,
+                    time.monotonic_ns(),
+                    sample_uuid=prepared.query_id,
+                    assert_active=True,
+                )
+
+            # Issue post request
+            resp = await prepared.client_request.send(conn)
+            prepared.timing_ctx["t_http"] = time.monotonic_ns()
+
+            # Store response to resume processing in asyncio task
+            prepared.response = resp
+            prepared.connection = conn
+            prepared.log_timing_pre()
+            return True
+
+        except Exception as e:
+            await self._handle_error(prepared.query_id, e)
+            logger.error(f"Request {prepared.query_id} failed: {type(e).__name__}: {e}")
+            return False
+
+    @profile
+    async def _handle_non_streaming_response(self, prepared: PreparedRequest) -> None:
+        """Handle non-streaming HTTP response."""
+        # Await response bytes
+        response_bytes = await prepared.response.read()
+        prepared.timing_ctx["t_response"] = time.monotonic_ns()
+
+        # Decode response into QueryResult
+        result = self._adapter.decode_response(response_bytes, prepared.query_id)
+        await self._response_socket.send(result)
+
+        prepared.timing_ctx["t_zmq_sent"] = time.monotonic_ns()
+        if self.http_config.record_worker_events:
+            EventRecorder.record_event(
+                SampleEvent.ZMQ_RESPONSE_SENT,
+                time.monotonic_ns(),
+                sample_uuid=prepared.query_id,
+                assert_active=True,
+            )
+        prepared.log_timing_post()
+
+    @profile
+    async def _handle_streaming_response(self, prepared: PreparedRequest) -> None:
+        """Handle streaming SSE HTTP response."""
+        query_id = prepared.query_id
+        first_chunk_received = False
+
+        # Select accumulator based on API type
+        match self.http_config.api_type:
+            case APIType.SGLANG:
+                accumulator_type = SGLangSSEAccumulator
+            case _:  # Default to OpenAI compatible accumulator
+                accumulator_type = OpenAISSEAccumulator
+
+        accumulator = accumulator_type(query_id, self.http_config.stream_all_chunks)
+        async for chunk_batch in self._iter_sse_lines(prepared.response):
+            if not first_chunk_received:
+                prepared.timing_ctx["t_first_chunk"] = time.monotonic_ns()
+                first_chunk_received = True
+
+            for delta in chunk_batch:
+                if stream_chunk := accumulator.add_chunk(delta):
+                    await self._response_socket.send(stream_chunk)
+                    accumulator.first_chunk_sent = True
+
+                    if self.http_config.record_worker_events:
+                        EventRecorder.record_event(
+                            SampleEvent.ZMQ_RESPONSE_SENT,
+                            time.monotonic_ns(),
+                            sample_uuid=query_id,
+                            assert_active=True,
+                        )
+
+        # All chunks received
+        prepared.timing_ctx["t_response"] = time.monotonic_ns()
+
+        # Send final complete response
+        await self._response_socket.send(accumulator.get_final_output())
+
+        prepared.timing_ctx["t_zmq_sent"] = time.monotonic_ns()
+        if self.http_config.record_worker_events:
+            EventRecorder.record_event(
+                SampleEvent.ZMQ_RESPONSE_SENT,
+                time.monotonic_ns(),
+                sample_uuid=query_id,
+                assert_active=True,
+            )
+        prepared.log_timing_post()
+
+    async def _handle_error(self, query_id: str, error: Exception | str) -> None:
+        """Report error for Query."""
+
+        # Skip if we're shutting down or response socket is not available
+        if self._shutdown or not self._response_socket:
+            return
+
+        error_message = repr(error) if isinstance(error, Exception) else error
+        error_response = QueryResult(
+            id=query_id,
+            response_output=None,
+            error=error_message,
+        )
+        await self._response_socket.send(error_response)
 
     @profile
     async def _iter_sse_lines(
@@ -682,120 +855,3 @@ class Worker:
         # Terminate ZMQ context
         if self._zmq_context:
             self._zmq_context.destroy(linger=0)
-
-
-class WorkerManager:
-    """Manages the lifecycle of worker processes."""
-
-    def __init__(
-        self,
-        http_config: HTTPClientConfig,
-        aiohttp_config: AioHttpConfig,
-        zmq_config: ZMQConfig,
-        zmq_context: zmq.asyncio.Context,
-    ):
-        """Initialize worker manager."""
-        self.http_config = http_config
-        self.aiohttp_config = aiohttp_config
-        self.zmq_config = zmq_config
-        self.zmq_context = zmq_context
-        self.workers: list[Process] = []
-        self.worker_pids: dict[int, int] = {}  # worker_id -> pid
-        self._shutdown_event = asyncio.Event()
-
-    async def initialize(self) -> None:
-        """Initialize workers and ZMQ infrastructure."""
-        # Create readiness pull socket to receive worker ready signals
-        readiness_socket = ZMQPullSocket(
-            self.zmq_context,
-            self.zmq_config.zmq_readiness_queue_addr,
-            self.zmq_config,
-            bind=True,
-        )
-
-        initialization_succeeded = False
-        try:
-            logger.debug(f"Starting {self.http_config.num_workers} worker processes")
-
-            # Spawn worker processes
-            for i in range(self.http_config.num_workers):
-                worker = self._spawn_worker(i)
-                self.workers.append(worker)
-                self.worker_pids[i] = worker.pid
-
-            # Wait for all workers to signal readiness
-            async def wait_for_all_workers():
-                ready_count = 0
-                # Keep trying until we get all N readiness signals
-
-                while ready_count < self.http_config.num_workers:
-                    worker_id = await readiness_socket.receive()
-                    if worker_id is not None:
-                        ready_count += 1
-                        logger.debug(
-                            f"Worker {worker_id} is ready ({ready_count}/{self.http_config.num_workers})"
-                        )
-
-                return ready_count
-
-            ready_count = await asyncio.wait_for(
-                wait_for_all_workers(),
-                timeout=self.http_config.worker_initialization_timeout,
-            )
-            logger.debug(f"{ready_count}/{self.http_config.num_workers} workers ready")
-            initialization_succeeded = True
-        except TimeoutError as e:
-            raise TimeoutError(
-                f"Workers failed to initialize within {self.http_config.worker_initialization_timeout} seconds."
-            ) from e
-        finally:
-            # Close readiness socket
-            readiness_socket.close()
-            # Shutdown any spawned workers on error/interrupt
-            if not initialization_succeeded and self.workers:
-                await self.shutdown()
-
-    def _spawn_worker(self, worker_id: int) -> Process:
-        """Spawn a single worker process."""
-        # Create worker process as daemon.
-        # 1. Automatic Termination: No need to manually join/reap worker processes
-        # 2. Zombie Prevention: Relies on multiprocessing's internal atexit handler
-        process = Process(
-            target=worker_main,
-            args=(
-                worker_id,
-                self.http_config,
-                self.aiohttp_config,
-                self.zmq_config,
-            ),
-            daemon=True,
-        )
-        process.start()
-        return process
-
-    async def shutdown(self) -> None:
-        """Graceful shutdown of all workers."""
-        self._shutdown_event.set()
-
-        # Send SIGTERM to alive workers for graceful shutdown
-        for worker in self.workers:
-            if worker.is_alive():
-                worker.terminate()
-
-        # Wait for graceful shutdown
-        await asyncio.sleep(self.http_config.worker_graceful_shutdown_wait)
-
-        # Force kill any remaining workers
-        for worker in self.workers:
-            if worker.is_alive():
-                worker.kill()
-
-        # Join all workers to ensure termination
-        await asyncio.gather(
-            *(
-                asyncio.to_thread(
-                    worker.join, timeout=self.http_config.worker_force_kill_timeout
-                )
-                for worker in self.workers
-            )
-        )

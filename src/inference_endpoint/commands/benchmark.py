@@ -74,6 +74,7 @@ from inference_endpoint.load_generator import (
     WithoutReplacementSampleOrder,
 )
 from inference_endpoint.load_generator.scheduler import Scheduler
+from inference_endpoint.utils.logging import verbosity_to_log_level
 
 # Suppress HuggingFace warnings about missing PyTorch/TensorFlow
 transformers_logging.set_verbosity_error()
@@ -308,7 +309,7 @@ def _build_config_from_cli(
             ),
             client=ClientSettings(
                 workers=args.workers if args.workers else 4,
-                log_level="DEBUG" if verbose_level >= 2 else "INFO",
+                log_level=verbosity_to_log_level(verbose_level),
             ),
         ),
         model_params=ModelParams(

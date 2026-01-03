@@ -29,9 +29,7 @@ from inference_endpoint.endpoint_client.configs import (
     HTTPClientConfig,
     ZMQConfig,
 )
-from inference_endpoint.endpoint_client.worker import WorkerManager
-
-# from inference_endpoint.endpoint_client.worker_2 import WorkerManager
+from inference_endpoint.endpoint_client.worker_manager import WorkerManager
 from inference_endpoint.endpoint_client.zmq_utils import ZMQPullSocket, ZMQPushSocket
 
 logger = logging.getLogger(__name__)

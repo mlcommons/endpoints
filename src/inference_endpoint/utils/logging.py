@@ -29,6 +29,28 @@ from colorama import init as _colorama_init
 # Initialize colorama
 _colorama_init(autoreset=True)
 
+# Custom TRACE level (below DEBUG) for deep instrumentation
+TRACE = 5
+logging.addLevelName(TRACE, "TRACE")
+
+
+def verbosity_to_log_level(verbosity: int, as_int: bool = False) -> str | int:
+    """Convert CLI verbosity count to log level.
+
+    Args:
+        verbosity: Count of -v flags (0, 1, 2, 3+)
+        as_int: If True, return integer level; if False, return string name
+
+    Returns:
+        Log level as string ("INFO", "DEBUG", "TRACE") or int (20, 10, 5)
+    """
+    if verbosity >= 3:
+        return TRACE if as_int else "TRACE"
+    elif verbosity >= 2:
+        return logging.DEBUG if as_int else "DEBUG"
+    return logging.INFO if as_int else "INFO"
+
+
 # Map levelname -> color
 _LEVEL_COLORS = {
     "INFO": Fore.GREEN,
@@ -111,9 +133,13 @@ def setup_logging(level: str | None = None, format_string: str | None = None) ->
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(ColoredFormatter(fmt=format_string, use_color=use_color))
 
-    logging.basicConfig(
-        level=getattr(logging, level.upper()), handlers=[handler], force=True
-    )
+    # Handle custom TRACE level
+    if level.upper() == "TRACE":
+        log_level = TRACE
+    else:
+        log_level = getattr(logging, level.upper())
+
+    logging.basicConfig(level=log_level, handlers=[handler], force=True)
 
     # Set specific logger levels
     logging.getLogger("asyncio").setLevel(logging.WARNING)

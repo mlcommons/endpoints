@@ -13,7 +13,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .bare_response_server import BareResponseServer, BareResponseServerProcess
-from .echo_server import EchoServer
+"""Utility functions for endpoint client."""
 
-__all__ = ["BareResponseServer", "BareResponseServerProcess", "EchoServer"]
+
+def get_ephemeral_port_limit() -> int:
+    """Get the number of available ephemeral ports from ip_local_port_range.
+
+    Reads /proc/sys/net/ipv4/ip_local_port_range to determine the range of
+    ports available for outbound TCP connections.
+
+    Returns:
+        Number of available ephemeral ports.
+    """
+    try:
+        with open("/proc/sys/net/ipv4/ip_local_port_range") as f:
+            low, high = map(int, f.read().split())
+            return high - low + 1
+    except (OSError, ValueError):
+        # Fallback to typical Linux default (32768-60999 = 28232 ports)
+        return 28232

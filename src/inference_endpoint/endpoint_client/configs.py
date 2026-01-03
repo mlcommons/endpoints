@@ -58,9 +58,22 @@ class HTTPClientConfig:
     stream_all_chunks: bool = False
 
     # Worker lifecycle timeouts
-    worker_initialization_timeout: float = 40.0  # init
+    worker_initialization_timeout: float = (
+        120.0  # initialize and warmup TCP connections
+    )
     worker_graceful_shutdown_wait: float = 0.5  # post-run
     worker_force_kill_timeout: float = 0.5  # post-run
+
+    # TCP connection warmup per worker:
+    #   "auto" (default) = ephemeral_port_limit // num_workers
+    #   "auto-min" = 0.10 * (ephemeral_port_limit // num_workers))
+    #   None or 0 = disable warmup
+    #   int = explicit number of connections to warm up
+    warmup_connections: str | int | None = "auto"
+
+    # Disable Python garbage collection in worker processes
+    # Can reduce latency spikes from GC pauses during request processing
+    disable_gc: bool = False
 
     # TODO(vir):
     #   -  move streaming to HttpClient config (not per-query)
@@ -169,10 +182,14 @@ class AioHttpConfig:
     )
 
     # TCP Connection Pooling
-    tcp_connector_limit: int | None = None  # None for unlimited (system limit)
-    tcp_connector_limit_per_host: int | None = None
+    # NOTE: limit=0 means unlimited; None defaults to aiohttp's 100 which causes pool starvation
+    tcp_connector_limit: int = 0  # 0 = unlimited (respects system fd limit)
+    tcp_connector_limit_per_host: int = 0  # 0 = unlimited per host
     tcp_connector_force_close: bool = False  # Enable connection pooling
-    tcp_connector_keepalive_timeout: int = 30  # 30 seconds timeout for idle connection
+    tcp_connector_keepalive_timeout: int = 86400  # 24 hours - keep connections alive
+    tcp_connector_enable_cleanup_closed: bool = (
+        False  # Skip SSL transport cleanup overhead
+    )
 
     # DNS caching
     tcp_connector_use_dns_cache: bool = True
@@ -183,7 +200,8 @@ class AioHttpConfig:
     # This offers better connection latency when host is known reliable
     tcp_connector_happy_eyeballs_delay: float | None = None  # None = disabled
 
-    tcp_connector_family: int = socket.AF_UNSPEC  # IPv4 and IPv6
+    # AF_UNSPEC = IPv4 and IPv6, AF_INET = IPv4 only, AF_INET6 = IPv6 only
+    tcp_connector_family: int = socket.AF_UNSPEC
 
     # Socket defaults
     socket_defaults: SocketConfig = field(default_factory=SocketConfig)
@@ -203,6 +221,7 @@ class AioHttpConfig:
             "limit_per_host": self.tcp_connector_limit_per_host,
             "force_close": self.tcp_connector_force_close,
             "keepalive_timeout": self.tcp_connector_keepalive_timeout,
+            "enable_cleanup_closed": self.tcp_connector_enable_cleanup_closed,
             "ttl_dns_cache": self.tcp_connector_ttl_dns_cache,
             "use_dns_cache": self.tcp_connector_use_dns_cache,
             "happy_eyeballs_delay": self.tcp_connector_happy_eyeballs_delay,

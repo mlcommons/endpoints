@@ -357,7 +357,7 @@ class Worker:
                 # TODO(vir): re-do work-consumer loop to leverage built-in zmq load-balancing
                 # Pull query from queue with timeout
                 query = await self._request_socket.receive()
-                t_recv = time.perf_counter_ns()
+                t_recv = time.monotonic_ns()
 
                 # Handle timeout (no query available)
                 if query is None:
@@ -433,10 +433,10 @@ class Worker:
 
         # Encode query to bytes (prepared.process holds the query)
         payload_bytes = self._adapter.encode_query(prepared.process)
-        prepared.timing_ctx["t_prepare"] = time.perf_counter_ns()
+        prepared.timing_ctx["t_prepare"] = time.monotonic_ns()
 
         # Record time just before HTTP request
-        prepared.timing_ctx["t_http"] = time.perf_counter_ns()
+        prepared.timing_ctx["t_http"] = time.monotonic_ns()
         prepared.log_timing_pre()
 
         if self.http_config.record_worker_events:
@@ -451,7 +451,7 @@ class Worker:
             url, data=payload_bytes, headers=prepared.process.headers
         ) as response:
             # Record when headers are received
-            prepared.timing_ctx["t_headers"] = time.perf_counter_ns()
+            prepared.timing_ctx["t_headers"] = time.monotonic_ns()
 
             if response.status != 200:
                 error_text = await response.text()
@@ -554,7 +554,7 @@ class Worker:
             # Process SSE stream - yields batches of chunks
             async for chunk_batch in self._iter_sse_lines(response):
                 if not first_chunk_received:
-                    prepared.timing_ctx["t_first_chunk"] = time.perf_counter_ns()
+                    prepared.timing_ctx["t_first_chunk"] = time.monotonic_ns()
                     first_chunk_received = True
 
                 for delta in chunk_batch:
@@ -571,11 +571,11 @@ class Worker:
                             )
 
             # All chunks received
-            prepared.timing_ctx["t_response"] = time.perf_counter_ns()
+            prepared.timing_ctx["t_response"] = time.monotonic_ns()
 
             await self._response_socket.send(accumulator.get_final_output())
 
-            prepared.timing_ctx["t_zmq_sent"] = time.perf_counter_ns()
+            prepared.timing_ctx["t_zmq_sent"] = time.monotonic_ns()
             prepared.log_timing_post()
 
             if self.http_config.record_worker_events:
@@ -591,12 +591,12 @@ class Worker:
         """Handle non-streaming response with timing."""
         async for response in self._make_http_request(prepared):
             response_bytes = await response.read()
-            prepared.timing_ctx["t_response"] = time.perf_counter_ns()
+            prepared.timing_ctx["t_response"] = time.monotonic_ns()
 
             result = self._adapter.decode_response(response_bytes, prepared.query_id)
             await self._response_socket.send(result)
 
-            prepared.timing_ctx["t_zmq_sent"] = time.perf_counter_ns()
+            prepared.timing_ctx["t_zmq_sent"] = time.monotonic_ns()
             prepared.log_timing_post()
 
             if self.http_config.record_worker_events:

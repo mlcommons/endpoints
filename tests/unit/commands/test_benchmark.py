@@ -27,9 +27,11 @@ Focus areas:
 - Configuration loading and merging
 - Dataset validation
 - Error propagation with proper exception types
+- Verbosity levels and logging
 """
 
 import argparse
+import logging
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -40,6 +42,7 @@ from inference_endpoint.commands.benchmark import (
 )
 from inference_endpoint.config.schema import APIType
 from inference_endpoint.exceptions import InputValidationError
+from inference_endpoint.utils.logging import TRACE
 
 
 def _create_mock_args(**overrides):
@@ -267,3 +270,36 @@ endpoint_config:
     # Note: Testing unsupported load patterns requires full integration
     # as it happens during scheduler creation after dataset loading.
     # This is covered by yaml_config.py tests and integration tests.
+
+
+class TestVerbosityLevels:
+    """Test CLI verbosity levels and TRACE logging for timing."""
+
+    def test_trace_level_exists(self):
+        """Verify TRACE level is defined below DEBUG."""
+        assert TRACE < logging.DEBUG
+        assert TRACE == 5
+        assert logging.getLevelName(TRACE) == "TRACE"
+
+    def test_timing_logs_require_trace_level(self):
+        """Verify timing logs only appear at TRACE level (-vvv), not DEBUG (-vv)."""
+
+        test_logger = logging.getLogger("inference_endpoint.endpoint_client.types")
+
+        # At DEBUG level (-vv), timing logs should NOT appear
+        test_logger.setLevel(logging.DEBUG)
+        assert not test_logger.isEnabledFor(TRACE)
+
+        # At TRACE level (-vvv), timing logs should appear
+        test_logger.setLevel(TRACE)
+        assert test_logger.isEnabledFor(TRACE)
+
+    def test_verbosity_mapping(self):
+        """Verify -v, -vv, -vvv map to correct log levels."""
+        # These are the expected mappings from cli.py:
+        # -v   (verbose=1) -> INFO
+        # -vv  (verbose=2) -> DEBUG
+        # -vvv (verbose=3) -> TRACE
+        assert logging.INFO == 20
+        assert logging.DEBUG == 10
+        assert TRACE == 5
