@@ -21,8 +21,10 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import partial
+from pathlib import Path
 from typing import Any
 
+import orjson
 from aiohttp.client_reqrep import ClientRequest, ClientResponse
 
 from inference_endpoint.utils.logging import TRACE
@@ -57,6 +59,95 @@ def logging_timing_printer(
 
     log_parts = duration_parts + timestamp_parts
     logger.log(TRACE, f"[{query_id}] timing_{phase}: {', '.join(log_parts)}")
+
+
+class FileTimingPrinter:
+    """
+    File-based timing printer that buffers entries and writes JSONL at close.
+
+    Buffers timing data in memory during the run to avoid per-request I/O overhead.
+    Writes all entries to file when close() is called (at worker shutdown).
+
+    Each line is a JSON object with:
+        - query_id: The request ID
+        - worker_id: The worker process ID
+        - phase: "pre" or "post"
+        - metrics: Dict of timing metrics (durations in ms, timestamps in ns)
+
+    Usage as context manager:
+        with FileTimingPrinter.configure(event_logs_dir, worker_id):
+            # timing_printer is now set to write to file
+            run_worker()
+        # On exit: writes buffered entries, restores original printer
+    """
+
+    __slots__ = ("path", "worker_id", "_entries", "_previous_printer")
+
+    def __init__(self, path: Path, worker_id: int):
+        self.path = path
+        self.worker_id = worker_id
+        self._entries: list[bytes] = []
+        self._previous_printer: TimingPrinter | None = None
+
+    def close(self) -> None:
+        """Write all buffered entries to file."""
+        if not self._entries:
+            return
+
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.path, "wb") as f:
+            f.write(b"\n".join(self._entries))
+            f.write(b"\n")
+        logger.debug(f"Wrote {len(self._entries)} timing entries to {self.path}")
+        self._entries.clear()
+
+    def __call__(self, query_id: str, phase: str, metrics: dict[str, float]) -> None:
+        """Buffer timing entry for later write."""
+        entry = {
+            "query_id": query_id,
+            "worker_id": self.worker_id,
+            "phase": phase,
+            "metrics": metrics,
+        }
+        self._entries.append(orjson.dumps(entry))
+
+    def __enter__(self) -> FileTimingPrinter:
+        """Set this printer as the active timing_printer."""
+        global timing_printer
+        self._previous_printer = timing_printer
+        timing_printer = self
+        return self
+
+    def __exit__(self, *_: Any) -> None:
+        """Write entries and restore previous printer."""
+        global timing_printer
+        self.close()
+        if self._previous_printer is not None:
+            timing_printer = self._previous_printer
+
+    @classmethod
+    def configure(
+        cls, event_logs_dir: Path | None, worker_id: int
+    ) -> FileTimingPrinter | _NullContext:
+        """
+        Factory to create a configured FileTimingPrinter context manager.
+
+        Returns a null context if event_logs_dir is None.
+        """
+        if event_logs_dir is None:
+            return _NullContext()
+        path = event_logs_dir / f"timing_worker_{worker_id}.jsonl"
+        return cls(path, worker_id)
+
+
+class _NullContext:
+    """No-op context manager for when timing is disabled."""
+
+    def __enter__(self) -> None:
+        return None
+
+    def __exit__(self, *_: Any) -> None:
+        pass
 
 
 # Active printer - swap to change output destination

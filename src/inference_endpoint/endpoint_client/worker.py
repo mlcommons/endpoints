@@ -46,7 +46,7 @@ from inference_endpoint.endpoint_client.configs import (
     HTTPClientConfig,
     ZMQConfig,
 )
-from inference_endpoint.endpoint_client.types import PreparedRequest
+from inference_endpoint.endpoint_client.types import FileTimingPrinter, PreparedRequest
 from inference_endpoint.endpoint_client.utils import get_ephemeral_port_limit
 from inference_endpoint.endpoint_client.zmq_utils import ZMQPullSocket, ZMQPushSocket
 from inference_endpoint.load_generator.events import SampleEvent
@@ -83,10 +83,17 @@ def worker_main(
     worker_log_format = f"%(asctime)s - %(name)s[W{worker_id}/%(process)d] - %(funcName)s - %(levelname)s - %(message)s"
     setup_logging(level=http_config.log_level, format_string=worker_log_format)
 
-    # Disable GC to reduce latency spikes from collection pauses
-    if http_config.disable_gc:
-        gc.disable()
-        logger.debug("Garbage collection disabled")
+    match http_config.worker_gc_mode:
+        case "disabled":
+            gc.disable()
+            logger.debug("GC fully disabled")
+        case "relaxed":
+            # Relaxed thresholds: 50x higher than default (700, 10, 10)
+            gc_relaxed_thresholds = (35000, 500, 500)
+            gc.set_threshold(*gc_relaxed_thresholds)
+            logger.debug(f"GC thresholds relaxed to {gc_relaxed_thresholds}")
+        case "system" | _:
+            logger.debug("GC using default Python thresholds")
 
     # Install uvloop which also enables it
     import uvloop
@@ -95,16 +102,16 @@ def worker_main(
 
     # Create and run worker
     try:
-        worker = Worker(
-            worker_id=worker_id,
-            http_config=http_config,
-            aiohttp_config=aiohttp_config,
-            zmq_config=zmq_config,
-        )
-
-        # Run event loop
-        uvloop.run(worker.run())
-
+        # FileTimingPrinter context manager handles setup/teardown of timing output
+        with FileTimingPrinter.configure(http_config.event_logs_dir, worker_id):
+            uvloop.run(
+                Worker(
+                    worker_id=worker_id,
+                    http_config=http_config,
+                    aiohttp_config=aiohttp_config,
+                    zmq_config=zmq_config,
+                ).run()
+            )
     except Exception as e:
         logger.error(f"Crashed: {type(e).__name__}: {str(e)}\n{traceback.format_exc()}")
         sys.exit(1)

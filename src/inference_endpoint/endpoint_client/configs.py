@@ -64,17 +64,23 @@ class HTTPClientConfig:
     worker_graceful_shutdown_wait: float = 0.5  # post-run
     worker_force_kill_timeout: float = 0.5  # post-run
 
-    # TCP connection warmup per worker:
-    #   "auto" (default) = ephemeral_port_limit // num_workers
-    #   "auto-min" = 0.10 * (ephemeral_port_limit // num_workers))
-    #   None or 0 = disable warmup
-    #   int = explicit number of connections to warm up
-    warmup_connections: str | int | None = "auto"
+    # Pre-Open TCP connection sockets during init for resuse at runtime.
+    # Can reduce p99,max-latency hit from cold-start connections or bursty traffic.
+    #
+    # Values:
+    #   - "auto" (default) = ephemeral_port_limit // num_workers
+    #   - "auto-min" = 0.10 * (ephemeral_port_limit // num_workers))
+    #   - None or 0 = disable warmup
+    #   - >0 = explicit number of connections to warm up
+    warmup_connections: str | int | None = True
 
-    # Disable Python garbage collection in worker processes
-    # Can reduce latency spikes from GC pauses during request processing
-    # TODO(vir): re-enable opportunistic gc
-    disable_gc: bool = True
+    # GC strategy for worker processes to reduce latency spikes from collection pauses
+    #
+    # Values:
+    #   - "disabled": GC completely disabled (risky for long-running benchmarks)
+    #   - "relaxed": GC enabled with 50x higher thresholds (less aggressive)
+    #   - "system": Standard Python GC with default thresholds
+    worker_gc_mode: str = "relaxed"
 
     # TODO(vir):
     #   -  move streaming to HttpClient config (not per-query)

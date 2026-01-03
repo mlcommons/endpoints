@@ -15,9 +15,14 @@
 # limitations under the License.
 
 """
-Parse verbose outputs to report inference-endpoint http-client overhead.
+Parse timing data to report inference-endpoint http-client overhead.
 
 Usage:
+    # Option 1: Read from timing JSONL files (preferred)
+    # --timing-dir defaults to {report-dir}/endpoint_client/ if not specified
+    python scripts/parse_endpoint_client_logs.py --report-dir output/
+
+    # Option 2: Parse verbose log output (legacy, requires -vvv)
     inference-endpoint -vvv benchmark offline ... --report-dir output/ 2>&1 | python scripts/parse_endpoint_client_logs.py --report-dir output/
 """
 
@@ -144,6 +149,39 @@ def load_events(report_dir: Path) -> dict[str, dict[str, int]]:
     return samples
 
 
+def load_timing_jsonl(report_dir: Path) -> Stats:
+    """
+    Load timing data from worker JSONL files.
+
+    Reads timing_worker_*.jsonl files from report_dir.
+    Each line is a JSON object with: query_id, worker_id, phase, metrics.
+
+    Returns a Stats object populated with the timing data.
+    """
+    stats = Stats()
+    stats.report_dir = report_dir
+
+    timing_files = list(report_dir.glob("timing_worker_*.jsonl"))
+    if not timing_files:
+        return stats
+
+    for timing_file in timing_files:
+        with open(timing_file) as f:
+            for line in f:
+                if not (line := line.strip()):
+                    continue
+                try:
+                    entry = json.loads(line)
+                    query_id = entry.get("query_id", "")
+                    phase = entry.get("phase", "")
+                    metrics = entry.get("metrics", {})
+                    stats.add(phase, query_id, metrics)
+                except json.JSONDecodeError:
+                    continue
+
+    return stats
+
+
 def print_live(stats: Stats) -> None:
     """Print live stats (clears screen)."""
     pre, post, count = stats.pre, stats.post, stats.count
@@ -267,14 +305,49 @@ def print_analysis(stats: Stats, events: dict[str, dict[str, int]]) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--report-dir", type=Path, help="Report directory")
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument(
+        "--timing-dir",
+        type=Path,
+        help="Directory containing timing_worker_*.jsonl files (default: {report-dir}/endpoint_client/)",
+    )
+    parser.add_argument(
+        "--report-dir",
+        type=Path,
+        help="Report directory containing events.json (for IPC calculations)",
+    )
     args = parser.parse_args()
 
-    if os.isatty(sys.stdin.fileno()):
+    # Default timing-dir to report-dir/endpoint_client/ if not specified
+    if args.timing_dir is None and args.report_dir is not None:
+        args.timing_dir = args.report_dir / "endpoint_client"
+
+    # Check if we should read from JSONL files or stdin
+    stdin_is_tty = os.isatty(sys.stdin.fileno())
+
+    if stdin_is_tty and args.timing_dir:
+        # No stdin input - load from timing JSONL files
+        stats = load_timing_jsonl(args.timing_dir)
+        if stats.count == 0:
+            print(f"No timing data found in {args.timing_dir}")
+            print("Looking for: timing_worker_*.jsonl files")
+            return
+
+        with stats.lock:
+            print_live(stats)
+
+        # Load events.json from report_dir for IPC calculations
+        events = load_events(args.report_dir) if args.report_dir else {}
+        print_analysis(stats, events)
+        return
+
+    if stdin_is_tty:
         print(__doc__)
         return
 
+    # Legacy mode: parse timing from verbose log output on stdin
     stats = Stats()
     stats.report_dir = args.report_dir
     stop = threading.Event()

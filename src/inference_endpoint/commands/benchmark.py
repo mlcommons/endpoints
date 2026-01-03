@@ -551,6 +551,10 @@ def _run_benchmark(
     tmp_dir = tempfile.mkdtemp(prefix="inference_endpoint_")
 
     try:
+        # event_logs_dir is used for worker timing data and optional event logs
+        endpoint_client_dir = (
+            Path(report_dir) / "endpoint_client" if report_dir else None
+        )
         http_config = HTTPClientConfig(
             endpoint_url=urljoin(
                 endpoint, config.endpoint_config.api_type.default_route()
@@ -558,7 +562,7 @@ def _run_benchmark(
             api_type=config.endpoint_config.api_type,
             num_workers=num_workers,
             record_worker_events=config.settings.client.record_worker_events,
-            event_logs_dir=report_dir,
+            event_logs_dir=endpoint_client_dir,
             log_level=config.settings.client.log_level,
         )
         aiohttp_config = AioHttpConfig()
