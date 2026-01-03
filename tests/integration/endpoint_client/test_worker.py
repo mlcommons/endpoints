@@ -355,9 +355,20 @@ class TestWorkerErrorHandling:
     @pytest.mark.parametrize(
         "stream", [False, True], ids=["non_streaming", "streaming"]
     )
-    async def test_worker_exception_handling(self, basic_config, stream):
-        """Test worker handles exceptions in _process_request for both streaming and non-streaming."""
-        http_config, aiohttp_config, zmq_config = basic_config
+    async def test_worker_exception_handling(
+        self, mock_http_echo_server, tmp_path, stream
+    ):
+        """Test worker handles exceptions in response handlers."""
+        # Need a working server so _fire_request succeeds before handler is called
+        http_config = HTTPClientConfig(
+            endpoint_url=f"{mock_http_echo_server.url}/v1/chat/completions",
+            num_workers=1,
+        )
+        aiohttp_config = AioHttpConfig()
+        zmq_config = ZMQConfig(
+            zmq_request_queue_prefix=get_test_socket_path(tmp_path, "test_exc", "_req"),
+            zmq_response_queue_addr=get_test_socket_path(tmp_path, "test_exc", "_resp"),
+        )
 
         context = zmq.asyncio.Context()
 
@@ -378,13 +389,13 @@ class TestWorkerErrorHandling:
             # Mock the appropriate handler to raise an exception
             error_msg = f"Simulated {'streaming' if stream else 'non-streaming'} processing error"
 
-            async def mock_handle_request(query):
+            async def mock_handle_response(prepared):
                 raise RuntimeError(error_msg)
 
             if stream:
-                worker._handle_streaming_request = mock_handle_request
+                worker._handle_streaming_response = mock_handle_response
             else:
-                worker._handle_non_streaming_request = mock_handle_request
+                worker._handle_non_streaming_response = mock_handle_response
 
             # Start worker
             worker_task = asyncio.create_task(worker.run())

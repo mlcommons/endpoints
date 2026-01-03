@@ -288,11 +288,11 @@ class TestWorkerDeathScenarios:
     """Test edge cases: multiple worker deaths, concurrent failures, and cleanup."""
 
     @pytest.fixture
-    def worker_death_config(self, tmp_path):
+    def worker_death_config(self, tmp_path, mock_http_echo_server):
         """Create configuration for worker death scenario tests."""
         # Use tmp_path for unique socket paths per test
         http_config = HTTPClientConfig(
-            endpoint_url="http://localhost:99999/advanced",
+            endpoint_url=f"{mock_http_echo_server.url}/v1/chat/completions",
             num_workers=2,
         )
         aiohttp_config = AioHttpConfig()

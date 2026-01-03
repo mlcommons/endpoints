@@ -373,4 +373,14 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+
+    def _create_eager_loop() -> asyncio.AbstractEventLoop:
+        """Create event loop with eager task factory for better performance."""
+        loop = asyncio.new_event_loop()
+        loop.set_task_factory(asyncio.eager_task_factory)
+        return loop
+
+    # Use asyncio.Runner with eager_task_factory,
+    # which immediately starts task execution rather than scheduling
+    with asyncio.Runner(loop_factory=_create_eager_loop) as runner:
+        runner.run(main())
