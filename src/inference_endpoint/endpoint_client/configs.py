@@ -72,7 +72,7 @@ class HTTPClientConfig:
     #   - "auto-min" = 0.10 * (ephemeral_port_limit // num_workers))
     #   - None or 0 = disable warmup
     #   - >0 = explicit number of connections to warm up
-    warmup_connections: str | int | None = True
+    warmup_connections: str | int | None = "auto"
 
     # GC strategy for worker processes to reduce latency spikes from collection pauses
     #
