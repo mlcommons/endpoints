@@ -663,52 +663,6 @@ class Worker:
             self._active_tasks.discard(asyncio.current_task())
 
     @profile
-    async def _fire_request(self, prepared: PreparedRequest) -> bool:
-        """
-        Fire HTTP POST request. Returns True on success.
-
-        Only establishes TCP connection and sends POST - header await is deferred
-        to background task so main loop can immediately resume ZMQ consumption.
-        """
-        if self._shutdown:
-            await self._handle_error(prepared.query_id, "Worker is shutting down")
-            return False
-
-        try:
-            # Establish TCP connection (try-reuse connections from pool)
-            prepared.timing_ctx["t_conn_start"] = time.monotonic_ns()
-            conn = await self.tcp_connector.connect(
-                prepared.client_request, traces=[], timeout=self._timeout
-            )
-            # NOTE(vir): need to re-do this every request to recreate HttpResponseParser
-            conn.protocol.set_response_params(**self._response_params)
-            prepared.timing_ctx["t_conn_end"] = time.monotonic_ns()
-
-            # Record time just-before request is issued
-            if self.http_config.record_worker_events:
-                EventRecorder.record_event(
-                    SampleEvent.HTTP_REQUEST_ISSUED,
-                    time.monotonic_ns(),
-                    sample_uuid=prepared.query_id,
-                    assert_active=True,
-                )
-
-            # Issue post request
-            resp = await prepared.client_request.send(conn)
-            prepared.timing_ctx["t_http"] = time.monotonic_ns()
-
-            # Store response to resume processing in asyncio task
-            prepared.response = resp
-            prepared.connection = conn
-            prepared.log_timing_pre()
-            return True
-
-        except Exception as e:
-            await self._handle_error(prepared.query_id, e)
-            logger.error(f"Request {prepared.query_id} failed: {type(e).__name__}: {e}")
-            return False
-
-    @profile
     async def _handle_non_streaming_response(self, prepared: PreparedRequest) -> None:
         """Handle non-streaming HTTP response."""
         # Await response bytes
