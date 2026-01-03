@@ -16,19 +16,37 @@
 """Asyncio utilities for the MLPerf Inference Endpoint Benchmarking System."""
 
 import asyncio
+import os
 
 import uvloop
 
 
-def create_eager_loop() -> asyncio.AbstractEventLoop:
+def create_eager_loop(
+    slow_callback_duration: float | None = None,
+) -> asyncio.AbstractEventLoop:
     """Create uvloop event loop with eager task factory.
 
     The eager task factory immediately starts task execution rather than scheduling it for later,
     which can provide better performance for I/O-bound workloads.
+
+    Args:
+        slow_callback_duration: If set, enables debug mode and logs callbacks exceeding
+            this duration in seconds. Can also be set via ASYNCIO_SLOW_CALLBACK_MS env var.
 
     Returns:
         asyncio.AbstractEventLoop: A uvloop event loop with eager task factory configured.
     """
     loop = uvloop.new_event_loop()
     loop.set_task_factory(asyncio.eager_task_factory)
+
+    # Check env var for slow callback threshold (in milliseconds)
+    if slow_callback_duration is None:
+        env_ms = os.environ.get("ASYNCIO_SLOW_CALLBACK_MS")
+        if env_ms:
+            slow_callback_duration = float(env_ms) / 1000.0
+
+    if slow_callback_duration is not None:
+        loop.set_debug(True)
+        loop.slow_callback_duration = slow_callback_duration
+
     return loop

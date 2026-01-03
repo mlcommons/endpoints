@@ -16,11 +16,11 @@
 """HTTP endpoint client implementation."""
 
 import asyncio
+import itertools
 import logging
 import threading
 import uuid
 
-import uvloop
 import zmq.asyncio
 
 from inference_endpoint.core.types import Query, QueryResult, StreamChunk
@@ -31,6 +31,7 @@ from inference_endpoint.endpoint_client.configs import (
 )
 from inference_endpoint.endpoint_client.worker_manager import WorkerManager
 from inference_endpoint.endpoint_client.zmq_utils import ZMQPullSocket, ZMQPushSocket
+from inference_endpoint.utils.asyncio import create_eager_loop
 
 logger = logging.getLogger(__name__)
 
@@ -61,13 +62,11 @@ class AsyncHttpEndpointClient:
         self.config = config
         self.aiohttp_config = aiohttp_config
         self.zmq_config = zmq_config
-        self._next_worker_idx = 0
 
         # Use provided loop or create own
-        self._owns_loop = loop is None
         if loop is None:
-            self.loop = uvloop.new_event_loop()
-            self._loop_thread: threading.Thread = threading.Thread(
+            self.loop = create_eager_loop()
+            self._loop_thread: threading.Thread | None = threading.Thread(
                 target=self.loop.run_forever,
                 daemon=True,  # no need for explicit join
                 name=f"HttpClient-{self.client_id}",
@@ -92,7 +91,7 @@ class AsyncHttpEndpointClient:
             io_threads=self.zmq_config.zmq_io_threads
         )
 
-        self.worker_push_sockets = [
+        self._worker_push_sockets = [
             ZMQPushSocket(
                 self.zmq_context,
                 f"{self.zmq_config.zmq_request_queue_prefix}_{i}_requests",
@@ -100,6 +99,7 @@ class AsyncHttpEndpointClient:
             )
             for i in range(self.config.num_workers)
         ]
+        self._worker_cycle = itertools.cycle(self._worker_push_sockets)
 
         self.worker_manager = WorkerManager(
             self.config, self.aiohttp_config, self.zmq_config, self.zmq_context
@@ -122,10 +122,7 @@ class AsyncHttpEndpointClient:
         assert (
             not self._shutdown_event.is_set()
         ), "Cannot issue query: client is shutting down"
-        await self.worker_push_sockets[self._next_worker_idx].send(query)
-        self._next_worker_idx = (self._next_worker_idx + 1) % len(
-            self.worker_push_sockets
-        )
+        await next(self._worker_cycle).send(query)
 
     async def try_receive(self) -> QueryResult | StreamChunk | None:
         """Receive next ready response if available, else return None."""
@@ -137,14 +134,14 @@ class AsyncHttpEndpointClient:
         self._shutdown_event.set()
 
         self._response_socket.close()
-        for socket in self.worker_push_sockets:
+        for socket in self._worker_push_sockets:
             socket.close()
 
         await self.worker_manager.shutdown()
         self.zmq_context.destroy(linger=0)
 
         # Stop event loop if we own it (scheduled to run after this coroutine completes)
-        if self._owns_loop:
+        if self._loop_thread is not None:
             self.loop.call_soon(self.loop.stop)
 
         logger.info(f"[{self.client_id}] Shutdown complete.")
