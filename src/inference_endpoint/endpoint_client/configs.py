@@ -73,7 +73,8 @@ class HTTPClientConfig:
 
     # Disable Python garbage collection in worker processes
     # Can reduce latency spikes from GC pauses during request processing
-    disable_gc: bool = False
+    # TODO(vir): re-enable opportunistic gc
+    disable_gc: bool = True
 
     # TODO(vir):
     #   -  move streaming to HttpClient config (not per-query)
