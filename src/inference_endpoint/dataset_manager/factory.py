@@ -20,14 +20,11 @@ TODO: Very simple factory for now. Will be expanded to support multiple formats 
 
 import logging
 from pathlib import Path
-from typing import Any
 
 from inference_endpoint.dataset_manager.dataset import DatasetFormat
 
-from .dataset import (
-    Dataset,
-    RowProcessor,
-)
+from .dataset import Dataset
+from .transforms import AddStaticColumns, ColumnNameRemap
 
 logger = logging.getLogger(__name__)
 
@@ -64,22 +61,20 @@ class DataLoaderFactory:
         Raises:
             ValueError: If format is unsupported
         """
-
-        class KeyMapRowProcessor(RowProcessor):
-            def __init__(self):
-                if key_maps is None:
-                    self.key_maps = [{"prompt": "text_input"}]
-                else:
-                    self.key_maps = key_maps
-                super().__init__()
-
-            def __call__(self, row: dict[str, Any]) -> Any:
-                return {k: row[v] for k, v in self.key_maps[0].items()} | (
-                    metadata or {}
-                )
-
         if format is not None:
             format = DatasetFormat(format)
+
+        if key_maps is None:
+            remap = {"prompt": "text_input"}
+        else:
+            remap = key_maps[0]
+
+        transforms = [ColumnNameRemap(remap)]
+        if metadata is not None:
+            transforms.append(AddStaticColumns(metadata))
+
         return Dataset.load_from_file(
-            dataset_path, row_processor=KeyMapRowProcessor(), format=format
+            dataset_path,
+            transforms=transforms,
+            format=format,
         )

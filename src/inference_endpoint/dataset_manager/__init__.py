@@ -21,8 +21,24 @@ This module handles dataset loading, preprocessing, and management.
 
 from .dataset import Dataset
 from .factory import DataLoaderFactory
+from .transforms import (
+    AddStaticColumns,
+    ColumnNameRemap,
+    DropColumns,
+    FusedRowProcessor,
+    Harmonize,
+    UserPromptFormatter,
+    apply_transforms,
+)
 
 __all__ = [
     "Dataset",
     "DataLoaderFactory",
+    "ColumnNameRemap",
+    "AddStaticColumns",
+    "UserPromptFormatter",
+    "DropColumns",
+    "FusedRowProcessor",
+    "Harmonize",
+    "apply_transforms",
 ]

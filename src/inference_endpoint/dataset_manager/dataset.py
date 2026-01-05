@@ -24,8 +24,11 @@ from typing import Any, ClassVar
 
 import numpy as np
 import pandas as pd
-from datasets import load_dataset, load_from_disk
 from transformers import AutoTokenizer, PreTrainedTokenizer
+
+from datasets import load_dataset, load_from_disk
+
+from .transforms import Transform, apply_transforms
 
 logger = getLogger(__name__)
 
@@ -303,16 +306,23 @@ def load_from_huggingface(
     load_options: dict[str, Any] | None = None,
     cache_options: dict[str, Any] | None = None,
 ) -> pd.DataFrame:
-    """Load a dataset from HuggingFace"""
+    """Load a dataset from HuggingFace.
 
-    # If the dataset path is a local directory, load the dataset from the disk
-    if dataset_path is not None:
-        ds = load_from_disk(dataset_path)
-        return ds[split].to_pandas()
+    Args:
+        dataset_path: The path to the dataset on HuggingFace. See HuggingFace docs for more details.
+        dataset_name: The name of the dataset from the path to load. See HuggingFace docs for more details.
+        split: The split of the dataset. Defaults to "train".
+        cache_dir: Optional explicit cache directory to load dataset from. This is useful if your dataset is
+            saved to an external storage location not in your local HuggingFace cache.
+        load_options: Optional additional options to pass to the load_dataset function. See HuggingFace docs for more details.
+        cache_options: Optional additional options to pass to the save_to_disk function. See HuggingFace docs for more details.
 
-    # else load the dataset from the HuggingFace hub, and cache it if cache_dir is provided
+    Returns:
+        A pandas dataframe containing the dataset.
+    """
     load_options = load_options or {}
     cache_options = cache_options or {}
+
     if cache_dir is not None and cache_dir.exists():
         try:
             ds = load_from_disk(str(cache_dir), **cache_options)
@@ -329,17 +339,6 @@ def load_from_huggingface(
     return ds[split].to_pandas()
 
 
-class RowProcessor:
-    """Class for processing rows of a dataframe."""
-
-    def __init__(self, *args, **kwargs):
-        pass
-
-    def __call__(self, row: dict[str, Any]) -> Any:
-        """Process a row of a dataframe."""
-        return row
-
-
 class Dataset:
     """Class for loading and managing benchmark datasets.
 
@@ -352,24 +351,52 @@ class Dataset:
     The DataLoader is responsible for raw data loading only. Parsing and
     transformation (e.g., converting to request format) is handled separately
     by parser functions.
-
     """
+
+    COLUMN_NAMES: ClassVar[list[str] | None] = None
+    """The column names of the dataset. If proovided by a subclass, upon creation of an instance,
+    an error will be raised if all elements of the list are not present in the columns of the dataframe."""
+
+    PREDEFINED: ClassVar[dict[str, type["Dataset"]]] = {}
+    """A dictionary of predefined datasets, as subclasses of Dataset."""
+
+    def __init_subclass__(
+        cls,
+        dataset_id: str | None = None,
+        **kwargs,
+    ):
+        super().__init_subclass__(**kwargs)
+
+        if not inspect.isabstract(cls):
+            if dataset_id is None:
+                dataset_id = cls.__name__
+            cls.DATASET_ID = dataset_id
+            Dataset.PREDEFINED[dataset_id] = cls
 
     def __init__(
         self,
         dataframe: pd.DataFrame | None = None,
-        row_processor: RowProcessor | None = None,
+        transforms: list[Transform] | None = None,
     ):
+        if self.__class__.COLUMN_NAMES is not None:
+            common = set(self.__class__.COLUMN_NAMES) & set(dataframe.columns)
+            if len(common) != len(self.__class__.COLUMN_NAMES):
+                missing = set(self.__class__.COLUMN_NAMES) - common
+                raise ValueError(
+                    f"Required columns {missing} are not present in the dataframe"
+                )
+
         self.dataframe = dataframe
         self.logger = getLogger(__name__)
-        self.row_processor = row_processor or RowProcessor()
+        self.transforms = transforms
 
     @classmethod
     def load_from_file(
         cls,
         file_path: PathLike,
-        row_processor: RowProcessor | None = None,
+        transforms: list[Transform] | None = None,
         format: DatasetFormat | None = None,
+        dataset_id: str | None = None,
     ) -> "Dataset":
         assert format is None or isinstance(
             format, DatasetFormat
@@ -378,21 +405,26 @@ class Dataset:
         LoaderClass = DatafileLoader.get_loader(file_path, format=format)
         loader = LoaderClass(file_path)
         loader.read()
-        return Dataset(
+
+        ds_class = cls
+        if dataset_id is not None:
+            ds_class = Dataset.PREDEFINED[dataset_id]
+        return ds_class(
             loader.get_dataframe(),
-            row_processor=row_processor or RowProcessor(),
+            transforms=transforms,
         )
 
     def load(self):
-        """Load the dataset into memory for pre-processing.
+        """Load the dataset into memory for pre-processing. After transforms are applied,
+        the dataset is converted to a contiguous numpy array.
 
         Args:
             force: If True, reloads even if already loaded (for refreshing data).
         """
-        self.data = []
-        for row in self.dataframe.to_dict(orient="records"):
-            self.data.append(self.row_processor(row))
-        self.data = np.ascontiguousarray(self.data)
+        df = self.dataframe
+        if self.transforms is not None:
+            df = apply_transforms(df, self.transforms)
+        self.data = np.ascontiguousarray(df.to_dict(orient="records"))
 
     def load_sample(self, index: int) -> Any:
         """Load a single sample from the dataset by index.
