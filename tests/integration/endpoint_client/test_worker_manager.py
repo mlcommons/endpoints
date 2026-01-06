@@ -28,7 +28,7 @@ from inference_endpoint.endpoint_client.configs import (
     HTTPClientConfig,
     ZMQConfig,
 )
-from inference_endpoint.endpoint_client.worker import WorkerManager
+from inference_endpoint.endpoint_client.worker_manager import WorkerManager
 
 from ...test_helpers import get_test_socket_path
 
@@ -116,6 +116,7 @@ class TestWorkerLifecycle:
         http_config = HTTPClientConfig(
             endpoint_url=f"{mock_http_echo_server.url}/v1/chat/completions",
             num_workers=2,
+            warmup_connections=None,  # Skip warmup for faster tests
         )
         aiohttp_config = AioHttpConfig()
         # Use tmp_path for unique socket paths per test
@@ -294,6 +295,7 @@ class TestWorkerDeathScenarios:
         http_config = HTTPClientConfig(
             endpoint_url=f"{mock_http_echo_server.url}/v1/chat/completions",
             num_workers=2,
+            warmup_connections=None,  # Skip warmup for faster tests
         )
         aiohttp_config = AioHttpConfig()
         zmq_config = ZMQConfig(

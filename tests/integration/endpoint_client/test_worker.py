@@ -50,6 +50,7 @@ class TestWorkerBasicFunctionality:
         http_config = HTTPClientConfig(
             endpoint_url=f"{mock_http_echo_server.url}/v1/chat/completions",
             num_workers=2,
+            warmup_connections=None,  # Skip warmup for faster tests
         )
         aiohttp_config = AioHttpConfig()
         return http_config, aiohttp_config
@@ -260,10 +261,11 @@ class TestWorkerErrorHandling:
     @pytest.fixture
     def basic_config(self, tmp_path):
         """Create basic configuration for error handling tests."""
-        # Use invalid port to trigger connection errors
+        # Use non-listening port to trigger connection errors
         http_config = HTTPClientConfig(
-            endpoint_url="http://localhost:99999/v1/chat/completions",
+            endpoint_url="http://localhost:59999/v1/chat/completions",
             num_workers=1,
+            warmup_connections=None,  # Skip warmup for faster tests
         )
         aiohttp_config = AioHttpConfig()
         # Use tmp_path for unique socket paths per test
@@ -285,8 +287,8 @@ class TestWorkerErrorHandling:
         """Test worker error handling with invalid endpoint for both streaming and non-streaming."""
         http_config, aiohttp_config, zmq_config = basic_config
 
-        # Use invalid endpoint to trigger connection error
-        http_config.endpoint_url = "http://localhost:99999/v1/chat/completions"
+        # Use non-listening port to trigger connection error
+        http_config.endpoint_url = "http://localhost:59999/v1/chat/completions"
 
         worker = Worker(
             worker_id=0,
@@ -339,7 +341,7 @@ class TestWorkerErrorHandling:
                     and "refused" in response.error.lower()
                 )
                 or "cannot connect" in response.error.lower()
-                or "99999" in response.error
+                or "59999" in response.error
             )
 
             # Shutdown
@@ -363,6 +365,7 @@ class TestWorkerErrorHandling:
         http_config = HTTPClientConfig(
             endpoint_url=f"{mock_http_echo_server.url}/v1/chat/completions",
             num_workers=1,
+            warmup_connections=None,  # Skip warmup for faster tests
         )
         aiohttp_config = AioHttpConfig()
         zmq_config = ZMQConfig(

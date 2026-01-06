@@ -48,6 +48,7 @@ class DeepSeekR1SampleIssuer(HttpClientSampleIssuer):
         self.http_config = HTTPClientConfig(
             endpoint_url=urljoin(url, "/v1/chat/completions"),
             num_workers=16,
+            warmup_connections=None,  # Skip warmup for faster tests
         )
         self.aiohttp_config = AioHttpConfig()
         self.zmq_config = ZMQConfig(

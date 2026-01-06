@@ -184,17 +184,21 @@ class PreparedRequest:
 
     Computed Metrics:
         PRE-SEND:
-            recv_to_prepare = t_prepare - t_recv
-            pool_acquire    = t_conn_end - t_conn_start (waiting for connection)
-            http_send       = t_http - t_conn_end (sending POST request)
-            pre_overhead    = t_http - t_recv (total)
+            recv_to_bytes        = t_encode - t_recv
+            bytes_to_http_payload = t_prepare - t_encode
+            tcp_conn_pool        = t_conn_end - t_conn_start (waiting for connection)
+            http_payload_send    = t_http - t_conn_end (sending POST request)
+            pre_overhead         = t_http - t_recv (total)
 
         POST-SEND:
-            task_overhead   = t_task_awake - t_task_created
-            http_to_headers = t_headers - t_http
-            ... (streaming metrics)
-            post_overhead   = t_zmq_sent - t_response
-            end_to_end      = t_zmq_sent - t_recv
+            task_overhead        = t_task_awake - t_task_created
+            http_to_headers      = t_headers - t_http
+            headers_to_first_chunk = t_first_chunk - t_headers (streaming only)
+            first_to_last_chunk  = t_response - t_first_chunk (streaming only)
+            in_flight_time       = t_response - t_http (total server processing)
+            query_result_sent    = t_zmq_sent - t_response
+            post_overhead        = t_zmq_sent - t_response
+            end_to_end           = t_zmq_sent - t_recv
     """
 
     query_id: str
@@ -232,27 +236,26 @@ class PreparedRequest:
     def log_timing_pre(self) -> None:
         """
         Emit pre-send timing metrics.
-
-        Call this after timing_ctx["t_http"] is set, just after the HTTP request is sent.
         """
         ctx = self.timing_ctx
         t_recv = ctx["t_recv"]
         t_prepare = ctx["t_prepare"]
-        t_conn_start = ctx.get("t_conn_start")
-        t_conn_end = ctx.get("t_conn_end")
         t_http = ctx["t_http"]
 
-        metrics = {
-            "recv_to_prepare": (t_prepare - t_recv) / 1_000_000.0,
-        }
+        metrics: dict[str, float] = {}
 
-        # Time waiting for connection from pool
-        if t_conn_start is not None and t_conn_end is not None:
-            metrics["pool_acquire"] = (t_conn_end - t_conn_start) / 1_000_000.0
+        # Encode timing breakdown (optional - not all code paths set t_encode)
+        if "t_encode" in ctx:
+            t_encode = ctx["t_encode"]
+            metrics["recv_to_bytes"] = (t_encode - t_recv) / 1_000_000.0
+            metrics["bytes_to_http_payload"] = (t_prepare - t_encode) / 1_000_000.0
 
-        # Time to send HTTP POST (after connection acquired)
-        if t_conn_end is not None:
-            metrics["http_send"] = (t_http - t_conn_end) / 1_000_000.0
+        # Connection timing (optional - not all code paths set these)
+        if "t_conn_start" in ctx:
+            t_conn_start = ctx["t_conn_start"]
+            t_conn_end = ctx["t_conn_end"]
+            metrics["tcp_conn_pool"] = (t_conn_end - t_conn_start) / 1_000_000.0
+            metrics["http_payload_send"] = (t_http - t_conn_end) / 1_000_000.0
 
         metrics["pre_overhead"] = (t_http - t_recv) / 1_000_000.0
 
@@ -261,34 +264,39 @@ class PreparedRequest:
     def log_timing_post(self) -> None:
         """
         Emit post-receive timing metrics.
-
-        Call this after timing_ctx["t_zmq_sent"] is set, once the response has been
-        fully processed and sent via ZMQ.
         """
         ctx = self.timing_ctx
         t_recv = ctx["t_recv"]
         t_http = ctx["t_http"]
         t_headers = ctx["t_headers"]
-        t_first_chunk = ctx.get("t_first_chunk")
         t_response = ctx["t_response"]
         t_zmq_sent = ctx["t_zmq_sent"]
 
-        # Asyncio task scheduling overhead
-        t_task_created = ctx.get("t_task_created")
-        t_task_awake = ctx.get("t_task_awake")
-
         metrics: dict[str, float] = {}
 
-        if t_task_created is not None and t_task_awake is not None:
+        # Asyncio task scheduling overhead (optional - not all code paths set these)
+        if "t_task_created" in ctx:
+            t_task_created = ctx["t_task_created"]
+            t_task_awake = ctx["t_task_awake"]
             metrics["task_overhead"] = (t_task_awake - t_task_created) / 1_000_000.0
 
         metrics["http_to_headers"] = (t_headers - t_http) / 1_000_000.0
 
-        if t_first_chunk is not None:
-            metrics["headers_to_first"] = (t_first_chunk - t_headers) / 1_000_000.0
-            metrics["first_to_last"] = (t_response - t_first_chunk) / 1_000_000.0
+        # Streaming timing (optional - only set for streaming responses)
+        if "t_first_chunk" in ctx:
+            t_first_chunk = ctx["t_first_chunk"]
+            headers_to_first = (t_first_chunk - t_headers) / 1_000_000.0
+            first_to_last = (t_response - t_first_chunk) / 1_000_000.0
+            # Output both naming conventions for compatibility
+            metrics["headers_to_first_chunk"] = headers_to_first
+            metrics["first_to_last_chunk"] = first_to_last
+            metrics["headers_to_first"] = headers_to_first  # For print_analysis
+            metrics["first_to_last"] = first_to_last  # For print_analysis
 
-        metrics["response_to_zmq"] = (t_zmq_sent - t_response) / 1_000_000.0
+        # Total in-flight time (http payload sent -> response complete)
+        metrics["in_flight_time"] = (t_response - t_http) / 1_000_000.0
+
+        metrics["query_result_sent"] = (t_zmq_sent - t_response) / 1_000_000.0
         metrics["post_overhead"] = (t_zmq_sent - t_response) / 1_000_000.0
         metrics["end_to_end"] = (t_zmq_sent - t_recv) / 1_000_000.0
 

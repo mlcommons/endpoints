@@ -49,6 +49,7 @@ async def test_external_serving(vllm_docker_server, tmp_path, streaming, num_req
         http_config = HTTPClientConfig(
             endpoint_url=f"{vllm_docker_server['url']}/v1/chat/completions",
             num_workers=num_workers,
+            warmup_connections=None,  # Skip warmup for faster tests
         )
 
         zmq_config_kwargs = {

@@ -552,8 +552,10 @@ def _run_benchmark(
 
     try:
         # event_logs_dir is used for worker timing data and optional event logs
+        # Only write timing files when user explicitly specifies --report-dir
+        # Otherwise, use TRACE-level logging for timing (requires -vvv)
         endpoint_client_dir = (
-            Path(report_dir) / "endpoint_client" if report_dir else None
+            Path(report_dir) / "endpoint_client" if config.report_dir else None
         )
         http_config = HTTPClientConfig(
             endpoint_url=urljoin(

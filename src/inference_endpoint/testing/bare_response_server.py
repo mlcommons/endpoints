@@ -149,24 +149,43 @@ class BareResponseServer:
     async def _handle(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
-        """Handle connection - read until header end, send pre-built response."""
+        """Handle connection - read request (headers + body), send pre-built response."""
         response = self._response  # Local reference for speed
         try:
             while True:
-                # Wait for header end, ignore body - fire response immediately
-                await reader.readuntil(b"\r\n\r\n")
+                # Read headers
+                headers = await reader.readuntil(b"\r\n\r\n")
+
+                # Parse Content-Length to consume request body (prevents protocol desync)
+                content_length = 0
+                for line in headers.split(b"\r\n"):
+                    if line.lower().startswith(b"content-length:"):
+                        content_length = int(line.split(b":", 1)[1].strip())
+                        break
+
+                # Consume request body if present
+                if content_length > 0:
+                    await reader.readexactly(content_length)
+
                 self.request_count += 1
                 writer.write(response)
                 # Skip drain() for speed - let OS buffer handle it
         except (
             asyncio.IncompleteReadError,
+            asyncio.LimitOverrunError,
             ConnectionResetError,
+            ConnectionAbortedError,
             BrokenPipeError,
             asyncio.CancelledError,
+            OSError,
         ):
             pass
         finally:
-            writer.close()
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except Exception:
+                pass
 
     def _on_client_connected(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter

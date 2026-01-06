@@ -48,6 +48,7 @@ def create_futures_client(
     http_config = HTTPClientConfig(
         endpoint_url=url,
         num_workers=num_workers,
+        warmup_connections=None,  # Skip warmup for faster tests
     )
 
     zmq_kwargs = {

@@ -178,8 +178,13 @@ async def run_probe_command(args: argparse.Namespace) -> None:
                         len(received_ids) % max(1, num_expected // 10) == 0
                         or len(received_ids) == num_expected
                     ):
+                        output_preview = (
+                            result.response_output[:100]
+                            if result.response_output
+                            else f"[error: {result.error}]"
+                        )
                         logger.info(
-                            f"  Processed {len(received_ids)}/{num_expected} responses : {query_id} : {result.response_output[:100]}"
+                            f"  Processed {len(received_ids)}/{num_expected} responses : {query_id} : {output_preview}"
                         )
 
                 except Exception as e:

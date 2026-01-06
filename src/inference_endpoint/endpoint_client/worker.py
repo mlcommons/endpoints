@@ -517,7 +517,11 @@ class Worker:
 
                 # Process response asynchronously
                 prepared.timing_ctx["t_task_created"] = time.monotonic_ns()
-                task = asyncio.create_task(self._process_response(prepared))
+                task = asyncio.Task(
+                    self._process_response(prepared),
+                    loop=self._loop,
+                    eager_start=True,
+                )
 
                 # Keep task alive to prevent GC
                 # Cleaned up in _process_response finally block
@@ -534,6 +538,7 @@ class Worker:
 
         # Encode Query into HTTP payload bytes
         payload_bytes = self._adapter.encode_query(query)
+        t_encode = time.monotonic_ns()
 
         # Build aiohttp ClientRequest (unique payload_bytes)
         client_request = ClientRequest(
@@ -559,7 +564,7 @@ class Worker:
         prepared_request = PreparedRequest.create(
             query_id=query.id,
             client_request=client_request,
-            timing_ctx={"t_recv": t_recv},
+            timing_ctx={"t_recv": t_recv, "t_encode": t_encode},
             handler=handler,
         )
         prepared_request.timing_ctx["t_prepare"] = time.monotonic_ns()
@@ -583,9 +588,11 @@ class Worker:
             # Establish TCP connection (try-reuse connections from pool)
             prepared.timing_ctx["t_conn_start"] = time.monotonic_ns()
             conn = await self.tcp_connector.connect(
-                prepared.client_request, traces=[], timeout=self._timeout
+                prepared.client_request, traces=None, timeout=self._timeout
             )
-            # NOTE(vir): need to re-do this every request to recreate HttpResponseParser
+            # NOTE(vir):
+            # Need to re-do this every request to recreate HttpResponseParser.
+            # The parser is stateful and tracks current response, so cannot be cached.
             conn.protocol.set_response_params(**self._response_params)
             prepared.timing_ctx["t_conn_end"] = time.monotonic_ns()
 
@@ -598,11 +605,11 @@ class Worker:
                     assert_active=True,
                 )
 
-            # Issue post request
+            # Issue POST request
             resp = await prepared.client_request.send(conn)
             prepared.timing_ctx["t_http"] = time.monotonic_ns()
 
-            # Store response to resume processing in asyncio task
+            # Store response and connection for process_response
             prepared.response = resp
             prepared.connection = conn
             prepared.log_timing_pre()

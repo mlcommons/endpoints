@@ -48,6 +48,7 @@ def sglang_futures_client(tmp_path):
         endpoint_url=SGLANG_ENDPOINT,
         num_workers=4,
         api_type="sglang",
+        warmup_connections=None,  # Skip warmup for faster tests
     )
 
     zmq_kwargs = {

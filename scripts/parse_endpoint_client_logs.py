@@ -18,12 +18,14 @@
 Parse timing data to report inference-endpoint http-client overhead.
 
 Usage:
-    # Option 1: Read from timing JSONL files (preferred)
-    # --timing-dir defaults to {report-dir}/endpoint_client/ if not specified
-    python scripts/parse_endpoint_client_logs.py --report-dir output/
+    # Option 1: Read from timing JSONL files (when --report-dir was specified during benchmark)
+    # Timing files are at: {report-dir}/endpoint_client/timing_worker_*.jsonl
+    inference-endpoint benchmark offline ... --report-dir outputs/
+    python scripts/parse_endpoint_client_logs.py --report-dir outputs/
 
-    # Option 2: Parse verbose log output (legacy, requires -vvv)
-    inference-endpoint -vvv benchmark offline ... --report-dir output/ 2>&1 | python scripts/parse_endpoint_client_logs.py --report-dir output/
+    # Option 2: Pipe verbose log output (requires -vvv for TRACE level timing)
+    # Use this when --report-dir was NOT specified during benchmark
+    inference-endpoint benchmark offline ... -vvv 2>&1 | python scripts/parse_endpoint_client_logs.py
 """
 
 from __future__ import annotations
@@ -49,24 +51,40 @@ REPORT_DIR_RE = re.compile(r"Saved:\s+(.+?/reports_[^/]+)")
 class MetricSection(NamedTuple):
     """A section of metrics to display in the timing report."""
 
-    name: str  # Section header (e.g., "PRE-SEND")
-    metrics: set[str]  # Metric names in this section
-    subtotal_key: str | None  # Metric to use as subtotal, or None
+    name: str  # Section header with description (e.g., "PRE-SEND (recv → http_send)")
+    metrics: set[str]  # Breakdown metric names (shown indented)
+    total_key: str | None  # Metric for section total (shown as header row), or None
 
 
 # Metric categories for display (ordered)
+# total_key: shown as the section header row (recv to end of section)
+# metrics: breakdown components shown indented below
 SECTIONS = [
     MetricSection(
-        "PRE-SEND",
-        {"recv_to_prepare", "pool_acquire", "http_send", "pre_overhead"},
-        "pre_overhead",
+        "PRE-SEND (recv → http_payload_send)",
+        {
+            "recv_to_bytes",
+            "bytes_to_http_payload",
+            "tcp_conn_pool",
+            "http_payload_send",
+        },
+        "pre_overhead",  # Total: t_http - t_recv
     ),
     MetricSection(
-        "IN-FLIGHT",
-        {"task_overhead", "http_to_headers", "headers_to_first", "first_to_last"},
-        None,
+        "IN-FLIGHT (http_payload_send → response)",
+        {
+            "task_overhead",
+            "http_to_headers",
+            "headers_to_first_chunk",
+            "first_to_last_chunk",
+        },
+        "in_flight_time",  # Total: t_response - t_http
     ),
-    MetricSection("POST-RECV", {"response_to_zmq", "post_overhead"}, "post_overhead"),
+    MetricSection(
+        "POST-RECV (response → query_result_sent)",
+        {"query_result_sent"},
+        "post_overhead",  # Total: t_zmq_sent - t_response
+    ),
 ]
 
 
@@ -85,13 +103,122 @@ def percentiles(values: list[float]) -> tuple[float, float, float, float, float]
     )
 
 
-def fmt_row(label: str, values: list[float], width: int = 18) -> str:
-    """Format a stats row."""
+class TableFormatter:
+    """
+    Dynamic table formatter that adjusts column widths based on content.
+
+    Collects all rows first, then formats with consistent column widths.
+    """
+
+    STAT_COLS = ("N", "Avg", "p50", "p99", "p99.9", "Max")
+    MIN_STAT_WIDTH = 10  # Minimum width for stat columns
+
+    def __init__(self, label_header: str = "Metric"):
+        self.rows: list[tuple[str, int, tuple[float, ...]]] = []  # (label, n, stats)
+        self.label_header = label_header
+
+    def add_row(self, label: str, values: list[float]) -> None:
+        """Add a row to the table."""
+        if not values:
+            return
+        stats = percentiles(values)
+        self.rows.append((label, len(values), stats))
+
+    def _fmt_num(self, val: float) -> str:
+        """Format a number, using compact notation for large values."""
+        if abs(val) >= 1_000_000:
+            return f"{val:.2e}"
+        elif abs(val) >= 1000:
+            return f"{val:.2f}"
+        else:
+            return f"{val:.4f}"
+
+    def _compute_widths(self) -> tuple[int, list[int]]:
+        """Compute column widths based on content."""
+        if not self.rows:
+            return len(self.label_header), [self.MIN_STAT_WIDTH] * 6
+
+        # Label column width
+        label_width = max(len(self.label_header), max(len(r[0]) for r in self.rows))
+
+        # Stat column widths (N + 5 percentile columns)
+        stat_widths = [len(h) for h in self.STAT_COLS]  # Start with header widths
+
+        for _, n, stats in self.rows:
+            # N column
+            stat_widths[0] = max(stat_widths[0], len(str(n)))
+            # Percentile columns
+            for i, val in enumerate(stats):
+                stat_widths[i + 1] = max(stat_widths[i + 1], len(self._fmt_num(val)))
+
+        # Apply minimum widths
+        stat_widths = [max(w, self.MIN_STAT_WIDTH) for w in stat_widths]
+
+        return label_width, stat_widths
+
+    def format(self) -> list[str]:
+        """Format all rows with consistent column widths."""
+        if not self.rows:
+            return []
+
+        label_width, stat_widths = self._compute_widths()
+        total_width = label_width + 2 + sum(w + 1 for w in stat_widths) + 2
+
+        lines = []
+
+        # Header
+        lines.append("=" * total_width)
+        header_parts = [f"  {self.label_header:<{label_width}}"]
+        for col, w in zip(self.STAT_COLS, stat_widths, strict=False):
+            header_parts.append(f"{col:>{w}}")
+        lines.append(" ".join(header_parts))
+        lines.append("=" * total_width)
+
+        return lines
+
+    def format_row(self, label: str, n: int, stats: tuple[float, ...]) -> str:
+        """Format a single data row."""
+        label_width, stat_widths = self._compute_widths()
+
+        parts = [f"  {label:<{label_width}}"]
+        parts.append(f"{n:>{stat_widths[0]}}")
+        for val, w in zip(stats, stat_widths[1:], strict=False):
+            parts.append(f"{self._fmt_num(val):>{w}}")
+        return " ".join(parts)
+
+    def format_all(self) -> list[str]:
+        """Format header and all data rows."""
+        lines = self.format()
+        for label, n, stats in self.rows:
+            lines.append(self.format_row(label, n, stats))
+        return lines
+
+    def get_separator(self, char: str = "─") -> str:
+        """Get a separator line of the correct width."""
+        label_width, stat_widths = self._compute_widths()
+        total_width = label_width + 2 + sum(w + 1 for w in stat_widths) + 2
+        return char * total_width
+
+
+# Legacy function for simple cases
+def fmt_row(label: str, values: list[float], width: int = 30) -> str:
+    """Format a stats row (legacy, use TableFormatter for dynamic widths)."""
     n = len(values)
     if n == 0:
         return ""
     avg, p50, p99, p999, mx = percentiles(values)
-    return f"  {label:<{width}} {n:>8} {avg:>12.4f} {p50:>12.4f} {p99:>12.4f} {p999:>12.4f} {mx:>12.4f}"
+
+    def fmt(v: float) -> str:
+        if abs(v) >= 1_000_000:
+            return f"{v:>12.2e}"
+        elif abs(v) >= 1000:
+            return f"{v:>12.2f}"
+        else:
+            return f"{v:>12.4f}"
+
+    return (
+        f"  {label:<{width}} {n:>8}{fmt(avg)}{fmt(p50)}{fmt(p99)}{fmt(p999)}{fmt(mx)}"
+    )
 
 
 class Stats:
@@ -186,43 +313,82 @@ def print_live(stats: Stats) -> None:
     """Print live stats (clears screen)."""
     pre, post, count = stats.pre, stats.post, stats.count
     sys.stdout.write("\033[2J\033[H")
-    print("=" * 102)
-    print(f"  WORKER TIMING  |  Requests: {count}")
-    print("=" * 102)
 
     if count == 0:
+        print("=" * 60)
+        print(f"  WORKER TIMING  |  Requests: {count}")
+        print("=" * 60)
         print("\n  Waiting for data...")
         sys.stdout.flush()
         return
 
-    header = f"  {'Metric':<18} {'N':>8} {'Avg':>12} {'p50':>12} {'p99':>12} {'p99.9':>12} {'Max':>12}"
-    print(header)
-    print("=" * 102)
+    # Build table structure: collect all rows first for dynamic column sizing
+    # Structure: list of (section_name, total_values, [(metric_name, values), ...])
+    table_data: list[tuple[str, list[float] | None, list[tuple[str, list[float]]]]] = []
 
     for section in SECTIONS:
-        data = pre if section.name == "PRE-SEND" else post
-        rows = [
-            fmt_row(m, data.get(m, []))
-            for m in section.metrics
-            if m != section.subtotal_key and data.get(m)
+        data = pre if "PRE-SEND" in section.name else post
+
+        total_values = data.get(section.total_key, []) if section.total_key else None
+        breakdown = [
+            (m, data.get(m, []))
+            for m in sorted(section.metrics)  # Sort for consistent ordering
+            if m != section.total_key and data.get(m)
         ]
-        if rows:
-            print(f"\n  [{section.name}]")
-            for r in rows:
-                print(r)
-            if section.subtotal_key and data.get(section.subtotal_key):
-                print(fmt_row("→ subtotal", data[section.subtotal_key]))
 
-    if e2e := post.get("end_to_end"):
-        print(f"\n{'─' * 102}")
-        print(fmt_row("END-TO-END TOTAL", e2e))
+        if total_values or breakdown:
+            table_data.append(
+                (section.name, total_values if total_values else None, breakdown)
+            )
 
-    print("=" * 102)
+    # Add end-to-end if available
+    e2e = post.get("end_to_end", [])
+
+    # Create formatter and add all rows to compute widths
+    fmt = TableFormatter()
+    for section_name, total_values, breakdown in table_data:
+        if total_values:
+            fmt.add_row(section_name, total_values)
+        for metric_name, values in breakdown:
+            fmt.add_row(f"  {metric_name}", values)
+    if e2e:
+        fmt.add_row("END-TO-END TOTAL", e2e)
+
+    # Print title
+    sep = fmt.get_separator("=")
+    print(sep)
+    print(f"  WORKER TIMING  |  Requests: {count}")
+
+    # Print header
+    for line in fmt.format():
+        print(line)
+
+    # Print sections
+    for section_name, total_values, breakdown in table_data:
+        print()
+        if total_values:
+            stats_tuple = percentiles(total_values)
+            print(fmt.format_row(section_name, len(total_values), stats_tuple))
+        else:
+            print(f"  [{section_name}]")
+
+        for metric_name, values in breakdown:
+            stats_tuple = percentiles(values)
+            print(fmt.format_row(f"  {metric_name}", len(values), stats_tuple))
+
+    # Print end-to-end total
+    if e2e:
+        print()
+        print(fmt.get_separator("─"))
+        stats_tuple = percentiles(e2e)
+        print(fmt.format_row("END-TO-END TOTAL", len(e2e), stats_tuple))
+
+    print(sep)
     sys.stdout.flush()
 
 
 def print_analysis(stats: Stats, events: dict[str, dict[str, int]]) -> None:
-    """Print overhead breakdown."""
+    """Print overhead breakdown with p99.9 and max for worst-case analysis."""
     pre, post = stats.pre, stats.post
 
     # Calculate metrics from events
@@ -236,20 +402,6 @@ def print_analysis(stats: Stats, events: dict[str, dict[str, int]]) -> None:
         for e in events.values()
         if "complete" in e and "loadgen_issue_called" in e
     ]
-
-    # IPC delays (all timestamps are monotonic_ns)
-    ipc_send, ipc_recv = [], []
-    for qid, ts in stats.timestamps.items():
-        if (
-            qid in events
-            and (t_recv := ts.get("t_recv"))
-            and (t_sent := ts.get("t_zmq_sent"))
-        ):
-            e = events[qid]
-            if main_send := e.get("loadgen_issue_called"):
-                ipc_send.append((t_recv - main_send) / 1e6)
-            if main_recv := e.get("complete"):
-                ipc_recv.append((main_recv - t_sent) / 1e6)
 
     e2e = post.get("end_to_end", [])
     server = (
@@ -268,40 +420,84 @@ def print_analysis(stats: Stats, events: dict[str, dict[str, int]]) -> None:
         else []
     )
 
-    def row(label: str, vals: list[float], pct_base: float = 0) -> str:
+    def fmt_num(v: float) -> str:
+        """Format number, using compact notation for large values."""
+        if abs(v) >= 1_000_000:
+            return f"{v:.2e}"
+        elif abs(v) >= 1000:
+            return f"{v:.2f}"
+        else:
+            return f"{v:.4f}"
+
+    def row(label: str, vals: list[float], pct_base: float = 0, indent: int = 0) -> str:
+        prefix = "  " + "  " * indent
         if not vals:
-            return f"  {label:<32} {'N/A':>12}"
+            return f"{prefix}{label:<{32 - indent * 2}} {'N/A':>12}"
         avg, p50, p99, p999, mx = percentiles(vals)
-        pct = f"{(avg / pct_base) * 100:>7.3f}%" if pct_base else ""
-        return f"  {label:<32} {avg:>12.4f} {p50:>12.4f} {p99:>12.4f} {pct}"
+        pct = f"{(avg / pct_base) * 100:>6.2f}%" if pct_base else ""
+        return (
+            f"{prefix}{label:<{32 - indent * 2}} "
+            f"{fmt_num(avg):>12} {fmt_num(p50):>12} {fmt_num(p99):>12} "
+            f"{fmt_num(p999):>12} {fmt_num(mx):>12} {pct}"
+        )
 
     e2e_avg = statistics.mean(e2e) if e2e else 0
+    width = 120
 
-    print("\n" + "=" * 102)
+    print("\n" + "=" * width)
     print(f"  OVERHEAD BREAKDOWN  |  Samples: {len(latency) or stats.count}")
-    print("=" * 102)
-    print(f"  {'Metric':<32} {'Avg(ms)':>12} {'p50(ms)':>12} {'p99(ms)':>12} {'%':>8}")
-    print("─" * 102)
+    print("=" * width)
+    print(
+        f"  {'Metric':<32} {'Avg(ms)':>12} {'p50(ms)':>12} {'p99(ms)':>12} "
+        f"{'p99.9(ms)':>12} {'Max(ms)':>12} {'%':>7}"
+    )
+    print("─" * width)
 
     print("  [LOAD GENERATOR]")
-    print(row("  TTFT", ttft))
-    print(row("  Latency", latency))
+    print(row("TTFT", ttft, indent=1))
+    print(row("Latency", latency, indent=1))
 
     print("\n  [WORKER]")
-    print(row("  Pre-Overhead", pre.get("pre_overhead", []), e2e_avg))
-    print(row("  Server Time", server, e2e_avg))
-    print(row("  Post-Overhead", post.get("post_overhead", []), e2e_avg))
-    print(row("  E2E", e2e))
+    print(row("Pre-Overhead", pre.get("pre_overhead", []), e2e_avg, indent=1))
 
-    if ipc_send or ipc_recv:
-        print("\n  [IPC]")
-        print(row("  Send (main→worker)", ipc_send))
-        print(row("  Recv (worker→main)", ipc_recv))
-        if ipc_send and ipc_recv:
-            total = [s + r for s, r in zip(ipc_send, ipc_recv, strict=False)]
-            print(row("  Total", total))
+    # Pre-overhead breakdown
+    pre_breakdown = [
+        ("recv_to_bytes", pre.get("recv_to_bytes", [])),
+        ("bytes_to_http_payload", pre.get("bytes_to_http_payload", [])),
+        ("tcp_conn_pool", pre.get("tcp_conn_pool", [])),
+        ("http_payload_send", pre.get("http_payload_send", [])),
+    ]
+    for name, vals in pre_breakdown:
+        if vals:
+            print(row(name, vals, e2e_avg, indent=2))
 
-    print("=" * 102)
+    print(row("Server Time", server, e2e_avg, indent=1))
+
+    # Server time breakdown (in-flight: http_send -> response)
+    server_breakdown = [
+        ("task_overhead", post.get("task_overhead", [])),  # Task creation -> task wake
+        ("http_to_headers", post.get("http_to_headers", [])),
+        ("headers_to_first", post.get("headers_to_first", [])),
+        ("first_to_last", post.get("first_to_last", [])),
+    ]
+    for name, vals in server_breakdown:
+        if vals:
+            print(row(name, vals, e2e_avg, indent=2))
+
+    print(row("Post-Overhead", post.get("post_overhead", []), e2e_avg, indent=1))
+
+    # Post-overhead breakdown (response -> zmq_sent)
+    post_breakdown = [
+        ("query_result_sent", post.get("query_result_sent", [])),
+    ]
+    for name, vals in post_breakdown:
+        if vals:
+            print(row(name, vals, e2e_avg, indent=2))
+
+    print("─" * width)
+    print(row("E2E", e2e, indent=1))
+
+    print("=" * width)
 
 
 def main() -> None:
@@ -309,29 +505,27 @@ def main() -> None:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument(
-        "--timing-dir",
-        type=Path,
-        help="Directory containing timing_worker_*.jsonl files (default: {report-dir}/endpoint_client/)",
-    )
-    parser.add_argument(
         "--report-dir",
         type=Path,
-        help="Report directory containing events.json (for IPC calculations)",
+        help="Report directory (timing files in endpoint_client/, events in events.json)",
     )
     args = parser.parse_args()
 
-    # Default timing-dir to report-dir/endpoint_client/ if not specified
-    if args.timing_dir is None and args.report_dir is not None:
-        args.timing_dir = args.report_dir / "endpoint_client"
+    # Timing files are in {report-dir}/endpoint_client/
+    timing_dir = args.report_dir / "endpoint_client" if args.report_dir else None
 
-    # Check if we should read from JSONL files or stdin
+    # Check if stdin is piped (not a TTY)
     stdin_is_tty = os.isatty(sys.stdin.fileno())
 
-    if stdin_is_tty and args.timing_dir:
-        # No stdin input - load from timing JSONL files
-        stats = load_timing_jsonl(args.timing_dir)
+    if stdin_is_tty:
+        # No stdin input - read from timing JSONL files
+        if not timing_dir:
+            print(__doc__)
+            return
+
+        stats = load_timing_jsonl(timing_dir)
         if stats.count == 0:
-            print(f"No timing data found in {args.timing_dir}")
+            print(f"No timing data found in {timing_dir}")
             print("Looking for: timing_worker_*.jsonl files")
             return
 
@@ -341,10 +535,6 @@ def main() -> None:
         # Load events.json from report_dir for IPC calculations
         events = load_events(args.report_dir) if args.report_dir else {}
         print_analysis(stats, events)
-        return
-
-    if stdin_is_tty:
-        print(__doc__)
         return
 
     # Legacy mode: parse timing from verbose log output on stdin
@@ -376,7 +566,10 @@ def main() -> None:
 
     # Final output
     if stats.count == 0:
-        print("\nNo timing data found")
+        print("\nNo timing data found in stdin")
+        print(
+            "Hint: Use -vvv flag with inference-endpoint to enable TRACE-level timing logs"
+        )
         return
 
     with stats.lock:

@@ -165,9 +165,11 @@ class HTTPEndpointClient(AsyncHttpEndpointClient):
         coro = super().issue_query(query)
 
         # NOTE(vir):
-        # use call_soon_threadsafe directly to avoid concurrent.futures overhead in run_coroutine_threadsafe
-        # need this since issue_query might be called from any thread
-        self.loop.call_soon_threadsafe(lambda: asyncio.create_task(coro))
+        # asyncio.run_coroutine_threadsafe wraps callback with unnecessary future,
+        # use loop.call_soon_threadsafe directly since we have a fire-and-forget pattern
+        #
+        # TODO(vir): does this need create_eager_task?
+        self.loop.call_soon_threadsafe(self.loop.create_task, coro)
 
     def shutdown(self) -> None:  # type: ignore[override]
         """Sync shutdown wrapper - blocks until base class async shutdown completes."""
