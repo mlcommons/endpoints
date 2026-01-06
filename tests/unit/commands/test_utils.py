@@ -234,7 +234,15 @@ class TestGenerateUserConfSubmissionChecker:
         return report_dir
 
     def test_generate_user_conf_success(self, report_dir_with_settings):
-        """Test successful user.conf generation."""
+        """Test successful user.conf generation with correct key mapping.
+
+        Verifies that:
+        1. user.conf file is created
+        2. All entries have correct format (*.*.loadgen_key=value)
+        3. All keys in sample_runtime_settings are correctly transformed
+        4. Mapped keys use their loadgen equivalents per ENDPOINTS_TO_LOADGEN_KEY_MAPPING
+        5. Unmapped keys use their original names
+        """
         # Generate user.conf
         generate_user_conf_submission_checker(report_dir_with_settings)
 
@@ -251,7 +259,8 @@ class TestGenerateUserConfSubmissionChecker:
             len(lines) > 0
         ), "user.conf should not be empty when runtime_settings exists with data"
 
-        # Verify format: each line should be in format "<text>.<text>.<text>=<value>"
+        # Verify format and check key mappings
+
         for line in lines:
             assert "=" in line, f"Line should contain '=' but got: {line}"
             key_part, value_part = line.split("=")
@@ -267,6 +276,43 @@ class TestGenerateUserConfSubmissionChecker:
                 ), f"Each part in key should be non-empty but got: {key_part}"
             # Value should not be empty
             assert len(value_part) > 0, f"Value should not be empty: {line}"
+
+        # Parse content into a dictionary for easier verification
+        content_dict = {}
+        for line in lines:
+            key_part, value_part = line.split("=")
+            # Extract the actual key (after the first two dots which are wildcards)
+            actual_key = ".".join(key_part.split(".")[2:])
+            content_dict[actual_key] = value_part
+
+        # Verify all mappings from sample_runtime_settings
+        # Expected mappings based on ENDPOINTS_TO_LOADGEN_KEY_MAPPING:
+        expected_mappings = {
+            # Mapped keys (will use loadgen names)
+            "qsl_reported_performance_count": "1000",  # from n_samples_from_dataset
+            "effective_max_duration_ms": "60000",  # from max_duration_ms
+            "effective_min_duration_ms": "30000",  # from min_duration_ms
+            "effective_min_query_count": "100",  # from min_sample_count
+            # Unmapped keys (will use original names)
+            "n_samples_to_issue": "500",
+            "total_samples_to_issue": "500",
+            "scheduler_random_seed": "42",
+            "dataloader_random_seed": "123",
+        }
+
+        # Verify each expected mapping
+        for expected_key, expected_value in expected_mappings.items():
+            assert (
+                expected_key in content_dict
+            ), f"Expected key '{expected_key}' not found in user.conf. Available keys: {list(content_dict.keys())}"
+            assert (
+                content_dict[expected_key] == expected_value
+            ), f"Key '{expected_key}' should have value '{expected_value}' but got '{content_dict[expected_key]}'"
+
+        # Verify that the correct number of keys are present
+        assert (
+            len(content_dict) == len(expected_mappings)
+        ), f"Expected {len(expected_mappings)} keys but got {len(content_dict)}: {list(content_dict.keys())}"
 
     def test_missing_runtime_settings_file(self, tmp_path):
         """Test error handling when runtime_settings.json is missing."""

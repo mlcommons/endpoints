@@ -17,6 +17,7 @@
 
 import argparse
 import datetime
+import json
 import logging
 import os
 import platform
@@ -338,7 +339,7 @@ def generate_user_conf_submission_checker(report_dir: Path) -> None:
         raise FileNotFoundError(f"runtime_settings.json not found in {report_dir}")
     try:
         with open(runtime_settings_path) as f:
-            runtime_settings = yaml.safe_load(f)
+            runtime_settings = json.load(f)
 
         with open(user_conf_path, "w") as f:
             for key, value in runtime_settings.items():
@@ -350,3 +351,4 @@ def generate_user_conf_submission_checker(report_dir: Path) -> None:
 
     except Exception as e:
         logger.error(f"Failed to generate user.conf: {e}")
+        raise

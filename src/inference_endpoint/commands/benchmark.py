@@ -279,6 +279,9 @@ def _build_config_from_cli(
     timeout = getattr(args, "timeout", None)
     verbose = getattr(args, "verbose", False)
     output = getattr(args, "output", None)
+    ensure_submission_checker_compatibility = getattr(
+        args, "ensure_submission_checker_compatibility", False
+    )
     # Build BenchmarkConfig from CLI params
     return BenchmarkConfig(
         name=f"cli_{benchmark_mode}",
@@ -332,6 +335,7 @@ def _build_config_from_cli(
         output=output,
         timeout=timeout,
         verbose=verbose,
+        ensure_submission_checker_compatibility=ensure_submission_checker_compatibility,
     )
 
 
@@ -692,9 +696,14 @@ def _run_benchmark(
                 logger.error(f"Save failed: {e}")
 
         if config.ensure_submission_checker_compatibility:
-            # convert the runtime_settings.json to user.conf format and
-            # result_summary.json to mlperf_log_details.txt format(TODO)
-            generate_user_conf_submission_checker(report_dir)
+            try:
+                # convert the runtime_settings.json to user.conf format and
+                # result_summary.json to mlperf_log_details.txt format(TODO)
+                generate_user_conf_submission_checker(report_dir)
+            except Exception as e:
+                logger.error(
+                    f"Failed to generate user conf for submission checker: {e}"
+                )
 
     except KeyboardInterrupt:
         logger.warning("Benchmark interrupted by user")

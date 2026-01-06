@@ -325,7 +325,7 @@ class BenchmarkConfig(BaseModel):
     report_dir: Path | None = None
     timeout: int | None = None
     verbose: bool = False
-    ensure_submission_checker_compatibility: bool = True
+    ensure_submission_checker_compatibility: bool = False
 
     @classmethod
     def from_yaml_file(cls, path: Path) -> BenchmarkConfig:
