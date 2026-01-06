@@ -71,7 +71,7 @@ class Scorer(ABC):
             for line in f:
                 event = orjson.loads(line.strip())
                 if event["event_type"] == SampleEvent.COMPLETE.value:
-                    outputs.append(event["data"])
+                    outputs.append(event)
         df = pd.DataFrame(outputs, columns=["sample_uuid", "value"])
         df.rename(columns={"value": "output"}, inplace=True)
         return df

@@ -25,8 +25,8 @@ class Extractor(ABC):
     numeric value plain or inside a LaTeX block.
     """
 
-    @abstractmethod
     @classmethod
+    @abstractmethod
     def extract(cls, text: str) -> str | None:
         raise NotImplementedError
 
