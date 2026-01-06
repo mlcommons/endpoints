@@ -73,8 +73,11 @@ SECTIONS = [
     MetricSection(
         "IN-FLIGHT (http_payload_send → response)",
         {
+            # Client overhead (t_http → t_task_awake):
             "task_overhead",
+            # Server TTFB + response (t_http → t_headers):
             "http_to_headers",
+            # Streaming breakdown:
             "headers_to_first_chunk",
             "first_to_last_chunk",
         },
@@ -475,8 +478,11 @@ def print_analysis(stats: Stats, events: dict[str, dict[str, int]]) -> None:
 
     # Server time breakdown (in-flight: http_send -> response)
     server_breakdown = [
-        ("task_overhead", post.get("task_overhead", [])),  # Task creation -> task wake
+        # Client overhead (t_http → t_task_awake):
+        ("task_overhead", post.get("task_overhead", [])),
+        # Server TTFB (t_http → t_headers):
         ("http_to_headers", post.get("http_to_headers", [])),
+        # Streaming response breakdown:
         ("headers_to_first", post.get("headers_to_first", [])),
         ("first_to_last", post.get("first_to_last", [])),
     ]

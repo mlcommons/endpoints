@@ -160,6 +160,19 @@ class HTTPEndpointClient(AsyncHttpEndpointClient):
         response = await client.try_receive()
     """
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.loop.set_exception_handler(self._exception_handler)
+
+    def _exception_handler(
+        self, loop: asyncio.AbstractEventLoop, context: dict
+    ) -> None:
+        """Supress errors post shutdown."""
+        if self._shutdown_event.is_set():
+            return  # Suppress all errors during shutdown
+        # Default handling for non-shutdown errors
+        loop.default_exception_handler(context)
+
     def issue_query(self, query: Query) -> None:  # type: ignore[override]
         """Issue query."""
         coro = super().issue_query(query)
