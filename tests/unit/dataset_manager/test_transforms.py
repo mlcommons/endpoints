@@ -42,8 +42,8 @@ class TestColumnNameRemap:
         transform = ColumnNameRemap({"old_name": "new_name"}, inplace=True)
         result = transform(df)
 
-        # With inplace=True, should modify original DataFrame
-        assert result is None
+        # For inplace, the input should be returned
+        assert result is df
         assert "new_name" in df.columns
         assert "old_name" not in df.columns
         assert list(df["new_name"]) == [1, 2, 3]
@@ -521,16 +521,14 @@ class TestTransformBaseClass:
     """Test suite for Transform base class."""
 
     def test_transform_not_implemented(self):
-        """Test that Transform base class __call__ raises NotImplementedError."""
+        """Test that Transform base class __call__ raises Error"""
 
-        class IncompleteTransform(Transform):
-            pass
+        with pytest.raises(TypeError):
 
-        df = pd.DataFrame({"col1": [1, 2, 3]})
-        transform = IncompleteTransform()
+            class IncompleteTransform(Transform):
+                pass
 
-        with pytest.raises(NotImplementedError):
-            transform(df)
+            IncompleteTransform()
 
     def test_custom_transform_implementation(self):
         """Test implementing a custom transform."""

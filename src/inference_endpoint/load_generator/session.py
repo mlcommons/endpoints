@@ -95,12 +95,15 @@ class BenchmarkSession:
                 EventRecorder.record_event(
                     SessionEvent.STOP_PERFORMANCE_TRACKING, time.monotonic_ns()
                 )
+                self.logger.info("All performance samples issued")
 
                 if accuracy_test_generators:
                     for _, generator in accuracy_test_generators.items():
                         for _ in generator:
                             # Actual issue is done during next(generator). Nothing else to do here, just pass.
                             pass
+
+                self.logger.info("All accuracy samples issued")
 
                 self.event_recorder.should_check_idle = True
                 EventRecorder.record_event(

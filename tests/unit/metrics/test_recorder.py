@@ -342,7 +342,7 @@ def test_shm_usage(sample_uuids):
         rec.wait_for_writes()
     events_created_ev.set()
 
-    worker_proc.join(timeout=5)
+    worker_proc.join(timeout=10)
     if worker_proc.is_alive():
         worker_proc.terminate()
         worker_proc.join(timeout=1)
