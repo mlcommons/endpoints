@@ -184,6 +184,19 @@ def create_sglang_client(tmp_dir: Path) -> HTTPEndpointClient:
     return client
 
 
+class EmptyDataset(Dataset):
+    """Empty dataset for performance run."""
+
+    def __init__(self):
+        super().__init__(None)
+
+    def load_sample(self, index: int):
+        return None
+
+    def num_samples(self):
+        return 0
+
+
 def run_benchmark_session(dataset: Dataset, issuer: HttpClientSampleIssuer, args):
     """Run a benchmark session with the SGLang endpoint.
 
@@ -219,9 +232,10 @@ def run_benchmark_session(dataset: Dataset, issuer: HttpClientSampleIssuer, args
         pbar_hook.set_pbar(pbar)
         sess = BenchmarkSession.start(
             rt_settings,
-            dataset,
+            EmptyDataset(),
             issuer,
             scheduler,
+            accuracy_datasets=[dataset],
             name="gpqa_sglang_benchmark",
             report_dir=args.report_dir,
             dump_events_log=True,
@@ -253,7 +267,7 @@ def run_main(args):
         print("Creating dataset with transforms...")
         print(df.columns)
         df.to_parquet("datasets/gqpa_diamond_pre-transformed_gpt-oss.parquet")
-        dataset = Dataset(df, transforms=transforms)
+        dataset = GPQA(df, transforms=transforms)
         dataset.load()
         print(f"Dataset loaded with {dataset.num_samples()} samples")
 
