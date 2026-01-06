@@ -201,9 +201,9 @@ def run_benchmark_session(dataset: Dataset, issuer: HttpClientSampleIssuer, args
         reported_metrics=[],
         min_duration_ms=args.min_duration * 1000,
         max_duration_ms=args.max_duration * 1000,
-        n_samples_from_dataset=dataset.num_samples(),
-        n_samples_to_issue=dataset.num_samples(),
-        min_sample_count=dataset.num_samples(),
+        n_samples_from_dataset=0,
+        n_samples_to_issue=0,
+        min_sample_count=0,
         rng_sched=random.Random(42),
         rng_sample_index=random.Random(42),
         load_pattern=LoadPattern(type=LoadPatternType.MAX_THROUGHPUT),
@@ -213,7 +213,7 @@ def run_benchmark_session(dataset: Dataset, issuer: HttpClientSampleIssuer, args
     scheduler = MaxThroughputScheduler(rt_settings, WithoutReplacementSampleOrder)
 
     # Run the benchmark session
-    n_total = rt_settings.total_samples_to_issue()
+    n_total = dataset.num_samples() * dataset.repeats
 
     with tqdm(desc="GPQA Benchmark", total=n_total, unit="samples") as pbar:
         pbar_hook.set_pbar(pbar)

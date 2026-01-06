@@ -377,6 +377,7 @@ class Dataset:
         self,
         dataframe: pd.DataFrame | None = None,
         transforms: list[Transform] | None = None,
+        repeats: int = 1,
     ):
         if self.__class__.COLUMN_NAMES is not None:
             common = set(self.__class__.COLUMN_NAMES) & set(dataframe.columns)
@@ -389,6 +390,7 @@ class Dataset:
         self.dataframe = dataframe
         self.logger = getLogger(__name__)
         self.transforms = transforms
+        self.repeats = repeats
 
     @classmethod
     def load_from_file(

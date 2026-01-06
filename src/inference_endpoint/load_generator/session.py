@@ -31,6 +31,7 @@ from ..metrics.recorder import EventRecorder
 from ..metrics.reporter import MetricsReporter
 from .events import SessionEvent
 from .load_generator import LoadGenerator, SampleIssuer, SchedulerBasedLoadGenerator
+from .scheduler import Scheduler, WithoutReplacementSampleOrder
 
 logger = logging.getLogger(__name__)
 
@@ -214,7 +215,7 @@ class BenchmarkSession:
                         f.write(orjson.dumps(self.sample_uuid_map).decode("utf-8"))
 
                     if dump_events_log:
-                        reporter.dump_to_json(Path(report_dir) / "events.json")
+                        reporter.dump_to_json(Path(report_dir) / "events.jsonl")
 
                 # Print summary
                 report.display()
@@ -238,7 +239,9 @@ class BenchmarkSession:
         runtime_settings: RuntimeSettings,
         dataset: Dataset,
         sample_issuer: SampleIssuer,
+        scheduler: Scheduler,
         *args,
+        accuracy_datasets: list[Dataset] | None = None,
         load_generator_cls: type[LoadGenerator] = SchedulerBasedLoadGenerator,
         name: str | None = None,
         max_shutdown_timeout_s: float = 300.0,
@@ -250,8 +253,10 @@ class BenchmarkSession:
 
         Args:
             runtime_settings: The runtime settings to use for the session.
-            dataset: The dataset to use for the session.
+            dataset: The dataset to use for the performance test.
             sample_issuer: The sample issuer to use for the session.
+            scheduler: The scheduler to use for the session.
+            accuracy_datasets: The datasets to use for the accuracy tests. If None, no accuracy tests will be run.
             load_generator_cls: The load generator class to use for the session.
             name: The name of the session.
             max_shutdown_timeout_s: The maximum timeout to wait for the test to complete after all samples have been issued.
@@ -266,11 +271,44 @@ class BenchmarkSession:
             The new BenchmarkSession.
         """
         session = cls(runtime_settings, session_id=name)
-        load_generator = load_generator_cls(sample_issuer, dataset, *args)
+        load_generator = load_generator_cls(sample_issuer, dataset, scheduler, *args)
+
+        # Create accuracy test generators
+        accuracy_test_generators = None
+        if accuracy_datasets:
+            accuracy_test_generators = {}
+            for ds in accuracy_datasets:
+                if hasattr(ds.__class__, "DATASET_ID"):
+                    ds_name = ds.__class__.DATASET_ID
+                else:
+                    ds_name = ds.__class__.__name__
+
+                # Create accuracy dataset specific runtime settings
+                acc_rt_settings = RuntimeSettings(
+                    metric_target=runtime_settings.metric_target,
+                    reported_metrics=runtime_settings.reported_metrics,
+                    min_duration_ms=0,
+                    max_duration_ms=None,
+                    n_samples_from_dataset=ds.num_samples(),
+                    n_samples_to_issue=ds.num_samples() * ds.repeats,
+                    min_sample_count=ds.num_samples() * ds.repeats,
+                    rng_sched=runtime_settings.rng_sched,
+                    rng_sample_index=runtime_settings.rng_sample_index,
+                    load_pattern=runtime_settings.load_pattern,
+                )
+                acc_sched = scheduler.__class__(
+                    acc_rt_settings, WithoutReplacementSampleOrder
+                )
+
+                accuracy_test_generators[ds_name] = load_generator_cls(
+                    sample_issuer, ds, acc_sched, *args
+                )
+
         session.thread = threading.Thread(
             target=session._run_test,
             args=(load_generator,),
             kwargs={
+                "accuracy_test_generators": accuracy_test_generators,
                 "max_shutdown_timeout_s": max_shutdown_timeout_s,
                 "report_dir": report_dir,
                 "tokenizer_override": tokenizer_override,
