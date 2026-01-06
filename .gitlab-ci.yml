@@ -63,7 +63,7 @@ test:
     - pip install -r requirements/test.txt
 
   script:
-    - pytest -xv -m "not slow and not performance" --cov=src --cov-report=xml --cov-report=html
+    - pytest -xv -m "not slow and not performance and not run_explicitly" --cov=src --cov-report=xml --cov-report=html
 
   # after_script:
   #   # Upload coverage to Codecov (requires CODECOV_TOKEN in CI/CD variables)

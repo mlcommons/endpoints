@@ -24,12 +24,11 @@ inference-endpoint benchmark offline \
   --endpoint URL \
   --model Qwen/Qwen3-8B \
   --dataset tests/datasets/dummy_1k.pkl \
-  --report-path my_benchmark_report
+  --report-dir my_benchmark_report
 
 # YAML-based (YAML mode - no CLI overrides)
 inference-endpoint benchmark from-config \
-  --config test.yaml \
-  --output results.json
+  --config test.yaml
 ```
 
 **Default Test Dataset:** Use `tests/datasets/dummy_1k.pkl` (1000 samples, ~133 KB) for local testing.
@@ -69,8 +68,7 @@ inference-endpoint info
 - `--model NAME` - Model name (required for CLI mode, e.g., Qwen/Qwen3-8B)
 - `--dataset, -d PATH` - Dataset file (required for CLI mode)
 - `--config, -c PATH` - YAML config file (required for from-config mode)
-- `--output, -o PATH` - Save results to JSON
-- `--report-path PATH` - Save detailed benchmark report with metrics
+- `--report-dir PATH` - Save detailed benchmark report with metrics
 - `--verbose, -v` - Increase verbosity (-vv for debug)
 
 ## Benchmark Options (CLI Mode Only)
@@ -96,9 +94,6 @@ inference-endpoint info
 
 - `pkl` - Pickle format (default)
 - `hf` - HuggingFace datasets
-
-**Coming Soon:**
-
 - `jsonl` - JSON Lines format
 
 ## Test Modes
@@ -193,7 +188,7 @@ inference-endpoint init --template submission
 # 3. Run (YAML mode - no CLI overrides)
 inference-endpoint benchmark from-config \
   --config submission_template.yaml \
-  --output official_results.json
+  --report-dir official_results
 ```
 
 ### Validate First

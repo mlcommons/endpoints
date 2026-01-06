@@ -24,7 +24,7 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 
 # 3. Install development dependencies
 pip install -e .
-pip install -r requirements/dev.txt
+pip install -r requirements/base.txt
 
 # 4. Install pre-commit hooks
 pre-commit install
@@ -287,15 +287,14 @@ python -m pdb -m pytest test_file.py
 
 ### Adding Dependencies
 
-1. **Base Dependencies** (`requirements/base.txt`): Required for package to function
-2. **Development Dependencies** (`requirements/dev.txt`): Development tools, linters, and pre-commit hooks
-3. **Test Dependencies** (`requirements/test.txt`): Testing framework and utilities (pytest, pytest-asyncio, etc.)
+1. **Base Dependencies** (`requirements/base.txt`): Required for package to function, development tools, linters, and pre-commit hooks
+2. **Test Dependencies** (`requirements/test.txt`): Testing framework and utilities (pytest, pytest-asyncio, etc.)
 
 ### Updating Dependencies
 
 ```bash
 # Update all dependencies
-pip install --upgrade -r requirements/dev.txt
+pip install --upgrade -r requirements/base.txt
 
 # Check for outdated packages
 pip list --outdated

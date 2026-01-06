@@ -142,56 +142,62 @@ class TestRunInitCommand:
         """Test init with unknown template type."""
         args = MagicMock()
         args.template = "unknown"
-        args.output = None
 
         with pytest.raises(InputValidationError, match="Unknown template"):
             await run_init_command(args)
 
     @pytest.mark.asyncio
-    async def test_init_success(self, tmp_path):
+    async def test_init_success(self):
         """Test successful template generation."""
-        output_file = tmp_path / "test_template.yaml"
 
         args = MagicMock()
         args.template = "offline"
-        args.output = str(output_file)
 
-        await run_init_command(args)
+        output_file = Path(f"{args.template}_template.yaml")
 
-        assert output_file.exists()
-        content = output_file.read_text()
-        assert "offline-benchmark" in content
-        assert "max_throughput" in content
+        try:
+            await run_init_command(args)
+
+            assert output_file.exists()
+            content = output_file.read_text()
+            assert "offline-benchmark" in content
+            assert "max_throughput" in content
+        finally:
+            output_file.unlink(missing_ok=True)
 
     @pytest.mark.asyncio
-    async def test_init_warns_on_overwrite(self, tmp_path, caplog):
+    async def test_init_warns_on_overwrite(self, caplog):
         """Test warning when file already exists."""
-        output_file = tmp_path / "existing.yaml"
-        output_file.write_text("existing content")
 
         args = MagicMock()
         args.template = "online"
-        args.output = str(output_file)
 
-        await run_init_command(args)
+        output_file = Path(f"{args.template}_template.yaml")
+        output_file.write_text("existing content")
 
-        assert "will be overwritten" in caplog.text
-        # File should be replaced
-        assert "online-benchmark" in output_file.read_text()
+        try:
+            await run_init_command(args)
+
+            assert "will be overwritten" in caplog.text
+            # File should be replaced
+            assert "online-benchmark" in output_file.read_text()
+        finally:
+            output_file.unlink(missing_ok=True)
 
     @pytest.mark.asyncio
-    async def test_init_all_templates(self, tmp_path):
+    async def test_init_all_templates(self):
         """Test generating all template types."""
         templates = ["offline", "online", "eval", "submission"]
 
         for template_type in templates:
-            output_file = tmp_path / f"{template_type}_test.yaml"
-
+            output_file = Path(f"{template_type}_template.yaml")
             args = MagicMock()
             args.template = template_type
-            args.output = str(output_file)
 
-            await run_init_command(args)
+            try:
+                await run_init_command(args)
 
-            assert output_file.exists()
-            assert output_file.stat().st_size > 0
+                assert output_file.exists()
+                assert output_file.stat().st_size > 0
+            finally:
+                output_file.unlink(missing_ok=True)

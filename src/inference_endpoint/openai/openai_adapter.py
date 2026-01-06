@@ -35,27 +35,7 @@ from .openai_types_gen import (
     Role6,
     ServiceTier,
 )
-
-
-# msgspec structs for typed SSE message parsing (OpenAI streaming format)
-class SSEDelta(msgspec.Struct):
-    """SSE delta object containing content."""
-
-    content: str = ""
-    reasoning: str = ""
-
-
-class SSEChoice(msgspec.Struct):
-    """SSE choice object containing delta."""
-
-    delta: SSEDelta = msgspec.field(default_factory=SSEDelta)
-    finish_reason: str | None = None
-
-
-class SSEMessage(msgspec.Struct):
-    """SSE message structure for OpenAI streaming responses."""
-
-    choices: list[SSEChoice] = msgspec.field(default_factory=list)
+from .types import SSEMessage
 
 
 class OpenAIAdapter(HttpRequestAdapter):

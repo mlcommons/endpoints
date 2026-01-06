@@ -38,6 +38,7 @@ class TestProbeCommandIntegration:
         """Test successful probe against echo server."""
         args = MagicMock()
         args.endpoint = mock_http_echo_server.url
+        args.api_type = "openai"
         args.requests = 5
         args.prompt = "Test probe message"
         args.model = "gpt-3.5-turbo"  # Required
@@ -60,6 +61,7 @@ class TestProbeCommandIntegration:
         """Test probe with default prompt."""
         args = MagicMock()
         args.endpoint = mock_http_echo_server.url
+        args.api_type = "openai"
         args.requests = 3
         args.prompt = "Please write me a joke in 30 words."  # Default
         args.model = "gpt-3.5-turbo"  # Required
@@ -77,6 +79,7 @@ class TestProbeCommandIntegration:
         """Test that probe shows sample responses."""
         args = MagicMock()
         args.endpoint = mock_http_echo_server.url
+        args.api_type = "openai"
         args.requests = 15  # More than 10 to test truncation
         args.prompt = "Sample response text"
         args.model = "gpt-3.5-turbo"  # Required
@@ -95,6 +98,7 @@ class TestProbeCommandIntegration:
         """Test probe fails gracefully with invalid endpoint."""
         args = MagicMock()
         args.endpoint = "http://invalid-host-does-not-exist:9999"
+        args.api_type = "openai"
         args.requests = 3
         args.prompt = "Test"
         args.model = "gpt-3.5-turbo"  # Required
@@ -111,6 +115,7 @@ class TestProbeCommandIntegration:
 
         args = MagicMock()
         args.endpoint = mock_http_echo_server.url
+        args.api_type = "openai"
         args.requests = 2
         args.prompt = custom_prompt
         args.model = "gpt-3.5-turbo"  # Required

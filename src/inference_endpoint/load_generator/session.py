@@ -26,13 +26,16 @@ import orjson
 from transformers import AutoTokenizer
 
 from ..config.runtime_settings import RuntimeSettings
-from ..dataset_manager.dataloader import DataLoader
+from ..dataset_manager.dataset import Dataset
 from ..metrics.recorder import EventRecorder
 from ..metrics.reporter import MetricsReporter
 from .events import SessionEvent
 from .load_generator import LoadGenerator, SampleIssuer, SchedulerBasedLoadGenerator
 
 logger = logging.getLogger(__name__)
+
+# poll interval for checking if test-session should end
+SHUTDOWN_POLL_INTERVAL_S = 10.0
 
 
 class BenchmarkSession:
@@ -45,18 +48,30 @@ class BenchmarkSession:
         self.runtime_settings = runtime_settings
         self.session_id = session_id if session_id else uuid.uuid4().hex
 
+        # EventRecorder will set this when all samples complete, helps avoid busy-waiting
         self.end_event = threading.Event()
         self.thread = None
+
+        # CPython GIL provides atomic boolean writes, no need for threading.Event()
+        self.stop_requested = False
 
         self.event_recorder = EventRecorder(
             session_id=self.session_id, notify_idle=self.end_event
         )
+        # Will be populated after the test finishes by _run_test
+        self.report = None
 
         self.sample_uuid_map = None
 
     @property
     def is_running(self):
         return self.thread is not None and self.thread.is_alive()
+
+    def stop(self) -> None:
+        """Signal the session to stop early."""
+        self.stop_requested = True
+        # wakeup _run_test if needed, short-circuit SHUTDOWN_POLL_INTERVAL_S
+        self.end_event.set()
 
     def _run_test(
         self,
@@ -65,7 +80,7 @@ class BenchmarkSession:
         max_shutdown_timeout_s: float = 300.0,
         report_dir: os.PathLike | None = None,
         tokenizer_override: AutoTokenizer | None = None,
-        dump_events_csv: bool = False,
+        dump_events_log: bool = False,
     ):
         with self.event_recorder:
             try:
@@ -100,10 +115,18 @@ class BenchmarkSession:
                         raise TimeoutError(
                             f"Max shutdown timeout of {max_shutdown_timeout_s}s reached"
                         )
-                    self.end_event.wait(timeout=10.0)
+
+                    if self.stop_requested:
+                        self.logger.info(
+                            f"Early stop requested (pending={self.event_recorder.n_inflight_samples}), shutting down test..."
+                        )
+                        break
+
+                    self.end_event.wait(timeout=SHUTDOWN_POLL_INTERVAL_S)
                     self.logger.info(
                         f"Waiting for the test to end... {self.event_recorder.n_inflight_samples} samples remaining"
                     )
+
             except Exception as e:
                 logger.error(f"Error running benchmark session: {e}")
                 raise e
@@ -131,6 +154,9 @@ class BenchmarkSession:
                             )
                             tokenizer = None
                 report = reporter.create_report(tokenizer)
+
+                # Store report on session so external callers can use it
+                self.report = report
 
                 # Consolidate UUID->index mappings
                 perf_name = (
@@ -184,8 +210,8 @@ class BenchmarkSession:
                     with (Path(report_dir) / "sample_idx_map.json").open("w") as f:
                         f.write(orjson.dumps(self.sample_uuid_map).decode("utf-8"))
 
-                    if dump_events_csv:
-                        reporter.dump_to_csv(Path(report_dir) / "events.csv")
+                    if dump_events_log:
+                        reporter.dump_to_json(Path(report_dir) / "events.json")
 
                 # Print summary
                 report.display()
@@ -207,7 +233,7 @@ class BenchmarkSession:
     def start(
         cls,
         runtime_settings: RuntimeSettings,
-        dataloader: DataLoader,
+        dataset: Dataset,
         sample_issuer: SampleIssuer,
         *args,
         load_generator_cls: type[LoadGenerator] = SchedulerBasedLoadGenerator,
@@ -215,13 +241,13 @@ class BenchmarkSession:
         max_shutdown_timeout_s: float = 300.0,
         report_dir: os.PathLike | None = None,
         tokenizer_override: AutoTokenizer | None = None,
-        dump_events_csv: bool = False,
+        dump_events_log: bool = False,
     ) -> BenchmarkSession:
         """Start a new BenchmarkSession in a thread.
 
         Args:
             runtime_settings: The runtime settings to use for the session.
-            dataloader: The dataloader to use for the session.
+            dataset: The dataset to use for the session.
             sample_issuer: The sample issuer to use for the session.
             load_generator_cls: The load generator class to use for the session.
             name: The name of the session.
@@ -237,7 +263,7 @@ class BenchmarkSession:
             The new BenchmarkSession.
         """
         session = cls(runtime_settings, session_id=name)
-        load_generator = load_generator_cls(sample_issuer, dataloader, *args)
+        load_generator = load_generator_cls(sample_issuer, dataset, *args)
         session.thread = threading.Thread(
             target=session._run_test,
             args=(load_generator,),
@@ -245,7 +271,7 @@ class BenchmarkSession:
                 "max_shutdown_timeout_s": max_shutdown_timeout_s,
                 "report_dir": report_dir,
                 "tokenizer_override": tokenizer_override,
-                "dump_events_csv": dump_events_csv,
+                "dump_events_log": dump_events_log,
             },
         )
         session.thread.start()

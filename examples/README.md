@@ -16,6 +16,14 @@ Benchmarking a real-world model served via open-source serving systems such as [
 
 Compare `inference-endpoint` with [vLLM's](https://github.com/vllm-project/vllm) benchmarking tool.
 
+### [04_GPTOSS120B_Example](04_GPTOSS120B_Example/)
+
+Sample yaml configuration to benchmark `openai/gpt-oss-120b`.
+
+### [05_Llama3.1-8B_Example](05_Llama3.1-8B_Example/)
+
+Sample yaml configuration to benchmark `meta-llama/Llama-3.1-8B-Instruct`.
+
 ## Getting Help
 
 - For general usage: See main [README](../README.md)

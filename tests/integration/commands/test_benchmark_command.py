@@ -116,7 +116,11 @@ class TestBenchmarkCommandIntegration:
         self, mock_http_echo_server, ds_pickle_dataset_path, tmp_path
     ):
         """Test benchmark saves results to JSON file."""
-        output_file = tmp_path / "benchmark_results.json"
+        # The benchmark command writes results to `results.json` inside the
+        # configured `report_dir`. Pass `report_dir=tmp_path` so the command
+        # will write output into this temporary directory and we can assert on
+        # the produced file.
+        report_dir = tmp_path
 
         args = argparse.Namespace(
             benchmark_mode="offline",
@@ -133,17 +137,19 @@ class TestBenchmarkCommandIntegration:
             min_output_tokens=None,
             max_output_tokens=None,
             mode=None,
-            output=output_file,
+            report_dir=report_dir,
             verbose=0,
             model="echo-server",
             timeout=None,
         )
+
         await run_benchmark_command(args)
 
-        # Verify file was created
-        assert output_file.exists()
+        # Verify file was created at <report_dir>/results.json
+        results_path = report_dir / "results.json"
+        assert results_path.exists()
 
-        with open(output_file) as f:
+        with open(results_path) as f:
             results = json.load(f)
 
         assert "config" in results

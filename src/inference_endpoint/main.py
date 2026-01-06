@@ -33,25 +33,23 @@ logger = logging.getLogger(__name__)
 
 async def main() -> None:
     """Main application entry point."""
-    try:
-        # Setup logging
-        setup_logging()
-        logger.info("Starting MLPerf Inference Endpoint Benchmarking System")
-
-        # Run CLI
-        await cli_main()
-
-    except KeyboardInterrupt:
-        logger.info("Application interrupted by user")
-        sys.exit(0)
-    except Exception as e:
-        logger.error(f"Application error: {e}")
-        sys.exit(1)
+    logger.info("Starting MLPerf Inference Endpoint Benchmarking System")
+    await cli_main()
 
 
 def run() -> None:
     """Entry point for setuptools."""
-    asyncio.run(main())
+    # Setup logging first
+    setup_logging()
+
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Application interrupted by user")
+        sys.exit(130)  # 128 + SIGINT
+    except Exception as e:
+        logger.error(f"Application error: {e}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

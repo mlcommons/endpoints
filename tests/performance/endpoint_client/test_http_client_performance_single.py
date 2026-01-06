@@ -24,7 +24,7 @@ import pytest
 from inference_endpoint import metrics
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import LoadPattern, LoadPatternType
-from inference_endpoint.dataset_manager.dataloader import DataLoader
+from inference_endpoint.dataset_manager.dataset import Dataset
 from inference_endpoint.endpoint_client.http_sample_issuer import HttpClientSampleIssuer
 from inference_endpoint.load_generator.scheduler import (
     MaxThroughputScheduler,
@@ -65,7 +65,7 @@ PERFORMANCE_CONFIG = {
 
 
 # Helper dataloader for Query objects
-class QueryDataLoader(DataLoader):
+class QueryDataLoader(Dataset):
     """Dataloader that extracts .data from Query objects."""
 
     def __init__(self, queries):
@@ -169,8 +169,6 @@ def run_performance_test(
     sample_issuer = HttpClientSampleIssuer(http_client)
 
     try:
-        sample_issuer.start()
-
         # Start benchmark session with metrics-tracking sample factory
         # MetricsSampleFactory will store itself in _latest_instance for retrieval
         session = BenchmarkSession.start(
@@ -186,9 +184,6 @@ def run_performance_test(
 
         # Wait for test to complete
         session.wait_for_test_end()
-
-        # Wait for all pending responses to complete
-        sample_issuer.wait_for_all_complete()
     finally:
         # Shutdown
         sample_issuer.shutdown()
