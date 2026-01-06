@@ -239,7 +239,7 @@ def run_benchmark_session(dataset: Dataset, issuer: HttpClientSampleIssuer, args
             name="gpqa_sglang_benchmark",
             report_dir=args.report_dir,
             dump_events_log=True,
-            max_shutdown_timeout_s=600.0,
+            max_shutdown_timeout_s=None,
         )
         sess.wait_for_test_end()
 
@@ -267,7 +267,9 @@ def run_main(args):
         print("Creating dataset with transforms...")
         print(df.columns)
         df.to_parquet("datasets/gqpa_diamond_pre-transformed_gpt-oss.parquet")
-        dataset = GPQA(df, transforms=transforms)
+        dataset = GPQA(
+            df, transforms=transforms, repeats=5
+        )  # Artificial Analysis uses 5 repeats
         dataset.load()
         print(f"Dataset loaded with {dataset.num_samples()} samples")
 

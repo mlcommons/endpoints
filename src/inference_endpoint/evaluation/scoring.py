@@ -85,9 +85,21 @@ class Scorer(ABC):
     def score_single_sample(self, value: str, ground_truth: str) -> float:
         raise NotImplementedError
 
-    def score(self) -> float:
+    def score(self) -> tuple[float, int]:
+        """Scores the dataset and returns the mean score and the number of repeats.
+
+        Returns:
+            tuple[float, int]: The mean score and the number of repeats.
+        """
         df = self.get_outputs()
+
+        # Outputs are for all samples, not just the target dataset
+        valid_uuids = self.sample_index_map.keys()
+        df = df[df["sample_uuid"].isin(valid_uuids)]
+
+        # Match to sample index from dataset
         df = df.apply(self.match_sample_index, axis=1)
+
         empirical = df["output"]
         if self.extractor is not None:
             empirical = empirical.apply(self.extractor.extract)
@@ -101,7 +113,8 @@ class Scorer(ABC):
         for i in range(len(empirical)):
             scores.append(self.score_single_sample(empirical[i], ground_truths[i]))
 
-        return np.mean(scores)
+        n_repeats = len(scores) // self.dataset.num_samples()
+        return np.mean(scores), n_repeats
 
 
 class PassAt1Scorer(Scorer):

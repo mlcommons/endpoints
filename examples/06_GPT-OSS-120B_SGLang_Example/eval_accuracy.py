@@ -36,8 +36,8 @@ def main(args):
     )
 
     # Score the dataset
-    score = scorer.score()
-    print(f"Pass@1 Score: {score}")
+    score, n_repeats = scorer.score()
+    print(f"Pass@1 Score ({n_repeats} repeats): {score}")
 
 
 if __name__ == "__main__":
