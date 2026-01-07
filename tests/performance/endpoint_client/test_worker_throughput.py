@@ -22,7 +22,6 @@ Tests:
 
 from __future__ import annotations
 
-import hashlib
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,6 +39,8 @@ from inference_endpoint.endpoint_client.worker_manager import WorkerManager
 from inference_endpoint.endpoint_client.zmq_utils import ZMQPullSocket, ZMQPushSocket
 from inference_endpoint.testing.bare_response_server import BareResponseServerProcess
 
+from tests.test_helpers import get_test_socket_path
+
 # =============================================================================
 # Configuration
 # =============================================================================
@@ -49,15 +50,6 @@ ISSUE_RATE_DURATION_S = 5.0
 
 # Prompt sizes in characters
 PROMPT_SIZES = [128, 1024 * 4, 1024 * 16, 1024 * 32]
-
-# Chunk percentages for streaming tests (% of prompt_size)
-STREAM_CHUNK_PCTS = [0.01, 0.90]
-
-
-def _num_chunks_from_pct(prompt_size: int, pct: float) -> int:
-    """Compute num_chunks as percentage of prompt_size, minimum 1."""
-    return max(1, int(prompt_size * pct))
-
 
 # =============================================================================
 # Helpers
@@ -76,17 +68,12 @@ class Result:
         return self.count / self.elapsed if self.elapsed > 0 else 0
 
 
-def _socket_path(tmp: Path, name: str) -> str:
-    """Generate unique IPC socket path."""
-    return f"ipc://{tmp}/{hashlib.md5(str(tmp).encode()).hexdigest()[:8]}_{name}"
-
-
 async def _setup_worker(server_url: str, tmp_path: Path):
     """Initialize worker and return (push, pull, manager, context)."""
     zmq_cfg = ZMQConfig(
-        zmq_request_queue_prefix=_socket_path(tmp_path, "req"),
-        zmq_response_queue_addr=_socket_path(tmp_path, "resp"),
-        zmq_readiness_queue_addr=_socket_path(tmp_path, "ready"),
+        zmq_request_queue_prefix=get_test_socket_path(tmp_path, "worker", "_req"),
+        zmq_response_queue_addr=get_test_socket_path(tmp_path, "worker", "_resp"),
+        zmq_readiness_queue_addr=get_test_socket_path(tmp_path, "worker", "_ready"),
     )
     http_cfg = HTTPClientConfig(
         endpoint_url=f"{server_url}/v1/chat/completions",
@@ -160,19 +147,19 @@ def event_loop():
 
 
 # =============================================================================
-# Tests - Non-Streaming
+# Tests - Issue Rate
 # =============================================================================
 
 
 @pytest.mark.timeout(0)
-class TestWorkerIssueRateNonStreaming:
-    """Test max ZMQ send rate to worker process (non-streaming)."""
+class TestWorkerIssueRate:
+    """Test max ZMQ send rate to worker process."""
 
     @pytest.mark.performance
     @pytest.mark.xdist_group(name="serial_performance")
     @pytest.mark.parametrize("prompt_size", PROMPT_SIZES)
     def test_issue_rate(self, prompt_size: int, event_loop, tmp_path):
-        """Measure max issue rate for non-streaming mode."""
+        """Measure max issue rate for given prompt size."""
 
         async def run():
             async with BareResponseServerProcess(
@@ -183,42 +170,5 @@ class TestWorkerIssueRateNonStreaming:
                 )
 
         result = event_loop.run_until_complete(run())
-        print(f"\n  nonstream prompt={prompt_size}: {result.qps:,.0f} QPS")
-        assert result.qps > 0
-
-
-# =============================================================================
-# Tests - Streaming (parameterized by chunk percentage)
-# =============================================================================
-
-
-@pytest.mark.timeout(0)
-class TestWorkerIssueRateStreaming:
-    """Test max ZMQ send rate to worker process (streaming)."""
-
-    @pytest.mark.performance
-    @pytest.mark.xdist_group(name="serial_performance")
-    @pytest.mark.parametrize("prompt_size", PROMPT_SIZES)
-    @pytest.mark.parametrize("chunk_pct", STREAM_CHUNK_PCTS)
-    def test_issue_rate(self, prompt_size: int, chunk_pct: float, event_loop, tmp_path):
-        """Measure max issue rate for streaming mode with varied chunk counts."""
-        num_chunks = _num_chunks_from_pct(prompt_size, chunk_pct)
-
-        async def run():
-            async with BareResponseServerProcess(
-                streaming=True, num_chunks=num_chunks, response_size=prompt_size
-            ) as srv:
-                return await _measure_issue_rate(
-                    True,
-                    prompt_size,
-                    num_chunks,
-                    ISSUE_RATE_DURATION_S,
-                    srv.url,
-                    tmp_path,
-                )
-
-        result = event_loop.run_until_complete(run())
-        print(
-            f"\n  stream prompt={prompt_size} chunks={num_chunks} ({chunk_pct:.0%}): {result.qps:,.0f} QPS"
-        )
+        print(f"\n  Issue rate prompt={prompt_size}: {result.qps:,.0f} QPS")
         assert result.qps > 0

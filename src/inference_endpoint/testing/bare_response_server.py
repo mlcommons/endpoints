@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """
 Barebones HTTP server for benchmarking - responds immediately without parsing request.
@@ -14,17 +26,19 @@ from __future__ import annotations
 import asyncio
 import multiprocessing as mp
 import socket
+from collections.abc import Callable
 from multiprocessing import Queue
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from multiprocessing.context import SpawnProcess
+from multiprocessing.context import SpawnProcess
 
 # Default content size in tokens (approximated as characters for ASCII)
 DEFAULT_RESPONSE_SIZE = 64
 
 # Socket buffer sizes (10MB for high throughput)
 _SOCKET_BUFFER_SIZE = 10 * 1024 * 1024
+
+# Pre-computed header markers
+_HEADER_END = b"\r\n\r\n"
+_CONTENT_LENGTH_LOWER = b"content-length:"
 
 
 def _build_content(size: int) -> bytes:
@@ -74,7 +88,7 @@ def _build_streaming_response(
         b"HTTP/1.1 200 OK\r\n"
         b"Content-Type: text/event-stream\r\n"
         b"Cache-Control: no-cache\r\n"
-        b"Connection: keep-alive\r\n"
+        b"Connection: close\r\n"
         b"\r\n" + body
     )
 
@@ -99,9 +113,125 @@ def _configure_socket(sock: socket.socket) -> None:
     sock.setblocking(False)
 
 
-class BareResponseServer:
-    """Zero-overhead HTTP server - fires response as soon as request header end is detected.
+class BareResponseProtocol(asyncio.Protocol):
+    """
+    Raw Protocol implementation for HTTP response processing.
+    - data_received(): Called when data arrives (no await overhead)
+    - transport.write(): Direct write (no drain() await)
 
+    Handles HTTP keep-alive by buffering and processing multiple requests
+    per connection. Closes connection after response if Connection: close.
+    """
+
+    __slots__ = (
+        "_transport",
+        "_response",
+        "_request_count_callback",
+        "_buffer",
+        "_waiting_for_body",
+        "_body_remaining",
+        "_close_after_response",
+    )
+
+    def __init__(
+        self,
+        response: bytes,
+        request_count_callback: Callable[[], None] | None = None,
+    ):
+        self._response = response
+        self._request_count_callback = request_count_callback
+        self._transport: asyncio.Transport | None = None
+        self._buffer = b""
+        self._waiting_for_body = False
+        self._body_remaining = 0
+        # Check if response has Connection: close header
+        self._close_after_response = b"Connection: close" in response
+
+    def connection_made(self, transport: asyncio.Transport) -> None:
+        """Called when connection is established."""
+        self._transport = transport
+
+    def data_received(self, data: bytes) -> None:
+        """
+        Called when data is received from the socket.
+
+        Processes complete HTTP requests from the buffer and sends responses.
+        Handles keep-alive by processing multiple requests per connection.
+        """
+        self._buffer += data
+        transport = self._transport
+        response = self._response
+        callback = self._request_count_callback
+
+        # Process all complete requests in buffer
+        while True:
+            if self._waiting_for_body:
+                # Waiting for request body
+                if len(self._buffer) < self._body_remaining:
+                    return  # Need more data
+
+                # Consume body and send response
+                self._buffer = self._buffer[self._body_remaining :]
+                self._waiting_for_body = False
+                self._body_remaining = 0
+
+                if callback is not None:
+                    callback()
+                transport.write(response)
+                if self._close_after_response:
+                    transport.close()
+                    return
+                continue
+
+            # Look for header end
+            header_end = self._buffer.find(_HEADER_END)
+            if header_end == -1:
+                return  # Need more data
+
+            # Extract headers (including \r\n\r\n)
+            header_end += 4
+            headers = self._buffer[:header_end]
+
+            # Parse Content-Length (case-insensitive)
+            content_length = 0
+            headers_lower = headers.lower()
+            cl_pos = headers_lower.find(_CONTENT_LENGTH_LOWER)
+            if cl_pos != -1:
+                # Find the value after "content-length:"
+                value_start = cl_pos + len(_CONTENT_LENGTH_LOWER)
+                value_end = headers.find(b"\r\n", value_start)
+                if value_end != -1:
+                    content_length = int(headers[value_start:value_end].strip())
+
+            # Check if we have the full request
+            request_end = header_end + content_length
+            if len(self._buffer) < request_end:
+                # Need to wait for body
+                self._buffer = self._buffer[header_end:]
+                self._waiting_for_body = True
+                self._body_remaining = content_length
+                return
+
+            # Complete request - consume and respond
+            self._buffer = self._buffer[request_end:]
+
+            if callback is not None:
+                callback()
+            transport.write(response)
+            if self._close_after_response:
+                transport.close()
+                return
+
+    def connection_lost(self, exc: Exception | None) -> None:
+        """Called when connection is closed."""
+        self._transport = None
+        self._buffer = b""
+
+
+class BareResponseServer:
+    """Zero-overhead HTTP server - fires response as soon as request is complete.
+
+    Uses raw Protocol API for minimal overhead (no StreamReader/StreamWriter).
     Runs in the same process/event loop as the caller.
 
     Args:
@@ -119,7 +249,6 @@ class BareResponseServer:
         "_actual_port",
         "request_count",
         "_response",
-        "_handler_tasks",
     )
 
     def __init__(
@@ -140,60 +269,14 @@ class BareResponseServer:
             if streaming
             else _build_non_streaming_response(response_size)
         )
-        self._handler_tasks: set[asyncio.Task] = set()
 
     @property
     def url(self) -> str:
         return f"http://{self.host}:{self._actual_port or self.port}"
 
-    async def _handle(
-        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
-    ) -> None:
-        """Handle connection - read request (headers + body), send pre-built response."""
-        response = self._response  # Local reference for speed
-        try:
-            while True:
-                # Read headers
-                headers = await reader.readuntil(b"\r\n\r\n")
-
-                # Parse Content-Length to consume request body (prevents protocol desync)
-                content_length = 0
-                for line in headers.split(b"\r\n"):
-                    if line.lower().startswith(b"content-length:"):
-                        content_length = int(line.split(b":", 1)[1].strip())
-                        break
-
-                # Consume request body if present
-                if content_length > 0:
-                    await reader.readexactly(content_length)
-
-                self.request_count += 1
-                writer.write(response)
-                # Skip drain() for speed - let OS buffer handle it
-        except (
-            asyncio.IncompleteReadError,
-            asyncio.LimitOverrunError,
-            ConnectionResetError,
-            ConnectionAbortedError,
-            BrokenPipeError,
-            asyncio.CancelledError,
-            OSError,
-        ):
-            pass
-        finally:
-            try:
-                writer.close()
-                await writer.wait_closed()
-            except Exception:
-                pass
-
-    def _on_client_connected(
-        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
-    ) -> None:
-        """Callback when client connects - track the handler task."""
-        task = asyncio.create_task(self._handle(reader, writer))
-        self._handler_tasks.add(task)
-        task.add_done_callback(self._handler_tasks.discard)
+    def _increment_request_count(self) -> None:
+        """Callback to increment request count (passed to protocol)."""
+        self.request_count += 1
 
     async def start(self) -> None:
         """Start the server."""
@@ -201,7 +284,12 @@ class BareResponseServer:
         _configure_socket(sock)
         sock.bind((self.host, self.port))
         sock.listen(65535)
-        self._server = await asyncio.start_server(self._on_client_connected, sock=sock)
+
+        loop = asyncio.get_running_loop()
+        self._server = await loop.create_server(
+            lambda: BareResponseProtocol(self._response, self._increment_request_count),
+            sock=sock,
+        )
         self._actual_port = sock.getsockname()[1]
 
     async def stop(self) -> None:
@@ -209,15 +297,7 @@ class BareResponseServer:
         if self._server:
             self._server.close()
             await self._server.wait_closed()
-
-        # Cancel all pending handler tasks
-        for task in self._handler_tasks:
-            task.cancel()
-
-        # Wait for all tasks to complete cancellation
-        if self._handler_tasks:
-            await asyncio.gather(*self._handler_tasks, return_exceptions=True)
-        self._handler_tasks.clear()
+            self._server = None
 
     async def __aenter__(self) -> BareResponseServer:
         await self.start()
@@ -233,26 +313,40 @@ class BareResponseServer:
 
 
 def _server_process_main(
-    port_queue: Queue,
+    port_queue: Queue | None,
     stop_event: mp.Event,
     host: str,
+    port: int,
     streaming: bool,
     num_chunks: int,
     response_size: int,
 ) -> None:
-    """Entry point for server subprocess."""
+    """Entry point for server subprocess.
+
+    Args:
+        port_queue: Queue to report assigned port (only first worker uses this)
+        stop_event: Event to signal shutdown
+        host: Bind address
+        port: Port to bind (0 = auto-assign, used by first worker)
+        streaming: Use SSE streaming response format
+        num_chunks: Number of SSE chunks for streaming mode
+        response_size: Size of content in tokens
+    """
     import uvloop
 
     async def run_server():
         server = BareResponseServer(
             host=host,
-            port=0,
+            port=port,
             streaming=streaming,
             num_chunks=num_chunks,
             response_size=response_size,
         )
         await server.start()
-        port_queue.put(server._actual_port)
+
+        # First worker reports port, others just start
+        if port_queue is not None:
+            port_queue.put(server._actual_port)
 
         # Wait for stop signal
         while not stop_event.is_set():
@@ -264,16 +358,20 @@ def _server_process_main(
 
 
 class BareResponseServerProcess:
-    """Out-of-process HTTP server - runs in separate process to isolate CPU load.
+    """Out-of-process HTTP server - runs in separate process(es) to isolate CPU load.
 
     Use this for accurate benchmarking where the server shouldn't compete
     with the client for CPU resources.
+
+    With num_workers > 1, spawns multiple processes that all bind to the same
+    port using SO_REUSEPORT. The kernel load-balances connections across workers.
 
     Args:
         host: Bind address (default: 127.0.0.1)
         streaming: Use SSE streaming response format
         num_chunks: Number of SSE chunks for streaming mode
         response_size: Size of content in tokens (approximated as characters for ASCII)
+        num_workers: Number of worker processes (default: 1)
     """
 
     __slots__ = (
@@ -281,7 +379,8 @@ class BareResponseServerProcess:
         "streaming",
         "num_chunks",
         "response_size",
-        "_process",
+        "num_workers",
+        "_processes",
         "_port",
         "_port_queue",
         "_stop_event",
@@ -293,12 +392,14 @@ class BareResponseServerProcess:
         streaming: bool = False,
         num_chunks: int = 1,
         response_size: int = DEFAULT_RESPONSE_SIZE,
+        num_workers: int = 1,
     ):
         self.host = host
         self.streaming = streaming
         self.num_chunks = num_chunks
         self.response_size = response_size
-        self._process: SpawnProcess | None = None
+        self.num_workers = max(1, num_workers)
+        self._processes: list[SpawnProcess] = []
         self._port: int | None = None
         self._port_queue: Queue | None = None
         self._stop_event: mp.Event | None = None
@@ -310,40 +411,65 @@ class BareResponseServerProcess:
         return f"http://{self.host}:{self._port}"
 
     def start(self) -> None:
-        """Start server in separate process."""
+        """Start server in separate process(es).
+
+        First worker binds to port 0 (OS assigns), reports port via queue.
+        Additional workers bind to the same port using SO_REUSEPORT.
+        """
         ctx = mp.get_context("spawn")
         self._port_queue = ctx.Queue()
         self._stop_event = ctx.Event()
 
-        self._process = ctx.Process(
+        # Start first worker - it picks the port
+        first_process = ctx.Process(
             target=_server_process_main,
             args=(
                 self._port_queue,
                 self._stop_event,
                 self.host,
+                0,  # port=0, OS assigns
                 self.streaming,
                 self.num_chunks,
                 self.response_size,
             ),
             daemon=True,
         )
-        self._process.start()
+        first_process.start()
+        self._processes.append(first_process)
 
-        # Wait for port from subprocess
+        # Wait for port from first worker
         self._port = self._port_queue.get(timeout=10.0)
 
+        # Start additional workers on the same port
+        for _ in range(1, self.num_workers):
+            process = ctx.Process(
+                target=_server_process_main,
+                args=(
+                    None,  # No port queue needed
+                    self._stop_event,
+                    self.host,
+                    self._port,  # Same port as first worker
+                    self.streaming,
+                    self.num_chunks,
+                    self.response_size,
+                ),
+                daemon=True,
+            )
+            process.start()
+            self._processes.append(process)
+
     def stop(self) -> None:
-        """Stop the server process."""
+        """Stop all server processes."""
         if self._stop_event:
             self._stop_event.set()
 
-        if self._process:
-            self._process.join(timeout=5.0)
-            if self._process.is_alive():
-                self._process.terminate()
-                self._process.join(timeout=1.0)
+        for process in self._processes:
+            process.join(timeout=5.0)
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=1.0)
 
-        self._process = None
+        self._processes.clear()
         self._port = None
 
     def __enter__(self) -> BareResponseServerProcess:

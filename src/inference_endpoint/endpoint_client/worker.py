@@ -567,7 +567,7 @@ class Worker:
             # - asyncio calls protocol.data_received() when socket has data
             # - Protocol uses C-accelerated HTTP parser
             while True:
-                message, payload = await prepared.conn.protocol.read()
+                message, payload = await prepared.connection.protocol.read()
                 # Skip 1xx informational responses (100 Continue, etc.)
                 # Only break on final response (2xx, 3xx, 4xx, 5xx) or 101 Switching Protocols
                 if message.code < 100 or message.code > 199 or message.code == 101:
