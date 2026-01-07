@@ -34,5 +34,5 @@ RUN if ! getent group ${GROUP_ID}; then \
 USER appuser
 ENV PATH="/home/appuser/.local/bin:$PATH"
 
-RUN pip install --no-cache-dir -r requirements/dev.txt -r requirements/test.txt
+RUN pip install --no-cache-dir -r requirements/base.txt -r requirements/test.txt
 RUN pip install -e .

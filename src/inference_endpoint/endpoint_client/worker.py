@@ -208,7 +208,7 @@ class SGLangSSEAccumulator:
                 "first_chunk": not self.first_chunk_sent,
                 "final_chunk": False,
                 "retraction_occurred": delta.has_retractions,
-                "n_tokens": len(delta.token_ids),
+                "n_tokens": len(delta.token_delta),
             }
             return StreamChunk(
                 id=self.query_id,

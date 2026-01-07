@@ -33,11 +33,8 @@ import pytest
 from inference_endpoint import metrics
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import LoadPattern, LoadPatternType
-from inference_endpoint.dataset_manager.dataset import (
-    Dataset,
-    DatasetFormat,
-    RowProcessor,
-)
+from inference_endpoint.dataset_manager.dataset import Dataset, DatasetFormat
+from inference_endpoint.dataset_manager.transforms import ColumnNameRemap
 from inference_endpoint.load_generator.events import SampleEvent, SessionEvent
 from inference_endpoint.load_generator.sample import SampleEventHandler
 from inference_endpoint.testing.docker_server import DockerServer
@@ -188,17 +185,7 @@ def ds_pickle_reader(ds_pickle_dataset_path):
     """
     Returns a PickleReader object for the ds_samples.pkl file.
     """
-
-    class PickleRowProcessor(RowProcessor):
-        def __init__(self):
-            super().__init__()
-
-        def __call__(self, row: dict[str, Any]) -> Any:
-            return row
-
-    return Dataset.load_from_file(
-        file_path=ds_pickle_dataset_path, row_processor=PickleRowProcessor()
-    )
+    return Dataset.load_from_file(file_path=ds_pickle_dataset_path)
 
 
 @pytest.fixture
@@ -217,7 +204,6 @@ def hf_squad_dataset(hf_squad_dataset_path):
 
     return Dataset.load_from_file(
         file_path=hf_squad_dataset_path,
-        row_processor=lambda x: x,
         format=DatasetFormat.HF,
     )
 
@@ -343,28 +329,11 @@ class OracleServer(EchoServer):
         self.logger = logging.getLogger(__name__)
         self.file_path = file_path
 
-        class OracleRowProcessor(RowProcessor):
-            def __init__(self):
-                super().__init__()
-
-            def __call__(self, row: dict[str, Any]) -> Any:
-                return {
-                    "prompt": row["text_input"],
-                    "output": row["ref_output"],
-                }
-
-            """
-            Extract the prompt and reference output from a dataset sample object.
-
-            Converts a dataset sample into a dictionary with 'prompt' and 'output' keys,
-            using the sample's text input as the prompt and reference output as the response.
-
-            Returns:
-                dict: A dictionary with 'prompt' and 'output' keys derived from the input sample.
-            """
-
         data_loader = Dataset.load_from_file(
-            self.file_path, row_processor=OracleRowProcessor()
+            self.file_path,
+            transforms=[
+                ColumnNameRemap({"text_input": "prompt", "ref_output": "output"})
+            ],
         )
         data_loader.load()
         self.data = {}
