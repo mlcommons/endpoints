@@ -17,291 +17,209 @@
 
 from __future__ import annotations
 
-import logging
+import asyncio
 from collections.abc import Callable
-from contextlib import nullcontext
 from dataclasses import dataclass, field
-from functools import partial
-from pathlib import Path
 from typing import Any
 
-import orjson
-from aiohttp.client_reqrep import ClientRequest, ClientResponse
+from aiohttp import hdrs
+from aiohttp.client import ClientSession
+from aiohttp.client_reqrep import ClientRequest, ClientResponse, RequestInfo
+from aiohttp.streams import StreamReader
+from multidict import CIMultiDict, CIMultiDictProxy
+from yarl import URL
 
-from inference_endpoint.utils.logging import TRACE
-
-logger = logging.getLogger(__name__)
-
-
-# =============================================================================
-# Timing Printer
-# =============================================================================
-
-TimingPrinter = Callable[[str, str, dict[str, float]], None]
+from inference_endpoint.endpoint_client.timing_context import RequestTimingContext
 
 
-# TODO(vir): replace / add prometheus printer
-def logging_timing_printer(
-    query_id: str, phase: str, metrics: dict[str, float]
-) -> None:
-    """Emit timing metrics via TRACE level logging (requires -vvv)."""
-    if not logger.isEnabledFor(TRACE):
-        return
-
-    duration_parts = []
-    timestamp_parts = []
-    for name, value in metrics.items():
-        if name.startswith("t_"):
-            # Raw timestamps in nanoseconds (for IPC delay calculation)
-            timestamp_parts.append(f"{name}={int(value)}")
-        else:
-            # Duration metrics in milliseconds
-            duration_parts.append(f"d_{name}={value:.4f}ms")
-
-    log_parts = duration_parts + timestamp_parts
-    logger.log(TRACE, f"[{query_id}] timing_{phase}: {', '.join(log_parts)}")
-
-
-class FileTimingPrinter:
+@dataclass(slots=True)
+class HttpRequestTemplate:
     """
-    File-based timing printer that buffers entries and writes JSONL at close.
+    Pre-computed HTTP/1.1 request parts for direct socket writes.
 
-    Buffers timing data in memory during the run to avoid per-request I/O overhead.
-    Writes all entries to file when close() is called (at worker shutdown).
+    These are computed once from the endpoint URL and reused for all requests,
+    avoiding repeated string formatting and encoding overhead.
 
-    Each line is a JSON object with:
-        - query_id: The request ID
-        - worker_id: The worker process ID
-        - phase: "pre" or "post"
-        - metrics: Dict of timing metrics (durations in ms, timestamps in ns)
-
-    Usage as context manager:
-        with FileTimingPrinter.configure(event_logs_dir, worker_id):
-            # timing_printer is now set to write to file
-            run_worker()
-        # On exit: writes buffered entries, restores original printer
+    Attributes:
+        request_line: HTTP request line bytes (e.g., b"POST /v1/chat HTTP/1.1\\r\\n")
+        host_header: HTTP Host header bytes, required for HTTP/1.1
+        request_info: aiohttp RequestInfo for response association
+        connection_request: Cached ClientRequest used as key for TCP connection pool
     """
 
-    __slots__ = ("path", "worker_id", "_entries", "_previous_printer")
-
-    def __init__(self, path: Path, worker_id: int):
-        self.path = path
-        self.worker_id = worker_id
-        self._entries: list[bytes] = []
-        self._previous_printer: TimingPrinter | None = None
-
-    def close(self) -> None:
-        """Write all buffered entries to file."""
-        if not self._entries:
-            return
-
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.path, "wb") as f:
-            f.write(b"\n".join(self._entries))
-            f.write(b"\n")
-        logger.debug(f"Wrote {len(self._entries)} timing entries to {self.path}")
-        self._entries.clear()
-
-    def __call__(self, query_id: str, phase: str, metrics: dict[str, float]) -> None:
-        """Buffer timing entry for later write."""
-        entry = {
-            "query_id": query_id,
-            "worker_id": self.worker_id,
-            "phase": phase,
-            "metrics": metrics,
-        }
-        self._entries.append(orjson.dumps(entry))
-
-    def __enter__(self) -> FileTimingPrinter:
-        """Set this printer as the active timing_printer."""
-        global timing_printer
-        self._previous_printer = timing_printer
-        timing_printer = self
-        return self
-
-    def __exit__(self, *_: Any) -> None:
-        """Write entries and restore previous printer."""
-        global timing_printer
-        self.close()
-        if self._previous_printer is not None:
-            timing_printer = self._previous_printer
+    request_line: bytes
+    host_header: bytes
+    request_info: RequestInfo
+    connection_request: ClientRequest
 
     @classmethod
-    def configure(
-        cls, event_logs_dir: Path | None, worker_id: int
-    ) -> FileTimingPrinter | nullcontext:
+    def from_url(
+        cls,
+        url: URL,
+        loop: asyncio.AbstractEventLoop,
+        session: ClientSession,
+    ) -> HttpRequestTemplate:
         """
-        Factory to create a configured FileTimingPrinter context manager.
+        Create an HttpRequestTemplate from a URL.
 
-        Returns a nullcontext if event_logs_dir is None.
+        Pre-computes static HTTP/1.1 request components that remain constant
+        across all requests. This avoids repeated string formatting and
+        encoding on every request in the hot path.
+
+        Args:
+            url: Target endpoint URL
+            loop: Event loop for ClientRequest
+            session: aiohttp session for connection pool key
+
+        Returns:
+            HttpRequestTemplate ready for building requests
+
+        Components computed:
+            - request_line: "POST /path HTTP/1.1\\r\\n" encoded as bytes
+            - host_header: "Host: hostname[:port]\\r\\n" (required by HTTP/1.1 RFC 7230)
+            - request_info: aiohttp metadata for response/request association
+            - connection_request: ClientRequest used as connection pool lookup key
         """
-        if event_logs_dir is None:
-            return nullcontext()
-        path = event_logs_dir / f"timing_worker_{worker_id}.jsonl"
-        return cls(path, worker_id)
+        path = url.raw_path_qs or "/"
+        request_line = f"POST {path} HTTP/1.1\r\n".encode("ascii")
 
+        # Host header is mandatory in HTTP/1.1 (RFC 7230 Section 5.4)
+        # Port is omitted for default ports (80 for HTTP, 443 for HTTPS)
+        host = url.raw_host or "localhost"
+        if url.port and url.port not in (80, 443):
+            host_header = f"Host: {host}:{url.port}\r\n".encode("ascii")
+        else:
+            host_header = f"Host: {host}\r\n".encode("ascii")
 
-# Active printer - swap to change output destination
-timing_printer: TimingPrinter = logging_timing_printer
+        request_info = RequestInfo(
+            url=url,
+            method="POST",
+            headers=CIMultiDictProxy(CIMultiDict()),
+            real_url=url,
+        )
 
+        # aiohttp's TCPConnector uses ClientRequest as the connection pool key.
+        # The connector hashes (host, port, ssl) from the request to lookup/store
+        # connections. By reusing the same ClientRequest instance for both warmup
+        # and actual requests, we ensure connections warmed up during startup are
+        # found in the pool during request handling.
+        connection_request = ClientRequest(
+            method=hdrs.METH_POST,
+            url=url,
+            loop=loop,
+            response_class=ClientResponse,
+            session=session,
+            ssl=False,
+        )
 
-# =============================================================================
-# PreparedRequest
-# =============================================================================
+        return cls(
+            request_line=request_line,
+            host_header=host_header,
+            request_info=request_info,
+            connection_request=connection_request,
+        )
+
+    def build_request(self, body: bytes, headers: dict[str, str]) -> bytes:
+        """
+        Build a complete HTTP/1.1 request as raw bytes.
+
+        Constructs the wire format per RFC 7230:
+            request-line CRLF
+            *(header-field CRLF)
+            CRLF
+            message-body
+
+        Args:
+            body: Request body bytes (JSON payload)
+            headers: Additional headers from the query (e.g., Content-Type, Authorization)
+
+        Returns:
+            Complete HTTP request ready for socket.write()
+
+        Header handling:
+            - Host: Always included from template (required by HTTP/1.1)
+            - Content-Length: Computed from body size (required for POST)
+            - Other headers: Passed through from query.headers
+        """
+        parts = [self.request_line, self.host_header]
+
+        # Append additional headers from query
+        for key, value in headers.items():
+            parts.append(f"{key}: {value}\r\n".encode("latin-1"))
+
+        # Content-Length is required for requests with a body (RFC 7230 Section 3.3.2)
+        parts.append(b"Content-Length: ")
+        parts.append(str(len(body)).encode("ascii"))
+        parts.append(b"\r\n")
+
+        # Empty line marks end of headers, followed by body
+        parts.append(b"\r\n")
+        parts.append(body)
+        return b"".join(parts)
 
 
 @dataclass(slots=True)
 class PreparedRequest:
-    """
-    Encapsulates a pre-built HTTP request.
-
-    This class tracks the lifecycle of an HTTP request through the worker,
-    capturing timestamps at key stages for performance analysis.
+    """A prepared HTTP request ready to be sent.
 
     Attributes:
-        query_id: Unique identifier for this request.
-        client_request: Pre-built aiohttp ClientRequest ready to send.
-        timing_ctx: Dictionary of nanosecond timestamps for performance tracking.
-        process: Async callable to process the response (bound method).
-        response: The HTTP response once received (initially None).
-        connection: The aiohttp TCP connection, set after connect (initially None).
-
-    Timing Context Keys (all in nanoseconds from time.monotonic_ns()):
-        PRE-SEND (logged in timing_pre):
-            t_recv       - Query received from ZMQ
-            t_prepare    - Query encoded, ClientRequest built
-            t_conn_start - connector.connect() called
-            t_conn_end   - Connection acquired from pool
-            t_http       - POST request.send() completed
-
-        POST-SEND (logged in timing_post):
-            t_task_created - Asyncio task created
-            t_task_awake   - Asyncio task started executing
-            t_headers      - Response headers received
-            t_first_chunk  - First SSE chunk (streaming only)
-            t_response     - Response completed
-            t_zmq_sent     - Result sent via ZMQ
-
-    Computed Metrics:
-        PRE-SEND:
-            recv_to_bytes        = t_encode - t_recv
-            bytes_to_http_payload = t_prepare - t_encode
-            tcp_conn_pool        = t_conn_end - t_conn_start (waiting for connection)
-            http_payload_send    = t_http - t_conn_end (sending POST request)
-            pre_overhead         = t_http - t_recv (total)
-
-        POST-SEND:
-            task_overhead        = t_task_awake - t_task_created
-            http_to_headers      = t_headers - t_http
-            headers_to_first_chunk = t_first_chunk - t_headers (streaming only)
-            first_to_last_chunk  = t_response - t_first_chunk (streaming only)
-            in_flight_time       = t_response - t_http (total server processing)
-            query_result_sent    = t_zmq_sent - t_response
-            post_overhead        = t_zmq_sent - t_response
-            end_to_end           = t_zmq_sent - t_recv
+        query_id: Unique identifier for the request (matches Query.id).
+        http_bytes: Pre-built HTTP request bytes ready for socket.write().
+        timing: RequestTimingContext for overhead measurement.
+        is_streaming: True if this is a streaming (SSE) request.
+        url: Target URL for the request.
+        request_info: aiohttp RequestInfo for response association.
+        process: Callback to handle the response (set after preparation).
+        response: ResponseData container (set after headers received).
+        connection: aiohttp connection (set after connection acquired).
     """
 
     query_id: str
-    client_request: ClientRequest
-    timing_ctx: dict[str, int]
+    http_bytes: bytes
+    timing: RequestTimingContext
+    is_streaming: bool
+    url: URL
+    request_info: RequestInfo
     process: Callable[[], Any] | None = None
-    response: ClientResponse | None = field(default=None, repr=False)
+    response: ResponseData | None = field(default=None, repr=False)
     connection: Any | None = field(default=None, repr=False)
 
-    @classmethod
-    def create(
-        cls,
-        query_id: str,
-        client_request: ClientRequest,
-        timing_ctx: dict[str, int],
-        handler: Callable[[PreparedRequest], Any],
-    ) -> PreparedRequest:
-        """
-        Factory method to create a fully-initialized PreparedRequest.
+    def release(self) -> None:
+        """Release connection back to pool."""
+        if self.connection is not None:
+            self.connection.release()
+            self.connection = None
 
-        Args:
-            query_id: Unique identifier for tracking this request.
-            client_request: Pre-built aiohttp ClientRequest.
-            timing_ctx: Dict for tracking timestamps (caller should set t_recv).
-            handler: Async callable to process the response (will be bound to this instance).
-        """
-        prepared = cls(
-            query_id=query_id,
-            client_request=client_request,
-            timing_ctx=timing_ctx,
-        )
-        prepared.process = partial(handler, prepared)
-        return prepared
+    def __del__(self) -> None:
+        """Release connection on garbage collection."""
+        self.release()
 
-    def log_timing_pre(self) -> None:
-        """
-        Emit pre-send timing metrics.
-        """
-        ctx = self.timing_ctx
-        t_recv = ctx["t_recv"]
-        t_prepare = ctx["t_prepare"]
-        t_http = ctx["t_http"]
 
-        metrics: dict[str, float] = {}
+@dataclass(slots=True)
+class ResponseData:
+    """
+    Container for HTTP response data from aiohttp protocol.
 
-        # Encode timing breakdown (optional - not all code paths set t_encode)
-        if "t_encode" in ctx:
-            t_encode = ctx["t_encode"]
-            metrics["recv_to_bytes"] = (t_encode - t_recv) / 1_000_000.0
-            metrics["bytes_to_http_payload"] = (t_prepare - t_encode) / 1_000_000.0
+    Wraps the raw response components from aiohttp's ResponseHandler.read()
+    into a minimal structure for processing. Provides async methods to
+    consume the response body.
 
-        # Connection timing (optional - not all code paths set these)
-        if "t_conn_start" in ctx:
-            t_conn_start = ctx["t_conn_start"]
-            t_conn_end = ctx["t_conn_end"]
-            metrics["tcp_conn_pool"] = (t_conn_end - t_conn_start) / 1_000_000.0
-            metrics["http_payload_send"] = (t_http - t_conn_end) / 1_000_000.0
+    Attributes:
+        status: HTTP status code (e.g., 200, 404, 500)
+        reason: HTTP reason phrase (e.g., "OK", "Not Found")
+        headers: Response headers as case-insensitive multidict
+        content: StreamReader for async body consumption
+    """
 
-        metrics["pre_overhead"] = (t_http - t_recv) / 1_000_000.0
+    status: int
+    reason: str
+    headers: CIMultiDictProxy
+    content: StreamReader
 
-        timing_printer(self.query_id, "pre", metrics)
+    async def read(self) -> bytes:
+        """Read entire response body as bytes."""
+        return await self.content.read()
 
-    def log_timing_post(self) -> None:
-        """
-        Emit post-receive timing metrics.
-        """
-        ctx = self.timing_ctx
-        t_recv = ctx["t_recv"]
-        t_http = ctx["t_http"]
-        t_headers = ctx["t_headers"]
-        t_response = ctx["t_response"]
-        t_zmq_sent = ctx["t_zmq_sent"]
-
-        metrics: dict[str, float] = {}
-
-        # Asyncio task scheduling overhead (optional - not all code paths set these)
-        if "t_task_created" in ctx:
-            t_task_created = ctx["t_task_created"]
-            t_task_awake = ctx["t_task_awake"]
-            metrics["task_overhead"] = (t_task_awake - t_task_created) / 1_000_000.0
-
-        metrics["http_to_headers"] = (t_headers - t_http) / 1_000_000.0
-
-        # Streaming timing (optional - only set for streaming responses)
-        if "t_first_chunk" in ctx:
-            t_first_chunk = ctx["t_first_chunk"]
-            headers_to_first = (t_first_chunk - t_headers) / 1_000_000.0
-            first_to_last = (t_response - t_first_chunk) / 1_000_000.0
-            # Output both naming conventions for compatibility
-            metrics["headers_to_first_chunk"] = headers_to_first
-            metrics["first_to_last_chunk"] = first_to_last
-            metrics["headers_to_first"] = headers_to_first  # For print_analysis
-            metrics["first_to_last"] = first_to_last  # For print_analysis
-
-        # Total in-flight time (http payload sent -> response complete)
-        metrics["in_flight_time"] = (t_response - t_http) / 1_000_000.0
-
-        metrics["query_result_sent"] = (t_zmq_sent - t_response) / 1_000_000.0
-        metrics["post_overhead"] = (t_zmq_sent - t_response) / 1_000_000.0
-        metrics["end_to_end"] = (t_zmq_sent - t_recv) / 1_000_000.0
-
-        # Raw timestamps for IPC delay calculation
-        metrics["t_recv"] = float(t_recv)
-        metrics["t_zmq_sent"] = float(t_zmq_sent)
-
-        timing_printer(self.query_id, "post", metrics)
+    async def text(self, encoding: str = "utf-8") -> str:
+        """Read response body as decoded text."""
+        return (await self.content.read()).decode(encoding)

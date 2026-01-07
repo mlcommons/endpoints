@@ -26,11 +26,17 @@ import aiohttp
 import zmq
 
 from ..config.schema import APIType
+from .accumulator_protocol import SSEAccumulatorProtocol
 from .adapter_protocol import HttpRequestAdapter
 
 ADAPTER_MAP = {
     APIType.OPENAI: "inference_endpoint.openai.openai_msgspec_adapter.OpenAIMsgspecAdapter",
     APIType.SGLANG: "inference_endpoint.sglang.adapter.SGLangGenerateAdapter",
+}
+
+ACCUMULATOR_MAP = {
+    APIType.OPENAI: "inference_endpoint.openai.accumulator.OpenAISSEAccumulator",
+    APIType.SGLANG: "inference_endpoint.sglang.accumulator.SGLangSSEAccumulator",
 }
 
 
@@ -78,7 +84,7 @@ class HTTPClientConfig:
     #
     # Values:
     #   - "disabled": GC completely disabled (risky for long-running benchmarks)
-    #   - "relaxed": GC enabled with 50x higher thresholds (less aggressive)
+    #   - "relaxed": GC enabled with 50x higher threshold (less aggressive)
     #   - "system": Standard Python GC with default thresholds
     worker_gc_mode: str = "relaxed"
 
@@ -90,8 +96,11 @@ class HTTPClientConfig:
     # Request adapter for Query/Response <-> Payload/Response bytes
     adapter: type[HttpRequestAdapter] | None = field(default=None, init=False)
 
+    # SSE stream accumulator for streaming responses
+    accumulator: type[SSEAccumulatorProtocol] | None = field(default=None, init=False)
+
     def __post_init__(self):
-        # set default adapter in __post_init__ to avoid circular dependency
+        # Set defaults in __post_init__ to avoid circular dependency
         if isinstance(self.api_type, str):
             self.api_type = APIType(self.api_type)
 
@@ -103,6 +112,15 @@ class HTTPClientConfig:
             module_path, class_name = adapter_path.rsplit(".", 1)
             module = import_module(module_path)
             self.adapter = getattr(module, class_name)
+
+        if self.accumulator is None:
+            # Default to OpenAI accumulator for unrecognized API types
+            accumulator_path = ACCUMULATOR_MAP.get(
+                self.api_type, ACCUMULATOR_MAP[APIType.OPENAI]
+            )
+            module_path, class_name = accumulator_path.rsplit(".", 1)
+            module = import_module(module_path)
+            self.accumulator = getattr(module, class_name)
 
 
 @dataclass(slots=True)

@@ -25,36 +25,38 @@ import sys
 import time
 import traceback
 from collections.abc import AsyncGenerator
+from functools import partial
 from typing import Any
 
 import aiohttp
 import zmq
 import zmq.asyncio
-from aiohttp import hdrs
-from aiohttp.client_reqrep import ClientRequest, ClientResponse
 from yarl import URL
 
-from inference_endpoint.config.schema import APIType
-from inference_endpoint.core.types import (
-    Query,
-    QueryResult,
-    StreamChunk,
-)
+from inference_endpoint.core.types import Query, QueryResult
 from inference_endpoint.endpoint_client.adapter_protocol import HttpRequestAdapter
 from inference_endpoint.endpoint_client.configs import (
     AioHttpConfig,
     HTTPClientConfig,
     ZMQConfig,
 )
-from inference_endpoint.endpoint_client.types import FileTimingPrinter, PreparedRequest
+from inference_endpoint.endpoint_client.timing_context import (
+    LoggingTimingPrinter,
+    MemoryBufferPrinter,
+    RequestTimingContext,
+    TimingPrinter,
+)
+from inference_endpoint.endpoint_client.types import (
+    HttpRequestTemplate,
+    PreparedRequest,
+    ResponseData,
+)
 from inference_endpoint.endpoint_client.utils import get_ephemeral_port_limit
 from inference_endpoint.endpoint_client.zmq_utils import ZMQPullSocket, ZMQPushSocket
 from inference_endpoint.load_generator.events import SampleEvent
 from inference_endpoint.metrics.recorder import EventRecorder
 from inference_endpoint.metrics.reporter import MetricsReporter
-from inference_endpoint.openai.types import SSEDelta as OpenAISSEDelta
 from inference_endpoint.profiling import profile
-from inference_endpoint.sglang.types import SGLangSSEDelta
 from inference_endpoint.utils.logging import setup_logging
 
 logger = logging.getLogger(__name__)
@@ -100,155 +102,32 @@ def worker_main(
 
     uvloop.install()
 
+    # Create timing printer - MemoryBufferPrinter if event_logs_dir is set
+    timing_printer: TimingPrinter
+    if http_config.event_logs_dir is not None:
+        path = http_config.event_logs_dir / f"timing_worker_{worker_id}.jsonl"
+        timing_printer = MemoryBufferPrinter(path, worker_id)
+    else:
+        timing_printer = LoggingTimingPrinter()
+
     # Create and run worker
     try:
-        # FileTimingPrinter context manager handles setup/teardown of timing output
-        with FileTimingPrinter.configure(http_config.event_logs_dir, worker_id):
-            uvloop.run(
-                Worker(
-                    worker_id=worker_id,
-                    http_config=http_config,
-                    aiohttp_config=aiohttp_config,
-                    zmq_config=zmq_config,
-                ).run()
-            )
+        uvloop.run(
+            Worker(
+                worker_id=worker_id,
+                http_config=http_config,
+                aiohttp_config=aiohttp_config,
+                zmq_config=zmq_config,
+                timing_printer=timing_printer,
+            ).run()
+        )
     except Exception as e:
         logger.error(f"Crashed: {type(e).__name__}: {str(e)}\n{traceback.format_exc()}")
         sys.exit(1)
-
-
-class OpenAISSEAccumulator:
-    def __init__(self, query_id: str, stream_all_chunks: bool):
-        self.output_chunks = []
-        self.reasoning_chunks = []
-
-        self.first_chunk_sent = False
-        self.query_id = query_id
-        self.stream_all_chunks = stream_all_chunks
-
-    def add_chunk(self, delta: OpenAISSEDelta) -> StreamChunk | None:
-        if not isinstance(delta, OpenAISSEDelta):
-            return None
-
-        content = None
-        if delta.content:
-            self.output_chunks.append(delta.content)
-            content = delta.content
-        elif delta.reasoning:
-            self.reasoning_chunks.append(delta.reasoning)
-            content = delta.reasoning
-        else:
-            # logger.debug("empty SSE delta")
-            return None
-
-        if content is not None and (
-            self.stream_all_chunks or not self.first_chunk_sent
-        ):
-            return StreamChunk(
-                id=self.query_id,
-                response_chunk=content,
-                is_complete=False,
-                metadata={
-                    "first_chunk": not self.first_chunk_sent,
-                    "final_chunk": False,
-                },
-            )
-        else:
-            return None
-
-    def get_final_output(self) -> QueryResult:
-        response_output = {"output": []}
-        if self.reasoning_chunks:
-            # If there are reasoning chunks, then the first chunk received
-            # is the first reasoning chunk. The rest of the reasoning chunks,
-            # as well as the output chunks can be joined together.
-            resp_reasoning = [self.reasoning_chunks[0]]
-            if len(self.reasoning_chunks) > 1:
-                resp_reasoning.append("".join(self.reasoning_chunks[1:]))
-
-            response_output = {
-                "output": "".join(self.output_chunks),
-                "reasoning": resp_reasoning,
-            }
-        elif self.output_chunks:
-            # If there are only output chunks, the first chunk is the used for
-            # TTFT calculations. The rest are joined together.
-            resp_output = [self.output_chunks[0]]
-            if len(self.output_chunks) > 1:
-                resp_output.append("".join(self.output_chunks[1:]))
-
-            response_output = {
-                "output": resp_output,
-            }
-        return QueryResult(
-            id=self.query_id,
-            response_output=response_output,
-            metadata={
-                "first_chunk": not self.first_chunk_sent,
-                "final_chunk": True,
-            },
-        )
-
-
-class SGLangSSEAccumulator:
-    def __init__(self, query_id: str, stream_all_chunks: bool):
-        self.text = ""
-        self.token_ids = []
-        self.total_tokens = 0
-        self.retraction_occurred = False
-
-        self.first_chunk_sent = False
-        self.query_id = query_id
-        self.stream_all_chunks = stream_all_chunks
-
-    def add_chunk(self, delta: SGLangSSEDelta) -> StreamChunk | None:
-        if not isinstance(delta, SGLangSSEDelta):
-            return None
-
-        if delta.total_completion_tokens == self.total_tokens:
-            return None
-
-        # In SGLang /generate, the .text field is the total accumulated text, not
-        # a difference, so we'll need to compute the diff for the StreamChunk
-        content_diff = ""
-        if len(delta.text) > (start_idx := len(self.text)):
-            content_diff = delta.text[start_idx:]
-        self.text = delta.text
-        self.token_ids.extend(delta.token_delta)
-        self.total_tokens = delta.total_completion_tokens
-        if delta.has_retractions:
-            # For now, we won't be handling retractions if they occur, but we will
-            # report it as part of the metadata if it does happen.
-            self.retraction_occurred = True
-
-        if content_diff and (self.stream_all_chunks or not self.first_chunk_sent):
-            metadata = {
-                "first_chunk": not self.first_chunk_sent,
-                "final_chunk": False,
-                "retraction_occurred": delta.has_retractions,
-                "n_tokens": len(delta.token_ids),
-            }
-            return StreamChunk(
-                id=self.query_id,
-                response_chunk=content_diff,
-                is_complete=False,
-                metadata=metadata,
-            )
-        else:
-            return None
-
-    def get_final_output(self) -> QueryResult:
-        return QueryResult(
-            id=self.query_id,
-            response_output=self.text,
-            metadata={
-                "first_chunk": not self.first_chunk_sent,
-                "final_chunk": True,
-                "retraction_occurred": self.retraction_occurred,
-                "n_tokens": self.total_tokens,
-                "token_ids": self.token_ids,
-            },
-        )
+    finally:
+        # Flush timing entries to file
+        if http_config.event_logs_dir is not None:
+            timing_printer.flush()
 
 
 class Worker:
@@ -260,12 +139,14 @@ class Worker:
         http_config: HTTPClientConfig,
         aiohttp_config: AioHttpConfig,
         zmq_config: ZMQConfig,
+        timing_printer: TimingPrinter,
     ):
         """Initialize worker with configurations."""
         self.worker_id = worker_id
         self.http_config = http_config
         self.aiohttp_config = aiohttp_config
         self.zmq_config = zmq_config
+        self._timing_printer = timing_printer
         self._shutdown = False
 
         self._zmq_context: zmq.asyncio.Context | None = None
@@ -284,6 +165,21 @@ class Worker:
 
         self._url: URL = URL(self.http_config.endpoint_url)
         self._adapter: type[HttpRequestAdapter] = self.http_config.adapter
+
+        # Pre-computed HTTP request components
+        self._http_template: HttpRequestTemplate | None = None
+
+    def _init_http(self) -> None:
+        """Initialize HTTP template from endpoint URL."""
+        self._http_template = HttpRequestTemplate.from_url(
+            url=self._url,
+            loop=self._loop,
+            session=self._session,
+        )
+        logger.debug(
+            f"HTTP template initialized: path={self._url.raw_path_qs or '/'}, "
+            f"host={self._url.raw_host or 'localhost'}"
+        )
 
     async def run(self) -> None:
         """Initialize worker and launch main loop."""
@@ -332,23 +228,28 @@ class Worker:
                 "timer": None,
                 "skip_payload": False,
                 "read_until_eof": True,
-                "auto_decompress": True,
+                # NOTE(vir):
+                # Disable auto-decompression - we don't send Accept-Encoding header
+                # and responses are text/JSON (or binary images/video in future)
+                "auto_decompress": False,
                 "read_timeout": self._timeout.sock_read,
-                "read_bufsize": 2**16,  # 64KB, TODO(vir): make this a config
+                "read_bufsize": 2**16,
                 "timeout_ceil_threshold": 5,
-                "max_line_size": 8190,  # 8KB, TODO(vir): make this a config
-                "max_field_size": 8190,  # 8KB, TODO(vir): make this a config
+                "max_line_size": 8190,
+                "max_field_size": 8190,
             }
 
             # Create aiohttp session
             self._session = aiohttp.ClientSession(
                 timeout=self._timeout,
                 connector=self.tcp_connector,
-                connector_owner=False,  # owned by Worker
+                connector_owner=False,
                 skip_auto_headers=self.aiohttp_config.skip_auto_headers,
             )
 
-            # Signal handlers for graceful shutdown
+            # Initialize HTTP components after session is created
+            self._init_http()
+
             signal.signal(signal.SIGTERM, self.shutdown)
             signal.signal(signal.SIGINT, self.shutdown)
 
@@ -377,7 +278,6 @@ class Worker:
                     await self._main_loop()
                     event_recorder.wait_for_writes(force_commit=True)
                     with MetricsReporter(event_recorder.connection_name) as reporter:
-                        logger.info(f"About to dump worker report to {report_path}")
                         reporter.dump_all_to_csv(report_path)
                         logger.info(f"Worker report dumped to {report_path}")
             else:
@@ -411,10 +311,7 @@ class Worker:
         - int: Uses the specified number directly
         - Other values: Disables warmup
         """
-        warmup_cfg = self.http_config.warmup_connections
-
-        # Determine number of connections to warm up
-        match warmup_cfg:
+        match self.http_config.warmup_connections:
             case "auto":
                 num_connections = max(
                     get_ephemeral_port_limit() // self.http_config.num_workers, 1
@@ -436,22 +333,12 @@ class Worker:
 
         logger.debug(f"Warming up {num_connections} TCP connections")
 
-        # Create a dummy request just for connection establishment
-        dummy_request = ClientRequest(
-            method=hdrs.METH_GET,
-            url=self._url,
-            loop=self._loop,
-            response_class=ClientResponse,
-            session=self._session,
-            ssl=False,
-        )
-
         # Establish all connections first, then release together (ensures no reuse)
         connections: list = []
 
         async def warmup_one():
             conn = await self.tcp_connector.connect(
-                dummy_request, traces=[], timeout=self._timeout
+                self._http_template.connection_request, traces=[], timeout=self._timeout
             )
             connections.append(conn)
 
@@ -516,7 +403,7 @@ class Worker:
                     continue
 
                 # Process response asynchronously
-                prepared.timing_ctx["t_task_created"] = time.monotonic_ns()
+                prepared.timing["t_task_created"] = time.monotonic_ns()
                 task = asyncio.Task(
                     self._process_response(prepared),
                     loop=self._loop,
@@ -534,41 +421,38 @@ class Worker:
 
     @profile
     def _prepare_request(self, query: Query, t_recv: int) -> PreparedRequest:
-        """Build PreparedRequest from Query."""
-
-        # Encode Query into HTTP payload bytes
-        payload_bytes = self._adapter.encode_query(query)
+        """Build PreparedRequest with pre-built HTTP bytes."""
+        body_bytes = self._adapter.encode_query(query)
         t_encode = time.monotonic_ns()
 
-        # Build aiohttp ClientRequest (unique payload_bytes)
-        client_request = ClientRequest(
-            method=hdrs.METH_POST,
-            url=self._url,
-            headers=query.headers,
-            data=payload_bytes,
-            loop=self._loop,
-            response_class=ClientResponse,
-            timer=None,
-            session=self._session,
-            ssl=False,  # TODO(vir): checkme
-        )
+        # Encode Query into HTTP payload bytes
+        http_bytes = self._http_template.build_request(body_bytes, query.headers)
+        is_streaming = query.data.get("stream", False)
 
-        # Select response handler
-        handler = (
-            self._handle_streaming_response
-            if query.data.get("stream", False)
-            else self._handle_non_streaming_response
-        )
+        # Create timing context with initial timestamps
+        timing = RequestTimingContext(id=query.id)
+        timing["t_recv"] = t_recv
+        timing["t_encode"] = t_encode
 
-        # Build PreparedRequest via factory
-        prepared_request = PreparedRequest.create(
+        # Setup state for processing
+        prepared = PreparedRequest(
             query_id=query.id,
-            client_request=client_request,
-            timing_ctx={"t_recv": t_recv, "t_encode": t_encode},
-            handler=handler,
+            http_bytes=http_bytes,
+            timing=timing,
+            is_streaming=is_streaming,
+            url=self._url,
+            request_info=self._http_template.request_info,
         )
-        prepared_request.timing_ctx["t_prepare"] = time.monotonic_ns()
-        return prepared_request
+
+        prepared.process = partial(
+            self._handle_streaming_response
+            if is_streaming
+            else self._handle_non_streaming_response,
+            prepared,
+        )
+
+        timing["t_prepare"] = time.monotonic_ns()
+        return prepared
 
     @profile
     async def _fire_request(self, prepared: PreparedRequest) -> bool:
@@ -585,16 +469,18 @@ class Worker:
             return False
 
         try:
-            # Establish TCP connection (try-reuse connections from pool)
-            prepared.timing_ctx["t_conn_start"] = time.monotonic_ns()
+            # Acquire connection using cached request
+            prepared.timing["t_conn_start"] = time.monotonic_ns()
             conn = await self.tcp_connector.connect(
-                prepared.client_request, traces=None, timeout=self._timeout
+                self._http_template.connection_request,
+                traces=None,
+                timeout=self._timeout,
             )
             # NOTE(vir):
             # Need to re-do this every request to recreate HttpResponseParser.
             # The parser is stateful and tracks current response, so cannot be cached.
             conn.protocol.set_response_params(**self._response_params)
-            prepared.timing_ctx["t_conn_end"] = time.monotonic_ns()
+            prepared.timing["t_conn_end"] = time.monotonic_ns()
 
             # Record time just-before request is issued
             if self.http_config.record_worker_events:
@@ -605,14 +491,49 @@ class Worker:
                     assert_active=True,
                 )
 
-            # Issue POST request
-            resp = await prepared.client_request.send(conn)
-            prepared.timing_ctx["t_http"] = time.monotonic_ns()
+            # NOTE(vir):
+            # ┌─────────────────────────────────────────────────────────────┐
+            # │                        Transport                            │
+            # │  (low-level socket I/O - owned by asyncio event loop)       │
+            # ├─────────────────────────────────────────────────────────────┤
+            # │  write(data) ──────────► send bytes to socket               │
+            # │                          (synchronous, non-blocking,        │
+            # │                           buffers in OS send queue)         │
+            # │                                                             │
+            # │  [socket readable] ────► calls protocol.data_received(data) │
+            # │                          (asyncio does this automatically)  │
+            # └─────────────────────────────────────────────────────────────┘
+            #                               │
+            #                               ▼
+            # ┌─────────────────────────────────────────────────────────────┐
+            # │                        Protocol                             │
+            # │  (HTTP parser + connection state machine)                   │
+            # ├─────────────────────────────────────────────────────────────┤
+            # │  data_received(data) ──► parse HTTP, buffer chunks          │
+            # │                          (called by transport when data     │
+            # │                           arrives on socket)                │
+            # │                                                             │
+            # │  read() ───────────────► returns (message, payload)         │
+            # │                          message: status, headers, version  │
+            # │                          payload: StreamReader for body     │
+            # └─────────────────────────────────────────────────────────────┘
 
-            # Store response and connection for process_response
-            prepared.response = resp
+            # transport.write() instead of ClientRequest.send():
+            # - transport.write() is synchronous and non-blocking
+            # - Bytes go directly to OS send buffer (with TCP_NODELAY, sent immediately)
+            # - Bypasses StreamWriter's buffering, drain() awaits, and chunked encoding
+            #
+            # Response read happens via protocol.data_received() callbacks from asyncio.
+            conn.protocol.transport.write(prepared.http_bytes)
+            conn.protocol.start_timeout()
+            prepared.timing["t_http"] = time.monotonic_ns()
+
+            # Store connection for _process_response to use protocol.read() directly
             prepared.connection = conn
-            prepared.log_timing_pre()
+
+            # Emit pre-send timing metrics
+            metrics = prepared.timing.compute_pre_overheads()
+            self._timing_printer(prepared.timing.id, "pre", metrics)
             return True
 
         except Exception as e:
@@ -632,32 +553,53 @@ class Worker:
         asyncio create_task overhead with TCP/HTTP POST/ACK communication.
         """
         try:
-            # Record task awake time (asyncio scheduling delay measurement)
-            prepared.timing_ctx["t_task_awake"] = time.monotonic_ns()
+            prepared.timing["t_task_awake"] = time.monotonic_ns()
 
-            # Await response headers (deferred from main loop to overlap with scheduling)
-            await prepared.response.start(prepared.connection)
-            prepared.timing_ctx["t_headers"] = time.monotonic_ns()
+            # protocol.read() instead of response.start():
+            # - ClientResponse.start() creates many objects and handles cookies, timers, etc.
+            # - protocol.read() is the minimal path to get parsed HTTP response
+            # - Returns (message, payload) where:
+            #   * message: parsed status line + headers (code, reason, headers)
+            #   * payload: StreamReader for response body
+            #
+            # can't bypass protocol.read():
+            # - Transport has no read() method - write-only
+            # - asyncio calls protocol.data_received() when socket has data
+            # - Protocol uses C-accelerated HTTP parser
+            while True:
+                message, payload = await prepared.conn.protocol.read()
+                # Skip 1xx informational responses (100 Continue, etc.)
+                # Only break on final response (2xx, 3xx, 4xx, 5xx) or 101 Switching Protocols
+                if message.code < 100 or message.code > 199 or message.code == 101:
+                    break
 
-            # Check response status
-            if prepared.response.status != 200:
-                error_text = await prepared.response.text()
+            # Handle error response code
+            if message.code != 200:
+                error_text = (await payload.read()).decode("utf-8")
                 await self._handle_error(
-                    prepared.query_id,
-                    f"HTTP {prepared.response.status}: {error_text}",
+                    prepared.query_id, f"HTTP {message.code}: {error_text}"
                 )
                 logger.error(
-                    f"Request {prepared.query_id} failed: "
-                    f"HTTP {prepared.response.status}: {error_text}"
+                    f"Request {prepared.query_id} failed: HTTP {message.code}: {error_text}"
                 )
                 return
+
+            # Mark headers received
+            prepared.timing["t_headers"] = time.monotonic_ns()
+
+            # Create response container
+            prepared.response = ResponseData(
+                status=message.code,
+                reason=message.reason,
+                headers=message.headers,
+                content=payload,
+            )
 
             await prepared.process()
         except Exception as e:
             await self._handle_error(prepared.query_id, e)
         finally:
-            # release connection back to TCP pool
-            prepared.response.close()
+            prepared.release()
 
             if self.http_config.record_worker_events:
                 EventRecorder.record_event(
@@ -674,13 +616,13 @@ class Worker:
         """Handle non-streaming HTTP response."""
         # Await response bytes
         response_bytes = await prepared.response.read()
-        prepared.timing_ctx["t_response"] = time.monotonic_ns()
+        prepared.timing["t_response"] = time.monotonic_ns()
 
         # Decode response into QueryResult
         result = self._adapter.decode_response(response_bytes, prepared.query_id)
         await self._response_socket.send(result)
 
-        prepared.timing_ctx["t_zmq_sent"] = time.monotonic_ns()
+        prepared.timing["t_zmq_sent"] = time.monotonic_ns()
         if self.http_config.record_worker_events:
             EventRecorder.record_event(
                 SampleEvent.ZMQ_RESPONSE_SENT,
@@ -688,7 +630,10 @@ class Worker:
                 sample_uuid=prepared.query_id,
                 assert_active=True,
             )
-        prepared.log_timing_post()
+
+        # Emit post-receive timing metrics
+        metrics = prepared.timing.compute_post_overheads()
+        self._timing_printer(prepared.query_id, "post", metrics)
 
     @profile
     async def _handle_streaming_response(self, prepared: PreparedRequest) -> None:
@@ -696,17 +641,13 @@ class Worker:
         query_id = prepared.query_id
         first_chunk_received = False
 
-        # Select accumulator based on API type
-        match self.http_config.api_type:
-            case APIType.SGLANG:
-                accumulator_type = SGLangSSEAccumulator
-            case _:  # Default to OpenAI compatible accumulator
-                accumulator_type = OpenAISSEAccumulator
-
-        accumulator = accumulator_type(query_id, self.http_config.stream_all_chunks)
+        # Instantiate accumulator instance
+        accumulator = self.http_config.accumulator(
+            query_id, self.http_config.stream_all_chunks
+        )
         async for chunk_batch in self._iter_sse_lines(prepared.response):
             if not first_chunk_received:
-                prepared.timing_ctx["t_first_chunk"] = time.monotonic_ns()
+                prepared.timing["t_first_chunk"] = time.monotonic_ns()
                 first_chunk_received = True
 
             for delta in chunk_batch:
@@ -723,12 +664,12 @@ class Worker:
                         )
 
         # All chunks received
-        prepared.timing_ctx["t_response"] = time.monotonic_ns()
+        prepared.timing["t_response"] = time.monotonic_ns()
 
         # Send final complete response
         await self._response_socket.send(accumulator.get_final_output())
 
-        prepared.timing_ctx["t_zmq_sent"] = time.monotonic_ns()
+        prepared.timing["t_zmq_sent"] = time.monotonic_ns()
         if self.http_config.record_worker_events:
             EventRecorder.record_event(
                 SampleEvent.ZMQ_RESPONSE_SENT,
@@ -736,7 +677,10 @@ class Worker:
                 sample_uuid=query_id,
                 assert_active=True,
             )
-        prepared.log_timing_post()
+
+        # Emit post-receive timing metrics
+        metrics = prepared.timing.compute_post_overheads()
+        self._timing_printer(query_id, "post", metrics)
 
     async def _handle_error(self, query_id: str, error: Exception | str) -> None:
         """Report error for Query."""
@@ -755,7 +699,7 @@ class Worker:
 
     @profile
     async def _iter_sse_lines(
-        self, response: aiohttp.ClientResponse
+        self, response: ResponseData
     ) -> AsyncGenerator[list[str], None]:
         """
         Iterate over complete SSE chunks (events) from response stream.
