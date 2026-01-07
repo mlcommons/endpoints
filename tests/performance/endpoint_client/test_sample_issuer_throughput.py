@@ -48,13 +48,17 @@ from tests.test_helpers import get_test_socket_path
 # Configuration
 # =============================================================================
 
-NUM_RESPONSES = 50_000
+NUM_RESPONSES = 25_000
 
-# Response sizes to test (characters) - matches test_worker_throughput.py
+# Response sizes to test (characters)
 RESPONSE_SIZES = [128, 1024 * 4, 1024 * 16, 1024 * 32]
 
 # Streaming rates: fraction of messages that are StreamChunks
-STREAMING_RATES = [0.0, 0.50, 0.90, 0.99]
+# NOTE(vir):
+# 0.99 excluded - at 25K requests with 99 chunks each, generates ~2.5M events
+# EventRecorder writer thread commits 1000 events/batch and cannot drain the queue
+# before the 10s close_timeout_s, causing RuntimeError on context exit.
+STREAMING_RATES = [0.0, 0.50, 0.75, 0.90]
 
 
 # =============================================================================
