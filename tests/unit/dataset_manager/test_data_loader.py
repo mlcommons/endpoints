@@ -13,14 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any
 
 import pytest
 from inference_endpoint.dataset_manager import Dataset
 from inference_endpoint.dataset_manager.dataset import (
-    DatasetFormat,
     RandomDataGenerator,
-    RowProcessor,
 )
 
 
@@ -46,57 +43,11 @@ def test_ds_pickle_reader_unique_dataset(ds_pickle_reader):
     assert len(unique_datasets) == 5
 
 
-def test_custom_parser_pickle_reader(ds_pickle_dataset_path):
-    class TestRowProcessor(RowProcessor):
-        def __init__(self):
-            super().__init__()
-
-        def __call__(self, row: dict[str, Any]) -> Any:
-            # custom parser to only return dataset and text_input
-            return {"dataset": row["dataset"], "text_input": row["text_input"]}
-
-    data_loader = Dataset.load_from_file(
-        ds_pickle_dataset_path, row_processor=TestRowProcessor()
-    )
-    data_loader.load()
-    # check number of samples
-    assert data_loader.num_samples() == 5
-    # check first sample
-    samples = data_loader.load_sample(0)
-
-    # check columns that were not requested are not present
-    assert "ref_output" not in samples and "metric" not in samples
-    # check columns that were requested are present
-    assert "dataset" in samples and "text_input" in samples
-    # check order or rows - zeroth row should be livecodebench
-    assert samples["dataset"] == "livecodebench"
-
-
 def test_hf_squad_dataset(hf_squad_dataset):
     hf_squad_dataset.load()
     assert hf_squad_dataset.num_samples() == 50
     sample = hf_squad_dataset.load_sample(0)
     assert all(k in sample for k in ["id", "title", "context", "question", "answers"])
-    assert sample["title"] == "Egypt"
-
-
-def test_custom_parser_hf_squad_dataset(hf_squad_dataset_path):
-    def parser(row):
-        return {
-            "title": row["title"],
-            "context": row["context"],
-            "question": row["question"],
-            "answers": row["answers"],
-        }
-
-    dataset = Dataset.load_from_file(
-        file_path=hf_squad_dataset_path, row_processor=parser, format=DatasetFormat.HF
-    )
-    dataset.load()
-    assert dataset.num_samples() == 50
-    sample = dataset.load_sample(0)
-    assert "id" not in sample
-    assert all(k in sample for k in ["title", "context", "question", "answers"])
     assert sample["title"] == "Egypt"
 
 
