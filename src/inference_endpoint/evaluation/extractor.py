@@ -162,3 +162,14 @@ class ABCDExtractor(Extractor):
             return choice_map[abcd_choice]
 
         return ""
+
+
+class BoxedMathExtractor(Extractor):
+    """Extract boxed math answer from response text."""
+
+    @classmethod
+    def extract(cls, text: str) -> str | None:
+        matches = re.findall(r"\\boxed\{([^}]+)\}", text)
+        if matches:
+            return matches[-1]
+        return None

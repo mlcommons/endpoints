@@ -36,6 +36,7 @@ from inference_endpoint import metrics
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import LoadPattern, LoadPatternType
 from inference_endpoint.dataset_manager.dataset import Dataset
+from inference_endpoint.dataset_manager.predefined.aime25 import AIME25
 from inference_endpoint.dataset_manager.predefined.gpqa import GPQA
 from inference_endpoint.dataset_manager.transforms import (
     AddStaticColumns,
@@ -61,7 +62,7 @@ from tqdm import tqdm
 
 # Configuration for SGLang server
 SGLANG_SERVER_HOST = "localhost"
-SGLANG_SERVER_PORT = 30000
+SGLANG_SERVER_PORT = 3000
 SGLANG_ENDPOINT = f"http://{SGLANG_SERVER_HOST}:{SGLANG_SERVER_PORT}/generate"
 
 
@@ -105,6 +106,20 @@ def generate_gpqa_dataset(
     return df
 
 
+def generate_aime25_dataset(
+    datasets_dir: Path,
+    max_samples: int | None = None,
+    force: bool = False,
+) -> pd.DataFrame:
+    """Generate the AIME25 dataset to a file."""
+    df = AIME25.generate(
+        datasets_dir=Path(datasets_dir),
+        max_samples=max_samples,
+        force=force,
+    )
+    return df
+
+
 def create_transforms() -> list:
     """Create the list of transforms to apply to the GPQA dataset.
 
@@ -140,6 +155,41 @@ def create_transforms() -> list:
                 "choice4",
                 "domain",
                 "subdomain",
+                "user_prompt",
+            ],
+            errors="ignore",
+        ),
+        # Step 4: Add metadata columns since we don't want to do a dict update every iteration
+        AddStaticColumns(
+            {
+                "stream": True,
+                "max_new_tokens": 32768,
+                "temperature": 1.0,
+                "top_p": 1.0,
+                "tok_k": -1,
+            }
+        ),
+    ]
+
+
+def create_aime25_transforms() -> list:
+    """Create the list of transforms to apply to the AIME25 dataset."""
+    prompt_format = "{question}\nPlease reason step by step, and put your final answer within \\boxed{{}}."
+
+    return [
+        # Step 1: Format the prompt from question and choices
+        UserPromptFormatter(
+            user_prompt_format=prompt_format,
+            output_column="user_prompt",
+        ),
+        # Step 2: Harmonize the prompt for SGLang/GPT-OSS
+        Harmonize(
+            prompt_column="user_prompt",
+        ),
+        # Step 3: Drop columns we don't need for inference
+        DropColumns(
+            columns=[
+                "question",
                 "user_prompt",
             ],
             errors="ignore",
@@ -251,26 +301,48 @@ def run_main(args):
     tmp_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        # Step 1: Generate GPQA dataset
-        print("Generating GPQA diamond dataset...")
-        df = generate_gpqa_dataset(
-            datasets_dir="datasets",
-            force=args.force_regenerate,
-        )
-        print(f"Loaded {len(df)} samples from GPQA diamond")
+        if False:
+            print("Generating GPQA diamond dataset...")
+            df = generate_gpqa_dataset(
+                datasets_dir="datasets",
+                force=args.force_regenerate,
+            )
+            print(f"Loaded {len(df)} samples from GPQA diamond")
 
-        # Step 2: Create transforms
-        print("Creating transforms...")
-        transforms = create_transforms()
+            # Step 2: Create transforms
+            print("Creating transforms...")
+            transforms = create_transforms()
 
-        # Step 3: Create Dataset with transforms (transforms will be applied during load())
-        print("Creating dataset with transforms...")
-        print(df.columns)
-        df.to_parquet("datasets/gqpa_diamond_pre-transformed_gpt-oss.parquet")
-        dataset = GPQA(
-            df, transforms=transforms, repeats=5
-        )  # Artificial Analysis uses 5 repeats
-        dataset.load()
+            # Step 3: Create Dataset with transforms (transforms will be applied during load())
+            print("Creating dataset with transforms...")
+            print(df.columns)
+            df.to_parquet("datasets/gqpa_diamond_pre-transformed_gpt-oss.parquet")
+            dataset = GPQA(
+                df, transforms=transforms, repeats=5
+            )  # Artificial Analysis uses 5 repeats
+            dataset.load()
+        else:
+            print("Generating AIME25 dataset...")
+            df = generate_aime25_dataset(
+                datasets_dir="datasets",
+                force=args.force_regenerate,
+            )
+            print(f"Loaded {len(df)} samples from AIME25")
+
+            # Step 2: Create transforms
+            print("Creating transforms...")
+            transforms = create_aime25_transforms()
+
+            # Step 3: Create Dataset with transforms (transforms will be applied during load())
+            print("Creating dataset with transforms...")
+            print(df.columns)
+            df.to_parquet("datasets/aime25_pre-transformed_gpt-oss.parquet")
+            # breakpoint()
+            dataset = AIME25(
+                df, transforms=transforms, repeats=5
+            )  # Artificial Analysis uses 5 repeats
+            dataset.load()
+
         print(f"Dataset loaded with {dataset.num_samples()} samples")
 
         # Step 4: Create SGLang client
