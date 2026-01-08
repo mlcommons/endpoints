@@ -39,12 +39,13 @@ class Scorer(ABC):
         dataset: Dataset,
         report_dir: os.PathLike,
         extractor: type[Extractor] | None = None,
+        ground_truth_column: str = "ground_truth",
     ):
         self.dataset = dataset
         self.report_dir = Path(report_dir)
         self.extractor = extractor
         self.dataset_name = dataset_name
-
+        self.ground_truth_column = ground_truth_column
         self.sample_index_map = self._load_sample_index_map()
 
     def _load_sample_index_map(self):
@@ -107,7 +108,9 @@ class Scorer(ABC):
 
         # Get ground truths
         order = df["sample_index"].to_numpy()
-        ground_truths = self.dataset.dataframe["ground_truth"].to_numpy()[order]
+        ground_truths = self.dataset.dataframe[self.ground_truth_column].to_numpy()[
+            order
+        ]
 
         scores = []
         for i in range(len(empirical)):
