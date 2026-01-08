@@ -162,3 +162,26 @@ class ABCDExtractor(Extractor):
             return choice_map[abcd_choice]
 
         return ""
+
+
+class BoxedMathExtractor(Extractor):
+    """Extract boxed math answer from response text.
+    Based on OpenAI's extract_boxed_math function from GPT-OSS.
+    https://github.com/openai/gpt-oss/blob/main/gpt_oss/evals/aime_eval.py
+    """
+
+    @classmethod
+    def extract(cls, text: str) -> str | None:
+        pattern = r"boxed{(.*?)}|framebox{(.*?)}"
+        matches = re.findall(pattern, text, re.DOTALL)
+        if matches:
+            for match in matches[::-1]:
+                for group in match:
+                    if group != "":
+                        retval = group.split(",")[-1].strip()
+                        return retval
+        pattern = r"\d+"  # get the last integer if no pattern found
+        matches = re.findall(pattern, text, re.DOTALL)
+        if matches:
+            return matches[-1]
+        return None

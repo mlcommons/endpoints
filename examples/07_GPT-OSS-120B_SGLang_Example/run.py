@@ -28,23 +28,21 @@ Prerequisites:
 from __future__ import annotations
 
 import argparse
+import logging
 import random
 import shutil
 import tempfile
 from pathlib import Path
 
-import pandas as pd
 from inference_endpoint import metrics
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import LoadPattern, LoadPatternType
-from inference_endpoint.dataset_manager.dataset import Dataset
-from inference_endpoint.dataset_manager.predefined.gpqa import GPQA
-from inference_endpoint.dataset_manager.transforms import (
-    AddStaticColumns,
-    DropColumns,
-    Harmonize,
-    UserPromptFormatter,
+from inference_endpoint.dataset_manager import Dataset, EmptyDataset
+from inference_endpoint.dataset_manager.predefined.aime25 import (
+    AIME25,
+    AIME_GPTOSS_SGLang,
 )
+from inference_endpoint.dataset_manager.predefined.gpqa import GPQA, GPQA_GPTOSS_SGLang
 from inference_endpoint.endpoint_client.configs import (
     AioHttpConfig,
     HTTPClientConfig,
@@ -52,6 +50,8 @@ from inference_endpoint.endpoint_client.configs import (
 )
 from inference_endpoint.endpoint_client.http_client import HTTPEndpointClient
 from inference_endpoint.endpoint_client.http_sample_issuer import HttpClientSampleIssuer
+from inference_endpoint.evaluation.extractor import ABCDExtractor, BoxedMathExtractor
+from inference_endpoint.evaluation.scoring import PassAt1Scorer
 from inference_endpoint.load_generator import (
     BenchmarkSession,
     MaxThroughputScheduler,
@@ -81,84 +81,6 @@ class ProgressBarHook:
         self.pbar = pbar
 
 
-def generate_gpqa_dataset(
-    datasets_dir: Path,
-    variant: str = "diamond",
-    max_samples: int | None = None,
-    force: bool = False,
-) -> pd.DataFrame:
-    """Generate the GPQA dataset to a file.
-
-    Args:
-        datasets_dir: Directory where datasets are stored
-        variant: GPQA variant to use (default: "diamond")
-        max_samples: Maximum number of samples to include (default: None = all)
-        force: Force regeneration of dataset even if it exists
-
-    Returns:
-        DataFrame containing the GPQA dataset
-    """
-    df = GPQA.generate(
-        datasets_dir=Path(datasets_dir),
-        variant=variant,
-        max_samples=max_samples,
-        force=force,
-    )
-    return df
-
-
-def create_transforms() -> list:
-    """Create the list of transforms to apply to the GPQA dataset.
-
-    Returns:
-        List of transforms to apply
-    """
-    prompt_format = (
-        "{question}\n\n"
-        "(A) {choice1}\n"
-        "(B) {choice2}\n"
-        "(C) {choice3}\n"
-        "(D) {choice4}\n\n"
-        "Express your final answer as the corresponding option 'A', 'B', 'C', or 'D'."
-    )
-
-    return [
-        # Step 1: Format the prompt from question and choices
-        UserPromptFormatter(
-            user_prompt_format=prompt_format,
-            output_column="user_prompt",
-        ),
-        # Step 2: Harmonize the prompt for SGLang/GPT-OSS
-        Harmonize(
-            prompt_column="user_prompt",
-        ),
-        # Step 3: Drop columns we don't need for inference
-        DropColumns(
-            columns=[
-                "question",
-                "choice1",
-                "choice2",
-                "choice3",
-                "choice4",
-                "domain",
-                "subdomain",
-                "user_prompt",
-            ],
-            errors="ignore",
-        ),
-        # Step 4: Add metadata columns since we don't want to do a dict update every iteration
-        AddStaticColumns(
-            {
-                "stream": True,
-                "max_new_tokens": 32768,
-                "temperature": 1.0,
-                "top_p": 1.0,
-                "tok_k": -1,
-            }
-        ),
-    ]
-
-
 def create_sglang_client(tmp_dir: Path) -> HTTPEndpointClient:
     """Create an SGLang HTTP client for issuing queries.
 
@@ -186,20 +108,9 @@ def create_sglang_client(tmp_dir: Path) -> HTTPEndpointClient:
     return client
 
 
-class EmptyDataset(Dataset):
-    """Empty dataset for performance run."""
-
-    def __init__(self):
-        super().__init__(None)
-
-    def load_sample(self, index: int):
-        return None
-
-    def num_samples(self):
-        return 0
-
-
-def run_benchmark_session(dataset: Dataset, issuer: HttpClientSampleIssuer, args):
+def run_benchmark_session(
+    accuracy_datasets: list[Dataset], issuer: HttpClientSampleIssuer, args
+):
     """Run a benchmark session with the SGLang endpoint.
 
     Args:
@@ -228,63 +139,78 @@ def run_benchmark_session(dataset: Dataset, issuer: HttpClientSampleIssuer, args
     scheduler = MaxThroughputScheduler(rt_settings, WithoutReplacementSampleOrder)
 
     # Run the benchmark session
-    n_total = dataset.num_samples() * dataset.repeats
+    n_total = sum(
+        [dataset.num_samples() * dataset.repeats for dataset in accuracy_datasets]
+    )
 
-    with tqdm(desc="GPQA Benchmark", total=n_total, unit="samples") as pbar:
+    with tqdm(desc="GPQA/AIME25 Benchmark", total=n_total, unit="samples") as pbar:
         pbar_hook.set_pbar(pbar)
         sess = BenchmarkSession.start(
             rt_settings,
             EmptyDataset(),
             issuer,
             scheduler,
-            accuracy_datasets=[dataset],
-            name="gpqa_sglang_benchmark",
+            accuracy_datasets=accuracy_datasets,
+            name="gpqa_aime25_sglang_benchmark",
             report_dir=args.report_dir,
             dump_events_log=True,
             max_shutdown_timeout_s=None,
         )
         sess.wait_for_test_end()
 
+    # Create the scorer
+    scorer = PassAt1Scorer(
+        GPQA.DATASET_ID,
+        accuracy_datasets[0],
+        args.report_dir,
+        extractor=ABCDExtractor,
+    )
+
+    # Score the dataset
+    score, n_repeats = scorer.score()
+    logging.info(f"Pass@1 Score ({n_repeats} repeats): {score}")
+
+    scorer = PassAt1Scorer(
+        AIME25.DATASET_ID,
+        accuracy_datasets[1],
+        args.report_dir,
+        extractor=BoxedMathExtractor,
+        ground_truth_column="answer",
+    )
+
+    # Score the dataset
+    score, n_repeats = scorer.score()
+    logging.info(f"Pass@1 Score ({n_repeats} repeats): {score}")
+
 
 def run_main(args):
     """Main function to run the example."""
     # Setup paths
     tmp_dir = Path(tempfile.mkdtemp(prefix="sglang_manual_example_"))
+    num_repeats = args.num_repeats
 
     client = None
     try:
-        # Step 1: Generate GPQA dataset
-        print("Generating GPQA diamond dataset...")
-        df = generate_gpqa_dataset(
-            datasets_dir="datasets",
-            force=args.force_regenerate,
-        )
-        print(f"Loaded {len(df)} samples from GPQA diamond")
-
-        # Step 2: Create transforms
-        print("Creating transforms...")
-        transforms = create_transforms()
-
-        # Step 3: Create Dataset with transforms (transforms will be applied during load())
-        print("Creating dataset with transforms...")
-        print(df.columns)
-        df.to_parquet("datasets/gpqa_diamond_pre-transformed_gpt-oss.parquet")
-        dataset = GPQA(
-            df, transforms=transforms, repeats=5
-        )  # Artificial Analysis uses 5 repeats
-        dataset.load()
-        print(f"Dataset loaded with {dataset.num_samples()} samples")
+        # Always generate GPQA diamond dataset
+        logging.info("Generating GPQA diamond dataset...")
+        gpqa_dataset = GPQA_GPTOSS_SGLang.get_dataloader(num_repeats=num_repeats)
+        gpqa_dataset.load()
+        # Always generate AIME25 dataset
+        logging.info("Generating AIME25 dataset...")
+        aime25_dataset = AIME_GPTOSS_SGLang.get_dataloader(num_repeats=num_repeats)
+        aime25_dataset.load()
+        logging.info(f"Dataset loaded with {aime25_dataset.num_samples()} samples")
 
         # Step 4: Create SGLang client
-        print(f"Creating SGLang client for endpoint: {SGLANG_ENDPOINT}")
+        logging.info(f"Creating SGLang client for endpoint: {SGLANG_ENDPOINT}")
         client = create_sglang_client(tmp_dir)
         sample_issuer = HttpClientSampleIssuer(client)
 
         # Step 5: Run benchmark session
-        print("Starting benchmark session...")
-        run_benchmark_session(dataset, sample_issuer, args)
+        logging.info("Starting benchmark session...")
+        run_benchmark_session([gpqa_dataset, aime25_dataset], sample_issuer, args)
 
-        print(f"\nBenchmark complete! Results saved to {args.report_dir}/")
+        logging.info(f"\nBenchmark complete! Results saved to {args.report_dir}/")
 
     finally:
         # Cleanup
@@ -296,7 +222,7 @@ def run_main(args):
 def main():
     """Main entry point for the manual example."""
     parser = argparse.ArgumentParser(
-        description="GPQA dataset example with SGLang endpoint",
+        description="GPQA and AIME25 MLPerf dataset example with SGLang endpoint",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -324,18 +250,25 @@ def main():
     parser.add_argument(
         "--report-dir",
         type=str,
-        default="gpqa_sglang_report",
-        help="Directory to save benchmark reports (default: gpqa_sglang_report)",
+        default="gpqa_aime25_sglang_report",
+        help="Directory to save benchmark reports (default: gpqa_aime25_sglang_report)",
+    )
+
+    parser.add_argument(
+        "--num-repeats",
+        type=int,
+        default=1,
+        help="Number of repeats to run (default: 1)",
     )
 
     args = parser.parse_args()
 
-    print("=" * 60)
-    print("GPQA Dataset Example with SGLang")
-    print("=" * 60)
-    print("\nConfiguration:")
-    print(f"  SGLang endpoint: {SGLANG_ENDPOINT}")
-    print(f"  Report directory: {args.report_dir}\n")
+    logging.info("=" * 60)
+    logging.info("GPQA and AIME25 MLPerf Dataset Example with SGLang")
+    logging.info("=" * 60)
+    logging.info("\nConfiguration:")
+    logging.info(f"  SGLang endpoint: {SGLANG_ENDPOINT}")
+    logging.info(f"  Report directory: {args.report_dir}\n")
 
     # Run the main function
     run_main(args)
