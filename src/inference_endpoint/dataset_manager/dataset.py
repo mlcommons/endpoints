@@ -24,8 +24,9 @@ from typing import Any, ClassVar
 
 import numpy as np
 import pandas as pd
-from datasets import load_dataset, load_from_disk
 from transformers import AutoTokenizer, PreTrainedTokenizer
+
+from datasets import load_dataset, load_from_disk
 
 from .transforms import Transform, apply_transforms
 
@@ -446,7 +447,7 @@ class Dataset:
 
 
 class EmptyDataset(Dataset):
-    """Empty dataset for performance run."""
+    """Empty dataset to be used as performance dataset when running only accuracy tests."""
 
     def __init__(self):
         super().__init__(None)

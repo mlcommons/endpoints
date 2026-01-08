@@ -140,8 +140,8 @@ class AIME25(
         return df
 
 
-class AIME_MLPerf(AIME25):
-    """AIME_MLPerf: AIME 2025 MLPerf Dataset
+class AIME_GTPOSS_SGLang(AIME25):
+    """AIME_GTPOSS_SGLang: AIME 2025 GTPOSS_SGLang Dataset
     Reference: https://huggingface.co/datasets/opencompass/AIME2025/
     """
 
@@ -161,7 +161,7 @@ class AIME_MLPerf(AIME25):
         return df
 
     @classmethod
-    def create_aime25_transforms(cls) -> list:
+    def create_transforms(cls) -> list:
         """Create the list of transforms to apply to the AIME25 dataset."""
         prompt_format = "{question}\nPlease reason step by step, and put your final answer within \\boxed{{}}."
 
@@ -196,8 +196,8 @@ class AIME_MLPerf(AIME25):
         ]
 
     @classmethod
-    def get_aime25_dataloader(cls, num_repeats: int = 5):
+    def get_dataloader(cls, num_repeats: int = 5):
         df = AIME25.generate(datasets_dir=Path("datasets"))
-        transforms = AIME_MLPerf.create_aime25_transforms()
+        transforms = AIME_GTPOSS_SGLang.create_transforms()
         aime25_dataset = AIME25(df, transforms=transforms, repeats=num_repeats)
         return aime25_dataset

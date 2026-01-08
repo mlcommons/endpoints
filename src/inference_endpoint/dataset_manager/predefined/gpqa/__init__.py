@@ -154,13 +154,13 @@ class GPQA(
         return df
 
 
-class GPQA_MLPerf(GPQA):
-    """GPQA_MLPerf: GPQA MLPerf Dataset
+class GPQA_GPTOSS_SGLang(GPQA):
+    """GPQA_GPTOSS_SGLang: GPQA GTPOSS_SGLang Dataset
     Reference: https://huggingface.co/datasets/opencompass/GPQA/
     """
 
     @classmethod
-    def create_gpqa_transforms(cls) -> list:
+    def create_transforms(cls) -> list:
         """Create the list of transforms to apply to the GPQA dataset.
 
         Returns:
@@ -212,8 +212,8 @@ class GPQA_MLPerf(GPQA):
         ]
 
     @classmethod
-    def get_gpqa_dataloader(cls, num_repeats: int = 5):
+    def get_dataloader(cls, num_repeats: int = 5):
         df = GPQA.generate(datasets_dir=Path("datasets"))
-        transforms = GPQA_MLPerf.create_gpqa_transforms()
+        transforms = GPQA_GPTOSS_SGLang.create_transforms()
         gpqa_dataset = GPQA(df, transforms=transforms, repeats=num_repeats)
         return gpqa_dataset

@@ -28,6 +28,7 @@ Prerequisites:
 from __future__ import annotations
 
 import argparse
+import logging
 import random
 from pathlib import Path
 
@@ -35,8 +36,11 @@ from inference_endpoint import metrics
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import LoadPattern, LoadPatternType
 from inference_endpoint.dataset_manager import Dataset, EmptyDataset
-from inference_endpoint.dataset_manager.predefined.aime25 import AIME25, AIME_MLPerf
-from inference_endpoint.dataset_manager.predefined.gpqa import GPQA, GPQA_MLPerf
+from inference_endpoint.dataset_manager.predefined.aime25 import (
+    AIME25,
+    AIME_GTPOSS_SGLang,
+)
+from inference_endpoint.dataset_manager.predefined.gpqa import GPQA, GPQA_GPTOSS_SGLang
 from inference_endpoint.endpoint_client.configs import (
     AioHttpConfig,
     HTTPClientConfig,
@@ -137,7 +141,7 @@ def run_benchmark_session(
         [dataset.num_samples() * dataset.repeats for dataset in accuracy_datasets]
     )
 
-    with tqdm(desc="GPQA Benchmark", total=n_total, unit="samples") as pbar:
+    with tqdm(desc="GPQA/AIME25 Benchmark", total=n_total, unit="samples") as pbar:
         pbar_hook.set_pbar(pbar)
         sess = BenchmarkSession.start(
             rt_settings,
@@ -162,7 +166,7 @@ def run_benchmark_session(
 
     # Score the dataset
     score, n_repeats = scorer.score()
-    print(f"Pass@1 Score ({n_repeats} repeats): {score}")
+    logging.info(f"Pass@1 Score ({n_repeats} repeats): {score}")
 
     scorer = PassAt1Scorer(
         AIME25.DATASET_ID,
@@ -174,7 +178,7 @@ def run_benchmark_session(
 
     # Score the dataset
     score, n_repeats = scorer.score()
-    print(f"Pass@1 Score ({n_repeats} repeats): {score}")
+    logging.info(f"Pass@1 Score ({n_repeats} repeats): {score}")
 
 
 def run_main(args):
@@ -186,25 +190,25 @@ def run_main(args):
 
     try:
         # Always generate GPQA diamond dataset
-        print("Generating GPQA diamond dataset...")
-        gpqa_dataset = GPQA_MLPerf.get_gpqa_dataloader(num_repeats=num_repeats)
+        logging.info("Generating GPQA diamond dataset...")
+        gpqa_dataset = GPQA_GPTOSS_SGLang.get_dataloader(num_repeats=num_repeats)
         gpqa_dataset.load()
         # Always generate AIME25 dataset
-        print("Generating AIME25 dataset...")
-        aime25_dataset = AIME_MLPerf.get_aime25_dataloader(num_repeats=num_repeats)
+        logging.info("Generating AIME25 dataset...")
+        aime25_dataset = AIME_GTPOSS_SGLang.get_dataloader(num_repeats=num_repeats)
         aime25_dataset.load()
-        print(f"Dataset loaded with {aime25_dataset.num_samples()} samples")
+        logging.info(f"Dataset loaded with {aime25_dataset.num_samples()} samples")
 
         # Step 4: Create SGLang client
-        print(f"Creating SGLang client for endpoint: {SGLANG_ENDPOINT}")
+        logging.info(f"Creating SGLang client for endpoint: {SGLANG_ENDPOINT}")
         client = create_sglang_client(tmp_dir)
         sample_issuer = HttpClientSampleIssuer(client)
 
         # Step 5: Run benchmark session
-        print("Starting benchmark session...")
+        logging.info("Starting benchmark session...")
         run_benchmark_session([gpqa_dataset, aime25_dataset], sample_issuer, args)
 
-        print(f"\nBenchmark complete! Results saved to {args.report_dir}/")
+        logging.info(f"\nBenchmark complete! Results saved to {args.report_dir}/")
 
     finally:
         # Cleanup
@@ -256,12 +260,12 @@ def main():
 
     args = parser.parse_args()
 
-    print("=" * 60)
-    print("GPQA and AIME25 MLPerf Dataset Example with SGLang")
-    print("=" * 60)
-    print("\nConfiguration:")
-    print(f"  SGLang endpoint: {SGLANG_ENDPOINT}")
-    print(f"  Report directory: {args.report_dir}\n")
+    logging.info("=" * 60)
+    logging.info("GPQA and AIME25 MLPerf Dataset Example with SGLang")
+    logging.info("=" * 60)
+    logging.info("\nConfiguration:")
+    logging.info(f"  SGLang endpoint: {SGLANG_ENDPOINT}")
+    logging.info(f"  Report directory: {args.report_dir}\n")
 
     # Run the main function
     run_main(args)
