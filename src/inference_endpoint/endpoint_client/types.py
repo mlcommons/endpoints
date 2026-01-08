@@ -18,18 +18,436 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+import logging
+import time
+from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from aiohttp import hdrs
-from aiohttp.client import ClientSession
-from aiohttp.client_reqrep import ClientRequest, ClientResponse, RequestInfo
-from aiohttp.streams import StreamReader
-from multidict import CIMultiDict, CIMultiDictProxy
-from yarl import URL
+import httptools
 
+from inference_endpoint.endpoint_client.configs import SocketConfig
 from inference_endpoint.endpoint_client.timing_context import RequestTimingContext
+
+logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# HTTP Response Protocol
+# =============================================================================
+
+
+class HttpResponseProtocol(asyncio.Protocol):
+    """
+    Minimal HTTP/1.1 response protocol using httptools.
+
+    Uses llhttp (same C parser as Node.js) for parsing HTTP responses.
+    Designed for connection reuse - call reset() between requests.
+    """
+
+    __slots__ = (
+        "_transport",
+        "_parser",
+        "_loop",
+        # Response state
+        "_status_code",
+        "_headers",
+        "_body_chunks",
+        "_content_length",
+        "_is_chunked",
+        # Futures for async coordination
+        "_headers_future",
+        "_body_future",
+        "_chunk_queue",
+        # Flags
+        "_headers_complete",
+        "_message_complete",
+        "_connection_lost",
+        "_exc",
+    )
+
+    def __init__(self, loop: asyncio.AbstractEventLoop):
+        self._loop = loop
+        self._transport: asyncio.Transport | None = None
+        self._parser: httptools.HttpResponseParser | None = None
+
+        # Response state
+        self._status_code: int = 0
+        self._headers: dict[str, str] = {}
+        self._body_chunks: list[bytes] = []
+        self._content_length: int = -1
+        self._is_chunked: bool = False
+
+        # Async coordination
+        self._headers_future: asyncio.Future | None = None
+        self._body_future: asyncio.Future | None = None
+        self._chunk_queue: asyncio.Queue[bytes | None] | None = None
+
+        # Flags
+        self._headers_complete: bool = False
+        self._message_complete: bool = False
+        self._connection_lost: bool = False
+        self._exc: Exception | None = None
+
+    def reset(self) -> None:
+        """Reset protocol state for connection reuse."""
+        self._parser = httptools.HttpResponseParser(self)
+        self._status_code = 0
+        self._headers.clear()
+        self._body_chunks.clear()
+        self._content_length = -1
+        self._is_chunked = False
+        self._headers_future = None
+        self._body_future = None
+        self._chunk_queue = None
+        self._headers_complete = False
+        self._message_complete = False
+        self._exc = None
+
+    # -------------------------------------------------------------------------
+    # asyncio.Protocol callbacks
+    # -------------------------------------------------------------------------
+
+    def connection_made(self, transport: asyncio.Transport) -> None:
+        self._transport = transport
+        self._parser = httptools.HttpResponseParser(self)
+
+    def data_received(self, data: bytes) -> None:
+        if self._parser is None:
+            return
+        try:
+            self._parser.feed_data(data)
+        except httptools.HttpParserError as e:
+            self._exc = e
+            if self._headers_future and not self._headers_future.done():
+                self._headers_future.set_exception(e)
+            if self._body_future and not self._body_future.done():
+                self._body_future.set_exception(e)
+
+    def connection_lost(self, exc: Exception | None) -> None:
+        self._connection_lost = True
+        self._exc = exc
+
+        # Complete any pending futures
+        if self._headers_future and not self._headers_future.done():
+            if exc:
+                self._headers_future.set_exception(exc)
+            else:
+                self._headers_future.set_exception(
+                    ConnectionResetError("Connection closed before headers received")
+                )
+
+        if self._body_future and not self._body_future.done():
+            if exc:
+                self._body_future.set_exception(exc)
+            elif not self._message_complete:
+                self._body_future.set_exception(
+                    ConnectionResetError("Connection closed before body complete")
+                )
+            else:
+                self._body_future.set_result(b"".join(self._body_chunks))
+
+        # Signal end of stream for chunk queue
+        if self._chunk_queue:
+            try:
+                self._chunk_queue.put_nowait(None)
+            except asyncio.QueueFull:
+                pass
+
+    def eof_received(self) -> bool | None:
+        # Return False to close transport, True to keep open
+        return False
+
+    # -------------------------------------------------------------------------
+    # httptools callbacks
+    # -------------------------------------------------------------------------
+
+    def on_status(self, status: bytes) -> None:
+        pass  # We get status code from on_headers_complete
+
+    def on_header(self, name: bytes, value: bytes) -> None:
+        header_name = name.decode("latin-1").lower()
+        header_value = value.decode("latin-1")
+        self._headers[header_name] = header_value
+
+        if header_name == "content-length":
+            self._content_length = int(header_value)
+        elif header_name == "transfer-encoding" and "chunked" in header_value.lower():
+            self._is_chunked = True
+
+    def on_headers_complete(self) -> None:
+        self._status_code = self._parser.get_status_code()
+        self._headers_complete = True
+
+        if self._headers_future and not self._headers_future.done():
+            self._headers_future.set_result((self._status_code, self._headers))
+
+    def on_body(self, body: bytes) -> None:
+        if self._chunk_queue is not None:
+            # Streaming mode - push to queue
+            try:
+                self._chunk_queue.put_nowait(body)
+            except asyncio.QueueFull:
+                # Queue full, append to buffer instead
+                self._body_chunks.append(body)
+        else:
+            # Buffered mode
+            self._body_chunks.append(body)
+
+    def on_message_complete(self) -> None:
+        self._message_complete = True
+
+        if self._body_future and not self._body_future.done():
+            self._body_future.set_result(b"".join(self._body_chunks))
+
+        # Signal end of stream for chunk queue
+        if self._chunk_queue:
+            try:
+                self._chunk_queue.put_nowait(None)
+            except asyncio.QueueFull:
+                pass
+
+    def on_chunk_header(self) -> None:
+        pass
+
+    def on_chunk_complete(self) -> None:
+        pass
+
+    # -------------------------------------------------------------------------
+    # Public API
+    # -------------------------------------------------------------------------
+
+    @property
+    def transport(self) -> asyncio.Transport | None:
+        return self._transport
+
+    def write(self, data: bytes) -> None:
+        """Write data to transport."""
+        if self._transport:
+            self._transport.write(data)
+
+    async def read_headers(self) -> tuple[int, dict[str, str]]:
+        """Wait for and return (status_code, headers)."""
+        if self._headers_complete:
+            return (self._status_code, self._headers)
+
+        self._headers_future = self._loop.create_future()
+        return await self._headers_future
+
+    async def read_body(self) -> bytes:
+        """Read entire response body."""
+        if self._message_complete:
+            return b"".join(self._body_chunks)
+
+        self._body_future = self._loop.create_future()
+        return await self._body_future
+
+    async def iter_body(self) -> AsyncGenerator[bytes, None]:
+        """Iterate over body chunks as they arrive."""
+        # Initialize queue for streaming
+        self._chunk_queue = asyncio.Queue(maxsize=64)
+
+        # Yield any chunks already buffered
+        for chunk in self._body_chunks:
+            yield chunk
+        self._body_chunks.clear()
+
+        # Yield new chunks as they arrive
+        while True:
+            chunk = await self._chunk_queue.get()
+            if chunk is None:
+                break
+            yield chunk
+
+
+# =============================================================================
+# Connection Pool
+# =============================================================================
+
+
+class PooledConnection:
+    """A pooled TCP connection with its protocol."""
+
+    __slots__ = ("transport", "protocol", "created_at", "last_used", "in_use", "_id")
+
+    def __init__(
+        self,
+        transport: asyncio.Transport,
+        protocol: HttpResponseProtocol,
+        created_at: float,
+    ):
+        self.transport = transport
+        self.protocol = protocol
+        self.created_at = created_at
+        self.last_used = created_at
+        self.in_use = True
+        self._id = id(self)  # Unique identifier for hashing
+
+    def __hash__(self) -> int:
+        return self._id
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, PooledConnection):
+            return NotImplemented
+        return self._id == other._id
+
+    def is_alive(self) -> bool:
+        """Check if connection is still usable."""
+        return (
+            not self.protocol._connection_lost
+            and self.transport is not None
+            and not self.transport.is_closing()
+        )
+
+    def release(self) -> None:
+        """Mark connection as available for reuse."""
+        self.in_use = False
+        self.last_used = time.monotonic()
+
+
+class ConnectionPool:
+    """
+    Minimal async connection pool for HTTP/1.1.
+
+    Optimized for single-host usage (all requests to same endpoint).
+    Uses LIFO (stack) for connection reuse to favor hot connections.
+    """
+
+    __slots__ = (
+        "_host",
+        "_port",
+        "_loop",
+        "_socket_config",
+        "_idle_stack",
+        "_all_connections",
+        "_max_connections",
+        "_keepalive_timeout",
+        "_creating",
+    )
+
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        loop: asyncio.AbstractEventLoop,
+        socket_config: SocketConfig | None = None,
+        max_connections: int = 0,
+        keepalive_timeout: float = 86400,
+    ):
+        self._host = host
+        self._port = port
+        self._loop = loop
+        self._socket_config = socket_config
+        self._max_connections = max_connections  # 0 = unlimited
+        self._keepalive_timeout = keepalive_timeout
+
+        self._idle_stack: list[PooledConnection] = []
+        self._all_connections: set[PooledConnection] = set()
+        self._creating: int = 0
+
+    async def acquire(self) -> PooledConnection:
+        """Get a connection from pool or create new one."""
+        # Fast path: reuse from stack (LIFO for hot connections)
+        while self._idle_stack:
+            conn = self._idle_stack.pop()
+            if conn.is_alive():
+                conn.in_use = True
+                conn.protocol.reset()
+                return conn
+            else:
+                # Dead connection, remove from tracking
+                self._all_connections.discard(conn)
+
+        # Slow path: create new connection
+        return await self._create_connection()
+
+    async def _create_connection(self) -> PooledConnection:
+        """Create a new TCP connection."""
+        self._creating += 1
+        try:
+            # Create protocol instance
+            protocol = HttpResponseProtocol(self._loop)
+
+            # Use asyncio's create_connection which handles socket creation properly
+            transport, _ = await self._loop.create_connection(
+                lambda: protocol,
+                host=self._host,
+                port=self._port,
+            )
+
+            # Apply socket options after connection is established
+            if self._socket_config is not None:
+                sock = transport.get_extra_info("socket")
+                if sock is not None:
+                    self._socket_config.apply_to_socket(sock)
+
+            now = time.monotonic()
+            conn = PooledConnection(
+                transport=transport,
+                protocol=protocol,
+                created_at=now,
+            )
+            self._all_connections.add(conn)
+            return conn
+
+        finally:
+            self._creating -= 1
+
+    def release(self, conn: PooledConnection) -> None:
+        """Return connection to pool for reuse."""
+        if not conn.is_alive():
+            self._all_connections.discard(conn)
+            return
+
+        conn.release()
+        self._idle_stack.append(conn)
+
+    async def warmup(self, num_connections: int) -> int:
+        """Pre-establish connections for warmup."""
+        connections: list[PooledConnection] = []
+
+        async def create_one():
+            try:
+                conn = await self._create_connection()
+                connections.append(conn)
+            except Exception as e:
+                logger.debug(f"Warmup connection failed: {e}")
+
+        await asyncio.gather(
+            *[create_one() for _ in range(num_connections)],
+            return_exceptions=True,
+        )
+
+        # Release all to pool
+        for conn in connections:
+            self.release(conn)
+
+        return len(self._idle_stack)
+
+    async def close(self) -> None:
+        """Close all connections."""
+        for conn in list(self._all_connections):
+            if conn.transport and not conn.transport.is_closing():
+                conn.transport.close()
+        self._all_connections.clear()
+        self._idle_stack.clear()
+
+    @property
+    def idle_count(self) -> int:
+        return len(self._idle_stack)
+
+    @property
+    def total_count(self) -> int:
+        return len(self._all_connections)
+
+    @property
+    def in_use_count(self) -> int:
+        return sum(1 for c in self._all_connections if c.in_use)
+
+
+# =============================================================================
+# HTTP Request Template
+# =============================================================================
 
 
 @dataclass(slots=True)
@@ -43,81 +461,37 @@ class HttpRequestTemplate:
     Attributes:
         request_line: HTTP request line bytes (e.g., b"POST /v1/chat HTTP/1.1\\r\\n")
         host_header: HTTP Host header bytes, required for HTTP/1.1
-        request_info: aiohttp RequestInfo for response association
-        connection_request: Cached ClientRequest used as key for TCP connection pool
     """
 
     request_line: bytes
     host_header: bytes
-    request_info: RequestInfo
-    connection_request: ClientRequest
 
     @classmethod
-    def from_url(
-        cls,
-        url: URL,
-        loop: asyncio.AbstractEventLoop,
-        session: ClientSession,
-    ) -> HttpRequestTemplate:
+    def from_url(cls, host: str, port: int, path: str) -> HttpRequestTemplate:
         """
-        Create an HttpRequestTemplate from a URL.
+        Create an HttpRequestTemplate from URL components.
 
         Pre-computes static HTTP/1.1 request components that remain constant
-        across all requests. This avoids repeated string formatting and
-        encoding on every request in the hot path.
+        across all requests.
 
         Args:
-            url: Target endpoint URL
-            loop: Event loop for ClientRequest
-            session: aiohttp session for connection pool key
+            host: Target hostname
+            port: Target port
+            path: Request path (e.g., "/v1/chat/completions")
 
         Returns:
             HttpRequestTemplate ready for building requests
-
-        Components computed:
-            - request_line: "POST /path HTTP/1.1\\r\\n" encoded as bytes
-            - host_header: "Host: hostname[:port]\\r\\n" (required by HTTP/1.1 RFC 7230)
-            - request_info: aiohttp metadata for response/request association
-            - connection_request: ClientRequest used as connection pool lookup key
         """
-        path = url.raw_path_qs or "/"
         request_line = f"POST {path} HTTP/1.1\r\n".encode("ascii")
 
         # Host header is mandatory in HTTP/1.1 (RFC 7230 Section 5.4)
         # Port is omitted for default ports (80 for HTTP, 443 for HTTPS)
-        host = url.raw_host or "localhost"
-        if url.port and url.port not in (80, 443):
-            host_header = f"Host: {host}:{url.port}\r\n".encode("ascii")
-        else:
+        if port in (80, 443):
             host_header = f"Host: {host}\r\n".encode("ascii")
+        else:
+            host_header = f"Host: {host}:{port}\r\n".encode("ascii")
 
-        request_info = RequestInfo(
-            url=url,
-            method="POST",
-            headers=CIMultiDictProxy(CIMultiDict()),
-            real_url=url,
-        )
-
-        # aiohttp's TCPConnector uses ClientRequest as the connection pool key.
-        # The connector hashes (host, port, ssl) from the request to lookup/store
-        # connections. By reusing the same ClientRequest instance for both warmup
-        # and actual requests, we ensure connections warmed up during startup are
-        # found in the pool during request handling.
-        connection_request = ClientRequest(
-            method=hdrs.METH_POST,
-            url=url,
-            loop=loop,
-            response_class=ClientResponse,
-            session=session,
-            ssl=False,
-        )
-
-        return cls(
-            request_line=request_line,
-            host_header=host_header,
-            request_info=request_info,
-            connection_request=connection_request,
-        )
+        return cls(request_line=request_line, host_header=host_header)
 
     def build_request(self, body: bytes, headers: dict[str, str]) -> bytes:
         """
@@ -135,11 +509,6 @@ class HttpRequestTemplate:
 
         Returns:
             Complete HTTP request ready for socket.write()
-
-        Header handling:
-            - Host: Always included from template (required by HTTP/1.1)
-            - Content-Length: Computed from body size (required for POST)
-            - Other headers: Passed through from query.headers
         """
         parts = [self.request_line, self.host_header]
 
@@ -158,6 +527,11 @@ class HttpRequestTemplate:
         return b"".join(parts)
 
 
+# =============================================================================
+# Prepared Request
+# =============================================================================
+
+
 @dataclass(slots=True)
 class PreparedRequest:
     """A prepared HTTP request ready to be sent.
@@ -167,59 +541,13 @@ class PreparedRequest:
         http_bytes: Pre-built HTTP request bytes ready for socket.write().
         timing: RequestTimingContext for overhead measurement.
         is_streaming: True if this is a streaming (SSE) request.
-        url: Target URL for the request.
-        request_info: aiohttp RequestInfo for response association.
         process: Callback to handle the response (set after preparation).
-        response: ResponseData container (set after headers received).
-        connection: aiohttp connection (set after connection acquired).
+        connection: PooledConnection (set after connection acquired).
     """
 
     query_id: str
     http_bytes: bytes
     timing: RequestTimingContext
     is_streaming: bool
-    url: URL
-    request_info: RequestInfo
     process: Callable[[], Any] | None = None
-    response: ResponseData | None = field(default=None, repr=False)
-    connection: Any | None = field(default=None, repr=False)
-
-    def release(self) -> None:
-        """Release connection back to pool."""
-        if self.connection is not None:
-            self.connection.release()
-            self.connection = None
-
-    def __del__(self) -> None:
-        """Release connection on garbage collection."""
-        self.release()
-
-
-@dataclass(slots=True)
-class ResponseData:
-    """
-    Container for HTTP response data from aiohttp protocol.
-
-    Wraps the raw response components from aiohttp's ResponseHandler.read()
-    into a minimal structure for processing. Provides async methods to
-    consume the response body.
-
-    Attributes:
-        status: HTTP status code (e.g., 200, 404, 500)
-        reason: HTTP reason phrase (e.g., "OK", "Not Found")
-        headers: Response headers as case-insensitive multidict
-        content: StreamReader for async body consumption
-    """
-
-    status: int
-    reason: str
-    headers: CIMultiDictProxy
-    content: StreamReader
-
-    async def read(self) -> bytes:
-        """Read entire response body as bytes."""
-        return await self.content.read()
-
-    async def text(self, encoding: str = "utf-8") -> str:
-        """Read response body as decoded text."""
-        return (await self.content.read()).decode(encoding)
+    connection: PooledConnection | None = field(default=None, repr=False)

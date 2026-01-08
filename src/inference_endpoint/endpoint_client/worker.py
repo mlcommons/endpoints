@@ -27,11 +27,10 @@ import traceback
 from collections.abc import AsyncGenerator
 from functools import partial
 from typing import Any
+from urllib.parse import urlparse
 
-import aiohttp
 import zmq
 import zmq.asyncio
-from yarl import URL
 
 from inference_endpoint.core.types import Query, QueryResult
 from inference_endpoint.endpoint_client.adapter_protocol import HttpRequestAdapter
@@ -47,9 +46,10 @@ from inference_endpoint.endpoint_client.timing_context import (
     format_timing_log,
 )
 from inference_endpoint.endpoint_client.types import (
+    ConnectionPool,
     HttpRequestTemplate,
+    PooledConnection,
     PreparedRequest,
-    ResponseData,
 )
 from inference_endpoint.endpoint_client.utils import get_ephemeral_port_limit
 from inference_endpoint.endpoint_client.zmq_utils import ZMQPullSocket, ZMQPushSocket
@@ -152,32 +152,22 @@ class Worker:
         self._response_socket: ZMQPushSocket | None = None
         self._readiness_socket: ZMQPushSocket | None = None
 
-        self._session: aiohttp.ClientSession | None = None
-        self.tcp_connector: aiohttp.TCPConnector | None = None
-        self._timeout: aiohttp.ClientTimeout | None = None
+        self._pool: ConnectionPool | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
-        self._response_params: dict | None = None  # cached set_response_params kwargs
+
+        # Parse endpoint URL into components
+        parsed = urlparse(self.http_config.endpoint_url)
+        self._host = parsed.hostname or "localhost"
+        self._port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        self._path = parsed.path or "/"
 
         # Track active request tasks
         self._active_tasks: set[asyncio.Task] = set()
 
-        self._url: URL = URL(self.http_config.endpoint_url)
         self._adapter: type[HttpRequestAdapter] = self.http_config.adapter
 
         # Pre-computed HTTP request components
         self._http_template: HttpRequestTemplate | None = None
-
-    def _init_http(self) -> None:
-        """Initialize HTTP template from endpoint URL."""
-        self._http_template = HttpRequestTemplate.from_url(
-            url=self._url,
-            loop=self._loop,
-            session=self._session,
-        )
-        logger.debug(
-            f"HTTP template initialized: path={self._url.raw_path_qs or '/'}, "
-            f"host={self._url.raw_host or 'localhost'}"
-        )
 
     async def run(self) -> None:
         """Initialize worker and launch main loop."""
@@ -211,42 +201,24 @@ class Worker:
                 self._zmq_context, readiness_socket_addr, self.zmq_config
             )
 
-            # Create TCP connector
-            self.tcp_connector = self.aiohttp_config.create_tcp_connector()
-
-            # Create HTTP timeout config (shared across requests)
-            self._timeout = aiohttp.ClientTimeout(
-                total=self.aiohttp_config.client_timeout_total,
-                connect=self.aiohttp_config.client_timeout_connect,
-                sock_read=self.aiohttp_config.client_timeout_sock_read,
+            # Initialize HTTP template from URL components
+            self._http_template = HttpRequestTemplate.from_url(
+                self._host, self._port, self._path
+            )
+            logger.debug(
+                f"HTTP template initialized: path={self._path}, "
+                f"host={self._host}:{self._port}"
             )
 
-            # Cache response parsing params
-            self._response_params = {
-                "timer": None,
-                "skip_payload": False,
-                "read_until_eof": True,
-                # NOTE(vir):
-                # Disable auto-decompression - we don't send Accept-Encoding header
-                # and responses are text/JSON (or binary images/video in future)
-                "auto_decompress": False,
-                "read_timeout": self._timeout.sock_read,
-                "read_bufsize": 2**16,
-                "timeout_ceil_threshold": 5,
-                "max_line_size": 8190,
-                "max_field_size": 8190,
-            }
-
-            # Create aiohttp session
-            self._session = aiohttp.ClientSession(
-                timeout=self._timeout,
-                connector=self.tcp_connector,
-                connector_owner=False,
-                skip_auto_headers=self.aiohttp_config.skip_auto_headers,
+            # Create connection pool
+            self._pool = ConnectionPool(
+                host=self._host,
+                port=self._port,
+                loop=self._loop,
+                socket_config=self.aiohttp_config.socket_defaults,
+                max_connections=self.aiohttp_config.tcp_connector_limit,
+                keepalive_timeout=self.aiohttp_config.tcp_connector_keepalive_timeout,
             )
-
-            # Initialize HTTP components after session is created
-            self._init_http()
 
             signal.signal(signal.SIGTERM, self.shutdown)
             signal.signal(signal.SIGINT, self.shutdown)
@@ -299,7 +271,7 @@ class Worker:
         throughput during the initial phase.
 
         This method pre-establishes TCP connections and adds them to
-        aiohttp's connection pool before the worker signals readiness.
+        the connection pool before the worker signals readiness.
         Subsequent requests can then reuse these pooled connections,
         avoiding the connection establishment overhead entirely.
 
@@ -330,30 +302,8 @@ class Worker:
                 return
 
         logger.debug(f"Warming up {num_connections} TCP connections")
-
-        # Establish all connections first, then release together (ensures no reuse)
-        connections: list = []
-
-        async def warmup_one():
-            conn = await self.tcp_connector.connect(
-                self._http_template.connection_request, traces=[], timeout=self._timeout
-            )
-            connections.append(conn)
-
-        # Establish all connections concurrently
-        await asyncio.gather(
-            *[warmup_one() for _ in range(num_connections)],
-            return_exceptions=True,
-        )
-
-        # Release all connections to pool
-        for conn in connections:
-            conn.release()
-
-        idle_conns = sum(len(conns) for conns in self.tcp_connector._conns.values())
-        logger.debug(
-            f"Warmup Complete: {idle_conns}/{num_connections} connections pooled"
-        )
+        pooled = await self._pool.warmup(num_connections)
+        logger.debug(f"Warmup complete: {pooled}/{num_connections} connections pooled")
 
     @profile
     async def _main_loop(self) -> None:
@@ -438,8 +388,6 @@ class Worker:
             http_bytes=http_bytes,
             timing=timing,
             is_streaming=is_streaming,
-            url=self._url,
-            request_info=self._http_template.request_info,
         )
 
         prepared.process = partial(
@@ -458,7 +406,7 @@ class Worker:
         Fire HTTP POST request:
         1. establish / acquire TCP connection (from connection pool)
         2. send POST request bytes
-        3. save resp, conn for process_response task to process concurrently
+        3. save conn for process_response task to process concurrently
 
         Returns True on success.
         """
@@ -467,29 +415,10 @@ class Worker:
             return False
 
         try:
-            # Acquire connection using cached request
+            # Acquire connection from pool
             prepared.timing["t_conn_start"] = time.monotonic_ns()
-
-            # Direct pool access via _get() - the fast path in aiohttp 3.13+.
-            # _get() returns Connection directly if available in pool, None otherwise.
-            # This bypasses connect()'s timeout ceiling, available_connections checks,
-            # and waiter queue management when we have warmed-up connections.
-            conn = await self.tcp_connector._get(
-                self._http_template.connection_request.connection_key, []
-            )
-            if conn is None:
-                # Slow path: pool empty, use public connect() API
-                conn = await self.tcp_connector.connect(
-                    self._http_template.connection_request,
-                    traces=[],
-                    timeout=self._timeout,
-                )
+            conn = await self._pool.acquire()
             prepared.timing["t_conn_end"] = time.monotonic_ns()
-
-            # NOTE(vir):
-            # Need to re-do this every request to recreate HttpResponseParser.
-            # The parser is stateful and tracks current response, so cannot be cached.
-            conn.protocol.set_response_params(**self._response_params)
 
             # Record time just-before request is issued
             if self.http_config.record_worker_events:
@@ -500,44 +429,11 @@ class Worker:
                     assert_active=True,
                 )
 
-            # NOTE(vir):
-            # ┌─────────────────────────────────────────────────────────────┐
-            # │                        Transport                            │
-            # │  (low-level socket I/O - owned by asyncio event loop)       │
-            # ├─────────────────────────────────────────────────────────────┤
-            # │  write(data) ──────────► send bytes to socket               │
-            # │                          (synchronous, non-blocking,        │
-            # │                           buffers in OS send queue)         │
-            # │                                                             │
-            # │  [socket readable] ────► calls protocol.data_received(data) │
-            # │                          (asyncio does this automatically)  │
-            # └─────────────────────────────────────────────────────────────┘
-            #                               │
-            #                               ▼
-            # ┌─────────────────────────────────────────────────────────────┐
-            # │                        Protocol                             │
-            # │  (HTTP parser + connection state machine)                   │
-            # ├─────────────────────────────────────────────────────────────┤
-            # │  data_received(data) ──► parse HTTP, buffer chunks          │
-            # │                          (called by transport when data     │
-            # │                           arrives on socket)                │
-            # │                                                             │
-            # │  read() ───────────────► returns (message, payload)         │
-            # │                          message: status, headers, version  │
-            # │                          payload: StreamReader for body     │
-            # └─────────────────────────────────────────────────────────────┘
-
-            # transport.write() instead of ClientRequest.send():
-            # - transport.write() is synchronous and non-blocking
-            # - Bytes go directly to OS send buffer (with TCP_NODELAY, sent immediately)
-            # - Bypasses StreamWriter's buffering, drain() awaits, and chunked encoding
-            #
-            # Response read happens via protocol.data_received() callbacks from asyncio.
-            conn.protocol.transport.write(prepared.http_bytes)
-            conn.protocol.start_timeout()
+            # Write request bytes directly to transport
+            conn.protocol.write(prepared.http_bytes)
             prepared.timing["t_http"] = time.monotonic_ns()
 
-            # Store connection for _process_response to use protocol.read() directly
+            # Store connection for _process_response to use
             prepared.connection = conn
 
             # Emit pre-send timing metrics
@@ -563,54 +459,36 @@ class Worker:
         Header is awaited here instead of in _fire_request to overlap
         asyncio create_task overhead with TCP/HTTP POST/ACK communication.
         """
+        conn = prepared.connection
         try:
             prepared.timing["t_task_awake"] = time.monotonic_ns()
 
-            # protocol.read() instead of response.start():
-            # - ClientResponse.start() creates many objects and handles cookies, timers, etc.
-            # - protocol.read() is the minimal path to get parsed HTTP response
-            # - Returns (message, payload) where:
-            #   * message: parsed status line + headers (code, reason, headers)
-            #   * payload: StreamReader for response body
-            #
-            # can't bypass protocol.read():
-            # - Transport has no read() method - write-only
-            # - asyncio calls protocol.data_received() when socket has data
-            # - Protocol uses C-accelerated HTTP parser
-            while True:
-                message, payload = await prepared.connection.protocol.read()
-                # Skip 1xx informational responses (100 Continue, etc.)
-                # Only break on final response (2xx, 3xx, 4xx, 5xx) or 101 Switching Protocols
-                if message.code < 100 or message.code > 199 or message.code == 101:
-                    break
+            # Read headers using httptools protocol
+            status, _ = await conn.protocol.read_headers()
 
             # Handle error response code
-            if message.code != 200:
-                error_text = (await payload.read()).decode("utf-8")
+            if status != 200:
+                error_body = await conn.protocol.read_body()
+                error_text = error_body.decode("utf-8", errors="replace")
                 await self._handle_error(
-                    prepared.query_id, f"HTTP {message.code}: {error_text}"
+                    prepared.query_id, f"HTTP {status}: {error_text}"
                 )
                 logger.error(
-                    f"Request {prepared.query_id} failed: HTTP {message.code}: {error_text}"
+                    f"Request {prepared.query_id} failed: HTTP {status}: {error_text}"
                 )
                 return
 
             # Mark headers received
             prepared.timing["t_headers"] = time.monotonic_ns()
 
-            # Create response container
-            prepared.response = ResponseData(
-                status=message.code,
-                reason=message.reason,
-                headers=message.headers,
-                content=payload,
-            )
-
+            # Process using the pre-bound handler (streaming or non-streaming)
             await prepared.process()
+
         except Exception as e:
             await self._handle_error(prepared.query_id, e)
         finally:
-            prepared.release()
+            # Release connection back to pool
+            self._pool.release(conn)
 
             if self.http_config.record_worker_events:
                 EventRecorder.record_event(
@@ -625,8 +503,10 @@ class Worker:
     @profile
     async def _handle_non_streaming_response(self, prepared: PreparedRequest) -> None:
         """Handle non-streaming HTTP response."""
+        conn = prepared.connection
+
         # Await response bytes
-        response_bytes = await prepared.response.read()
+        response_bytes = await conn.protocol.read_body()
         prepared.timing["t_response"] = time.monotonic_ns()
 
         # Decode response into QueryResult
@@ -651,6 +531,7 @@ class Worker:
     @profile
     async def _handle_streaming_response(self, prepared: PreparedRequest) -> None:
         """Handle streaming SSE HTTP response."""
+        conn = prepared.connection
         query_id = prepared.query_id
         first_chunk_received = False
 
@@ -658,7 +539,7 @@ class Worker:
         accumulator = self.http_config.accumulator(
             query_id, self.http_config.stream_all_chunks
         )
-        async for chunk_batch in self._iter_sse_lines(prepared.response):
+        async for chunk_batch in self._iter_sse_lines(conn):
             if not first_chunk_received:
                 prepared.timing["t_first_chunk"] = time.monotonic_ns()
                 first_chunk_received = True
@@ -714,7 +595,7 @@ class Worker:
 
     @profile
     async def _iter_sse_lines(
-        self, response: ResponseData
+        self, conn: PooledConnection
     ) -> AsyncGenerator[list[str], None]:
         """
         Iterate over complete SSE chunks (events) from response stream.
@@ -729,7 +610,7 @@ class Worker:
         """
         incomplete_chunk = b""
 
-        async for chunk_bytes in response.content.iter_any():
+        async for chunk_bytes in conn.protocol.iter_body():
             # Prepend incomplete chunk and find last complete event boundary
             buffer = incomplete_chunk + chunk_bytes
             last_delimiter = buffer.rfind(b"\n\n")
@@ -766,13 +647,9 @@ class Worker:
             self._active_tasks.clear()
             logger.debug(f"Cancelled {not_done} pending requests.")
 
-        # Close aiohttp session
-        if self._session:
-            await self._session.close()
-
-        # Close TCP connector
-        if self.tcp_connector:
-            await self.tcp_connector.close()
+        # Close connection pool
+        if self._pool:
+            await self._pool.close()
 
         # Close ZMQ sockets
         for socket in (self._request_socket, self._response_socket):

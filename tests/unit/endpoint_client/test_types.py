@@ -18,8 +18,6 @@
 Uses h11 library to validate HTTP/1.1 wire format compliance per RFC 7230.
 """
 
-from unittest.mock import MagicMock
-
 import h11
 from inference_endpoint.endpoint_client.types import HttpRequestTemplate
 
@@ -41,14 +39,9 @@ class TestHttpRequestBuilding:
 
     def test_http_request_rfc7230_compliance(self):
         """Test HTTP/1.1 request format per RFC 7230: method, headers, body."""
-        mock_request_info = MagicMock()
-        mock_client_request = MagicMock()
-
         template = HttpRequestTemplate(
             request_line=b"POST /v1/chat/completions HTTP/1.1\r\n",
             host_header=b"Host: localhost:8080\r\n",
-            request_info=mock_request_info,
-            connection_request=mock_client_request,
         )
 
         body = b'{"model": "test", "messages": []}'
@@ -70,14 +63,9 @@ class TestHttpRequestBuilding:
 
     def test_http_request_edge_cases(self):
         """Test edge cases: empty body, UTF-8 multi-byte, header passthrough."""
-        mock_request_info = MagicMock()
-        mock_client_request = MagicMock()
-
         template = HttpRequestTemplate(
             request_line=b"POST /api HTTP/1.1\r\n",
             host_header=b"Host: localhost\r\n",
-            request_info=mock_request_info,
-            connection_request=mock_client_request,
         )
 
         # Empty body -> Content-Length: 0
