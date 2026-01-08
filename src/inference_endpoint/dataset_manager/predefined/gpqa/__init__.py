@@ -18,6 +18,12 @@ from logging import getLogger
 from pathlib import Path
 
 import pandas as pd
+from inference_endpoint.dataset_manager.transforms import (
+    AddStaticColumns,
+    DropColumns,
+    Harmonize,
+    UserPromptFormatter,
+)
 
 from ...dataset import Dataset, load_from_huggingface
 
@@ -146,3 +152,68 @@ class GPQA(
         df.to_parquet(dst_path)
         logger.info(f"Saved {len(df)} samples to {dst_path}")
         return df
+
+
+class GPQA_MLPerf(GPQA):
+    """GPQA_MLPerf: GPQA MLPerf Dataset
+    Reference: https://huggingface.co/datasets/opencompass/GPQA/
+    """
+
+    @classmethod
+    def create_gpqa_transforms(cls) -> list:
+        """Create the list of transforms to apply to the GPQA dataset.
+
+        Returns:
+            List of transforms to apply
+        """
+        prompt_format = (
+            "{question}\n\n"
+            "(A) {choice1}\n"
+            "(B) {choice2}\n"
+            "(C) {choice3}\n"
+            "(D) {choice4}\n\n"
+            "Express your final answer as the corresponding option 'A', 'B', 'C', or 'D'."
+        )
+
+        return [
+            # Step 1: Format the prompt from question and choices
+            UserPromptFormatter(
+                user_prompt_format=prompt_format,
+                output_column="user_prompt",
+            ),
+            # Step 2: Harmonize the prompt for SGLang/GPT-OSS
+            Harmonize(
+                prompt_column="user_prompt",
+            ),
+            # Step 3: Drop columns we don't need for inference
+            DropColumns(
+                columns=[
+                    "question",
+                    "choice1",
+                    "choice2",
+                    "choice3",
+                    "choice4",
+                    "domain",
+                    "subdomain",
+                    "user_prompt",
+                ],
+                errors="ignore",
+            ),
+            # Step 4: Add metadata columns since we don't want to do a dict update every iteration
+            AddStaticColumns(
+                {
+                    "stream": True,
+                    "max_new_tokens": 32768,
+                    "temperature": 1.0,
+                    "top_p": 1.0,
+                    "top_k": -1,
+                }
+            ),
+        ]
+
+    @classmethod
+    def get_gpqa_dataloader(cls, num_repeats: int = 5):
+        df = GPQA.generate(datasets_dir=Path("datasets"))
+        transforms = GPQA_MLPerf.create_gpqa_transforms()
+        gpqa_dataset = GPQA(df, transforms=transforms, repeats=num_repeats)
+        return gpqa_dataset

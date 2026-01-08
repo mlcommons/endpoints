@@ -31,19 +31,12 @@ import argparse
 import random
 from pathlib import Path
 
-import pandas as pd
 from inference_endpoint import metrics
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import LoadPattern, LoadPatternType
 from inference_endpoint.dataset_manager.dataset import Dataset
-from inference_endpoint.dataset_manager.predefined.aime25 import AIME25
-from inference_endpoint.dataset_manager.predefined.gpqa import GPQA
-from inference_endpoint.dataset_manager.transforms import (
-    AddStaticColumns,
-    DropColumns,
-    Harmonize,
-    UserPromptFormatter,
-)
+from inference_endpoint.dataset_manager.predefined.aime25 import AIME25, AIME_MLPerf
+from inference_endpoint.dataset_manager.predefined.gpqa import GPQA, GPQA_MLPerf
 from inference_endpoint.endpoint_client.configs import (
     AioHttpConfig,
     HTTPClientConfig,
@@ -64,7 +57,7 @@ from tqdm import tqdm
 
 # Configuration for SGLang server
 SGLANG_SERVER_HOST = "localhost"
-SGLANG_SERVER_PORT = 30000
+SGLANG_SERVER_PORT = 3000
 SGLANG_ENDPOINT = f"http://{SGLANG_SERVER_HOST}:{SGLANG_SERVER_PORT}/generate"
 
 
@@ -80,133 +73,6 @@ class ProgressBarHook:
 
     def set_pbar(self, pbar: tqdm):
         self.pbar = pbar
-
-
-def generate_gpqa_dataset(
-    datasets_dir: Path,
-    variant: str = "diamond",
-    max_samples: int | None = None,
-    force: bool = False,
-) -> pd.DataFrame:
-    """Generate the GPQA dataset to a file.
-
-    Args:
-        datasets_dir: Directory where datasets are stored
-        variant: GPQA variant to use (default: "diamond")
-        max_samples: Maximum number of samples to include (default: None = all)
-        force: Force regeneration of dataset even if it exists
-
-    Returns:
-        DataFrame containing the GPQA dataset
-    """
-    df = GPQA.generate(
-        datasets_dir=Path(datasets_dir),
-        variant=variant,
-        max_samples=max_samples,
-        force=force,
-    )
-    return df
-
-
-def generate_aime25_dataset(
-    datasets_dir: Path,
-    max_samples: int | None = None,
-    force: bool = False,
-) -> pd.DataFrame:
-    """Generate the AIME25 dataset to a file."""
-    df = AIME25.generate(
-        datasets_dir=Path(datasets_dir),
-        max_samples=max_samples,
-        force=force,
-    )
-    return df
-
-
-def create_transforms() -> list:
-    """Create the list of transforms to apply to the GPQA dataset.
-
-    Returns:
-        List of transforms to apply
-    """
-    prompt_format = (
-        "{question}\n\n"
-        "(A) {choice1}\n"
-        "(B) {choice2}\n"
-        "(C) {choice3}\n"
-        "(D) {choice4}\n\n"
-        "Express your final answer as the corresponding option 'A', 'B', 'C', or 'D'."
-    )
-
-    return [
-        # Step 1: Format the prompt from question and choices
-        UserPromptFormatter(
-            user_prompt_format=prompt_format,
-            output_column="user_prompt",
-        ),
-        # Step 2: Harmonize the prompt for SGLang/GPT-OSS
-        Harmonize(
-            prompt_column="user_prompt",
-        ),
-        # Step 3: Drop columns we don't need for inference
-        DropColumns(
-            columns=[
-                "question",
-                "choice1",
-                "choice2",
-                "choice3",
-                "choice4",
-                "domain",
-                "subdomain",
-                "user_prompt",
-            ],
-            errors="ignore",
-        ),
-        # Step 4: Add metadata columns since we don't want to do a dict update every iteration
-        AddStaticColumns(
-            {
-                "stream": True,
-                "max_new_tokens": 32768,
-                "temperature": 1.0,
-                "top_p": 1.0,
-                "top_k": -1,
-            }
-        ),
-    ]
-
-
-def create_aime25_transforms() -> list:
-    """Create the list of transforms to apply to the AIME25 dataset."""
-    prompt_format = "{question}\nPlease reason step by step, and put your final answer within \\boxed{{}}."
-
-    return [
-        # Step 1: Format the prompt from question and choices
-        UserPromptFormatter(
-            user_prompt_format=prompt_format,
-            output_column="user_prompt",
-        ),
-        # Step 2: Harmonize the prompt for SGLang/GPT-OSS
-        Harmonize(
-            prompt_column="user_prompt",
-        ),
-        # Step 3: Drop columns we don't need for inference
-        DropColumns(
-            columns=[
-                "question",
-                "user_prompt",
-            ],
-            errors="ignore",
-        ),
-        # Step 4: Add metadata columns since we don't want to do a dict update every iteration
-        AddStaticColumns(
-            {
-                "stream": True,
-                "max_new_tokens": 32768,
-                "temperature": 1.0,
-                "top_p": 1.0,
-                "tok_k": -1,
-            }
-        ),
-    ]
 
 
 def create_sglang_client(tmp_dir: Path) -> HTTPEndpointClient:
@@ -334,43 +200,11 @@ def run_main(args):
     try:
         # Always generate GPQA diamond dataset
         print("Generating GPQA diamond dataset...")
-        df = generate_gpqa_dataset(
-            datasets_dir="datasets",
-            force=args.force_regenerate,
-        )
-        print(f"Loaded {len(df)} samples from GPQA diamond")
-
-        # Step 2: Create transforms
-        print("Creating transforms...")
-        transforms = create_transforms()
-
-        # Step 3: Create Dataset with transforms (transforms will be applied during load())
-        print("Creating dataset with transforms...")
-        print(df.columns)
-        df.to_parquet("datasets/gqpa_diamond_pre-transformed_gpt-oss.parquet")
-        gpqa_dataset = GPQA(
-            df, transforms=transforms, repeats=num_repeats
-        )  # Artificial Analysis uses 5 repeats
+        gpqa_dataset = GPQA_MLPerf.get_gpqa_dataloader(num_repeats=num_repeats)
         gpqa_dataset.load()
         # Always generate AIME25 dataset
         print("Generating AIME25 dataset...")
-        df = generate_aime25_dataset(
-            datasets_dir="datasets",
-            force=args.force_regenerate,
-        )
-        print(f"Loaded {len(df)} samples from AIME25")
-
-        # Step 2: Create transforms
-        print("Creating transforms...")
-        transforms = create_aime25_transforms()
-
-        # Step 3: Create Dataset with transforms (transforms will be applied during load())
-        print("Creating dataset with transforms...")
-        print(df.columns)
-        df.to_parquet("datasets/aime25_pre-transformed_gpt-oss.parquet")
-        aime25_dataset = AIME25(
-            df, transforms=transforms, repeats=num_repeats
-        )  # Artificial Analysis uses 5 repeats
+        aime25_dataset = AIME_MLPerf.get_aime25_dataloader(num_repeats=num_repeats)
         aime25_dataset.load()
         print(f"Dataset loaded with {aime25_dataset.num_samples()} samples")
 
@@ -394,7 +228,7 @@ def run_main(args):
 def main():
     """Main entry point for the manual example."""
     parser = argparse.ArgumentParser(
-        description="GPQA dataset example with SGLang endpoint",
+        description="GPQA and AIME25 MLPerf dataset example with SGLang endpoint",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -436,7 +270,7 @@ def main():
     args = parser.parse_args()
 
     print("=" * 60)
-    print("GPQA Dataset Example with SGLang")
+    print("GPQA and AIME25 MLPerf Dataset Example with SGLang")
     print("=" * 60)
     print("\nConfiguration:")
     print(f"  SGLang endpoint: {SGLANG_ENDPOINT}")

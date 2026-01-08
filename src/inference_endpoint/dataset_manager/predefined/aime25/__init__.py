@@ -18,6 +18,12 @@ from logging import getLogger
 from pathlib import Path
 
 import pandas as pd
+from inference_endpoint.dataset_manager.transforms import (
+    AddStaticColumns,
+    DropColumns,
+    Harmonize,
+    UserPromptFormatter,
+)
 
 from ...dataset import Dataset, load_from_huggingface
 
@@ -119,3 +125,81 @@ class AIME25(
         df.to_parquet(dst_path)
         logger.info(f"Saved {len(df)} samples to {dst_path}")
         return df
+
+    # @classmethod
+    # def generate_aime25_dataset(
+    #     cls,
+    #     datasets_dir: Path,
+    #     max_samples: int | None = None,
+    #     force: bool = False,
+    # ) -> pd.DataFrame:
+    #     """Generate the AIME25 dataset to a file."""
+    #     df = AIME25.generate(
+    #         datasets_dir=Path(datasets_dir),
+    #         max_samples=max_samples,
+    #         force=force,
+    #     )
+    #     return df
+
+
+class AIME_MLPerf(AIME25):
+    """AIME_MLPerf: AIME 2025 MLPerf Dataset
+    Reference: https://huggingface.co/datasets/opencompass/AIME2025/
+    """
+
+    @classmethod
+    def generate(
+        cls,
+        datasets_dir: Path,
+        max_samples: int | None = None,
+        force: bool = False,
+    ) -> pd.DataFrame:
+        """Generate the AIME25 MLPerf dataset to a file."""
+        df = AIME25.generate(
+            datasets_dir=Path(datasets_dir),
+            max_samples=max_samples,
+            force=force,
+        )
+        return df
+
+    @classmethod
+    def create_aime25_transforms(cls) -> list:
+        """Create the list of transforms to apply to the AIME25 dataset."""
+        prompt_format = "{question}\nPlease reason step by step, and put your final answer within \\boxed{{}}."
+
+        return [
+            # Step 1: Format the prompt from question and choices
+            UserPromptFormatter(
+                user_prompt_format=prompt_format,
+                output_column="user_prompt",
+            ),
+            # Step 2: Harmonize the prompt for SGLang/GPT-OSS
+            Harmonize(
+                prompt_column="user_prompt",
+            ),
+            # Step 3: Drop columns we don't need for inference
+            DropColumns(
+                columns=[
+                    "question",
+                    "user_prompt",
+                ],
+                errors="ignore",
+            ),
+            # Step 4: Add metadata columns since we don't want to do a dict update every iteration
+            AddStaticColumns(
+                {
+                    "stream": True,
+                    "max_new_tokens": 32768,
+                    "temperature": 1.0,
+                    "top_p": 1.0,
+                    "top_k": -1,
+                }
+            ),
+        ]
+
+    @classmethod
+    def get_aime25_dataloader(cls, num_repeats: int = 5):
+        df = AIME25.generate(datasets_dir=Path("datasets"))
+        transforms = AIME_MLPerf.create_aime25_transforms()
+        aime25_dataset = AIME25(df, transforms=transforms, repeats=num_repeats)
+        return aime25_dataset
