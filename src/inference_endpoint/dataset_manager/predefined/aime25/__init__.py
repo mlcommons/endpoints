@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import random
+import re
 from logging import getLogger
 from pathlib import Path
 
@@ -28,6 +29,16 @@ from inference_endpoint.dataset_manager.transforms import (
 from ...dataset import Dataset, load_from_huggingface
 
 logger = getLogger(__name__)
+
+
+def normalize_number(s):
+    """Normalize a number string to an integer.
+    Reference https://github.com/openai/gpt-oss/blob/48db88d8e29f48493fe75f084a8c9bd900a2b92f/gpt_oss/evals/aime_eval.py#L20
+    """
+    match = re.match(r"\d+", s)  # match digits from the start
+    if not match:
+        return None
+    return int(match.group(0))
 
 
 class AIME25(
@@ -110,12 +121,15 @@ class AIME25(
 
         processed_rows = []
         for _, row in df.iterrows():
-            correct_answer = row["answer"]
-
+            correct_answer = (
+                normalize_number(row["answer"])
+                if isinstance(row["answer"], str)
+                else row["answer"]
+            )
             # Create processed row
             processed_row = {
                 "question": row["question"],  # Original question
-                "answer": correct_answer,
+                "answer": str(correct_answer),
             }
 
             processed_rows.append(processed_row)
@@ -125,21 +139,6 @@ class AIME25(
         df.to_parquet(dst_path)
         logger.info(f"Saved {len(df)} samples to {dst_path}")
         return df
-
-    # @classmethod
-    # def generate_aime25_dataset(
-    #     cls,
-    #     datasets_dir: Path,
-    #     max_samples: int | None = None,
-    #     force: bool = False,
-    # ) -> pd.DataFrame:
-    #     """Generate the AIME25 dataset to a file."""
-    #     df = AIME25.generate(
-    #         datasets_dir=Path(datasets_dir),
-    #         max_samples=max_samples,
-    #         force=force,
-    #     )
-    #     return df
 
 
 class AIME_MLPerf(AIME25):

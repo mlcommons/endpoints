@@ -19,7 +19,7 @@ Dataset Manager for the MLPerf Inference Endpoint Benchmarking System.
 This module handles dataset loading, preprocessing, and management.
 """
 
-from .dataset import Dataset
+from .dataset import Dataset, EmptyDataset
 from .factory import DataLoaderFactory
 from .transforms import (
     AddStaticColumns,
@@ -33,6 +33,7 @@ from .transforms import (
 
 __all__ = [
     "Dataset",
+    "EmptyDataset",
     "DataLoaderFactory",
     "ColumnNameRemap",
     "AddStaticColumns",

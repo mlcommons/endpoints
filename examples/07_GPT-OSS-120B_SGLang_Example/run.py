@@ -34,7 +34,7 @@ from pathlib import Path
 from inference_endpoint import metrics
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import LoadPattern, LoadPatternType
-from inference_endpoint.dataset_manager.dataset import Dataset
+from inference_endpoint.dataset_manager import Dataset, EmptyDataset
 from inference_endpoint.dataset_manager.predefined.aime25 import AIME25, AIME_MLPerf
 from inference_endpoint.dataset_manager.predefined.gpqa import GPQA, GPQA_MLPerf
 from inference_endpoint.endpoint_client.configs import (
@@ -57,7 +57,7 @@ from tqdm import tqdm
 
 # Configuration for SGLang server
 SGLANG_SERVER_HOST = "localhost"
-SGLANG_SERVER_PORT = 3000
+SGLANG_SERVER_PORT = 30000
 SGLANG_ENDPOINT = f"http://{SGLANG_SERVER_HOST}:{SGLANG_SERVER_PORT}/generate"
 
 
@@ -100,19 +100,6 @@ def create_sglang_client(tmp_dir: Path) -> HTTPEndpointClient:
 
     client = HTTPEndpointClient(http_config, aiohttp_config, zmq_config)
     return client
-
-
-class EmptyDataset(Dataset):
-    """Empty dataset for performance run."""
-
-    def __init__(self):
-        super().__init__(None)
-
-    def load_sample(self, index: int):
-        return None
-
-    def num_samples(self):
-        return 0
 
 
 def run_benchmark_session(

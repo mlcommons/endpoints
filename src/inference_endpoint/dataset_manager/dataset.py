@@ -323,12 +323,6 @@ def load_from_huggingface(
     load_options = load_options or {}
     cache_options = cache_options or {}
 
-    # if cache_dir is not None and cache_dir.exists():
-    #     try:
-    #         ds = load_from_disk(str(cache_dir), **cache_options)
-    #         return ds[split].to_pandas()
-    #     except Exception as e:
-    #         logger.warning(f"Error loading dataset from cache: {e}")
     ds = load_dataset(dataset_path, dataset_name, **load_options)
 
     if cache_dir is not None:
@@ -450,3 +444,16 @@ class Dataset:
 
     def num_samples(self) -> int:
         return len(self.data)
+
+
+class EmptyDataset(Dataset):
+    """Empty dataset for performance run."""
+
+    def __init__(self):
+        super().__init__(None)
+
+    def load_sample(self, index: int):
+        return None
+
+    def num_samples(self):
+        return 0
