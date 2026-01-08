@@ -29,6 +29,8 @@ from __future__ import annotations
 
 import argparse
 import random
+import shutil
+import tempfile
 from pathlib import Path
 
 import pandas as pd
@@ -247,9 +249,9 @@ def run_benchmark_session(dataset: Dataset, issuer: HttpClientSampleIssuer, args
 def run_main(args):
     """Main function to run the example."""
     # Setup paths
-    tmp_dir = Path("/tmp/sglang_manual_example")
-    tmp_dir.mkdir(parents=True, exist_ok=True)
+    tmp_dir = Path(tempfile.mkdtemp(prefix="sglang_manual_example_"))
 
+    client = None
     try:
         # Step 1: Generate GPQA dataset
         print("Generating GPQA diamond dataset...")
@@ -266,7 +268,7 @@ def run_main(args):
         # Step 3: Create Dataset with transforms (transforms will be applied during load())
         print("Creating dataset with transforms...")
         print(df.columns)
-        df.to_parquet("datasets/gqpa_diamond_pre-transformed_gpt-oss.parquet")
+        df.to_parquet("datasets/gpqa_diamond_pre-transformed_gpt-oss.parquet")
         dataset = GPQA(
             df, transforms=transforms, repeats=5
         )  # Artificial Analysis uses 5 repeats
@@ -286,8 +288,9 @@ def run_main(args):
 
     finally:
         # Cleanup
-        if "client" in locals():
+        if client is not None:
             client.shutdown()
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 def main():

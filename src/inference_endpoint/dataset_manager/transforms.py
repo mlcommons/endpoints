@@ -80,7 +80,7 @@ class ColumnNameRemap(Transform):
     and values are the new column names.
     """
 
-    def __init__(self, column_mapping: dict[str, str], inplace: bool = True):
+    def __init__(self, column_mapping: dict[str, str], inplace: bool = False):
         """Initialize the ColumnNameRemap transform.
 
         Args:
@@ -171,7 +171,7 @@ class Harmonize(RowProcessor):
 
         Args:
             tokenizer_name: The name of the tokenizer to use for the dataset.
-            encoding_name: The name of the HarmonyEncoding enum member to use. If not a valid
+            encoding_name: The name of the HarmonyEncoding enum member to use.
             reasoning_effort: The reasoning effort to use for the dataset.
             conversation_start_date: The start date of the conversation.
             prompt_column: The name of the column containing the user prompt.
