@@ -73,12 +73,20 @@ class AIME25(
             return pd.read_parquet(dst_path)
 
         try:
-            df = load_from_huggingface(
+            df_i = load_from_huggingface(
                 "opencompass/AIME2025",
                 dataset_name="AIME2025-I",
                 split="test",
                 cache_dir=datasets_dir / "hf_cache" / "aime25",
             )
+            df_ii = load_from_huggingface(
+                "opencompass/AIME2025",
+                dataset_name="AIME2025-II",
+                split="test",
+                cache_dir=datasets_dir / "hf_cache" / "aime25",
+            )
+            df = pd.concat([df_i, df_ii])
+            logger.info(f"Loaded {len(df)} samples from AIME25-I and AIME25-II")
         except Exception as e:
             logger.error(f"Error loading dataset: {e}")
             logger.error("Note: This dataset may require HuggingFace authentication.")
@@ -93,8 +101,6 @@ class AIME25(
             sampled_indices = rng.sample(range(len(df)), max_samples)
             df = df.iloc[sampled_indices].reset_index(drop=True)
             logger.info(f"Sampled {max_samples} questions")
-
-        rng = random.Random(seed)
 
         processed_rows = []
         for _, row in df.iterrows():

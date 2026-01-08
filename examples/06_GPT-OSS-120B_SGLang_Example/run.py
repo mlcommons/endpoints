@@ -51,6 +51,8 @@ from inference_endpoint.endpoint_client.configs import (
 )
 from inference_endpoint.endpoint_client.http_client import HTTPEndpointClient
 from inference_endpoint.endpoint_client.http_sample_issuer import HttpClientSampleIssuer
+from inference_endpoint.evaluation.extractor import ABCDExtractor, BoxedMathExtractor
+from inference_endpoint.evaluation.scoring import PassAt1Scorer
 from inference_endpoint.load_generator import (
     BenchmarkSession,
     MaxThroughputScheduler,
@@ -62,7 +64,7 @@ from tqdm import tqdm
 
 # Configuration for SGLang server
 SGLANG_SERVER_HOST = "localhost"
-SGLANG_SERVER_PORT = 3000
+SGLANG_SERVER_PORT = 30000
 SGLANG_ENDPOINT = f"http://{SGLANG_SERVER_HOST}:{SGLANG_SERVER_PORT}/generate"
 
 
@@ -166,7 +168,7 @@ def create_transforms() -> list:
                 "max_new_tokens": 32768,
                 "temperature": 1.0,
                 "top_p": 1.0,
-                "tok_k": -1,
+                "top_k": -1,
             }
         ),
     ]
@@ -247,7 +249,9 @@ class EmptyDataset(Dataset):
         return 0
 
 
-def run_benchmark_session(dataset: Dataset, issuer: HttpClientSampleIssuer, args):
+def run_benchmark_session(
+    accuracy_datasets: list[Dataset], issuer: HttpClientSampleIssuer, args
+):
     """Run a benchmark session with the SGLang endpoint.
 
     Args:
@@ -276,7 +280,9 @@ def run_benchmark_session(dataset: Dataset, issuer: HttpClientSampleIssuer, args
     scheduler = MaxThroughputScheduler(rt_settings, WithoutReplacementSampleOrder)
 
     # Run the benchmark session
-    n_total = dataset.num_samples() * dataset.repeats
+    n_total = sum(
+        [dataset.num_samples() * dataset.repeats for dataset in accuracy_datasets]
+    )
 
     with tqdm(desc="GPQA Benchmark", total=n_total, unit="samples") as pbar:
         pbar_hook.set_pbar(pbar)
@@ -285,13 +291,37 @@ def run_benchmark_session(dataset: Dataset, issuer: HttpClientSampleIssuer, args
             EmptyDataset(),
             issuer,
             scheduler,
-            accuracy_datasets=[dataset],
-            name="gpqa_sglang_benchmark",
+            accuracy_datasets=accuracy_datasets,
+            name="gpqa_aime25_sglang_benchmark",
             report_dir=args.report_dir,
             dump_events_log=True,
             max_shutdown_timeout_s=None,
         )
         sess.wait_for_test_end()
+
+    # Create the scorer
+    scorer = PassAt1Scorer(
+        GPQA.DATASET_ID,
+        accuracy_datasets[0],
+        args.report_dir,
+        extractor=ABCDExtractor,
+    )
+
+    # Score the dataset
+    score, n_repeats = scorer.score()
+    print(f"Pass@1 Score ({n_repeats} repeats): {score}")
+
+    scorer = PassAt1Scorer(
+        AIME25.DATASET_ID,
+        accuracy_datasets[1],
+        args.report_dir,
+        extractor=BoxedMathExtractor,
+        ground_truth_column="answer",
+    )
+
+    # Score the dataset
+    score, n_repeats = scorer.score()
+    print(f"Pass@1 Score ({n_repeats} repeats): {score}")
 
 
 def run_main(args):
@@ -299,51 +329,50 @@ def run_main(args):
     # Setup paths
     tmp_dir = Path("/tmp/sglang_manual_example")
     tmp_dir.mkdir(parents=True, exist_ok=True)
+    num_repeats = args.num_repeats
 
     try:
-        if False:
-            print("Generating GPQA diamond dataset...")
-            df = generate_gpqa_dataset(
-                datasets_dir="datasets",
-                force=args.force_regenerate,
-            )
-            print(f"Loaded {len(df)} samples from GPQA diamond")
+        # Always generate GPQA diamond dataset
+        print("Generating GPQA diamond dataset...")
+        df = generate_gpqa_dataset(
+            datasets_dir="datasets",
+            force=args.force_regenerate,
+        )
+        print(f"Loaded {len(df)} samples from GPQA diamond")
 
-            # Step 2: Create transforms
-            print("Creating transforms...")
-            transforms = create_transforms()
+        # Step 2: Create transforms
+        print("Creating transforms...")
+        transforms = create_transforms()
 
-            # Step 3: Create Dataset with transforms (transforms will be applied during load())
-            print("Creating dataset with transforms...")
-            print(df.columns)
-            df.to_parquet("datasets/gqpa_diamond_pre-transformed_gpt-oss.parquet")
-            dataset = GPQA(
-                df, transforms=transforms, repeats=5
-            )  # Artificial Analysis uses 5 repeats
-            dataset.load()
-        else:
-            print("Generating AIME25 dataset...")
-            df = generate_aime25_dataset(
-                datasets_dir="datasets",
-                force=args.force_regenerate,
-            )
-            print(f"Loaded {len(df)} samples from AIME25")
+        # Step 3: Create Dataset with transforms (transforms will be applied during load())
+        print("Creating dataset with transforms...")
+        print(df.columns)
+        df.to_parquet("datasets/gqpa_diamond_pre-transformed_gpt-oss.parquet")
+        gpqa_dataset = GPQA(
+            df, transforms=transforms, repeats=num_repeats
+        )  # Artificial Analysis uses 5 repeats
+        gpqa_dataset.load()
+        # Always generate AIME25 dataset
+        print("Generating AIME25 dataset...")
+        df = generate_aime25_dataset(
+            datasets_dir="datasets",
+            force=args.force_regenerate,
+        )
+        print(f"Loaded {len(df)} samples from AIME25")
 
-            # Step 2: Create transforms
-            print("Creating transforms...")
-            transforms = create_aime25_transforms()
+        # Step 2: Create transforms
+        print("Creating transforms...")
+        transforms = create_aime25_transforms()
 
-            # Step 3: Create Dataset with transforms (transforms will be applied during load())
-            print("Creating dataset with transforms...")
-            print(df.columns)
-            df.to_parquet("datasets/aime25_pre-transformed_gpt-oss.parquet")
-            # breakpoint()
-            dataset = AIME25(
-                df, transforms=transforms, repeats=5
-            )  # Artificial Analysis uses 5 repeats
-            dataset.load()
-
-        print(f"Dataset loaded with {dataset.num_samples()} samples")
+        # Step 3: Create Dataset with transforms (transforms will be applied during load())
+        print("Creating dataset with transforms...")
+        print(df.columns)
+        df.to_parquet("datasets/aime25_pre-transformed_gpt-oss.parquet")
+        aime25_dataset = AIME25(
+            df, transforms=transforms, repeats=num_repeats
+        )  # Artificial Analysis uses 5 repeats
+        aime25_dataset.load()
+        print(f"Dataset loaded with {aime25_dataset.num_samples()} samples")
 
         # Step 4: Create SGLang client
         print(f"Creating SGLang client for endpoint: {SGLANG_ENDPOINT}")
@@ -352,7 +381,7 @@ def run_main(args):
 
         # Step 5: Run benchmark session
         print("Starting benchmark session...")
-        run_benchmark_session(dataset, sample_issuer, args)
+        run_benchmark_session([gpqa_dataset, aime25_dataset], sample_issuer, args)
 
         print(f"\nBenchmark complete! Results saved to {args.report_dir}/")
 
@@ -395,6 +424,13 @@ def main():
         type=str,
         default="gpqa_sglang_report",
         help="Directory to save benchmark reports (default: gpqa_sglang_report)",
+    )
+
+    parser.add_argument(
+        "--num-repeats",
+        type=int,
+        default=1,
+        help="Number of repeats to run (default: 1)",
     )
 
     args = parser.parse_args()
