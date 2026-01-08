@@ -243,8 +243,8 @@ def main():
     parser.add_argument(
         "--report-dir",
         type=str,
-        default="gpqa_sglang_report",
-        help="Directory to save benchmark reports (default: gpqa_sglang_report)",
+        default="gpqa_aime25_sglang_report",
+        help="Directory to save benchmark reports (default: gpqa_aime25_sglang_report)",
     )
 
     parser.add_argument(

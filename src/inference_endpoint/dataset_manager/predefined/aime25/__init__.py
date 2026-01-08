@@ -62,16 +62,15 @@ class AIME25(
         max_samples: int | None = None,
         force: bool = False,
     ) -> pd.DataFrame:
-        """Generates the GPQA reference dataset for accuracy evaluation.
+        """Generates the AIME25 reference dataset for accuracy evaluation.
 
-        The dataset variant is pulled from HuggingFace and is pre-processed by shuffling
-        the choices are randomly for each question, and saved to a parquet file.
+        The dataset variant is pulled from HuggingFace and is processed by extracting the correct answer and saving to a parquet file.
 
         Args:
             datasets_dir: The root datasets directory to save the dataset under. A
                 subdirectory with the name and variant of the dataset will be created if
                 it does not exist.
-            seed: The random seed to use for shuffling the choices. Defaults to 0.
+            seed: The random seed to use for sampling the dataset. Defaults to 0.
             max_samples: The maximum number of samples save to the file. If None, the
                 entire dataset will be used as-is without shuffling. Otherwise, `max_samples`
                 samples will be randomly sampled from the dataset.
