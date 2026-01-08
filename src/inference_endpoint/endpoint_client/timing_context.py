@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Timing context for request overhead measurement."""
+"""Timing context and printers for request overhead measurement."""
 
 from __future__ import annotations
 
@@ -30,48 +30,10 @@ logger = logging.getLogger(__name__)
 # Unit conversion constant: nanoseconds to milliseconds
 _NS_PER_MS: float = 1_000_000.0
 
-# Type alias for timing printer callable
-TimingPrinter = Callable[[str, str, dict[str, float]], None]
 
-
-class LoggingTimingPrinter:
-    """
-    Logging-based timing printer.
-
-    Emits timing metrics via Python logging. Checks if the log level is enabled
-    at construction time to short-circuit __call__ when logging is disabled.
-
-    Args:
-        level: Log level to use. Default is TRACE (requires -vvv).
-
-    Example:
-        >>> printer = LoggingTimingPrinter()  # Uses TRACE level
-        >>> printer("query-1", "pre", {"overhead": 1.5})
-    """
-
-    __slots__ = ("_level", "_enabled")
-
-    def __init__(self, level: int = TRACE):
-        self._level = level
-        self._enabled = logger.isEnabledFor(level)
-
-    def __call__(self, query_id: str, phase: str, metrics: dict[str, float]) -> None:
-        """Emit timing metrics via logging."""
-        if not self._enabled:
-            return
-
-        duration_parts = []
-        timestamp_parts = []
-        for name, value in metrics.items():
-            if name.startswith("t_"):
-                # Raw timestamps in nanoseconds (for IPC delay calculation)
-                timestamp_parts.append(f"{name}={int(value)}")
-            else:
-                # Duration metrics in milliseconds
-                duration_parts.append(f"d_{name}={value:.4f}ms")
-
-        log_parts = duration_parts + timestamp_parts
-        logger.log(self._level, f"[{query_id}] timing_{phase}: {', '.join(log_parts)}")
+# =============================================================================
+# Request Timing Context
+# =============================================================================
 
 
 class RequestTimingContext(dict):
@@ -90,7 +52,7 @@ class RequestTimingContext(dict):
         >>> timing["t_recv"] = time.monotonic_ns()
         >>> timing["t_http"] = time.monotonic_ns()
         >>> metrics = timing.compute_pre_overheads()
-        >>> printer(timing.id, "pre", metrics)
+        >>> printer.write({"query_id": timing.id, "phase": "pre", "metrics": metrics})
     """
 
     __slots__ = ("id",)
@@ -104,6 +66,7 @@ class RequestTimingContext(dict):
 
         Returns:
             Dict of metric name to value (durations in milliseconds).
+            Includes pool state (pool_idle, pool_acquired, pool_waiters) if captured.
         """
         t_recv = self["t_recv"]
         t_encode = self["t_encode"]
@@ -153,62 +116,48 @@ class RequestTimingContext(dict):
         }
 
 
-class MemoryBufferPrinter:
+# =============================================================================
+# Printers
+# =============================================================================
+
+
+class BufferPrinter:
     """
-    In-memory timing printer that buffers entries and flushes to file.
+    Buffered JSONL file writer - stores dicts, serializes on flush.
 
-    Accumulates timing data in memory during the run to avoid per-request I/O.
-    Automatically flushes on exit, interrupt (SIGINT), or termination (SIGTERM).
-
-    Directories are created during initialization to fail fast on permission errors.
-
-    Each line is a JSON object with:
-        - query_id: The request ID
-        - worker_id: The worker process ID
-        - phase: "pre" or "post"
-        - metrics: Dict of timing metrics (durations in ms, timestamps in ns)
+    Accumulates data in memory during the run to minimize per-write overhead.
+    Serialization happens once during flush for efficiency.
 
     Example:
-        >>> printer = MemoryBufferPrinter(Path("/tmp/timing.jsonl"), worker_id=0)
-        >>> printer("query-1", "pre", {"overhead": 1.5})
-        >>> printer("query-1", "post", {"end_to_end": 10.0})
-        >>> # Flushes automatically on exit, or call printer.flush() manually
+        >>> printer = BufferPrinter(Path("/tmp/data.jsonl"))
+        >>> printer.write({"query_id": "q1", "phase": "pre", "metrics": {...}})
+        >>> printer.flush()  # Serializes and writes all entries
     """
 
-    __slots__ = ("path", "worker_id", "_entries", "_flushed")
+    __slots__ = ("path", "_entries", "_flushed")
 
-    def __init__(self, path: Path, worker_id: int):
+    def __init__(self, path: Path):
         self.path = path
-        self.worker_id = worker_id
-        self._entries: list[bytes] = []
+        self._entries: list[dict] = []
         self._flushed = False
-
-        # Create directories during init to fail fast on permission errors
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
-    def __call__(self, query_id: str, phase: str, metrics: dict[str, float]) -> None:
-        """Buffer a timing entry."""
-        entry = {
-            "query_id": query_id,
-            "worker_id": self.worker_id,
-            "phase": phase,
-            "metrics": metrics,
-        }
-        self._entries.append(orjson.dumps(entry))
+    def write(self, data: dict) -> None:
+        """Buffer a dict entry."""
+        self._entries.append(data)
 
     def flush(self) -> None:
-        """Write all buffered entries to file and clear buffer."""
-        if not self._entries or self._flushed:
+        """Serialize and write all buffered entries to file."""
+        if self._flushed or not self._entries:
             return
 
         try:
             with open(self.path, "wb") as f:
-                f.write(b"\n".join(self._entries))
+                f.write(b"\n".join(orjson.dumps(e) for e in self._entries))
                 f.write(b"\n")
-            logger.debug(f"Wrote {len(self._entries)} timing entries to {self.path}")
+            logger.debug(f"Wrote {len(self._entries)} entries to {self.path}")
         except Exception as e:
-            # Log error but don't raise - we're likely in cleanup
-            logger.error(f"Failed to write timing entries: {e}")
+            logger.error(f"Failed to write to {self.path}: {e}")
         finally:
             self._entries.clear()
             self._flushed = True
@@ -217,7 +166,57 @@ class MemoryBufferPrinter:
         """Return number of buffered entries."""
         return len(self._entries)
 
-    @property
-    def buffer_size_bytes(self) -> int:
-        """Return total size of buffered entries in bytes."""
-        return sum(len(entry) for entry in self._entries)
+
+class LogPrinter:
+    """
+    Log-based printer with configurable formatter.
+
+    Emits data via Python logging.
+
+    Example:
+        >>> def fmt_timing(d): return f"[{d['query_id']}] {d['phase']}: ..."
+        >>> printer = LogPrinter(formatter=fmt_timing)
+        >>> printer.write({"query_id": "q1", "phase": "pre", "metrics": {...}})
+    """
+
+    __slots__ = ("_level", "_formatter")
+
+    def __init__(
+        self, level: int = TRACE, formatter: Callable[[dict], str] | None = None
+    ):
+        self._level = level
+        self._formatter = formatter
+
+    def write(self, data: dict) -> None:
+        """Log formatted data."""
+        if not logger.isEnabledFor(self._level):
+            return
+        msg = self._formatter(data) if self._formatter else str(data)
+        logger.log(self._level, msg)
+
+    def flush(self) -> None:
+        """No-op for log printer."""
+        pass
+
+
+# =============================================================================
+# Log Formatters
+# =============================================================================
+
+
+def format_timing_log(data: dict) -> str:
+    """Format timing entry for logging."""
+    query_id = data["query_id"]
+    phase = data["phase"]
+    metrics = data["metrics"]
+
+    parts = []
+    for name, value in metrics.items():
+        if name.startswith("t_"):
+            parts.append(f"{name}={int(value)}")
+        elif isinstance(value, float):
+            parts.append(f"d_{name}={value:.4f}ms")
+        else:
+            parts.append(f"{name}={value}")
+
+    return f"[{query_id}] timing_{phase}: {', '.join(parts)}"

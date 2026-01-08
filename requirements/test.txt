@@ -22,4 +22,4 @@ pytest-timeout==2.4.0
 pytest-xdist==3.8.0
 
 # HTTP/1.1 validation for unit tests
-h11>=0.14.0
+h11==0.16.0

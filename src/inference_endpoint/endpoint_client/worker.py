@@ -41,10 +41,10 @@ from inference_endpoint.endpoint_client.configs import (
     ZMQConfig,
 )
 from inference_endpoint.endpoint_client.timing_context import (
-    LoggingTimingPrinter,
-    MemoryBufferPrinter,
+    BufferPrinter,
+    LogPrinter,
     RequestTimingContext,
-    TimingPrinter,
+    format_timing_log,
 )
 from inference_endpoint.endpoint_client.types import (
     HttpRequestTemplate,
@@ -102,13 +102,13 @@ def worker_main(
 
     uvloop.install()
 
-    # Create timing printer - MemoryBufferPrinter if event_logs_dir is set
-    timing_printer: TimingPrinter
+    # Create timing printer
     if http_config.event_logs_dir is not None:
-        path = http_config.event_logs_dir / f"timing_worker_{worker_id}.jsonl"
-        timing_printer = MemoryBufferPrinter(path, worker_id)
+        timing_printer = BufferPrinter(
+            http_config.event_logs_dir / f"timing_worker_{worker_id}.jsonl"
+        )
     else:
-        timing_printer = LoggingTimingPrinter()
+        timing_printer = LogPrinter(formatter=format_timing_log)
 
     # Create and run worker
     try:
@@ -125,9 +125,7 @@ def worker_main(
         logger.error(f"Crashed: {type(e).__name__}: {str(e)}\n{traceback.format_exc()}")
         sys.exit(1)
     finally:
-        # Flush timing entries to file
-        if http_config.event_logs_dir is not None:
-            timing_printer.flush()
+        timing_printer.flush()
 
 
 class Worker:
@@ -139,7 +137,7 @@ class Worker:
         http_config: HTTPClientConfig,
         aiohttp_config: AioHttpConfig,
         zmq_config: ZMQConfig,
-        timing_printer: TimingPrinter,
+        timing_printer: BufferPrinter | LogPrinter,
     ):
         """Initialize worker with configurations."""
         self.worker_id = worker_id
@@ -471,16 +469,27 @@ class Worker:
         try:
             # Acquire connection using cached request
             prepared.timing["t_conn_start"] = time.monotonic_ns()
-            conn = await self.tcp_connector.connect(
-                self._http_template.connection_request,
-                traces=None,
-                timeout=self._timeout,
+
+            # Direct pool access via _get() - the fast path in aiohttp 3.13+.
+            # _get() returns Connection directly if available in pool, None otherwise.
+            # This bypasses connect()'s timeout ceiling, available_connections checks,
+            # and waiter queue management when we have warmed-up connections.
+            conn = await self.tcp_connector._get(
+                self._http_template.connection_request.connection_key, []
             )
+            if conn is None:
+                # Slow path: pool empty, use public connect() API
+                conn = await self.tcp_connector.connect(
+                    self._http_template.connection_request,
+                    traces=[],
+                    timeout=self._timeout,
+                )
+            prepared.timing["t_conn_end"] = time.monotonic_ns()
+
             # NOTE(vir):
             # Need to re-do this every request to recreate HttpResponseParser.
             # The parser is stateful and tracks current response, so cannot be cached.
             conn.protocol.set_response_params(**self._response_params)
-            prepared.timing["t_conn_end"] = time.monotonic_ns()
 
             # Record time just-before request is issued
             if self.http_config.record_worker_events:
@@ -533,7 +542,9 @@ class Worker:
 
             # Emit pre-send timing metrics
             metrics = prepared.timing.compute_pre_overheads()
-            self._timing_printer(prepared.timing.id, "pre", metrics)
+            self._timing_printer.write(
+                {"query_id": prepared.timing.id, "phase": "pre", "metrics": metrics}
+            )
             return True
 
         except Exception as e:
@@ -633,7 +644,9 @@ class Worker:
 
         # Emit post-receive timing metrics
         metrics = prepared.timing.compute_post_overheads()
-        self._timing_printer(prepared.query_id, "post", metrics)
+        self._timing_printer.write(
+            {"query_id": prepared.query_id, "phase": "post", "metrics": metrics}
+        )
 
     @profile
     async def _handle_streaming_response(self, prepared: PreparedRequest) -> None:
@@ -680,7 +693,9 @@ class Worker:
 
         # Emit post-receive timing metrics
         metrics = prepared.timing.compute_post_overheads()
-        self._timing_printer(query_id, "post", metrics)
+        self._timing_printer.write(
+            {"query_id": query_id, "phase": "post", "metrics": metrics}
+        )
 
     async def _handle_error(self, query_id: str, error: Exception | str) -> None:
         """Report error for Query."""
