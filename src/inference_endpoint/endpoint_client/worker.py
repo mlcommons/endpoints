@@ -41,6 +41,7 @@ from inference_endpoint.endpoint_client.configs import (
 )
 from inference_endpoint.endpoint_client.timing_context import (
     BufferPrinter,
+    DisabledPrinter,
     LogPrinter,
     RequestTimingContext,
     format_timing_log,
@@ -137,7 +138,7 @@ class Worker:
         http_config: HTTPClientConfig,
         aiohttp_config: AioHttpConfig,
         zmq_config: ZMQConfig,
-        timing_printer: BufferPrinter | LogPrinter,
+        timing_printer: BufferPrinter | LogPrinter | DisabledPrinter | None = None,
     ):
         """Initialize worker with configurations."""
         self.worker_id = worker_id
@@ -145,7 +146,10 @@ class Worker:
         self.aiohttp_config = aiohttp_config
         self.zmq_config = zmq_config
         self._timing_printer = timing_printer
+
         self._shutdown = False
+        if self._timing_printer is None:
+            self._timing_printer = DisabledPrinter()
 
         self._zmq_context: zmq.asyncio.Context | None = None
         self._request_socket: ZMQPullSocket | None = None
@@ -507,7 +511,10 @@ class Worker:
 
         # Await response bytes
         response_bytes = await conn.protocol.read_body()
-        prepared.timing["t_response"] = time.monotonic_ns()
+        t_response = time.monotonic_ns()
+        # For non-streaming, set t_first_chunk = t_response (whole response arrives at once)
+        prepared.timing["t_response"] = t_response
+        prepared.timing["t_first_chunk"] = t_response
 
         # Decode response into QueryResult
         result = self._adapter.decode_response(response_bytes, prepared.query_id)

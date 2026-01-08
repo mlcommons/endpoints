@@ -121,6 +121,20 @@ class RequestTimingContext(dict):
 # =============================================================================
 
 
+class DisabledPrinter:
+    """No-op printer that discards all timing data."""
+
+    __slots__ = ()
+
+    def write(self, data: dict) -> None:
+        """No-op."""
+        pass
+
+    def flush(self) -> None:
+        """No-op."""
+        pass
+
+
 class BufferPrinter:
     """
     Buffered JSONL file writer - stores dicts, serializes on flush.
