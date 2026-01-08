@@ -38,7 +38,7 @@ from inference_endpoint.config.schema import LoadPattern, LoadPatternType
 from inference_endpoint.dataset_manager import Dataset, EmptyDataset
 from inference_endpoint.dataset_manager.predefined.aime25 import (
     AIME25,
-    AIME_GTPOSS_SGLang,
+    AIME_GPTOSS_SGLang,
 )
 from inference_endpoint.dataset_manager.predefined.gpqa import GPQA, GPQA_GPTOSS_SGLang
 from inference_endpoint.endpoint_client.configs import (
@@ -195,7 +195,7 @@ def run_main(args):
         gpqa_dataset.load()
         # Always generate AIME25 dataset
         logging.info("Generating AIME25 dataset...")
-        aime25_dataset = AIME_GTPOSS_SGLang.get_dataloader(num_repeats=num_repeats)
+        aime25_dataset = AIME_GPTOSS_SGLang.get_dataloader(num_repeats=num_repeats)
         aime25_dataset.load()
         logging.info(f"Dataset loaded with {aime25_dataset.num_samples()} samples")
 

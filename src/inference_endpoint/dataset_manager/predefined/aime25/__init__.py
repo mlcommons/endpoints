@@ -140,8 +140,8 @@ class AIME25(
         return df
 
 
-class AIME_GTPOSS_SGLang(AIME25):
-    """AIME_GTPOSS_SGLang: AIME 2025 GTPOSS_SGLang Dataset
+class AIME_GPTOSS_SGLang(AIME25):
+    """AIME_GPTOSS_SGLang: AIME 2025 GPTOSS_SGLang Dataset
     Reference: https://huggingface.co/datasets/opencompass/AIME2025/
     """
 
@@ -198,6 +198,6 @@ class AIME_GTPOSS_SGLang(AIME25):
     @classmethod
     def get_dataloader(cls, num_repeats: int = 5):
         df = AIME25.generate(datasets_dir=Path("datasets"))
-        transforms = AIME_GTPOSS_SGLang.create_transforms()
+        transforms = AIME_GPTOSS_SGLang.create_transforms()
         aime25_dataset = AIME25(df, transforms=transforms, repeats=num_repeats)
         return aime25_dataset
