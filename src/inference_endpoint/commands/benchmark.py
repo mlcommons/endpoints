@@ -431,7 +431,8 @@ def _run_benchmark(
         if config.loadgen_cpu_affinity is not None
         else get_fastest_cpu()
     )
-    set_loadgen_cpu(loadgen_cpu)
+    if loadgen_cpu is not None:
+        set_loadgen_cpu(loadgen_cpu)
 
     # Load tokenizer if model name is provided
     # Priority: CLI args (offline/online modes) > config submission_ref (from-config mode)

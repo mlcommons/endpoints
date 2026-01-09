@@ -28,15 +28,18 @@ except (OSError, AttributeError):
     AVAILABLE_CPUS = set(range(os.cpu_count() or 1))
 
 
-def get_fastest_cpu() -> int:
+def get_fastest_cpu() -> int | None:
     """Return the CPU core with the highest max frequency.
 
     Reads max frequency from sysfs on Linux. Falls back to min available CPU
     if detection fails (e.g., in containers, non-Linux, or missing cpufreq).
 
     Returns:
-        CPU core number with highest max frequency.
+        CPU core number with highest max frequency, or None if no CPUs found.
     """
+    if not AVAILABLE_CPUS:
+        return None
+
     sysfs_base = Path("/sys/devices/system/cpu")
     best_cpu = min(AVAILABLE_CPUS)
     best_freq = 0

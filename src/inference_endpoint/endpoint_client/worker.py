@@ -724,6 +724,10 @@ class WorkerManager:
                     return
 
             # assign CPU affinity round-robin among available CPUs
+            if not cpu_list:
+                logger.warning("No available CPUs for worker pinning")
+                return
+
             for worker_id, pid in self.worker_pids.items():
                 cpus = {cpu_list[worker_id % len(cpu_list)]}
                 set_cpu_affinity(pid=pid, cpus=cpus)
