@@ -49,7 +49,11 @@ from inference_endpoint.metrics.reporter import MetricsReporter
 from inference_endpoint.openai.types import SSEDelta as OpenAISSEDelta
 from inference_endpoint.profiling import profile
 from inference_endpoint.sglang.types import SGLangSSEDelta
-from inference_endpoint.utils.cpu_affinity import AVAILABLE_CPUS, set_cpu_affinity
+from inference_endpoint.utils.cpu_affinity import (
+    AVAILABLE_CPUS,
+    get_cpus_sorted_by_numa_preference,
+    set_cpu_affinity,
+)
 from inference_endpoint.utils.logging import setup_logging
 
 logger = logging.getLogger(__name__)
@@ -703,7 +707,7 @@ class WorkerManager:
     def _pin_workers(self) -> None:
         """
         Pin workers to CPU cores based on config:
-         - "auto": distribute workers across all available CPUs (excluding CPU 0)
+         - "auto": distribute workers across available CPUs
          - list[int]: pin workers to specified cores (round-robin)
          - None or falsy: disable CPU affinity override
         """
@@ -715,7 +719,8 @@ class WorkerManager:
                 case "auto":
                     # NOTE(vir):
                     # AVAILABLE_CPUS already excludes loadgen CPU (see: cpu_affinity.py)
-                    cpu_list = sorted(AVAILABLE_CPUS)
+                    # We further sort by NUMA preference (to favor latency bw loadgen)
+                    cpu_list = get_cpus_sorted_by_numa_preference()
                 case list():
                     cpu_list = sorted(
                         set(self.http_config.cpu_affinity) & AVAILABLE_CPUS
