@@ -13,18 +13,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""
-Endpoint Client for the MLPerf Inference Endpoint Benchmarking System.
+"""Transport abstraction for worker IPC."""
 
-This module provides HTTP client implementation with multiprocessing and ZMQ.
-"""
+from .protocol import (
+    ReceiverTransport,
+    SenderTransport,
+    WorkerConnector,
+    WorkerPoolTransport,
+)
 
-from .configs import AioHttpConfig, HTTPClientConfig
-from .http_client import AsyncHttpEndpointClient, HTTPEndpointClient
+# ZMQ implementation
+from .zmq import ZmqWorkerPoolTransport
 
 __all__ = [
-    "AsyncHttpEndpointClient",
-    "HTTPEndpointClient",
-    "HTTPClientConfig",
-    "AioHttpConfig",
+    # Protocols
+    "ReceiverTransport",
+    "SenderTransport",
+    "WorkerConnector",
+    "WorkerPoolTransport",
+    # Default implementation
+    "ZmqWorkerPoolTransport",
 ]

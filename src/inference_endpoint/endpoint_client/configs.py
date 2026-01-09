@@ -15,7 +15,6 @@
 
 """Configuration classes for HTTP endpoint client."""
 
-import os
 import socket
 from dataclasses import dataclass, field
 from importlib import import_module
@@ -23,14 +22,20 @@ from pathlib import Path
 from typing import Any
 
 import aiohttp
-import zmq
 
 from ..config.schema import APIType
+from .accumulator_protocol import SSEAccumulatorProtocol
 from .adapter_protocol import HttpRequestAdapter
+from .transport.protocol import WorkerPoolTransport
 
 ADAPTER_MAP = {
     APIType.OPENAI: "inference_endpoint.openai.openai_msgspec_adapter.OpenAIMsgspecAdapter",
     APIType.SGLANG: "inference_endpoint.sglang.adapter.SGLangGenerateAdapter",
+}
+
+ACCUMULATOR_MAP = {
+    APIType.OPENAI: "inference_endpoint.openai.accumulator.OpenAISSEAccumulator",
+    APIType.SGLANG: "inference_endpoint.sglang.accumulator.SGLangSSEAccumulator",
 }
 
 
@@ -71,7 +76,13 @@ class HTTPClientConfig:
     streaming_buffer_size: int = 128 * 1024  # 128KB buffer for streaming tokens
 
     # Request adapter for Query/Response <-> Payload/Response bytes
-    adapter: type[HttpRequestAdapter] | None = field(default=None, init=False)
+    adapter: type[HttpRequestAdapter] | None = None  # None: use default
+
+    # SSE accumulator for streaming responses
+    accumulator: type[SSEAccumulatorProtocol] | None = None  # None: use default
+
+    # Worker pool transport class for worker IPC
+    worker_pool_transport: type[WorkerPoolTransport] | None = None  # None: use default
 
     def __post_init__(self):
         # set default adapter in __post_init__ to avoid circular dependency
@@ -86,6 +97,21 @@ class HTTPClientConfig:
             module_path, class_name = adapter_path.rsplit(".", 1)
             module = import_module(module_path)
             self.adapter = getattr(module, class_name)
+
+        if self.accumulator is None:
+            # Default to OpenAI accumulator for unrecognized API types
+            accumulator_path = ACCUMULATOR_MAP.get(
+                self.api_type, ACCUMULATOR_MAP[APIType.OPENAI]
+            )
+            module_path, class_name = accumulator_path.rsplit(".", 1)
+            module = import_module(module_path)
+            self.accumulator = getattr(module, class_name)
+
+        if self.worker_pool_transport is None:
+            # Default to ZMQ worker pool transport
+            from .transport import ZmqWorkerPoolTransport
+
+            self.worker_pool_transport = ZmqWorkerPoolTransport
 
 
 @dataclass
@@ -218,71 +244,4 @@ class AioHttpConfig:
         return aiohttp.TCPConnector(**connector_kwargs)
 
 
-@dataclass
-class ZMQConfig:
-    """Configuration for ZMQ sockets and communication."""
-
-    # Main ZMQ settings
-    zmq_io_threads: int = 4  # Number of ZMQ IO threads ; TODO(vir): needs to scale?
-    zmq_high_water_mark: int = 0  # Max queue size per socket (0=unlimited)
-
-    # ZMQ addresses (use None for auto-generated prefixes using PID)
-    zmq_request_queue_prefix: str | None = None
-    zmq_response_queue_addr: str | None = None
-    zmq_readiness_queue_addr: str | None = None
-
-    # ZMQ socket options
-    zmq_linger: int = 0  # 0 = Don't block on close
-    zmq_immediate: int = 1  # ensure messages only enqueued on READY connections
-    zmq_send_timeout: int = -1  # -1 = Non-blocking send
-    zmq_recv_timeout: int = 1  # Timeout on receive() in ms
-
-    zmq_recv_buffer_size: int = 10 * 1024 * 1024  # 10MB receive buffer (OS level)
-    zmq_send_buffer_size: int = 10 * 1024 * 1024  # 10MB send buffer (OS level)
-
-    def __post_init__(self):
-        """Generate portable ZMQ socket paths if not provided."""
-        if self.zmq_request_queue_prefix is None:
-            self.zmq_request_queue_prefix = ZMQConfig._get_ipc_path(
-                "http_worker_requests"
-            )
-        assert (
-            len(self.zmq_request_queue_prefix) <= zmq.IPC_PATH_MAX_LEN
-        ), "ZMQ request queue prefix is too long"
-
-        if self.zmq_response_queue_addr is None:
-            self.zmq_response_queue_addr = ZMQConfig._get_ipc_path(
-                "http_worker_responses"
-            )
-        assert (
-            len(self.zmq_response_queue_addr) <= zmq.IPC_PATH_MAX_LEN
-        ), "ZMQ response queue address is too long"
-
-        if self.zmq_readiness_queue_addr is None:
-            self.zmq_readiness_queue_addr = ZMQConfig._get_ipc_path(
-                "http_worker_readiness"
-            )
-        assert (
-            len(self.zmq_readiness_queue_addr) <= zmq.IPC_PATH_MAX_LEN
-        ), "ZMQ readiness queue address is too long"
-
-    @staticmethod
-    def _get_ipc_path(name: str) -> str:
-        """Generate an IPC socket path.
-
-        Args:
-            name: Base name for the socket
-
-        Returns:
-            IPC socket path with PID to avoid conflicts
-        """
-        assert os.name != "nt", "Windows not yet supported"
-
-        # Include PID to avoid conflicts between processes
-        pid = os.getpid()
-        ipc_path = f"ipc:///tmp/mlperf_endpoint_{name}_{pid}"
-        assert len(ipc_path) <= zmq.IPC_PATH_MAX_LEN, "ZMQ socket path is too long"
-        return ipc_path
-
-
-__all__ = ["HTTPClientConfig", "AioHttpConfig", "ZMQConfig", "SocketConfig"]
+__all__ = ["HTTPClientConfig", "AioHttpConfig", "SocketConfig"]

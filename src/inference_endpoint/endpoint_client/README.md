@@ -18,8 +18,8 @@ HTTP client for LLM inference with multiprocessing workers and ZMQ communication
 │                                    │ ◀─────────HTTP Response─────────────────┘          │
 │                                    │                                                    │
 │  ┌───────────────────────┐         │                                                    │
-│  │     try_receive       │◀────────┴ ZMQ PULL                                           │
-│  │      (poll API)       │                                                              │
+│  │   poll() / recv()     │◀────────┴ ZMQ PULL                                           │
+│  │      drain()          │                                                              │
 │  └───────────────────────┘                                                              │
 └─────────────────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -48,8 +48,15 @@ client.issue_query(Query(
     headers={"Content-Type": "application/json"},
 ))
 
-# Async receive (non-blocking, returns None on timeout)
-response = await client.try_receive()
+# Non-blocking poll (returns None if no response available)
+response = client.poll()
+
+# Blocking receive (waits for next response)
+response = await client.recv()
+
+# Drain all available responses
+responses = client.drain()
+
 if response:
     print(f"Response for {response.id}: {response}")
 ```

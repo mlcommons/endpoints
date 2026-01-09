@@ -58,7 +58,6 @@ from inference_endpoint.dataset_manager.factory import DataLoaderFactory
 from inference_endpoint.endpoint_client.configs import (
     AioHttpConfig,
     HTTPClientConfig,
-    ZMQConfig,
 )
 from inference_endpoint.endpoint_client.http_client import HTTPEndpointClient
 from inference_endpoint.endpoint_client.http_sample_issuer import HttpClientSampleIssuer
@@ -624,13 +623,8 @@ def _run_benchmark(
             cpu_affinity=config.settings.client.cpu_affinity,
         )
         aiohttp_config = AioHttpConfig()
-        zmq_config = ZMQConfig(
-            zmq_request_queue_prefix=f"ipc://{tmp_dir}/req",
-            zmq_response_queue_addr=f"ipc://{tmp_dir}/resp",
-            zmq_readiness_queue_addr=f"ipc://{tmp_dir}/ready",
-        )
 
-        http_client = HTTPEndpointClient(http_config, aiohttp_config, zmq_config)
+        http_client = HTTPEndpointClient(http_config, aiohttp_config)
         sample_issuer = HttpClientSampleIssuer(http_client)
 
     except Exception as e:

@@ -21,16 +21,11 @@ import signal
 import subprocess
 
 import pytest
-import zmq
-import zmq.asyncio
 from inference_endpoint.endpoint_client.configs import (
     AioHttpConfig,
     HTTPClientConfig,
-    ZMQConfig,
 )
-from inference_endpoint.endpoint_client.worker import WorkerManager
-
-from ...test_helpers import get_test_socket_path
+from inference_endpoint.endpoint_client.worker_manager import WorkerManager
 
 # timeout for OS to handle process signals
 TEST_WORKER_POST_KILL_DELAY_S = 0.5
@@ -111,35 +106,25 @@ class TestWorkerLifecycle:
     """Test basic worker spawning, lifecycle, and shutdown."""
 
     @pytest.fixture
-    def manager_config(self, mock_http_echo_server, tmp_path):
+    def manager_config(self, mock_http_echo_server):
         """Create manager configuration."""
         http_config = HTTPClientConfig(
             endpoint_url=f"{mock_http_echo_server.url}/v1/chat/completions",
             num_workers=2,
         )
         aiohttp_config = AioHttpConfig()
-        # Use tmp_path for unique socket paths per test
-        zmq_config = ZMQConfig(
-            zmq_request_queue_prefix=get_test_socket_path(
-                tmp_path, "test_manager", "_req"
-            ),
-            zmq_response_queue_addr=get_test_socket_path(
-                tmp_path, "test_manager", "_resp"
-            ),
-        )
-        zmq_context = zmq.asyncio.Context()
-        return http_config, aiohttp_config, zmq_config, zmq_context
+        return http_config, aiohttp_config
 
     @pytest.mark.asyncio
     async def test_spawn_workers_and_graceful_shutdown(self, manager_config):
         """Test WorkerManager spawning and monitoring real workers."""
-        http_config, aiohttp_config, zmq_config, zmq_context = manager_config
+        http_config, aiohttp_config = manager_config
+        loop = asyncio.get_running_loop()
 
         manager = WorkerManager(
             http_config=http_config,
             aiohttp_config=aiohttp_config,
-            zmq_config=zmq_config,
-            zmq_context=zmq_context,
+            loop=loop,
         )
 
         try:
@@ -163,7 +148,7 @@ class TestWorkerLifecycle:
                 assert not worker.is_alive()
 
         finally:
-            zmq_context.destroy(linger=0)
+            pass
 
     @pytest.mark.parametrize(
         "signal_type,signal_method",
@@ -179,14 +164,14 @@ class TestWorkerLifecycle:
         self, manager_config, signal_type, signal_method
     ):
         """Test workers handle signals correctly and are reaped without leaving zombies."""
-        http_config, aiohttp_config, zmq_config, zmq_context = manager_config
+        http_config, aiohttp_config = manager_config
         http_config.num_workers = 1
+        loop = asyncio.get_running_loop()
 
         manager = WorkerManager(
             http_config=http_config,
             aiohttp_config=aiohttp_config,
-            zmq_config=zmq_config,
-            zmq_context=zmq_context,
+            loop=loop,
         )
 
         try:
@@ -230,19 +215,19 @@ class TestWorkerLifecycle:
             print(f"✓ Worker properly handled {signal_type} and was reaped")
 
         finally:
-            zmq_context.destroy(linger=0)
+            pass
 
     @pytest.mark.asyncio
     async def test_multiple_workers_with_mixed_signals(self, manager_config):
         """Test shutdown handles multiple workers killed with different signals simultaneously."""
-        http_config, aiohttp_config, zmq_config, zmq_context = manager_config
+        http_config, aiohttp_config = manager_config
         http_config.num_workers = 3
+        loop = asyncio.get_running_loop()
 
         manager = WorkerManager(
             http_config=http_config,
             aiohttp_config=aiohttp_config,
-            zmq_config=zmq_config,
-            zmq_context=zmq_context,
+            loop=loop,
         )
 
         try:
@@ -281,42 +266,32 @@ class TestWorkerLifecycle:
             )
 
         finally:
-            zmq_context.destroy(linger=0)
+            pass
 
 
 class TestWorkerDeathScenarios:
     """Test edge cases: multiple worker deaths, concurrent failures, and cleanup."""
 
     @pytest.fixture
-    def worker_death_config(self, tmp_path):
+    def worker_death_config(self):
         """Create configuration for worker death scenario tests."""
-        # Use tmp_path for unique socket paths per test
         http_config = HTTPClientConfig(
             endpoint_url="http://localhost:99999/advanced",
             num_workers=2,
         )
         aiohttp_config = AioHttpConfig()
-        zmq_config = ZMQConfig(
-            zmq_request_queue_prefix=get_test_socket_path(
-                tmp_path, "test_advanced", "_req"
-            ),
-            zmq_response_queue_addr=get_test_socket_path(
-                tmp_path, "test_advanced", "_resp"
-            ),
-        )
-        zmq_context = zmq.asyncio.Context()
-        return http_config, aiohttp_config, zmq_config, zmq_context
+        return http_config, aiohttp_config
 
     @pytest.mark.asyncio
     async def test_all_workers_killed_simultaneously(self, worker_death_config):
         """Test shutdown reaps all zombies when all workers are killed at once."""
-        http_config, aiohttp_config, zmq_config, zmq_context = worker_death_config
+        http_config, aiohttp_config = worker_death_config
+        loop = asyncio.get_running_loop()
 
         manager = WorkerManager(
             http_config=http_config,
             aiohttp_config=aiohttp_config,
-            zmq_config=zmq_config,
-            zmq_context=zmq_context,
+            loop=loop,
         )
 
         try:
@@ -370,18 +345,18 @@ class TestWorkerDeathScenarios:
                 )
 
         finally:
-            zmq_context.destroy(linger=0)
+            pass
 
     @pytest.mark.asyncio
     async def test_shutdown_with_preexisting_dead_worker(self, worker_death_config):
         """Test shutdown gracefully handles workers that died before shutdown was called."""
-        http_config, aiohttp_config, zmq_config, zmq_context = worker_death_config
+        http_config, aiohttp_config = worker_death_config
+        loop = asyncio.get_running_loop()
 
         manager = WorkerManager(
             http_config=http_config,
             aiohttp_config=aiohttp_config,
-            zmq_config=zmq_config,
-            zmq_context=zmq_context,
+            loop=loop,
         )
 
         try:
@@ -406,8 +381,7 @@ class TestWorkerDeathScenarios:
             # Immediately shutdown manager (should handle dead worker gracefully)
             await manager.shutdown()
 
-            # Verify shutdown completed without hanging
-            assert manager._shutdown_event.is_set()
+            # If we reached here, shutdown completed without hanging
 
             # Verify all workers are dead and reaped (no zombies)
             for worker in manager.workers:
@@ -427,4 +401,4 @@ class TestWorkerDeathScenarios:
                 print(f"✓ Verified: Zombie {dead_pid} was reaped by shutdown")
 
         finally:
-            zmq_context.destroy(linger=0)
+            pass

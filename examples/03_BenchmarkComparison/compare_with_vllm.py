@@ -170,7 +170,7 @@ def generate_ie_config(
                 "name": "comparison-dataset",
                 "type": "performance",
                 "path": str(dataset_path),
-                "format": "jsonl",
+                "format": ".jsonl",
                 "samples": num_requests,
                 "parser": {"prompt": "text_input"},
             }

@@ -46,7 +46,6 @@ from inference_endpoint.dataset_manager.predefined.gpqa import GPQA, GPQA_GPTOSS
 from inference_endpoint.endpoint_client.configs import (
     AioHttpConfig,
     HTTPClientConfig,
-    ZMQConfig,
 )
 from inference_endpoint.endpoint_client.http_client import HTTPEndpointClient
 from inference_endpoint.endpoint_client.http_sample_issuer import HttpClientSampleIssuer
@@ -96,15 +95,9 @@ def create_sglang_client(tmp_dir: Path) -> HTTPEndpointClient:
         api_type="sglang",
     )
 
-    zmq_config = ZMQConfig(
-        zmq_request_queue_prefix=f"ipc://{tmp_dir}/req",
-        zmq_response_queue_addr=f"ipc://{tmp_dir}/resp",
-        zmq_readiness_queue_addr=f"ipc://{tmp_dir}/ready",
-    )
-
     aiohttp_config = AioHttpConfig()
 
-    client = HTTPEndpointClient(http_config, aiohttp_config, zmq_config)
+    client = HTTPEndpointClient(http_config, aiohttp_config)
     return client
 
 

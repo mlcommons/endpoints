@@ -1,0 +1,674 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""
+ZMQ transport implementation.
+
+Register ZMQ socket's FD with event loop using add_reader/add_writer.
+When data is available, the callback fires directly - no polling needed.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import errno
+import logging
+import os
+import tempfile
+import uuid
+from collections import deque
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from typing import Any
+
+import msgspec
+import zmq
+import zmq.asyncio
+
+from inference_endpoint.core.types import Query, QueryResult, StreamChunk
+
+from ..protocol import (
+    ReceiverTransport,
+    SenderTransport,
+    WorkerConnector,
+    WorkerPoolTransport,
+)
+
+logger = logging.getLogger(__name__)
+
+
+__all__ = [
+    "ZmqWorkerPoolTransport",
+]
+
+
+@dataclass
+class _ZMQSocketConfig:
+    """Internal: ZMQ socket configuration with tuned defaults."""
+
+    io_threads: int = 4
+    high_water_mark: int = 0  # 0 = unlimited
+    linger: int = -1  # Block indefinitely on close to send pending messages
+    immediate: int = 1  # Only enqueue on ready connections
+    recv_buffer_size: int = 4 * 1024 * 1024  # 4MB
+    send_buffer_size: int = 4 * 1024 * 1024  # 4MB
+
+
+class _ZmqReceiverTransport(ReceiverTransport):
+    """ZMQ PULL socket transport with event-driven receive (internal).
+
+    Note: ZMQ's FD is edge-triggered on internal state changes, not level-triggered.
+    We must drain all messages and reschedule via call_soon if more arrive during
+    processing. See aiozmq's _ZmqLooplessTransportImpl for the canonical pattern.
+    """
+
+    __slots__ = (
+        "_loop",
+        "_sock",
+        "_fd",
+        "_decoder",
+        "_deque",
+        "_waiter",
+        "_closing",
+        "_soon_call",
+    )
+
+    def __init__(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        sock: zmq.Socket,
+        decoder: msgspec.msgpack.Decoder,
+    ):
+        self._loop = loop
+        self._sock = sock
+        self._fd = sock.getsockopt(zmq.FD)
+        self._decoder = decoder
+        # Fast queue: deque + Future (no lock overhead vs asyncio.Queue)
+        self._deque: deque[Any] = deque()
+        self._waiter: asyncio.Future[None] | None = None
+        self._closing = False
+        self._soon_call: asyncio.Handle | None = None
+
+        self._loop.add_reader(self._fd, self._on_readable)
+
+    def _on_readable(self) -> None:
+        """Called by event loop when ZMQ socket FD is readable.
+
+        ZMQ's FD is edge-triggered, so we must:
+        1. Drain all available messages
+        2. Re-check zmq.EVENTS after processing
+        3. Reschedule via call_soon if POLLIN is still set
+        """
+        self._soon_call = None
+
+        if self._closing or self._sock is None or self._sock.closed:
+            return
+
+        try:
+            events = self._sock.getsockopt(zmq.EVENTS)
+        except zmq.ZMQError:
+            return
+
+        if not (events & zmq.POLLIN):
+            return
+
+        did_work = False
+        while True:
+            try:
+                data = self._sock.recv(zmq.NOBLOCK, copy=False, track=False)
+                msg = self._decoder.decode(data)
+                self._deque.append(msg)
+                did_work = True
+            except zmq.Again:
+                break
+            except zmq.ZMQError as e:
+                # EAGAIN/EINTR: normal, retry later
+                # ENOTSOCK: socket closed during shutdown, ignore
+                if e.errno not in (errno.EAGAIN, errno.EINTR, errno.ENOTSOCK):
+                    logger.error(f"ZMQ recv error: {e}")
+                break
+            except Exception as e:
+                logger.error(f"Decode error: {e}")
+                continue
+
+        # Wake up any waiting consumer
+        if did_work and self._waiter is not None and not self._waiter.done():
+            self._waiter.set_result(None)
+
+        # Re-check events and reschedule if more messages arrived during processing
+        if did_work and self._soon_call is None:
+            try:
+                postevents = self._sock.getsockopt(zmq.EVENTS)
+                if postevents & zmq.POLLIN:
+                    self._soon_call = self._loop.call_soon(self._on_readable)
+            except zmq.ZMQError:
+                pass
+
+    def poll(self) -> Any | None:
+        """Non-blocking poll. Returns item if available, None otherwise."""
+        if self._deque:
+            return self._deque.popleft()
+        return None
+
+    async def recv(self) -> Any | None:
+        """Receive a message. Returns None when closed."""
+        # Fast path: items already in deque
+        if self._deque:
+            return self._deque.popleft()
+
+        # Check if closed with empty queue
+        if self._closing:
+            return None
+
+        # Wait for items
+        while not self._deque:
+            if self._closing:
+                return None
+            self._waiter = self._loop.create_future()
+            try:
+                await self._waiter
+            finally:
+                self._waiter = None
+
+        return self._deque.popleft()
+
+    def close(self) -> None:
+        """Close the transport. Idempotent."""
+        if self._closing:
+            return
+        self._closing = True
+
+        # Cancel pending callback
+        if self._soon_call is not None:
+            self._soon_call.cancel()
+            self._soon_call = None
+
+        # Remove from event loop
+        try:
+            self._loop.remove_reader(self._fd)
+        except (ValueError, OSError):
+            # Already removed or invalid fd
+            pass
+
+        # Close socket
+        try:
+            self._sock.setsockopt(zmq.LINGER, 0)
+            self._sock.close()
+        except zmq.ZMQError:
+            # Already closed
+            pass
+
+        # Wake waiter so receive() can return None
+        if self._waiter is not None and not self._waiter.done():
+            self._waiter.set_result(None)
+
+
+class _ZmqSenderTransport(SenderTransport):
+    """ZMQ PUSH socket transport with buffered non-blocking writes (internal).
+
+    Note: ZMQ's FD is edge-triggered on internal state changes, not level-triggered.
+    We must drain the buffer and reschedule via call_soon if more work is pending.
+    See aiozmq's _ZmqLooplessTransportImpl for the canonical pattern.
+    """
+
+    __slots__ = (
+        "_loop",
+        "_sock",
+        "_fd",
+        "_encoder",
+        "_buffer",
+        "_closing",
+        "_writing",
+        "_soon_call",
+    )
+
+    def __init__(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        sock: zmq.Socket,
+        encoder: msgspec.msgpack.Encoder,
+    ):
+        self._loop = loop
+        self._sock = sock
+        self._fd = sock.getsockopt(zmq.FD)
+        self._encoder = encoder
+        self._buffer: deque[bytes] = deque()
+        self._closing = False
+        self._writing = False
+        self._soon_call: asyncio.Handle | None = None
+
+    def send(self, data: Any) -> None:
+        """Send a message. Non-blocking, buffers if socket would block."""
+        if self._closing:
+            return
+
+        serialized = self._encoder.encode(data)
+
+        if not self._buffer:
+            try:
+                self._sock.send(serialized, zmq.NOBLOCK, copy=False, track=False)
+                return
+            except zmq.Again:
+                pass
+            except zmq.ZMQError as e:
+                if e.errno not in (errno.EAGAIN, errno.EINTR):
+                    logger.error(f"ZMQ send error: {e}")
+                    return
+
+        self._buffer.append(serialized)
+        if not self._writing:
+            self._writing = True
+            self._loop.add_writer(self._fd, self._on_writable)
+
+    def _on_writable(self) -> None:
+        """Called by event loop when socket is writable.
+
+        ZMQ's FD is edge-triggered, so we must:
+        1. Drain the buffer as much as possible
+        2. Re-check zmq.EVENTS after processing
+        3. Reschedule via call_soon if POLLOUT is still set and buffer has items
+        """
+        self._soon_call = None
+
+        if self._closing or self._sock is None or self._sock.closed:
+            return
+
+        try:
+            events = self._sock.getsockopt(zmq.EVENTS)
+        except zmq.ZMQError:
+            return
+
+        if not (events & zmq.POLLOUT):
+            return
+
+        did_work = False
+        while self._buffer:
+            try:
+                data = self._buffer[0]
+                self._sock.send(data, zmq.NOBLOCK, copy=False, track=False)
+                self._buffer.popleft()
+                did_work = True
+            except zmq.Again:
+                break
+            except zmq.ZMQError as e:
+                # EAGAIN/EINTR: normal, retry later
+                # ENOTSOCK: socket closed during shutdown, cleanup
+                if e.errno not in (errno.EAGAIN, errno.EINTR, errno.ENOTSOCK):
+                    logger.error(f"ZMQ send error in buffer drain: {e}")
+                self._buffer.clear()
+                self._stop_writing()
+                return
+
+        if not self._buffer:
+            self._stop_writing()
+        elif did_work and self._soon_call is None:
+            # More to send, reschedule if socket is ready
+            try:
+                postevents = self._sock.getsockopt(zmq.EVENTS)
+                if postevents & zmq.POLLOUT:
+                    self._soon_call = self._loop.call_soon(self._on_writable)
+            except zmq.ZMQError:
+                pass
+
+    def _stop_writing(self) -> None:
+        """Stop watching for writability."""
+        if self._writing:
+            try:
+                self._loop.remove_writer(self._fd)
+            except (ValueError, OSError):
+                # Already removed or invalid fd
+                pass
+            self._writing = False
+
+    def close(self) -> None:
+        """Close the transport. Idempotent."""
+        if self._closing:
+            return
+        self._closing = True
+
+        # Cancel pending callback
+        if self._soon_call is not None:
+            self._soon_call.cancel()
+            self._soon_call = None
+
+        self._stop_writing()
+        self._buffer.clear()
+
+        # Close socket
+        try:
+            self._sock.setsockopt(zmq.LINGER, 0)
+            self._sock.close()
+        except zmq.ZMQError:
+            # Already closed
+            pass
+
+
+# =============================================================================
+# Factory Functions (internal)
+# =============================================================================
+
+
+def _create_receiver(
+    loop: asyncio.AbstractEventLoop,
+    address: str,
+    context: zmq.Context,
+    config: _ZMQSocketConfig,
+    message_type: type | None = None,
+    bind: bool = False,
+) -> _ZmqReceiverTransport:
+    """Create a ZMQ receiver transport."""
+    sock = context.socket(zmq.PULL)
+    sock.setsockopt(zmq.LINGER, config.linger)
+    sock.setsockopt(zmq.RCVHWM, config.high_water_mark)
+    sock.setsockopt(zmq.RCVBUF, config.recv_buffer_size)
+
+    if bind:
+        sock.bind(address)
+    else:
+        sock.connect(address)
+
+    decoder = (
+        msgspec.msgpack.Decoder(type=message_type)
+        if message_type
+        else msgspec.msgpack.Decoder()
+    )
+
+    return _ZmqReceiverTransport(loop, sock, decoder)
+
+
+def _create_sender(
+    loop: asyncio.AbstractEventLoop,
+    address: str,
+    context: zmq.Context,
+    config: _ZMQSocketConfig,
+    bind: bool = False,
+) -> _ZmqSenderTransport:
+    """Create a ZMQ sender transport."""
+    sock = context.socket(zmq.PUSH)
+    sock.setsockopt(zmq.LINGER, config.linger)
+    sock.setsockopt(zmq.SNDHWM, config.high_water_mark)
+    sock.setsockopt(zmq.SNDBUF, config.send_buffer_size)
+    sock.setsockopt(zmq.IMMEDIATE, config.immediate)
+
+    if bind:
+        sock.bind(address)
+    else:
+        sock.connect(address)
+
+    encoder = msgspec.msgpack.Encoder()
+    return _ZmqSenderTransport(loop, sock, encoder)
+
+
+# =============================================================================
+# Worker Connector (passed to worker processes)
+# =============================================================================
+
+
+@dataclass
+class _ZmqWorkerConnector(WorkerConnector):
+    """Internal: Picklable connector for worker processes.
+
+    Contains pre-allocated addresses. Passed to workers via multiprocessing.
+    """
+
+    config: _ZMQSocketConfig
+    request_addrs: list[str]
+    response_addr: str
+    readiness_addr: str
+
+    @asynccontextmanager
+    async def connect(
+        self, worker_id: int
+    ) -> AsyncIterator[tuple[_ZmqReceiverTransport, _ZmqSenderTransport]]:
+        """Connect worker transports and signal readiness.
+
+        Args:
+            worker_id: Unique identifier for this worker.
+
+        Yields:
+            Tuple of (request_receiver, response_sender) transports.
+        """
+        loop = asyncio.get_running_loop()
+        context = zmq.Context()
+
+        request_addr = self.request_addrs[worker_id]
+
+        logger.debug("Worker %d request addr: %s", worker_id, request_addr)
+        logger.debug("Worker %d response addr: %s", worker_id, self.response_addr)
+
+        # Worker CONNECTS (main process BINDS)
+        requests = _create_receiver(
+            loop, request_addr, context, self.config, Query, bind=False
+        )
+        responses = _create_sender(
+            loop, self.response_addr, context, self.config, bind=False
+        )
+
+        # Signal readiness using zmq.asyncio for proper async send
+        async_ctx = zmq.asyncio.Context()
+        readiness_sock = async_ctx.socket(zmq.PUSH)
+        readiness_sock.setsockopt(zmq.LINGER, -1)  # Wait indefinitely for delivery
+        readiness_sock.connect(self.readiness_addr)
+
+        try:
+            encoder = msgspec.msgpack.Encoder()
+            await readiness_sock.send(encoder.encode(worker_id))  # Async send
+            readiness_sock.close()  # LINGER ensures message is sent
+            async_ctx.term()
+            logger.debug("Worker %d signaled readiness", worker_id)
+
+            yield requests, responses
+        finally:
+            requests.close()
+            responses.close()
+            context.term()
+
+
+# =============================================================================
+# Worker Pool Transport (main process)
+# =============================================================================
+
+
+class ZmqWorkerPoolTransport(WorkerPoolTransport):
+    """ZMQ implementation of WorkerPoolTransport.
+
+    Main process transport for worker pool communication.
+    Provides fan-out (send to workers) and fan-in (receive from workers).
+
+    Creates and manages its own temporary directory for IPC sockets.
+    The directory is cleaned up automatically on cleanup().
+
+    Usage:
+        pool = ZmqWorkerPoolTransport.create(loop, num_workers=4)
+
+        for i in range(4):
+            spawn_worker(i, pool.worker_connector, ...)
+
+        await pool.wait_for_workers_ready(timeout=30)
+
+        pool.send(worker_id, query)
+        result = pool.poll()        # Non-blocking
+        result = await pool.recv()  # Blocking
+
+        pool.cleanup()
+    """
+
+    def __init__(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        config: _ZMQSocketConfig,
+        num_workers: int,
+    ) -> None:
+        self._loop = loop
+        self._config = config
+        self._num_workers = num_workers
+        self._closed = False
+        self._context = zmq.Context(io_threads=config.io_threads)
+
+        # Create temporary directory for IPC sockets
+        # Use short prefix to keep socket paths under IPC_PATH_MAX_LEN (typically 107)
+        self._tmp_dir = tempfile.TemporaryDirectory(prefix="zmq_")
+        scratch_path = self._tmp_dir.name
+        suffix = uuid.uuid4().hex[:8]
+
+        # Generate addresses
+        self._request_addrs = [
+            f"ipc://{scratch_path}/req_{suffix}_{i}" for i in range(num_workers)
+        ]
+        self._response_addr = f"ipc://{scratch_path}/resp_{suffix}"
+        self._readiness_addr = f"ipc://{scratch_path}/ready_{suffix}"
+
+        # Validate path lengths
+        for addr in self._request_addrs + [self._response_addr, self._readiness_addr]:
+            if len(addr) > zmq.IPC_PATH_MAX_LEN:
+                self._tmp_dir.cleanup()
+                raise ValueError(
+                    f"IPC path too long ({len(addr)} > {zmq.IPC_PATH_MAX_LEN}): {addr}"
+                )
+
+        # Create connector for workers
+        self._worker_connector = _ZmqWorkerConnector(
+            config=config,
+            request_addrs=self._request_addrs,
+            response_addr=self._response_addr,
+            readiness_addr=self._readiness_addr,
+        )
+
+        # Create transports (main process BINDS)
+        self._request_senders = [
+            _create_sender(loop, addr, self._context, config, bind=True)
+            for addr in self._request_addrs
+        ]
+        self._response_receiver = _create_receiver(
+            loop,
+            self._response_addr,
+            self._context,
+            config,
+            QueryResult | StreamChunk,
+            bind=True,
+        )
+        self._readiness_receiver = _create_receiver(
+            loop, self._readiness_addr, self._context, config, bind=True
+        )
+
+    @classmethod
+    def create(
+        cls,
+        loop: asyncio.AbstractEventLoop,
+        num_workers: int,
+        **overrides: Any,
+    ) -> ZmqWorkerPoolTransport:
+        """Factory to create ZmqWorkerPoolTransport.
+
+        Args:
+            loop: Event loop for transport registration.
+            num_workers: Number of workers.
+            **overrides: Internal config overrides (io_threads, high_water_mark, etc.).
+
+        Returns:
+            Configured ZmqWorkerPoolTransport instance.
+        """
+        if os.name == "nt":
+            raise RuntimeError("Windows not yet supported for ZMQ transport")
+
+        config = _ZMQSocketConfig(**overrides)
+        return cls(loop, config, num_workers)
+
+    @property
+    def worker_connector(self) -> WorkerConnector:
+        """Connector to pass to worker processes."""
+        return self._worker_connector
+
+    def send(self, worker_id: int, query: Query) -> None:
+        """Send request to specific worker."""
+        self._request_senders[worker_id].send(query)
+
+    def poll(self) -> QueryResult | StreamChunk | None:
+        """Non-blocking poll. Returns response if available, None otherwise."""
+        return self._response_receiver.poll()
+
+    async def recv(self) -> QueryResult | StreamChunk | None:
+        """Blocking receive. Waits for next response."""
+        return await self._response_receiver.recv()
+
+    async def wait_for_workers_ready(self, timeout: float | None = None) -> None:
+        """Block until all workers signal readiness.
+
+        Args:
+            timeout: Maximum seconds to wait. None means wait indefinitely.
+
+        Raises:
+            TimeoutError: If workers don't signal in time (only if timeout is set).
+        """
+        ready_count = 0
+        while ready_count < self._num_workers:
+            try:
+                if timeout is None:
+                    worker_id = await self._readiness_receiver.recv()
+                else:
+                    worker_id = await asyncio.wait_for(
+                        self._readiness_receiver.recv(),
+                        timeout=timeout,
+                    )
+                if worker_id is not None:
+                    ready_count += 1
+                    logger.debug(
+                        f"Worker {worker_id} ready ({ready_count}/{self._num_workers})"
+                    )
+            except TimeoutError:
+                raise TimeoutError(
+                    f"Workers failed to initialize: {ready_count}/{self._num_workers} ready"
+                ) from None
+
+        logger.debug(f"All {self._num_workers} workers ready")
+
+        # Close readiness receiver - no longer needed
+        self._readiness_receiver.close()
+
+    def cleanup(self) -> None:
+        """Close all transports and release resources. Idempotent."""
+        if self._closed:
+            return
+        self._closed = True
+
+        # Close all transports (each is idempotent)
+        for sender in self._request_senders:
+            sender.close()
+        self._response_receiver.close()
+        self._readiness_receiver.close()
+
+        # Terminate ZMQ context
+        try:
+            self._context.setsockopt(zmq.LINGER, 0)
+            self._context.term()
+        except zmq.ZMQError:
+            # Already terminated or error during shutdown
+            pass
+
+        # Cleanup temp directory
+        try:
+            self._tmp_dir.cleanup()
+        except (OSError, FileNotFoundError):
+            # Already cleaned up or missing
+            pass
+
+    def __del__(self) -> None:
+        """Best-effort cleanup on garbage collection."""
+        try:
+            self.cleanup()
+        except Exception:
+            # Never raise from __del__
+            pass
