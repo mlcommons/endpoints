@@ -204,6 +204,7 @@ class TestRunInitCommand:
             finally:
                 output_file.unlink(missing_ok=True)
 
+
 class TestGenerateUserConfSubmissionChecker:
     """Test user.conf generation for submission checker.
 
