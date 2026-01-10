@@ -69,10 +69,12 @@ async def run_probe_command(args: argparse.Namespace) -> None:
     with tempfile.TemporaryDirectory(prefix="probe_") as tmp_dir:
         try:
             # Setup HTTP client with futures support
+            # Disable warmup for probe - not needed and causes hangs with invalid endpoints
             http_config = HTTPClientConfig(
                 endpoint_url=urljoin(endpoint, api_type.default_route()),
                 api_type=api_type,
                 num_workers=1,
+                warmup_connections=0,
             )
             aiohttp_config = AioHttpConfig()
             zmq_config = ZMQConfig(

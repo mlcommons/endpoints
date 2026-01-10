@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections import deque
 from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -58,7 +59,10 @@ class HttpResponseProtocol(asyncio.Protocol):
         # Futures for async coordination
         "_headers_future",
         "_body_future",
-        "_chunk_queue",
+        # Streaming state: deque+Event pair, guarded by _streaming flag
+        "_streaming",
+        "_chunk_deque",
+        "_chunk_event",
         # Flags
         "_headers_complete",
         "_message_complete",
@@ -81,7 +85,11 @@ class HttpResponseProtocol(asyncio.Protocol):
         # Async coordination
         self._headers_future: asyncio.Future | None = None
         self._body_future: asyncio.Future | None = None
-        self._chunk_queue: asyncio.Queue[bytes | None] | None = None
+        # Streaming state: deque+Event pair (always set together via iter_body)
+        # When _streaming is True, both _chunk_deque and _chunk_event are valid
+        self._streaming: bool = False
+        self._chunk_deque: deque[bytes | None] = deque()
+        self._chunk_event: asyncio.Event = asyncio.Event()
 
         # Flags
         self._headers_complete: bool = False
@@ -99,7 +107,9 @@ class HttpResponseProtocol(asyncio.Protocol):
         self._is_chunked = False
         self._headers_future = None
         self._body_future = None
-        self._chunk_queue = None
+        self._streaming = False
+        self._chunk_deque.clear()
+        self._chunk_event.clear()
         self._headers_complete = False
         self._message_complete = False
         self._exc = None
@@ -147,12 +157,10 @@ class HttpResponseProtocol(asyncio.Protocol):
             else:
                 self._body_future.set_result(b"".join(self._body_chunks))
 
-        # Signal end of stream for chunk queue
-        if self._chunk_queue:
-            try:
-                self._chunk_queue.put_nowait(None)
-            except asyncio.QueueFull:
-                pass
+        # Signal end of stream for streaming mode
+        if self._streaming:
+            self._chunk_deque.append(None)
+            self._chunk_event.set()
 
     def eof_received(self) -> bool | None:
         # Return False to close transport, True to keep open
@@ -183,13 +191,10 @@ class HttpResponseProtocol(asyncio.Protocol):
             self._headers_future.set_result((self._status_code, self._headers))
 
     def on_body(self, body: bytes) -> None:
-        if self._chunk_queue is not None:
-            # Streaming mode - push to queue
-            try:
-                self._chunk_queue.put_nowait(body)
-            except asyncio.QueueFull:
-                # Queue full, append to buffer instead
-                self._body_chunks.append(body)
+        if self._streaming:
+            # Streaming mode - push to deque and signal
+            self._chunk_deque.append(body)
+            self._chunk_event.set()
         else:
             # Buffered mode
             self._body_chunks.append(body)
@@ -200,12 +205,10 @@ class HttpResponseProtocol(asyncio.Protocol):
         if self._body_future and not self._body_future.done():
             self._body_future.set_result(b"".join(self._body_chunks))
 
-        # Signal end of stream for chunk queue
-        if self._chunk_queue:
-            try:
-                self._chunk_queue.put_nowait(None)
-            except asyncio.QueueFull:
-                pass
+        # Signal end of stream for streaming mode
+        if self._streaming:
+            self._chunk_deque.append(None)
+            self._chunk_event.set()
 
     def on_chunk_header(self) -> None:
         pass
@@ -244,17 +247,25 @@ class HttpResponseProtocol(asyncio.Protocol):
 
     async def iter_body(self) -> AsyncGenerator[bytes, None]:
         """Iterate over body chunks as they arrive."""
-        # Initialize queue for streaming
-        self._chunk_queue = asyncio.Queue(maxsize=64)
+        # Enable streaming mode (deque+event already initialized in __init__)
+        self._streaming = True
 
         # Yield any chunks already buffered
         for chunk in self._body_chunks:
             yield chunk
         self._body_chunks.clear()
 
+        # If message already complete (sync parse), exit early
+        if self._message_complete:
+            return
+
         # Yield new chunks as they arrive
         while True:
-            chunk = await self._chunk_queue.get()
+            # Wait for data if deque is empty
+            while not self._chunk_deque:
+                self._chunk_event.clear()
+                await self._chunk_event.wait()
+            chunk = self._chunk_deque.popleft()
             if chunk is None:
                 break
             yield chunk
