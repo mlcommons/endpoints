@@ -84,6 +84,8 @@ exclude = [
     "tests/datasets/*",
     "src/inference_endpoint/openai/openai_types_gen.py",
     "src/inference_endpoint/openai/openapi.yaml",
+    "datasets/*",
+    "datasets/",
 ]
 
 
