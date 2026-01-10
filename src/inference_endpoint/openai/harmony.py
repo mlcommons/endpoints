@@ -21,7 +21,10 @@ from transformers import AutoTokenizer, PreTrainedTokenizer
 
 
 class Harmonizer:
-    """Utility class for using the OpenAI Harmony library to pre-process user prompts."""
+    """Utility class for using the OpenAI Harmony library to pre-process user prompts.
+
+    See https://cookbook.openai.com/articles/openai-harmony for more details.
+    """
 
     _tokenizers: dict[str, PreTrainedTokenizer] = {}
     _encodings: dict[str, "harmony.HarmonyEncoding"] = {}
