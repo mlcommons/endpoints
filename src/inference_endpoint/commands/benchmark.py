@@ -658,8 +658,7 @@ def _run_benchmark(
         finally:
             # Always restore original handler
             signal.signal(signal.SIGINT, old_handler)
-
-        # Prefer authoritative metrics from the session report
+        accuracy_scores = {}
         for (
             scorer,
             extractor,
@@ -676,8 +675,17 @@ def _run_benchmark(
                 ground_truth_column=ground_truth_column,
             )
             score, n_repeats = scorer_instance.score()
+            accuracy_scores[dataset_id] = {
+                "dataset_id": dataset_id,
+                "num_samples": len(dataset.data),
+                "extractor": extractor.__name__,
+                "ground_truth_column": ground_truth_column,
+                "score": score,
+                "n_repeats": n_repeats,
+            }
             logger.info(f"Score for {dataset_id}: {score} ({n_repeats} repeats)")
 
+        # Prefer authoritative metrics from the session report
         report = getattr(sess, "report", None)
         if report is None:
             logger.error(
@@ -722,6 +730,8 @@ def _run_benchmark(
                     "qps": estimated_qps,
                 },
             }
+            if accuracy_scores:
+                results["accuracy_scores"] = accuracy_scores
             if collect_responses:
                 results["responses"] = response_collector.responses
             # Always save all errors (useful for debugging)

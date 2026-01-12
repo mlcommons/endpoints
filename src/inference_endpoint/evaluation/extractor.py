@@ -60,7 +60,9 @@ class Extractor(ABC):
         try:
             return Extractor.PREDEFINED[name]
         except KeyError as e:
-            raise KeyError(f"Extractor '{name}' is not registered.") from e
+            raise KeyError(
+                f"Extractor '{name}' is not registered - available extractors: {Extractor.available_extractors()}"
+            ) from e
 
     @classmethod
     def available_extractors(cls) -> list[str]:
