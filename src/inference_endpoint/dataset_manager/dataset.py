@@ -24,9 +24,8 @@ from typing import Any, ClassVar
 
 import numpy as np
 import pandas as pd
-from transformers import AutoTokenizer, PreTrainedTokenizer
-
 from datasets import load_dataset, load_from_disk
+from transformers import AutoTokenizer, PreTrainedTokenizer
 
 from .transforms import Transform, apply_transforms
 
