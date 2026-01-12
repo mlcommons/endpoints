@@ -229,3 +229,52 @@ class BoxedMathExtractor(Extractor, extractor_id="boxed_math_extractor"):
         if matches:
             return matches[-1]
         return None
+
+
+class PythonCodeExtractor(Extractor, extractor_id="python_code_extractor"):
+    """Extract Python code from markdown code blocks.
+    Based on parse_code function from GPT-OSS livecodebench_eval.py.
+    Reference: https://github.com/openai/gpt-oss/blob/main/gpt_oss/evals/livecodebench_eval.py
+
+    Extracts Python code from ```python or ``` code blocks.
+    Priority:
+    1. Last ```python block
+    2. Last plain ``` block
+
+    Args:
+        text: Response text containing code blocks
+
+    Returns:
+        Extracted Python code or None if no code block found
+
+    Examples:
+        >>> PythonCodeExtractor.extract("```python\\ndef foo():\\n    pass\\n```")
+        'def foo():\\n    pass'
+        >>> PythonCodeExtractor.extract("```\\nprint('hello')\\n```")
+        "print('hello')"
+    """
+
+    @classmethod
+    def extract(cls, text: str) -> str | None:
+        if not text or not isinstance(text, str):
+            return None
+
+        text = text.strip()
+        if not text:
+            return None
+
+        # Try ```python blocks first (most specific)
+        python_matches = list(re.finditer(r"```python(.*?)```", text, re.DOTALL))
+        if python_matches:
+            return python_matches[-1].group(1).strip()
+
+        # Fall back to plain ``` blocks
+        plain_matches = list(re.finditer(r"```(.*?)```", text, re.DOTALL))
+        if plain_matches:
+            # Get the last match
+            code = plain_matches[-1].group(1).strip()
+            # Remove language tag if present (e.g., ```python\n or ```py\n)
+            code = re.sub(r"^(?:python|py)\s*\n", "", code, flags=re.IGNORECASE)
+            return code
+
+        return None
