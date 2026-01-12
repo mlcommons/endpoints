@@ -714,31 +714,22 @@ class WorkerManager:
         if not self.http_config.cpu_affinity:
             return
 
-        try:
-            match self.http_config.cpu_affinity:
-                case "auto":
-                    # NOTE(vir):
-                    # AVAILABLE_CPUS already excludes loadgen CPU (see: cpu_affinity.py)
-                    # We further sort by NUMA preference (to favor latency bw loadgen)
-                    cpu_list = get_cpus_sorted_by_numa_preference()
-                case list():
-                    cpu_list = sorted(
-                        set(self.http_config.cpu_affinity) & AVAILABLE_CPUS
-                    )
-                case _:
-                    return
-
-            # assign CPU affinity round-robin among available CPUs
-            if not cpu_list:
-                logger.warning("No available CPUs for worker pinning")
+        match self.http_config.cpu_affinity:
+            case "auto":
+                cpu_list = get_cpus_sorted_by_numa_preference()
+            case list():
+                cpu_list = sorted(set(self.http_config.cpu_affinity) & AVAILABLE_CPUS)
+            case _:
                 return
 
-            for worker_id, pid in self.worker_pids.items():
-                cpus = {cpu_list[worker_id % len(cpu_list)]}
-                set_cpu_affinity(pid=pid, cpus=cpus)
+        # assign CPU affinity round-robin among available CPUs
+        if not cpu_list:
+            logger.warning("No available CPUs for worker pinning")
+            return
 
-        except (OSError, AttributeError):
-            logger.warning("Failed to set CPU affinity for workers")
+        for worker_id, pid in self.worker_pids.items():
+            cpus = {cpu_list[worker_id % len(cpu_list)]}
+            set_cpu_affinity(pid=pid, cpus=cpus)
 
     async def shutdown(self) -> None:
         """Graceful shutdown of all workers."""

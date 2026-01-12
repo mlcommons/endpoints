@@ -19,6 +19,8 @@ import logging
 import os
 from pathlib import Path
 
+from inference_endpoint.exceptions import SetupError
+
 logger = logging.getLogger(__name__)
 
 # Capture available CPUs at module load time, before any pinning restricts the process
@@ -188,7 +190,7 @@ def get_cpus_sorted_by_numa_preference(
     return sorted(preferred_cpus) + sorted(other_cpus)
 
 
-def set_loadgen_cpu(cpu: int) -> bool:
+def set_loadgen_cpu(cpu: int) -> None:
     """Pin loadgen to CPU and remove it from available pool.
 
     After calling this, AVAILABLE_CPUS will no longer contain the loadgen CPU,
@@ -198,42 +200,35 @@ def set_loadgen_cpu(cpu: int) -> bool:
     Args:
         cpu: CPU core to pin loadgen process to.
 
-    Returns:
-        True if affinity was successfully set, False otherwise.
+    Raises:
+        SetupError: If CPU affinity cannot be set.
     """
     global LOADGEN_CPU
-    result = set_cpu_affinity(os.getpid(), {cpu})
-    if result:
-        AVAILABLE_CPUS.discard(cpu)
-        LOADGEN_CPU = cpu
-    return result
+    set_cpu_affinity(os.getpid(), {cpu})
+    AVAILABLE_CPUS.discard(cpu)
+    LOADGEN_CPU = cpu
 
 
-def set_cpu_affinity(pid: int, cpus: set[int]) -> bool:
+def set_cpu_affinity(pid: int, cpus: set[int]) -> None:
     """Set CPU affinity for a process.
 
     Args:
         pid: Process ID to set affinity for.
         cpus: Set of CPU cores to pin the process to.
 
-    Returns:
-        True if affinity was successfully set, False otherwise.
+    Raises:
+        SetupError: If CPU affinity cannot be set.
     """
     if not cpus:
-        return False
+        raise SetupError(f"No CPUs specified for process {pid}")
+
+    # Validate against launch-time CPUs, not current process affinity
+    valid_cpus = cpus & AVAILABLE_CPUS
+    if not valid_cpus:
+        raise SetupError(f"CPUs {cpus} not available for process {pid}")
 
     try:
-        # Validate against launch-time CPUs, not current process affinity
-        valid_cpus = cpus & AVAILABLE_CPUS
-        if not valid_cpus:
-            logger.warning(f"CPUs {cpus} not available, skipping CPU pinning")
-            return False
-
         os.sched_setaffinity(pid, valid_cpus)
         logger.debug(f"Process {pid} pinned to CPU {valid_cpus}")
-        return True
-
     except (OSError, AttributeError) as e:
-        logger.warning(f"Failed to set CPU affinity for pid {pid}: {e}")
-
-    return False
+        raise SetupError(f"Failed to set CPU affinity for pid {pid}: {e}") from e
