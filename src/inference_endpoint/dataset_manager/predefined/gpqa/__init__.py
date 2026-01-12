@@ -154,7 +154,7 @@ class GPQA(
         return df
 
 
-class GPQA_GPTOSS_SGLang(GPQA):
+class GPQA_GPTOSS_SGLang(GPQA, dataset_id="gpqa_gptoss_sglang"):
     """GPQA_GPTOSS_SGLang: GPQA GTPOSS_SGLang Dataset
     Reference: https://huggingface.co/datasets/opencompass/GPQA/
     """
@@ -212,8 +212,7 @@ class GPQA_GPTOSS_SGLang(GPQA):
         ]
 
     @classmethod
-    def get_dataloader(cls, num_repeats: int = 5):
+    def get_dataloader(cls, num_repeats: int = 1):
         df = GPQA.generate(datasets_dir=Path("datasets"))
         transforms = GPQA_GPTOSS_SGLang.create_transforms()
-        gpqa_dataset = GPQA(df, transforms=transforms, repeats=num_repeats)
-        return gpqa_dataset
+        return GPQA_GPTOSS_SGLang(df, transforms=transforms, repeats=num_repeats)

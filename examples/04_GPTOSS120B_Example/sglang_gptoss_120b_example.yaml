@@ -1,0 +1,58 @@
+name: "gpt-oss-120b-benchmark"
+version: "1.0"
+type: "online"
+
+model_params:
+  name: "openai/gpt-oss-120b"
+  temperature: 1.0
+  max_new_tokens: 32768
+  top_k: -1
+  top_p: 1.0
+  streaming: "on"
+
+datasets:
+  - name: "perf-test"
+    type: "performance"
+    path: "examples/04_GPTOSS120B_Example/data/acc_eval_ref.parquet"
+    parser:
+      input_tokens: "input_tokens"
+  - name: "aime_gptoss_sglang"
+    type: "accuracy"
+    accuracy_config:
+      eval_method: "pass_at_1"
+      ground_truth: "answer"
+      extractor: "boxed_math_extractor"
+  - name: "gpqa_gptoss_sglang"
+    type: "accuracy"
+    accuracy_config:
+      eval_method: "pass_at_1"
+      extractor: "abcd_extractor"
+
+settings:
+  runtime:
+    min_duration_ms: 300
+    max_duration_ms: 6000
+    scheduler_random_seed: 42
+    dataloader_random_seed: 42
+
+  load_pattern:
+    type: "concurrency"
+    target_concurrency: 512
+
+  client:
+    workers: 8
+    record_worker_events: false
+
+metrics:
+  collect:
+    - "throughput"
+    - "latency"
+    - "ttft"
+    - "tpot"
+
+endpoint_config:
+  endpoint: "http://localhost:30000"
+  api_key: null
+  api_type: "sglang"
+
+report_dir: "results/sglang_gptoss_120b_benchmark_mlperf_13_JAN_26/"

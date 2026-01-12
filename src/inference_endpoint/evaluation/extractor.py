@@ -14,8 +14,10 @@
 # limitations under the License.
 
 
+import inspect
 import re
 from abc import ABC, abstractmethod
+from typing import ClassVar
 
 
 class Extractor(ABC):
@@ -25,13 +27,53 @@ class Extractor(ABC):
     numeric value plain or inside a LaTeX block.
     """
 
+    # Provide a registration and lookup system for derived Extractor classes by name.
+    # This allows registering new extractors that can be instantiated via config/lookup.
+    PREDEFINED: ClassVar[dict[str, type["Extractor"]]] = {}
+
+    def __init_subclass__(
+        cls,
+        extractor_id: str | None = None,
+        **kwargs,
+    ):
+        super().__init_subclass__(**kwargs)
+
+        if not inspect.isabstract(cls):
+            if extractor_id is None:
+                extractor_id = cls.__name__
+            cls.EXTRACTOR_ID = extractor_id
+            Extractor.PREDEFINED[extractor_id] = cls
+
+    @classmethod
+    def get(cls, name: str) -> type["Extractor"]:
+        """Look up an Extractor subclass by its registered name.
+
+        Args:
+            name: str, the registered extractor name
+
+        Returns:
+            Extractor subclass
+
+        Raises:
+            KeyError: If no extractor with the given name is found
+        """
+        try:
+            return Extractor.PREDEFINED[name]
+        except KeyError as e:
+            raise KeyError(f"Extractor '{name}' is not registered.") from e
+
+    @classmethod
+    def available_extractors(cls) -> list[str]:
+        """Return the list of registered extractor names."""
+        return list(Extractor.PREDEFINED.keys())
+
     @classmethod
     @abstractmethod
     def extract(cls, text: str) -> str | None:
         raise NotImplementedError
 
 
-class ABCDExtractor(Extractor):
+class ABCDExtractor(Extractor, extractor_id="abcd_extractor"):
     """Extract ABCD multiple choice answer from response text.
     Based on OpenAI's extract_abcd function from GPT-OSS.
     Reference: https://github.com/openai/gpt-oss/blob/main/gpt_oss/evals/abcd_grader.py
@@ -164,7 +206,7 @@ class ABCDExtractor(Extractor):
         return ""
 
 
-class BoxedMathExtractor(Extractor):
+class BoxedMathExtractor(Extractor, extractor_id="boxed_math_extractor"):
     """Extract boxed math answer from response text.
     Based on OpenAI's extract_boxed_math function from GPT-OSS.
     https://github.com/openai/gpt-oss/blob/main/gpt_oss/evals/aime_eval.py

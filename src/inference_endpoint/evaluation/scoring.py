@@ -45,7 +45,9 @@ class Scorer(ABC):
         self.report_dir = Path(report_dir)
         self.extractor = extractor
         self.dataset_name = dataset_name
-        self.ground_truth_column = ground_truth_column
+        self.ground_truth_column = (
+            ground_truth_column if ground_truth_column is not None else "ground_truth"
+        )
         self.sample_index_map = self._load_sample_index_map()
 
     def _load_sample_index_map(self):
@@ -108,6 +110,9 @@ class Scorer(ABC):
 
         # Get ground truths
         order = df["sample_index"].to_numpy()
+        assert (
+            self.ground_truth_column in self.dataset.dataframe.columns
+        ), f"Ground truth column {self.ground_truth_column} not found in dataset {self.dataset}"
         ground_truths = self.dataset.dataframe[self.ground_truth_column].to_numpy()[
             order
         ]

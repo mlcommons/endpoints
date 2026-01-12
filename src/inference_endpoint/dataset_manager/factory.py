@@ -19,7 +19,6 @@ TODO: Very simple factory for now. Will be expanded to support multiple formats 
 """
 
 import logging
-from pathlib import Path
 
 from inference_endpoint.dataset_manager.dataset import DatasetFormat
 
@@ -41,38 +40,30 @@ class DataLoaderFactory:
 
     @staticmethod
     def create_loader(
-        dataset_path: Path | str,
-        format: str | None = None,
-        key_maps: list[dict[str, str]] | None = None,
+        config: Dataset,
         metadata: dict | None = None,
-        **kwargs,
     ) -> Dataset:
         """Create appropriate dataset loader based on format.
 
         Args:
-            dataset_path: Path to dataset file or directory
-            key_maps: Dictionary of key mappings for the parser
+            config: Dataset configuration
             metadata: Dictionary of metadata for the loader
-            **kwargs: Additional arguments for specific loaders
-
-        Returns:
-            DataLoader instance
-
-        Raises:
-            ValueError: If format is unsupported
         """
+        dataset_path = config.path
+        format = config.format
+        remap = config.parser
+        name = config.name
+        if name in Dataset.PREDEFINED:
+            return Dataset.PREDEFINED[name].get_dataloader()
         if format is not None:
             format = DatasetFormat(format)
 
-        if key_maps is None:
+        if remap is None:
             remap = {"prompt": "text_input"}
-        else:
-            remap = key_maps[0]
 
         transforms = [ColumnNameRemap(remap)]
         if metadata is not None:
             transforms.append(AddStaticColumns(metadata))
-
         return Dataset.load_from_file(
             dataset_path,
             transforms=transforms,

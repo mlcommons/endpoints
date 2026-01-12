@@ -194,11 +194,20 @@ class Dataset(BaseModel):
 
     name: str
     type: DatasetType
-    path: str
+    path: str | None = None
     format: str | None = None
     samples: int | None = None
     eval_method: EvalMethod | None = None
     parser: dict | None = None
+    accuracy_config: AccuracyConfig | None = None
+
+
+class AccuracyConfig(BaseModel):
+    """Accuracy configuration."""
+
+    eval_method: str | None = None
+    ground_truth: str | None = None
+    extractor: str | None = None
 
 
 class RuntimeConfig(BaseModel):

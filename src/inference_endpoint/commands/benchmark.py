@@ -62,6 +62,8 @@ from inference_endpoint.endpoint_client.configs import (
 )
 from inference_endpoint.endpoint_client.http_client import HTTPEndpointClient
 from inference_endpoint.endpoint_client.http_sample_issuer import HttpClientSampleIssuer
+from inference_endpoint.evaluation import Extractor
+from inference_endpoint.evaluation.scoring import PassAt1Scorer
 from inference_endpoint.exceptions import (
     ExecutionError,
     InputValidationError,
@@ -456,10 +458,6 @@ def _run_benchmark(
         # Throw exception if no model name is provided
         raise InputValidationError("No model name provided")
 
-    # Get dataset - from CLI or from config
-    # TODO: Dataset Logic is not yet fully implemented
-    dataset_path = config.datasets[0].path
-
     # Determine if streaming should be enabled based on config
     streaming_mode = config.model_params.streaming
 
@@ -476,17 +474,68 @@ def _run_benchmark(
         else:
             logger.info("Streaming: disabled (auto, offline mode)")
 
-    try:
-        if any(d.parser for d in config.datasets):
-            key_maps = [d.parser for d in config.datasets]
-        else:
-            key_maps = None
-        logger.info(f"Parser key maps: {key_maps}")
+    # Get dataset - from CLI or from config
+    # TODO: Dataset Logic is not yet fully implemented
 
+    accuracy_configs = [
+        config for config in config.datasets if config.type == DatasetType.ACCURACY
+    ]
+    performance_configs = [
+        config for config in config.datasets if config.type == DatasetType.PERFORMANCE
+    ]
+    if not performance_configs and not accuracy_configs:
+        raise InputValidationError("No performance or accuracy datasets provided")
+    accuracy_datasets = []
+    eval_configs = []
+    if len(accuracy_configs) > 0:
+        # TODO configure metadata for accuracy datasets - should be done in the dataset config
+        metadata = {
+            "model": model_name,
+            "stream": enable_streaming,
+            "max_completion_tokens": max_tokens,
+            "temperature": config.model_params.temperature,
+            "top_p": config.model_params.top_p,
+            "top_k": config.model_params.top_k,
+            "repetition_penalty": config.model_params.repetition_penalty,
+        }
+        accuracy_datasets = [
+            DataLoaderFactory.create_loader(dataset, metadata=metadata)
+            for dataset in accuracy_configs
+        ]
+
+        # Pack the evaluation parameters for each accuracy dataset
+        for i in range(len(accuracy_configs)):
+            dataset = accuracy_configs[i]
+            extractor = Extractor.get(dataset.accuracy_config.extractor)
+            ground_truth_column = dataset.accuracy_config.ground_truth
+            scorer = PassAt1Scorer  # currently only PassAt1Scorer is supported
+            # TODO add support for other scorers
+            # TODO add tests and defaults
+            eval_configs.append(
+                (
+                    scorer,
+                    extractor,
+                    dataset.name,
+                    accuracy_datasets[i],
+                    config.report_dir,
+                    ground_truth_column,
+                )
+            )
+            accuracy_datasets[i].load()
+            logger.info(
+                f"Loaded {accuracy_datasets[i]} - {accuracy_datasets[i].num_samples()} samples"
+            )
+
+    else:
+        logger.info("No accuracy datasets provided")
+    if len(performance_configs) > 1:
+        logger.warning(
+            "Multiple performance datasets provided, only the first one will be used"
+        )
+
+    try:
         dataloader = DataLoaderFactory.create_loader(
-            dataset_path,
-            format=config.datasets[0].format,
-            key_maps=key_maps,
+            performance_configs[0],
             metadata={
                 "model": model_name,
                 "stream": enable_streaming,
@@ -500,8 +549,10 @@ def _run_benchmark(
         dataloader.load()
         logger.info(f"Loaded {dataloader.num_samples()} samples")
     except FileNotFoundError as e:
-        logger.error(f"Dataset file not found: {dataset_path}")
-        raise InputValidationError(f"Dataset file not found: {dataset_path}") from e
+        logger.error(f"Dataset file not found: {performance_configs[0].path}")
+        raise InputValidationError(
+            f"Dataset file not found: {performance_configs[0].path}"
+        ) from e
     except Exception as e:
         logger.error("Dataset load failed")
         raise SetupError(f"Failed to load dataset: {e}") from e
@@ -513,6 +564,8 @@ def _run_benchmark(
 
     # Calculate and display expected sample count
     total_samples = rt_settings.total_samples_to_issue()
+    if accuracy_datasets is not None:
+        total_samples += sum(len(dataset.dataframe) for dataset in accuracy_datasets)
     duration_s = rt_settings.min_duration_ms / 1000
 
     logger.info(
@@ -587,6 +640,7 @@ def _run_benchmark(
             name=f"cli_benchmark_{uuid.uuid4().hex[0:8]}",
             report_dir=report_dir,
             tokenizer_override=tokenizer,
+            accuracy_datasets=accuracy_datasets,
             max_shutdown_timeout_s=config.timeout if config.timeout else None,
             dump_events_log=True,
         )
@@ -606,6 +660,24 @@ def _run_benchmark(
             signal.signal(signal.SIGINT, old_handler)
 
         # Prefer authoritative metrics from the session report
+        for (
+            scorer,
+            extractor,
+            dataset_id,
+            dataset,
+            report_dir,
+            ground_truth_column,
+        ) in eval_configs:
+            scorer_instance = scorer(
+                dataset_id,
+                dataset,
+                report_dir,
+                extractor=extractor,
+                ground_truth_column=ground_truth_column,
+            )
+            score, n_repeats = scorer_instance.score()
+            logger.info(f"Score for {dataset_id}: {score} ({n_repeats} repeats)")
+
         report = getattr(sess, "report", None)
         if report is None:
             logger.error(
