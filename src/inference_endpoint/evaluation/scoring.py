@@ -15,6 +15,8 @@
 
 
 import os
+import tempfile
+import uuid
 from abc import ABC, abstractmethod
 from pathlib import Path
 
@@ -24,7 +26,7 @@ import pandas as pd
 
 from ..dataset_manager.dataset import Dataset
 from ..load_generator.events import SampleEvent
-from .extractor import Extractor
+from .extractor import Extractor, PythonCodeExtractor
 
 
 class Scorer(ABC):
@@ -141,3 +143,108 @@ class PassAt1Scorer(Scorer):
 
 
 ExactMatchScorer = PassAt1Scorer
+
+
+class LiveCodeBenchScorer(Scorer):
+    """Scorer for LiveCodeBench code generation tasks.
+
+    Uses the lcb_runner evaluation framework to execute generated code against test cases.
+    Requires lcb_runner to be installed (pip install from LiveCodeBench).
+
+    The scorer:
+    1. Extracts Python code from model outputs (using PythonCodeExtractor)
+    2. Runs code execution tests using lcb_runner
+    3. Returns 1.0 if all tests pass, 0.0 otherwise
+
+    Args:
+        dataset_name: Name of the dataset
+        dataset: Dataset object containing problems
+        report_dir: Directory containing evaluation logs
+        extractor: Extractor class (defaults to PythonCodeExtractor)
+        lcb_version: LiveCodeBench version tag (e.g., "release_v5", "release_v6")
+        num_workers: Number of parallel workers for code evaluation
+        timeout: Timeout in seconds for each test execution
+        question_id_column: Column name in dataset containing question IDs
+    """
+
+    def __init__(
+        self,
+        dataset_name: str,
+        dataset: Dataset,
+        report_dir: os.PathLike,
+        extractor: type[Extractor] = PythonCodeExtractor,
+        lcb_version: str = "release_v6",
+        timeout: int = 60,
+        question_id_column: str = "question_id",
+    ):
+        # Note: LiveCodeBench doesn't use ground_truth_column the same way
+        # but we need to pass something to the parent
+        super().__init__(
+            dataset_name=dataset_name,
+            dataset=dataset,
+            report_dir=report_dir,
+            extractor=extractor,
+            ground_truth_column=question_id_column,
+        )
+
+        self.lcb_version = lcb_version
+        self.timeout = timeout
+        self.question_id_column = question_id_column
+
+    def score_single_sample(self, value: str, ground_truth: str) -> float:
+        raise RuntimeError(
+            "This method should not be called. Use the score() method instead, which invokes lcb_runner."
+        )
+
+    def score(self) -> tuple[float, int]:
+        """Score the dataset using parallel evaluation.
+
+        This overrides the base class method to use parallel evaluation
+        for better performance with code execution tests.
+
+        Returns:
+            tuple[float, int]: The mean score and the number of repeats.
+        """
+        df = self.get_outputs()
+
+        # Outputs are for all samples, not just the target dataset
+        valid_uuids = self.sample_index_map.keys()
+        df = df[df["sample_uuid"].isin(valid_uuids)]
+
+        # Match to sample index from dataset
+        df = df.apply(self.match_sample_index, axis=1)
+
+        # Get question IDs
+        def get_question_id(sample_index: int) -> str:
+            return self.dataset.dataframe.iloc[sample_index][self.question_id_column]
+
+        df["question_id"] = df["sample_index"].apply(get_question_id)
+
+        # Extract code from outputs
+        df["extracted_code"] = df["output"].apply(self.extractor.extract)
+
+        n_repeats = len(df) // self.dataset.num_samples()
+
+        # TODO: For now run locally in the same process. In the future, we need to migrate
+        # LCBServe to be running as a background process listening on a port or something
+        # so that it can be containerized for security reasons.
+        if not Path("/opt/LiveCodeBench").exists():
+            raise FileNotFoundError(
+                "Currently LCB is only supported if it is cloned in /opt/LiveCodeBench"
+            )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            parquet_name = f"{uuid.uuid4()}.parquet"
+            parquet_path = Path(temp_dir) / parquet_name
+            df.to_parquet(parquet_path)
+
+            from ..dataset_manager.predefined.livecodebench.lcb_serve import LCBServe
+
+            lcb_serve = LCBServe(
+                version_tag=self.lcb_version,
+                output_file_store=Path(temp_dir),
+                lcb_root=Path("/opt/LiveCodeBench"),
+            )
+            pass_at_1, _ = lcb_serve.eval_parquet(parquet_name)
+
+        return pass_at_1, n_repeats
