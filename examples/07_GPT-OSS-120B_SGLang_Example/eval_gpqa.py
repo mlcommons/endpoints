@@ -17,23 +17,22 @@
 import argparse
 from pathlib import Path
 
-from inference_endpoint.dataset_manager.predefined.aime25 import AIME25
-from inference_endpoint.evaluation.extractor import BoxedMathExtractor
+from inference_endpoint.dataset_manager.predefined.gpqa import GPQA
+from inference_endpoint.evaluation.extractor import ABCDExtractor
 from inference_endpoint.evaluation.scoring import PassAt1Scorer
 
 
 def main(args):
     # Load the dataset
-    ds = AIME25.load_from_file(args.dataset_path)
+    ds = GPQA.load_from_file(args.dataset_path)
     ds.load()
 
     # Create the scorer
     scorer = PassAt1Scorer(
-        AIME25.DATASET_ID,
+        GPQA.DATASET_ID,
         ds,
         args.report_dir,
-        extractor=BoxedMathExtractor,
-        ground_truth_column="answer",
+        extractor=ABCDExtractor,
     )
 
     # Score the dataset
@@ -43,7 +42,7 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Evaluate accuracy of the SGLang endpoint on the AIME25 dataset",
+        description="Evaluate accuracy of the SGLang endpoint on the GPQA dataset",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -51,7 +50,7 @@ if __name__ == "__main__":
         "--dataset-path",
         type=Path,
         help="Path to the dataset",
-        default="datasets/aime25/aime25.parquet",
+        default="datasets/gpqa/diamond/gpqa_diamond.parquet",
     )
     parser.add_argument(
         "--report-dir",
