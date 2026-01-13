@@ -59,7 +59,6 @@ class _LCBWorker:
         # LiveCodeBench assumes that it is run from the root of its repository. As
         # such, we need to chdir() to it before any imports are done
         os.chdir(self.lcb_root)
-        os.environ["TQDM_DISABLE"] = "1"
 
         from lcb_runner.evaluation import extract_instance_results
         from lcb_runner.runner.scenario_router import (
@@ -133,8 +132,6 @@ class LCBServe:
 
     def load_test_suites(self):
         with chdir(self.lcb_root):
-            os.environ["TQDM_DISABLE"] = "1"
-
             from lcb_runner.runner.scenario_router import build_prompt_benchmark
             from lcb_runner.utils.scenarios import Scenario
 
@@ -179,7 +176,7 @@ class LCBServe:
         codes = []
         for _, row in df.iterrows():
             tests.append(self.test_suites[row["question_id"]])
-            codes.append(row["extracted_code"])
+            codes.append([row["extracted_code"]])
 
         # In the eval code for GPT-OSS in MLPerf Inference v6.0, a ProcessPoolExecutor is used.
         # For now, we'll delegate the worker distribution to lcb_runner rather than handling it
