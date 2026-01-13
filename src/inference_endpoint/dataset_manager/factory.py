@@ -42,6 +42,7 @@ class DataLoaderFactory:
     def create_loader(
         config: Dataset,
         metadata: dict | None = None,
+        **kwargs,
     ) -> Dataset:
         """Create appropriate dataset loader based on format.
 
@@ -54,7 +55,7 @@ class DataLoaderFactory:
         remap = config.parser
         name = config.name
         if name in Dataset.PREDEFINED:
-            return Dataset.PREDEFINED[name].get_dataloader()
+            return Dataset.PREDEFINED[name].get_dataloader(**kwargs)
         if format is not None:
             format = DatasetFormat(format)
 

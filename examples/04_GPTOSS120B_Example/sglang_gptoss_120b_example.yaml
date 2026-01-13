@@ -22,12 +22,14 @@ datasets:
       eval_method: "pass_at_1"
       ground_truth: "answer"
       extractor: "boxed_math_extractor"
+      num_repeats: 8
   - name: "gpqa_gptoss_sglang"
     type: "accuracy"
     accuracy_config:
       eval_method: "pass_at_1"
       extractor: "abcd_extractor"
-
+      num_repeats: 5
+  # LCB - 3
 settings:
   runtime:
     min_duration_ms: 300
@@ -55,4 +57,4 @@ endpoint_config:
   api_key: null
   api_type: "sglang"
 
-report_dir: "results/sglang_gptoss_120b_benchmark_mlperf_13_JAN_26/"
+report_dir: "results/sglang_gptoss_120b_benchmark_mlperf_13_JAN_26_DP4_FULL/"

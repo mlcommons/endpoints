@@ -21,10 +21,12 @@ Benchmark command implementation."""
 import argparse
 import json
 import logging
+import os
 import shutil
 import signal
 import tempfile
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urljoin
 
@@ -63,7 +65,7 @@ from inference_endpoint.endpoint_client.configs import (
 from inference_endpoint.endpoint_client.http_client import HTTPEndpointClient
 from inference_endpoint.endpoint_client.http_sample_issuer import HttpClientSampleIssuer
 from inference_endpoint.evaluation import Extractor
-from inference_endpoint.evaluation.scoring import PassAt1Scorer
+from inference_endpoint.evaluation.scoring import Scorer
 from inference_endpoint.exceptions import (
     ExecutionError,
     InputValidationError,
@@ -139,6 +141,17 @@ class ResponseCollector:
 
         if self.pbar:
             self.pbar.update(1)
+
+
+@dataclass
+class AccuracyConfiguration:
+    scorer: Scorer
+    extractor: Extractor
+    dataset_name: str
+    dataset: Dataset
+    report_dir: os.PathLike
+    ground_truth_column: str
+    num_repeats: int
 
 
 async def run_benchmark_command(args: argparse.Namespace) -> None:
@@ -336,49 +349,6 @@ def _build_config_from_cli(
     )
 
 
-def _get_dataset_path(args: argparse.Namespace, config: BenchmarkConfig) -> Path:
-    """Get dataset path from CLI args or config.
-
-    CURRENT LIMITATION: Only supports single dataset execution.
-    Priority: CLI args > config datasets[0]
-
-    Args:
-        args: Command arguments
-        config: BenchmarkConfig
-
-    Returns:
-        Path to dataset file
-
-    Raises:
-        InputValidationError: If no dataset specified or file doesn't exist
-
-    TODO: Multi-dataset support
-    When implemented, this should:
-    1. Return list[Path] for multiple datasets
-    2. Validate all dataset paths exist
-    3. Support dataset interleaving strategies
-    """
-    if hasattr(args, "dataset") and args.dataset:
-        dataset_path = Path(args.dataset)
-    else:
-        # TODO: Multi-dataset - currently just picks single dataset
-        single_dataset = config.get_single_dataset()
-        if single_dataset:
-            dataset_path = Path(single_dataset.path)
-        else:
-            logger.error("Dataset required: --dataset PATH or specify in config")
-            raise InputValidationError(
-                "Dataset required: --dataset PATH or specify in config"
-            )
-
-    # Validate file exists
-    if not dataset_path.exists():
-        logger.error(f"Dataset not found: {dataset_path}")
-        raise InputValidationError(f"Dataset not found: {dataset_path}")
-
-    return dataset_path
-
-
 def _run_benchmark(
     config: BenchmarkConfig,
     collect_responses: bool,
@@ -498,33 +468,31 @@ def _run_benchmark(
             "top_k": config.model_params.top_k,
             "repetition_penalty": config.model_params.repetition_penalty,
         }
-        accuracy_datasets = [
-            DataLoaderFactory.create_loader(dataset, metadata=metadata)
-            for dataset in accuracy_configs
-        ]
 
         # Pack the evaluation parameters for each accuracy dataset
-        for i in range(len(accuracy_configs)):
-            dataset = accuracy_configs[i]
-            extractor = Extractor.get(dataset.accuracy_config.extractor)
-            ground_truth_column = dataset.accuracy_config.ground_truth
-            scorer = PassAt1Scorer  # currently only PassAt1Scorer is supported
-            # TODO add support for other scorers
+        for acc_config in accuracy_configs:
+            extractor = Extractor.get(acc_config.accuracy_config.extractor)
+            ground_truth_column = acc_config.accuracy_config.ground_truth
+            scorer = Scorer.get(acc_config.accuracy_config.eval_method)
+            num_repeats = acc_config.accuracy_config.num_repeats
+            dataset = DataLoaderFactory.create_loader(
+                acc_config, metadata=metadata, num_repeats=num_repeats
+            )
+            accuracy_datasets.append(dataset)
             # TODO add tests and defaults
             eval_configs.append(
-                (
+                AccuracyConfiguration(
                     scorer,
                     extractor,
-                    dataset.name,
-                    accuracy_datasets[i],
+                    acc_config.name,
+                    dataset,
                     config.report_dir,
                     ground_truth_column,
+                    num_repeats,
                 )
             )
-            accuracy_datasets[i].load()
-            logger.info(
-                f"Loaded {accuracy_datasets[i]} - {accuracy_datasets[i].num_samples()} samples"
-            )
+            dataset.load()
+            logger.info(f"Loaded {dataset} - {dataset.num_samples()} samples")
 
     else:
         logger.info("No accuracy datasets provided")
@@ -659,31 +627,26 @@ def _run_benchmark(
             # Always restore original handler
             signal.signal(signal.SIGINT, old_handler)
         accuracy_scores = {}
-        for (
-            scorer,
-            extractor,
-            dataset_id,
-            dataset,
-            report_dir,
-            ground_truth_column,
-        ) in eval_configs:
-            scorer_instance = scorer(
-                dataset_id,
-                dataset,
-                report_dir,
-                extractor=extractor,
-                ground_truth_column=ground_truth_column,
+        for eval_config in eval_configs:
+            scorer_instance = eval_config.scorer(
+                eval_config.dataset_name,
+                eval_config.dataset,
+                eval_config.report_dir,
+                extractor=eval_config.extractor,
+                ground_truth_column=eval_config.ground_truth_column,
             )
             score, n_repeats = scorer_instance.score()
-            accuracy_scores[dataset_id] = {
-                "dataset_id": dataset_id,
-                "num_samples": len(dataset.data),
-                "extractor": extractor.__name__,
-                "ground_truth_column": ground_truth_column,
+            accuracy_scores[eval_config.dataset_name] = {
+                "dataset_name": eval_config.dataset_name,
+                "num_samples": len(eval_config.dataset.data),
+                "extractor": eval_config.extractor.__name__,
+                "ground_truth_column": eval_config.ground_truth_column,
                 "score": score,
                 "n_repeats": n_repeats,
             }
-            logger.info(f"Score for {dataset_id}: {score} ({n_repeats} repeats)")
+            logger.info(
+                f"Score for {eval_config.dataset_name}: {score} ({n_repeats} repeats)"
+            )
 
         # Prefer authoritative metrics from the session report
         report = getattr(sess, "report", None)

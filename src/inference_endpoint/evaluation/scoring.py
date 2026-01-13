@@ -14,9 +14,11 @@
 # limitations under the License.
 
 
+import inspect
 import os
 from abc import ABC, abstractmethod
 from pathlib import Path
+from typing import ClassVar
 
 import numpy as np
 import orjson
@@ -32,6 +34,46 @@ class Scorer(ABC):
     An optional extractor can be provided to post-process the output to extract values that
     can be compared against the ground truth.
     """
+
+    PREDEFINED: ClassVar[dict[str, type["Scorer"]]] = {}
+
+    def __init_subclass__(
+        cls,
+        scorer_id: str | None = None,
+        **kwargs,
+    ):
+        super().__init_subclass__(**kwargs)
+
+        if not inspect.isabstract(cls):
+            if scorer_id is None:
+                scorer_id = cls.__name__
+            cls.SCORER_ID = scorer_id
+            Scorer.PREDEFINED[scorer_id] = cls
+
+    @classmethod
+    def get(cls, name: str) -> type["Scorer"]:
+        """Look up an Scorer subclass by its registered name.
+
+        Args:
+            name: str, the registered scorer name
+
+        Returns:
+            Scorer subclass
+
+        Raises:
+            KeyError: If no scorer with the given name is found
+        """
+        try:
+            return Scorer.PREDEFINED[name]
+        except KeyError as e:
+            raise KeyError(
+                f"Scorer '{name}' is not registered - available scorers: {Scorer.available_scorers()}"
+            ) from e
+
+    @classmethod
+    def available_scorers(cls) -> list[str]:
+        """Return the list of registered scorer names."""
+        return list(Scorer.PREDEFINED.keys())
 
     def __init__(
         self,
@@ -125,7 +167,7 @@ class Scorer(ABC):
         return np.mean(scores), n_repeats
 
 
-class PassAt1Scorer(Scorer):
+class PassAt1Scorer(Scorer, scorer_id="pass_at_1"):
     """Implements pass@1 scoring as defined by Artificial Analysis.
     pass@1 means the model gets exactly one attempt to produce the correct answer.
     The score is 1 if the output matches the ground truth exactly, 0 otherwise.
