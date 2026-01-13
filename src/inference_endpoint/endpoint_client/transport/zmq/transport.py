@@ -14,10 +14,28 @@
 # limitations under the License.
 
 """
-ZMQ transport implementation.
+ZMQ transport implementation for worker pool IPC.
 
-Register ZMQ socket's FD with event loop using add_reader/add_writer.
-When data is available, the callback fires directly - no polling needed.
+    Main Process                      Worker Processes
+    ┌─────────────────┐              ┌─────────────────┐
+    │ ZmqWorkerPool   │              │ Worker 0        │
+    │ Transport       │              │                 │
+    │                 │   PUSH/PULL  │  ┌───────────┐  │
+    │  request_sender ├──────────────┼──► receiver  │  │
+    │       [0]       │   (per-wkr)  │  └───────────┘  │
+    │                 │              │                 │
+    │  response_recv  ◄──────────────┼── sender        │
+    │   (fan-in)      │   PULL/PUSH  │                 │
+    └─────────────────┘              └─────────────────┘
+
+Notes:
+    - Edge-Triggered FDs: ZMQ sockets use edge-triggered notifications.
+      We drain all messages on each callback and reschedule via ``call_soon``
+      to catch messages arriving during processing.
+    - Direct Event Loop Integration: Uses ``add_reader``/``add_writer`` instead
+      of asyncio ZMQ. This gives us control over the hot path and avoids extra layers.
+    - Uses msgspec.msgpack serialization.
+    - All transports are single-threaded and must be used from the event loop thread.
 """
 
 from __future__ import annotations
@@ -68,11 +86,20 @@ class _ZMQSocketConfig:
 
 
 class _ZmqReceiverTransport(ReceiverTransport):
-    """ZMQ PULL socket transport with event-driven receive (internal).
+    """
+    ZMQ PULL socket receiver with event-driven receive.
 
-    Note: ZMQ's FD is edge-triggered on internal state changes, not level-triggered.
-    We must drain all messages and reschedule via call_soon if more arrive during
-    processing. See aiozmq's _ZmqLooplessTransportImpl for the canonical pattern.
+    ZMQ's FD is edge-triggered (signals on state change, not data presence).
+    This requires special handling:
+
+    1. On FD readable, we drain ALL available messages (not just one)
+    2. After draining, we reschedule via `call_soon` to catch messages
+       that arrived during processing (race condition mitigation)
+    3. The `_soon_call` handle prevents duplicate schedules and enables
+       clean cancellation on close
+
+    This pattern is adapted from aiozmq's `_ZmqLooplessTransportImpl`.
+    (see: https://github.com/aio-libs/aiozmq/blob/bc471896c3b200fd052beccfac32bd4cd79e24d5/aiozmq/core.py#L678)
     """
 
     __slots__ = (
@@ -105,57 +132,59 @@ class _ZmqReceiverTransport(ReceiverTransport):
         self._loop.add_reader(self._fd, self._on_readable)
 
     def _on_readable(self) -> None:
-        """Called by event loop when ZMQ socket FD is readable.
+        """
+        Handle FD readable event - drain all messages.
 
-        ZMQ's FD is edge-triggered, so we must:
-        1. Drain all available messages
-        2. Re-check zmq.EVENTS after processing
-        3. Reschedule via call_soon if POLLIN is still set
+        Called by event loop when ZMQ's internal state changes. Because ZMQ
+        uses edge-triggering, we must:
+
+        1. Clear `_soon_call` (we're now executing)
+        2. Drain ALL available messages in a tight loop
+        3. Wake waiter ONCE after draining (batched notification)
+        4. Reschedule via `call_soon` if we did work (catch racing messages)
+
+        The reschedule step handles this race:
+            t0: FD becomes readable, event loop queues our callback
+            t1: We start draining messages
+            t2: New message arrives (no new edge notification)
+            t3: We finish draining, think we're done
+            t4: call_soon fires, we drain the t2 message
+
+        Without step 4, the t2 message would sit unprocessed until the next
+        unrelated edge trigger.
         """
         self._soon_call = None
 
-        if self._closing or self._sock is None or self._sock.closed:
+        if self._closing:
             return
 
+        count = 0
         try:
-            events = self._sock.getsockopt(zmq.EVENTS)
-        except zmq.ZMQError:
-            return
-
-        if not (events & zmq.POLLIN):
-            return
-
-        did_work = False
-        while True:
-            try:
+            while True:
                 data = self._sock.recv(zmq.NOBLOCK, copy=False, track=False)
-                msg = self._decoder.decode(data)
-                self._deque.append(msg)
-                did_work = True
-            except zmq.Again:
-                break
-            except zmq.ZMQError as e:
-                # EAGAIN/EINTR: normal, retry later
-                # ENOTSOCK: socket closed during shutdown, ignore
-                if e.errno not in (errno.EAGAIN, errno.EINTR, errno.ENOTSOCK):
-                    logger.error(f"ZMQ recv error: {e}")
-                break
-            except Exception as e:
-                logger.error(f"Decode error: {e}")
-                continue
+                self._deque.append(self._decoder.decode(data))
+                count += 1
+        except zmq.Again:
+            # Normal: no more messages
+            pass
+        except zmq.ZMQError as e:
+            if e.errno not in (errno.EAGAIN, errno.EINTR, errno.ENOTSOCK):
+                logger.error(f"ZMQ recv error: {e}")
+        except Exception as e:
+            logger.error(f"Decode error: {e}")
 
-        # Wake up any waiting consumer
-        if did_work and self._waiter is not None and not self._waiter.done():
-            self._waiter.set_result(None)
+        # Wake waiter once after draining (not per message)
+        if count > 0:
+            if self._waiter is not None and not self._waiter.done():
+                self._waiter.set_result(None)
 
-        # Re-check events and reschedule if more messages arrived during processing
-        if did_work and self._soon_call is None:
-            try:
-                postevents = self._sock.getsockopt(zmq.EVENTS)
-                if postevents & zmq.POLLIN:
-                    self._soon_call = self._loop.call_soon(self._on_readable)
-            except zmq.ZMQError:
-                pass
+            # Reschedule to catch messages that arrived during processing
+            if self._soon_call is None:
+                try:
+                    if self._sock.getsockopt(zmq.EVENTS) & zmq.POLLIN:
+                        self._soon_call = self._loop.call_soon(self._on_readable)
+                except zmq.ZMQError:
+                    pass
 
     def poll(self) -> Any | None:
         """Non-blocking poll. Returns item if available, None otherwise."""
@@ -217,11 +246,14 @@ class _ZmqReceiverTransport(ReceiverTransport):
 
 
 class _ZmqSenderTransport(SenderTransport):
-    """ZMQ PUSH socket transport with buffered non-blocking writes (internal).
+    """
+    ZMQ PUSH socket sender with buffered non-blocking writes.
 
-    Note: ZMQ's FD is edge-triggered on internal state changes, not level-triggered.
-    We must drain the buffer and reschedule via call_soon if more work is pending.
-    See aiozmq's _ZmqLooplessTransportImpl for the canonical pattern.
+    ZMQ's FD is edge-triggered (signals on state change, not data presence).
+    This requires special handling:
+    1. Fast path: Direct send when buffer empty and socket ready
+    2. Slow path: Buffer message, register writer callback
+    3. Writer callback drains buffer, reschedules if more work
     """
 
     __slots__ = (
@@ -257,6 +289,7 @@ class _ZmqSenderTransport(SenderTransport):
 
         serialized = self._encoder.encode(data)
 
+        # Fast path: direct send when buffer is empty
         if not self._buffer:
             try:
                 self._sock.send(serialized, zmq.NOBLOCK, copy=False, track=False)
@@ -266,8 +299,9 @@ class _ZmqSenderTransport(SenderTransport):
             except zmq.ZMQError as e:
                 if e.errno not in (errno.EAGAIN, errno.EINTR):
                     logger.error(f"ZMQ send error: {e}")
-                    return
+                return
 
+        # Slow path: buffer and register writer
         self._buffer.append(serialized)
         if not self._writing:
             self._writing = True
@@ -278,50 +312,34 @@ class _ZmqSenderTransport(SenderTransport):
 
         ZMQ's FD is edge-triggered, so we must:
         1. Drain the buffer as much as possible
-        2. Re-check zmq.EVENTS after processing
-        3. Reschedule via call_soon if POLLOUT is still set and buffer has items
+        2. Reschedule via call_soon if buffer still has items
         """
         self._soon_call = None
 
-        if self._closing or self._sock is None or self._sock.closed:
+        if self._closing:
             return
 
         try:
-            events = self._sock.getsockopt(zmq.EVENTS)
-        except zmq.ZMQError:
-            return
-
-        if not (events & zmq.POLLOUT):
-            return
-
-        did_work = False
-        while self._buffer:
-            try:
-                data = self._buffer[0]
-                self._sock.send(data, zmq.NOBLOCK, copy=False, track=False)
+            while self._buffer:
+                self._sock.send(self._buffer[0], zmq.NOBLOCK, copy=False, track=False)
                 self._buffer.popleft()
-                did_work = True
-            except zmq.Again:
-                break
-            except zmq.ZMQError as e:
-                # EAGAIN/EINTR: normal, retry later
-                # ENOTSOCK: socket closed during shutdown, cleanup
-                if e.errno not in (errno.EAGAIN, errno.EINTR, errno.ENOTSOCK):
-                    logger.error(f"ZMQ send error in buffer drain: {e}")
-                self._buffer.clear()
-                self._stop_writing()
-                return
+        except zmq.Again:
+            # Normal: socket would block
+            pass
+        except zmq.ZMQError as e:
+            if e.errno not in (errno.EAGAIN, errno.EINTR, errno.ENOTSOCK):
+                logger.error(f"ZMQ send error in buffer drain: {e}")
+            self._buffer.clear()
+            self._stop_writing()
+            return
 
         if not self._buffer:
             self._stop_writing()
-        elif did_work and self._soon_call is None:
-            # More to send, reschedule if socket is ready
-            try:
-                postevents = self._sock.getsockopt(zmq.EVENTS)
-                if postevents & zmq.POLLOUT:
-                    self._soon_call = self._loop.call_soon(self._on_writable)
-            except zmq.ZMQError:
-                pass
+            return
+
+        # Buffer has remaining items - always reschedule to drain
+        if self._soon_call is None:
+            self._soon_call = self._loop.call_soon(self._on_writable)
 
     def _stop_writing(self) -> None:
         """Stop watching for writability."""
@@ -417,7 +435,7 @@ def _create_sender(
 # =============================================================================
 
 
-@dataclass
+@dataclass(slots=True)
 class _ZmqWorkerConnector(WorkerConnector):
     """Internal: Picklable connector for worker processes.
 
@@ -434,6 +452,22 @@ class _ZmqWorkerConnector(WorkerConnector):
         self, worker_id: int
     ) -> AsyncIterator[tuple[_ZmqReceiverTransport, _ZmqSenderTransport]]:
         """Connect worker transports and signal readiness.
+
+        Startup Sequence
+        -------------------
+        Main Process              Worker Process
+            │                         │
+            │  spawn(connector)       │
+            ├────────────────────────►│
+            │                         │
+            │                    connect to request addr
+            │                    connect to response addr
+            │                    connect to readiness addr
+            │                         │
+            │◄────── READY signal ────┤
+            │                         │
+        wait_for_workers_ready()      │
+        returns                   (start processing)
 
         Args:
             worker_id: Unique identifier for this worker.

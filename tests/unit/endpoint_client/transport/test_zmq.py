@@ -40,12 +40,12 @@ def event_loop():
 
 
 @pytest_asyncio.fixture
-async def pool():
+async def zmq_pool():
     """Provide a ZmqWorkerPoolTransport with auto-cleanup."""
     loop = asyncio.get_running_loop()
-    pool = ZmqWorkerPoolTransport.create(loop, num_workers=1)
-    yield pool
-    pool.cleanup()
+    zmq_pool = ZmqWorkerPoolTransport.create(loop, num_workers=1)
+    yield zmq_pool
+    zmq_pool.cleanup()
 
 
 # =============================================================================
@@ -58,20 +58,22 @@ class TestZmqPoolCreation:
 
     def test_create_with_defaults(self, event_loop):
         """Basic creation with defaults."""
-        pool = ZmqWorkerPoolTransport.create(event_loop, num_workers=4)
+        zmq_pool = ZmqWorkerPoolTransport.create(event_loop, num_workers=4)
         try:
-            assert pool is not None
-            assert pool.worker_connector is not None
+            assert zmq_pool is not None
+            assert zmq_pool.worker_connector is not None
         finally:
-            pool.cleanup()
+            zmq_pool.cleanup()
 
     def test_create_with_overrides(self, event_loop):
         """Config overrides are applied."""
-        pool = ZmqWorkerPoolTransport.create(event_loop, num_workers=2, io_threads=8)
+        zmq_pool = ZmqWorkerPoolTransport.create(
+            event_loop, num_workers=2, io_threads=8
+        )
         try:
-            assert pool._config.io_threads == 8
+            assert zmq_pool._config.io_threads == 8
         finally:
-            pool.cleanup()
+            zmq_pool.cleanup()
 
 
 # =============================================================================
@@ -83,14 +85,14 @@ class TestZmqCommunication:
     """Tests for send/receive functionality."""
 
     @pytest.mark.asyncio
-    async def test_send_recv_roundtrip(self, pool):
+    async def test_send_recv_roundtrip(self, zmq_pool):
         """Basic send→recv roundtrip."""
-        connector = pool.worker_connector
+        connector = zmq_pool.worker_connector
 
         async with connector.connect(0) as (worker_recv, worker_send):
             # Main sends request
             query = Query(id="test-1", data={"prompt": "hello"})
-            pool.send(0, query)
+            zmq_pool.send(0, query)
 
             # Worker receives
             received = await worker_recv.recv()
@@ -102,38 +104,38 @@ class TestZmqCommunication:
             worker_send.send(result)
 
             # Main receives via recv()
-            response = await pool.recv()
+            response = await zmq_pool.recv()
             assert response.id == "test-1"
             assert response.response_output == "world"
 
     @pytest.mark.asyncio
-    async def test_poll_nonblocking(self, pool):
+    async def test_poll_nonblocking(self, zmq_pool):
         """poll() returns None when empty, item when available."""
-        connector = pool.worker_connector
+        connector = zmq_pool.worker_connector
 
         async with connector.connect(0) as (_, worker_send):
             # Empty - poll returns None immediately
-            assert pool.poll() is None
+            assert zmq_pool.poll() is None
 
             # Worker sends response
             worker_send.send(QueryResult(id="test", response_output="hi"))
             await asyncio.sleep(0.01)  # Let event loop process
 
             # Available - poll returns item
-            result = pool.poll()
+            result = zmq_pool.poll()
             assert result is not None
             assert result.id == "test"
 
             # Empty again
-            assert pool.poll() is None
+            assert zmq_pool.poll() is None
 
     @pytest.mark.asyncio
     async def test_multiple_workers_readiness(self):
         """Multiple workers can signal readiness."""
         loop = asyncio.get_running_loop()
         num_workers = 4
-        pool = ZmqWorkerPoolTransport.create(loop, num_workers=num_workers)
-        connector = pool.worker_connector
+        zmq_pool = ZmqWorkerPoolTransport.create(loop, num_workers=num_workers)
+        connector = zmq_pool.worker_connector
 
         async def simulate_worker(worker_id: int):
             async with connector.connect(worker_id):
@@ -144,12 +146,12 @@ class TestZmqCommunication:
         ]
 
         try:
-            await pool.wait_for_workers_ready(timeout=0.5)
+            await zmq_pool.wait_for_workers_ready(timeout=0.5)
         finally:
             for task in worker_tasks:
                 task.cancel()
             await asyncio.gather(*worker_tasks, return_exceptions=True)
-            pool.cleanup()
+            zmq_pool.cleanup()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -163,26 +165,26 @@ class TestZmqCommunication:
     async def test_payload_variants(self, payload):
         """Various payload types serialize correctly."""
         loop = asyncio.get_running_loop()
-        pool = ZmqWorkerPoolTransport.create(loop, num_workers=1)
+        zmq_pool = ZmqWorkerPoolTransport.create(loop, num_workers=1)
 
         try:
-            async with pool.worker_connector.connect(0) as (worker_recv, _):
+            async with zmq_pool.worker_connector.connect(0) as (worker_recv, _):
                 query = Query(id=payload["id"], data={"prompt": payload["prompt"]})
-                pool.send(0, query)
+                zmq_pool.send(0, query)
 
                 received = await worker_recv.recv()
                 assert received.id == payload["id"]
                 assert received.data["prompt"] == payload["prompt"]
         finally:
-            pool.cleanup()
+            zmq_pool.cleanup()
 
     @pytest.mark.asyncio
-    async def test_messages_preserve_order(self, pool):
+    async def test_messages_preserve_order(self, zmq_pool):
         """Multiple queued messages are received in order."""
-        async with pool.worker_connector.connect(0) as (worker_recv, _):
+        async with zmq_pool.worker_connector.connect(0) as (worker_recv, _):
             num_messages = 10
             for i in range(num_messages):
-                pool.send(0, Query(id=f"msg-{i}", data={"seq": i}))
+                zmq_pool.send(0, Query(id=f"msg-{i}", data={"seq": i}))
 
             for i in range(num_messages):
                 received = await asyncio.wait_for(worker_recv.recv(), timeout=0.5)
@@ -208,8 +210,8 @@ class TestZmqRobustness:
         """Timeout when not all workers connect."""
         loop = asyncio.get_running_loop()
         total_workers = 2 if workers_started == 0 else 3
-        pool = ZmqWorkerPoolTransport.create(loop, num_workers=total_workers)
-        connector = pool.worker_connector
+        zmq_pool = ZmqWorkerPoolTransport.create(loop, num_workers=total_workers)
+        connector = zmq_pool.worker_connector
 
         async def simulate_worker(wid):
             async with connector.connect(wid):
@@ -221,18 +223,18 @@ class TestZmqRobustness:
 
         try:
             with pytest.raises(TimeoutError) as exc_info:
-                await pool.wait_for_workers_ready(timeout=0.05)
+                await zmq_pool.wait_for_workers_ready(timeout=0.05)
             assert expected_ready in str(exc_info.value)
         finally:
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
-            pool.cleanup()
+            zmq_pool.cleanup()
 
     @pytest.mark.asyncio
-    async def test_close_wakes_pending_recv(self, pool):
+    async def test_close_wakes_pending_recv(self, zmq_pool):
         """Closing receiver wakes pending recv() with None."""
-        async with pool.worker_connector.connect(0) as (worker_recv, _):
+        async with zmq_pool.worker_connector.connect(0) as (worker_recv, _):
             worker_recv.close()
             result = await asyncio.wait_for(worker_recv.recv(), timeout=0.5)
             assert result is None
@@ -241,9 +243,9 @@ class TestZmqRobustness:
     async def test_cleanup_idempotent(self):
         """cleanup() and close() are idempotent."""
         loop = asyncio.get_running_loop()
-        pool = ZmqWorkerPoolTransport.create(loop, num_workers=1)
+        zmq_pool = ZmqWorkerPoolTransport.create(loop, num_workers=1)
 
-        async with pool.worker_connector.connect(0) as (recv, send):
+        async with zmq_pool.worker_connector.connect(0) as (recv, send):
             # Transport close is idempotent
             recv.close()
             recv.close()
@@ -251,26 +253,26 @@ class TestZmqRobustness:
             send.close()
 
         # Pool cleanup is idempotent
-        pool.cleanup()
-        pool.cleanup()
-        pool.cleanup()
+        zmq_pool.cleanup()
+        zmq_pool.cleanup()
+        zmq_pool.cleanup()
 
     @pytest.mark.asyncio
     async def test_operations_after_cleanup(self):
         """Operations after cleanup are safe."""
         loop = asyncio.get_running_loop()
-        pool = ZmqWorkerPoolTransport.create(loop, num_workers=1)
-        pool.cleanup()
+        zmq_pool = ZmqWorkerPoolTransport.create(loop, num_workers=1)
+        zmq_pool.cleanup()
 
         # send is silent
-        pool.send(0, Query(id="x", data={}))
+        zmq_pool.send(0, Query(id="x", data={}))
 
         # recv returns None
-        result = await asyncio.wait_for(pool.recv(), timeout=0.1)
+        result = await asyncio.wait_for(zmq_pool.recv(), timeout=0.1)
         assert result is None
 
         # poll returns None
-        assert pool.poll() is None
+        assert zmq_pool.poll() is None
 
 
 # =============================================================================
