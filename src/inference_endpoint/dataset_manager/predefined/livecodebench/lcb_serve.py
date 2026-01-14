@@ -42,6 +42,17 @@ from pathlib import Path
 import pandas as pd
 
 
+@contextmanager
+def chdir(path: Path):
+    """Context manager to change the current working directory to the given path."""
+    old_dir = os.getcwd()
+    os.chdir(path)
+    try:
+        yield
+    finally:
+        os.chdir(old_dir)
+
+
 class _LCBWorker:
     def __init__(
         self,
@@ -58,51 +69,39 @@ class _LCBWorker:
     def __call__(self, test_suites, extracted_code):
         # LiveCodeBench assumes that it is run from the root of its repository. As
         # such, we need to chdir() to it before any imports are done
-        os.chdir(self.lcb_root)
+        with chdir(self.lcb_root):
+            from lcb_runner.evaluation import extract_instance_results
+            from lcb_runner.runner.scenario_router import (
+                get_metrics,
+                sort_and_extract_save_results,
+            )
+            from lcb_runner.utils.scenarios import Scenario
 
-        from lcb_runner.evaluation import extract_instance_results
-        from lcb_runner.runner.scenario_router import (
-            get_metrics,
-            sort_and_extract_save_results,
-        )
-        from lcb_runner.utils.scenarios import Scenario
+            save_results = [
+                suite.insert_output(output, output)
+                for suite, output in zip(test_suites, extracted_code, strict=False)
+            ]
 
-        save_results = [
-            suite.insert_output(output, output)
-            for suite, output in zip(test_suites, extracted_code, strict=False)
-        ]
+            save_results, combined_results = sort_and_extract_save_results(
+                Scenario.codegeneration, save_results
+            )
 
-        save_results, combined_results = sort_and_extract_save_results(
-            Scenario.codegeneration, save_results
-        )
-
-        mock_args = argparse.Namespace(
-            timeout=60,
-            num_process_evaluate=self.n_lcb_workers,
-        )
-        _, instance_results, _ = get_metrics(
-            Scenario.codegeneration,
-            mock_args,
-            sorted(test_suites, key=lambda x: x.question_id),
-            combined_results,
-        )
-        graded = extract_instance_results(instance_results)
+            mock_args = argparse.Namespace(
+                timeout=60,
+                num_process_evaluate=self.n_lcb_workers,
+            )
+            _, instance_results, _ = get_metrics(
+                Scenario.codegeneration,
+                mock_args,
+                sorted(test_suites, key=lambda x: x.question_id),
+                combined_results,
+            )
+            graded = extract_instance_results(instance_results)
 
         # Currently, Endpoints scoring doesn't care about the reason for failed tests, just the
         # score itself. Also currently lcb_runner is hard-coded and only supports Pass@1 scoring.
         # In the future, if we want to log test failure reasons, it should be added here.
         return graded
-
-
-@contextmanager
-def chdir(path: Path):
-    """Context manager to change the current working directory to the given path."""
-    old_dir = os.getcwd()
-    os.chdir(path)
-    try:
-        yield
-    finally:
-        os.chdir(old_dir)
 
 
 class LCBServe:
