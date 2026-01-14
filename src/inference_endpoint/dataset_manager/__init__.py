@@ -46,7 +46,6 @@ __all__ = [
     "Harmonize",
     "apply_transforms",
     "AIME25",
-    "AIME_GPTOSS_SGLang",
     "GPQA",
     "GPQA_GPTOSS_SGLang",
     "LiveCodeBench",

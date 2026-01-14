@@ -17,22 +17,23 @@
 import argparse
 from pathlib import Path
 
-from inference_endpoint.dataset_manager.predefined.gpqa import GPQA
-from inference_endpoint.evaluation.extractor import ABCDExtractor
-from inference_endpoint.evaluation.scoring import PassAt1Scorer
+from inference_endpoint.dataset_manager.predefined.livecodebench import LiveCodeBench
+from inference_endpoint.evaluation.scoring import LiveCodeBenchScorer
 
 
 def main(args):
     # Load the dataset
-    ds = GPQA.load_from_file(args.dataset_path)
+    ds = LiveCodeBench.load_from_file(args.dataset_path)
     ds.load()
 
     # Create the scorer
-    scorer = PassAt1Scorer(
-        GPQA.DATASET_ID,
+    scorer = LiveCodeBenchScorer(
+        LiveCodeBench.DATASET_ID,
         ds,
         args.report_dir,
-        extractor=ABCDExtractor,
+        lcb_version=args.lcb_version,
+        timeout=args.timeout,
+        lcb_root=Path(args.lcb_root),
     )
 
     # Score the dataset
@@ -42,7 +43,7 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Evaluate accuracy of the SGLang endpoint on the GPQA dataset",
+        description="Evaluate accuracy of the SGLang endpoint on the LiveCodeBench dataset",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -50,13 +51,31 @@ if __name__ == "__main__":
         "--dataset-path",
         type=Path,
         help="Path to the dataset",
-        default="datasets/gpqa/diamond/gpqa_diamond.parquet",
+        default="datasets/livecodebench/release_v6/livecodebench_release_v6.parquet",
     )
     parser.add_argument(
         "--report-dir",
         type=Path,
         help="Path to the report directory",
-        default="gpqa_sglang_report",
+        default="sglang_accuracy_report",
+    )
+    parser.add_argument(
+        "--lcb-version",
+        type=str,
+        help="LiveCodeBench version tag (e.g., 'release_v5', 'release_v6')",
+        default="release_v6",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        help="Timeout in seconds for each test execution",
+        default=60,
+    )
+    parser.add_argument(
+        "--lcb-root",
+        type=Path,
+        help="Path to LiveCodeBench installation directory",
+        default="/opt/LiveCodeBench",
     )
     args = parser.parse_args()
     main(args)

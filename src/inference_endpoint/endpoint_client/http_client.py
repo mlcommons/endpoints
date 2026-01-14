@@ -19,18 +19,16 @@ import asyncio
 import logging
 import threading
 import uuid
+from itertools import cycle
 
 import uvloop
-import zmq.asyncio
 
 from inference_endpoint.core.types import Query, QueryResult, StreamChunk
 from inference_endpoint.endpoint_client.configs import (
     AioHttpConfig,
     HTTPClientConfig,
-    ZMQConfig,
 )
-from inference_endpoint.endpoint_client.worker import WorkerManager
-from inference_endpoint.endpoint_client.zmq_utils import ZMQPullSocket, ZMQPushSocket
+from inference_endpoint.endpoint_client.worker_manager import WorkerManager
 
 logger = logging.getLogger(__name__)
 
@@ -42,32 +40,32 @@ class AsyncHttpEndpointClient:
     Architecture:
     - Main process: Accepts requests, distributes to workers, handles responses
     - Worker processes: Make actual HTTP requests to the endpoint
-    - requests are distributed to workers ROUND-ROBIN
+    - Requests are distributed to workers round-robin
 
     Usage:
-        client = AsyncHttpEndpointClient(config, aiohttp_config, zmq_config)
-        await client.issue_query(query)
-        response_if_any = await client.try_receive()
+        client = AsyncHttpEndpointClient(config, aiohttp_config)
+        client.issue(query)
+        response = client.poll()        # Non-blocking
+        response = await client.recv()  # Blocking
+        responses = client.drain()      # Drain all available
     """
 
     def __init__(
         self,
         config: HTTPClientConfig,
         aiohttp_config: AioHttpConfig,
-        zmq_config: ZMQConfig,
         loop: asyncio.AbstractEventLoop | None = None,
     ):
         self.client_id = uuid.uuid4().hex[:8]
         self.config = config
         self.aiohttp_config = aiohttp_config
-        self.zmq_config = zmq_config
-        self._next_worker_idx = 0
+        self._worker_cycle = cycle(range(config.num_workers))
 
         # Use provided loop or create own
         self._owns_loop = loop is None
         if loop is None:
             self.loop = uvloop.new_event_loop()
-            self._loop_thread: threading.Thread = threading.Thread(
+            self._loop_thread = threading.Thread(
                 target=self.loop.run_forever,
                 daemon=True,  # no need for explicit join
                 name=f"HttpClient-{self.client_id}",
@@ -81,67 +79,51 @@ class AsyncHttpEndpointClient:
         asyncio.run_coroutine_threadsafe(self._initialize(), self.loop).result()
 
         logger.info(
-            f"HTTPEndpointClient[{self.config.adapter.__name__}] initialized with num_workers={self.config.num_workers}"
+            f"EndpointClient initialized with num_workers={self.config.num_workers}, "
+            f"adapter={self.config.adapter.__name__}, "
+            f"accumulator={self.config.accumulator.__name__}, "
+            f"pool_transport={self.config.worker_pool_transport.__name__}"
         )
 
     async def _initialize(self) -> None:
-        """Initialize ZMQ context, sockets, and start workers."""
+        """Initialize worker manager and transports."""
         self._shutdown_event = asyncio.Event()
 
-        self.zmq_context = zmq.asyncio.Context(
-            io_threads=self.zmq_config.zmq_io_threads
-        )
-
-        self.worker_push_sockets = [
-            ZMQPushSocket(
-                self.zmq_context,
-                f"{self.zmq_config.zmq_request_queue_prefix}_{i}_requests",
-                self.zmq_config,
-            )
-            for i in range(self.config.num_workers)
-        ]
-
-        self.worker_manager = WorkerManager(
-            self.config, self.aiohttp_config, self.zmq_config, self.zmq_context
-        )
+        # WorkerManager creates and owns all transports
+        self.worker_manager = WorkerManager(self.config, self.aiohttp_config, self.loop)
         await self.worker_manager.initialize()
+        self.pool = self.worker_manager.pool_transport
 
-        self._response_socket = ZMQPullSocket(
-            self.zmq_context,
-            self.zmq_config.zmq_response_queue_addr,
-            self.zmq_config,
-            bind=True,
-            decoder_type=QueryResult | StreamChunk,
-        )
-
-    async def issue_query(self, query: Query) -> None:
+    def issue(self, query: Query) -> None:
         """
-        Issue query to endpoint.
-        Query is assigned to a worker to process in round-robin fashion.
+        Issue query to endpoint (round-robin to workers).
+        Non-blocking - buffers if socket would block.
         """
-        assert (
-            not self._shutdown_event.is_set()
-        ), "Cannot issue query: client is shutting down"
-        await self.worker_push_sockets[self._next_worker_idx].send(query)
-        self._next_worker_idx = (self._next_worker_idx + 1) % len(
-            self.worker_push_sockets
-        )
+        assert not self._shutdown_event.is_set(), "Client is shutting down"
+        self.pool.send(next(self._worker_cycle), query)
 
-    async def try_receive(self) -> QueryResult | StreamChunk | None:
-        """Receive next ready response if available, else return None."""
-        return await self._response_socket.receive()
+    def poll(self) -> QueryResult | StreamChunk | None:
+        """Non-blocking. Returns response if available, None otherwise."""
+        return self.pool.poll()
+
+    async def recv(self) -> QueryResult | StreamChunk | None:
+        """Blocking. Waits for next response. Returns None when closed."""
+        return await self.pool.recv()
+
+    def drain(self) -> list[QueryResult | StreamChunk]:
+        """Non-blocking. Returns all available responses."""
+        results: list[QueryResult | StreamChunk] = []
+        while (r := self.poll()) is not None:
+            results.append(r)
+        return results
 
     async def shutdown(self) -> None:
         """Gracefully shutdown client."""
         logger.info(f"[{self.client_id}] Shutting down...")
         self._shutdown_event.set()
 
-        self._response_socket.close()
-        for socket in self.worker_push_sockets:
-            socket.close()
-
+        # Shutdown workers
         await self.worker_manager.shutdown()
-        self.zmq_context.destroy(linger=0)
 
         # Stop event loop if we own it (scheduled to run after this coroutine completes)
         if self._owns_loop:
@@ -158,20 +140,17 @@ class HTTPEndpointClient(AsyncHttpEndpointClient):
     TODO(vir): sync recv. API is not required/implemented yet
 
     Usage:
-        client = HTTPEndpointClient(config, aiohttp_config, zmq_config)
-        client.issue_query(query)
-        response = await client.try_receive()
+        client = HTTPEndpointClient(config, aiohttp_config)
+        client.issue(query)
     """
 
-    def issue_query(self, query: Query) -> None:  # type: ignore[override]
+    def issue(self, query: Query) -> None:  # type: ignore[override]
         """Issue query."""
-        coro = super().issue_query(query)
-
-        # NOTE(vir):
-        # use call_soon_threadsafe directly to avoid concurrent.futures overhead in run_coroutine_threadsafe
-        # need this since issue_query might be called from any thread
-        self.loop.call_soon_threadsafe(lambda: asyncio.create_task(coro))
+        # Schedule on event loop thread for thread-safety
+        self.loop.call_soon_threadsafe(
+            lambda: super(HTTPEndpointClient, self).issue(query)
+        )
 
     def shutdown(self) -> None:  # type: ignore[override]
-        """Sync shutdown wrapper - blocks until base class async shutdown completes."""
+        """Sync shutdown."""
         asyncio.run_coroutine_threadsafe(super().shutdown(), self.loop).result()

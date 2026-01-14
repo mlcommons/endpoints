@@ -47,7 +47,7 @@ class TestHttpEndpointClientScaleOut:
                     "stream": False,
                 },
             )
-            future = futures_http_client.issue_query(query)
+            future = futures_http_client.issue(query)
             futures.append(future)
 
         # Wait for all futures to complete
@@ -85,7 +85,7 @@ class TestHttpEndpointClientScaleOut:
                     "stream": True,
                 },
             )
-            future = futures_http_client.issue_query(query)
+            future = futures_http_client.issue(query)
             futures.append(future)
 
         # Wait for all futures to complete
@@ -129,7 +129,7 @@ class TestHttpEndpointClientScaleOut:
                     "max_tokens": 2000,
                 },
             )
-            future = futures_http_client.issue_query(query)
+            future = futures_http_client.issue(query)
             futures.append((name, size, future))
 
         # Wait for all payloads
@@ -141,7 +141,7 @@ class TestHttpEndpointClientScaleOut:
 
     @pytest.mark.asyncio
     @pytest.mark.slow
-    async def test_many_workers(self, mock_http_echo_server, tmp_path):
+    async def test_many_workers(self, mock_http_echo_server):
         """Test with many workers."""
         actual_max_concurrency = 1000
         worker_counts = [16, 32]
@@ -151,8 +151,6 @@ class TestHttpEndpointClientScaleOut:
 
             client = create_futures_client(
                 f"{mock_http_echo_server.url}/v1/chat/completions",
-                tmp_path,
-                "custom",
                 num_workers=num_workers,
             )
 
@@ -169,7 +167,7 @@ class TestHttpEndpointClientScaleOut:
                             "model": "gpt-3.5-turbo",
                         },
                     )
-                    future = client.issue_query(query)
+                    future = client.issue(query)
                     futures.append(future)
 
                 # Wait for all
@@ -193,7 +191,7 @@ class TestHTTPEndpointClientFunctionality:
     """Test core functionality of the HTTP endpoint client."""
 
     @pytest.mark.asyncio
-    async def test_shutdown_cancels_requests(self, tmp_path):
+    async def test_shutdown_cancels_requests(self):
         """Test that shutdown properly cancels in-flight HTTP requests.
 
         This test verifies that when shutdown is called:
@@ -234,11 +232,12 @@ class TestHTTPEndpointClientFunctionality:
 
         try:
             # Create client pointing to slow server
+            # NOTE(vir):
+            # Using single worker to avoid timing issues with async TestServer
+            # which will spawn its own even loop
             client = create_futures_client(
                 f"http://localhost:{server.port}/v1/chat/completions",
-                tmp_path,
-                "test_shutdown_cancels",
-                num_workers=2,
+                num_workers=1,
             )
 
             # Issue requests that will block on the server
@@ -252,7 +251,7 @@ class TestHTTPEndpointClientFunctionality:
                         "model": "gpt-3.5-turbo",
                     },
                 )
-                future = client.issue_query(query)
+                future = client.issue(query)
                 futures.append(future)
 
             # Wait for at least one request to reach the server
@@ -285,12 +284,10 @@ class TestHTTPEndpointClientFunctionality:
             await server.close()
 
     @pytest.mark.asyncio
-    async def test_error_response_propagation(self, tmp_path):
+    async def test_error_response_propagation(self):
         """Test that error responses are propagated as exceptions in futures."""
         client = create_futures_client(
             "http://invalid-host-does-not-exist:9999/v1/chat/completions",
-            tmp_path,
-            "test_error_prop",
         )
 
         try:
@@ -303,7 +300,7 @@ class TestHTTPEndpointClientFunctionality:
                 },
             )
 
-            future = client.issue_query(query)
+            future = client.issue(query)
 
             # Should get error
             with pytest.raises(Exception) as exc_info:
@@ -326,12 +323,14 @@ class TestHTTPEndpointClientFunctionality:
                 "model": "gpt-3.5-turbo",
             },
         )
-        future1 = futures_http_client.issue_query(query1)
+        future1 = futures_http_client.issue(query1)
 
         # Create context to inject invalid data
         context = zmq.asyncio.Context()
         response_push = context.socket(zmq.PUSH)
-        response_push.connect(futures_http_client.zmq_config.zmq_response_queue_addr)
+        # Access response address via pool transport internal state
+        response_addr = futures_http_client.worker_manager.pool_transport._response_addr
+        response_push.connect(response_addr)
 
         try:
             # Send invalid data that will cause error in handler
@@ -345,7 +344,7 @@ class TestHTTPEndpointClientFunctionality:
                     "model": "gpt-3.5-turbo",
                 },
             )
-            future2 = futures_http_client.issue_query(query2)
+            future2 = futures_http_client.issue(query2)
 
             # Wait for both futures
             result1 = await asyncio.wrap_future(future1)
@@ -360,13 +359,11 @@ class TestHTTPEndpointClientFunctionality:
             context.destroy(linger=0)
 
     @pytest.mark.asyncio
-    async def test_streaming_error_propagation(self, tmp_path):
+    async def test_streaming_error_propagation(self):
         """Test error propagation in streaming responses."""
         # Use invalid endpoint to trigger errors
         client = create_futures_client(
             "http://invalid-endpoint-12345:9999/v1/chat/completions",
-            tmp_path,
-            "tse",
         )
 
         try:
@@ -379,7 +376,7 @@ class TestHTTPEndpointClientFunctionality:
                 },
             )
 
-            future = client.issue_query(query)
+            future = client.issue(query)
 
             # Complete response should fail
             with pytest.raises(Exception):  # noqa: B017 Worker wraps errors in generic Exception
@@ -426,7 +423,7 @@ class TestHTTPEndpointClientFunctionality:
                     "stream": True,
                 },
             )
-            futures.append((name, prompt, futures_http_client.issue_query(query)))
+            futures.append((name, prompt, futures_http_client.issue(query)))
 
         # Verify all complete correctly
         for name, prompt, future in futures:

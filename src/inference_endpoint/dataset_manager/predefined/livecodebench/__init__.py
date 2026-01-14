@@ -20,11 +20,7 @@ from pathlib import Path
 import pandas as pd
 
 from ...dataset import Dataset, load_from_huggingface
-from ...transforms import (
-    AddStaticColumns,
-    Harmonize,
-    UserPromptFormatter,
-)
+from . import presets
 
 logger = getLogger(__name__)
 
@@ -43,6 +39,8 @@ class LiveCodeBench(
         "question",
         "starter_code",
     ]
+
+    PRESETS = presets
 
     @classmethod
     def generate(
@@ -106,7 +104,7 @@ class LiveCodeBench(
         logger.info(f"Saved {len(df)} samples to {dst_path}")
         return df
 
-
+# TODO : Cleanup post merge with main
 class LiveCodeBench_GPTOSS_SGLang(
     LiveCodeBench, dataset_id="livecodebench_gptoss_sglang"
 ):
