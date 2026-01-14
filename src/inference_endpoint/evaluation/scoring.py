@@ -207,13 +207,6 @@ class RougeScorer(Scorer, scorer_id="rouge"):
         texts = ["\n".join(nltk.sent_tokenize(text)) for text in texts]
         return texts
 
-    def score_single_sample(self, value: str, ground_truth: str) -> float:
-        """Compute ROUGE-L F1 score between value and ground_truth."""
-        # print("ground_truth:", ground_truth)
-        # print("value:", value)
-        # scores = self.rouge_scorer.score(ground_truth, value)
-        # return scores['rougeL'].fmeasure
-
     def score(self) -> tuple[float, int]:
         df = self.get_outputs()
 
