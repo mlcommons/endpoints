@@ -207,6 +207,16 @@ class RougeScorer(Scorer, scorer_id="rouge"):
         texts = ["\n".join(nltk.sent_tokenize(text)) for text in texts]
         return texts
 
+    def score_single_sample(self, value: str, ground_truth: str) -> float:
+        # This method is not used
+        raise RuntimeError(
+            """
+            This method should not be called.
+            Use the score() method instead,
+            which computes ROUGE on the whole dataset."
+            """
+        )
+
     def score(self) -> tuple[float, int]:
         df = self.get_outputs()
 
