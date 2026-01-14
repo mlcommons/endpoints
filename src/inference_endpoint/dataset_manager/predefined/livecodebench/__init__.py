@@ -119,10 +119,7 @@ class LiveCodeBench_GPTOSS_SGLang(
         transforms: list[Transform] | None = None,
         force_regenerate: bool = False,
     ) -> "Dataset":
-        if transforms is None:
-            transforms = LiveCodeBench.PRESETS.gptoss_sglang()
-        else:
-            transforms = transforms + LiveCodeBench.PRESETS.gptoss_sglang()
+        transforms = (transforms or []) + LiveCodeBench.PRESETS.gptoss_sglang()
 
         df = LiveCodeBench.generate(force=force_regenerate, datasets_dir=datasets_dir)
         return cls(df, transforms=transforms, repeats=num_repeats)

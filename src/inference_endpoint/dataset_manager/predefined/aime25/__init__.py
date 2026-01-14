@@ -149,10 +149,6 @@ class AIME25_GPTOSS_SGLang(AIME25, dataset_id="aime25_gptoss_sglang"):
         transforms: list[Transform] | None = None,
         force_regenerate: bool = False,
     ) -> "Dataset":
-        if transforms is None:
-            transforms = AIME25.PRESETS.gptoss_sglang()
-        else:
-            transforms = transforms + AIME25.PRESETS.gptoss_sglang()
-
+        transforms = (transforms or []) + AIME25.PRESETS.gptoss_sglang()
         df = AIME25.generate(force=force_regenerate, datasets_dir=datasets_dir)
         return cls(df, transforms=transforms, repeats=num_repeats)

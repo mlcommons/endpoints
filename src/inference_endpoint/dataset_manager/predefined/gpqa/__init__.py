@@ -163,10 +163,6 @@ class GPQA_GPTOSS_SGLang(GPQA, dataset_id="gpqa_gptoss_sglang"):
         transforms: list[Transform] | None = None,
         force_regenerate: bool = False,
     ) -> "Dataset":
-        if transforms is None:
-            transforms = GPQA.PRESETS.gptoss_sglang()
-        else:
-            transforms = transforms + GPQA.PRESETS.gptoss_sglang()
-
+        transforms = (transforms or []) + GPQA.PRESETS.gptoss_sglang()
         df = GPQA.generate(force=force_regenerate, datasets_dir=datasets_dir)
         return cls(df, transforms=transforms, repeats=num_repeats)

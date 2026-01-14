@@ -146,7 +146,7 @@ class ResponseCollector:
 @dataclass
 class AccuracyConfiguration:
     scorer: Scorer
-    extractor: Extractor
+    extractor: type[Extractor]
     dataset_name: str
     dataset: Dataset
     report_dir: os.PathLike
