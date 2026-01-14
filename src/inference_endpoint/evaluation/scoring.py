@@ -185,8 +185,15 @@ class RougeScorer(Scorer, scorer_id="rouge"):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         try:
-            # from rouge_score import rouge_scorer
-            # self.rouge_scorer = rouge_scorer.RougeScorer(['rougeL'], use_stemmer=True)
+            import importlib.util as _importlib_util
+
+            if (
+                _importlib_util.find_spec("evaluate") is None
+                or _importlib_util.find_spec("nltk") is None
+                or _importlib_util.find_spec("rouge_score") is None
+            ):
+                raise ImportError
+
             import evaluate
             import nltk
 
@@ -195,8 +202,8 @@ class RougeScorer(Scorer, scorer_id="rouge"):
             nltk.download("punkt_tab")
         except ImportError:
             raise ImportError(
-                "nltk and evaluate is required for ROUGE scoring. "
-                "Install it with: pip install nltk evaluate"
+                "nltk, evaluate, and rouge_score are required for ROUGE scoring. "
+                "Install with: pip install nltk evaluate rouge_score"
             ) from None
 
     def postprocess_text(self, texts):
@@ -256,12 +263,7 @@ class RougeScorer(Scorer, scorer_id="rouge"):
             **result,
             "gen_len": f"{np.sum(prediction_lens)}",
             "gen_num": gen_num,
-            # "gen_tok_len": gen_tok_len,
-            # "tokens_per_sample": round(np.sum(prediction_lens) / gen_num, 1),
         }
-
-        print("\nResults\n")
-        print(result)
 
         return result, 1
 

@@ -239,7 +239,7 @@ class NoneExtractor(Extractor, extractor_id="None"):
     """
 
     @classmethod
-    def extract(cls, text: str) -> None:
+    def extract(cls, text: str) -> str:
         return text
 
 

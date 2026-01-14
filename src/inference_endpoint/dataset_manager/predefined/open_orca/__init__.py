@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from logging import getLogger
 from pathlib import Path
 
 import pandas as pd
@@ -23,8 +22,6 @@ from inference_endpoint.dataset_manager.transforms import (
 )
 
 from ...dataset import Dataset
-
-logger = getLogger(__name__)
 
 
 class OpenOrca(
