@@ -221,7 +221,15 @@ class RougeScorer(Scorer, scorer_id="rouge"):
         df = df.apply(self.match_sample_index, axis=1)
 
         empirical = df["output"].tolist()
-        ground_truths = self.dataset.dataframe[self.ground_truth_column].tolist()
+
+        order = df["sample_index"].to_numpy().astype(int)
+        assert (
+            self.ground_truth_column in self.dataset.dataframe.columns
+        ), f"Ground truth column {self.ground_truth_column} not found in dataset {self.dataset}"
+
+        ground_truths = list(
+            self.dataset.dataframe[self.ground_truth_column].to_numpy()[order]
+        )
 
         empirical = self.postprocess_text(empirical)
         ground_truths = self.postprocess_text(ground_truths)
