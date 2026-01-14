@@ -17,6 +17,7 @@
 import os
 from abc import ABC, abstractmethod
 from pathlib import Path
+from typing import ClassVar
 
 import numpy as np
 import orjson
@@ -32,6 +33,34 @@ class Scorer(ABC):
     An optional extractor can be provided to post-process the output to extract values that
     can be compared against the ground truth.
     """
+
+    PREDEFINED: ClassVar[dict[str, type["Scorer"]]] = {}
+
+    def __init_subclass__(
+        cls,
+        scorer_id: str | None = None,
+        **kwargs,
+    ):
+        super().__init_subclass__(**kwargs)
+        if scorer_id is not None:
+            cls.SCORER_ID = scorer_id
+            Scorer.PREDEFINED[scorer_id] = cls
+
+    @classmethod
+    def get(cls, scorer_id: str) -> type["Scorer"]:
+        """Look up a Scorer subclass by its registered name.
+
+        Args:
+            scorer_id: The registered name of the scorer
+
+        Returns:
+            Scorer subclass
+        """
+        if scorer_id not in cls.PREDEFINED:
+            raise ValueError(
+                f"Unknown scorer: {scorer_id}. Available: {list(cls.PREDEFINED.keys())}"
+            )
+        return cls.PREDEFINED[scorer_id]
 
     def __init__(
         self,
@@ -125,7 +154,7 @@ class Scorer(ABC):
         return np.mean(scores), n_repeats
 
 
-class PassAt1Scorer(Scorer):
+class PassAt1Scorer(Scorer, scorer_id="pass_at_1"):
     """Implements pass@1 scoring as defined by Artificial Analysis.
     pass@1 means the model gets exactly one attempt to produce the correct answer.
     The score is 1 if the output matches the ground truth exactly, 0 otherwise.
@@ -141,3 +170,82 @@ class PassAt1Scorer(Scorer):
 
 
 ExactMatchScorer = PassAt1Scorer
+
+
+class RougeScorer(Scorer, scorer_id="rouge"):
+    """Implements ROUGE scoring for text generation evaluation.
+    ROUGE (Recall-Oriented Understudy for Gisting Evaluation) measures the overlap
+    between generated text and reference text. Returns the ROUGE-L F1 score.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        try:
+            # from rouge_score import rouge_scorer
+            # self.rouge_scorer = rouge_scorer.RougeScorer(['rougeL'], use_stemmer=True)
+            import evaluate
+            import nltk
+
+            self.metric = evaluate.load("rouge")
+            nltk.download("punkt")
+            nltk.download("punkt_tab")
+        except ImportError:
+            raise ImportError(
+                "nltk and evaluate is required for ROUGE scoring. "
+                "Install it with: pip install nltk evaluate"
+            ) from None
+
+    def postprocess_text(self, texts):
+        import nltk
+
+        texts = [text.strip() for text in texts]
+        # rougeLSum expects newline after each sentence
+        texts = ["\n".join(nltk.sent_tokenize(text)) for text in texts]
+        return texts
+
+    def score_single_sample(self, value: str, ground_truth: str) -> float:
+        """Compute ROUGE-L F1 score between value and ground_truth."""
+        # print("ground_truth:", ground_truth)
+        # print("value:", value)
+        # scores = self.rouge_scorer.score(ground_truth, value)
+        # return scores['rougeL'].fmeasure
+
+    def score(self) -> tuple[float, int]:
+        df = self.get_outputs()
+
+        # Outputs are for all samples, not just the target dataset
+        valid_uuids = self.sample_index_map.keys()
+        df = df[df["sample_uuid"].isin(valid_uuids)]
+
+        # Match to sample index from dataset
+        df = df.apply(self.match_sample_index, axis=1)
+
+        empirical = df["output"].tolist()
+        ground_truths = self.dataset.dataframe[self.ground_truth_column].tolist()
+
+        empirical = self.postprocess_text(empirical)
+        ground_truths = self.postprocess_text(ground_truths)
+
+        result = self.metric.compute(
+            predictions=empirical,
+            references=ground_truths,
+            use_stemmer=True,
+            use_aggregator=False,
+        )
+
+        result = {k: f"{round(np.mean(v) * 100, 4)}" for k, v in result.items()}
+        prediction_lens = [len(pred) for pred in empirical]
+        gen_num = len(empirical)
+
+        result = {
+            **result,
+            "gen_len": f"{np.sum(prediction_lens)}",
+            "gen_num": gen_num,
+            # "gen_tok_len": gen_tok_len,
+            # "tokens_per_sample": round(np.sum(prediction_lens) / gen_num, 1),
+        }
+
+        print("\nResults\n")
+        print(result)
+
+        return result, 1

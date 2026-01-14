@@ -57,6 +57,8 @@ class Extractor(ABC):
         Raises:
             KeyError: If no extractor with the given name is found
         """
+        if name is None:
+            return NoneExtractor
         try:
             return Extractor.PREDEFINED[name]
         except KeyError as e:
@@ -229,3 +231,13 @@ class BoxedMathExtractor(Extractor, extractor_id="boxed_math_extractor"):
         if matches:
             return matches[-1]
         return None
+
+
+class NoneExtractor(Extractor, extractor_id="None"):
+    """A no-op extractor that always returns input.
+    Used for cases where no extraction is needed
+    """
+
+    @classmethod
+    def extract(cls, text: str) -> None:
+        return text

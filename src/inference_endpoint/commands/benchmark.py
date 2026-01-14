@@ -63,7 +63,7 @@ from inference_endpoint.endpoint_client.configs import (
 from inference_endpoint.endpoint_client.http_client import HTTPEndpointClient
 from inference_endpoint.endpoint_client.http_sample_issuer import HttpClientSampleIssuer
 from inference_endpoint.evaluation import Extractor
-from inference_endpoint.evaluation.scoring import PassAt1Scorer
+from inference_endpoint.evaluation.scoring import Scorer
 from inference_endpoint.exceptions import (
     ExecutionError,
     InputValidationError,
@@ -517,9 +517,9 @@ def _run_benchmark(
             dataset = accuracy_configs[i]
             extractor = Extractor.get(dataset.accuracy_config.extractor)
             ground_truth_column = dataset.accuracy_config.ground_truth
-            scorer = PassAt1Scorer  # currently only PassAt1Scorer is supported
-            # TODO add support for other scorers
-            # TODO add tests and defaults
+            # Get scorer based on eval_method from config, default to pass_at_1
+            eval_method = dataset.accuracy_config.eval_method or "pass_at_1"
+            scorer = Scorer.get(eval_method)
             eval_configs.append(
                 (
                     scorer,

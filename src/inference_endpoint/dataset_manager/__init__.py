@@ -23,6 +23,7 @@ from .dataset import Dataset, EmptyDataset
 from .factory import DataLoaderFactory
 from .predefined.aime25 import AIME25, AIME_GPTOSS_SGLang
 from .predefined.gpqa import GPQA, GPQA_GPTOSS_SGLang
+from .predefined.open_orca import OpenOrca
 from .transforms import (
     AddStaticColumns,
     ColumnNameRemap,
@@ -48,4 +49,5 @@ __all__ = [
     "AIME_GPTOSS_SGLang",
     "GPQA",
     "GPQA_GPTOSS_SGLang",
+    "OpenOrca",
 ]
