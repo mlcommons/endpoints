@@ -83,7 +83,14 @@ class LiveCodeBench(
         # Following pre-processing steps from GPT-OSS side branch for parity with MLPerf Inference v6.0 GPT-OSS:
         # https://github.com/v-shobhit/gpt-oss/blob/feat/mlperf_integration/gpt_oss/evals/livecodebench_eval.py#L75
 
-        keep = ["question_id", "question_content", "starter_code"]
+        keep = [
+            "question_id",
+            "question_content",
+            "starter_code",
+            "public_test_cases",
+            "private_test_cases",
+            "platform",
+        ]
         df = df[keep]
         df.rename(columns={"question_content": "question"}, inplace=True)
 
@@ -100,7 +107,9 @@ class LiveCodeBench(
         return df
 
 
-class LiveCodeBench_GPTOSS_SGLang(LiveCodeBench):
+class LiveCodeBench_GPTOSS_SGLang(
+    LiveCodeBench, dataset_id="livecodebench_gptoss_sglang"
+):
     """LiveCodeBench_GPTOSS_SGLang: LiveCodeBench GTPOSS_SGLang Dataset
     Reference: https://huggingface.co/datasets/livecodebench/code_generation_lite/
     """
@@ -150,7 +159,7 @@ class LiveCodeBench_GPTOSS_SGLang(LiveCodeBench):
     def get_dataloader(cls, num_repeats: int = 5):
         df = LiveCodeBench.generate(datasets_dir=Path("datasets"))
         transforms = LiveCodeBench_GPTOSS_SGLang.create_transforms()
-        livecodebench_dataset = LiveCodeBench(
+        livecodebench_dataset = LiveCodeBench_GPTOSS_SGLang(
             df, transforms=transforms, repeats=num_repeats
         )
         return livecodebench_dataset

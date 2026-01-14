@@ -182,4 +182,14 @@ class PassAt1Scorer(Scorer, scorer_id="pass_at_1"):
         return 1.0 if value == ground_truth else 0.0
 
 
+class StringMatchScorer(Scorer, scorer_id="string_match"):
+    """Implements exact string match scoring.
+    The score is 1 if the output matches the ground truth exactly, 0 otherwise.
+    This is useful for debugging and development.
+    """
+
+    def score_single_sample(self, value: str, ground_truth: str) -> float:
+        return 1.0 if value.strip() == ground_truth.strip() else 0.0
+
+
 ExactMatchScorer = PassAt1Scorer

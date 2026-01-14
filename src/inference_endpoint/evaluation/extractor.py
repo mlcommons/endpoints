@@ -229,3 +229,11 @@ class BoxedMathExtractor(Extractor, extractor_id="boxed_math_extractor"):
         if matches:
             return matches[-1]
         return None
+
+
+class IdentityExtractor(Extractor, extractor_id="identity_extractor"):
+    """Extract identity answer from response text."""
+
+    @classmethod
+    def extract(cls, text: str) -> str | None:
+        return text
