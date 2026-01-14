@@ -24,7 +24,6 @@ from typing import Any, ClassVar
 
 import numpy as np
 import pandas as pd
-
 from datasets import load_dataset, load_from_disk
 
 from .transforms import Transform, apply_transforms
@@ -63,9 +62,6 @@ class DatasetFormat(Enum):
 
     HF = "huggingface"
     """HuggingFace dataset."""
-
-    RANDOM = "random"
-    """Random dataset. This is a dataset that is generated randomly."""
 
 
 class DatafileLoader(ABC):

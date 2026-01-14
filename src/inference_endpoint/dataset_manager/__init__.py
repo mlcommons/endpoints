@@ -24,6 +24,7 @@ from .factory import DataLoaderFactory
 from .predefined.aime25 import AIME25
 from .predefined.gpqa import GPQA
 from .predefined.livecodebench import LiveCodeBench
+from .predefined.random import RandomDataset
 from .transforms import (
     AddStaticColumns,
     ColumnNameRemap,
@@ -48,4 +49,5 @@ __all__ = [
     "AIME25",
     "GPQA",
     "LiveCodeBench",
+    "RandomDataset",
 ]

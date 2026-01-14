@@ -232,6 +232,7 @@ class LiveCodeBenchScorer(Scorer, scorer_id="code_bench_scorer"):
         question_id_column: str = "question_id",
         lcb_root: Path = Path("/opt/LiveCodeBench"),
         show_lcb_runner_output: bool = True,
+        **kwargs,
     ):
         # Note: LiveCodeBench doesn't use ground_truth_column the same way
         # but we need to pass something to the parent
