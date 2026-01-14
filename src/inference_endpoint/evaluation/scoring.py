@@ -220,7 +220,7 @@ class RougeScorer(Scorer, scorer_id="rouge"):
             """
             This method should not be called.
             Use the score() method instead,
-            which computes ROUGE on the whole dataset."
+            which computes ROUGE on the whole dataset.
             """
         )
 
@@ -265,7 +265,9 @@ class RougeScorer(Scorer, scorer_id="rouge"):
             "gen_num": gen_num,
         }
 
-        return result, 1
+        # TODO: return only rouge1 for now to align with other scorers
+        # Return the rest of the metrics later
+        return result["rouge1"], 1
 
 
 class LiveCodeBenchScorer(Scorer):
