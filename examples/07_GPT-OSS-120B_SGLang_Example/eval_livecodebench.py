@@ -33,6 +33,7 @@ def main(args):
         args.report_dir,
         lcb_version=args.lcb_version,
         timeout=args.timeout,
+        lcb_root=Path(args.lcb_root),
     )
 
     # Score the dataset
@@ -69,6 +70,12 @@ if __name__ == "__main__":
         type=int,
         help="Timeout in seconds for each test execution",
         default=60,
+    )
+    parser.add_argument(
+        "--lcb-root",
+        type=Path,
+        help="Path to LiveCodeBench installation directory",
+        default="/opt/LiveCodeBench",
     )
     args = parser.parse_args()
     main(args)

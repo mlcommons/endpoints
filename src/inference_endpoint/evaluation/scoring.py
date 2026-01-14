@@ -179,6 +179,7 @@ class LiveCodeBenchScorer(Scorer):
         timeout: int = 60,
         question_id_column: str = "question_id",
         lcb_root: Path = Path("/opt/LiveCodeBench"),
+        show_lcb_runner_output: bool = True,
     ):
         # Note: LiveCodeBench doesn't use ground_truth_column the same way
         # but we need to pass something to the parent
@@ -199,6 +200,7 @@ class LiveCodeBenchScorer(Scorer):
         self.lcb_version = lcb_version
         self.timeout = timeout
         self.question_id_column = question_id_column
+        self.show_lcb_runner_output = show_lcb_runner_output
 
     def score_single_sample(self, value: str, ground_truth: str) -> float:
         raise RuntimeError(
@@ -264,9 +266,54 @@ class LiveCodeBenchScorer(Scorer):
             ]
 
             try:
-                result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-                output = orjson.loads(result.stdout.encode("utf-8"))
-                pass_at_1 = output["pass_at_1"]
+                # Run subprocess with output both captured and displayed (tee-like behavior)
+                # Note: We let stderr pass through directly for real-time progress bars/logs
+                if self.show_lcb_runner_output:
+                    proc_stderr = None
+                else:
+                    proc_stderr = subprocess.DEVNULL
+
+                process = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=proc_stderr,
+                    text=True,
+                    bufsize=1,  # Line buffered
+                )
+
+                # Collect stdout while displaying it character-by-character to support
+                # progress bars that use carriage returns
+                stdout_buffer = []
+                while True:
+                    char = process.stdout.read(1)
+                    if not char:
+                        break
+
+                    if self.show_lcb_runner_output:
+                        sys.stdout.write(char)
+                        sys.stdout.flush()
+                    stdout_buffer.append(char)
+
+                # Wait for process to complete and check return code
+                return_code = process.wait()
+                if return_code != 0:
+                    raise subprocess.CalledProcessError(return_code, cmd)
+
+                # Parse the JSON output from the captured stdout
+                # Look for JSON at the end (after any progress bar output)
+                stdout_text = "".join(stdout_buffer)
+                # Try to find the last line that looks like JSON
+                lines = stdout_text.strip().split("\n")
+                for line in reversed(lines):
+                    line = line.strip()
+                    if line.startswith("{") and line.endswith("}"):
+                        output = orjson.loads(line.encode("utf-8"))
+                        pass_at_1 = output["pass_at_1"]
+                        break
+                else:
+                    # No JSON found, try parsing the whole output
+                    output = orjson.loads(stdout_text.encode("utf-8"))
+                    pass_at_1 = output["pass_at_1"]
             except (subprocess.CalledProcessError, orjson.JSONDecodeError, KeyError):
                 # Return None if subprocess fails or JSON parsing fails
                 pass_at_1 = None

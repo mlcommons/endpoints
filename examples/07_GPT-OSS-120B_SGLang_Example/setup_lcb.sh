@@ -19,12 +19,33 @@
 
 set -euo pipefail
 
-LCB_ROOT="/opt/LiveCodeBench"
+# Default installation directory
+DEFAULT_LCB_ROOT="/opt/LiveCodeBench"
+
+# Parse command line arguments
+LCB_ROOT="${1:-$DEFAULT_LCB_ROOT}"
+
+# Display installation path
+echo "LiveCodeBench will be installed to: ${LCB_ROOT}"
+
+# Check if directory already exists
+if [ -d "${LCB_ROOT}" ]; then
+    echo "Warning: Directory ${LCB_ROOT} already exists."
+    read -p "Do you want to remove it and reinstall? (y/N): " -n 1 -r
+    echo
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        echo "Removing existing directory..."
+        rm -rf "${LCB_ROOT}"
+    else
+        echo "Installation cancelled."
+        exit 1
+    fi
+fi
 
 echo "Cloning LiveCodeBench repository..."
-git clone https://github.com/LiveCodeBench/LiveCodeBench.git ${LCB_ROOT}
+git clone https://github.com/LiveCodeBench/LiveCodeBench.git "${LCB_ROOT}"
 
 echo "Installing dependencies..."
-cd ${LCB_ROOT}
+cd "${LCB_ROOT}"
 pip install datasets==3.6.0  # LCB requires HF datasets < 4.0.0
 pip install -e .

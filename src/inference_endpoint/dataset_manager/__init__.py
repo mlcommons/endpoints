@@ -23,6 +23,7 @@ from .dataset import Dataset, EmptyDataset
 from .factory import DataLoaderFactory
 from .predefined.aime25 import AIME25
 from .predefined.gpqa import GPQA
+from .predefined.livecodebench import LiveCodeBench
 from .transforms import (
     AddStaticColumns,
     ColumnNameRemap,
