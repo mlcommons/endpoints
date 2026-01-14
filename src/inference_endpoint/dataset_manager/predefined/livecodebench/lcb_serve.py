@@ -36,6 +36,7 @@ running in.
 
 import argparse
 import os
+from collections import defaultdict
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -171,16 +172,15 @@ class LCBServe:
         num_extract_fail = int(df["extracted_code"].isnull().sum())
         df = df.dropna().reset_index(drop=True)
 
-        tests = []
-        codes = []
+        test_inputs = defaultdict(list)
         for _, row in df.iterrows():
-            tests.append(self.test_suites[row["question_id"]])
-            codes.append([row["extracted_code"]])
+            # Group by question ID in the case of repeats
+            test_inputs[row["question_id"]].append(row["extracted_code"])
 
         # In the eval code for GPT-OSS in MLPerf Inference v6.0, a ProcessPoolExecutor is used.
         # For now, we'll delegate the worker distribution to lcb_runner rather than handling it
         # ourselves.
         worker = _LCBWorker(n_lcb_workers=self.n_workers)
-        graded = worker(tests, codes)
-        pass_at_1 = sum([all(results) for results in graded]) / total_samples
+        graded = worker(test_inputs.keys(), test_inputs.values())
+        pass_at_1 = sum([sum(results) for results in graded]) / total_samples
         return pass_at_1, num_extract_fail
