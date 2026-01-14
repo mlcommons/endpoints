@@ -199,7 +199,7 @@ class StringMatchScorer(Scorer, scorer_id="string_match"):
 ExactMatchScorer = PassAt1Scorer
 
 
-class LiveCodeBenchScorer(Scorer):
+class LiveCodeBenchScorer(Scorer, scorer_id="code_bench_scorer"):
     """Scorer for LiveCodeBench code generation tasks.
 
     Uses the lcb_runner evaluation framework to execute generated code against test cases.

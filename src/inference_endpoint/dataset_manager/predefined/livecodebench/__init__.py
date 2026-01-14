@@ -18,6 +18,7 @@ from logging import getLogger
 from pathlib import Path
 
 import pandas as pd
+from inference_endpoint.dataset_manager.transforms import Transform
 
 from ...dataset import Dataset, load_from_huggingface
 from . import presets
@@ -104,60 +105,24 @@ class LiveCodeBench(
         logger.info(f"Saved {len(df)} samples to {dst_path}")
         return df
 
-# TODO : Cleanup post merge with main
+
 class LiveCodeBench_GPTOSS_SGLang(
     LiveCodeBench, dataset_id="livecodebench_gptoss_sglang"
 ):
-    """LiveCodeBench_GPTOSS_SGLang: LiveCodeBench GTPOSS_SGLang Dataset
-    Reference: https://huggingface.co/datasets/livecodebench/code_generation_lite/
-    """
+    """LiveCodeBench for GPTOSS-SGLang"""
 
     @classmethod
-    def create_transforms(cls) -> list:
-        """Create the list of transforms to apply to the LiveCodeBench dataset."""
+    def get_dataloader(
+        cls,
+        datasets_dir: Path = Path("datasets"),
+        num_repeats: int = 1,
+        transforms: list[Transform] | None = None,
+        force_regenerate: bool = False,
+    ) -> "Dataset":
+        if transforms is None:
+            transforms = LiveCodeBench.PRESETS.gptoss_sglang()
+        else:
+            transforms = transforms + LiveCodeBench.PRESETS.gptoss_sglang()
 
-        instructions = (
-            "You are a python coding expert that solves problems step-by-step.\n"
-            "You must provide the reasoning to arriving at your solution and the code to solve the problem.\n"
-            "Do not try simulating the code execution. The code must be enclosed within ```python delimiters.\n"
-        )
-
-        user_prompt_format = (
-            f"{instructions}\n\n"
-            "{question}\n"
-            "### Format: You will use the following starter code to write the solution to the problem and enclose your code within delimiters.\n"
-            "```python\n"
-            "{starter_code}\n"
-            "```\n"
-        )
-
-        return [
-            # Step 1: Add instructions to the dataset
-            UserPromptFormatter(
-                user_prompt_format=user_prompt_format,
-                output_column="user_prompt",
-            ),
-            # Step 2: Harmonize the prompt for SGLang/GPT-OSS
-            Harmonize(
-                prompt_column="user_prompt",
-            ),
-            # Step 3: Add metadata columns since we don't want to do a dict update every iteration
-            AddStaticColumns(
-                {
-                    "stream": True,
-                    "max_new_tokens": 32768,
-                    "temperature": 1.0,
-                    "top_p": 1.0,
-                    "top_k": -1,
-                }
-            ),
-        ]
-
-    @classmethod
-    def get_dataloader(cls, num_repeats: int = 5):
-        df = LiveCodeBench.generate(datasets_dir=Path("datasets"))
-        transforms = LiveCodeBench_GPTOSS_SGLang.create_transforms()
-        livecodebench_dataset = LiveCodeBench_GPTOSS_SGLang(
-            df, transforms=transforms, repeats=num_repeats
-        )
-        return livecodebench_dataset
+        df = LiveCodeBench.generate(force=force_regenerate, datasets_dir=datasets_dir)
+        return cls(df, transforms=transforms, repeats=num_repeats)

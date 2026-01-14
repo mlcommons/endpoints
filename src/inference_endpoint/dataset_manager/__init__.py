@@ -21,9 +21,9 @@ This module handles dataset loading, preprocessing, and management.
 
 from .dataset import Dataset, EmptyDataset
 from .factory import DataLoaderFactory
-from .predefined.aime25 import AIME25, AIME_GPTOSS_SGLang
-from .predefined.gpqa import GPQA, GPQA_GPTOSS_SGLang
-from .predefined.livecodebench import LiveCodeBench, LiveCodeBench_GPTOSS_SGLang
+from .predefined.aime25 import AIME25
+from .predefined.gpqa import GPQA
+from .predefined.livecodebench import LiveCodeBench
 from .transforms import (
     AddStaticColumns,
     ColumnNameRemap,
@@ -47,7 +47,5 @@ __all__ = [
     "apply_transforms",
     "AIME25",
     "GPQA",
-    "GPQA_GPTOSS_SGLang",
     "LiveCodeBench",
-    "LiveCodeBench_GPTOSS_SGLang",
 ]

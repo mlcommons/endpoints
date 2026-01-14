@@ -13,10 +13,17 @@ model_params:
 datasets:
   - name: "perf-test"
     type: "performance"
-    path: "examples/04_GPTOSS120B_Example/data/acc_eval_ref.parquet"
+    path: "examples/04_GPTOSS120B_Example/data/perf_eval_ref.parquet"
     parser:
       input_tokens: "input_tokens"
-  - name: "aime_gptoss_sglang"
+  - name: "livecodebench_gptoss_sglang"
+    type: "accuracy"
+    accuracy_config:
+      eval_method: "string_match"
+      ground_truth: "public_test_cases"
+      extractor: "identity_extractor"
+      num_repeats: 1
+  - name: "aime25_gptoss_sglang"
     type: "accuracy"
     accuracy_config:
       eval_method: "pass_at_1"
@@ -57,4 +64,4 @@ endpoint_config:
   api_key: null
   api_type: "sglang"
 
-report_dir: "results/sglang_gptoss_120b_benchmark_mlperf_13_JAN_26_DP4_FULL/"
+report_dir: "results/sglang_gptoss_120b_benchmark_mlperf_13_JAN_26_DP4_FULL_LCB_DEBUG/"
