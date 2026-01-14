@@ -176,6 +176,7 @@ class LiveCodeBenchScorer(Scorer):
         lcb_version: str = "release_v6",
         timeout: int = 60,
         question_id_column: str = "question_id",
+        lcb_root: Path = Path("/opt/LiveCodeBench"),
     ):
         # Note: LiveCodeBench doesn't use ground_truth_column the same way
         # but we need to pass something to the parent
@@ -186,6 +187,12 @@ class LiveCodeBenchScorer(Scorer):
             extractor=extractor,
             ground_truth_column=question_id_column,
         )
+
+        self.lcb_root = Path(lcb_root)
+        if not self.lcb_root.exists():
+            raise FileNotFoundError(
+                f"LiveCodeBench root directory {lcb_root} does not exist"
+            )
 
         self.lcb_version = lcb_version
         self.timeout = timeout
@@ -228,11 +235,6 @@ class LiveCodeBenchScorer(Scorer):
         # TODO: For now run locally in the same process. In the future, we need to migrate
         # LCBServe to be running as a background process listening on a port or something
         # so that it can be containerized for security reasons.
-        if not Path("/opt/LiveCodeBench").exists():
-            raise FileNotFoundError(
-                "Currently LCB is only supported if it is cloned in /opt/LiveCodeBench"
-            )
-
         with tempfile.TemporaryDirectory() as temp_dir:
             parquet_name = f"{uuid.uuid4()}.parquet"
             parquet_path = Path(temp_dir) / parquet_name
@@ -243,8 +245,10 @@ class LiveCodeBenchScorer(Scorer):
             lcb_serve = LCBServe(
                 version_tag=self.lcb_version,
                 output_file_store=Path(temp_dir),
-                lcb_root=Path("/opt/LiveCodeBench"),
+                lcb_root=self.lcb_root,
             )
-            pass_at_1, _ = lcb_serve.eval_parquet(parquet_name)
+            pass_at_1, _ = lcb_serve.eval_parquet(
+                parquet_name, timeout_sec=self.timeout
+            )
 
         return pass_at_1, n_repeats

@@ -59,6 +59,7 @@ class _LCBWorker:
         self,
         lcb_root: Path = Path("/opt/LiveCodeBench"),
         n_lcb_workers: int = 1,
+        worker_timeout_sec: int = 60,
     ):
         if not lcb_root.exists():
             raise FileNotFoundError(
@@ -66,6 +67,7 @@ class _LCBWorker:
             )
         self.lcb_root = lcb_root
         self.n_lcb_workers = n_lcb_workers
+        self.worker_timeout_sec = worker_timeout_sec
 
     def __call__(self, test_suites, extracted_code):
         # LiveCodeBench assumes that it is run from the root of its repository. As
@@ -88,7 +90,7 @@ class _LCBWorker:
             )
 
             mock_args = argparse.Namespace(
-                timeout=60,
+                timeout=self.worker_timeout_sec,
                 num_process_evaluate=self.n_lcb_workers,
             )
             _, instance_results, _ = get_metrics(
@@ -145,11 +147,15 @@ class LCBServe:
             test_suites, _ = build_prompt_benchmark(mock_args)
         return {suite.question_id: suite for suite in test_suites}
 
-    def eval_parquet(self, parquet_file: Path) -> tuple[float, int]:
+    def eval_parquet(
+        self, parquet_file: Path, timeout_sec: int = 60
+    ) -> tuple[float, int]:
         """Evaluates all LiveCodeBench problems in a parquet file.
 
         Args:
             parquet_file: Path to the parquet file containing the outputs to evaluate.
+            timeout_sec: Timeout in seconds for each worker to use for each test case. If a test case does
+                not complete within this timeout, it is treated as a test fail. (Default: 60)
 
         Returns:
             tuple[float, int]: The pass@1 score and the number of samples that failed to extract code.
@@ -177,10 +183,18 @@ class LCBServe:
             # Group by question ID in the case of repeats
             test_inputs[row["question_id"]].append(row["extracted_code"])
 
+        test_suites_to_run = []
+        codes_to_run = []
+        for qid, codes in test_inputs.items():
+            test_suites_to_run.append(self.test_suites[qid])
+            codes_to_run.append(codes)
+
         # In the eval code for GPT-OSS in MLPerf Inference v6.0, a ProcessPoolExecutor is used.
         # For now, we'll delegate the worker distribution to lcb_runner rather than handling it
         # ourselves.
-        worker = _LCBWorker(n_lcb_workers=self.n_workers)
-        graded = worker(test_inputs.keys(), test_inputs.values())
+        worker = _LCBWorker(
+            n_lcb_workers=self.n_workers, worker_timeout_sec=timeout_sec
+        )
+        graded = worker(test_suites_to_run, codes_to_run)
         pass_at_1 = sum([sum(results) for results in graded]) / total_samples
         return pass_at_1, num_extract_fail
