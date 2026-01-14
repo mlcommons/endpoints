@@ -1,7 +1,8 @@
 # Online Latency Benchmark
 name: "online-llama2-70b-orca-benchmark"
 version: "1.0"
-type: "online"
+type: "submission"
+benchmark_mode: "online"
 
 model_params:
   name: "meta-llama/Llama-2-70b-chat-hf"
@@ -10,13 +11,23 @@ model_params:
   max_new_tokens: 1024
 
 datasets:
-  - name: "perf-test"
-    type: "performance"
+  - name: "open-orca-accuracy"
+    type: "accuracy"
     path: "open_orca/open_orca_gpt4_tokenized_llama.sampled_24576.pkl"
     samples: 24576
     parser:
-      prompt: "question"
-      system: "system_prompt"
+      question: "prompt"
+      system_prompt: "system"
+    accuracy_config:
+      eval_method: "rouge"
+      ground_truth: "output"
+  - name: "open-orca-performance"
+    type: "performance"
+    path: "open_orca/open_orca_gpt4_tokenized_llama.sampled_24576.pkl"
+    samples: 1000
+    parser:
+      question: "prompt"
+      system_prompt: "system"
 
 settings:
   runtime:
