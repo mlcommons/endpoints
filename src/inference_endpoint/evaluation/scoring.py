@@ -15,6 +15,8 @@
 
 
 import os
+import subprocess
+import sys
 import tempfile
 import uuid
 from abc import ABC, abstractmethod
@@ -210,7 +212,8 @@ class LiveCodeBenchScorer(Scorer):
         for better performance with code execution tests.
 
         Returns:
-            tuple[float, int]: The mean score and the number of repeats.
+            tuple[float | None, int]: The mean score and the number of repeats. If an error occurs during scoring,
+            returns None as the score.
         """
         df = self.get_outputs()
 
@@ -232,23 +235,40 @@ class LiveCodeBenchScorer(Scorer):
 
         n_repeats = len(df) // self.dataset.num_samples()
 
-        # TODO: For now run locally in the same process. In the future, we need to migrate
-        # LCBServe to be running as a background process listening on a port or something
-        # so that it can be containerized for security reasons.
+        # TODO: Currently runs as a subprocess. In the future, we need to migrate
+        # LCBServe to be running as a background service listening on a port or socket
+        # so that it can be containerized for better security and isolation.
         with tempfile.TemporaryDirectory() as temp_dir:
             parquet_name = f"{uuid.uuid4()}.parquet"
             parquet_path = Path(temp_dir) / parquet_name
             df.to_parquet(parquet_path)
 
-            from ..dataset_manager.predefined.livecodebench.lcb_serve import LCBServe
+            # Invoke lcb_serve.py as a subprocess to avoid importing LiveCodeBench dependencies
+            # in the main inference endpoint environment, and also because LCB eval will
+            # attempt to sandbox Python code execution by setting a bunch of core standard library
+            # methods to None (i.e. most things in the os, sys, and other such modules), which would
+            # impact the rest of the current Python process.
+            cmd = [
+                sys.executable,
+                "-m",
+                "inference_endpoint.dataset_manager.predefined.livecodebench.lcb_serve",
+                parquet_name,
+                "--version-tag",
+                self.lcb_version,
+                "--output-file-store",
+                str(temp_dir),
+                "--lcb-root",
+                str(self.lcb_root),
+                "--timeout",
+                str(self.timeout),
+            ]
 
-            lcb_serve = LCBServe(
-                version_tag=self.lcb_version,
-                output_file_store=Path(temp_dir),
-                lcb_root=self.lcb_root,
-            )
-            pass_at_1, _ = lcb_serve.eval_parquet(
-                parquet_name, timeout_sec=self.timeout
-            )
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+                output = orjson.loads(result.stdout.encode("utf-8"))
+                pass_at_1 = output["pass_at_1"]
+            except (subprocess.CalledProcessError, orjson.JSONDecodeError, KeyError):
+                # Return None if subprocess fails or JSON parsing fails
+                pass_at_1 = None
 
         return pass_at_1, n_repeats

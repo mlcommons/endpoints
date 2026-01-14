@@ -198,3 +198,55 @@ class LCBServe:
         graded = worker(test_suites_to_run, codes_to_run)
         pass_at_1 = sum([sum(results) for results in graded]) / total_samples
         return pass_at_1, num_extract_fail
+
+
+if __name__ == "__main__":
+    import json
+
+    parser = argparse.ArgumentParser(
+        description="Evaluate LiveCodeBench parquet file and output results as JSON"
+    )
+    parser.add_argument(
+        "parquet_file",
+        type=str,
+        help="Path to the parquet file (relative to output_file_store)",
+    )
+    parser.add_argument(
+        "--version-tag",
+        type=str,
+        default="release_v6",
+        help="LiveCodeBench version tag (default: release_v6)",
+    )
+    parser.add_argument(
+        "--output-file-store",
+        type=Path,
+        default=Path("/mnt/lcb_outputs"),
+        help="Directory where parquet file is stored (default: /mnt/lcb_outputs)",
+    )
+    parser.add_argument(
+        "--lcb-root",
+        type=Path,
+        default=Path("/opt/LiveCodeBench"),
+        help="Path to LiveCodeBench root directory (default: /opt/LiveCodeBench)",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=60,
+        help="Timeout in seconds for each test case (default: 60)",
+    )
+
+    args = parser.parse_args()
+
+    lcb_serve = LCBServe(
+        version_tag=args.version_tag,
+        output_file_store=args.output_file_store,
+        lcb_root=args.lcb_root,
+    )
+
+    pass_at_1, num_extract_fail = lcb_serve.eval_parquet(
+        args.parquet_file, timeout_sec=args.timeout
+    )
+
+    result = {"pass_at_1": pass_at_1, "num_extract_fail": num_extract_fail}
+    print(json.dumps(result))
