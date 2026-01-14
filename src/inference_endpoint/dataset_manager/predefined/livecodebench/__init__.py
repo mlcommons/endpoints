@@ -20,11 +20,7 @@ from pathlib import Path
 import pandas as pd
 
 from ...dataset import Dataset, load_from_huggingface
-from ...transforms import (
-    AddStaticColumns,
-    Harmonize,
-    UserPromptFormatter,
-)
+from . import presets
 
 logger = getLogger(__name__)
 
@@ -43,6 +39,8 @@ class LiveCodeBench(
         "question",
         "starter_code",
     ]
+
+    PRESETS = presets
 
     @classmethod
     def generate(
@@ -98,59 +96,3 @@ class LiveCodeBench(
         df.to_parquet(dst_path)
         logger.info(f"Saved {len(df)} samples to {dst_path}")
         return df
-
-
-class LiveCodeBench_GPTOSS_SGLang(LiveCodeBench):
-    """LiveCodeBench_GPTOSS_SGLang: LiveCodeBench GTPOSS_SGLang Dataset
-    Reference: https://huggingface.co/datasets/livecodebench/code_generation_lite/
-    """
-
-    @classmethod
-    def create_transforms(cls) -> list:
-        """Create the list of transforms to apply to the LiveCodeBench dataset."""
-
-        instructions = (
-            "You are a python coding expert that solves problems step-by-step.\n"
-            "You must provide the reasoning to arriving at your solution and the code to solve the problem.\n"
-            "Do not try simulating the code execution. The code must be enclosed within ```python delimiters.\n"
-        )
-
-        user_prompt_format = (
-            f"{instructions}\n\n"
-            "{question}\n"
-            "### Format: You will use the following starter code to write the solution to the problem and enclose your code within delimiters.\n"
-            "```python\n"
-            "{starter_code}\n"
-            "```\n"
-        )
-
-        return [
-            # Step 1: Add instructions to the dataset
-            UserPromptFormatter(
-                user_prompt_format=user_prompt_format,
-                output_column="user_prompt",
-            ),
-            # Step 2: Harmonize the prompt for SGLang/GPT-OSS
-            Harmonize(
-                prompt_column="user_prompt",
-            ),
-            # Step 3: Add metadata columns since we don't want to do a dict update every iteration
-            AddStaticColumns(
-                {
-                    "stream": True,
-                    "max_new_tokens": 32768,
-                    "temperature": 1.0,
-                    "top_p": 1.0,
-                    "top_k": -1,
-                }
-            ),
-        ]
-
-    @classmethod
-    def get_dataloader(cls, num_repeats: int = 5):
-        df = LiveCodeBench.generate(datasets_dir=Path("datasets"))
-        transforms = LiveCodeBench_GPTOSS_SGLang.create_transforms()
-        livecodebench_dataset = LiveCodeBench(
-            df, transforms=transforms, repeats=num_repeats
-        )
-        return livecodebench_dataset

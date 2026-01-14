@@ -15,6 +15,10 @@
 
 
 import os
+import subprocess
+import sys
+import tempfile
+import uuid
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import ClassVar
@@ -25,7 +29,7 @@ import pandas as pd
 
 from ..dataset_manager.dataset import Dataset
 from ..load_generator.events import SampleEvent
-from .extractor import Extractor
+from .extractor import Extractor, PythonCodeExtractor
 
 
 class Scorer(ABC):
@@ -257,3 +261,177 @@ class RougeScorer(Scorer, scorer_id="rouge"):
         print(result)
 
         return result, 1
+
+
+class LiveCodeBenchScorer(Scorer):
+    """Scorer for LiveCodeBench code generation tasks.
+
+    Uses the lcb_runner evaluation framework to execute generated code against test cases.
+    Requires lcb_runner to be installed (pip install from LiveCodeBench).
+
+    The scorer:
+    1. Extracts Python code from model outputs (using PythonCodeExtractor)
+    2. Runs code execution tests using lcb_runner
+    3. Returns 1.0 if all tests pass, 0.0 otherwise
+
+    Args:
+        dataset_name: Name of the dataset
+        dataset: Dataset object containing problems
+        report_dir: Directory containing evaluation logs
+        extractor: Extractor class (defaults to PythonCodeExtractor)
+        lcb_version: LiveCodeBench version tag (e.g., "release_v5", "release_v6")
+        num_workers: Number of parallel workers for code evaluation
+        timeout: Timeout in seconds for each test execution
+        question_id_column: Column name in dataset containing question IDs
+    """
+
+    def __init__(
+        self,
+        dataset_name: str,
+        dataset: Dataset,
+        report_dir: os.PathLike,
+        extractor: type[Extractor] = PythonCodeExtractor,
+        lcb_version: str = "release_v6",
+        timeout: int = 60,
+        question_id_column: str = "question_id",
+        lcb_root: Path = Path("/opt/LiveCodeBench"),
+        show_lcb_runner_output: bool = True,
+    ):
+        # Note: LiveCodeBench doesn't use ground_truth_column the same way
+        # but we need to pass something to the parent
+        super().__init__(
+            dataset_name=dataset_name,
+            dataset=dataset,
+            report_dir=report_dir,
+            extractor=extractor,
+            ground_truth_column=question_id_column,
+        )
+
+        self.lcb_root = Path(lcb_root)
+        if not self.lcb_root.exists():
+            raise FileNotFoundError(
+                f"LiveCodeBench root directory {lcb_root} does not exist"
+            )
+
+        self.lcb_version = lcb_version
+        self.timeout = timeout
+        self.question_id_column = question_id_column
+        self.show_lcb_runner_output = show_lcb_runner_output
+
+    def score_single_sample(self, value: str, ground_truth: str) -> float:
+        raise RuntimeError(
+            "This method should not be called. Use the score() method instead, which invokes lcb_runner."
+        )
+
+    def score(self) -> tuple[float, int]:
+        """Score the dataset using parallel evaluation.
+
+        This overrides the base class method to use parallel evaluation
+        for better performance with code execution tests.
+
+        Returns:
+            tuple[float | None, int]: The mean score and the number of repeats. If an error occurs during scoring,
+            returns None as the score.
+        """
+        df = self.get_outputs()
+
+        # Outputs are for all samples, not just the target dataset
+        valid_uuids = self.sample_index_map.keys()
+        df = df[df["sample_uuid"].isin(valid_uuids)]
+
+        # Match to sample index from dataset
+        df = df.apply(self.match_sample_index, axis=1)
+
+        # Get question IDs
+        def get_question_id(sample_index: int) -> str:
+            return self.dataset.dataframe.iloc[sample_index][self.question_id_column]
+
+        df["question_id"] = df["sample_index"].apply(get_question_id)
+
+        # Extract code from outputs
+        df["extracted_code"] = df["output"].apply(self.extractor.extract)
+
+        n_repeats = len(df) // self.dataset.num_samples()
+
+        # TODO: Currently runs as a subprocess. In the future, we need to migrate
+        # LCBServe to be running as a background service listening on a port or socket
+        # so that it can be containerized for better security and isolation.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            parquet_name = f"{uuid.uuid4()}.parquet"
+            parquet_path = Path(temp_dir) / parquet_name
+            df.to_parquet(parquet_path)
+
+            # Invoke lcb_serve.py as a subprocess to avoid importing LiveCodeBench dependencies
+            # in the main inference endpoint environment, and also because LCB eval will
+            # attempt to sandbox Python code execution by setting a bunch of core standard library
+            # methods to None (i.e. most things in the os, sys, and other such modules), which would
+            # impact the rest of the current Python process.
+            cmd = [
+                sys.executable,
+                "-m",
+                "inference_endpoint.dataset_manager.predefined.livecodebench.lcb_serve",
+                parquet_name,
+                "--version-tag",
+                self.lcb_version,
+                "--output-file-store",
+                str(temp_dir),
+                "--lcb-root",
+                str(self.lcb_root),
+                "--timeout",
+                str(self.timeout),
+            ]
+
+            try:
+                # Run subprocess with output both captured and displayed (tee-like behavior)
+                # Note: We let stderr pass through directly for real-time progress bars/logs
+                if self.show_lcb_runner_output:
+                    proc_stderr = None
+                else:
+                    proc_stderr = subprocess.DEVNULL
+
+                process = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=proc_stderr,
+                    text=True,
+                    bufsize=1,  # Line buffered
+                )
+
+                # Collect stdout while displaying it character-by-character to support
+                # progress bars that use carriage returns
+                stdout_buffer = []
+                while True:
+                    char = process.stdout.read(1)
+                    if not char:
+                        break
+
+                    if self.show_lcb_runner_output:
+                        sys.stdout.write(char)
+                        sys.stdout.flush()
+                    stdout_buffer.append(char)
+
+                # Wait for process to complete and check return code
+                return_code = process.wait()
+                if return_code != 0:
+                    raise subprocess.CalledProcessError(return_code, cmd)
+
+                # Parse the JSON output from the captured stdout
+                # Look for JSON at the end (after any progress bar output)
+                stdout_text = "".join(stdout_buffer)
+                # Try to find the last line that looks like JSON
+                lines = stdout_text.strip().split("\n")
+                for line in reversed(lines):
+                    line = line.strip()
+                    if line.startswith("{") and line.endswith("}"):
+                        output = orjson.loads(line.encode("utf-8"))
+                        pass_at_1 = output["pass_at_1"]
+                        break
+                else:
+                    # No JSON found, try parsing the whole output
+                    output = orjson.loads(stdout_text.encode("utf-8"))
+                    pass_at_1 = output["pass_at_1"]
+            except (subprocess.CalledProcessError, orjson.JSONDecodeError, KeyError):
+                # Return None if subprocess fails or JSON parsing fails
+                pass_at_1 = None
+
+        return pass_at_1, n_repeats

@@ -25,11 +25,9 @@ from inference_endpoint.core.types import Query
 from inference_endpoint.endpoint_client.configs import (
     AioHttpConfig,
     HTTPClientConfig,
-    ZMQConfig,
 )
 
 from tests.futures_client import FuturesHttpClient
-from tests.test_helpers import get_test_socket_path
 
 # Configuration for external GPT-OSS server
 SGLANG_SERVER_HOST = "localhost"
@@ -38,7 +36,7 @@ SGLANG_ENDPOINT = f"http://{SGLANG_SERVER_HOST}:{SGLANG_SERVER_PORT}/generate"
 
 
 @pytest.fixture
-def sglang_futures_client(tmp_path):
+def sglang_futures_client():
     """Create a FuturesHttpClient configured for SGLang endpoint.
 
     This fixture creates a client that connects to a GPT-OSS server
@@ -49,23 +47,9 @@ def sglang_futures_client(tmp_path):
         num_workers=4,
         api_type="sglang",
     )
-
-    zmq_kwargs = {
-        "zmq_request_queue_prefix": get_test_socket_path(
-            tmp_path, "sglang_test", "_req"
-        ),
-        "zmq_response_queue_addr": get_test_socket_path(
-            tmp_path, "sglang_test", "_resp"
-        ),
-        "zmq_readiness_queue_addr": get_test_socket_path(
-            tmp_path, "sglang_test", "_ready"
-        ),
-    }
-
-    zmq_config = ZMQConfig(**zmq_kwargs)
     aiohttp_config = AioHttpConfig()
 
-    client = FuturesHttpClient(http_config, aiohttp_config, zmq_config)
+    client = FuturesHttpClient(http_config, aiohttp_config)
     yield client
     client.shutdown()
 
@@ -100,7 +84,7 @@ class TestSGLangAdapterIntegration:
             },
         )
 
-        future = sglang_futures_client.issue_query(query)
+        future = sglang_futures_client.issue(query)
         result = await asyncio.wrap_future(future)
 
         # Verify result structure
@@ -145,7 +129,7 @@ class TestSGLangAdapterIntegration:
             },
         )
 
-        future = sglang_futures_client.issue_query(query)
+        future = sglang_futures_client.issue(query)
         result = await asyncio.wrap_future(future)
 
         # Verify result structure

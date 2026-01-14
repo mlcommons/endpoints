@@ -30,7 +30,6 @@ from inference_endpoint.dataset_manager.transforms import (
 from inference_endpoint.endpoint_client.configs import (
     AioHttpConfig,
     HTTPClientConfig,
-    ZMQConfig,
 )
 from inference_endpoint.endpoint_client.http_client import HTTPEndpointClient
 from inference_endpoint.endpoint_client.http_sample_issuer import HttpClientSampleIssuer
@@ -42,8 +41,6 @@ from inference_endpoint.load_generator import (
     WithoutReplacementSampleOrder,
 )
 
-from tests.test_helpers import get_test_socket_path
-
 
 class DeepSeekR1SampleIssuer(HttpClientSampleIssuer):
     def __init__(self, tmp_path: str, url: str):
@@ -52,20 +49,7 @@ class DeepSeekR1SampleIssuer(HttpClientSampleIssuer):
             num_workers=16,
         )
         self.aiohttp_config = AioHttpConfig()
-        self.zmq_config = ZMQConfig(
-            zmq_request_queue_prefix=get_test_socket_path(
-                tmp_path, "test_streaming", "_req"
-            ),
-            zmq_response_queue_addr=get_test_socket_path(
-                tmp_path, "test_streaming", "_resp"
-            ),
-            zmq_readiness_queue_addr=get_test_socket_path(
-                tmp_path, "test_streaming", "_ready"
-            ),
-        )
-        super().__init__(
-            HTTPEndpointClient(self.http_config, self.aiohttp_config, self.zmq_config)
-        )
+        super().__init__(HTTPEndpointClient(self.http_config, self.aiohttp_config))
 
 
 async def run_benchmark(server_url, dataloader, tmp_path, rt_settings):

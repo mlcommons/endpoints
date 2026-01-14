@@ -38,20 +38,17 @@ from inference_endpoint import metrics
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import LoadPattern, LoadPatternType
 from inference_endpoint.dataset_manager import Dataset, EmptyDataset
-from inference_endpoint.dataset_manager.predefined.aime25 import (
-    AIME25,
-    AIME_GPTOSS_SGLang,
-)
-from inference_endpoint.dataset_manager.predefined.gpqa import GPQA, GPQA_GPTOSS_SGLang
+from inference_endpoint.dataset_manager.predefined.aime25 import AIME25
+from inference_endpoint.dataset_manager.predefined.gpqa import GPQA
+from inference_endpoint.dataset_manager.predefined.livecodebench import LiveCodeBench
 from inference_endpoint.endpoint_client.configs import (
     AioHttpConfig,
     HTTPClientConfig,
-    ZMQConfig,
 )
 from inference_endpoint.endpoint_client.http_client import HTTPEndpointClient
 from inference_endpoint.endpoint_client.http_sample_issuer import HttpClientSampleIssuer
 from inference_endpoint.evaluation.extractor import ABCDExtractor, BoxedMathExtractor
-from inference_endpoint.evaluation.scoring import PassAt1Scorer
+from inference_endpoint.evaluation.scoring import LiveCodeBenchScorer, PassAt1Scorer
 from inference_endpoint.load_generator import (
     BenchmarkSession,
     MaxThroughputScheduler,
@@ -96,15 +93,9 @@ def create_sglang_client(tmp_dir: Path) -> HTTPEndpointClient:
         api_type="sglang",
     )
 
-    zmq_config = ZMQConfig(
-        zmq_request_queue_prefix=f"ipc://{tmp_dir}/req",
-        zmq_response_queue_addr=f"ipc://{tmp_dir}/resp",
-        zmq_readiness_queue_addr=f"ipc://{tmp_dir}/ready",
-    )
-
     aiohttp_config = AioHttpConfig()
 
-    client = HTTPEndpointClient(http_config, aiohttp_config, zmq_config)
+    client = HTTPEndpointClient(http_config, aiohttp_config)
     return client
 
 
@@ -143,7 +134,9 @@ def run_benchmark_session(
         [dataset.num_samples() * dataset.repeats for dataset in accuracy_datasets]
     )
 
-    with tqdm(desc="GPQA/AIME25 Benchmark", total=n_total, unit="samples") as pbar:
+    with tqdm(
+        desc="SGLang Accuracy Suite Benchmark", total=n_total, unit="samples"
+    ) as pbar:
         pbar_hook.set_pbar(pbar)
         sess = BenchmarkSession.start(
             rt_settings,
@@ -151,7 +144,7 @@ def run_benchmark_session(
             issuer,
             scheduler,
             accuracy_datasets=accuracy_datasets,
-            name="gpqa_aime25_sglang_benchmark",
+            name="sglang_accuracy_suite_benchmark",
             report_dir=args.report_dir,
             dump_events_log=True,
             max_shutdown_timeout_s=None,
@@ -168,7 +161,7 @@ def run_benchmark_session(
 
     # Score the dataset
     score, n_repeats = scorer.score()
-    logging.info(f"Pass@1 Score ({n_repeats} repeats): {score}")
+    logging.info(f"GPQA Pass@1 Score ({n_repeats} repeats): {score}")
 
     scorer = PassAt1Scorer(
         AIME25.DATASET_ID,
@@ -180,7 +173,19 @@ def run_benchmark_session(
 
     # Score the dataset
     score, n_repeats = scorer.score()
-    logging.info(f"Pass@1 Score ({n_repeats} repeats): {score}")
+    logging.info(f"AIME25 Pass@1 Score ({n_repeats} repeats): {score}")
+
+    # Score the LCB dataset
+    scorer = LiveCodeBenchScorer(
+        LiveCodeBench.DATASET_ID,
+        accuracy_datasets[2],
+        args.report_dir,
+        lcb_root=Path(args.lcb_root),
+    )
+
+    # Score the dataset
+    score, n_repeats = scorer.score()
+    logging.info(f"LCB Pass@1 Score ({n_repeats} repeats): {score}")
 
 
 def run_main(args):
@@ -193,13 +198,25 @@ def run_main(args):
     try:
         # Always generate GPQA diamond dataset
         logging.info("Generating GPQA diamond dataset...")
-        gpqa_dataset = GPQA_GPTOSS_SGLang.get_dataloader(num_repeats=num_repeats)
+        gpqa_dataset = GPQA.get_dataloader(
+            num_repeats=num_repeats, transforms=GPQA.PRESETS.gptoss_sglang()
+        )
         gpqa_dataset.load()
         # Always generate AIME25 dataset
         logging.info("Generating AIME25 dataset...")
-        aime25_dataset = AIME_GPTOSS_SGLang.get_dataloader(num_repeats=num_repeats)
+        aime25_dataset = AIME25.get_dataloader(
+            num_repeats=num_repeats, transforms=AIME25.PRESETS.gptoss_sglang()
+        )
         aime25_dataset.load()
         logging.info(f"Dataset loaded with {aime25_dataset.num_samples()} samples")
+        # Generate LCB Dataset
+        logging.info("Generating LCB dataset...")
+        lcb_dataset = LiveCodeBench.get_dataloader(
+            num_repeats=num_repeats,
+            transforms=LiveCodeBench.PRESETS.gptoss_sglang(),
+        )
+        lcb_dataset.load()
+        logging.info(f"Dataset loaded with {lcb_dataset.num_samples()} samples")
 
         # Step 4: Create SGLang client
         logging.info(f"Creating SGLang client for endpoint: {SGLANG_ENDPOINT}")
@@ -208,7 +225,9 @@ def run_main(args):
 
         # Step 5: Run benchmark session
         logging.info("Starting benchmark session...")
-        run_benchmark_session([gpqa_dataset, aime25_dataset], sample_issuer, args)
+        run_benchmark_session(
+            [gpqa_dataset, aime25_dataset, lcb_dataset], sample_issuer, args
+        )
 
         logging.info(f"\nBenchmark complete! Results saved to {args.report_dir}/")
 
@@ -221,8 +240,14 @@ def run_main(args):
 
 def main():
     """Main entry point for the manual example."""
+    # Configure logging to display INFO level messages
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
+
     parser = argparse.ArgumentParser(
-        description="GPQA and AIME25 MLPerf dataset example with SGLang endpoint",
+        description="SGLang Accuracy Suite Benchmark",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -250,8 +275,8 @@ def main():
     parser.add_argument(
         "--report-dir",
         type=str,
-        default="gpqa_aime25_sglang_report",
-        help="Directory to save benchmark reports (default: gpqa_aime25_sglang_report)",
+        default="sglang_accuracy_report",
+        help="Directory to save benchmark reports (default: sglang_accuracy_report)",
     )
 
     parser.add_argument(
@@ -261,10 +286,17 @@ def main():
         help="Number of repeats to run (default: 1)",
     )
 
+    parser.add_argument(
+        "--lcb-root",
+        type=Path,
+        default="/opt/LiveCodeBench",
+        help="Path to LiveCodeBench installation directory (default: /opt/LiveCodeBench)",
+    )
+
     args = parser.parse_args()
 
     logging.info("=" * 60)
-    logging.info("GPQA and AIME25 MLPerf Dataset Example with SGLang")
+    logging.info("SGLang Accuracy Suite Benchmark")
     logging.info("=" * 60)
     logging.info("\nConfiguration:")
     logging.info(f"  SGLang endpoint: {SGLANG_ENDPOINT}")

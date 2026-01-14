@@ -34,7 +34,7 @@ class HttpClientSampleIssuer(SampleIssuer):
 
     Usage:
         # Create HTTP client and sample issuer - auto-initializes
-        client = HTTPEndpointClient(config, aiohttp_config, zmq_config)
+        client = HTTPEndpointClient(config, aiohttp_config)
         issuer = HttpClientSampleIssuer(client)
 
         # Issue samples
@@ -60,7 +60,7 @@ class HttpClientSampleIssuer(SampleIssuer):
         """Route completed responses to SampleEventHandler."""
         while True:
             try:
-                match response := await self.http_client.try_receive():
+                match response := await self.http_client.recv():
                     case StreamChunk(is_complete=False):
                         # NOTE(vir): is_complete=True should not be received, QueryResult is expected instead
                         SampleEventHandler.stream_chunk_complete(response)
@@ -71,8 +71,8 @@ class HttpClientSampleIssuer(SampleIssuer):
                             logger.error(f"Error in request {response.id}: {err}")
 
                     case None:
-                        # No response available, yield to event loop
-                        continue
+                        # Transport closed or shutdown
+                        break
 
                     case _:
                         raise ValueError(f"Unexpected response type: {type(response)}")
@@ -87,7 +87,7 @@ class HttpClientSampleIssuer(SampleIssuer):
     @profile
     def issue(self, sample: Sample):
         """Issue sample to HTTP endpoint."""
-        self.http_client.issue_query(
+        self.http_client.issue(
             Query(
                 id=sample.uuid,
                 data=sample.data,

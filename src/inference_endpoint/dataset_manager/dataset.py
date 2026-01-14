@@ -455,6 +455,27 @@ class Dataset:
     def num_samples(self) -> int:
         return len(self.data)
 
+    @classmethod
+    def get_dataloader(
+        cls,
+        datasets_dir: Path = Path("datasets"),
+        num_repeats: int = 1,
+        transforms: list[Transform] | None = None,
+        force_regenerate: bool = False,
+    ) -> "Dataset":
+        if not hasattr(cls, "generate"):
+            raise ValueError(
+                f"Dataset {cls.__name__} does not have a generate method and cannot be auto-loaded"
+            )
+
+        if not callable(cls.generate):
+            raise ValueError(
+                f"Dataset {cls.__name__} has a generate method that is not callable and cannot be auto-loaded"
+            )
+
+        df = cls.generate(datasets_dir=datasets_dir, force=force_regenerate)
+        return cls(df, transforms=transforms, repeats=num_repeats)
+
 
 class EmptyDataset(Dataset):
     """Empty dataset to be used as performance dataset when running only accuracy tests."""
