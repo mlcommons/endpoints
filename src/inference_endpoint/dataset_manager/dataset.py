@@ -395,6 +395,7 @@ class Dataset:
         num_repeats: int = 1,
         transforms: list[Transform] | None = None,
         force_regenerate: bool = False,
+        **kwargs,
     ) -> "Dataset":
         if not hasattr(cls, "generate"):
             raise ValueError(
@@ -406,7 +407,7 @@ class Dataset:
                 f"Dataset {cls.__name__} has a generate method that is not callable and cannot be auto-loaded"
             )
 
-        df = cls.generate(datasets_dir=datasets_dir, force=force_regenerate)
+        df = cls.generate(datasets_dir=datasets_dir, force=force_regenerate, **kwargs)
         return cls(df, transforms=transforms, repeats=num_repeats)
 
 

@@ -29,8 +29,11 @@ class RandomDataset(Dataset, dataset_id="random"):
         "input_seq_length",
     ]
 
-    def __init__(
-        self,
+    @classmethod
+    def generate(
+        cls,
+        datasets_dir,  # type: ignore
+        force,  # type: ignore
         *,
         num_sequences: int = 1024,
         input_seq_length: int = 1024,
@@ -38,35 +41,23 @@ class RandomDataset(Dataset, dataset_id="random"):
         random_seed: int = 42,
         save_tokenized_data: bool = False,
         tokenizer: str | PreTrainedTokenizer,
-    ):
-        self.input_seq_length = input_seq_length
-        self.num_sequences = num_sequences
-        self.range_ratio = range_ratio
-        self.random_seed = random_seed
-        self.transforms = []
-        self.repeats = 1
+    ) -> pd.DataFrame:
         if isinstance(tokenizer, str):
-            self.tokenizer = AutoTokenizer.from_pretrained(tokenizer)
-        else:
-            self.tokenizer = tokenizer
-        self.save_tokenized_data = save_tokenized_data
-        self.rng = np.random.default_rng(random_seed)
-        self.dataframe = self._generate_random_sequence()
+            tokenizer = AutoTokenizer.from_pretrained(tokenizer)
 
-    def _generate_random_sequence(self) -> pd.DataFrame:
+        rng = np.random.default_rng(random_seed)
         data = []
-        tokenizer = self.tokenizer
         # Generate the input sequence lengths given the range ratio
-        input_seq_length = self.rng.integers(
-            int(self.input_seq_length * self.range_ratio),
-            self.input_seq_length + 1,
-            self.num_sequences,
+        input_seq_length = rng.integers(
+            int(input_seq_length * range_ratio),
+            input_seq_length + 1,
+            num_sequences,
         )
         # Generate the input starts randomly from the vocab size
-        input_starts = self.rng.integers(0, tokenizer.vocab_size, self.num_sequences)
+        input_starts = rng.integers(0, tokenizer.vocab_size, num_sequences)
 
         # Generate the input sequences
-        for i in range(self.num_sequences):
+        for i in range(num_sequences):
             # Generate the input sequence by adding the input starts to the input sequence lengths and modding by the vocab size
             input_sequence = [
                 (input_starts[i] + j) % tokenizer.vocab_size
@@ -76,7 +67,7 @@ class RandomDataset(Dataset, dataset_id="random"):
             prompt = tokenizer.decode(input_sequence, add_special_tokens=False)
             # If we are saving the tokenized data, append the input sequence to the input tokens
             # This can be useful for debugging or for other purposes
-            if self.save_tokenized_data:
+            if save_tokenized_data:
                 # Encode the prompt to get the input tokens back
                 input_tokens = tokenizer.encode(prompt, add_special_tokens=False)
             else:
@@ -89,9 +80,4 @@ class RandomDataset(Dataset, dataset_id="random"):
                 }
             )
 
-        self.dataframe = pd.DataFrame(data)
-        return self.dataframe
-
-    @classmethod
-    def generate(cls, *args, **kwargs):
-        return RandomDataset(*args, **kwargs)
+        return pd.DataFrame(data)

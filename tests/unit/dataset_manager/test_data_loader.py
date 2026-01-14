@@ -57,7 +57,7 @@ def test_random_data_loader(range_ratio):
     random_seed = 42
     tokenizer = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
     save_tokenized_data = True
-    random_data_loader = RandomDataset.generate(
+    random_data_loader = RandomDataset.get_dataloader(
         num_sequences=num_sequences,
         input_seq_length=input_seq_length,
         range_ratio=range_ratio,
