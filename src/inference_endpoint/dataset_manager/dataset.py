@@ -361,8 +361,6 @@ class Dataset:
             if isinstance(df[col].iloc[0], np.ndarray):
                 df[col] = df[col].map(np.ndarray.tolist)
         # Repeat the dataframe if the number of repeats is greater than 1
-        if self.repeats > 1:
-            df = pd.concat([df] * self.repeats, ignore_index=True)
         self.data = df.to_dict(orient="records")
 
     def load_sample(self, index: int) -> Any:

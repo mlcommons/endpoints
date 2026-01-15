@@ -145,7 +145,7 @@ class ResponseCollector:
 
 @dataclass
 class AccuracyConfiguration:
-    scorer: Scorer
+    scorer: type[Scorer]
     extractor: type[Extractor]
     dataset_name: str
     dataset: Dataset
@@ -541,7 +541,7 @@ def _run_benchmark(
     # Calculate and display expected sample count
     total_samples = rt_settings.total_samples_to_issue()
     if accuracy_datasets is not None:
-        total_samples += sum(len(dataset.dataframe) for dataset in accuracy_datasets)
+        total_samples += sum([dataset.num_samples() * dataset.repeats for dataset in accuracy_datasets])
     duration_s = rt_settings.min_duration_ms / 1000
 
     logger.info(
