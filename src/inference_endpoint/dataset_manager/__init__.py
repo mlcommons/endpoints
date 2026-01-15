@@ -25,6 +25,7 @@ from .predefined.aime25 import AIME25
 from .predefined.gpqa import GPQA
 from .predefined.livecodebench import LiveCodeBench
 from .predefined.open_orca import OpenOrca
+from .predefined.random import RandomDataset
 from .transforms import (
     AddStaticColumns,
     ColumnNameRemap,
@@ -50,4 +51,5 @@ __all__ = [
     "GPQA",
     "OpenOrca",
     "LiveCodeBench",
+    "RandomDataset",
 ]

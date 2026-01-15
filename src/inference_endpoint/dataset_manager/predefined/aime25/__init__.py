@@ -19,6 +19,7 @@ from logging import getLogger
 from pathlib import Path
 
 import pandas as pd
+from inference_endpoint.dataset_manager.transforms import Transform
 
 from ...dataset import Dataset, load_from_huggingface
 from . import presets
@@ -135,3 +136,19 @@ class AIME25(
         df.to_parquet(dst_path)
         logger.info(f"Saved {len(df)} samples to {dst_path}")
         return df
+
+
+class AIME25_GPTOSS_SGLang(AIME25, dataset_id="aime25_gptoss_sglang"):
+    """AIME25 for GPTOSS-SGLang"""
+
+    @classmethod
+    def get_dataloader(
+        cls,
+        datasets_dir: Path = Path("datasets"),
+        num_repeats: int = 1,
+        transforms: list[Transform] | None = None,
+        force_regenerate: bool = False,
+    ) -> "Dataset":
+        transforms = (transforms or []) + AIME25.PRESETS.gptoss_sglang()
+        df = AIME25.generate(force=force_regenerate, datasets_dir=datasets_dir)
+        return cls(df, transforms=transforms, repeats=num_repeats)

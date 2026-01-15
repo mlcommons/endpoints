@@ -53,7 +53,7 @@ class SGLangGenerateAdapter(HttpRequestAdapter):
 
         # Get the input tokens
         if "input_tokens" not in query.data:
-            raise KeyError("input_tokens not found in query.data")
+            raise KeyError(f"input_tokens not found in query.data {query.data.keys()}")
         input_tokens = query.data["input_tokens"]
 
         return cls._request_encoder.encode(

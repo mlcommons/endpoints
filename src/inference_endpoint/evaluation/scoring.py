@@ -14,6 +14,7 @@
 # limitations under the License.
 
 
+import inspect
 import os
 import subprocess
 import sys
@@ -46,25 +47,37 @@ class Scorer(ABC):
         **kwargs,
     ):
         super().__init_subclass__(**kwargs)
-        if scorer_id is not None:
+
+        if not inspect.isabstract(cls):
+            if scorer_id is None:
+                scorer_id = cls.__name__
             cls.SCORER_ID = scorer_id
             Scorer.PREDEFINED[scorer_id] = cls
 
     @classmethod
-    def get(cls, scorer_id: str) -> type["Scorer"]:
-        """Look up a Scorer subclass by its registered name.
+    def get(cls, name: str) -> type["Scorer"]:
+        """Look up an Scorer subclass by its registered name.
 
         Args:
-            scorer_id: The registered name of the scorer
+            name: str, the registered scorer name
 
         Returns:
             Scorer subclass
+
+        Raises:
+            KeyError: If no scorer with the given name is found
         """
-        if scorer_id not in cls.PREDEFINED:
-            raise ValueError(
-                f"Unknown scorer: {scorer_id}. Available: {list(cls.PREDEFINED.keys())}"
-            )
-        return cls.PREDEFINED[scorer_id]
+        try:
+            return Scorer.PREDEFINED[name]
+        except KeyError as e:
+            raise KeyError(
+                f"Scorer '{name}' is not registered - available scorers: {Scorer.available_scorers()}"
+            ) from e
+
+    @classmethod
+    def available_scorers(cls) -> list[str]:
+        """Return the list of registered scorer names."""
+        return list(Scorer.PREDEFINED.keys())
 
     def __init__(
         self,
@@ -173,6 +186,16 @@ class PassAt1Scorer(Scorer, scorer_id="pass_at_1"):
         return 1.0 if value == ground_truth else 0.0
 
 
+class StringMatchScorer(Scorer, scorer_id="string_match"):
+    """Implements exact string match scoring.
+    The score is 1 if the output matches the ground truth exactly, 0 otherwise.
+    This is useful for debugging and development.
+    """
+
+    def score_single_sample(self, value: str, ground_truth: str) -> float:
+        return 1.0 if value.strip() == ground_truth.strip() else 0.0
+
+
 ExactMatchScorer = PassAt1Scorer
 
 
@@ -270,7 +293,7 @@ class RougeScorer(Scorer, scorer_id="rouge"):
         return result["rouge1"], 1
 
 
-class LiveCodeBenchScorer(Scorer):
+class LiveCodeBenchScorer(Scorer, scorer_id="code_bench_scorer"):
     """Scorer for LiveCodeBench code generation tasks.
 
     Uses the lcb_runner evaluation framework to execute generated code against test cases.
@@ -303,6 +326,7 @@ class LiveCodeBenchScorer(Scorer):
         question_id_column: str = "question_id",
         lcb_root: Path = Path("/opt/LiveCodeBench"),
         show_lcb_runner_output: bool = True,
+        **kwargs,
     ):
         # Note: LiveCodeBench doesn't use ground_truth_column the same way
         # but we need to pass something to the parent
