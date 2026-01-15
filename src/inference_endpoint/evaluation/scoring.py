@@ -238,11 +238,9 @@ class RougeScorer(Scorer, scorer_id="rouge"):
     def score_single_sample(self, value: str, ground_truth: str) -> float:
         # This method is not used
         raise RuntimeError(
-            """
-            This method should not be called.
-            Use the score() method instead,
-            which computes ROUGE on the whole dataset.
-            """
+            "ROUGE scoring requires batch processing for accurate aggregation. "
+            "Call score() to compute metrics across the entire dataset instead of "
+            "per-sample scoring."
         )
 
     def score(self) -> tuple[float, int]:
