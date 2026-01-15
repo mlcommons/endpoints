@@ -207,16 +207,19 @@ class AccuracyConfig(BaseModel):
     The eval_method is the method to use to evaluate the accuracy of the model. Currently only "pass_at_1" is supported.
     The ground_truth is the column in the dataset that contains the ground truth. Defaults to "ground_truth" if not specified.
     The extractor is the extractor to use to extract the ground truth from the output. Currently "boxed_math_extractor" and "abcd_extractor" are supported.
+    The num_repeats is the number of times to repeat the dataset for evaluation. Defaults to 1 if not specified.
     Example:
         accuracy_config:
           eval_method: "pass_at_1"
           ground_truth: "answer"
           extractor: "boxed_math_extractor"
+          num_repeats: 5
     """
 
     eval_method: str | None = None
     ground_truth: str = "ground_truth"
     extractor: str | None = None
+    num_repeats: int = 1
 
 
 class RuntimeConfig(BaseModel):

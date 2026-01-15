@@ -25,7 +25,6 @@ from typing import Any, ClassVar
 import numpy as np
 import pandas as pd
 from datasets import load_dataset, load_from_disk
-from transformers import AutoTokenizer, PreTrainedTokenizer
 
 from .transforms import Transform, apply_transforms
 
@@ -63,9 +62,6 @@ class DatasetFormat(Enum):
 
     HF = "huggingface"
     """HuggingFace dataset."""
-
-    RANDOM = "random"
-    """Random dataset. This is a dataset that is generated randomly."""
 
 
 class DatafileLoader(ABC):
@@ -232,72 +228,6 @@ class JsonLoader(DatafileLoader, format=DatasetFormat.JSON):
         self.dataframe = pd.read_json(self.json_path)
 
 
-class RandomDataGenerator(DatafileLoader, format=DatasetFormat.RANDOM):
-    def __init__(
-        self,
-        *,
-        num_sequences: int = 1024,
-        input_seq_length: int = 1024,
-        range_ratio: float = 1.0,
-        random_seed: int = 42,
-        save_tokenized_data: bool = False,
-        tokenizer: str | PreTrainedTokenizer,
-    ):
-        super().__init__()
-        self.input_seq_length = input_seq_length
-        self.num_sequences = num_sequences
-        self.range_ratio = range_ratio
-        self.random_seed = random_seed
-        if isinstance(tokenizer, str):
-            self.tokenizer = AutoTokenizer.from_pretrained(tokenizer)
-        else:
-            self.tokenizer = tokenizer
-        self.save_tokenized_data = save_tokenized_data
-        self.rng = np.random.default_rng(random_seed)
-
-    def read(self) -> None:
-        self.dataframe = self._generate_random_sequence()
-
-    def _generate_random_sequence(self) -> pd.DataFrame:
-        data = []
-        tokenizer = self.tokenizer
-        # Generate the input sequence lengths given the range ratio
-        input_seq_length = self.rng.integers(
-            int(self.input_seq_length * self.range_ratio),
-            self.input_seq_length + 1,
-            self.num_sequences,
-        )
-        # Generate the input starts randomly from the vocab size
-        input_starts = self.rng.integers(0, tokenizer.vocab_size, self.num_sequences)
-
-        # Generate the input sequences
-        for i in range(self.num_sequences):
-            # Generate the input sequence by adding the input starts to the input sequence lengths and modding by the vocab size
-            input_sequence = [
-                (input_starts[i] + j) % tokenizer.vocab_size
-                for j in range(input_seq_length[i])
-            ]
-            # Decode the input sequence to get the text prompt
-            prompt = tokenizer.decode(input_sequence, add_special_tokens=False)
-            # If we are saving the tokenized data, append the input sequence to the input tokens
-            # This can be useful for debugging or for other purposes
-            if self.save_tokenized_data:
-                # Encode the prompt to get the input tokens back
-                input_tokens = tokenizer.encode(prompt, add_special_tokens=False)
-            else:
-                input_tokens = None
-            data.append(
-                {
-                    "prompt": prompt,
-                    "input_tokens": input_tokens,
-                    "input_seq_length": input_seq_length[i],
-                }
-            )
-
-        self.dataframe = pd.DataFrame(data)
-        return self.dataframe
-
-
 def load_from_huggingface(
     dataset_path: str | None = None,
     dataset_name: str | None = None,
@@ -430,6 +360,7 @@ class Dataset:
         for col in df.columns:
             if isinstance(df[col].iloc[0], np.ndarray):
                 df[col] = df[col].map(np.ndarray.tolist)
+        # Repeat the dataframe if the number of repeats is greater than 1
         self.data = df.to_dict(orient="records")
 
     def load_sample(self, index: int) -> Any:
@@ -462,6 +393,7 @@ class Dataset:
         num_repeats: int = 1,
         transforms: list[Transform] | None = None,
         force_regenerate: bool = False,
+        **kwargs,
     ) -> "Dataset":
         if not hasattr(cls, "generate"):
             raise ValueError(
@@ -473,7 +405,7 @@ class Dataset:
                 f"Dataset {cls.__name__} has a generate method that is not callable and cannot be auto-loaded"
             )
 
-        df = cls.generate(datasets_dir=datasets_dir, force=force_regenerate)
+        df = cls.generate(datasets_dir=datasets_dir, force=force_regenerate, **kwargs)
         return cls(df, transforms=transforms, repeats=num_repeats)
 
 

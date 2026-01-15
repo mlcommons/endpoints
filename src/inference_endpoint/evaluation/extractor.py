@@ -231,6 +231,14 @@ class BoxedMathExtractor(Extractor, extractor_id="boxed_math_extractor"):
         return None
 
 
+class IdentityExtractor(Extractor, extractor_id="identity_extractor"):
+    """Extract identity answer from response text."""
+
+    @classmethod
+    def extract(cls, text: str) -> str | None:
+        return text
+
+
 class PythonCodeExtractor(Extractor, extractor_id="python_code_extractor"):
     """Extract Python code from markdown code blocks.
     Based on parse_code function from GPT-OSS livecodebench_eval.py.
