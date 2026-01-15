@@ -218,7 +218,10 @@ class BenchmarkSession:
                         reporter.dump_to_json(Path(report_dir) / "events.jsonl")
 
                 # Print summary
-                report.display()
+                report_path = report_dir / "report.txt"
+                with open(report_path, "w") as f:
+                    report.display(fn=f.write, newline="\n")
+                    logger.info(f"Report saved to {report_path}")
 
     def wait_for_test_end(self, timeout: float | None = None) -> bool:
         """
