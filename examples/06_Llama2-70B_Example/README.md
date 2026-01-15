@@ -12,6 +12,17 @@ export HF_TOKEN=<your Hugging Face token>
 hf download $MODEL_NAME
 ```
 
+# Prepare for accuracy evaluation
+
+Accuracy evaluation for MLPerf Llama2-70B requires additional setup. Before running the benchmark, run the following:
+
+```
+python3 -m pip install nltk evaluate rouge_score
+python3 -c 'import nltk; nltk.download("punkt"); nltk.download("punkt_tab")'
+```
+
+These steps are not needed when doing performance-only runs.
+
 # Benchmark Llama2-70b using a config file
 
 To run [llama2-70b](https://huggingface.co/meta-llama/Llama-2-70b-chat-hf) on a single Nvidia-H200 GPU, we first prepare the environment:

@@ -218,11 +218,9 @@ class RougeScorer(Scorer, scorer_id="rouge"):
                 raise ImportError
 
             import evaluate
-            import nltk
 
             self.metric = evaluate.load("rouge")
-            nltk.download("punkt")
-            nltk.download("punkt_tab")
+
         except ImportError:
             raise ImportError(
                 "nltk, evaluate, and rouge_score are required for ROUGE scoring. "

@@ -549,9 +549,13 @@ class BenchmarkConfig(BaseModel):
             # Empty datasets is OK for CLI-based benchmarks
             return
 
-        # Check for duplicate dataset names
-        names = [d.name for d in self.datasets]
-        duplicates = [name for name in set(names) if names.count(name) > 1]
+        # Check for duplicate dataset name + type combinations
+        pairs = [(d.name, d.type) for d in self.datasets]
+        duplicates = [
+            f"{name} ({dtype.value})"
+            for name, dtype in set(pairs)
+            if pairs.count((name, dtype)) > 1
+        ]
         if duplicates:
             raise ValueError(f"Duplicate dataset names: {duplicates}")
 

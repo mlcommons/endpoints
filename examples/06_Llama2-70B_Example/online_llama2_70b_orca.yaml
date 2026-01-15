@@ -11,7 +11,7 @@ model_params:
   max_new_tokens: 1024
 
 datasets:
-  - name: "open-orca-accuracy"
+  - name: "open_orca"
     type: "accuracy"
     path: "open_orca/open_orca_gpt4_tokenized_llama.sampled_24576.pkl"
     samples: 24576
@@ -20,11 +20,12 @@ datasets:
       system_prompt: "system"
     accuracy_config:
       eval_method: "rouge"
+      extractor: "identity_extractor"
       ground_truth: "output"
-  - name: "open-orca-performance"
+  - name: "open_orca"
     type: "performance"
     path: "open_orca/open_orca_gpt4_tokenized_llama.sampled_24576.pkl"
-    samples: 1000
+    samples: 24576
     parser:
       question: "prompt"
       system_prompt: "system"

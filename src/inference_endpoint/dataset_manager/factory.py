@@ -55,6 +55,12 @@ class DataLoaderFactory:
         remap = config.parser
         name = config.name
         if name in Dataset.PREDEFINED:
+            if "open_orca" in name:
+                return Dataset.PREDEFINED[name].get_dataloader(
+                    dataset_path=dataset_path,
+                    metadata=metadata,
+                    remap=remap,
+                )
             return Dataset.PREDEFINED[name].get_dataloader(**kwargs)
         if name not in Dataset.PREDEFINED and dataset_path is None:
             raise ValueError(

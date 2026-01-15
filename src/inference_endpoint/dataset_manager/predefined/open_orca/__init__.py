@@ -26,7 +26,7 @@ from ...dataset import Dataset
 
 class OpenOrca(
     Dataset,
-    dataset_id="open-orca-accuracy",
+    dataset_id="open_orca",
 ):
     """OpenOrca GPT4 tokenized dataset for accuracy evaluation."""
 
