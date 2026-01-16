@@ -14,10 +14,10 @@
 # limitations under the License.
 
 import base64
-import gzip
 import json
 import pickle
 import random
+import zlib
 from logging import getLogger
 from pathlib import Path
 
@@ -98,7 +98,7 @@ class LiveCodeBench(
         df = df.drop(columns=["question_title", "contest_date", "contest_id"])
 
         # Unpack the private test cases. In most cases, the private test cases are stored as either a
-        # JSON string, or a Base64-encoded GZIP'd pickle'd string, which needs to be JSON decoded.
+        # JSON string, or a Base64-encoded zlib-compressed pickle'd string, which needs to be JSON decoded.
         # Reference: https://github.com/LiveCodeBench/LiveCodeBench/blob/28fef95ea8c9f7a547c8329f2cd3d32b92c1fa24/lcb_runner/benchmarks/code_generation.py#L64-L74
         def deserialize_private_test(private_test_cases: str) -> str:
             try:
@@ -106,17 +106,17 @@ class LiveCodeBench(
                 _ = json.loads(private_test_cases)
                 return private_test_cases
             except json.JSONDecodeError as json_error:
-                # Otherwise, it is a Base64-encoded GZIP'd pickle'd string.
+                # Otherwise, it is a Base64-encoded zlib-compressed pickle'd string.
                 # If any steps fail, the dataset is probably malformed, and should be a fatal error.
 
                 # Decode the Base64 string
                 decoded_bytes = base64.b64decode(private_test_cases.encode("utf-8"))
 
-                # Gunzip the bytes
-                gunzipped_bytes = gzip.decompress(decoded_bytes)
+                # Uncompress the bytes
+                uncompressed_bytes = zlib.decompress(decoded_bytes)
 
                 # Unpickle the bytes
-                unpickled_obj = pickle.loads(gunzipped_bytes)
+                unpickled_obj = pickle.loads(uncompressed_bytes)
 
                 if not isinstance(unpickled_obj, str):
                     raise ValueError(
