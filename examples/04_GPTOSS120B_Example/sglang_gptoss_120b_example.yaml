@@ -17,12 +17,12 @@ datasets:
     parser:
       input_tokens: "input_tokens"
   # LCB should be supported when benchmark launched from container.
-  # - name: "livecodebench_gptoss_sglang"
-  #   type: "accuracy"
-  #   accuracy_config:
-  #     eval_method: "code_bench_scorer"
-  #     extractor: "python_code_extractor"
-  #     num_repeats: 3
+  - name: "livecodebench_gptoss_sglang"
+    type: "accuracy"
+    accuracy_config:
+      eval_method: "code_bench_scorer"
+      extractor: "python_code_extractor"
+      num_repeats: 3
   - name: "aime25_gptoss_sglang"
     type: "accuracy"
     accuracy_config:

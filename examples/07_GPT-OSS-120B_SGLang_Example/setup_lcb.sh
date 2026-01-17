@@ -31,15 +31,18 @@ echo "LiveCodeBench will be installed to: ${LCB_ROOT}"
 # Check if directory already exists
 if [ -d "${LCB_ROOT}" ]; then
     echo "Warning: Directory ${LCB_ROOT} already exists."
-    read -p "Do you want to remove it and reinstall? (y/N): " -n 1 -r
-    echo
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
-        echo "Removing existing directory..."
-        rm -rf "${LCB_ROOT}"
+    # Non-interactive mode: check if stdin is a terminal
+    if [ -t 0 ]; then
+        read -p "Do you want to remove it and reinstall? (y/N): " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            echo "Installation cancelled."
+            exit 1
+        fi
     else
-        echo "Installation cancelled."
-        exit 1
+        echo "Non-interactive mode: removing existing directory..."
     fi
+    rm -rf "${LCB_ROOT}"
 fi
 
 echo "Cloning LiveCodeBench repository..."
