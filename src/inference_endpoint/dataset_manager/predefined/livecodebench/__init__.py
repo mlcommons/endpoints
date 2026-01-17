@@ -13,17 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import base64
 import json
-import pickle
-import random
-import zlib
+import os
+import urllib.request
 from logging import getLogger
 from pathlib import Path
 
 import pandas as pd
 
-from ...dataset import Dataset, load_from_huggingface
+from ...dataset import Dataset
 from . import presets
 
 logger = getLogger(__name__)
@@ -51,16 +49,41 @@ class LiveCodeBench(
 
     PRESETS = presets
 
+    SERVER_ADDRESS = os.getenv("LCB_SERVER_ADDRESS", "127.0.0.1:13835")
+
     @classmethod
     def generate(
         cls,
         datasets_dir: Path,
         variant: str = "release_v6",
-        seed: int = 0,
-        max_samples: int | None = None,
         force: bool = False,
+        **kwargs,
     ) -> pd.DataFrame:
-        """Generates the LiveCodeBench reference dataset for accuracy evaluation."""
+        """Generates the LiveCodeBench reference dataset for accuracy evaluation. LiveCodeBench
+        requires a container to be running in the background as a webservice. The base container
+        contains a copy of the dataset inside at /opt/LiveCodeBench_Datasets/livecodebench_release_v6.parquet.
+
+        You can either copy it out via `docker cp`, or use this method, which requires the
+        container to be running, and the local <datasets_dir>/livecodebench/release_v6 directory
+        to be mounted on the container at /mnt/datasets.
+
+        ** NOTE ** It is the SUBDIRECTORY in the datasets_dir that must be mounted, not the entire datasets_dir
+
+        If the copy fails, or this directory is not mounted correctly, this method will raise an exception,
+
+        Args:
+            datasets_dir: Path to the base datasets directory where all datasets are stored.
+            variant: The variant of the dataset to generate. (Default: "release_v6")
+            force: Whether to force the generation of the dataset. (Default: False)
+            **kwargs: Additional keyword arguments to pass to the dataset generation method. These are ignored.
+
+        Returns:
+            pd.DataFrame: The dataset as a pandas DataFrame.
+
+        Raises:
+            FileNotFoundError: If the dataset is not found at the destination path.
+            RuntimeError: If the dataset copy fails.
+        """
         filename = f"{cls.DATASET_ID}_{variant}.parquet"
         dst_path = datasets_dir / cls.DATASET_ID / variant / filename
         if not dst_path.parent.exists():
@@ -70,86 +93,23 @@ class LiveCodeBench(
             logger.info(f"Dataset already exists at {dst_path}. Loading from file.")
             return pd.read_parquet(dst_path)
 
-        try:
-            # LCB is not up-to-date with HuggingFace 4.0+ APIs, and uses a custom setup script,
-            # so we need to set trust_remote_code to True to allow loading the dataset.
-            df = load_from_huggingface(
-                "livecodebench/code_generation_lite",
-                split="test",
-                cache_dir=datasets_dir / "hf_cache" / f"{cls.DATASET_ID}_{variant}",
-                load_options={
-                    "version_tag": variant,
-                    "trust_remote_code": True,
-                },
-            )
-        except Exception as e:
-            logger.error(f"Error loading dataset: {e}")
-            logger.error("Note: This dataset may require HuggingFace authentication.")
-            logger.error("Run: huggingface-cli login")
-            raise
+        # Try to get dataset from LCB server endpoint first
+        lcb_server_url = f"http://{cls.SERVER_ADDRESS}"
+        logger.info(f"Attempting to copy dataset from LCB server at {lcb_server_url}")
+        req = urllib.request.Request(f"{lcb_server_url}/copy_dataset", method="GET")
 
-        logger.info(f"Loaded {len(df)} samples from {variant} variant of LiveCodeBench")
+        # Any error that occurs here should be fatal, up to caller to handle gracefully.
+        with urllib.request.urlopen(req, timeout=30) as response:
+            response_data = response.read()
+            result = json.loads(response_data)
 
-        df = df.rename(columns={"question_content": "question"})
-
-        # We do not care about 'competition start date' since we evaluate on the entire dataset anyway.
-        # LiveCodeBench is a constantly evolving dataset, but will be pinned by version, so as long as
-        # we are consistent with the version_tag being used, we should be good.
-        df = df.drop(columns=["question_title", "contest_date", "contest_id"])
-
-        # Unpack the private test cases. In most cases, the private test cases are stored as either a
-        # JSON string, or a Base64-encoded zlib-compressed pickle'd string, which needs to be JSON decoded.
-        # Reference: https://github.com/LiveCodeBench/LiveCodeBench/blob/28fef95ea8c9f7a547c8329f2cd3d32b92c1fa24/lcb_runner/benchmarks/code_generation.py#L64-L74
-        def deserialize_private_test(private_test_cases: str) -> str:
-            try:
-                # Check if it is already JSON - if it is, do nothing.
-                _ = json.loads(private_test_cases)
-                return private_test_cases
-            except json.JSONDecodeError as json_error:
-                # Otherwise, it is a Base64-encoded zlib-compressed pickle'd string.
-                # If any steps fail, the dataset is probably malformed, and should be a fatal error.
-
-                # Decode the Base64 string
-                decoded_bytes = base64.b64decode(private_test_cases.encode("utf-8"))
-
-                # Uncompress the bytes
-                uncompressed_bytes = zlib.decompress(decoded_bytes)
-
-                # Unpickle the bytes
-                unpickled_obj = pickle.loads(uncompressed_bytes)
-
-                if not isinstance(unpickled_obj, str):
-                    raise ValueError(
-                        "Invalid private_test_cases format. Is the dataset malformed?"
-                    ) from json_error
-
-                # Check if is valid JSON
-                _ = json.loads(unpickled_obj)
-                return unpickled_obj
-
-        df["private_test_cases"] = df["private_test_cases"].apply(
-            deserialize_private_test
-        )
-
-        # The only important metadata field for evaluation is the 'func_name' field
-        def get_func_name(metadata_json: str) -> str:
-            try:
-                metadata = json.loads(metadata_json)
-                return metadata.get("func_name", "")
-            except json.JSONDecodeError:
-                return ""
-
-        df["func_name"] = df["metadata"].apply(get_func_name)
-        df = df.drop(columns=["metadata"])
-
-        # If max_samples is specified, sample 'max_samples' rows from the dataset
-        if max_samples is not None and max_samples < len(df):
-            rng = random.Random(seed)
-            sampled_indices = rng.sample(range(len(df)), max_samples)
-            df = df.iloc[sampled_indices].reset_index(drop=True)
-            logger.info(f"Sampled {max_samples} questions")
-
-        # Save to parquet file
-        df.to_parquet(dst_path)
-        logger.info(f"Saved {len(df)} samples to {dst_path}")
-        return df
+            if result.get("success"):
+                # Dataset was successfully copied to /mnt/datasets
+                if dst_path.exists():
+                    return pd.read_parquet(dst_path)
+                else:
+                    raise FileNotFoundError(
+                        f"Server-side copy succeeded, but dataset not found at {dst_path}, is it mounted correctly?"
+                    )
+            else:
+                raise RuntimeError(f"LCB server copy failed: {result.get('error')}")

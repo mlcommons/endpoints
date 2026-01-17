@@ -169,7 +169,6 @@ class LiveCodeBenchScorer(Scorer):
         lcb_version: LiveCodeBench version tag (e.g., "release_v5", "release_v6")
         timeout: Timeout in seconds for each test execution
         question_id_column: Column name in dataset containing question IDs
-        lcb_root: Path to LiveCodeBench installation (for subprocess fallback)
         show_lcb_runner_output: Whether to show output during evaluation
         lcb_websocket_port: Port for WebSocket service on localhost (default: 13835)
                            Set to None to disable WebSocket and use subprocess only.
@@ -186,7 +185,6 @@ class LiveCodeBenchScorer(Scorer):
         lcb_version: str = "release_v6",
         timeout: int = 60,
         question_id_column: str = "question_id",
-        lcb_root: Path = Path("/opt/LiveCodeBench"),
         show_lcb_runner_output: bool = True,
         lcb_websocket_port: int | None = 13835,
     ):
@@ -200,7 +198,6 @@ class LiveCodeBenchScorer(Scorer):
             ground_truth_column=question_id_column,
         )
 
-        self.lcb_root = Path(lcb_root)
         self.lcb_version = lcb_version
         self.timeout = timeout
         self.question_id_column = question_id_column
@@ -212,12 +209,6 @@ class LiveCodeBenchScorer(Scorer):
             if lcb_websocket_port is not None
             else None
         )
-
-        # Validate lcb_root only if WebSocket port is not provided
-        if lcb_websocket_port is None and not self.lcb_root.exists():
-            raise FileNotFoundError(
-                f"LiveCodeBench root directory {lcb_root} does not exist and no WebSocket port provided"
-            )
 
     def score_single_sample(self, value: str, ground_truth: str) -> float:
         raise RuntimeError(
@@ -350,6 +341,19 @@ class LiveCodeBenchScorer(Scorer):
         Returns:
             pass@1 score or None if evaluation failed
         """
+        # Check if local evaluation is allowed via environment variable
+        allow_local_eval = os.environ.get("ALLOW_LCB_LOCAL_EVAL", "").lower() in (
+            "true",
+            "1",
+            "yes",
+        )
+        if not allow_local_eval:
+            raise RuntimeError(
+                "Local LiveCodeBench evaluation via subprocess is disabled by default for security reasons. "
+                "To enable it, set the environment variable ALLOW_LCB_LOCAL_EVAL=true. "
+                "This will allow execution of generated code on your local machine."
+            )
+
         with tempfile.TemporaryDirectory() as temp_dir:
             parquet_name = f"{uuid.uuid4()}.parquet"
             parquet_path = Path(temp_dir) / parquet_name
@@ -369,8 +373,6 @@ class LiveCodeBenchScorer(Scorer):
                 self.lcb_version,
                 "--datasets-dir",
                 "datasets/livecodebench/release_v6",
-                "--lcb-root",
-                str(self.lcb_root),
                 "--timeout",
                 str(self.timeout),
             ]
