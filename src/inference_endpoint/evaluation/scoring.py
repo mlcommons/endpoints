@@ -229,11 +229,10 @@ class LiveCodeBenchScorer(Scorer):
         try:
             import websocket
         except ImportError:
-            if self.show_lcb_runner_output:
-                print(
-                    "Warning: websocket-client package not installed, falling back to subprocess"
-                )
-                print("Install with: pip install websocket-client")
+            print(
+                "Warning: websocket-client package not installed, falling back to subprocess"
+            )
+            print("Install with: pip install websocket-client")
             return None
 
         try:
@@ -264,17 +263,16 @@ class LiveCodeBenchScorer(Scorer):
                 }
                 ws.send(json.dumps(request))
 
-                if self.show_lcb_runner_output:
-                    print(f"Connected to WebSocket service: {self.lcb_websocket_url}")
-                    print(
-                        f"Evaluating {len(codes_dict)} questions ({total_samples} samples)..."
+                print(f"Connected to WebSocket service: {self.lcb_websocket_url}")
+                print(
+                    f"Evaluating {len(codes_dict)} questions ({total_samples} samples)..."
+                )
+                if tqdm:
+                    pbar = tqdm(
+                        total=total_samples,
+                        desc="LCB Evaluation",
+                        unit="sample",
                     )
-                    if tqdm:
-                        pbar = tqdm(
-                            total=total_samples,
-                            desc="LCB Evaluation",
-                            unit="sample",
-                        )
 
                 # Process responses
                 while True:
@@ -306,14 +304,12 @@ class LiveCodeBenchScorer(Scorer):
 
                         elif status == "error":
                             error_msg = data.get("error", "Unknown error")
-                            if self.show_lcb_runner_output:
-                                print(f"WebSocket evaluation error: {error_msg}")
+                            print(f"WebSocket evaluation error: {error_msg}")
                             return None
 
                     except websocket.WebSocketTimeoutException:
                         # This shouldn't happen with ping/pong, but handle gracefully
-                        if self.show_lcb_runner_output:
-                            print("WebSocket timeout - connection lost")
+                        print("WebSocket timeout - connection lost")
                         return None
 
                 # If we exit the loop without returning, something went wrong
@@ -331,8 +327,7 @@ class LiveCodeBenchScorer(Scorer):
                     pass  # Ignore errors on close
 
         except (ConnectionRefusedError, OSError, Exception) as e:
-            if self.show_lcb_runner_output:
-                print(f"WebSocket connection failed: {e}, falling back to subprocess")
+            print(f"WebSocket connection failed: {e}, falling back to subprocess")
             return None
 
     def _evaluate_via_subprocess(self, df: pd.DataFrame) -> float | None:
