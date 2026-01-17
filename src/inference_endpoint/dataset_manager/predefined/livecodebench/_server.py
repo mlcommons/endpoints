@@ -117,6 +117,12 @@ class EvaluationSession:
 
         # Calculate total samples upfront
         self.total_samples = sum(len(codes) for codes in request.codes_dict.values())
+        samples_per_problem = len(list(request.codes_dict.values())[0])
+        print(f"- Evaluating {self.total_samples} code samples")
+        print(f"    # problem IDs: {len(self.request.codes_dict)}")
+        print(f"    code samples per problem: {samples_per_problem}")
+        print(f"    timeout: {request.timeout_sec}")
+
         self.completed_samples = 0
 
         # Queue for progress updates from callback (thread-safe)
@@ -162,10 +168,12 @@ class EvaluationSession:
             )
             return {"success": True, "result": result}
         except Exception as e:
+            tb_string = traceback.format_exc()
+            print(tb_string)
             return {
                 "success": False,
                 "error": str(e),
-                "traceback": traceback.format_exc(),
+                "traceback": tb_string,
             }
 
     async def stream_progress_updates(self, eval_task: asyncio.Task) -> None:

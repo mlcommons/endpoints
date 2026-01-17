@@ -469,7 +469,16 @@ class LiveCodeBenchScorer(Scorer):
             if result is not None:
                 # Successfully evaluated via WebSocket
                 total_samples = result.get("total_samples", 0)
-                total_passed = result.get("total_passed", 0)
+                per_problem_results = result.get("results", {})
+                if not per_problem_results and total_samples:
+                    print(
+                        f"Server evaluated {total_samples} samples but returned an empty summary"
+                    )
+                    return None
+
+                total_passed = sum(
+                    sum(code_passed) for code_passed in per_problem_results.values()
+                )
                 pass_at_1 = total_passed / total_samples if total_samples > 0 else 0.0
                 return pass_at_1, n_repeats
 

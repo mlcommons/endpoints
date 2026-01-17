@@ -57,7 +57,7 @@ def execute_code_single(test_suite_json: str, code: str, timeout_sec: int = 60):
     from .run_lcb_tests import run_test
 
     res, metadata = run_test(
-        {"input_output": test_suite_json}, test=code, debug=False, timeout=timeout_sec
+        {"input_output": test_suite_json}, test=code, timeout=timeout_sec
     )
 
     # LCB results are expected to be plain booleans or error codes.
@@ -196,7 +196,9 @@ class _LCBWorker:
             # Gather results as they complete
             for future in as_completed(futures):
                 qid, code_idx = futures[future]
-                res, _ = future.result()
+                res, metadata = future.result()
+                if "error" in metadata:
+                    print(metadata)
 
                 # LCB uses any result > 0 as a 'pass' since:
                 # Negative numbers indicate error codes
@@ -338,7 +340,7 @@ class LCBServe:
         self,
         df: pd.DataFrame,
         timeout_sec: int = 60,
-        on_problem_complete: Callable[[list[int]], None] | None = None,
+        on_problem_complete: Callable[[list[str]], None] | None = None,
     ) -> dict[str, int | float]:
         """Evaluates all LiveCodeBench problems in a parquet file and returns a dictionary in the form:
         {
