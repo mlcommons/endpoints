@@ -37,7 +37,7 @@ from lib.lcb_serve import LCBServe
 class EvaluationRequest(BaseModel):
     """Schema for evaluation request."""
 
-    codes_dict: dict[int, list[str]] = Field(
+    codes_dict: dict[str, list[str]] = Field(
         description="Dictionary mapping question IDs to lists of code samples"
     )
     timeout_sec: int = Field(
@@ -49,15 +49,15 @@ class EvaluationRequest(BaseModel):
 
     @field_validator("codes_dict")
     @classmethod
-    def validate_codes_dict(cls, v: dict[int, list[str]]) -> dict[int, list[str]]:
+    def validate_codes_dict(cls, v: dict[str, list[str]]) -> dict[str, list[str]]:
         """Validate that codes_dict has correct structure."""
         if not v:
             raise ValueError("codes_dict cannot be empty")
 
         code_list_length = None
         for qid, code_list in v.items():
-            if not isinstance(qid, int):
-                raise ValueError(f"Question ID must be int, got {type(qid)}")
+            if not isinstance(qid, str):
+                raise ValueError(f"Question ID must be str, got {type(qid)}")
             if not isinstance(code_list, list):
                 raise ValueError(
                     f"Code samples for question {qid} must be a list, got {type(code_list)}"
@@ -108,10 +108,12 @@ class EvaluationSession:
         websocket: WebSocket,
         request: EvaluationRequest,
         lcb_serve_instance: LCBServe,
+        event_loop: asyncio.AbstractEventLoop,
     ):
         self.websocket = websocket
         self.request = request
         self.lcb_serve = lcb_serve_instance
+        self.event_loop = event_loop
 
         # Calculate total samples upfront
         self.total_samples = sum(len(codes) for codes in request.codes_dict.values())
@@ -120,7 +122,7 @@ class EvaluationSession:
         # Queue for progress updates from callback (thread-safe)
         self.progress_queue: asyncio.Queue = asyncio.Queue()
 
-    def on_problem_complete(self, question_ids: list[int]) -> None:
+    def on_problem_complete(self, question_ids: list[str]) -> None:
         """Callback invoked when problems complete evaluation.
 
         This runs in the executor thread and safely enqueues progress updates.
@@ -128,6 +130,7 @@ class EvaluationSession:
         self.completed_samples += len(question_ids)
 
         # Put progress update in queue (thread-safe)
+        # Use the stored event loop since this runs in a thread pool executor
         asyncio.run_coroutine_threadsafe(
             self.progress_queue.put(
                 {
@@ -136,7 +139,7 @@ class EvaluationSession:
                     "completed_samples": self.completed_samples,
                 }
             ),
-            asyncio.get_event_loop(),
+            self.event_loop,
         )
 
     async def send_message(self, message: ProgressMessage) -> None:
@@ -149,9 +152,8 @@ class EvaluationSession:
         Returns:
             dict with keys: "success" (bool), "result" (dict) or "error" (str)
         """
-        loop = asyncio.get_event_loop()
         try:
-            result = await loop.run_in_executor(
+            result = await self.event_loop.run_in_executor(
                 None,
                 self.lcb_serve.evaluate,
                 self.request.codes_dict,
@@ -283,6 +285,42 @@ async def startup_event():
     print("LCBServe initialized successfully")
 
 
+@app.get("/info")
+async def get_info():
+    """Get information about the LCBServe instance.
+
+    Returns:
+        JSON response with version tag, number of workers, and dataset size.
+    """
+    if lcb_serve is None:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "success": False,
+                "error": "LCBServe not initialized",
+            },
+        )
+
+    try:
+        return JSONResponse(
+            status_code=200,
+            content={
+                "version_tag": lcb_serve.version_tag,
+                "n_workers": lcb_serve.n_workers,
+                "dataset_size": len(lcb_serve.df),
+            },
+        )
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "success": False,
+                "error": f"Error retrieving info: {e!s}",
+                "traceback": traceback.format_exc(),
+            },
+        )
+
+
 @app.get("/copy_dataset")
 async def copy_dataset():
     """Copy dataset file from LCB_DATASETS_DIR to /mnt/datasets.
@@ -396,7 +434,8 @@ async def websocket_evaluate(websocket: WebSocket):
             return
 
         # Create and execute evaluation session
-        session = EvaluationSession(websocket, request, lcb_serve)
+        loop = asyncio.get_event_loop()
+        session = EvaluationSession(websocket, request, lcb_serve, loop)
         await session.execute()
     except WebSocketDisconnect:
         # Client disconnected, nothing to do

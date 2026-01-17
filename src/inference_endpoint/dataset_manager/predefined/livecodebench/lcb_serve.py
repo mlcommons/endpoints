@@ -148,7 +148,7 @@ def run_code_subprocess(
 class _LCBWorker:
     def __init__(
         self,
-        test_suites: dict[int, str],
+        test_suites: dict[str, str],
         n_lcb_workers: int = 1,
         worker_timeout_sec: int = 60,
     ):
@@ -158,10 +158,10 @@ class _LCBWorker:
 
     def __call__(
         self,
-        question_ids: list[int],
+        question_ids: list[str],
         codes: list[list[str]],
-        on_problem_complete: Callable[[list[int]], None] | None = None,
-    ) -> dict[int, list[bool]]:
+        on_problem_complete: Callable[[list[str]], None] | None = None,
+    ) -> dict[str, list[bool]]:
         """Evaluates LiveCodeBench problems given question IDs and their corresponding code samples.
 
         Args:
@@ -171,7 +171,7 @@ class _LCBWorker:
                 list of question IDs that completed.
 
         Returns:
-            dict[int, list[bool]]: Dictionary mapping question IDs to lists of boolean results for each code sample.
+            dict[str, list[bool]]: Dictionary mapping question IDs to lists of boolean results for each code sample.
         """
         # Create results dict with the expected size
         results = {}
@@ -264,7 +264,7 @@ class LCBServe:
             print(f"Loaded {len(self.df)}")
         self.test_suites = self.consolidate_test_cases()
 
-    def consolidate_test_cases(self) -> dict[int, str]:
+    def consolidate_test_cases(self) -> dict[str, str]:
         # Consolidate the inputs and outputs of the test cases into a JSON string.
         # Reference: https://github.com/LiveCodeBench/LiveCodeBench/blob/28fef95ea8c9f7a547c8329f2cd3d32b92c1fa24/lcb_runner/benchmarks/code_generation.py#L106
         test_suites = {}
@@ -289,10 +289,10 @@ class LCBServe:
 
     def evaluate(
         self,
-        codes_dict: dict[int, list[str]],
+        codes_dict: dict[str, list[str]],
         timeout_sec: int = 60,
-        on_problem_complete: Callable[[list[int]], None] | None = None,
-    ) -> dict[int, list[bool]]:
+        on_problem_complete: Callable[[list[str]], None] | None = None,
+    ) -> dict[str, list[bool]]:
         """Evaluates LiveCodeBench problems given question IDs and their corresponding code samples.
 
         Args:
@@ -303,7 +303,7 @@ class LCBServe:
                 list of question IDs that completed.
 
         Returns:
-            dict[int, list[bool]]: Dictionary mapping question IDs to lists of boolean results for each code sample.
+            dict[str, list[bool]]: Dictionary mapping question IDs to lists of boolean results for each code sample.
 
         Raises:
             KeyError: If any question_id is not found in the loaded test suites.
