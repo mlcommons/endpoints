@@ -42,4 +42,4 @@ endpoint_config:
   endpoint: "http://localhost:8000"
   api_key: null
 
-report_dir: logs/llama3_8b_cnn_offline/ # Directory to save the benchmark report
+report_dir: logs/llama3_8b_cnn_offline # Directory to save the benchmark report
