@@ -339,7 +339,7 @@ def _build_config_from_cli(
             streaming=StreamingMode(getattr(args, "streaming", "auto")),
         ),
         endpoint_config=EndpointConfig(
-            endpoint=args.endpoint, api_key=args.api_key, api_type=api_type
+            endpoint=args.endpoint.split(","), api_key=args.api_key, api_type=api_type
         ),
         metrics=Metrics(),
         baseline=None,  # CLI mode doesn't use baseline
@@ -582,9 +582,10 @@ def _run_benchmark(
 
     try:
         http_config = HTTPClientConfig(
-            endpoint_url=urljoin(
-                endpoint, config.endpoint_config.api_type.default_route()
-            ),
+            endpoint_urls=[
+                urljoin(endpoint[i], config.endpoint_config.api_type.default_route())
+                for i in range(len(endpoint))
+            ],
             api_type=config.endpoint_config.api_type,
             num_workers=num_workers,
             record_worker_events=config.settings.client.record_worker_events,

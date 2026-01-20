@@ -340,7 +340,7 @@ class EndpointConfig(BaseModel):
     The Default API type is APIType.OPENAI, which refers to the the /v1/chat/completions route.
     """
 
-    endpoint: str | None = None
+    endpoint: list[str] | None = None
     api_key: str | None = None
     api_type: APIType = APIType.OPENAI
 

@@ -64,7 +64,7 @@ class DataLoaderFactory:
             format = DatasetFormat(format)
 
         if remap is None:
-            remap = {"prompt": "text_input"}
+            remap = {"question": "prompt"}
 
         transforms = [ColumnNameRemap(remap)]
         if metadata is not None:

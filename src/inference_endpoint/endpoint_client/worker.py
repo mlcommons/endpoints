@@ -276,7 +276,9 @@ class Worker:
             await self._handle_error(query.id, "Worker is shutting down")
             return
 
-        url = self.http_config.endpoint_url
+        url = self.http_config.endpoint_urls[
+            self.worker_id % len(self.http_config.endpoint_urls)
+        ]
         logger.debug(
             f"Making HTTP request to {url} with query: {query} and headers: {query.headers}"
         )

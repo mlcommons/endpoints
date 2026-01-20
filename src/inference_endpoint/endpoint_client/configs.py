@@ -43,7 +43,7 @@ ACCUMULATOR_MAP = {
 class HTTPClientConfig:
     """Configuration for the HTTP endpoint client."""
 
-    endpoint_url: str
+    endpoint_urls: list[str]
     api_type: APIType = APIType.OPENAI
     num_workers: int = 4
 
