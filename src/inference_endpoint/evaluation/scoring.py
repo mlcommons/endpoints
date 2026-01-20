@@ -218,8 +218,10 @@ class RougeScorer(Scorer, scorer_id="rouge"):
                 raise ImportError
 
             import evaluate
+            import nltk
 
             self.metric = evaluate.load("rouge")
+            self.nltk = nltk
 
         except ImportError:
             raise ImportError(
@@ -228,11 +230,9 @@ class RougeScorer(Scorer, scorer_id="rouge"):
             ) from None
 
     def postprocess_text(self, texts):
-        import nltk
-
         texts = [text.strip() for text in texts]
         # rougeLSum expects newline after each sentence
-        texts = ["\n".join(nltk.sent_tokenize(text)) for text in texts]
+        texts = ["\n".join(self.nltk.sent_tokenize(text)) for text in texts]
         return texts
 
     def score_single_sample(self, value: str, ground_truth: str) -> float:
