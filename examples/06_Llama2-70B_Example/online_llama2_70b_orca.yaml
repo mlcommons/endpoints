@@ -13,22 +13,12 @@ model_params:
 datasets:
   - name: "open_orca"
     type: "accuracy"
-    path: "open_orca/open_orca_gpt4_tokenized_llama.sampled_24576.pkl"
-    samples: 24576
-    parser:
-      question: "prompt"
-      system_prompt: "system"
     accuracy_config:
       eval_method: "rouge"
       extractor: "identity_extractor"
       ground_truth: "output"
   - name: "open_orca"
     type: "performance"
-    path: "open_orca/open_orca_gpt4_tokenized_llama.sampled_24576.pkl"
-    samples: 24576
-    parser:
-      question: "prompt"
-      system_prompt: "system"
 
 settings:
   runtime:

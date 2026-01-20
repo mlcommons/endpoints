@@ -1,6 +1,18 @@
 # Running Endpoints with Llama2-70B
 
-This document describes how to perform MLPerf Llama2-70B benchmarking using the inference endpoints. Instructions to download the model and dataset are provided in [Reference Implementation for llama2-70b](https://github.com/mlcommons/inference/tree/master/language/llama2-70b)
+This document describes how to perform MLPerf Llama2-70B benchmarking using the inference endpoints. Additional instructions to download the model and dataset are provided in [Reference Implementation for llama2-70b](https://github.com/mlcommons/inference/tree/master/language/llama2-70b)
+
+## (Optional) Get Dataset
+
+You can use the MLCommons R2 Downloader to download the preprocessed dataset from a Cloudflare R2 bucket (more information about the MLC R2 Downloader, including how to run it on Windows, can be found [here](https://inference.mlcommons-storage.org)).
+
+Navigate in the terminal to your desired download directory and run the following command to download the dataset:
+
+```
+bash <(curl -s https://raw.githubusercontent.com/mlcommons/r2-downloader/refs/heads/main/mlc-r2-downloader.sh) https://inference.mlcommons-storage.org/metadata/llama-2-70b-open-orca-dataset.uri
+```
+
+Dataset will be downloaded automatically to ./open_orca before benchmark if not downloaded previously.
 
 ## Get Model
 
