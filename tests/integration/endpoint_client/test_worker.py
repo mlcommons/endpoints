@@ -42,7 +42,7 @@ class TestWorkerBasicFunctionality:
     def worker_config(self, mock_http_echo_server):
         """Create worker configuration with echo server URL."""
         http_config = HTTPClientConfig(
-            endpoint_url=f"{mock_http_echo_server.url}/v1/chat/completions",
+            endpoint_urls=[f"{mock_http_echo_server.url}/v1/chat/completions"],
             num_workers=1,
         )
         aiohttp_config = AioHttpConfig()
@@ -238,7 +238,7 @@ class TestWorkerErrorHandling:
     def error_config(self):
         """Create configuration with invalid endpoint for error tests."""
         http_config = HTTPClientConfig(
-            endpoint_url="http://localhost:99999/v1/chat/completions",
+            endpoint_urls=["http://localhost:99999/v1/chat/completions"],
             num_workers=1,
         )
         aiohttp_config = AioHttpConfig()
@@ -415,7 +415,7 @@ class TestWorkerErrorHandling:
 
         # Create config with test server URL
         http_config = HTTPClientConfig(
-            endpoint_url=f"http://localhost:{server.port}/malformed",
+            endpoint_urls=[f"http://localhost:{server.port}/malformed"],
             num_workers=1,
         )
         aiohttp_config = AioHttpConfig()
@@ -478,7 +478,7 @@ class TestWorkerErrorHandling:
     async def test_worker_zmq_socket_binding_error(self):
         """Test worker handling ZMQ socket binding errors."""
         http_config = HTTPClientConfig(
-            endpoint_url="http://localhost:99999/v1/chat/completions",
+            endpoint_urls=["http://localhost:99999/v1/chat/completions"],
             num_workers=1,
         )
         aiohttp_config = AioHttpConfig()

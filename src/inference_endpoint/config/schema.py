@@ -364,6 +364,7 @@ class BenchmarkConfig(BaseModel):
     datasets: list[Dataset]
     settings: Settings = Field(default_factory=Settings)
     metrics: Metrics = Field(default_factory=Metrics)
+    # workers are assigned endpoints in a round-robin manner
     endpoint_config: EndpointConfig = Field(default_factory=EndpointConfig)
     report_dir: Path | None = None
     timeout: int | None = None

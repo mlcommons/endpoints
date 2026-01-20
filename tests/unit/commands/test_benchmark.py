@@ -108,7 +108,7 @@ class TestBuildConfigFromCLI:
         config = _build_config_from_cli(args, "offline")
 
         assert config.name == "cli_offline"
-        assert config.endpoint_config.endpoint == "http://test:8000"
+        assert config.endpoint_config.endpoint == ["http://test:8000"]
         assert config.datasets[0].path == "test.pkl"
         assert config.settings.load_pattern.type.value == "max_throughput"
         assert config.settings.load_pattern.target_qps is None
@@ -191,7 +191,8 @@ datasets:
     type: "performance"
     path: "tests/datasets/dummy_1k.pkl"
 endpoint_config:
-  endpoint: "http://test:8000"
+  endpoint:
+  - "http://test:8000"
 """)
             config_path = Path(f.name)
 
@@ -206,7 +207,7 @@ endpoint_config:
             from inference_endpoint.config.yaml_loader import ConfigLoader
 
             config = ConfigLoader.load_yaml(config_path)
-            assert config.endpoint_config.endpoint == "http://test:8000"
+            assert config.endpoint_config.endpoint == ["http://test:8000"]
         finally:
             config_path.unlink()
 
