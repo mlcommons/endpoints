@@ -4,7 +4,7 @@ version: "1.0"
 type: "online"
 
 model_params:
-  name: "/data/model/Llama-3.1-8B-Instruct-autoround-w4g-1-iters512-xpu/" # Path to the model
+  name: "meta-llama/Llama-3.1-8B-Instruct" # Path to the model
   temperature: 0.0
   top_p: 1.0
   max_new_tokens: 128
