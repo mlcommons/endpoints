@@ -55,7 +55,8 @@ metrics:
     - "throughput"
 
 endpoint_config:
-  endpoint: "http://localhost:8000"
+  endpoint:
+    - "http://localhost:8000"
 """
         config_file = tmp_path / "test_config.yaml"
         config_file.write_text(config_content)
