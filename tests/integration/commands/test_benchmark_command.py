@@ -43,7 +43,7 @@ class TestBenchmarkCommandIntegration:
         args = argparse.Namespace(
             benchmark_mode="offline",
             config=None,
-            endpoints=mock_http_echo_server.url,
+            endpoint=mock_http_echo_server.url,
             dataset=Path(ds_pickle_dataset_path),
             api_key=None,
             target_qps=None,
@@ -83,7 +83,7 @@ class TestBenchmarkCommandIntegration:
         args = argparse.Namespace(
             benchmark_mode="online",
             config=None,
-            endpoints=mock_http_echo_server.url,
+            endpoint=mock_http_echo_server.url,
             dataset=Path(ds_pickle_dataset_path),
             api_key=None,
             target_qps=50,
@@ -127,7 +127,7 @@ class TestBenchmarkCommandIntegration:
         args = argparse.Namespace(
             benchmark_mode="offline",
             config=None,
-            endpoints=mock_http_echo_server.url,
+            endpoint=mock_http_echo_server.url,
             dataset=Path(ds_pickle_dataset_path),
             api_key=None,
             target_qps=None,
@@ -169,7 +169,7 @@ class TestBenchmarkCommandIntegration:
         args = argparse.Namespace(
             benchmark_mode="online",
             config=None,
-            endpoints=mock_http_echo_server.url,
+            endpoint=mock_http_echo_server.url,
             dataset=Path(ds_pickle_dataset_path),
             api_key=None,
             target_qps=20,
