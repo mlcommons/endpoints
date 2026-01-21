@@ -22,8 +22,8 @@ from pathlib import Path
 import pandas as pd
 import requests
 from inference_endpoint.dataset_manager.transforms import (
-    AddStaticColumns,
     ColumnNameRemap,
+    Transform,
 )
 
 from ...dataset import Dataset
@@ -100,8 +100,10 @@ class OpenOrca(
     @classmethod
     def get_dataloader(
         cls,
-        metadata: dict[str, str] | None = None,
+        datasets_dir: Path = Path("open_orca"),
         num_repeats: int = 1,
+        transforms: list[Transform] | None = None,
+        force_regenerate: bool = False,
     ):
         """Load the OpenOrca dataset from a file.
 
@@ -126,10 +128,7 @@ class OpenOrca(
         remap = {"question": "prompt", "system_prompt": "system"}
 
         # Create transforms
-        transforms = [ColumnNameRemap(remap)]
-
-        if metadata is not None:
-            transforms.append(AddStaticColumns(metadata))
+        transforms = [ColumnNameRemap(remap)] + (transforms or [])
 
         return cls(df, transforms=transforms)
 

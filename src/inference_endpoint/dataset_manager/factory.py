@@ -56,8 +56,9 @@ class DataLoaderFactory:
         name = config.name
         if name in Dataset.PREDEFINED:
             # To pass model name or other metadata to predefined datasets
-            if "open_orca" in name:
-                kwargs["metadata"] = metadata
+            if metadata is not None:
+                transforms = AddStaticColumns(metadata)
+                kwargs.setdefault("transforms", []).append(transforms)
             return Dataset.PREDEFINED[name].get_dataloader(**kwargs)
         if name not in Dataset.PREDEFINED and dataset_path is None:
             raise ValueError(
