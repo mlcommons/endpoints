@@ -55,6 +55,9 @@ class DataLoaderFactory:
         remap = config.parser
         name = config.name
         if name in Dataset.PREDEFINED:
+            # To pass model name or other metadata to predefined datasets
+            if "open_orca" in name:
+                kwargs["metadata"] = metadata
             return Dataset.PREDEFINED[name].get_dataloader(**kwargs)
         if name not in Dataset.PREDEFINED and dataset_path is None:
             raise ValueError(
@@ -64,7 +67,7 @@ class DataLoaderFactory:
             format = DatasetFormat(format)
 
         if remap is None:
-            remap = {"prompt": "text_input"}
+            remap = {"question": "prompt"}
 
         transforms = [ColumnNameRemap(remap)]
         if metadata is not None:

@@ -104,7 +104,8 @@ class TestProbeCommandIntegration:
         args.model = "gpt-3.5-turbo"  # Required
         args.verbose = 0
 
-        # Should raise ExecutionError when all requests fail
+        # With lazy connection pooling, client creation succeeds but requests fail
+        # during execution when the worker can't resolve the hostname
         with pytest.raises(ExecutionError, match="Probe failed"):
             await run_probe_command(args)
 

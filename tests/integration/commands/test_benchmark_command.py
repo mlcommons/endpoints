@@ -43,7 +43,7 @@ class TestBenchmarkCommandIntegration:
         args = argparse.Namespace(
             benchmark_mode="offline",
             config=None,
-            endpoint=mock_http_echo_server.url,
+            endpoints=mock_http_echo_server.url,
             dataset=Path(ds_pickle_dataset_path),
             api_key=None,
             target_qps=None,
@@ -59,6 +59,7 @@ class TestBenchmarkCommandIntegration:
             verbose=1,
             model="echo-server",
             timeout=None,
+            warmup_connections=False,
         )
 
         with caplog.at_level("INFO"):
@@ -82,7 +83,7 @@ class TestBenchmarkCommandIntegration:
         args = argparse.Namespace(
             benchmark_mode="online",
             config=None,
-            endpoint=mock_http_echo_server.url,
+            endpoints=mock_http_echo_server.url,
             dataset=Path(ds_pickle_dataset_path),
             api_key=None,
             target_qps=50,
@@ -98,6 +99,7 @@ class TestBenchmarkCommandIntegration:
             verbose=1,
             model="echo-server",
             timeout=None,
+            warmup_connections=False,
         )
         with caplog.at_level("INFO"):
             await run_benchmark_command(args)
@@ -125,7 +127,7 @@ class TestBenchmarkCommandIntegration:
         args = argparse.Namespace(
             benchmark_mode="offline",
             config=None,
-            endpoint=mock_http_echo_server.url,
+            endpoints=mock_http_echo_server.url,
             dataset=Path(ds_pickle_dataset_path),
             api_key=None,
             target_qps=None,
@@ -141,6 +143,7 @@ class TestBenchmarkCommandIntegration:
             verbose=0,
             model="echo-server",
             timeout=None,
+            warmup_connections=False,
         )
 
         await run_benchmark_command(args)
@@ -166,7 +169,7 @@ class TestBenchmarkCommandIntegration:
         args = argparse.Namespace(
             benchmark_mode="online",
             config=None,
-            endpoint=mock_http_echo_server.url,
+            endpoints=mock_http_echo_server.url,
             dataset=Path(ds_pickle_dataset_path),
             api_key=None,
             target_qps=20,
@@ -182,6 +185,7 @@ class TestBenchmarkCommandIntegration:
             verbose=1,
             model="echo-server",
             timeout=None,
+            warmup_connections=False,
         )
         with caplog.at_level("INFO"):
             await run_benchmark_command(args)

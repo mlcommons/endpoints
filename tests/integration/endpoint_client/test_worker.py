@@ -19,19 +19,9 @@ import asyncio
 import signal
 
 import pytest
-import zmq
 from inference_endpoint.core.types import Query, QueryResult, StreamChunk
-from inference_endpoint.endpoint_client.configs import (
-    AioHttpConfig,
-    HTTPClientConfig,
-)
+from inference_endpoint.endpoint_client.config import HTTPClientConfig
 from inference_endpoint.endpoint_client.transport import ZmqWorkerPoolTransport
-
-# Import private classes for testing internal error handling
-from inference_endpoint.endpoint_client.transport.zmq.transport import (
-    _ZMQSocketConfig,
-    _ZmqWorkerConnector,
-)
 from inference_endpoint.endpoint_client.worker import Worker
 
 
@@ -42,11 +32,12 @@ class TestWorkerBasicFunctionality:
     def worker_config(self, mock_http_echo_server):
         """Create worker configuration with echo server URL."""
         http_config = HTTPClientConfig(
-            endpoint_url=f"{mock_http_echo_server.url}/v1/chat/completions",
+            endpoint_urls=[f"{mock_http_echo_server.url}/v1/chat/completions"],
             num_workers=1,
+            max_connections=10,
+            warmup_connections=False,
         )
-        aiohttp_config = AioHttpConfig()
-        return http_config, aiohttp_config
+        return http_config
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -77,13 +68,9 @@ class TestWorkerBasicFunctionality:
             "empty_prompts",
         ],
     )
-    async def test_worker_request_handling(
-        self,
-        worker_config,
-        requests,
-    ):
+    async def test_worker_request_handling(self, worker_config, requests):
         """Test worker handling various request patterns including streaming, non-streaming, and multiple requests."""
-        http_config, aiohttp_config = worker_config
+        http_config = worker_config
 
         # Create pool transport with the running event loop
         loop = asyncio.get_running_loop()
@@ -93,7 +80,6 @@ class TestWorkerBasicFunctionality:
             worker_id=0,
             connector=pool.worker_connector,
             http_config=http_config,
-            aiohttp_config=aiohttp_config,
         )
 
         # Start worker
@@ -192,7 +178,7 @@ class TestWorkerBasicFunctionality:
         - SIGHUP: Hangup signal (terminal closed)
         - SIGQUIT: Quit signal (Ctrl+\\)
         """
-        http_config, aiohttp_config = worker_config
+        http_config = worker_config
 
         # Create pool transport with the running event loop
         loop = asyncio.get_running_loop()
@@ -202,7 +188,6 @@ class TestWorkerBasicFunctionality:
             worker_id=0,
             connector=pool.worker_connector,
             http_config=http_config,
-            aiohttp_config=aiohttp_config,
         )
 
         # Start worker
@@ -235,14 +220,26 @@ class TestWorkerErrorHandling:
     """Test Worker error handling for various failure scenarios."""
 
     @pytest.fixture
+    def worker_config(self, mock_http_echo_server):
+        """Create worker configuration with echo server URL."""
+        http_config = HTTPClientConfig(
+            endpoint_urls=[f"{mock_http_echo_server.url}/v1/chat/completions"],
+            num_workers=1,
+            max_connections=10,
+            warmup_connections=False,
+        )
+        return http_config
+
+    @pytest.fixture
     def error_config(self):
         """Create configuration with invalid endpoint for error tests."""
         http_config = HTTPClientConfig(
-            endpoint_url="http://localhost:99999/v1/chat/completions",
+            endpoint_urls=["http://localhost:59999/v1/chat/completions"],
             num_workers=1,
+            max_connections=10,
+            warmup_connections=False,
         )
-        aiohttp_config = AioHttpConfig()
-        return http_config, aiohttp_config
+        return http_config
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -250,7 +247,7 @@ class TestWorkerErrorHandling:
     )
     async def test_worker_connection_error_handling(self, error_config, stream):
         """Test worker error handling with invalid endpoint for both streaming and non-streaming."""
-        http_config, aiohttp_config = error_config
+        http_config = error_config
 
         # Create pool transport with the running event loop
         loop = asyncio.get_running_loop()
@@ -260,7 +257,6 @@ class TestWorkerErrorHandling:
             worker_id=0,
             connector=pool.worker_connector,
             http_config=http_config,
-            aiohttp_config=aiohttp_config,
         )
 
         # Start worker
@@ -291,14 +287,13 @@ class TestWorkerErrorHandling:
             assert isinstance(response, QueryResult)
             assert response.id == query_id
             assert response.error is not None
+            # Check for connection error indicators
+            error_lower = response.error.lower()
             assert (
-                (
-                    "connection" in response.error.lower()
-                    and "refused" in response.error.lower()
-                )
-                or "cannot connect" in response.error.lower()
-                or "99999" in response.error
-            )
+                ("connect" in error_lower and "failed" in error_lower)
+                or ("connection" in error_lower and "refused" in error_lower)
+                or ("cannot connect" in error_lower)
+            ), f"Unexpected error message: {response.error}"
 
         finally:
             worker.shutdown()
@@ -309,9 +304,9 @@ class TestWorkerErrorHandling:
     @pytest.mark.parametrize(
         "stream", [False, True], ids=["non_streaming", "streaming"]
     )
-    async def test_worker_exception_handling(self, error_config, stream):
-        """Test worker handles exceptions in _process_request for both streaming and non-streaming."""
-        http_config, aiohttp_config = error_config
+    async def test_worker_exception_handling(self, worker_config, stream):
+        """Test worker handles exceptions in body handler for both streaming and non-streaming."""
+        http_config = worker_config
 
         # Create pool transport with the running event loop
         loop = asyncio.get_running_loop()
@@ -321,21 +316,20 @@ class TestWorkerErrorHandling:
             worker_id=0,
             connector=pool.worker_connector,
             http_config=http_config,
-            aiohttp_config=aiohttp_config,
         )
 
-        # Mock the appropriate handler to raise an exception
+        # Mock the appropriate body handler to raise an exception
         error_msg = (
             f"Simulated {'streaming' if stream else 'non-streaming'} processing error"
         )
 
-        async def mock_handle_request(query):
+        async def mock_handle_body(prepared):
             raise RuntimeError(error_msg)
 
         if stream:
-            worker._handle_streaming_request = mock_handle_request
+            worker._handle_streaming_body = mock_handle_body
         else:
-            worker._handle_non_streaming_request = mock_handle_request
+            worker._handle_non_streaming_body = mock_handle_body
 
         # Start worker
         worker_task = asyncio.create_task(worker.run())
@@ -415,16 +409,16 @@ class TestWorkerErrorHandling:
 
         # Create config with test server URL
         http_config = HTTPClientConfig(
-            endpoint_url=f"http://localhost:{server.port}/malformed",
+            endpoint_urls=[f"http://localhost:{server.port}/malformed"],
             num_workers=1,
+            max_connections=10,
+            warmup_connections=False,
         )
-        aiohttp_config = AioHttpConfig()
 
         worker = Worker(
             worker_id=0,
             connector=pool.worker_connector,
             http_config=http_config,
-            aiohttp_config=aiohttp_config,
         )
 
         # Start worker
@@ -473,31 +467,3 @@ class TestWorkerErrorHandling:
             await asyncio.gather(worker_task, return_exceptions=True)
             pool.cleanup()
             await server.close()
-
-    @pytest.mark.asyncio
-    async def test_worker_zmq_socket_binding_error(self):
-        """Test worker handling ZMQ socket binding errors."""
-        http_config = HTTPClientConfig(
-            endpoint_url="http://localhost:99999/v1/chat/completions",
-            num_workers=1,
-        )
-        aiohttp_config = AioHttpConfig()
-
-        # Create connector with invalid socket address to trigger binding error
-        invalid_connector = _ZmqWorkerConnector(
-            config=_ZMQSocketConfig(),
-            request_addrs=["invalid://socket/address"],
-            response_addr="invalid://socket/response",
-            readiness_addr="invalid://socket/ready",
-        )
-
-        worker = Worker(
-            worker_id=0,
-            connector=invalid_connector,
-            http_config=http_config,
-            aiohttp_config=aiohttp_config,
-        )
-
-        # Worker run should raise on invalid socket connection
-        with pytest.raises(zmq.ZMQError):
-            await worker.run()

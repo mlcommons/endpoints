@@ -22,10 +22,7 @@ import asyncio
 
 import pytest
 from inference_endpoint.core.types import Query
-from inference_endpoint.endpoint_client.configs import (
-    AioHttpConfig,
-    HTTPClientConfig,
-)
+from inference_endpoint.endpoint_client.config import HTTPClientConfig
 
 from tests.futures_client import FuturesHttpClient
 
@@ -43,13 +40,13 @@ def sglang_futures_client():
     running at localhost:30000.
     """
     http_config = HTTPClientConfig(
-        endpoint_url=SGLANG_ENDPOINT,
+        endpoint_urls=[SGLANG_ENDPOINT],
         num_workers=4,
         api_type="sglang",
+        warmup_connections=False,
     )
-    aiohttp_config = AioHttpConfig()
 
-    client = FuturesHttpClient(http_config, aiohttp_config)
+    client = FuturesHttpClient(http_config)
     yield client
     client.shutdown()
 

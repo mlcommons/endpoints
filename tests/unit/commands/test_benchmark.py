@@ -54,7 +54,7 @@ def _create_mock_args(**overrides):
     defaults = {
         "benchmark_mode": "offline",
         "config": None,
-        "endpoint": "http://test.com",
+        "endpoints": "http://test.com",
         "dataset": Path("test.pkl"),
         "model": "llama-2-70b",
         "api_key": None,
@@ -93,7 +93,7 @@ class TestBuildConfigFromCLI:
         """Test building config with minimal offline params."""
         # Note: concurrency is now in shared args (applies to both offline and online)
         args = argparse.Namespace(
-            endpoint="http://test:8000",
+            endpoints="http://test:8000",
             dataset=Path("test.pkl"),
             model="llama-2-70b",  # Required
             api_key=None,
@@ -108,11 +108,11 @@ class TestBuildConfigFromCLI:
         config = _build_config_from_cli(args, "offline")
 
         assert config.name == "cli_offline"
-        assert config.endpoint_config.endpoint == "http://test:8000"
+        assert config.endpoint_config.endpoints == ["http://test:8000"]
         assert config.datasets[0].path == "test.pkl"
         assert config.settings.load_pattern.type.value == "max_throughput"
         assert config.settings.load_pattern.target_qps is None
-        assert config.settings.client.workers == 4  # Default
+        assert config.settings.client.workers == -1  # Default (auto)
         assert (
             config.settings.runtime.min_duration_ms == 0
         )  # Default: 0 - use dataset samples
@@ -122,7 +122,7 @@ class TestBuildConfigFromCLI:
         """Test building config with custom online params."""
         # Online mode has concurrency attribute (from _add_online_specific_args)
         args = argparse.Namespace(
-            endpoint="http://prod:8000",
+            endpoints="http://prod:8000",
             dataset=Path("dataset.pkl"),
             model="gpt-4",  # Required
             api_key="key123",
@@ -150,7 +150,7 @@ class TestBuildConfigFromCLI:
     def test_build_config_with_num_samples(self):
         """Test that num_samples parameter is mapped to config."""
         args = argparse.Namespace(
-            endpoint="http://test:8000",
+            endpoints="http://test:8000",
             dataset=Path("test.pkl"),
             model="llama-2-70b",
             api_key=None,
@@ -191,7 +191,8 @@ datasets:
     type: "performance"
     path: "tests/datasets/dummy_1k.pkl"
 endpoint_config:
-  endpoint: "http://test:8000"
+  endpoints:
+  - "http://test:8000"
 """)
             config_path = Path(f.name)
 
@@ -206,7 +207,7 @@ endpoint_config:
             from inference_endpoint.config.yaml_loader import ConfigLoader
 
             config = ConfigLoader.load_yaml(config_path)
-            assert config.endpoint_config.endpoint == "http://test:8000"
+            assert config.endpoint_config.endpoints == ["http://test:8000"]
         finally:
             config_path.unlink()
 

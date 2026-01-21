@@ -24,10 +24,7 @@ from itertools import cycle
 import uvloop
 
 from inference_endpoint.core.types import Query, QueryResult, StreamChunk
-from inference_endpoint.endpoint_client.configs import (
-    AioHttpConfig,
-    HTTPClientConfig,
-)
+from inference_endpoint.endpoint_client.config import HTTPClientConfig
 from inference_endpoint.endpoint_client.worker_manager import WorkerManager
 
 logger = logging.getLogger(__name__)
@@ -53,27 +50,32 @@ class AsyncHttpEndpointClient:
     def __init__(
         self,
         config: HTTPClientConfig,
-        aiohttp_config: AioHttpConfig,
         loop: asyncio.AbstractEventLoop | None = None,
     ):
         self.client_id = uuid.uuid4().hex[:8]
         self.config = config
-        self.aiohttp_config = aiohttp_config
-        self._worker_cycle = cycle(range(config.num_workers))
+        self._worker_cycle = cycle(range(self.config.num_workers))
 
         # Use provided loop or create own
-        self._owns_loop = loop is None
         if loop is None:
             self.loop = uvloop.new_event_loop()
             self._loop_thread = threading.Thread(
                 target=self.loop.run_forever,
-                daemon=True,  # no need for explicit join
+                daemon=True,
                 name=f"HttpClient-{self.client_id}",
             )
             self._loop_thread.start()
         else:
             self.loop = loop
             self._loop_thread = None
+
+        # Use eager task factory for immediate coroutine execution
+        # Tasks start executing synchronously until first await
+        #
+        # NOTE(vir):
+        # CRITICAL for http-client performance
+        # ensures issue() does not get starved by other threads under load
+        self.loop.set_task_factory(asyncio.eager_task_factory)
 
         # Initialize on event loop
         asyncio.run_coroutine_threadsafe(self._initialize(), self.loop).result()
@@ -90,7 +92,7 @@ class AsyncHttpEndpointClient:
         self._shutdown_event = asyncio.Event()
 
         # WorkerManager creates and owns all transports
-        self.worker_manager = WorkerManager(self.config, self.aiohttp_config, self.loop)
+        self.worker_manager = WorkerManager(self.config, self.loop)
         await self.worker_manager.initialize()
         self.pool = self.worker_manager.pool_transport
 
@@ -99,6 +101,7 @@ class AsyncHttpEndpointClient:
         Issue query to endpoint (round-robin to workers).
         Non-blocking - buffers if socket would block.
         """
+        # TODO(vir): handle gracefully
         assert not self._shutdown_event.is_set(), "Client is shutting down"
         self.pool.send(next(self._worker_cycle), query)
 
@@ -125,8 +128,8 @@ class AsyncHttpEndpointClient:
         # Shutdown workers
         await self.worker_manager.shutdown()
 
-        # Stop event loop if we own it (scheduled to run after this coroutine completes)
-        if self._owns_loop:
+        # Stop event loop if we own it
+        if self._loop_thread is not None:
             self.loop.call_soon(self.loop.stop)
 
         logger.info(f"[{self.client_id}] Shutdown complete.")
@@ -137,16 +140,14 @@ class HTTPEndpointClient(AsyncHttpEndpointClient):
     Sync HTTP client for LLM inference.
     Inherits from AsyncHttpEndpointClient and provides sync interface.
 
-    TODO(vir): sync recv. API is not required/implemented yet
-
     Usage:
-        client = HTTPEndpointClient(config, aiohttp_config)
+        client = HTTPEndpointClient(config)
         client.issue(query)
     """
 
     def issue(self, query: Query) -> None:  # type: ignore[override]
         """Issue query."""
-        # Schedule on event loop thread for thread-safety
+        # Schedule on event loop thread
         self.loop.call_soon_threadsafe(
             lambda: super(HTTPEndpointClient, self).issue(query)
         )

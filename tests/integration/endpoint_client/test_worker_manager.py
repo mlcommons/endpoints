@@ -21,10 +21,7 @@ import signal
 import subprocess
 
 import pytest
-from inference_endpoint.endpoint_client.configs import (
-    AioHttpConfig,
-    HTTPClientConfig,
-)
+from inference_endpoint.endpoint_client.config import HTTPClientConfig
 from inference_endpoint.endpoint_client.worker_manager import WorkerManager
 
 # timeout for OS to handle process signals
@@ -109,21 +106,21 @@ class TestWorkerLifecycle:
     def manager_config(self, mock_http_echo_server):
         """Create manager configuration."""
         http_config = HTTPClientConfig(
-            endpoint_url=f"{mock_http_echo_server.url}/v1/chat/completions",
+            endpoint_urls=[f"{mock_http_echo_server.url}/v1/chat/completions"],
             num_workers=2,
+            max_connections=10,
+            warmup_connections=False,
         )
-        aiohttp_config = AioHttpConfig()
-        return http_config, aiohttp_config
+        return http_config
 
     @pytest.mark.asyncio
     async def test_spawn_workers_and_graceful_shutdown(self, manager_config):
         """Test WorkerManager spawning and monitoring real workers."""
-        http_config, aiohttp_config = manager_config
+        http_config = manager_config
         loop = asyncio.get_running_loop()
 
         manager = WorkerManager(
             http_config=http_config,
-            aiohttp_config=aiohttp_config,
             loop=loop,
         )
 
@@ -160,13 +157,12 @@ class TestWorkerLifecycle:
         self, manager_config, signal_type, signal_method
     ):
         """Test workers handle signals correctly and are reaped without leaving zombies."""
-        http_config, aiohttp_config = manager_config
+        http_config = manager_config
         http_config.num_workers = 1
         loop = asyncio.get_running_loop()
 
         manager = WorkerManager(
             http_config=http_config,
-            aiohttp_config=aiohttp_config,
             loop=loop,
         )
 
@@ -212,13 +208,12 @@ class TestWorkerLifecycle:
     @pytest.mark.asyncio
     async def test_multiple_workers_with_mixed_signals(self, manager_config):
         """Test shutdown handles multiple workers killed with different signals simultaneously."""
-        http_config, aiohttp_config = manager_config
+        http_config = manager_config
         http_config.num_workers = 3
         loop = asyncio.get_running_loop()
 
         manager = WorkerManager(
             http_config=http_config,
-            aiohttp_config=aiohttp_config,
             loop=loop,
         )
 
@@ -262,21 +257,21 @@ class TestWorkerDeathScenarios:
     def worker_death_config(self):
         """Create configuration for worker death scenario tests."""
         http_config = HTTPClientConfig(
-            endpoint_url="http://localhost:99999/advanced",
+            endpoint_urls=["http://localhost:59999/advanced"],
             num_workers=2,
+            max_connections=10,
+            warmup_connections=False,
         )
-        aiohttp_config = AioHttpConfig()
-        return http_config, aiohttp_config
+        return http_config
 
     @pytest.mark.asyncio
     async def test_all_workers_killed_simultaneously(self, worker_death_config):
         """Test shutdown reaps all zombies when all workers are killed at once."""
-        http_config, aiohttp_config = worker_death_config
+        http_config = worker_death_config
         loop = asyncio.get_running_loop()
 
         manager = WorkerManager(
             http_config=http_config,
-            aiohttp_config=aiohttp_config,
             loop=loop,
         )
 
@@ -332,12 +327,11 @@ class TestWorkerDeathScenarios:
     @pytest.mark.asyncio
     async def test_shutdown_with_preexisting_dead_worker(self, worker_death_config):
         """Test shutdown gracefully handles workers that died before shutdown was called."""
-        http_config, aiohttp_config = worker_death_config
+        http_config = worker_death_config
         loop = asyncio.get_running_loop()
 
         manager = WorkerManager(
             http_config=http_config,
-            aiohttp_config=aiohttp_config,
             loop=loop,
         )
 

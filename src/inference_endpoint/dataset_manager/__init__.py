@@ -24,6 +24,7 @@ from .factory import DataLoaderFactory
 from .predefined.aime25 import AIME25
 from .predefined.gpqa import GPQA
 from .predefined.livecodebench import LiveCodeBench
+from .predefined.open_orca import OpenOrca
 from .predefined.random import RandomDataset
 from .transforms import (
     AddStaticColumns,
@@ -48,6 +49,7 @@ __all__ = [
     "apply_transforms",
     "AIME25",
     "GPQA",
+    "OpenOrca",
     "LiveCodeBench",
     "RandomDataset",
 ]
