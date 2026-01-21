@@ -66,7 +66,7 @@ async def run_probe_command(args: argparse.Namespace) -> None:
     try:
         # Setup HTTP client with futures support
         http_config = HTTPClientConfig(
-            endpoint_url=urljoin(endpoint, api_type.default_route()),
+            endpoint_urls=[urljoin(endpoint, api_type.default_route())],
             api_type=api_type,
             num_workers=1,
         )

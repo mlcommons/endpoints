@@ -109,7 +109,7 @@ class TestWorkerLifecycle:
     def manager_config(self, mock_http_echo_server):
         """Create manager configuration."""
         http_config = HTTPClientConfig(
-            endpoint_url=f"{mock_http_echo_server.url}/v1/chat/completions",
+            endpoint_urls=[f"{mock_http_echo_server.url}/v1/chat/completions"],
             num_workers=2,
         )
         aiohttp_config = AioHttpConfig()
@@ -262,7 +262,7 @@ class TestWorkerDeathScenarios:
     def worker_death_config(self):
         """Create configuration for worker death scenario tests."""
         http_config = HTTPClientConfig(
-            endpoint_url="http://localhost:99999/advanced",
+            endpoint_urls=["http://localhost:99999/advanced"],
             num_workers=2,
         )
         aiohttp_config = AioHttpConfig()

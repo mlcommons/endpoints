@@ -38,7 +38,7 @@ def create_futures_client(
         FuturesHttpClient: Configured client ready to use
     """
     http_config = HTTPClientConfig(
-        endpoint_url=url,
+        endpoint_urls=[url],
         num_workers=num_workers,
     )
     aiohttp_config = AioHttpConfig()

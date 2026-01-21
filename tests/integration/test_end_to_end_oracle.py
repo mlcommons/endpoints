@@ -45,7 +45,7 @@ from inference_endpoint.load_generator import (
 class DeepSeekR1SampleIssuer(HttpClientSampleIssuer):
     def __init__(self, tmp_path: str, url: str):
         self.http_config = HTTPClientConfig(
-            endpoint_url=urljoin(url, "/v1/chat/completions"),
+            endpoint_urls=[urljoin(url, "/v1/chat/completions")],
             num_workers=16,
         )
         self.aiohttp_config = AioHttpConfig()

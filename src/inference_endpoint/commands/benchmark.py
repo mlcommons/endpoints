@@ -339,7 +339,9 @@ def _build_config_from_cli(
             streaming=StreamingMode(getattr(args, "streaming", "auto")),
         ),
         endpoint_config=EndpointConfig(
-            endpoint=args.endpoint, api_key=args.api_key, api_type=api_type
+            endpoints=[e.strip() for e in args.endpoints.split(",") if e.strip()],
+            api_key=args.api_key,
+            api_type=api_type,
         ),
         metrics=Metrics(),
         baseline=None,  # CLI mode doesn't use baseline
@@ -574,17 +576,18 @@ def _run_benchmark(
     )
 
     # Create endpoint client
-    endpoint = config.endpoint_config.endpoint
+    endpoints = config.endpoint_config.endpoints
     num_workers = config.settings.client.workers
 
-    logger.info(f"Connecting: {endpoint}")
+    logger.info(f"Connecting: {endpoints}")
     tmp_dir = tempfile.mkdtemp(prefix="inference_endpoint_")
 
     try:
         http_config = HTTPClientConfig(
-            endpoint_url=urljoin(
-                endpoint, config.endpoint_config.api_type.default_route()
-            ),
+            endpoint_urls=[
+                urljoin(e, config.endpoint_config.api_type.default_route())
+                for e in endpoints
+            ],
             api_type=config.endpoint_config.api_type,
             num_workers=num_workers,
             record_worker_events=config.settings.client.record_worker_events,
@@ -687,7 +690,7 @@ def _run_benchmark(
         try:
             results = {
                 "config": {
-                    "endpoint": endpoint,
+                    "endpoint": endpoints,
                     "mode": test_mode,
                     "target_qps": target_qps,
                 },

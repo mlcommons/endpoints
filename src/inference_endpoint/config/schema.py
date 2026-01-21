@@ -340,7 +340,7 @@ class EndpointConfig(BaseModel):
     The Default API type is APIType.OPENAI, which refers to the the /v1/chat/completions route.
     """
 
-    endpoint: str | None = None
+    endpoints: list[str] | None = None
     api_key: str | None = None
     api_type: APIType = APIType.OPENAI
 
@@ -364,6 +364,7 @@ class BenchmarkConfig(BaseModel):
     datasets: list[Dataset]
     settings: Settings = Field(default_factory=Settings)
     metrics: Metrics = Field(default_factory=Metrics)
+    # workers are assigned endpoints in a round-robin manner
     endpoint_config: EndpointConfig = Field(default_factory=EndpointConfig)
     report_dir: Path | None = None
     timeout: int | None = None
@@ -462,9 +463,9 @@ class BenchmarkConfig(BaseModel):
         Raises:
             ValueError: If required fields are missing
         """
-        if not self.endpoint_config.endpoint:
+        if not self.endpoint_config.endpoints:
             raise ValueError(
-                "Endpoint required: specify --endpoint URL or set in YAML config"
+                "Endpoint required: specify --endpoints URL or set in YAML config"
             )
 
         # Model is required for production benchmarks
