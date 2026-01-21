@@ -19,8 +19,8 @@ To run LiveCodeBench in a container, you need:
 
 - **Docker Engine**: Use an up-to-date stable version of Docker. All scripts were tested with Docker engine v26+.
 - **System Resources**:
-  - All scripts were tested with 4 cores and 4 workers. The more cores available, the faster evaluation will run.
-  - Minimum 8GB RAM
+  - All scripts were tested with 24 cores and 16 workers.
+  - Minimum 32GB RAM available to allocate to container
   - 10GB available disk space
 
 ### Build Dependencies
@@ -114,9 +114,16 @@ When running LiveCodeBench containers, to minimize risk and maximize security is
 For resource limiting, there are a few caveats:
 
 - When using `--cpus` to limit the number of CPUs, you must set the number of workers manually via the `LCB_N_WORKERS` environment variable (see [Environment Variables](#environment-variables)). This is because Python's `os.cpu_count()` function reads from `/proc/cpuinfo` which is derived from the host, and is unaware of any cgroup or other CPU restricting functions.
-- If using `--memory`, the value should be set to at least `24g`. The dataset file itself is rather large (5.5GB when stored as Parquet). During `pandas.read_parquet`, around 21gb is used at the maximal memory usage during decompression, so it is advised to allocate at least 24gb of memory to the container.
-- It is advised to set `--memory-swap` to the same value as `--memory` to disable swap memory.
-- For `--pids-limit`, the value should be at least double the number of workers. For most cases, `--pids-limit=4096` is fine.
+- If using `--memory`, the value should be set to at least `32g`.
+  - The dataset file itself is rather large (5.5GB when stored as Parquet).
+  - During `pandas.read_parquet`, around 21gb is used at the maximal memory usage during decompression.
+  - After loading, the service will consume around 17-18 GiB while idle.
+  - During eval, memory usage of up to 31GB is observed with the configuration provided in the [sample command](#hardened-run-command) during a _single_ `/evaluate` connection.
+  - If multiple `/evaluate` connections are expected or required, it is recommended to increase the `--memory` limit greatly (by 16GB per expected connection).
+    - Currently there is no programmatic limit on the number of concurrent `/evaluate` connections.
+  - It is advised to set `--memory-swap` to the same value as `--memory` to disable swap memory unless your machine does not have enough system memory to support the workload, in which case you should increase the `--memory-swap` limit accordingly.
+- Process limits: For most cases, `--pids-limit=4096` is fine, but it is recommended to increase this value by at least double if multiple concurrent `/evaluate` connections are expected.
+- For best practices, when performing evaluation, to reduce the memory and PID footprint of the container, it is best to reduce the size of each `/evaluate` query to 1000 or fewer code generation samples. The [sample command](#hardened-run-command) was tested with 3 repeats of LiveCodeBench Lite v6 (3165 code generation samples) in a single query, but due to variance in the generated code, this is not recommended and may not always work.
 
 ---
 
@@ -184,8 +191,8 @@ docker run \
   -v /path/to/datasets/livecodebench/release_v6:/mnt/datasets \
   --security-opt=no-new-privileges:true \
   --security-opt apparmor=docker-default \
-  --memory=24g \
-  --memory-swap=24g \
+  --memory=32g \
+  --memory-swap=32g \
   --cpus=24 \
   -e LCB_N_WORKERS=16 \
   --pids-limit=4096 \

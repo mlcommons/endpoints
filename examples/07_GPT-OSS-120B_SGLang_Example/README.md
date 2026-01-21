@@ -64,53 +64,30 @@ If you already have the model weights or prefer a direct approach, follow the [i
 
 ### 2. Setting Up LiveCodeBench
 
-LiveCodeBench has different dependency requirements than the main Inference Endpoint package, so it needs to be installed separately.
+LiveCodeBench has a few security concerns and dependency conflicts, so it is recommended to run LiveCodeBench via the
+containerized workflow.
 
-#### Quick Setup (Default Installation)
+Follow the instructions in the [LiveCodeBench README](../../src/inference_endpoint/dataset_manager/predefined/livecodebench/README.md#running-the-container)
 
-By default, LiveCodeBench will be installed to `/opt/LiveCodeBench`:
+#### Non-containerized run (NOT RECOMMENDED)
 
-```bash
-cd examples/07_GPT-OSS-120B_SGLang_Example
-bash setup_lcb.sh
-```
-
-#### Custom Installation Directory
-
-To install LiveCodeBench to a custom directory:
+If you prefer to run `lcb-service` standalone without the docker container, do the following:
 
 ```bash
-bash setup_lcb.sh /path/to/custom/directory
+# Enter your venv for inference-endpoint
+source /path/to/inference-endpoint/venv/bin/activate
+
+# Downgrade Huggingface Datasets to 3.6.0
+pip install datasets==3.6.0
+
+# Install other dependencies
+pip install fastapi==0.128.0 uvicorn[standard]==0.40.0
+
+# Enable cli-based calling of LCBServe
+export ALLOW_LCB_LOCAL_EVAL=true
 ```
 
-For example, to install in your home directory:
-
-```bash
-bash setup_lcb.sh ~/LiveCodeBench
-```
-
-#### Manual Setup
-
-If you prefer to set up LiveCodeBench manually:
-
-```bash
-# Choose your installation directory
-LCB_ROOT="/opt/LiveCodeBench"  # or any other directory
-
-# Clone the repository
-git clone https://github.com/LiveCodeBench/LiveCodeBench.git ${LCB_ROOT}
-
-# Install dependencies
-cd ${LCB_ROOT}
-pip install datasets==3.6.0  # LCB requires HF datasets < 4.0.0
-pip install -e .
-```
-
-**Important Notes**:
-
-- LiveCodeBench requires `datasets==3.6.0`, which may conflict with other packages
-- Consider using a separate virtual environment if you encounter dependency conflicts
-- The setup script will prompt you if the directory already exists
+After these steps, the `LiveCodeBenchScorer` will fallback to running `lcb_serve` as a subprocess on the host.
 
 ## Running the Benchmark
 
@@ -123,8 +100,7 @@ python run.py \
     --report-dir ./results \
     --num-repeats 1 \
     --min-duration 10 \
-    --max-duration 600 \
-    --lcb-root /opt/LiveCodeBench
+    --max-duration 600
 ```
 
 **Arguments**:
@@ -133,7 +109,6 @@ python run.py \
 - `--num-repeats`: Number of times to repeat each dataset (default: 1)
 - `--min-duration`: Minimum benchmark duration in seconds (default: 10)
 - `--max-duration`: Maximum benchmark duration in seconds (default: 600)
-- `--lcb-root`: Path to LiveCodeBench installation directory (default: `/opt/LiveCodeBench`)
 - `--force-regenerate`: Force regeneration of datasets even if they exist
 
 ### Expected Output
@@ -176,15 +151,13 @@ python eval_livecodebench.py \
     --dataset-path datasets/livecodebench/release_v6/livecodebench_release_v6.parquet \
     --report-dir sglang_accuracy_report \
     --lcb-version release_v6 \
-    --timeout 60 \
-    --lcb-root /opt/LiveCodeBench
+    --timeout 60
 ```
 
 **Additional Arguments**:
 
 - `--lcb-version`: LiveCodeBench version tag (default: `release_v6`)
 - `--timeout`: Timeout in seconds for each test execution (default: 60)
-- `--lcb-root`: Path to LiveCodeBench installation directory (default: `/opt/LiveCodeBench`)
 
 ## Configuration
 
