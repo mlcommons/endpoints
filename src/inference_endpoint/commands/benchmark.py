@@ -337,7 +337,7 @@ def _build_config_from_cli(
             streaming=StreamingMode(getattr(args, "streaming", "auto")),
         ),
         endpoint_config=EndpointConfig(
-            endpoints=[e.strip() for e in args.endpoints.split(",") if e.strip()],
+            endpoints=[e.strip() for e in args.endpoint.split(",") if e.strip()],
             api_key=args.api_key,
             api_type=api_type,
         ),

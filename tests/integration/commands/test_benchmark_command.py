@@ -197,3 +197,55 @@ class TestBenchmarkCommandIntegration:
         assert "Mode:" in log_text and ("perf" in log_text or "PERF" in log_text)
         assert "QPS: 20" in log_text
         assert "Responses: False" in log_text  # perf mode
+
+    @pytest.mark.asyncio
+    async def test_cli_argument_names_match_benchmark_implementation(
+        self, mock_http_echo_server, ds_pickle_dataset_path, caplog
+    ):
+        """Test that CLI argument names match what benchmark command expects.
+
+        This test uses the actual CLI parser to parse arguments, ensuring that
+        the argument names defined in the parser (e.g., --endpoint) match what
+        _build_config_from_cli() expects (e.g., args.endpoint).
+
+        Without this test, a mismatch like defining --endpoint in CLI but
+        accessing args.endpoints in the code would pass unit tests but fail
+        in actual execution.
+        """
+        from inference_endpoint.cli import create_parser
+
+        # Build CLI command as would be used in actual execution
+        cli_args = [
+            "benchmark",
+            "offline",
+            "--endpoint",
+            mock_http_echo_server.url,
+            "--model",
+            "echo-server",
+            "--dataset",
+            str(ds_pickle_dataset_path),
+            "--workers",
+            "1",
+        ]
+
+        # Parse using the actual CLI parser
+        parser = create_parser()
+        args = parser.parse_args(cli_args)
+
+        # Verify essential attributes exist with expected names
+        # These assertions catch mismatches like 'endpoint' vs 'endpoints'
+        assert hasattr(args, "endpoint"), "CLI should define 'endpoint' attribute"
+        assert hasattr(args, "model"), "CLI should define 'model' attribute"
+        assert hasattr(args, "dataset"), "CLI should define 'dataset' attribute"
+        assert hasattr(
+            args, "benchmark_mode"
+        ), "CLI should define 'benchmark_mode' attribute"
+
+        # Run the benchmark with parsed args to ensure end-to-end compatibility
+        with caplog.at_level("INFO"):
+            await run_benchmark_command(args)
+
+        log_text = caplog.text
+        # Verify the benchmark actually ran successfully
+        assert "Completed in" in log_text
+        assert "successful" in log_text
