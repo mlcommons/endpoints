@@ -274,7 +274,7 @@ async def startup_event():
     datasets_dir = Path(os.getenv("LCB_DATASETS_DIR", "/opt/LiveCodeBench_Datasets"))
 
     # Parse boolean for auto_generate_dataset
-    auto_generate_str = os.getenv("LCB_AUTO_GENERATE_DATASET", "true").lower()
+    auto_generate_str = os.getenv("LCB_AUTO_GENERATE_DATASET", "false").lower()
     auto_generate_dataset = auto_generate_str in ("true", "1", "yes", "on")
 
     print("Initializing LCBServe with configuration:")

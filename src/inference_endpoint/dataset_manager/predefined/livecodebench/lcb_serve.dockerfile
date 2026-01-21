@@ -29,7 +29,7 @@ RUN python /opt/LiveCodeBench_Datasets/generate.py \
     --datasets-dir /opt/LiveCodeBench_Datasets \
     --variant release_v6
 RUN chmod 444 -R /opt/LiveCodeBench_Datasets/*
-RUN chmod 755 /opt/LiveCodeBench_Datasets
+RUN chmod 555 /opt/LiveCodeBench_Datasets
 
 ## -----------------------------------------------------
 FROM dhi.io/python:3.14-debian13 AS runtime-stage
@@ -40,8 +40,8 @@ ENV PATH="/app/venv/bin:$PATH"
 
 WORKDIR /app
 
-COPY --from=build-stage /app/venv /app/venv
-COPY --from=build-stage /opt/LiveCodeBench_Datasets /opt/LiveCodeBench_Datasets
+COPY --from=build-stage --chmod=0555 /app/venv /app/venv
+COPY --from=build-stage --chmod=0555 /opt/LiveCodeBench_Datasets /opt/LiveCodeBench_Datasets
 COPY lcb_serve.py /app/lib/lcb_serve.py
 COPY run_lcb_tests.py /app/lib/run_lcb_tests.py
 COPY generate.py /app/lib/generate.py

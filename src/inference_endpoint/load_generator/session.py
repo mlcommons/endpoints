@@ -127,9 +127,10 @@ class BenchmarkSession:
                         break
 
                     self.end_event.wait(timeout=SHUTDOWN_POLL_INTERVAL_S)
-                    self.logger.info(
-                        f"Waiting for the test to end... {self.event_recorder.n_inflight_samples} samples remaining"
-                    )
+                    if max_shutdown_timeout_s is not None:
+                        self.logger.info(
+                            f"Waiting for the test to end... {self.event_recorder.n_inflight_samples} samples remaining"
+                        )
 
             except Exception as e:
                 logger.error(f"Error running benchmark session: {e}")

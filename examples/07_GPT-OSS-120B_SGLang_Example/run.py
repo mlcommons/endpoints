@@ -180,7 +180,6 @@ def run_benchmark_session(
         LiveCodeBench.DATASET_ID,
         accuracy_datasets[2],
         args.report_dir,
-        lcb_root=Path(args.lcb_root),
     )
 
     # Score the dataset
@@ -284,13 +283,6 @@ def main():
         type=int,
         default=1,
         help="Number of repeats to run (default: 1)",
-    )
-
-    parser.add_argument(
-        "--lcb-root",
-        type=Path,
-        default="/opt/LiveCodeBench",
-        help="Path to LiveCodeBench installation directory (default: /opt/LiveCodeBench)",
     )
 
     args = parser.parse_args()
