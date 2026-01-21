@@ -59,6 +59,7 @@ class TestBenchmarkCommandIntegration:
             verbose=1,
             model="echo-server",
             timeout=None,
+            warmup_connections=False,
         )
 
         with caplog.at_level("INFO"):
@@ -98,6 +99,7 @@ class TestBenchmarkCommandIntegration:
             verbose=1,
             model="echo-server",
             timeout=None,
+            warmup_connections=False,
         )
         with caplog.at_level("INFO"):
             await run_benchmark_command(args)
@@ -141,6 +143,7 @@ class TestBenchmarkCommandIntegration:
             verbose=0,
             model="echo-server",
             timeout=None,
+            warmup_connections=False,
         )
 
         await run_benchmark_command(args)
@@ -182,6 +185,7 @@ class TestBenchmarkCommandIntegration:
             verbose=1,
             model="echo-server",
             timeout=None,
+            warmup_connections=False,
         )
         with caplog.at_level("INFO"):
             await run_benchmark_command(args)

@@ -19,17 +19,10 @@ import asyncio
 import logging
 from multiprocessing import Process
 
-from inference_endpoint.endpoint_client.configs import (
-    AioHttpConfig,
-    HTTPClientConfig,
-)
+from inference_endpoint.endpoint_client.config import HTTPClientConfig
+from inference_endpoint.endpoint_client.cpu_affinity import set_cpu_affinity
 from inference_endpoint.endpoint_client.transport import WorkerPoolTransport
 from inference_endpoint.endpoint_client.worker import worker_main
-from inference_endpoint.utils.cpu_affinity import (
-    AVAILABLE_CPUS,
-    get_cpus_sorted_by_numa_preference,
-    set_cpu_affinity,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -45,18 +38,15 @@ class WorkerManager:
     def __init__(
         self,
         http_config: HTTPClientConfig,
-        aiohttp_config: AioHttpConfig,
         loop: asyncio.AbstractEventLoop,
     ):
         """Initialize worker manager.
 
         Args:
             http_config: HTTP client configuration.
-            aiohttp_config: aiohttp session configuration.
             loop: Event loop for transport registration.
         """
         self.http_config = http_config
-        self.aiohttp_config = aiohttp_config
 
         # Create pool transport via factory
         self.pool_transport: WorkerPoolTransport = (
@@ -110,7 +100,6 @@ class WorkerManager:
                 worker_id,
                 connector,
                 self.http_config,
-                self.aiohttp_config,
             ),
             daemon=True,
         )
@@ -118,31 +107,19 @@ class WorkerManager:
         return process
 
     def _pin_workers(self) -> None:
-        """
-        Pin workers to CPU cores based on config:
-         - "auto": distribute workers across available CPUs
-         - list[int]: pin workers to specified cores (round-robin)
-         - None or falsy: disable CPU affinity override
-        """
-        if not self.http_config.cpu_affinity:
-            return
+        """Pin workers using the AffinityPlan from config.
 
-        match self.http_config.cpu_affinity:
-            case "auto":
-                cpu_list = get_cpus_sorted_by_numa_preference()
-            case list():
-                cpu_list = sorted(set(self.http_config.cpu_affinity) & AVAILABLE_CPUS)
-            case _:
-                return
-
-        # assign CPU affinity round-robin among available CPUs
-        if not cpu_list:
-            logger.warning("No available CPUs for worker pinning")
+        Each worker gets all hyperthreads of its assigned physical core.
+        """
+        plan = self.http_config.cpu_affinity
+        if plan is None or not plan.worker_cpu_sets:
             return
 
         for worker_id, pid in self.worker_pids.items():
-            cpus = {cpu_list[worker_id % len(cpu_list)]}
-            set_cpu_affinity(pid=pid, cpus=cpus)
+            cpus = plan.get_worker_cpus(worker_id)
+            if cpus:
+                set_cpu_affinity(pid=pid, cpus=set(cpus))
+                logger.debug(f"Worker {worker_id} (pid {pid}) pinned to CPUs {cpus}")
 
     async def shutdown(self) -> None:
         """Shutdown workers and transports."""

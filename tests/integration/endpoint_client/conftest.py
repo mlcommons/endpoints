@@ -16,10 +16,7 @@
 """Shared fixtures for endpoint client integration tests."""
 
 import pytest
-from inference_endpoint.endpoint_client.configs import (
-    AioHttpConfig,
-    HTTPClientConfig,
-)
+from inference_endpoint.endpoint_client.config import HTTPClientConfig
 
 from tests.futures_client import FuturesHttpClient
 
@@ -27,12 +24,16 @@ from tests.futures_client import FuturesHttpClient
 def create_futures_client(
     url: str,
     num_workers: int = 1,
+    max_connections: int = 10,
+    warmup_connections: bool = False,
 ) -> FuturesHttpClient:
     """Helper to create a FuturesHttpClient with specific config.
 
     Args:
         url: The endpoint URL to connect to
         num_workers: Number of worker processes (default: 1)
+        max_connections: Max connections per worker (default: 10 for tests)
+        warmup_connections: Whether to warmup connections (default: False for tests)
 
     Returns:
         FuturesHttpClient: Configured client ready to use
@@ -40,10 +41,11 @@ def create_futures_client(
     http_config = HTTPClientConfig(
         endpoint_urls=[url],
         num_workers=num_workers,
+        max_connections=max_connections,
+        warmup_connections=warmup_connections,
     )
-    aiohttp_config = AioHttpConfig()
 
-    return FuturesHttpClient(http_config, aiohttp_config)
+    return FuturesHttpClient(http_config)
 
 
 @pytest.fixture

@@ -77,7 +77,18 @@ __all__ = [
 class _ZMQSocketConfig:
     """Internal: ZMQ socket configuration with tuned defaults."""
 
+    # NOTE(vir): ZMQ Background I/O Threads
+    # Controls the size of the ZMQ background I/O thread pool (in C++).
+    # These threads handle non-blocking I/O, message queuing, and transport
+    # operations off the main Python thread.
+    #
+    # Performance characteristics:
+    #   - only created in Main Process (owning WorkerPoolTransport)
+    #   - each requires separate physical core for peak-performance, not hyperthreads
+    #   - possibly effected by msg-size, messaging rate, NOT worker count (since 4-threads works fine with 100 workers)
+    #   - tested io_threads=4 for upto 100 worker processes (on 224xCore x86 System)
     io_threads: int = 4
+
     high_water_mark: int = 0  # 0 = unlimited
     linger: int = -1  # Block indefinitely on close to send pending messages
     immediate: int = 1  # Only enqueue on ready connections

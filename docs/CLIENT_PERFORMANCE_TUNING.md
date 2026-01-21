@@ -9,7 +9,9 @@ CPU affinity settings to reduce latency jitter in benchmark measurements.
 | Setting                | Location          | Default  | Purpose                           |
 | ---------------------- | ----------------- | -------- | --------------------------------- |
 | `cpu_affinity`         | `settings.client` | `"auto"` | Pin worker processes to CPU cores |
-| `loadgen_cpu_affinity` | Top-level         | `null`   | Pin load generator to a CPU core  |
+| `loadgen_cpu_affinity` | Top-level         | `"auto"` | Pin loadgen to NUMA domain        |
+
+---
 
 ---
 
@@ -19,7 +21,7 @@ CPU affinity settings to reduce latency jitter in benchmark measurements.
 settings:
   client:
     workers: 4
-    cpu_affinity: "auto" # NUMA-aware auto-assignment, excludes loadgen CPU
+    cpu_affinity: "auto" # NUMA-aware auto-assignment
     # cpu_affinity: [4, 5, 6, 7]  # Explicit cores
     # cpu_affinity: null          # Disabled
 ```
@@ -28,17 +30,10 @@ settings:
 
 ## Loadgen CPU Affinity (`loadgen_cpu_affinity`)
 
-| Value          | Behavior                                   |
-| -------------- | ------------------------------------------ |
-| `null`         | Auto-detect CPU with highest max frequency |
-| `0`, `1`, etc. | Pin to specific core                       |
-
 ```yaml
-loadgen_cpu_affinity: null # Default: Auto-detect CPU with highest max frequency
-# loadgen_cpu_affinity: 4   # Pin to specific core
+loadgen_cpu_affinity: "auto" # Auto-assign to NUMA domain of fastest CPU
+# loadgen_cpu_affinity: null  # Disabled
 ```
-
----
 
 ## Platform Notes
 

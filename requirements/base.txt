@@ -13,14 +13,14 @@ psutil==6.1.1
 
 # Note: asyncio is part of Python 3.11+ standard library
 # Async and networking
-aiohttp==3.12.15
-pyzmq==27.0.2
-uvloop==0.21.0
+pyzmq==27.1.0
+uvloop==0.22.1
+httptools==0.7.1
 
 # Data handling
 duckdb==1.4.0
-orjson==3.11.0
-msgspec==0.19.0
+orjson==3.11.5
+msgspec==0.20.0
 pydantic==2.12.0
 pydantic_core==2.41.1
 

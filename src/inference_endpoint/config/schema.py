@@ -269,16 +269,18 @@ class ClientSettings(BaseModel):
     Only workers are required to configure the client.
     Timeout is handled by the HTTP client internally.
 
+    Note: for details see src/endpoint_client/config.py
     """
 
-    workers: int = 4
+    # Number of worker processes (-1 for automatic detection)
+    #   - -1 uses min(max(8, loadgen_numa_domain_size - 1), 24)
+    workers: int = -1
+
     record_worker_events: bool = False
     log_level: str = "INFO"
 
-    # CPU affinity for worker processes to reduce latency jitter.
-    # See docs/CLIENT_PERFORMANCE_TUNING.md for usage and recommendations.
-    # Options: None = disabled, list[int] = specific cores, "auto" = auto-assign
-    cpu_affinity: list[int] | str | None = "auto"
+    # Pre-establish TCP connections during init for reuse at runtime.
+    warmup_connections: bool = True
 
 
 class Settings(BaseModel):
@@ -369,8 +371,11 @@ class BenchmarkConfig(BaseModel):
     report_dir: Path | None = None
     timeout: int | None = None
     verbose: bool = False
-    # CPU affinity for loadgen process. See docs/CLIENT_PERFORMANCE_TUNING.md
-    loadgen_cpu_affinity: int | None = None  # None = auto-detect fastest core
+    # CPU affinity for loadgen and worker processes:
+    #   - -1 = auto assign
+    #   - list[int] = use these specific cores (shared by loadgen and workers)
+    #   - None = disabled
+    cpu_affinity: list[int] | int | None = -1
 
     @classmethod
     def from_yaml_file(cls, path: Path) -> BenchmarkConfig:
@@ -515,10 +520,10 @@ class BenchmarkConfig(BaseModel):
         Raises:
             ValueError: If settings are invalid
         """
-        if self.settings.client.workers < 1:
-            raise ValueError(
-                f"workers must be >= 1, got {self.settings.client.workers}"
-            )
+        workers = self.settings.client.workers
+        # -1 means auto-detect, otherwise must be >= 1
+        if workers < -1 or workers == 0:
+            raise ValueError(f"workers must be -1 (auto) or >= 1, got {workers}")
 
     def validate_runtime_settings(self) -> None:
         """Validate runtime settings are reasonable.
