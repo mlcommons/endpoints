@@ -276,6 +276,10 @@ class Worker:
             await self._handle_error(query.id, "Worker is shutting down")
             return
 
+        if not self.http_config.endpoint_urls:
+            await self._handle_error(query.id, "No endpoint URLs provided")
+            return
+
         url = self.http_config.endpoint_urls[
             self.worker_id % len(self.http_config.endpoint_urls)
         ]

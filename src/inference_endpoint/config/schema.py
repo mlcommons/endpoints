@@ -340,7 +340,7 @@ class EndpointConfig(BaseModel):
     The Default API type is APIType.OPENAI, which refers to the the /v1/chat/completions route.
     """
 
-    endpoint: list[str] | None = None
+    endpoints: list[str] | None = None
     api_key: str | None = None
     api_type: APIType = APIType.OPENAI
 
@@ -463,9 +463,9 @@ class BenchmarkConfig(BaseModel):
         Raises:
             ValueError: If required fields are missing
         """
-        if not self.endpoint_config.endpoint:
+        if not self.endpoint_config.endpoints:
             raise ValueError(
-                "Endpoint required: specify --endpoint URL or set in YAML config"
+                "Endpoint required: specify --endpoints URL or set in YAML config"
             )
 
         # Model is required for production benchmarks
