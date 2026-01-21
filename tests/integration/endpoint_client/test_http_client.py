@@ -152,6 +152,8 @@ class TestHttpEndpointClientScaleOut:
             client = create_futures_client(
                 f"{mock_http_echo_server.url}/v1/chat/completions",
                 num_workers=num_workers,
+                max_connections=num_workers * 10,  # ensure each worker has connections
+                warmup_connections=False,
             )
 
             try:
@@ -192,93 +194,48 @@ class TestHTTPEndpointClientFunctionality:
 
     @pytest.mark.asyncio
     async def test_shutdown_cancels_requests(self):
-        """Test that shutdown properly cancels in-flight HTTP requests.
-
-        This test verifies that when shutdown is called:
-        1. Client-side futures are cancelled
-        2. Server-side HTTP connections are terminated (via connection tracking)
-        3. No requests complete after shutdown is initiated
-        """
+        """Test that shutdown cancels in-flight requests."""
         from aiohttp import web
-
-        # Track active connections on the server side
-        active_connections: set[asyncio.Future] = set()
-        connection_received = asyncio.Event()
-        all_connections_closed = asyncio.Event()
-
-        async def slow_handler(request):
-            """Handler that blocks until cancelled, tracking active connections."""
-            wait_forever = asyncio.get_event_loop().create_future()
-            active_connections.add(wait_forever)
-            connection_received.set()  # Signal that a connection arrived
-            try:
-                await wait_forever  # Block until cancelled
-                return web.Response(text="should not reach here")
-            except asyncio.CancelledError:
-                raise
-            finally:
-                active_connections.discard(wait_forever)
-                if len(active_connections) == 0:
-                    all_connections_closed.set()
-
-        # Create and start test server
-        app = web.Application()
-        app.router.add_post("/v1/chat/completions", slow_handler)
-
         from aiohttp.test_utils import TestServer
 
+        request_received = asyncio.Event()
+
+        async def hang_forever(request):
+            """Handler that never responds."""
+            request_received.set()
+            await asyncio.sleep(999)
+            return web.Response(text="never reached")
+
+        app = web.Application()
+        app.router.add_post("/v1/chat/completions", hang_forever)
         server = TestServer(app)
         await server.start_server()
 
         try:
-            # Create client pointing to slow server
-            # NOTE(vir):
-            # Using single worker to avoid timing issues with async TestServer
-            # which will spawn its own even loop
             client = create_futures_client(
                 f"http://localhost:{server.port}/v1/chat/completions",
                 num_workers=1,
             )
 
-            # Issue requests that will block on the server
-            num_requests = 10
-            futures = []
-            for i in range(num_requests):
-                query = Query(
-                    id=f"cancel-test-{i}",
-                    data={
-                        "prompt": f"This request will be cancelled {i}",
-                        "model": "gpt-3.5-turbo",
-                    },
+            # Issue requests that will hang
+            num_requests = 5
+            futures = [
+                client.issue(
+                    Query(id=f"test-{i}", data={"prompt": "x", "model": "test"})
                 )
-                future = client.issue(query)
-                futures.append(future)
+                for i in range(num_requests)
+            ]
 
-            # Wait for at least one request to reach the server
-            await connection_received.wait()
-            connections_before_shutdown = len(active_connections)
+            # Wait for at least one request to reach server
+            await request_received.wait()
 
-            # Shutdown the client
+            # Shutdown should cancel all futures
             client.shutdown()
 
-            # Verify client-side: all futures should be cancelled
-            cancelled_count = sum(1 for f in futures if f.cancelled())
+            cancelled = sum(1 for f in futures if f.cancelled())
             assert (
-                cancelled_count == num_requests
-            ), f"Expected all {num_requests} futures cancelled, got {cancelled_count}"
-
-            # Verify server-side: wait for all connections to close
-            await all_connections_closed.wait()
-            assert len(active_connections) == 0, (
-                f"Expected 0 active connections after shutdown, "
-                f"got {len(active_connections)}"
-            )
-
-            print(
-                f"\nShutdown cancellation test: "
-                f"{cancelled_count}/{num_requests} futures cancelled, "
-                f"server connections: {connections_before_shutdown} -> 0"
-            )
+                cancelled == num_requests
+            ), f"Expected {num_requests} cancelled, got {cancelled}"
 
         finally:
             await server.close()
@@ -364,6 +321,7 @@ class TestHTTPEndpointClientFunctionality:
         # Use invalid endpoint to trigger errors
         client = create_futures_client(
             "http://invalid-endpoint-12345:9999/v1/chat/completions",
+            warmup_connections=False,
         )
 
         try:

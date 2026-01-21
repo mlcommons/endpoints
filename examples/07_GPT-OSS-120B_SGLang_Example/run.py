@@ -41,10 +41,7 @@ from inference_endpoint.dataset_manager import Dataset, EmptyDataset
 from inference_endpoint.dataset_manager.predefined.aime25 import AIME25
 from inference_endpoint.dataset_manager.predefined.gpqa import GPQA
 from inference_endpoint.dataset_manager.predefined.livecodebench import LiveCodeBench
-from inference_endpoint.endpoint_client.configs import (
-    AioHttpConfig,
-    HTTPClientConfig,
-)
+from inference_endpoint.endpoint_client.config import HTTPClientConfig
 from inference_endpoint.endpoint_client.http_client import HTTPEndpointClient
 from inference_endpoint.endpoint_client.http_sample_issuer import HttpClientSampleIssuer
 from inference_endpoint.evaluation.extractor import ABCDExtractor, BoxedMathExtractor
@@ -93,9 +90,7 @@ def create_sglang_client(tmp_dir: Path) -> HTTPEndpointClient:
         api_type="sglang",
     )
 
-    aiohttp_config = AioHttpConfig()
-
-    client = HTTPEndpointClient(http_config, aiohttp_config)
+    client = HTTPEndpointClient(http_config)
     return client
 
 

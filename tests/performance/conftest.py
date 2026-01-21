@@ -20,10 +20,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from inference_endpoint.endpoint_client.configs import (
-    AioHttpConfig,
-    HTTPClientConfig,
-)
+from inference_endpoint.endpoint_client.config import HTTPClientConfig
 from inference_endpoint.endpoint_client.http_client import HTTPEndpointClient
 from inference_endpoint.testing.echo_server import EchoServer
 from inference_endpoint.utils.logging import setup_logging
@@ -62,12 +59,10 @@ def http_client(perf_http_echo_server):
     http_config = HTTPClientConfig(
         endpoint_url=f"{perf_http_echo_server.url}/v1/chat/completions",
         num_workers=1,
+        warmup_connections=False,
     )
 
-    client = HTTPEndpointClient(
-        config=http_config,
-        aiohttp_config=AioHttpConfig(),
-    )
+    client = HTTPEndpointClient(config=http_config)
 
     try:
         yield client

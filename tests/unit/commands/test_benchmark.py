@@ -112,7 +112,7 @@ class TestBuildConfigFromCLI:
         assert config.datasets[0].path == "test.pkl"
         assert config.settings.load_pattern.type.value == "max_throughput"
         assert config.settings.load_pattern.target_qps is None
-        assert config.settings.client.workers == 4  # Default
+        assert config.settings.client.workers == -1  # Default (auto)
         assert (
             config.settings.runtime.min_duration_ms == 0
         )  # Default: 0 - use dataset samples

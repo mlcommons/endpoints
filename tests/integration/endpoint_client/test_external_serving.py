@@ -19,10 +19,7 @@ import time
 
 import pytest
 from inference_endpoint.core.types import Query
-from inference_endpoint.endpoint_client.configs import (
-    AioHttpConfig,
-    HTTPClientConfig,
-)
+from inference_endpoint.endpoint_client.config import HTTPClientConfig
 
 from tests.futures_client import FuturesHttpClient
 
@@ -38,39 +35,23 @@ async def test_external_serving(vllm_docker_server, streaming, num_requests):
     def _create_custom_client(
         vllm_docker_server,
         num_workers=1,
-        aiohttp_config=None,
     ):
         """Helper method to create a client with custom configuration."""
         http_config = HTTPClientConfig(
             endpoint_urls=[f"{vllm_docker_server['url']}/v1/chat/completions"],
             num_workers=num_workers,
+            max_connections=50,
+            warmup_connections=False,
         )
 
-        # Use provided aiohttp_config or create default
-        if aiohttp_config is None:
-            aiohttp_config = AioHttpConfig()
+        # TODO(vir):
+        # verify if this still works, custom http doesnt really support timeouts
+        return FuturesHttpClient(config=http_config)
 
-        return FuturesHttpClient(
-            config=http_config,
-            aiohttp_config=aiohttp_config,
-        )
-
-    # Configure aiohttp with connection limits to prevent "too many open files"
-    # Limit concurrent connections to avoid exceeding system file descriptor limits
-    aiohttp_config = AioHttpConfig(
-        tcp_connector_limit=50,  # Total connection pool limit
-        tcp_connector_limit_per_host=50,  # Limit per host (vLLM server)
-        tcp_connector_force_close=False,  # Enable connection pooling/reuse
-        client_timeout_total=300.0,
-        client_timeout_connect=30.0,
-        client_timeout_sock_read=60.0,
-    )
-
-    # create client with unlimited concurrency
+    # create client
     client = _create_custom_client(
         vllm_docker_server,
         num_workers=1,
-        aiohttp_config=aiohttp_config,
     )
 
     try:
