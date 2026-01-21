@@ -223,7 +223,7 @@ class TestWorkerErrorHandling:
     def worker_config(self, mock_http_echo_server):
         """Create worker configuration with echo server URL."""
         http_config = HTTPClientConfig(
-            endpoint_url=f"{mock_http_echo_server.url}/v1/chat/completions",
+            endpoint_urls=[f"{mock_http_echo_server.url}/v1/chat/completions"],
             num_workers=1,
             max_connections=10,
             warmup_connections=False,
