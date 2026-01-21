@@ -62,7 +62,6 @@ class OpenOrca(
         try:
             # Use absolute path for the script to avoid path doubling when cwd is set
             script_abs = str(script_path.resolve())
-            # subprocess.check_call(["bash", script_abs, dataset_url], cwd=str(target_dir))
             result = subprocess.run(
                 ["bash", script_abs, dataset_url],
                 stdout=subprocess.DEVNULL,  # Suppress normal output
