@@ -10,7 +10,7 @@ model_params:
   max_new_tokens: 128
 
 datasets:
-  - name: "perf-test"
+  - name: cnn_dailymail
     type: "performance"
     path: "data/cnn_dailymail_validation.jsonl" # Path to the dataset. Note: This should be the file generated with download_cnndm.py
     samples: 13368 # Number of samples in the dataset (validation has ~13.3k samples, while training has ~287k samples)
