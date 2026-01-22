@@ -43,7 +43,7 @@ class TestBenchmarkCommandIntegration:
         args = argparse.Namespace(
             benchmark_mode="offline",
             config=None,
-            endpoint=mock_http_echo_server.url,
+            endpoints=mock_http_echo_server.url,
             dataset=Path(ds_pickle_dataset_path),
             api_key=None,
             target_qps=None,
@@ -83,7 +83,7 @@ class TestBenchmarkCommandIntegration:
         args = argparse.Namespace(
             benchmark_mode="online",
             config=None,
-            endpoint=mock_http_echo_server.url,
+            endpoints=mock_http_echo_server.url,
             dataset=Path(ds_pickle_dataset_path),
             api_key=None,
             target_qps=50,
@@ -127,7 +127,7 @@ class TestBenchmarkCommandIntegration:
         args = argparse.Namespace(
             benchmark_mode="offline",
             config=None,
-            endpoint=mock_http_echo_server.url,
+            endpoints=mock_http_echo_server.url,
             dataset=Path(ds_pickle_dataset_path),
             api_key=None,
             target_qps=None,
@@ -169,7 +169,7 @@ class TestBenchmarkCommandIntegration:
         args = argparse.Namespace(
             benchmark_mode="online",
             config=None,
-            endpoint=mock_http_echo_server.url,
+            endpoints=mock_http_echo_server.url,
             dataset=Path(ds_pickle_dataset_path),
             api_key=None,
             target_qps=20,
@@ -218,7 +218,7 @@ class TestBenchmarkCommandIntegration:
         cli_args = [
             "benchmark",
             "offline",
-            "--endpoint",
+            "--endpoints",
             mock_http_echo_server.url,
             "--model",
             "echo-server",
@@ -234,7 +234,7 @@ class TestBenchmarkCommandIntegration:
 
         # Verify essential attributes exist with expected names
         # These assertions catch mismatches like 'endpoint' vs 'endpoints'
-        assert hasattr(args, "endpoint"), "CLI should define 'endpoint' attribute"
+        assert hasattr(args, "endpoints"), "CLI should define 'endpoints' attribute"
         assert hasattr(args, "model"), "CLI should define 'model' attribute"
         assert hasattr(args, "dataset"), "CLI should define 'dataset' attribute"
         assert hasattr(

@@ -43,7 +43,7 @@ async def run_probe_command(args: argparse.Namespace) -> None:
     3. Report validation status
     """
     # Extract arguments
-    endpoint = args.endpoint
+    endpoints = args.endpoints
     num_requests = args.requests
     test_prompt = args.prompt
     api_type = APIType(getattr(args, "api_type", "openai"))
@@ -55,7 +55,7 @@ async def run_probe_command(args: argparse.Namespace) -> None:
         raise InputValidationError("Model required: --model NAME")
     # Note: API key handling would go in HTTP client config if needed
 
-    logger.info(f"Probing: {endpoint}")
+    logger.info(f"Probing: {endpoints}")
 
     client = None
 
@@ -64,7 +64,9 @@ async def run_probe_command(args: argparse.Namespace) -> None:
         # Setup HTTP client with futures support
         # Disable warmup for probe - it's a quick health check
         http_config = HTTPClientConfig(
-            endpoint_urls=[urljoin(endpoint, api_type.default_route())],
+            endpoint_urls=[
+                urljoin(e, api_type.default_route()) for e in endpoints.split(",")
+            ],
             api_type=api_type,
             num_workers=1,
             warmup_connections=False,
@@ -72,7 +74,7 @@ async def run_probe_command(args: argparse.Namespace) -> None:
         # Client creates its own event loop in a separate thread
         client = HTTPEndpointClient(http_config)
 
-        logger.info(f"Sending {num_requests} requests...")
+        logger.info(f"Sending {num_requests} requests... to endpoints: {endpoints}")
 
         # Send test requests
         start_times: dict[str, float] = {}
