@@ -37,7 +37,7 @@ class TestProbeCommandIntegration:
     async def test_probe_with_echo_server(self, mock_http_echo_server, caplog):
         """Test successful probe against echo server."""
         args = MagicMock()
-        args.endpoint = mock_http_echo_server.url
+        args.endpoints = mock_http_echo_server.url
         args.api_type = "openai"
         args.requests = 5
         args.prompt = "Test probe message"
@@ -60,7 +60,7 @@ class TestProbeCommandIntegration:
     async def test_probe_with_default_prompt(self, mock_http_echo_server, caplog):
         """Test probe with default prompt."""
         args = MagicMock()
-        args.endpoint = mock_http_echo_server.url
+        args.endpoints = mock_http_echo_server.url
         args.api_type = "openai"
         args.requests = 3
         args.prompt = "Please write me a joke in 30 words."  # Default
@@ -78,7 +78,7 @@ class TestProbeCommandIntegration:
     async def test_probe_shows_multiple_responses(self, mock_http_echo_server, caplog):
         """Test that probe shows sample responses."""
         args = MagicMock()
-        args.endpoint = mock_http_echo_server.url
+        args.endpoints = mock_http_echo_server.url
         args.api_type = "openai"
         args.requests = 15  # More than 10 to test truncation
         args.prompt = "Sample response text"
@@ -97,7 +97,7 @@ class TestProbeCommandIntegration:
     async def test_probe_with_invalid_endpoint(self, caplog):
         """Test probe fails gracefully with invalid endpoint."""
         args = MagicMock()
-        args.endpoint = "http://invalid-host-does-not-exist:9999"
+        args.endpoints = "http://invalid-host-does-not-exist:9999"
         args.api_type = "openai"
         args.requests = 3
         args.prompt = "Test"
@@ -115,7 +115,7 @@ class TestProbeCommandIntegration:
         custom_prompt = "This is my custom probe message with special chars: @#$%"
 
         args = MagicMock()
-        args.endpoint = mock_http_echo_server.url
+        args.endpoints = mock_http_echo_server.url
         args.api_type = "openai"
         args.requests = 2
         args.prompt = custom_prompt

@@ -17,7 +17,7 @@
 
 This example demonstrates:
 1. Generating the GPQA dataset to a file
-2. Applying transforms (UserPromptFormatter, Harmonize, DropColumns)
+2. Applying transforms (UserPromptFormatter, Harmonize, ColumnFilter)
 3. Launching an SGLang API session using the transformed dataset
 
 Prerequisites:

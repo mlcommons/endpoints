@@ -25,7 +25,7 @@ from inference_endpoint.core.types import QueryResult
 from inference_endpoint.dataset_manager import Dataset
 from inference_endpoint.dataset_manager.transforms import (
     AddStaticColumns,
-    ColumnNameRemap,
+    ColumnRemap,
 )
 from inference_endpoint.endpoint_client.config import HTTPClientConfig
 from inference_endpoint.endpoint_client.http_client import HTTPEndpointClient
@@ -101,7 +101,7 @@ async def _run_load_generator_full_run_url(
     dummy_dataloader = Dataset.load_from_file(
         dataset_path,
         transforms=[
-            ColumnNameRemap({"text_input": "prompt", "ref_output": "output"}),
+            ColumnRemap({"text_input": "prompt", "ref_output": "output"}),
             AddStaticColumns({"model": hf_model_name}),
         ],
     )
@@ -163,7 +163,7 @@ async def test_load_generator_full_run_mock_http_oracle_server(
     dummy_dataloader = Dataset.load_from_file(
         ds_pickle_dataset_path,
         transforms=[
-            ColumnNameRemap({"text_input": "prompt", "ref_output": "output"}),
+            ColumnRemap({"text_input": "prompt", "ref_output": "output"}),
             AddStaticColumns({"model": hf_model_name}),
         ],
     )

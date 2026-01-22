@@ -44,7 +44,7 @@ class TestRunEvalCommand:
         """Test that eval raises NotImplementedError."""
         args = MagicMock()
         args.dataset = "gpqa"
-        args.endpoint = "http://test.com"
+        args.endpoints = "http://test.com"
 
         with pytest.raises(NotImplementedError, match="not yet implemented"):
             await run_eval_command(args)
@@ -54,7 +54,7 @@ class TestRunEvalCommand:
         """Test eval with non-existent dataset file."""
         args = MagicMock()
         args.dataset = "/nonexistent/dataset.pkl"
-        args.endpoint = "http://test.com"
+        args.endpoints = "http://test.com"
 
         with pytest.raises(InputValidationError, match="Dataset not found"):
             await run_eval_command(args)
@@ -68,7 +68,7 @@ class TestRunEvalCommand:
 
         args = MagicMock()
         args.dataset = str(dataset_file)
-        args.endpoint = "http://test.com"
+        args.endpoints = "http://test.com"
 
         # Should still raise NotImplementedError, but not InputValidationError
         with pytest.raises(NotImplementedError):
@@ -79,7 +79,7 @@ class TestRunEvalCommand:
         """Test eval recognizes built-in datasets."""
         args = MagicMock()
         args.dataset = "gpqa,math500,aime"
-        args.endpoint = "http://test.com"
+        args.endpoints = "http://test.com"
 
         with caplog.at_level("INFO"):
             with pytest.raises(NotImplementedError):
@@ -101,7 +101,7 @@ class TestRunEvalCommand:
 
         args = MagicMock()
         args.dataset = f"gpqa,{custom_ds},math500"
-        args.endpoint = "http://test.com"
+        args.endpoints = "http://test.com"
 
         with caplog.at_level("INFO"):
             with pytest.raises(NotImplementedError):

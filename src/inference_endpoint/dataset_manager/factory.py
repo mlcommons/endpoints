@@ -77,7 +77,7 @@ class DataLoaderFactory:
                         f"Dataset {name} does not have a preset model transform for {preset}"
                     )
 
-                preset_transforms = ds_cls.PRESETS[preset]()
+                preset_transforms = getattr(ds_cls.PRESETS, preset)()
             return ds_cls.get_dataloader(
                 transforms=preset_transforms,
                 num_repeats=num_repeats,

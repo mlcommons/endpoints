@@ -107,19 +107,18 @@ class UserPromptFormatter(RowProcessor):
         return row
 
 
-class AddStaticColumns(RowProcessor):
+class AddStaticColumns(Transform):
     """Transform that adds columns with constant values to a DataFrame."""
 
     def __init__(self, data: dict[str, Any]):
         """Initialize the AddStaticColumns transform."""
         self.data = data
 
-    def process_row(self, row: dict[str, Any]) -> dict[str, Any]:
+    def __call__(self, df: pd.DataFrame) -> pd.DataFrame:
         """Add the static columns to the row."""
-        # row is technically a Series object, so we can't directly use the | operator
         for key, value in self.data.items():
-            row[key] = value
-        return row
+            df[key] = value
+        return df
 
 
 class Harmonize(RowProcessor):
