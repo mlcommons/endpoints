@@ -19,6 +19,7 @@ from typing import Any
 
 import pandas as pd
 
+from ..config.schema import APIType, ModelParams
 from ..openai.harmony import Harmonizer
 
 
@@ -71,39 +72,6 @@ class RowProcessor(Transform):
             Processed row as a dictionary
         """
         raise NotImplementedError("Subclasses must implement this method.")
-
-
-class ColumnNameRemap(Transform):
-    """Transform that renames columns in a DataFrame.
-
-    This transform takes a mapping dictionary where keys are the current column names
-    and values are the new column names.
-    """
-
-    def __init__(self, column_mapping: dict[str, str], inplace: bool = False):
-        """Initialize the ColumnNameRemap transform.
-
-        Args:
-            column_mapping: Dictionary mapping old column names to new column names
-            inplace: If True, the DataFrame is modified in place. Otherwise, a new DataFrame is returned.
-        """
-        self.column_mapping = column_mapping
-        self.inplace = inplace
-
-    def __call__(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Rename columns in the DataFrame according to the mapping.
-
-        Args:
-            df: Input DataFrame
-
-        Returns:
-            DataFrame with renamed columns
-        """
-        retval = df.rename(columns=self.column_mapping, inplace=self.inplace)
-        if self.inplace:
-            return df
-        else:
-            return retval
 
 
 class UserPromptFormatter(RowProcessor):
@@ -206,32 +174,135 @@ class Harmonize(RowProcessor):
         return row
 
 
-class DropColumns(Transform):
-    """Transform that drops specified columns from a DataFrame.
-
-    This transform removes columns from a DataFrame by name.
+class ColumnFilter(Transform):
+    """Transform that filters columns from a DataFrame as an allow-list. Only the specified columns
+    will be kept in the DataFrame.
     """
 
-    def __init__(self, columns: list[str], errors: str = "ignore"):
-        """Initialize the DropColumns transform.
+    def __init__(
+        self,
+        required_columns: list[str],
+        optional_columns: list[str] | None = None,
+    ):
+        """Initialize the ColumnFilter transform.
 
         Args:
-            columns: List of column names to drop from the DataFrame
-            errors: How to handle errors. Options: 'raise' or 'ignore' (default: 'ignore')
+            required_columns: List of column names to keep in the DataFrame
+            optional_columns: List of column names to keep in the DataFrame if present
         """
-        self.columns = columns
-        self.errors = errors
+        self.required_columns = required_columns
+        self.optional_columns = optional_columns
+
+        # Check that required and optional columns are mutually exclusive
+        if optional_columns is not None and (
+            set(required_columns) & set(optional_columns)
+        ):
+            raise ValueError("Required and optional columns must be mutually exclusive")
 
     def __call__(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Drop specified columns from the DataFrame.
+        """Filter columns from the DataFrame.
 
         Args:
             df: Input DataFrame
 
         Returns:
-            DataFrame with specified columns removed
+            DataFrame with filtered columns
         """
-        return df.drop(columns=self.columns, errors=self.errors)
+        columns_to_keep = self.required_columns
+        if self.optional_columns is not None:
+            found_cols = set(df.columns) & set(self.optional_columns)
+            columns_to_keep += list(found_cols)
+
+        # Filter the columns
+        df = df[columns_to_keep]
+        return df
+
+
+class ColumnRemap(Transform):
+    """Remaps columns in a DataFrame. This Transform is has an added feature on top of the
+    normal dataframe.rename() method in that rather than remapping an old column name to a new
+    column name, a list of candidate column names can be provided.
+    This transform will iterate through the candidate column names and use the first one found
+    as the column to rename. As an example:
+
+    ColumnRemap(
+        remap={
+            "abc": "def",
+            ("123", "456", "789"): "numbers",
+        },
+        strict=False,
+    )
+
+    when applied to a dataframe with the columns ["789", "456", "abc"] will result in a new
+    dataframe with the columns ["789", "numbers", "def"], since "456" is the first column in the
+    remap key found in the original column list.
+
+    If `strict` is True, an error will be raised in the above example, since both "456" and "789"
+    exist in the original column list.
+    """
+
+    def __init__(
+        self,
+        remap: dict[str | tuple[str, ...], str],
+        strict: bool = True,
+    ):
+        self.remap = remap
+        self.strict = strict
+
+    def __call__(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Remap the columns in the DataFrame.
+
+        Args:
+            df: Input DataFrame
+        """
+        new_cols = {}
+        for src, dst in self.remap.items():
+            if isinstance(src, str):
+                new_cols[src] = dst
+            elif isinstance(src, tuple):
+                old_cols = set(df.columns)
+                found = None
+                for candidate in src:
+                    if candidate in old_cols:
+                        if found is None:
+                            new_cols[candidate] = dst
+                            found = candidate
+                        elif self.strict:
+                            raise ValueError(
+                                f"Multiple columns found for fuzzy remap: {found} and {candidate}"
+                            )
+        df = df.rename(columns=new_cols, errors="ignore")
+        return df
+
+
+class MakeAdapterCompatible(ColumnRemap):
+    """Special transform for arbitrary load_from_file() datasets which may have arbitrary
+    structure.
+
+    When using an arbitrary Dataset.load_from_file() dataframe, it is expected that the user
+    prompt will be stored in a column and is ready to be used for inference.
+
+    This transform will search for through a set of common column names and rename the column
+    to 'prompt', which is the expected column name for adapter transforms.
+
+    If no column is found, an error will be raised.
+    """
+
+    def __init__(self):
+        super().__init__(
+            remap={
+                (
+                    "user_prompt",
+                    "question",
+                    "input",
+                    "input_text",
+                    "problem",
+                    "query",
+                ): "prompt",
+                "system_prompt": "system",
+            },
+            strict=True,
+        )
 
 
 class FusedRowProcessor(RowProcessor):
@@ -302,3 +373,28 @@ def apply_transforms(
     for transform in transforms:
         df = transform(df)
     return df
+
+
+def get_transforms_for_api_type(
+    api_type: APIType, model_params: ModelParams
+) -> list[Transform]:
+    """Utility function to get the transforms required for a given API type.
+
+    Args:
+        api_type: The API type to get the transforms for
+
+    Returns:
+        A list of transforms required for the given API type
+    """
+    from importlib import import_module
+
+    from inference_endpoint.endpoint_client.config import ADAPTER_MAP
+
+    adapter_path = ADAPTER_MAP.get(api_type)
+    if not adapter_path:
+        raise ValueError(f"Invalid or unsupported API type: {api_type}")
+
+    module_path, class_name = adapter_path.rsplit(".", 1)
+    module = import_module(module_path)
+    adapter = getattr(module, class_name)
+    return adapter.dataset_transforms(model_params)

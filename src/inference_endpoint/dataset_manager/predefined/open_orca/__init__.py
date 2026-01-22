@@ -21,10 +21,6 @@ from pathlib import Path
 
 import pandas as pd
 import requests
-from inference_endpoint.dataset_manager.transforms import (
-    AddStaticColumns,
-    ColumnNameRemap,
-)
 
 from ...dataset import Dataset
 
@@ -38,21 +34,55 @@ class OpenOrca(
     """OpenOrca GPT4 tokenized dataset for accuracy evaluation."""
 
     @classmethod
-    def generate(cls):
-        """Download and extract the OpenOrca dataset files into a local folder.
+    def generate(
+        cls,
+        datasets_dir: Path,
+        variant: str = "mlperf-inference",
+        force: bool = False,
+    ):
+        """Download and extract the OpenOrca dataset files from MLCommons storage. This is
+        a curated and preprocessed dataset from MLCommons based on OpenOrca for MLPerf Inference.
+
+        The dataset contains 24576 samples and is filtered to be compatible with the ISL, OSL, and
+        max tokens rules for Llama2-70b in MLPerf Inference.
+
+        See https://github.com/mlcommons/inference/tree/master/language/llama2-70b for more details
+        on the Llama2-70b benchmark. The script used to generate the dataset from the full OpenOrca
+        dataset is here:
+        https://github.com/mlcommons/inference/blob/master/language/llama2-70b/processorca.py
+
+        Args:
+            datasets_dir: The root datasets directory to save the dataset under. A
+                subdirectory with the name and variant of the dataset will be created if
+                it does not exist.
+            variant: The variant of the dataset to generate. Defaults to "mlperf-inference".
+                Currently only "mlperf-inference" is supported. The "full", default OpenOrca dataset
+                should be added in the future.
+            force: If True, the dataset will be regenerated even if it already exists.
+                Defaults to False.
 
         Returns:
-            Path: path to the extracted folder containing the dataset files.
+            A pandas dataframe containing the dataset.
         """
-        target_dir = Path("open_orca")
-        target_dir.mkdir(parents=True, exist_ok=True)
+        if variant != "mlperf-inference":
+            raise ValueError(f"Unsupported variant: {variant}")
+
+        # The MLPerf Inference variant is stored as a pickle file
+        filename = "open_orca_gpt4_tokenized_llama.sampled_24576.pkl"
+        dst_path = datasets_dir / cls.DATASET_ID / variant / filename
+        if not dst_path.parent.exists():
+            dst_path.parent.mkdir(parents=True)
+
+        if dst_path.exists() and not force:
+            logger.info(f"Dataset already exists at {dst_path}. Loading from file.")
+            return pd.read_pickle(dst_path)
 
         # Dataset URL from README
         dataset_url = "https://inference.mlcommons-storage.org/metadata/llama-2-70b-open-orca-dataset.uri"
 
         # Download the r2-downloader script into a temp file in the target dir
         downloader_url = "https://raw.githubusercontent.com/mlcommons/r2-downloader/refs/heads/main/mlc-r2-downloader.sh"
-        script_path = target_dir / "mlc-r2-downloader.sh"
+        script_path = dst_path.parent / "mlc-r2-downloader.sh"
         r = requests.get(downloader_url, timeout=30)
         r.raise_for_status()
         script_path.write_bytes(r.content)
@@ -76,62 +106,40 @@ class OpenOrca(
         except subprocess.CalledProcessError as e:
             raise RuntimeError(f"R2 downloader failed: {e}") from e
 
-        # After downloader ran, decompress any .pkl.gz files inside open_orca
-        # Suppress decompression logs
-        open_orca_dir = target_dir / "open_orca"
-        if not open_orca_dir.exists():
-            # Some versions of the script drop files directly under target_dir
-            open_orca_dir = target_dir
+        # Script will generate a new 'open_orca' subdirectory with gzip'd pickle files
+        gzip_dir = dst_path.parent
+        if (gzip_dir / "open_orca").exists():
+            gzip_dir = gzip_dir / "open_orca"
 
-        for gz_path in open_orca_dir.glob("*.pkl.gz"):
-            pkl_path = gz_path.with_suffix("")
+        for gz_path in gzip_dir.glob("*.pkl.gz"):
             # Note: .with_suffix removes only one suffix, .pkl.gz -> .pkl
+            pkl_filename = gz_path.with_suffix("").name
+            pkl_path = dst_path.parent / pkl_filename
             if pkl_path.exists():
                 continue
+
             with gzip.open(gz_path, "rb") as f_in:
-                with open(pkl_path, "wb") as f_out:
+                with pkl_path.open(mode="wb") as f_out:
                     shutil.copyfileobj(f_in, f_out)
 
         logger.info(
-            "OpenOrca dataset downloaded and extracted to: %s", target_dir.resolve()
+            "OpenOrca dataset downloaded and extracted to: %s",
+            dst_path.parent.resolve(),
         )
-        return target_dir
 
-    @classmethod
-    def get_dataloader(
-        cls,
-        metadata: dict[str, str] | None = None,
-        num_repeats: int = 1,
-    ):
-        """Load the OpenOrca dataset from a file.
+        # Check if the specific file exists
+        if not dst_path.exists():
+            raise FileNotFoundError(
+                f"OpenOrca was downloaded, but {dst_path} does not exist"
+            )
 
-        Args:
-            dataset_path: Path to the dataset file (typically .pkl format)
-            metadata: Optional metadata to add to the dataset
-            remap: Column name remapping dict. If None, defaults to {"prompt": "text_input"}
+        # Clean up the intermediate gz files
+        for gz_path in gzip_dir.glob("*.pkl.gz"):
+            gz_path.unlink()
 
-        Returns:
-            OpenOrca dataset instance
-        """
-        # Generate dataset
-        dataset_dir = cls.generate()
+        logger.info(f"Cleaned up intermediate gz files in {gzip_dir}")
 
-        # Determine dataset path
-        dataset_path = dataset_dir / "open_orca_gpt4_tokenized_llama.sampled_24576.pkl"
-
-        # Load the dataset from file
-        df = pd.read_pickle(dataset_path)
-
-        # Apply same parser/remap logic as factory.py
-        remap = {"question": "prompt", "system_prompt": "system"}
-
-        # Create transforms
-        transforms = [ColumnNameRemap(remap)]
-
-        if metadata is not None:
-            transforms.append(AddStaticColumns(metadata))
-
-        return cls(df, transforms=transforms)
+        return pd.read_pickle(dst_path)
 
 
 __all__ = ["OpenOrca"]

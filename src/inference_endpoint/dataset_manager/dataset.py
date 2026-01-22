@@ -20,13 +20,17 @@ from enum import Enum
 from logging import getLogger
 from os import PathLike
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import numpy as np
 import pandas as pd
 from datasets import load_dataset, load_from_disk
 
-from .transforms import Transform, apply_transforms
+from ..config.schema import APIType, ModelParams
+from .transforms import Transform, apply_transforms, get_transforms_for_api_type
+
+if TYPE_CHECKING:
+    from inference_endpoint.endpoint_client.adapter_protocol import HttpRequestAdapter
 
 logger = getLogger(__name__)
 
@@ -329,6 +333,7 @@ class Dataset:
         transforms: list[Transform] | None = None,
         format: DatasetFormat | None = None,
         dataset_id: str | None = None,
+        num_repeats: int = 1,
     ) -> "Dataset":
         assert format is None or isinstance(
             format, DatasetFormat
@@ -341,26 +346,53 @@ class Dataset:
         ds_class = cls
         if dataset_id is not None:
             ds_class = Dataset.PREDEFINED[dataset_id]
+
         return ds_class(
             loader.get_dataframe(),
             transforms=transforms,
+            repeats=num_repeats,
         )
 
-    def load(self):
+    def load(
+        self,
+        adapter: "HttpRequestAdapter" | None = None,
+        api_type: APIType | None = None,
+        model_params: ModelParams | None = None,
+        force: bool = False,
+    ):
         """Load the dataset into memory for pre-processing. After transforms are applied,
         the dataset is converted to a contiguous numpy array.
 
         Args:
-            force: If True, reloads even if already loaded (for refreshing data).
+            adapter: If set, will apply the adapter's required transforms to the dataset after any
+                user-defined transforms. (Default: None)
+            api_type: If adapter is not specified, will use the API type to get the transforms for
+                the adapter. (Default: None)
+            force: If True, reloads even if already loaded (for refreshing data). (Default: False)
         """
+        if not force and hasattr(self, "data") and self.data is not None:
+            return
+
         df = self.dataframe
+
+        transforms = []
         if self.transforms is not None:
-            df = apply_transforms(df, self.transforms)
+            transforms.extend(self.transforms)
+
+        # If adapter is specified, use it to get transforms, otherwise fallback to use APIType to
+        # get transforms.
+        if adapter is not None:
+            transforms.extend(adapter.dataset_transforms(model_params))
+        elif api_type is not None:
+            transforms.extend(get_transforms_for_api_type(api_type, model_params))
+
+        if transforms:
+            df = apply_transforms(df, transforms)
+
         # Convert numpy arrays to lists because msgspec does not support numpy arrays
         for col in df.columns:
             if isinstance(df[col].iloc[0], np.ndarray):
                 df[col] = df[col].map(np.ndarray.tolist)
-        # Repeat the dataframe if the number of repeats is greater than 1
         self.data = df.to_dict(orient="records")
 
     def load_sample(self, index: int) -> Any:

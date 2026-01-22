@@ -18,7 +18,9 @@
 import re
 from abc import ABC, abstractmethod
 
+from inference_endpoint.config.schema import ModelParams
 from inference_endpoint.core.types import Query, QueryResult
+from inference_endpoint.dataset_manager.transforms import Transform
 
 
 class HttpRequestAdapter(ABC):
@@ -33,6 +35,27 @@ class HttpRequestAdapter(ABC):
     # Pre-compiled regex for extracting SSE data fields with JSON content
     # Matches "data: {json content}" and captures the JSON part
     SSE_DATA_PATTERN: re.Pattern[bytes] = re.compile(rb"data:\s*(\{[^\n]+\})")
+
+    @classmethod
+    @abstractmethod
+    def dataset_transforms(
+        cls,
+        model_params: ModelParams,
+    ) -> list[Transform]:
+        """Returns a list of transforms to apply to the dataset such that each row,
+        when converted to a dictionary, can be used as the `.data` field of a Query.
+
+        It is expected that these transforms will be applied after other transforms,
+        such that the input dataframe will contain a column `prompt` (and optionally
+        `system`). There can be any arbitrary number of extraneous columns in the
+        dataframe, which must be filtered out. As such, all adapter dataset transforms
+        should include a `ColumnFilter` transform to ensure that when a row is converted
+        to a dictionary, only the necessary keys are present.
+
+        Args:
+            model_params: The model parameters for the endpoint to use
+        """
+        raise NotImplementedError("dataset_transforms not implemented")
 
     @classmethod
     @abstractmethod

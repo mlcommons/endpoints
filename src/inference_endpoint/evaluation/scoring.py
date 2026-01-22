@@ -90,7 +90,12 @@ class Scorer(ABC):
         self.dataset = dataset
         self.report_dir = Path(report_dir)
         self.extractor = extractor
+        # If the dataset was transformed with a preset, we still treat it as the original
+        # dataset name for the purposes of scoring
+        if "::" in dataset_name:
+            dataset_name = dataset_name.split("::")[0]
         self.dataset_name = dataset_name
+
         self.ground_truth_column = (
             ground_truth_column if ground_truth_column is not None else "ground_truth"
         )
