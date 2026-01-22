@@ -82,8 +82,6 @@ class CNNDailyMail(
                 split="validation",
                 cache_dir=datasets_dir / "hf_cache" / "cnndailymail",
             )
-
-            logger.info(f"Loaded {len(df)} samples from CNN/DailyMail")
         except Exception as e:
             logger.error(f"Error loading dataset: {e}")
             logger.error("Note: This dataset may require HuggingFace authentication.")
