@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 import numpy as np
 import pandas as pd
+
 from datasets import load_dataset, load_from_disk
 
 from ..config.schema import APIType, ModelParams
@@ -355,7 +356,7 @@ class Dataset:
 
     def load(
         self,
-        adapter: "HttpRequestAdapter" | None = None,
+        adapter: "HttpRequestAdapter | None" = None,
         api_type: APIType | None = None,
         model_params: ModelParams | None = None,
         force: bool = False,
