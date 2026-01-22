@@ -286,7 +286,7 @@ class RougeScorer(Scorer, scorer_id="rouge"):
 
         # TODO: return only rouge1 for now to align with other scorers
         # Return the rest of the metrics later
-        return result["rouge1"], 1
+        return result, 1
 
 
 class LiveCodeBenchScorer(Scorer, scorer_id="code_bench_scorer"):
