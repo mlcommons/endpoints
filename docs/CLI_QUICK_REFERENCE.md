@@ -7,13 +7,13 @@
 ```bash
 # Offline (max throughput - CLI mode)
 inference-endpoint benchmark offline \
-  --endpoint URL \
+  --endpoints URL \
   --model Qwen/Qwen3-8B \
   --dataset tests/datasets/dummy_1k.pkl
 
 # Online (sustained QPS - CLI mode - requires --target-qps, --load-pattern)
 inference-endpoint benchmark online \
-  --endpoint URL \
+  --endpoints URL \
   --model Qwen/Qwen3-8B \
   --dataset tests/datasets/dummy_1k.pkl \
   --load-pattern poisson \
@@ -21,7 +21,7 @@ inference-endpoint benchmark online \
 
 # With detailed report generation
 inference-endpoint benchmark offline \
-  --endpoint URL \
+  --endpoints URL \
   --model Qwen/Qwen3-8B \
   --dataset tests/datasets/dummy_1k.pkl \
   --report-dir my_benchmark_report
@@ -36,7 +36,7 @@ inference-endpoint benchmark from-config \
 ### Accuracy Evaluation (stub - future implementation)
 
 ```bash
-inference-endpoint eval --dataset gpqa,aime --endpoint URL
+inference-endpoint eval --dataset gpqa,aime --endpoints URL
 ```
 
 ### Pre-flight Testing
@@ -44,7 +44,7 @@ inference-endpoint eval --dataset gpqa,aime --endpoint URL
 ```bash
 # Test endpoint connectivity
 inference-endpoint probe \
-  --endpoint URL \
+  --endpoints URL \
   --model gpt-3.5-turbo \
   --api-key KEY
 
@@ -64,7 +64,7 @@ inference-endpoint info
 
 ## Common Options
 
-- `--endpoint, -e URL` - Endpoint URL (required for CLI mode)
+- `--endpoints, -e URL` - Endpoint URL (required for CLI mode)
 - `--model NAME` - Model name (required for CLI mode, e.g., Qwen/Qwen3-8B)
 - `--dataset, -d PATH` - Dataset file (required for CLI mode)
 - `--config, -c PATH` - YAML config file (required for from-config mode)
@@ -142,7 +142,7 @@ inference-endpoint info
 
 ```bash
 inference-endpoint benchmark offline \
-  --endpoint http://localhost:8000 \
+  --endpoints http://localhost:8000 \
   --model Qwen/Qwen3-8B \
   --dataset tests/datasets/dummy_1k.pkl
 ```
@@ -152,7 +152,7 @@ inference-endpoint benchmark offline \
 ```bash
 # With explicit sample count
 inference-endpoint benchmark online \
-  --endpoint https://api.production.com \
+  --endpoints https://api.production.com \
   --model Qwen/Qwen3-8B \
   --dataset prod_queries.pkl \
   --load-pattern poisson \
@@ -165,7 +165,7 @@ inference-endpoint benchmark online \
 
 # Or with duration (calculates samples from target_qps * duration)
 inference-endpoint benchmark online \
-  --endpoint https://api.production.com \
+  --endpoints https://api.production.com \
   --model Qwen/Qwen3-8B \
   --dataset prod_queries.pkl \
   --load-pattern poisson \
@@ -196,7 +196,7 @@ inference-endpoint benchmark from-config \
 ```bash
 # Test connectivity
 inference-endpoint probe \
-  --endpoint https://api.example.com \
+  --endpoints https://api.example.com \
   --model Qwen/Qwen3-8B
 
 # Validate YAML config
@@ -243,7 +243,8 @@ metrics:
   collect: ["throughput", "latency", "ttft", "tpot"]
 
 endpoint_config:
-  endpoint: "http://localhost:8000"
+  endpoints:
+    - "http://localhost:8000"
   api_key: null
 ```
 
@@ -253,7 +254,7 @@ endpoint_config:
 
 - All parameters from command line
 - Quick testing and iteration
-- Examples: `benchmark offline --endpoint URL --model NAME --dataset FILE`
+- Examples: `benchmark offline --endpoints URL --model NAME --dataset FILE`
 
 **YAML Mode** (`benchmark from-config`):
 

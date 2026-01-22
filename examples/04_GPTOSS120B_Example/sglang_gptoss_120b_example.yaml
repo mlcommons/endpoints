@@ -59,7 +59,8 @@ metrics:
     - "tpot"
 
 endpoint_config:
-  endpoint: "http://localhost:30000"
+  endpoints:
+    - "http://localhost:30000"
   api_key: null
   api_type: "sglang"
 
