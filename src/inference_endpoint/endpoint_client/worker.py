@@ -188,7 +188,6 @@ class Worker:
 
             # Create connection pool
             # Naively divide max connections among workers
-            # TODO(vir): smarter allocation?
             connections_per_worker = (
                 self.http_config.max_connections // self.http_config.num_workers
             )
@@ -197,6 +196,7 @@ class Worker:
                 port=self._port,
                 loop=self._loop,
                 max_connections=connections_per_worker,
+                max_idle_time=self.http_config.max_idle_time,
             )
 
             # Signal handlers for graceful shutdown
@@ -204,18 +204,44 @@ class Worker:
             signal.signal(signal.SIGINT, self.shutdown)
 
             # Warmup connection pool if enabled
-            if self.http_config.warmup_connections:
-                warmed = await self._pool.warmup()
+            warmup_cfg = self.http_config.warmup_connections
+            if warmup_cfg != 0:
+                if warmup_cfg == -1:
+                    # Auto: 50% of pool (safe default)
+                    warmup_count = connections_per_worker // 2
+                else:
+                    # Explicit total count split across workers
+                    warmup_count = warmup_cfg // self.http_config.num_workers
+                warmup_count = max(1, warmup_count)
+                warmed = await self._pool.warmup(count=warmup_count)
                 logger.debug(f"Warmed up {warmed} connections")
 
-                # Check if we got enough connections (skip if 0 = disabled)
-                min_required = self.http_config.min_required_connections
-                if min_required > 0 and warmed < min_required:
-                    logger.warning(
-                        "Warmup established fewer connections than required. "
-                        f"REQUIRED: {min_required}, WARMED: {warmed}. "
-                        "Consider closing background TCP connections or adjusting --min_required_connections."
+                # Error if 0 connections warmed up
+                if warmed == 0:
+                    msg = "Warmup: failed to establish connection to endpoint. Consider closing background TCP connections."
+                    if self.http_config.min_required_connections == 0:
+                        # log error but continue if disabled check
+                        logger.error(msg)
+                    else:
+                        # NOTE(vir):
+                        # 0 warmup connections is always fatal in practice,
+                        # user needs to explicitly disable check to proceed
+                        logger.error(
+                            f"{msg} [ skip-check with --min_required_connections=0 ]"
+                        )
+                        sys.exit(1)
+
+                # Warn if below min_required_connections threshold (skip if 0 = disabled)
+                elif self.http_config.min_required_connections > 0:
+                    min_required_per_worker = (
+                        self.http_config.min_required_connections
+                        // self.http_config.num_workers
                     )
+                    if warmed < min_required_per_worker:
+                        logger.warning(
+                            f"Warmup: this worker has {warmed} connections, need {min_required_per_worker}. "
+                            "Consider closing background TCP connections or adjusting --min_required_connections."
+                        )
 
             # TODO(vir):
             # record_worker_events has high overhead - slows down the worker 100x
@@ -340,15 +366,6 @@ class Worker:
             # Acquire connection from pool
             conn = await self._pool.acquire()
 
-            # Record time just-before request is issued
-            if self.http_config.record_worker_events:
-                EventRecorder.record_event(
-                    SampleEvent.HTTP_REQUEST_ISSUED,
-                    time.monotonic_ns(),
-                    sample_uuid=req.query_id,
-                    assert_active=True,
-                )
-
             # Write request bytes directly to transport
             conn.protocol.write(req.http_bytes)
 
@@ -389,6 +406,7 @@ class Worker:
 
         except Exception as e:
             await self._handle_error(req.query_id, e)
+            logger.warning(f"Request {req.query_id} failed: {type(e).__name__}: {e}")
 
         finally:
             # Release connection back to pool if not already released

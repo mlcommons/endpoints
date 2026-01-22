@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from inference_endpoint.endpoint_client.cpu_affinity import (
     AffinityPlan,
     compute_affinity_plan,
+    get_all_online_cpus,
     pin_loadgen,
     set_cpu_affinity,
 )
@@ -76,3 +77,72 @@ class TestSetCpuAffinity:
         success = set_cpu_affinity(12345, set())
         assert not success
         mock_setaffinity.assert_not_called()
+
+
+class TestGetAllOnlineCpus:
+    """Test get_all_online_cpus with cgroup intersection logic."""
+
+    @patch("os.sched_getaffinity")
+    @patch("pathlib.Path.read_text")
+    def test_sysfs_intersected_with_cgroup(self, mock_read, mock_getaffinity):
+        """Test that sysfs CPUs are intersected with cgroup-allowed CPUs."""
+        # Sysfs reports 0-7, but cgroup restricts to 0-3
+        mock_read.return_value = "0-7\n"
+        mock_getaffinity.return_value = {0, 1, 2, 3}
+
+        cpus = get_all_online_cpus()
+
+        # Should return intersection: only CPUs allowed by both sysfs AND cgroup
+        assert cpus == {0, 1, 2, 3}
+
+    @patch("os.sched_getaffinity", side_effect=OSError("Permission denied"))
+    @patch("pathlib.Path.read_text")
+    def test_sysfs_without_cgroup_check(self, mock_read, mock_getaffinity):
+        """Test sysfs alone when sched_getaffinity fails."""
+        mock_read.return_value = "0-3,8-11\n"
+        cpus = get_all_online_cpus()
+        assert cpus == {0, 1, 2, 3, 8, 9, 10, 11}
+
+    @patch("os.sched_getaffinity")
+    @patch("pathlib.Path.read_text", side_effect=OSError("No such file"))
+    def test_fallback_cpu_directories_intersected(self, mock_read, mock_getaffinity):
+        """Test cpu directory fallback intersected with cgroup."""
+        mock_getaffinity.return_value = {0, 2}  # Cgroup restricts to 0, 2
+
+        # Create mock entries with proper name attribute
+        cpu0 = MagicMock()
+        cpu0.name = "cpu0"
+        cpu1 = MagicMock()
+        cpu1.name = "cpu1"
+        cpu2 = MagicMock()
+        cpu2.name = "cpu2"
+        cpufreq = MagicMock()
+        cpufreq.name = "cpufreq"
+
+        with patch("pathlib.Path.iterdir", return_value=[cpu0, cpu1, cpu2, cpufreq]):
+            cpus = get_all_online_cpus()
+            # Should return intersection of {0,1,2} (dirs) and {0,2} (cgroup)
+            assert cpus == {0, 2}
+
+    @patch("os.sched_getaffinity")
+    @patch("pathlib.Path.iterdir", side_effect=OSError("Permission denied"))
+    @patch("pathlib.Path.read_text", side_effect=OSError("No such file"))
+    def test_fallback_sched_getaffinity_only(
+        self, mock_read, mock_iterdir, mock_getaffinity
+    ):
+        """Test final fallback: uses sched_getaffinity directly."""
+        mock_getaffinity.return_value = {0, 2, 4, 6}
+
+        cpus = get_all_online_cpus()
+
+        assert cpus == {0, 2, 4, 6}
+
+    @patch("os.sched_getaffinity", side_effect=OSError("Permission denied"))
+    @patch("pathlib.Path.iterdir", side_effect=OSError("Permission denied"))
+    @patch("pathlib.Path.read_text", side_effect=OSError("No such file"))
+    def test_all_methods_fail_returns_empty(
+        self, mock_read, mock_iterdir, mock_getaffinity
+    ):
+        """Test that empty set is returned when all methods fail."""
+        cpus = get_all_online_cpus()
+        assert cpus == set()

@@ -322,6 +322,7 @@ def _build_config_from_cli(
                 workers=args.workers if args.workers else -1,
                 log_level="DEBUG" if verbose_level >= 2 else "INFO",
                 warmup_connections=getattr(args, "warmup_connections", True),
+                max_connections=getattr(args, "max_connections", None) or -1,
             ),
         ),
         model_params=ModelParams(
@@ -396,11 +397,8 @@ def _run_benchmark(
     """
     # CPU affinity: compute plan and pin loadgen
     affinity_plan = None
-    if config.cpu_affinity == -1:
-        # Auto: compute optimal plan based on system topology
+    if config.enable_cpu_affinity:
         affinity_plan = pin_loadgen(config.settings.client.workers)
-    elif isinstance(config.cpu_affinity, list) and config.cpu_affinity:
-        raise NotImplementedError("manual-affinity-override not yet enabled")
 
     # Load tokenizer if model name is provided
     # Priority: CLI args (offline/online modes) > config submission_ref (from-config mode)
@@ -543,7 +541,9 @@ def _run_benchmark(
 
     # Setup response collector
     pbar = tqdm(
-        desc=f"{model_name} (Streaming: {enable_streaming})", total=total_samples
+        desc=f"{model_name} (Streaming: {enable_streaming})",
+        total=total_samples,
+        smoothing=0,  # smoothing=0 shows average instead of EMA
     )
     response_collector = ResponseCollector(
         collect_responses=collect_responses, pbar=pbar
@@ -572,6 +572,7 @@ def _run_benchmark(
             log_level=config.settings.client.log_level,
             cpu_affinity=affinity_plan,
             warmup_connections=config.settings.client.warmup_connections,
+            max_connections=config.settings.client.max_connections,
         )
         http_client = HTTPEndpointClient(http_config)
         sample_issuer = HttpClientSampleIssuer(http_client)

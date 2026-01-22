@@ -282,6 +282,10 @@ class ClientSettings(BaseModel):
     # Pre-establish TCP connections during init for reuse at runtime.
     warmup_connections: bool = True
 
+    # Maximum concurrent TCP connections per worker.
+    # -1 = unlimited (bound by system ephemeral port limit)
+    max_connections: int = -1
+
 
 class Settings(BaseModel):
     """Test settings (can be overridden by CLI)."""
@@ -372,10 +376,9 @@ class BenchmarkConfig(BaseModel):
     timeout: int | None = None
     verbose: bool = False
     # CPU affinity for loadgen and worker processes:
-    #   - -1 = auto assign
-    #   - list[int] = use these specific cores (shared by loadgen and workers)
-    #   - None = disabled
-    cpu_affinity: list[int] | int | None = -1
+    #   - True = auto (compute optimal NUMA-aware plan)
+    #   - False = disabled (no CPU pinning)
+    enable_cpu_affinity: bool = True
 
     @classmethod
     def from_yaml_file(cls, path: Path) -> BenchmarkConfig:

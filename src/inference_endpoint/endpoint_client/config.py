@@ -74,9 +74,21 @@ class HTTPClientConfig:
     worker_graceful_shutdown_wait: float = 0.5  # post-run
     worker_force_kill_timeout: float = 0.5  # post-run
 
+    # Connection idle timeout - discard connections idle longer than this.
+    # Two fold benefits:
+    # 1. Prevents keep-alive race condition where server closes idle connection
+    #    at the exact moment client sends a new request (half-closed TCP).
+    # 2. Early discard connections which are likely disconnected by the server already
+    max_idle_time: float = 4.0  # seconds
+
     # Pre-establish TCP connections during init for reuse at runtime.
     # Reduces p99/max latency from cold-start connections.
-    warmup_connections: bool = True
+    #
+    # Values:
+    #   -1 = auto (50% of pool, safe default - 100% can overwhelm some servers)
+    #    0 = disabled
+    #   >0 = explicit total connection count to warmup (split across workers)
+    warmup_connections: int = -1
 
     # Maximum concurrent TCP connections.
     # Performance sweetspot is often a low number compared to port limit ~1024.
@@ -144,16 +156,24 @@ class HTTPClientConfig:
 
             self.worker_pool_transport = ZmqWorkerPoolTransport
 
+        low, high = get_ephemeral_port_range()
+        system_maximum_ports = high - low + 1
+        available_ports = get_ephemeral_port_limit()
+
         if self.max_connections == -1:
-            low, high = get_ephemeral_port_range()
-            system_maximum_ports = high - low + 1
-            available_ports = get_ephemeral_port_limit()
+            # Auto: use available ephemeral ports
+            self.max_connections = available_ports
 
             # Resolve min_required_connections: -1 means auto (90% of system max)
             if self.min_required_connections == -1:
                 self.min_required_connections = int(system_maximum_ports * 0.90)
-
-            self.max_connections = available_ports
+        else:
+            # User specified explicit max_connections - validate against port limit
+            if self.max_connections > available_ports:
+                raise RuntimeError(
+                    f"--max-connections ({self.max_connections}) exceeds ephemeral port limit ({available_ports}). "
+                    f"Either reduce --max-connections or increase system port limit."
+                )
 
 
 def _get_auto_num_workers() -> int:

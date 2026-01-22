@@ -128,7 +128,7 @@ class BenchmarkSession:
 
                     self.end_event.wait(timeout=SHUTDOWN_POLL_INTERVAL_S)
                     if max_shutdown_timeout_s is not None:
-                        self.logger.info(
+                        self.logger.debug(
                             f"Waiting for the test to end... {self.event_recorder.n_inflight_samples} samples remaining"
                         )
 

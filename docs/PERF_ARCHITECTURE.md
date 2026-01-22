@@ -285,6 +285,7 @@ Legend:  [AWAIT] = async suspend point     [SYNC] = synchronous (no suspend)
 ## 4. CPU Pinning Strategy
 
 The pinning strategy maximizes throughput while minimizing jitter between runs.
+NUMA-aware placement reduces cross-socket memory access and cache coherency traffic.
 
 ### Key Insight
 
@@ -296,33 +297,80 @@ The pinning strategy maximizes throughput while minimizing jitter between runs.
 
 Workers are mostly I/O-bound (waiting on HTTP responses).
 
-### Strategy
+### NUMA-Aware Algorithm
 
 ```
-┌───────────────────────────────────────────────────────────────────────────┐
-│  All Physical Cores (ranked fastest → slowest)                            │
-│                                                                           │
-│  [P0, P1, P2, P3, P4, P5, P6, P7, ... P111]                               │
-│   └───── LoadGen (6) ─────┘  └────── Workers (remaining) ──────┘          │
-│                                                                           │
-│  LoadGen: 6 fastest physical cores (both hyperthreads each)               │
-│    - 1 core: Session thread (scheduler, busy-wait, timing)                │
-│    - 1 core: Event loop thread (uvloop, response handling, metrics)       │
-│    - 4 cores: ZMQ I/O threads (IPC fan-in/fan-out with workers)           │
-│  Workers: 1 physical core each (both hyperthreads), remaining cores       │
-└───────────────────────────────────────────────────────────────────────────┘
+                    ┌─────────────────────────────────┐
+                    │   PHASE 1: TOPOLOGY DISCOVERY   │
+                    └─────────────────────────────────┘
+                                    │
+                                    ▼
+                    ┌──────────────────────────────────┐
+                    │ 1. Get online CPUs (cgroup-aware)│
+                    │ 2. Group by NUMA: {numa: cores}  │
+                    │ 3. Rank by perf (fast→slow)      │
+                    └──────────────────────────────────┘
+                                    │
+                                    ▼
+                    ┌─────────────────────────────────┐
+                    │   PHASE 2: LOADGEN ASSIGNMENT   │
+                    └─────────────────────────────────┘
+                                    │
+                                    ▼
+                    ┌─────────────────────────────────┐
+                    │ 1. Fastest core → Primary NUMA  │
+                    │ 2. Take min(N, available) cores │
+                    │    from Primary NUMA for loadgen│
+                    └─────────────────────────────────┘
+                                    │
+                                    ▼
+                    ┌─────────────────────────────────┐
+                    │   PHASE 3: WORKER ASSIGNMENT    │
+                    └─────────────────────────────────┘
+                                    │
+                                    ▼
+                    ┌─────────────────────────────────┐
+                    │ Build worker core list:         │
+                    │                                 │
+                    │ 1. Remaining Primary NUMA cores │
+                    │    (sorted by perf)             │
+                    │            ↓                    │
+                    │ 2. Next best NUMA cores         │
+                    │    (sorted by perf)             │
+                    │            ↓                    │
+                    │ 3. Continue until all NUMAs     │
+                    └─────────────────────────────────┘
+                                    │
+                                    ▼
+                    ┌─────────────────────────────────┐
+                    │ Return AffinityPlan             │
+                    └─────────────────────────────────┘
 ```
 
-| Component   | Allocation                       | Rationale                                                                  |
-| ----------- | -------------------------------- | -------------------------------------------------------------------------- |
-| **LoadGen** | 6 physical cores (12 logical)    | Session + event loop + 4 ZMQ I/O threads. Bottleneck - gets fastest cores. |
-| **Workers** | 1 physical core each (2 logical) | I/O-bound. Full core isolation prevents context switches, reduces jitter.  |
+### Worker Core Ordering
 
-LoadGen breakdown (6 physical cores):
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                                                                     │
+│   Primary NUMA          2nd best NUMA         3rd best NUMA  ...    │
+│   (fastest core here)                                               │
+│                                                                     │
+│   ┌──┬──┬──┬──┐         ┌──┬──┬──┬──┐         ┌──┬──┬──┬──┐         │
+│   │LG│LG│W0│W1│   →     │W2│W3│W4│W5│   →     │W6│W7│W8│W9│  →  ... │
+│   └──┴──┴──┴──┘         └──┴──┴──┴──┘         └──┴──┴──┴──┘         │
+│    ↑     ↑               ↑                     ↑                    │
+│    loadgen leftover      spill                 spill                │
+│                                                                     │
+│   Within each NUMA: sorted by performance (fast → slow)             │
+│   Across NUMAs: sorted by best core performance (fast → slow)       │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
 
-- **Session thread (1 core)**: Runs scheduler, busy-waits for precise timing, issues queries
-- **Event loop thread (1 core)**: uvloop event loop, handles responses, triggers metrics/callbacks
-- **ZMQ I/O threads (4 cores)**: Handle IPC message passing with workers. Default `io_threads=4` in ZMQ context (see `transport/zmq/transport.py`). Each I/O thread benefits from dedicated physical core for consistent throughput.
+| Component   | Allocation                       | Rationale                                                                 |
+| ----------- | -------------------------------- | ------------------------------------------------------------------------- |
+| **LoadGen** | 2 physical cores (4 logical)     | Session thread + event loop thread. Bottleneck - gets fastest cores.      |
+| **Workers** | 1 physical core each (2 logical) | I/O-bound. Full core isolation prevents context switches, reduces jitter. |
 
 ### Why Both Hyperthreads Per Core
 
@@ -332,15 +380,18 @@ Each process owns its **entire physical core** (both hyperthreads):
 - OS scheduler can use either hyperthread freely
 - Consistent, predictable performance
 
-### Implementation
+### Why NUMA-Aware Placement
 
-```
-compute_affinity_plan(num_workers, loadgen_cores=6):
-  1. Discover ALL online CPUs (cross-NUMA)
-  2. Map logical CPUs to (numa_node, physical_core_id)
-  3. Rank physical cores by performance (ACPI CPPC / cpu_capacity / freq)
-  4. LoadGen ← first 6 physical cores (all hyperthreads)
-  5. Workers ← remaining physical cores (spills across NUMA if needed)
+- **Memory locality**: Workers on same NUMA node as LoadGen can access shared memory without cross-socket hops
+- **Cache coherency**: Reduced inter-NUMA cache invalidation traffic
+- **Graceful spillover**: When Primary NUMA is exhausted, workers spill to next-best NUMA nodes
+
+### Configuration
+
+```yaml
+# BenchmarkConfig (schema.py)
+enable_cpu_affinity: true   # Auto-compute NUMA-aware plan (default)
+enable_cpu_affinity: false  # Disabled (no CPU pinning)
 ```
 
 See `src/inference_endpoint/endpoint_client/cpu_affinity.py` for full implementation.

@@ -202,7 +202,12 @@ def _add_shared_benchmark_args(parser):
         default="openai",
         help="API type: openai (default) or sglang",
     )
-    parser.add_argument("--workers", type=int, help="HTTP workers (default: 4)")
+    parser.add_argument("--workers", type=int, help="HTTP workers (default: auto)")
+    parser.add_argument(
+        "--max-connections",
+        type=int,
+        help="Max TCP connections per worker (default: -1 = unlimited)",
+    )
     parser.add_argument(
         "--duration",
         type=int,

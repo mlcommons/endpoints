@@ -519,7 +519,9 @@ class _ZmqWorkerConnector(WorkerConnector):
         finally:
             requests.close()
             responses.close()
-            context.term()
+            # linger=0 to force immediate shutdown
+            # without waiting for pending messages
+            self._context.destroy(linger=0)
 
 
 # =============================================================================
@@ -694,14 +696,9 @@ class ZmqWorkerPoolTransport(WorkerPoolTransport):
             sender.close()
         self._response_receiver.close()
         self._readiness_receiver.close()
-
-        # Terminate ZMQ context
-        try:
-            self._context.setsockopt(zmq.LINGER, 0)
-            self._context.term()
-        except zmq.ZMQError:
-            # Already terminated or error during shutdown
-            pass
+        # linger=0 to force immediate shutdown
+        # without waiting for pending messages
+        self._context.destroy(linger=0)
 
         # Cleanup temp directory
         try:

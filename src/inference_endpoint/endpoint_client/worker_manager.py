@@ -17,6 +17,7 @@
 
 import asyncio
 import logging
+import time
 from multiprocessing import Process
 
 from inference_endpoint.endpoint_client.config import HTTPClientConfig
@@ -75,10 +76,8 @@ class WorkerManager:
             # Apply CPU affinity after all workers are started
             self._pin_workers()
 
-            # Wait for all workers to signal readiness
-            await self.pool_transport.wait_for_workers_ready(
-                timeout=self.http_config.worker_initialization_timeout
-            )
+            # Wait for workers with periodic liveness checks
+            await self._wait_for_workers_with_liveness_check()
 
             logger.debug(f"All {self.http_config.num_workers} workers ready")
             initialization_succeeded = True
@@ -120,6 +119,36 @@ class WorkerManager:
             if cpus:
                 set_cpu_affinity(pid=pid, cpus=set(cpus))
                 logger.debug(f"Worker {worker_id} (pid {pid}) pinned to CPUs {cpus}")
+
+    async def _wait_for_workers_with_liveness_check(self) -> None:
+        """Wait for workers, checking liveness at 10% intervals."""
+        timeout = self.http_config.worker_initialization_timeout
+        check_interval = timeout * 0.10 if timeout else 1.0
+        start = time.monotonic()
+
+        while True:
+            # Check for dead workers
+            dead = [w for w in self.workers if not w.is_alive()]
+            if dead:
+                raise RuntimeError(
+                    f"Worker(s) died during init: PIDs {[w.pid for w in dead]}"
+                )
+
+            # Check remaining time
+            elapsed = time.monotonic() - start
+            remaining = timeout - elapsed if timeout else None
+            if remaining is not None and remaining <= 0:
+                raise TimeoutError("Workers failed to initialize")
+
+            # Try to wait with short timeout (25% of total, or remaining time)
+            try:
+                wait_time = (
+                    min(check_interval, remaining) if remaining else check_interval
+                )
+                await self.pool_transport.wait_for_workers_ready(timeout=wait_time)
+                return  # All ready
+            except TimeoutError:
+                continue  # Loop to check liveness again
 
     async def shutdown(self) -> None:
         """Shutdown workers and transports."""
