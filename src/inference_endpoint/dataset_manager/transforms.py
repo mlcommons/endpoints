@@ -156,6 +156,12 @@ class Harmonize(RowProcessor):
             conversation_start_date=conversation_start_date,
         )
 
+    def __call__(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Apply the transform, skipping if the target column already exists."""
+        if self.tokenized_column in df.columns:
+            return df
+        return super().__call__(df)
+
     def process_row(self, row: dict[str, Any]) -> dict[str, Any]:
         """Harmonize the user prompt for a single row.
 
