@@ -110,7 +110,7 @@ class CNNDailyMail(
         transforms: list[Transform] | None = None,
         force_regenerate: bool = False,
     ) -> "Dataset":
-        transforms = (transforms or []) + cls.PRESETS.llama3()
+        transforms = cls.PRESETS.llama3() + (transforms or [])
         df = cls.generate(force=force_regenerate, datasets_dir=datasets_dir)
         return cls(df, transforms=transforms, repeats=num_repeats)
 
