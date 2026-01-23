@@ -10,8 +10,6 @@ ENV PATH="/app/venv/bin:$PATH"
 
 WORKDIR /app
 
-RUN --mount=type=secret,id=HF_TOKEN,dst=/run/secrets/hf_token export HF_TOKEN=$(cat /run/secrets/hf_token)
-
 RUN python -m venv /app/venv
 RUN sfw pip install --no-cache-dir \
     datasets==3.6.0 \
@@ -25,9 +23,11 @@ RUN mkdir -p /opt/LiveCodeBench_Datasets/release_v6
 
 COPY generate.py /opt/LiveCodeBench_Datasets/generate.py
 
-RUN python /opt/LiveCodeBench_Datasets/generate.py \
-    --datasets-dir /opt/LiveCodeBench_Datasets \
-    --variant release_v6
+RUN --mount=type=secret,id=HF_TOKEN,dst=/run/secrets/hf_token \
+    export HF_TOKEN=$(cat /run/secrets/hf_token) \
+    && python /opt/LiveCodeBench_Datasets/generate.py \
+        --datasets-dir /opt/LiveCodeBench_Datasets \
+        --variant release_v6
 RUN chmod 444 -R /opt/LiveCodeBench_Datasets/*
 RUN chmod 555 /opt/LiveCodeBench_Datasets
 
