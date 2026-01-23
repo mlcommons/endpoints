@@ -17,8 +17,6 @@
 """Preset transforms for the CNN/DailyMail dataset."""
 
 from inference_endpoint.dataset_manager.transforms import (
-    AddStaticColumns,
-    DropColumns,
     Transform,
     UserPromptFormatter,
 )
@@ -36,23 +34,5 @@ def llama3(
         UserPromptFormatter(
             user_prompt_format=f"Summarize the following news article in {max_new_tokens} tokens. Please output the summary only, without any other text.\n\nArticle:\n{{article}}\n\nSummary:",
             output_column="prompt",
-        ),
-        # Step 2: Drop columns we don't need for inference
-        DropColumns(
-            columns=[
-                "article",
-                "highlights",
-            ],
-            errors="ignore",
-        ),
-        # Step 3: Add metadata columns since we don't want to do a dict update every iteration
-        AddStaticColumns(
-            {
-                "stream": stream,
-                "max_new_tokens": max_new_tokens,
-                "temperature": temperature,
-                "top_p": top_p,
-                "top_k": top_k,
-            }
         ),
     ]
