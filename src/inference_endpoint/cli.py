@@ -124,7 +124,7 @@ def create_parser() -> argparse.ArgumentParser:
         "--dataset", type=str, help="Dataset name(s) or path (comma-separated)"
     )
     eval_parser.add_argument(
-        "--endpoint", "-e", type=str, required=True, help="Endpoint URL"
+        "--endpoints", "-e", type=str, required=True, help="Endpoint URL"
     )
     eval_parser.add_argument("--api-key", type=str, help="API key")
 
@@ -135,7 +135,7 @@ def create_parser() -> argparse.ArgumentParser:
     # ===== Probe command =====
     probe_parser = subparsers.add_parser("probe", help="Test endpoint connectivity")
     probe_parser.add_argument(
-        "--endpoint", "-e", type=str, required=True, help="Endpoint URL"
+        "--endpoints", "-e", type=str, required=True, help="Endpoint URL"
     )
     probe_parser.add_argument("--api-key", type=str, help="API key")
     probe_parser.add_argument(
@@ -186,7 +186,7 @@ def _add_shared_benchmark_args(parser):
         parser: The argument parser to add arguments to.
     """
     parser.add_argument(
-        "--endpoint", "-e", type=str, required=True, help="Endpoint URL"
+        "--endpoints", "-e", type=str, required=True, help="Endpoint URL"
     )
     parser.add_argument(
         "--model", type=str, required=True, help="Model name (e.g., llama-2-70b)"

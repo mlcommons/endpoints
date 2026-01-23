@@ -18,7 +18,6 @@ from logging import getLogger
 from pathlib import Path
 
 import pandas as pd
-from inference_endpoint.dataset_manager.transforms import Transform
 
 from ...dataset import Dataset, load_from_huggingface
 from . import presets
@@ -150,19 +149,3 @@ class GPQA(
         df.to_parquet(dst_path)
         logger.info(f"Saved {len(df)} samples to {dst_path}")
         return df
-
-
-class GPQA_GPTOSS_SGLang(GPQA, dataset_id="gpqa_gptoss_sglang"):
-    """GPQA for GPTOSS-SGLang"""
-
-    @classmethod
-    def get_dataloader(
-        cls,
-        datasets_dir: Path = Path("datasets"),
-        num_repeats: int = 1,
-        transforms: list[Transform] | None = None,
-        force_regenerate: bool = False,
-    ) -> "Dataset":
-        transforms = (transforms or []) + GPQA.PRESETS.gptoss_sglang()
-        df = GPQA.generate(force=force_regenerate, datasets_dir=datasets_dir)
-        return cls(df, transforms=transforms, repeats=num_repeats)

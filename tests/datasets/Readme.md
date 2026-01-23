@@ -82,13 +82,13 @@ Describe space exploration (case 3) in detail
 ```bash
 # Test offline benchmark
 inference-endpoint benchmark offline \
-  --endpoint http://localhost:8765 \
+  --endpoints http://localhost:8765 \
   --model Qwen/Qwen3-8B \
   --dataset tests/datasets/dummy_1k.pkl
 
 # Test probe
 inference-endpoint probe \
-  --endpoint http://localhost:8765 \
+  --endpoints http://localhost:8765 \
   --model Qwen/Qwen3-8B \
   --requests 10
 ```

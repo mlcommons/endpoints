@@ -31,7 +31,7 @@ from inference_endpoint.endpoint_client import HTTPEndpointClient, HTTPClientCon
 from inference_endpoint.core.types import Query
 
 client = HTTPEndpointClient(
-    HTTPClientConfig(endpoint_url="http://localhost:8000/v1/completions")
+    HTTPClientConfig(endpoint_urls=["http://localhost:8000/v1/completions"])
 )
 
 # Sync issue (fire-and-forget)
@@ -70,7 +70,7 @@ plan = pin_loadgen(num_workers=8)
 # 2. Pass plan to client (workers get pinned automatically)
 client = HTTPEndpointClient(
     HTTPClientConfig(
-        endpoint_url="http://localhost:8000/v1/completions",
+        endpoint_urls=["http://localhost:8000/v1/completions"],
         num_workers=8,
         cpu_affinity=plan,
     )

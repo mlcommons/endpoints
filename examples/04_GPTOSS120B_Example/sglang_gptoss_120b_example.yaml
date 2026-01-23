@@ -23,14 +23,14 @@ datasets:
   #     eval_method: "code_bench_scorer"
   #     extractor: "python_code_extractor"
   #     num_repeats: 3
-  - name: "aime25_gptoss_sglang"
+  - name: "aime25::gptoss"
     type: "accuracy"
     accuracy_config:
       eval_method: "pass_at_1"
       ground_truth: "answer"
       extractor: "boxed_math_extractor"
       num_repeats: 8
-  - name: "gpqa_gptoss_sglang"
+  - name: "gpqa::gptoss"
     type: "accuracy"
     accuracy_config:
       eval_method: "pass_at_1"
@@ -59,7 +59,8 @@ metrics:
     - "tpot"
 
 endpoint_config:
-  endpoint: "http://localhost:30000"
+  endpoints:
+    - "http://localhost:30000"
   api_key: null
   api_type: "sglang"
 
