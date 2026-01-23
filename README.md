@@ -124,11 +124,23 @@ The system follows a modular, event-driven architecture:
 - **Metrics Collector**: Performance measurement and analysis
 - **Configuration Manager**: System configuration (TBD)
 
+## Accuracy Evaluation
+
+You can run accuracy evaluation with Pass@1 scoring by specifying accuracy datasets in the benchmark
+configuration. Currently, Inference Endpoints provides the following pre-defined accuracy benchmarks:
+
+- GPQA (default: GPQA Diamond)
+- AIME (default: AIME 2025)
+- LiveCodeBench (default: lite, release_v6)
+
+However, LiveCodeBench will not work out-of-the-box and requires some additional setup. See the
+[LiveCodeBench](src/inference_endpoint/dataset_manager/predefined/livecodebench/README.md) documentation
+for details and explanations.
+
 ## 🚧 Pending Features
 
 The following features are planned for future releases:
 
-- [ ] **Accuracy Evaluation** - Comprehensive accuracy metrics and validation
 - [ ] **Performance Tuning** - Advanced performance optimization features
 - [ ] **Submission Ruleset Integration** - Full MLPerf submission workflow support
 - [ ] **Documentation Generation and Hosting** - Sphinx-based API documentation with GitHub Pages
