@@ -13,13 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import random
+import json
+import os
+import urllib.request
 from logging import getLogger
 from pathlib import Path
 
 import pandas as pd
 
-from ...dataset import Dataset, load_from_huggingface
+from ...dataset import Dataset
 from . import presets
 
 logger = getLogger(__name__)
@@ -36,22 +38,52 @@ class LiveCodeBench(
     """
 
     COLUMN_NAMES = [
+        "question_id",
         "question",
         "starter_code",
+        "difficulty",
+        "public_test_cases",
+        "private_test_cases",
+        "func_name",
     ]
 
     PRESETS = presets
+
+    SERVER_ADDRESS = os.getenv("LCB_SERVER_ADDRESS", "127.0.0.1:13835")
 
     @classmethod
     def generate(
         cls,
         datasets_dir: Path,
         variant: str = "release_v6",
-        seed: int = 0,
-        max_samples: int | None = None,
         force: bool = False,
+        **kwargs,
     ) -> pd.DataFrame:
-        """Generates the LiveCodeBench reference dataset for accuracy evaluation."""
+        """Generates the LiveCodeBench reference dataset for accuracy evaluation. LiveCodeBench
+        requires a container to be running in the background as a webservice. The base container
+        contains a copy of the dataset inside at /opt/LiveCodeBench_Datasets/livecodebench_release_v6.parquet.
+
+        You can either copy it out via `docker cp`, or use this method, which requires the
+        container to be running, and the local <datasets_dir>/livecodebench/release_v6 directory
+        to be mounted on the container at /mnt/datasets.
+
+        ** NOTE ** It is the SUBDIRECTORY in the datasets_dir that must be mounted, not the entire datasets_dir
+
+        If the copy fails, or this directory is not mounted correctly, this method will raise an exception,
+
+        Args:
+            datasets_dir: Path to the base datasets directory where all datasets are stored.
+            variant: The variant of the dataset to generate. (Default: "release_v6")
+            force: Whether to force the generation of the dataset. (Default: False)
+            **kwargs: Additional keyword arguments to pass to the dataset generation method. These are ignored.
+
+        Returns:
+            pd.DataFrame: The dataset as a pandas DataFrame.
+
+        Raises:
+            FileNotFoundError: If the dataset is not found at the destination path.
+            RuntimeError: If the dataset copy fails.
+        """
         filename = f"{cls.DATASET_ID}_{variant}.parquet"
         dst_path = datasets_dir / cls.DATASET_ID / variant / filename
         if not dst_path.parent.exists():
@@ -61,45 +93,23 @@ class LiveCodeBench(
             logger.info(f"Dataset already exists at {dst_path}. Loading from file.")
             return pd.read_parquet(dst_path)
 
-        try:
-            df = load_from_huggingface(
-                "livecodebench/code_generation_lite",
-                split="test",
-                cache_dir=datasets_dir / "hf_cache" / f"{cls.DATASET_ID}_{variant}",
-                load_options={
-                    "version_tag": variant,
-                },
-            )
-        except Exception as e:
-            logger.error(f"Error loading dataset: {e}")
-            logger.error("Note: This dataset may require HuggingFace authentication.")
-            logger.error("Run: huggingface-cli login")
-            raise
+        # Try to get dataset from LCB server endpoint first
+        lcb_server_url = f"http://{cls.SERVER_ADDRESS}"
+        logger.info(f"Attempting to copy dataset from LCB server at {lcb_server_url}")
+        req = urllib.request.Request(f"{lcb_server_url}/copy_dataset", method="GET")
 
-        logger.info(f"Loaded {len(df)} samples from {variant} variant of LiveCodeBench")
+        # Any error that occurs here should be fatal, up to caller to handle gracefully.
+        with urllib.request.urlopen(req, timeout=30) as response:
+            response_data = response.read()
+            result = json.loads(response_data)
 
-        # Following pre-processing steps from GPT-OSS side branch for parity with MLPerf Inference v6.0 GPT-OSS:
-        # https://github.com/v-shobhit/gpt-oss/blob/feat/mlperf_integration/gpt_oss/evals/livecodebench_eval.py#L75
-
-        keep = [
-            "question_id",
-            "question_content",
-            "starter_code",
-            "public_test_cases",
-            "private_test_cases",
-            "platform",
-        ]
-        df = df[keep]
-        df.rename(columns={"question_content": "question"}, inplace=True)
-
-        # If max_samples is specified, sample 'max_samples' rows from the dataset
-        if max_samples is not None and max_samples < len(df):
-            rng = random.Random(seed)
-            sampled_indices = rng.sample(range(len(df)), max_samples)
-            df = df.iloc[sampled_indices].reset_index(drop=True)
-            logger.info(f"Sampled {max_samples} questions")
-
-        # Save to parquet file
-        df.to_parquet(dst_path)
-        logger.info(f"Saved {len(df)} samples to {dst_path}")
-        return df
+            if result.get("success"):
+                # Dataset was successfully copied to /mnt/datasets
+                if dst_path.exists():
+                    return pd.read_parquet(dst_path)
+                else:
+                    raise FileNotFoundError(
+                        f"Server-side copy succeeded, but dataset not found at {dst_path}, is it mounted correctly?"
+                    )
+            else:
+                raise RuntimeError(f"LCB server copy failed: {result.get('error')}")

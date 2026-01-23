@@ -18,7 +18,6 @@ RUN apt-get update && \
 
 RUN mkdir /mnt/inference-endpoint
 WORKDIR /mnt/inference-endpoint
-COPY requirements/ ./requirements/
 COPY pyproject.toml .
 COPY src/ ./src/
 
@@ -34,5 +33,5 @@ RUN if ! getent group ${GROUP_ID}; then \
 USER appuser
 ENV PATH="/home/appuser/.local/bin:$PATH"
 
-RUN pip install --no-cache-dir -r requirements/base.txt -r requirements/test.txt
-RUN pip install -e .
+RUN pip install -e .[dev]
+RUN pip install .[test]

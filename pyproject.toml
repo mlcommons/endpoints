@@ -34,6 +34,7 @@ dependencies = [
     "pyzmq==27.1.0",
     "uvloop==0.22.1",
     "httptools==0.7.1",
+    "websocket-client==1.9.0",
     # Data handling
     "duckdb==1.4.0",
     "orjson==3.11.5",
@@ -103,6 +104,9 @@ where = ["src"]
 
 [tool.setuptools.package-dir]
 "" = "src"
+
+[tool.setuptools.exclude-package-data]
+"inference_endpoint.evaluation.livecodebench" = ["_server.py"]
 
 [tool.autopep8]
 max_line_length = 88
