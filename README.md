@@ -6,7 +6,7 @@ A high-performance benchmarking tool for LLM endpoints.
 
 ### Installation
 
-**Requirements**: Python 3.12+ (Python 3.12 is recommended for optimal performance)
+**Requirements**: Python 3.12+ (Python 3.12 is recommended for optimal performance. GIL-less mode in higher Python versions is not yet supported.)
 
 ```bash
 # Clone the repository
@@ -18,12 +18,14 @@ cd endpoints
 python3.12 -m venv venv
 source venv/bin/activate
 
-# Install in development mode
-pip install -e .
-pip install -r requirements/dev.txt
+# As a user
+pip install .
 
-# Install pre-commit hooks
-pre-commit install
+# As a developer
+pip install -e .     # Editable installation
+pip install .[dev]   # For developer tools
+pip install .[test]  # For pytest deps
+pre-commit install   # Git commit hooks
 ```
 
 ### Basic Usage
@@ -84,7 +86,7 @@ See [Local Testing Guide](docs/LOCAL_TESTING.md) for detailed instructions.
 
 ```bash
 # Install tests/ and examples/ dependencies
-pip install -r requirements/test.txt
+pip install .[test]
 
 # Run tests (excluding performance and explicit-run tests)
 pytest -m "not performance and not run_explicitly"
