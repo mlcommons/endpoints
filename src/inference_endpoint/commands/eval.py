@@ -61,9 +61,9 @@ async def run_eval_command(args: argparse.Namespace) -> None:
                     )
                     raise InputValidationError(f"Dataset not found: {ds}")
 
-    endpoint = getattr(args, "endpoint", None)
-    if endpoint:
-        logger.info(f"Endpoint: {endpoint}")
+    endpoints = getattr(args, "endpoints", None)
+    if endpoints:
+        logger.info(f"Endpoints: {endpoints}")
 
     # Raise NotImplementedError for clarity
     logger.error("Eval framework not yet implemented")

@@ -15,7 +15,14 @@
 
 import msgspec
 
+from ..config.schema import ModelParams, StreamingMode
 from ..core.types import Query, QueryResult
+from ..dataset_manager.transforms import (
+    AddStaticColumns,
+    ColumnFilter,
+    Harmonize,
+    Transform,
+)
 from ..endpoint_client.adapter_protocol import HttpRequestAdapter
 from .types import (
     SamplingParams,
@@ -32,6 +39,32 @@ class SGLangGenerateAdapter(HttpRequestAdapter):
     _response_decoder: msgspec.json.Decoder = msgspec.json.Decoder(
         SGLangGenerateResponse
     )
+
+    @classmethod
+    def dataset_transforms(cls, model_params: ModelParams) -> list[Transform]:
+        # Set model param defaults
+        metadata = {
+            "stream": (model_params.streaming == StreamingMode.ON),
+            "max_new_tokens": 32768,
+            "temperature": 1.0,
+            "top_p": 1.0,
+            "top_k": -1,
+        }
+
+        for attr in ["max_new_tokens", "temperature", "top_p", "top_k"]:
+            if (v := getattr(model_params, attr)) is not None:
+                metadata[attr] = v
+
+        return [
+            # SGLang /generate expects a pre-harmonized input with the key `input_tokens`
+            Harmonize(),
+            # Only keep the `input_tokens` column
+            ColumnFilter(
+                required_columns=["input_tokens"],
+            ),
+            # Add metadata columns since we don't want to do a dict update every iteration
+            AddStaticColumns(metadata),
+        ]
 
     @classmethod
     def encode_query(cls, query: Query) -> bytes:

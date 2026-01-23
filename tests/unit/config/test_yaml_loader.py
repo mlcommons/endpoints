@@ -55,7 +55,7 @@ metrics:
     - "throughput"
 
 endpoint_config:
-  endpoint:
+  endpoints:
     - "http://localhost:8000"
 """
         config_file = tmp_path / "test_config.yaml"

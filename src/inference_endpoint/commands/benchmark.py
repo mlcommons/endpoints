@@ -408,8 +408,7 @@ def _run_benchmark(
     model_name = config.model_params.name
     if not model_name and config.submission_ref:
         model_name = config.submission_ref.model
-    if not model_name and config.model_params.name:
-        model_name = config.model_params.name
+        config.model_params.name = model_name
 
     if config.report_dir:
         report_dir = Path(config.report_dir)
@@ -418,8 +417,6 @@ def _run_benchmark(
 
     report_dir.mkdir(parents=True, exist_ok=True)
     config.to_yaml_file(report_dir / "config.yaml")
-
-    max_tokens = config.model_params.max_new_tokens
 
     if model_name:
         try:
@@ -448,8 +445,10 @@ def _run_benchmark(
         enable_streaming = benchmark_mode == TestType.ONLINE
         if enable_streaming:
             logger.info("Streaming: enabled (auto, online mode)")
+            config.model_params.streaming = StreamingMode.ON
         else:
             logger.info("Streaming: disabled (auto, offline mode)")
+            config.model_params.streaming = StreamingMode.OFF
 
     # Get dataset - from CLI or from config
     # TODO: Dataset Logic is not yet fully implemented
@@ -465,40 +464,28 @@ def _run_benchmark(
     accuracy_datasets = []
     eval_configs = []
     if len(accuracy_configs) > 0:
-        # TODO configure metadata for accuracy datasets - should be done in the dataset config
-        metadata = {
-            "model": model_name,
-            "stream": enable_streaming,
-            "max_completion_tokens": max_tokens,
-            "temperature": config.model_params.temperature,
-            "top_p": config.model_params.top_p,
-            "top_k": config.model_params.top_k,
-            "repetition_penalty": config.model_params.repetition_penalty,
-        }
-
         # Pack the evaluation parameters for each accuracy dataset
         for acc_config in accuracy_configs:
-            extractor = Extractor.get(acc_config.accuracy_config.extractor)
-            ground_truth_column = acc_config.accuracy_config.ground_truth
-            scorer = Scorer.get(acc_config.accuracy_config.eval_method)
-            num_repeats = acc_config.accuracy_config.num_repeats
             dataset = DataLoaderFactory.create_loader(
-                acc_config, metadata=metadata, num_repeats=num_repeats
+                acc_config, num_repeats=acc_config.accuracy_config.num_repeats
             )
             accuracy_datasets.append(dataset)
             # TODO add tests and defaults
             eval_configs.append(
                 AccuracyConfiguration(
-                    scorer,
-                    extractor,
+                    Scorer.get(acc_config.accuracy_config.eval_method),
+                    Extractor.get(acc_config.accuracy_config.extractor),
                     acc_config.name,
                     dataset,
                     config.report_dir,
-                    ground_truth_column,
-                    num_repeats,
+                    acc_config.accuracy_config.ground_truth,
+                    acc_config.accuracy_config.num_repeats,
                 )
             )
-            dataset.load()
+            dataset.load(
+                api_type=config.endpoint_config.api_type,
+                model_params=config.model_params,
+            )
             logger.info(f"Loaded {dataset} - {dataset.num_samples()} samples")
 
     else:
@@ -510,18 +497,11 @@ def _run_benchmark(
 
     try:
         dataloader = DataLoaderFactory.create_loader(
-            performance_configs[0],
-            metadata={
-                "model": model_name,
-                "stream": enable_streaming,
-                "max_completion_tokens": max_tokens,
-                "temperature": config.model_params.temperature,
-                "top_p": config.model_params.top_p,
-                "top_k": config.model_params.top_k,
-                "repetition_penalty": config.model_params.repetition_penalty,
-            },
+            performance_configs[0]
+        )  # Do not repeat perf datasets
+        dataloader.load(
+            api_type=config.endpoint_config.api_type, model_params=config.model_params
         )
-        dataloader.load()
         logger.info(f"Loaded {dataloader.num_samples()} samples")
     except FileNotFoundError as e:
         logger.error(f"Dataset file not found: {performance_configs[0].path}")

@@ -31,13 +31,13 @@ Server is running. Press Ctrl+C to stop...
 ```bash
 # Terminal 2: Test probe command
 inference-endpoint -v probe \
-  --endpoint http://localhost:8765 \
+  --endpoints http://localhost:8765 \
   --model Qwen/Qwen3-8B \
   --requests 5
 
 # With custom prompt and model
 inference-endpoint -v probe \
-  --endpoint http://localhost:8765 \
+  --endpoints http://localhost:8765 \
   --model Qwen/Qwen3-8B \
   --requests 10 \
   --prompt "Tell me a joke in 20 words"
@@ -70,13 +70,13 @@ Waiting for 5 responses...
 ```bash
 # Quick test (model is required)
 inference-endpoint -v benchmark offline \
-  --endpoint http://localhost:8765 \
+  --endpoints http://localhost:8765 \
   --model Qwen/Qwen3-8B \
   --dataset tests/datasets/dummy_1k.pkl
 
 # Production test with custom params and report generation
 inference-endpoint -v benchmark offline \
-  --endpoint http://localhost:8765 \
+  --endpoints http://localhost:8765 \
   --model Qwen/Qwen3-8B \
   --dataset tests/datasets/dummy_1k.pkl \
   --num-samples 5000 \
@@ -110,7 +110,7 @@ Cleaning up...
 ```bash
 # Test sustained QPS with latency focus
 inference-endpoint -v benchmark online \
-  --endpoint http://localhost:8765 \
+  --endpoints http://localhost:8765 \
   --model Qwen/Qwen3-8B \
   --dataset tests/datasets/dummy_1k.pkl \
   --load-pattern poisson \
@@ -149,7 +149,7 @@ inference-endpoint validate --config offline_template.yaml
 
 # Test with existing dataset
 inference-endpoint benchmark offline \
-  --endpoint http://localhost:8765 \
+  --endpoints http://localhost:8765 \
   --model Qwen/Qwen3-8B \
   --dataset tests/datasets/ds_samples.pkl \
   -v
@@ -254,11 +254,11 @@ python scripts/create_dummy_dataset.py
 export HF_TOKEN=your_huggingface_token
 
 # 4. Test probe first
-inference-endpoint probe --endpoint http://localhost:8000 --model Qwen/Qwen3-8B --requests 10
+inference-endpoint probe --endpoints http://localhost:8000 --model Qwen/Qwen3-8B --requests 10
 
 # 5. Run benchmark with report generation
 inference-endpoint -v benchmark offline \
-  --endpoint http://localhost:8000 \
+  --endpoints http://localhost:8000 \
   --model Qwen/Qwen3-8B \
   --dataset tests/datasets/dummy_1k.pkl \
   --workers 4 \
@@ -277,14 +277,14 @@ pkill -f echo_server
 ```bash
 # Offline (max throughput)
 inference-endpoint benchmark offline \
-  --endpoint http://localhost:8765 \
+  --endpoints http://localhost:8765 \
   --model Qwen/Qwen3-8B \
   --dataset tests/datasets/dummy_1k.pkl \
   --report-path offline_report
 
 # Online (Poisson distribution)
 inference-endpoint benchmark online \
-  --endpoint http://localhost:8765 \
+  --endpoints http://localhost:8765 \
   --model Qwen/Qwen3-8B \
   --dataset tests/datasets/dummy_1k.pkl \
   --load-pattern poisson \
@@ -293,21 +293,21 @@ inference-endpoint benchmark online \
 
 # With explicit sample count
 inference-endpoint benchmark offline \
-  --endpoint http://localhost:8765 \
+  --endpoints http://localhost:8765 \
   --model Qwen/Qwen3-8B \
   --dataset tests/datasets/dummy_1k.pkl \
   --num-samples 500
 
 # Force streaming on for offline mode (to test TTFT metrics)
 inference-endpoint benchmark offline \
-  --endpoint http://localhost:8765 \
+  --endpoints http://localhost:8765 \
   --model Qwen/Qwen3-8B \
   --dataset tests/datasets/dummy_1k.pkl \
   --streaming on
 
 # Concurrency mode (fixed concurrent requests)
 inference-endpoint benchmark online \
-  --endpoint http://localhost:8765 \
+  --endpoints http://localhost:8765 \
   --model Qwen/Qwen3-8B \
   --dataset tests/datasets/dummy_1k.pkl \
   --load-pattern concurrency \

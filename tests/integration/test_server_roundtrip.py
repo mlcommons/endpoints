@@ -19,7 +19,7 @@ import aiohttp
 import pytest
 from inference_endpoint.core.types import Query
 from inference_endpoint.dataset_manager import Dataset
-from inference_endpoint.dataset_manager.transforms import ColumnNameRemap
+from inference_endpoint.dataset_manager.transforms import ColumnRemap
 from inference_endpoint.openai.openai_adapter import OpenAIAdapter
 from inference_endpoint.openai.openai_types_gen import CreateChatCompletionResponse
 
@@ -39,7 +39,7 @@ async def test_ds_chat_completion_data_loader_with_oracle_server(
     """
     ds_chat_completion_data_loader = Dataset.load_from_file(
         ds_pickle_dataset_path,
-        transforms=[ColumnNameRemap({"text_input": "prompt", "ref_output": "output"})],
+        transforms=[ColumnRemap({"text_input": "prompt", "ref_output": "output"})],
     )
     ds_chat_completion_data_loader.load()
     assert ds_chat_completion_data_loader.num_samples() == 5

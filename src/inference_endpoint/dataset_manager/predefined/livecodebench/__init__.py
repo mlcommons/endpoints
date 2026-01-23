@@ -18,7 +18,6 @@ from logging import getLogger
 from pathlib import Path
 
 import pandas as pd
-from inference_endpoint.dataset_manager.transforms import Transform
 
 from ...dataset import Dataset, load_from_huggingface
 from . import presets
@@ -104,22 +103,3 @@ class LiveCodeBench(
         df.to_parquet(dst_path)
         logger.info(f"Saved {len(df)} samples to {dst_path}")
         return df
-
-
-class LiveCodeBench_GPTOSS_SGLang(
-    LiveCodeBench, dataset_id="livecodebench_gptoss_sglang"
-):
-    """LiveCodeBench for GPTOSS-SGLang"""
-
-    @classmethod
-    def get_dataloader(
-        cls,
-        datasets_dir: Path = Path("datasets"),
-        num_repeats: int = 1,
-        transforms: list[Transform] | None = None,
-        force_regenerate: bool = False,
-    ) -> "Dataset":
-        transforms = (transforms or []) + LiveCodeBench.PRESETS.gptoss_sglang()
-
-        df = LiveCodeBench.generate(force=force_regenerate, datasets_dir=datasets_dir)
-        return cls(df, transforms=transforms, repeats=num_repeats)

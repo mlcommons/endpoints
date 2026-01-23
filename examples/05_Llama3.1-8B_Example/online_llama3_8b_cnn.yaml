@@ -49,7 +49,8 @@ metrics:
     - "tpot"
 
 endpoint_config:
-  endpoints: ["http://localhost:8000"]
+  endpoints:
+    - "http://localhost:8000"
   api_key: null
 
 report_dir: logs/llama3_8b_cnn_online

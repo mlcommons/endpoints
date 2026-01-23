@@ -82,6 +82,7 @@ class AsyncHttpEndpointClient:
 
         logger.info(
             f"EndpointClient initialized with num_workers={self.config.num_workers}, "
+            f"endpoints={self.config.endpoint_urls}, "
             f"adapter={self.config.adapter.__name__}, "
             f"accumulator={self.config.accumulator.__name__}, "
             f"pool_transport={self.config.worker_pool_transport.__name__}"

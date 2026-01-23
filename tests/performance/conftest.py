@@ -57,7 +57,7 @@ def perf_http_echo_server():
 def http_client(perf_http_echo_server):
     """Create single-worker HTTP client for perf tests."""
     http_config = HTTPClientConfig(
-        endpoint_url=f"{perf_http_echo_server.url}/v1/chat/completions",
+        endpoint_urls=[f"{perf_http_echo_server.url}/v1/chat/completions"],
         num_workers=1,
         warmup_connections=False,
     )

@@ -20,10 +20,10 @@ TODO: Very simple factory for now. Will be expanded to support multiple formats 
 
 import logging
 
-from inference_endpoint.dataset_manager.dataset import DatasetFormat
+from inference_endpoint.config.schema import Dataset as DatasetConfig
+from inference_endpoint.dataset_manager.dataset import Dataset, DatasetFormat
 
-from .dataset import Dataset
-from .transforms import AddStaticColumns, ColumnNameRemap
+from .transforms import ColumnRemap, MakeAdapterCompatible
 
 logger = logging.getLogger(__name__)
 
@@ -39,42 +39,67 @@ class DataLoaderFactory:
     """
 
     @staticmethod
-    def create_loader(
-        config: Dataset,
-        metadata: dict | None = None,
-        **kwargs,
-    ) -> Dataset:
+    def create_loader(config: DatasetConfig, num_repeats: int = 1, **kwargs) -> Dataset:
         """Create appropriate dataset loader based on format.
 
         Args:
             config: Dataset configuration
-            metadata: Dictionary of metadata for the loader
+            num_repeats: Number of times to repeat the dataset
+            **kwargs: Additional keyword arguments to use for predefined datasets. Passed to
+                Dataset.get_dataloader()
         """
         dataset_path = config.path
-        format = config.format
+        file_format = config.format
         remap = config.parser
         name = config.name
+        preset = None
+
+        if "::" in name:
+            parts = name.split("::")
+            if len(parts) != 2:
+                raise ValueError(f"Invalid dataset name: {name}")
+            name = parts[0]
+            preset = parts[1]
+
         if name in Dataset.PREDEFINED:
-            # To pass model name or other metadata to predefined datasets
-            if metadata is not None:
-                transforms = AddStaticColumns(metadata)
-                kwargs.setdefault("transforms", []).append(transforms)
-            return Dataset.PREDEFINED[name].get_dataloader(**kwargs)
+            ds_cls = Dataset.PREDEFINED[name]
+            preset_transforms = None
+
+            # If preset is provided, search for the preset in the dataset class
+            if preset is not None:
+                if not hasattr(ds_cls, "PRESETS"):
+                    raise ValueError(
+                        f"Dataset {name} does not have preset model transforms"
+                    )
+
+                if not hasattr(ds_cls.PRESETS, preset):
+                    raise ValueError(
+                        f"Dataset {name} does not have a preset model transform for {preset}"
+                    )
+
+                preset_transforms = getattr(ds_cls.PRESETS, preset)()
+            return ds_cls.get_dataloader(
+                transforms=preset_transforms,
+                num_repeats=num_repeats,
+                **kwargs,
+            )
+
         if name not in Dataset.PREDEFINED and dataset_path is None:
             raise ValueError(
                 f"Dataset {name} is not predefined and no dataset path provided - predefined datasets are: {list(Dataset.PREDEFINED.keys())}"
             )
-        if format is not None:
-            format = DatasetFormat(format)
 
-        if remap is None:
-            remap = {"question": "prompt"}
+        if file_format is not None:
+            file_format = DatasetFormat(file_format)
 
-        transforms = [ColumnNameRemap(remap)]
-        if metadata is not None:
-            transforms.append(AddStaticColumns(metadata))
+        transforms = []
+        if remap is not None:
+            transforms.append(ColumnRemap(remap))
+        transforms.append(MakeAdapterCompatible())
+
         return Dataset.load_from_file(
             dataset_path,
             transforms=transforms,
-            format=format,
+            format=file_format,
+            num_repeats=num_repeats,
         )

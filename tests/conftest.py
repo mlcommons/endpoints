@@ -34,7 +34,7 @@ from inference_endpoint import metrics
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import LoadPattern, LoadPatternType
 from inference_endpoint.dataset_manager.dataset import Dataset, DatasetFormat
-from inference_endpoint.dataset_manager.transforms import ColumnNameRemap
+from inference_endpoint.dataset_manager.transforms import ColumnRemap
 from inference_endpoint.load_generator.events import SampleEvent, SessionEvent
 from inference_endpoint.load_generator.sample import SampleEventHandler
 from inference_endpoint.testing.docker_server import DockerServer
@@ -331,9 +331,7 @@ class OracleServer(EchoServer):
 
         data_loader = Dataset.load_from_file(
             self.file_path,
-            transforms=[
-                ColumnNameRemap({"text_input": "prompt", "ref_output": "output"})
-            ],
+            transforms=[ColumnRemap({"text_input": "prompt", "ref_output": "output"})],
         )
         data_loader.load()
         self.data = {}
