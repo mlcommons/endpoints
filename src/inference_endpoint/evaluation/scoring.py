@@ -215,7 +215,7 @@ class LiveCodeBenchScorer(Scorer):
             "This method should not be called. Use the score() method instead, which invokes lcb_runner."
         )
 
-    def _evaluate_via_websocket(self, codes_dict: dict[int, list[str]]) -> dict | None:
+    def _evaluate_via_websocket(self, codes_dict: dict[str, list[str]]) -> dict | None:
         """Attempt to evaluate via WebSocket service (synchronous).
 
         Configured for long-running connections (minutes to hours) with:
@@ -443,7 +443,7 @@ class LiveCodeBenchScorer(Scorer):
         df = df.apply(self.match_sample_index, axis=1)
 
         # Get question IDs
-        def get_question_id(sample_index: int) -> int:
+        def get_question_id(sample_index: int) -> str:
             return self.dataset.dataframe.iloc[sample_index][self.question_id_column]
 
         df["question_id"] = df["sample_index"].apply(get_question_id)
