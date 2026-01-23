@@ -60,7 +60,7 @@ test:
   before_script:
     - python -m pip install --upgrade pip
     - pip install -e .
-    - pip install -r requirements/test.txt
+    - pip install .[test]
 
   script:
     - pytest -xv -m "not slow and not performance and not run_explicitly" --cov=src --cov-report=xml --cov-report=html
