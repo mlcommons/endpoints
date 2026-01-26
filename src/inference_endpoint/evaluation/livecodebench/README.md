@@ -292,6 +292,7 @@ The following environment variables can be configured when running the LCB-Servi
 - `LCB_VERSION_TAG`: Specify the version of LiveCodeBench to use. By default this is `release_v6`.
 - `LCB_AUTO_GENERATE_DATASET`: If this is set to `true`, then if there is no dataset located in the `LCB_DATASETS_DIR`, it will automatically be generated when
   the service starts. This is useful when used in conjunction with `LCB_VERSION_TAG` and `LCB_DATASETS_DIR`. For instance, the following can be used to do a 1-time test run of LiveCodeBench v4:
+- `LCB_SERVER_DEBUG`: When set to any value (e.g., `true`, `1`, `yes`), enables DEBUG level logging for the server. By default, only INFO level logs and above are shown. This is useful for troubleshooting and development purposes.
 
 ```
 ...

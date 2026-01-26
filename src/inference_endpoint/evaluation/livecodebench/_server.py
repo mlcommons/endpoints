@@ -21,6 +21,7 @@ with real-time progress updates via callbacks.
 
 import asyncio
 import json
+import logging
 import os
 import shutil
 import traceback
@@ -31,6 +32,8 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from lib.lcb_serve import LCBServe
 from pydantic import BaseModel, Field, field_validator
+
+logger = logging.getLogger(__name__)
 
 
 class EvaluationRequest(BaseModel):
@@ -114,13 +117,15 @@ class EvaluationSession:
         self.lcb_serve = lcb_serve_instance
         self.event_loop = event_loop
 
-        # Calculate total samples upfront
-        self.total_samples = sum(len(codes) for codes in request.codes_dict.values())
-        samples_per_problem = len(list(request.codes_dict.values())[0])
-        print(f"- Evaluating {self.total_samples} code samples")
-        print(f"    # problem IDs: {len(self.request.codes_dict)}")
-        print(f"    code samples per problem: {samples_per_problem}")
-        print(f"    timeout: {request.timeout_sec}")
+        # Calculate total samples upfront.
+        # Pydantic validation ensures all code lists have the same length and are not empty.
+        # Note: next(iter(...)) is a common pattern to quickly get the first value of an iterator.
+        code_samples_per_problem = len(next(iter(request.codes_dict.values())))
+        self.total_samples = len(request.codes_dict) * code_samples_per_problem
+        logger.info(f"- Evaluating {self.total_samples} code samples")
+        logger.info(f"    # problem IDs: {len(self.request.codes_dict)}")
+        logger.info(f"    code samples per problem: {code_samples_per_problem}")
+        logger.info(f"    timeout: {request.timeout_sec}")
 
         self.completed_samples = 0
 
@@ -168,7 +173,8 @@ class EvaluationSession:
             return {"success": True, "result": result}
         except Exception as e:
             tb_string = traceback.format_exc()
-            print(tb_string)
+            logger.error(f"Evaluation failed with exception: {e}")
+            logger.error(tb_string)
             return {
                 "success": False,
                 "error": str(e),
@@ -259,8 +265,19 @@ async def startup_event():
     - LCB_N_WORKERS (default: None, auto-detect)
     - LCB_DATASETS_DIR (default: "/opt/LiveCodeBench_Datasets")
     - LCB_AUTO_GENERATE_DATASET (default: "true")
+    - LCB_SERVER_DEBUG (default: not set, enables DEBUG logging if set)
     """
     global lcb_serve
+
+    # Configure logging level
+    debug_mode = os.getenv("LCB_SERVER_DEBUG")
+    if debug_mode:
+        logging.basicConfig(level=logging.DEBUG, force=True)
+        logger.setLevel(logging.DEBUG)
+        logger.debug("Debug logging enabled via LCB_SERVER_DEBUG")
+    else:
+        logging.basicConfig(level=logging.INFO, force=True)
+        logger.setLevel(logging.INFO)
 
     # Read configuration from environment variables with defaults
     version_tag = os.getenv("LCB_VERSION_TAG", "release_v6")
@@ -276,11 +293,11 @@ async def startup_event():
     auto_generate_str = os.getenv("LCB_AUTO_GENERATE_DATASET", "false").lower()
     auto_generate_dataset = auto_generate_str in ("true", "1", "yes", "on")
 
-    print("Initializing LCBServe with configuration:")
-    print(f"  version_tag: {version_tag}")
-    print(f"  n_workers: {n_workers or 'auto-detect'}")
-    print(f"  datasets_dir: {datasets_dir}")
-    print(f"  auto_generate_dataset: {auto_generate_dataset}")
+    logger.info("Initializing LCBServe with configuration:")
+    logger.info(f"  version_tag: {version_tag}")
+    logger.info(f"  n_workers: {n_workers or 'auto-detect'}")
+    logger.info(f"  datasets_dir: {datasets_dir}")
+    logger.info(f"  auto_generate_dataset: {auto_generate_dataset}")
 
     lcb_serve = LCBServe(
         version_tag=version_tag,
@@ -289,7 +306,7 @@ async def startup_event():
         datasets_dir=datasets_dir,
         auto_generate_dataset=auto_generate_dataset,
     )
-    print("LCBServe initialized successfully")
+    logger.info("LCBServe initialized successfully")
 
 
 @app.get("/info")
@@ -445,9 +462,9 @@ async def websocket_evaluate(websocket: WebSocket):
         session = EvaluationSession(websocket, request, lcb_serve, loop)
         await session.execute()
     except WebSocketDisconnect:
-        # Client disconnected, nothing to do
-        pass
+        logger.info("WebSocket client disconnected")
     except Exception as e:
+        logger.error(f"Unexpected error in websocket_evaluate: {e}", exc_info=True)
         try:
             await websocket.send_json(
                 ProgressMessage(
@@ -455,14 +472,13 @@ async def websocket_evaluate(websocket: WebSocket):
                     error=f"Unexpected error: {e!s}",
                 ).model_dump()
             )
-        except Exception:
-            # If we can't send the error, just close
-            pass
+        except Exception as send_error:
+            logger.warning(f"Failed to send error message to client: {send_error}")
     finally:
         try:
             await websocket.close()
-        except Exception:
-            pass
+        except Exception as close_error:
+            logger.warning(f"Failed to close websocket: {close_error}")
 
 
 if __name__ == "__main__":

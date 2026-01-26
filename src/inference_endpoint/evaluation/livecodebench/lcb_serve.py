@@ -44,6 +44,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 import pandas as pd
+from tqdm import tqdm
 
 from .generate import generate_dataset
 
@@ -62,15 +63,14 @@ def execute_code_single(test_suite_json: str, code: str, timeout_sec: int = 60):
 
     # LCB results are expected to be plain booleans or error codes.
     # Reference: https://github.com/LiveCodeBench/LiveCodeBench/blob/28fef95ea8c9f7a547c8329f2cd3d32b92c1fa24/lcb_runner/evaluation/compute_code_generation_metrics.py#L72-L79
-    fixed = []
+    fixed_types = []
     for elem in res:
         if isinstance(elem, np.ndarray):
             elem = elem.item(0)
         if isinstance(elem, np.bool_):
             elem = bool(elem)
-        fixed.append(elem)
-    res = fixed
-    return res, metadata
+        fixed_types.append(elem)
+    return fixed_types, metadata
 
 
 def execute_code_single_suppressed_errors(*args, resp_buffer: list = None, **kwargs):
@@ -93,8 +93,7 @@ def execute_code_single_suppressed_errors(*args, resp_buffer: list = None, **kwa
 
     if resp_buffer is not None:
         resp_buffer.append((res, metadata))
-    else:
-        return res, metadata
+    return res, metadata
 
 
 def run_code_subprocess(
@@ -357,12 +356,7 @@ class LCBServe:
                 list of question IDs that completed.
 
         Returns:
-            dict[str, int | float]: Dictionary in the form:
-            {
-                "total_samples": int,
-                "passed_samples": int,
-                "pass_at_1": float,
-            }
+            dict[str, int | float]: See description above.
 
         Raises:
             FileNotFoundError: If the parquet file does not exist.
@@ -395,10 +389,6 @@ class LCBServe:
 
 
 if __name__ == "__main__":
-    import json
-
-    from tqdm import tqdm
-
     parser = argparse.ArgumentParser(
         description="Evaluate LiveCodeBench parquet file and output results as JSON"
     )

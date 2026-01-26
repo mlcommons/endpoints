@@ -28,6 +28,12 @@ from typing import ClassVar
 import numpy as np
 import orjson
 import pandas as pd
+from tqdm import tqdm
+
+try:
+    import websocket
+except ImportError:
+    websocket = None
 
 from ..dataset_manager.dataset import Dataset
 from ..load_generator.events import SampleEvent
@@ -372,19 +378,12 @@ class LiveCodeBenchScorer(Scorer, scorer_id="code_bench_scorer"):
         Returns:
             dict with evaluation results, or None if connection failed
         """
-        try:
-            import websocket
-        except ImportError:
+        if websocket is None:
             print(
                 "Warning: websocket-client package not installed, falling back to subprocess"
             )
             print("Install with: pip install websocket-client")
             return None
-
-        try:
-            from tqdm import tqdm
-        except ImportError:
-            tqdm = None
 
         try:
             # Create WebSocket connection with settings for long-running operations
@@ -413,12 +412,11 @@ class LiveCodeBenchScorer(Scorer, scorer_id="code_bench_scorer"):
                 print(
                     f"Evaluating {len(codes_dict)} questions ({total_samples} samples)..."
                 )
-                if tqdm:
-                    pbar = tqdm(
-                        total=total_samples,
-                        desc="LCB Evaluation",
-                        unit="sample",
-                    )
+                pbar = tqdm(
+                    total=total_samples,
+                    desc="LCB Evaluation",
+                    unit="sample",
+                )
 
                 # Process responses
                 while True:
@@ -436,16 +434,14 @@ class LiveCodeBenchScorer(Scorer, scorer_id="code_bench_scorer"):
                             pass
 
                         elif status == "progress":
-                            if pbar:
-                                completed = data.get("completed_samples", 0)
-                                # Update progress bar to current position
-                                pbar.n = completed
-                                pbar.refresh()
+                            completed = data.get("completed_samples", 0)
+                            # Update progress bar to current position
+                            pbar.n = completed
+                            pbar.refresh()
 
                         elif status == "completed":
-                            if pbar:
-                                pbar.n = total_samples
-                                pbar.refresh()
+                            pbar.n = total_samples
+                            pbar.refresh()
                             return data.get("result")
 
                         elif status == "error":
