@@ -10,12 +10,21 @@ model_params:
   max_new_tokens: 128
 
 datasets:
-  - name: cnn_dailymail
-    type: "performance"
-    path: "data/cnn_dailymail_validation.jsonl" # Path to the dataset. Note: This should be the file generated with download_cnndm.py
-    samples: 13368 # Number of samples in the dataset (validation has ~13.3k samples, while training has ~287k samples)
+  - name: cnn_dailymail::llama3_8b
+    type: accuracy
+    samples: 13368
     parser:
-      input: "prompt"
+      input: prompt
+    accuracy_config:
+      eval_method: "rouge"
+      ground_truth: "highlights"
+      extractor: identity_extractor
+      num_repeats: 1
+  - name: cnn_dailymail::llama3_8b
+    type: "performance"
+    samples: 13368
+    parser:
+      input: prompt
 
 settings:
   runtime:

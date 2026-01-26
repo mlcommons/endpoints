@@ -22,7 +22,7 @@ from inference_endpoint.dataset_manager.transforms import (
 )
 
 
-def llama3(
+def llama3_8b(
     stream: bool = True,
     max_new_tokens: int = 128,
     temperature: float = 0.0,
