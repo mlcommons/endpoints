@@ -184,7 +184,7 @@ def generate_ie_config(
             "load_pattern": {"type": "max_throughput"},
             "client": {"workers": workers},
         },
-        "endpoint_config": {"endpoint": endpoint_url},
+        "endpoint_config": {"endpoints": [endpoint_url]},
         "report_dir": str(report_dir),
         "timeout": timeout,
     }

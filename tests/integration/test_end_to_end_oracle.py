@@ -25,12 +25,9 @@ from inference_endpoint.core.types import QueryResult
 from inference_endpoint.dataset_manager import Dataset
 from inference_endpoint.dataset_manager.transforms import (
     AddStaticColumns,
-    ColumnNameRemap,
+    ColumnRemap,
 )
-from inference_endpoint.endpoint_client.configs import (
-    AioHttpConfig,
-    HTTPClientConfig,
-)
+from inference_endpoint.endpoint_client.config import HTTPClientConfig
 from inference_endpoint.endpoint_client.http_client import HTTPEndpointClient
 from inference_endpoint.endpoint_client.http_sample_issuer import HttpClientSampleIssuer
 from inference_endpoint.load_generator import (
@@ -45,11 +42,10 @@ from inference_endpoint.load_generator import (
 class DeepSeekR1SampleIssuer(HttpClientSampleIssuer):
     def __init__(self, tmp_path: str, url: str):
         self.http_config = HTTPClientConfig(
-            endpoint_url=urljoin(url, "/v1/chat/completions"),
-            num_workers=16,
+            endpoint_urls=[urljoin(url, "/v1/chat/completions")],
+            warmup_connections=False,
         )
-        self.aiohttp_config = AioHttpConfig()
-        super().__init__(HTTPEndpointClient(self.http_config, self.aiohttp_config))
+        super().__init__(HTTPEndpointClient(self.http_config))
 
 
 async def run_benchmark(server_url, dataloader, tmp_path, rt_settings):
@@ -105,7 +101,7 @@ async def _run_load_generator_full_run_url(
     dummy_dataloader = Dataset.load_from_file(
         dataset_path,
         transforms=[
-            ColumnNameRemap({"text_input": "prompt", "ref_output": "output"}),
+            ColumnRemap({"text_input": "prompt", "ref_output": "output"}),
             AddStaticColumns({"model": hf_model_name}),
         ],
     )
@@ -167,7 +163,7 @@ async def test_load_generator_full_run_mock_http_oracle_server(
     dummy_dataloader = Dataset.load_from_file(
         ds_pickle_dataset_path,
         transforms=[
-            ColumnNameRemap({"text_input": "prompt", "ref_output": "output"}),
+            ColumnRemap({"text_input": "prompt", "ref_output": "output"}),
             AddStaticColumns({"model": hf_model_name}),
         ],
     )

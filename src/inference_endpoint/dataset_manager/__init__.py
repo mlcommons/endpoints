@@ -22,15 +22,18 @@ This module handles dataset loading, preprocessing, and management.
 from .dataset import Dataset, EmptyDataset
 from .factory import DataLoaderFactory
 from .predefined.aime25 import AIME25
+from .predefined.cnndailymail import CNNDailyMail
 from .predefined.gpqa import GPQA
 from .predefined.livecodebench import LiveCodeBench
+from .predefined.open_orca import OpenOrca
 from .predefined.random import RandomDataset
 from .transforms import (
     AddStaticColumns,
-    ColumnNameRemap,
-    DropColumns,
+    ColumnFilter,
+    ColumnRemap,
     FusedRowProcessor,
     Harmonize,
+    MakeAdapterCompatible,
     UserPromptFormatter,
     apply_transforms,
 )
@@ -39,15 +42,18 @@ __all__ = [
     "Dataset",
     "EmptyDataset",
     "DataLoaderFactory",
-    "ColumnNameRemap",
+    "ColumnFilter",
+    "ColumnRemap",
     "AddStaticColumns",
     "UserPromptFormatter",
-    "DropColumns",
     "FusedRowProcessor",
     "Harmonize",
+    "MakeAdapterCompatible",
     "apply_transforms",
     "AIME25",
     "GPQA",
+    "OpenOrca",
     "LiveCodeBench",
+    "CNNDailyMail",
     "RandomDataset",
 ]

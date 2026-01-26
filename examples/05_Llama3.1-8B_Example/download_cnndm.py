@@ -45,7 +45,7 @@ def download_cnndm(
             for line in id_file:
                 calibration_ids.add(line.strip())
         output_file_tag = "calibration"
-    fname = f"cnn_dailymail_{output_file_tag}.json"
+    fname = f"cnn_dailymail_{output_file_tag}.jsonl"
     output_file = os.path.join(save_dir, fname)
 
     # Add the custom prompt to each example and filter if calibration IDs are provided

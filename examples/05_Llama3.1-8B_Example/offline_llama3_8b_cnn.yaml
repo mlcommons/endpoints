@@ -5,30 +5,40 @@ type: "offline"
 
 model_params:
   name: "meta-llama/Llama-3.1-8B-Instruct" # Path to the model
-  temperature: 1.0
+  temperature: 0.0
   top_p: 1.0
   max_new_tokens: 128
 
 datasets:
-  - name: "perf-test"
-    type: "performance"
-    path: "data/cnn_dailymail_validation.json" # Path to the dataset. Note: This should be the file generated with download_cnndm.py
-    samples: 13368 # Number of samples in the dataset (validation has ~13.3k samples, while training has ~287k samples)
+  - name: cnn_dailymail::llama3_8b
+    type: accuracy
+    samples: 13368
     parser:
-      prompt: "input"
+      input: prompt
+    accuracy_config:
+      eval_method: "rouge"
+      ground_truth: "highlights"
+      extractor: identity_extractor
+      num_repeats: 1
+  - name: cnn_dailymail::llama3_8b
+    type: "performance"
+    samples: 13368
+    parser:
+      input: prompt
 
 settings:
   runtime:
-    min_duration_ms: 600000 # 10 minutes
-    max_duration_ms: 3600000 # 60 minutes (Arbitrary here, and doesn't have counterpart in legacy loadgen)
+    min_duration_ms: 60000 # 1 minute
+    max_duration_ms: 360000 # 6 minutes (Arbitrary here, and doesn't have counterpart in legacy loadgen)
     scheduler_random_seed: 137 # For Poisson/distribution sampling
     dataloader_random_seed: 111 # For dataset shuffling (Will be updated after rng seeds are finalized for submission)
+    n_samples_to_issue: 13368 # Number of samples to issue (for offline, this should match the dataset samples)
 
   load_pattern:
     type: "max_throughput"
 
   client:
-    workers: 1 # Number of client workers
+    workers: 4 # Number of client workers
 
 metrics:
   collect:
@@ -38,5 +48,8 @@ metrics:
     - "tpot"
 
 endpoint_config:
-  endpoint: "http://localhost:8000"
+  endpoints:
+    - "http://localhost:8000"
   api_key: null
+
+report_dir: logs/llama3_8b_cnn_offline # Directory to save the benchmark report

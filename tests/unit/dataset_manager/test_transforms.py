@@ -23,9 +23,11 @@ from typing import Any
 import pandas as pd
 import pytest
 from inference_endpoint.dataset_manager.transforms import (
-    ColumnNameRemap,
-    DropColumns,
+    AddStaticColumns,
+    ColumnFilter,
+    ColumnRemap,
     FusedRowProcessor,
+    MakeAdapterCompatible,
     RowProcessor,
     Transform,
     UserPromptFormatter,
@@ -33,39 +35,23 @@ from inference_endpoint.dataset_manager.transforms import (
 )
 
 
-class TestColumnNameRemap:
-    """Test suite for ColumnNameRemap transform."""
+class TestColumnRemap:
+    """Test suite for ColumnRemap transform."""
 
-    def test_basic_column_rename_inplace(self):
-        """Test basic column renaming with inplace=True."""
+    def test_basic_column_rename(self):
+        """Test basic column renaming with string keys."""
         df = pd.DataFrame({"old_name": [1, 2, 3], "another_col": [4, 5, 6]})
-        transform = ColumnNameRemap({"old_name": "new_name"}, inplace=True)
+        transform = ColumnRemap({"old_name": "new_name"})
         result = transform(df)
 
-        # For inplace, the input should be returned
-        assert result is df
-        assert "new_name" in df.columns
-        assert "old_name" not in df.columns
-        assert list(df["new_name"]) == [1, 2, 3]
-
-    def test_basic_column_rename_not_inplace(self):
-        """Test basic column renaming with inplace=False."""
-        df = pd.DataFrame({"old_name": [1, 2, 3], "another_col": [4, 5, 6]})
-        transform = ColumnNameRemap({"old_name": "new_name"}, inplace=False)
-        result = transform(df)
-
-        # With inplace=False, should return new DataFrame and leave original unchanged
-        assert result is not None
         assert "new_name" in result.columns
         assert "old_name" not in result.columns
         assert list(result["new_name"]) == [1, 2, 3]
-        # Original should be unchanged
-        assert "old_name" in df.columns
 
     def test_multiple_columns_rename(self):
         """Test renaming multiple columns at once."""
         df = pd.DataFrame({"col1": [1, 2], "col2": [3, 4], "col3": [5, 6]})
-        transform = ColumnNameRemap({"col1": "a", "col2": "b"}, inplace=False)
+        transform = ColumnRemap({"col1": "a", "col2": "b"})
         result = transform(df)
 
         assert "a" in result.columns
@@ -77,30 +63,77 @@ class TestColumnNameRemap:
     def test_empty_mapping(self):
         """Test with empty mapping (no columns renamed)."""
         df = pd.DataFrame({"col1": [1, 2], "col2": [3, 4]})
-        transform = ColumnNameRemap({}, inplace=False)
+        transform = ColumnRemap({})
         result = transform(df)
 
         # Should return DataFrame with same columns
         assert list(result.columns) == list(df.columns)
-        assert result.equals(df)
+        pd.testing.assert_frame_equal(result, df)
 
     def test_rename_nonexistent_column(self):
-        """Test renaming a column that doesn't exist (should be silently ignored by pandas)."""
+        """Test renaming a column that doesn't exist (should be silently ignored)."""
         df = pd.DataFrame({"col1": [1, 2], "col2": [3, 4]})
-        transform = ColumnNameRemap({"nonexistent": "new_name"}, inplace=False)
+        transform = ColumnRemap({"nonexistent": "new_name"})
         result = transform(df)
 
-        # Pandas silently ignores non-existent column mappings
+        # Should silently ignore non-existent column mappings
         assert list(result.columns) == ["col1", "col2"]
-        assert result.equals(df)
+        pd.testing.assert_frame_equal(result, df)
 
-    def test_partial_column_rename(self):
-        """Test renaming only some columns, leaving others unchanged."""
-        df = pd.DataFrame({"a": [1], "b": [2], "c": [3], "d": [4]})
-        transform = ColumnNameRemap({"b": "B", "d": "D"}, inplace=False)
+    def test_fuzzy_remap_single_candidate_found(self):
+        """Test fuzzy remapping when one candidate column is found."""
+        df = pd.DataFrame({"question": [1, 2], "answer": [3, 4]})
+        transform = ColumnRemap({("user_prompt", "question", "input"): "prompt"})
         result = transform(df)
 
-        assert list(result.columns) == ["a", "B", "c", "D"]
+        # "question" is the first candidate found
+        assert "prompt" in result.columns
+        assert "question" not in result.columns
+        assert list(result["prompt"]) == [1, 2]
+
+    def test_fuzzy_remap_no_candidate_found(self):
+        """Test fuzzy remapping when no candidate column is found."""
+        df = pd.DataFrame({"col1": [1, 2], "col2": [3, 4]})
+        transform = ColumnRemap({("user_prompt", "question", "input"): "prompt"})
+        result = transform(df)
+
+        # No candidates found, so columns remain unchanged
+        assert "col1" in result.columns
+        assert "col2" in result.columns
+        assert "prompt" not in result.columns
+
+    def test_fuzzy_remap_strict_mode_multiple_found(self):
+        """Test fuzzy remapping in strict mode with multiple candidates found."""
+        df = pd.DataFrame({"question": [1, 2], "user_prompt": [3, 4]})
+        transform = ColumnRemap({("user_prompt", "question"): "prompt"}, strict=True)
+
+        # In strict mode, should raise error when multiple candidates exist
+        with pytest.raises(ValueError, match="Multiple columns found"):
+            transform(df)
+
+    def test_fuzzy_remap_non_strict_mode_multiple_found(self):
+        """Test fuzzy remapping in non-strict mode with multiple candidates found."""
+        df = pd.DataFrame({"question": [1, 2], "user_prompt": [3, 4], "other": [5, 6]})
+        transform = ColumnRemap({("user_prompt", "question"): "prompt"}, strict=False)
+        result = transform(df)
+
+        # In non-strict mode, should use first candidate found
+        assert "prompt" in result.columns
+        # Either "user_prompt" or "question" should be renamed based on first match
+        assert "user_prompt" not in result.columns or "question" not in result.columns
+
+    def test_mixed_string_and_tuple_keys(self):
+        """Test using both string and tuple keys in the same remap."""
+        df = pd.DataFrame({"old_col": [1, 2], "question": [3, 4], "other": [5, 6]})
+        transform = ColumnRemap(
+            {"old_col": "new_col", ("user_prompt", "question"): "prompt"}
+        )
+        result = transform(df)
+
+        assert "new_col" in result.columns
+        assert "prompt" in result.columns
+        assert "old_col" not in result.columns
+        assert "question" not in result.columns
 
 
 class TestUserPromptFormatter:
@@ -356,7 +389,7 @@ class TestApplyTransforms:
     def test_single_transform(self):
         """Test applying a single transform."""
         df = pd.DataFrame({"old": [1, 2, 3]})
-        transforms = [ColumnNameRemap({"old": "new"}, inplace=False)]
+        transforms = [ColumnRemap({"old": "new"})]
         result = apply_transforms(df, transforms)
 
         assert "new" in result.columns
@@ -373,7 +406,7 @@ class TestApplyTransforms:
 
         transforms = [
             AddColumn(),
-            ColumnNameRemap({"col1": "original", "col2": "doubled"}, inplace=False),
+            ColumnRemap({"col1": "original", "col2": "doubled"}),
         ]
         result = apply_transforms(df, transforms)
 
@@ -440,7 +473,7 @@ class TestApplyTransforms:
         df = pd.DataFrame({"value": [1, 2, 3]})
         transforms = [
             AddDoubled(),
-            ColumnNameRemap({"value": "original"}, inplace=False),
+            ColumnRemap({"value": "original"}),
         ]
         result = apply_transforms(df, transforms)
 
@@ -479,9 +512,7 @@ class TestApplyTransforms:
         df = pd.DataFrame({"value": [1, 2, 3]})
         transforms = [
             AddOne(),
-            ColumnNameRemap(
-                {"value": "value"}, inplace=False
-            ),  # No-op transform to break fusion
+            ColumnRemap({"value": "value"}),  # No-op transform to break fusion
             AddOne(),
         ]
         result = apply_transforms(df, transforms, fuse_row_processors=True)
@@ -506,7 +537,7 @@ class TestApplyTransforms:
         transforms = [
             AddSquared(),
             AddCubed(),
-            ColumnNameRemap({"num": "original_number"}, inplace=False),
+            ColumnRemap({"num": "original_number"}),
         ]
         result = apply_transforms(df, transforms)
 
@@ -545,108 +576,247 @@ class TestTransformBaseClass:
         assert list(result["col1"]) == [1.0, 3.0, 5.0]
 
 
-class TestDropColumns:
-    """Test suite for DropColumns transform."""
+class TestAddStaticColumns:
+    """Test suite for AddStaticColumns transform."""
 
-    def test_drop_single_column(self):
-        """Test dropping a single column."""
-        df = pd.DataFrame({"col1": [1, 2, 3], "col2": [4, 5, 6], "col3": [7, 8, 9]})
-        transform = DropColumns(columns=["col2"])
+    def test_add_single_column(self):
+        """Test adding a single static column."""
+        df = pd.DataFrame({"col1": [1, 2, 3]})
+        transform = AddStaticColumns({"static_col": "static_value"})
         result = transform(df)
 
-        assert "col1" in result.columns
-        assert "col2" not in result.columns
-        assert "col3" in result.columns
-        assert len(result.columns) == 2
-
-    def test_drop_multiple_columns(self):
-        """Test dropping multiple columns."""
-        df = pd.DataFrame(
-            {
-                "col1": [1, 2, 3],
-                "col2": [4, 5, 6],
-                "col3": [7, 8, 9],
-                "col4": [10, 11, 12],
-            }
-        )
-        transform = DropColumns(columns=["col2", "col4"])
-        result = transform(df)
-
-        assert "col1" in result.columns
-        assert "col2" not in result.columns
-        assert "col3" in result.columns
-        assert "col4" not in result.columns
-        assert len(result.columns) == 2
-
-    def test_drop_nonexistent_column_ignore(self):
-        """Test dropping a column that doesn't exist with errors='ignore'."""
-        df = pd.DataFrame({"col1": [1, 2, 3], "col2": [4, 5, 6]})
-        transform = DropColumns(columns=["col3"], errors="ignore")
-        result = transform(df)
-
-        # Should not raise an error and should return the original dataframe
-        assert "col1" in result.columns
-        assert "col2" in result.columns
-        assert len(result.columns) == 2
-
-    def test_drop_nonexistent_column_raise(self):
-        """Test dropping a column that doesn't exist with errors='raise'."""
-        df = pd.DataFrame({"col1": [1, 2, 3], "col2": [4, 5, 6]})
-        transform = DropColumns(columns=["col3"], errors="raise")
-
-        with pytest.raises(KeyError):
-            transform(df)
-
-    def test_drop_all_columns(self):
-        """Test dropping all columns."""
-        df = pd.DataFrame({"col1": [1, 2, 3], "col2": [4, 5, 6]})
-        transform = DropColumns(columns=["col1", "col2"])
-        result = transform(df)
-
-        assert len(result.columns) == 0
-        assert len(result) == 3  # Rows should remain
-
-    def test_drop_empty_list(self):
-        """Test dropping with an empty list of columns."""
-        df = pd.DataFrame({"col1": [1, 2, 3], "col2": [4, 5, 6]})
-        transform = DropColumns(columns=[])
-        result = transform(df)
-
-        # Should return the same dataframe
-        assert "col1" in result.columns
-        assert "col2" in result.columns
-        assert len(result.columns) == 2
-
-    def test_drop_columns_preserves_data(self):
-        """Test that dropping columns preserves remaining data."""
-        df = pd.DataFrame({"col1": [1, 2, 3], "col2": [4, 5, 6], "col3": [7, 8, 9]})
-        transform = DropColumns(columns=["col2"])
-        result = transform(df)
-
-        assert list(result["col1"]) == [1, 2, 3]
-        assert list(result["col3"]) == [7, 8, 9]
-
-    def test_drop_columns_in_pipeline(self):
-        """Test using DropColumns in a transform pipeline."""
-        df = pd.DataFrame(
-            {
-                "question": ["What is 2+2?"],
-                "answer": ["4"],
-                "metadata": ["some_metadata"],
-                "extra": ["extra_data"],
-            }
-        )
-
-        # Apply a sequence of transforms
-        transforms = [
-            ColumnNameRemap({"question": "prompt"}, inplace=False),
-            DropColumns(columns=["metadata", "extra"]),
+        assert "static_col" in result.columns
+        assert list(result["static_col"]) == [
+            "static_value",
+            "static_value",
+            "static_value",
         ]
 
-        result = apply_transforms(df, transforms)
+    def test_add_multiple_columns(self):
+        """Test adding multiple static columns."""
+        df = pd.DataFrame({"col1": [1, 2]})
+        transform = AddStaticColumns({"col_a": "value_a", "col_b": 123, "col_c": True})
+        result = transform(df)
+
+        assert "col_a" in result.columns
+        assert "col_b" in result.columns
+        assert "col_c" in result.columns
+        assert list(result["col_a"]) == ["value_a", "value_a"]
+        assert list(result["col_b"]) == [123, 123]
+        assert list(result["col_c"]) == [True, True]
+
+    def test_preserves_existing_columns(self):
+        """Test that existing columns are preserved."""
+        df = pd.DataFrame({"existing": [1, 2, 3]})
+        transform = AddStaticColumns({"new_col": "new_value"})
+        result = transform(df)
+
+        assert "existing" in result.columns
+        assert list(result["existing"]) == [1, 2, 3]
+        assert "new_col" in result.columns
+
+    def test_empty_dataframe(self):
+        """Test adding static columns to empty DataFrame."""
+        df = pd.DataFrame({"col1": []})
+        transform = AddStaticColumns({"static_col": "value"})
+        result = transform(df)
+
+        assert "static_col" in result.columns
+        assert len(result) == 0
+
+    def test_different_value_types(self):
+        """Test adding columns with different value types."""
+        df = pd.DataFrame({"col1": [1]})
+        transform = AddStaticColumns(
+            {
+                "str_col": "string",
+                "int_col": 42,
+                "float_col": 3.14,
+                "bool_col": False,
+                "none_col": None,
+            }
+        )
+        result = transform(df)
+
+        assert result["str_col"][0] == "string"
+        assert result["int_col"][0] == 42
+        assert result["float_col"][0] == 3.14
+        # Internally pandas always converts data to numpy types
+        assert bool(result["bool_col"][0]) is False
+        assert result["none_col"][0] is None
+
+
+class TestColumnFilter:
+    """Test suite for ColumnFilter transform."""
+
+    def test_filter_required_columns_only(self):
+        """Test filtering with only required columns."""
+        df = pd.DataFrame({"col1": [1, 2], "col2": [3, 4], "col3": [5, 6]})
+        transform = ColumnFilter(required_columns=["col1", "col3"])
+        result = transform(df)
+
+        assert "col1" in result.columns
+        assert "col3" in result.columns
+        assert "col2" not in result.columns
+        assert len(result.columns) == 2
+
+    def test_filter_with_optional_columns_present(self):
+        """Test filtering with optional columns that are present."""
+        df = pd.DataFrame({"col1": [1], "col2": [2], "col3": [3]})
+        transform = ColumnFilter(
+            required_columns=["col1"],
+            optional_columns=["col2", "col4"],
+        )
+        result = transform(df)
+
+        assert "col1" in result.columns
+        assert "col2" in result.columns
+        assert "col3" not in result.columns
+        # col4 is optional but not present, should not cause error
+
+    def test_filter_with_optional_columns_absent(self):
+        """Test filtering with optional columns that are not present."""
+        df = pd.DataFrame({"col1": [1], "col2": [2]})
+        transform = ColumnFilter(
+            required_columns=["col1"],
+            optional_columns=["col3", "col4"],
+        )
+        result = transform(df)
+
+        assert "col1" in result.columns
+        assert "col2" not in result.columns
+        assert len(result.columns) == 1
+
+    def test_filter_preserves_data(self):
+        """Test that filtering preserves data in kept columns."""
+        df = pd.DataFrame({"keep": [1, 2, 3], "drop": [4, 5, 6]})
+        transform = ColumnFilter(required_columns=["keep"])
+        result = transform(df)
+
+        assert list(result["keep"]) == [1, 2, 3]
+
+    def test_filter_column_order(self):
+        """Test that column order matches required + optional order."""
+        df = pd.DataFrame({"c": [1], "b": [2], "a": [3]})
+        transform = ColumnFilter(
+            required_columns=["a", "b"],
+            optional_columns=["c"],
+        )
+        result = transform(df)
+
+        assert list(result.columns) == ["a", "b", "c"]
+
+    def test_mutually_exclusive_validation(self):
+        """Test that required and optional columns must be mutually exclusive."""
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            ColumnFilter(
+                required_columns=["col1", "col2"],
+                optional_columns=["col2", "col3"],
+            )
+
+    def test_empty_dataframe(self):
+        """Test filtering an empty DataFrame."""
+        df = pd.DataFrame({"col1": [], "col2": []})
+        transform = ColumnFilter(required_columns=["col1"])
+        result = transform(df)
+
+        assert "col1" in result.columns
+        assert "col2" not in result.columns
+        assert len(result) == 0
+
+
+class TestMakeAdapterCompatible:
+    """Test suite for MakeAdapterCompatible transform."""
+
+    def test_remap_user_prompt(self):
+        """Test remapping user_prompt to prompt."""
+        df = pd.DataFrame({"user_prompt": ["Hello", "World"]})
+        transform = MakeAdapterCompatible()
+        result = transform(df)
 
         assert "prompt" in result.columns
-        assert "answer" in result.columns
-        assert "metadata" not in result.columns
-        assert "extra" not in result.columns
+        assert "user_prompt" not in result.columns
+        assert list(result["prompt"]) == ["Hello", "World"]
+
+    def test_remap_question(self):
+        """Test remapping question to prompt."""
+        df = pd.DataFrame({"question": ["What is AI?"]})
+        transform = MakeAdapterCompatible()
+        result = transform(df)
+
+        assert "prompt" in result.columns
         assert "question" not in result.columns
+
+    def test_remap_input(self):
+        """Test remapping input to prompt."""
+        df = pd.DataFrame({"input": ["Some input text"]})
+        transform = MakeAdapterCompatible()
+        result = transform(df)
+
+        assert "prompt" in result.columns
+        assert "input" not in result.columns
+
+    def test_remap_input_text(self):
+        """Test remapping input_text to prompt."""
+        df = pd.DataFrame({"input_text": ["Text input"]})
+        transform = MakeAdapterCompatible()
+        result = transform(df)
+
+        assert "prompt" in result.columns
+        assert "input_text" not in result.columns
+
+    def test_remap_problem(self):
+        """Test remapping problem to prompt."""
+        df = pd.DataFrame({"problem": ["Math problem"]})
+        transform = MakeAdapterCompatible()
+        result = transform(df)
+
+        assert "prompt" in result.columns
+        assert "problem" not in result.columns
+
+    def test_remap_query(self):
+        """Test remapping query to prompt."""
+        df = pd.DataFrame({"query": ["Search query"]})
+        transform = MakeAdapterCompatible()
+        result = transform(df)
+
+        assert "prompt" in result.columns
+        assert "query" not in result.columns
+
+    def test_remap_system_prompt(self):
+        """Test remapping system_prompt to system."""
+        df = pd.DataFrame({"system_prompt": ["You are a helpful assistant"]})
+        transform = MakeAdapterCompatible()
+        result = transform(df)
+
+        assert "system" in result.columns
+        assert "system_prompt" not in result.columns
+
+    def test_priority_order_strict_mode(self):
+        """Test that having multiple candidates in strict mode raises error."""
+        df = pd.DataFrame({"user_prompt": ["First"], "question": ["Second"]})
+        transform = MakeAdapterCompatible()
+
+        # MakeAdapterCompatible uses strict=True by default
+        with pytest.raises(ValueError, match="Multiple columns found"):
+            transform(df)
+
+    def test_already_has_prompt(self):
+        """Test when DataFrame already has prompt column (no remapping needed)."""
+        df = pd.DataFrame({"prompt": ["Already formatted"], "other": ["data"]})
+        transform = MakeAdapterCompatible()
+        result = transform(df)
+
+        # Should not raise error, prompt remains unchanged
+        assert "prompt" in result.columns
+        assert list(result["prompt"]) == ["Already formatted"]
+
+    def test_no_matching_columns(self):
+        """Test when no matching columns are found."""
+        df = pd.DataFrame({"unrelated": ["data"]})
+        transform = MakeAdapterCompatible()
+        result = transform(df)
+
+        # Should not raise error or create prompt column
+        assert "prompt" not in result.columns
+        assert "unrelated" in result.columns

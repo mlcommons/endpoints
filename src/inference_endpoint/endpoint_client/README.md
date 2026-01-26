@@ -27,18 +27,11 @@ HTTP client for LLM inference with multiprocessing workers and ZMQ communication
 ## Usage
 
 ```python
-from inference_endpoint.endpoint_client import (
-    HTTPEndpointClient,
-    HTTPClientConfig,
-    AioHttpConfig,
-    ZMQConfig,
-)
+from inference_endpoint.endpoint_client import HTTPEndpointClient, HTTPClientConfig
 from inference_endpoint.core.types import Query
 
 client = HTTPEndpointClient(
-    HTTPClientConfig(endpoint_url="http://localhost:8000/v1/completions", num_workers=2),
-    AioHttpConfig(),
-    ZMQConfig(),
+    HTTPClientConfig(endpoint_urls=["http://localhost:8000/v1/completions"])
 )
 
 # Sync issue (fire-and-forget)
@@ -61,41 +54,27 @@ if response:
     print(f"Response for {response.id}: {response}")
 ```
 
-### With HttpClientSampleIssuer
+## CPU Affinity
+
+For optimal performance, compute an `AffinityPlan` and pass it to `HTTPClientConfig`.
+The plan partitions physical cores between the main process (LoadGen) and workers,
+assigning all hyperthreads of each core together.
 
 ```python
-from inference_endpoint.endpoint_client import (
-    HTTPEndpointClient,
-    HTTPClientConfig,
-    AioHttpConfig,
-    ZMQConfig,
-)
-from inference_endpoint.endpoint_client.http_sample_issuer import HttpClientSampleIssuer
-from inference_endpoint.load_generator.sample import Sample
+from inference_endpoint.endpoint_client import HTTPEndpointClient, HTTPClientConfig
+from inference_endpoint.endpoint_client.cpu_affinity import pin_loadgen
 
+# 1. Compute plan and pin LoadGen (main process)
+plan = pin_loadgen(num_workers=8)
+
+# 2. Pass plan to client (workers get pinned automatically)
 client = HTTPEndpointClient(
-    HTTPClientConfig(endpoint_url="http://localhost:8000/v1/completions", num_workers=4),
-    AioHttpConfig(),
-    ZMQConfig(),
+    HTTPClientConfig(
+        endpoint_urls=["http://localhost:8000/v1/completions"],
+        num_workers=8,
+        cpu_affinity=plan,
+    )
 )
-issuer = HttpClientSampleIssuer(client)
-
-issuer.issue(Sample(
-    uuid="req-1",
-    data={"prompt": "Hello", "stream": False},
-))
-```
-
-## Configuration
-
-```python
-HTTPClientConfig(
-    endpoint_url="http://localhost:8000/v1/completions",
-    num_workers=4,  # Number of worker processes
-)
-
-AioHttpConfig()  # Socket, TCP, HTTP configs (use defaults)
-ZMQConfig()      # IPC configs (use defaults)
 ```
 
 ## Shutdown

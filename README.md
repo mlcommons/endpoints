@@ -37,18 +37,18 @@ inference-endpoint -v info
 
 # Test endpoint connectivity
 inference-endpoint probe \
-  --endpoint http://your-endpoint:8000 \
+  --endpoints http://your-endpoint:8000 \
   --model Qwen/Qwen3-8B
 
 # Run offline benchmark (max throughput - uses all dataset samples)
 inference-endpoint benchmark offline \
-  --endpoint http://your-endpoint:8000 \
+  --endpoints http://your-endpoint:8000 \
   --model Qwen/Qwen3-8B \
   --dataset tests/datasets/dummy_1k.pkl
 
 # Run online benchmark (sustained QPS - requires --target-qps, --load-pattern)
 inference-endpoint benchmark online \
-  --endpoint http://your-endpoint:8000 \
+  --endpoints http://your-endpoint:8000 \
   --model Qwen/Qwen3-8B \
   --dataset tests/datasets/dummy_1k.pkl \
   --load-pattern poisson \
@@ -56,7 +56,7 @@ inference-endpoint benchmark online \
 
 # With explicit sample count
 inference-endpoint benchmark offline \
-  --endpoint http://your-endpoint:8000 \
+  --endpoints http://your-endpoint:8000 \
   --model Qwen/Qwen3-8B \
   --dataset tests/datasets/dummy_1k.pkl \
   --num-samples 5000
@@ -70,7 +70,7 @@ python -m inference_endpoint.testing.echo_server --port 8765 &
 
 # Test with dummy dataset (included in repo)
 inference-endpoint benchmark offline \
-  --endpoint http://localhost:8765 \
+  --endpoints http://localhost:8765 \
   --model Qwen/Qwen3-8B \
   --dataset tests/datasets/dummy_1k.pkl
 

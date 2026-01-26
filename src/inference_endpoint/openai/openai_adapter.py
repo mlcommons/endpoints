@@ -20,6 +20,8 @@ import orjson
 from inference_endpoint.core.types import Query, QueryResult
 from inference_endpoint.endpoint_client.adapter_protocol import HttpRequestAdapter
 
+from ..config.schema import ModelParams, StreamingMode
+from ..dataset_manager.transforms import AddStaticColumns, ColumnFilter, Transform
 from .openai_types_gen import (
     ChatCompletionResponseMessage,
     Choice,
@@ -40,6 +42,26 @@ from .types import SSEMessage
 
 class OpenAIAdapter(HttpRequestAdapter):
     """Adapter for OpenAI API."""
+
+    @classmethod
+    def dataset_transforms(cls, model_params: ModelParams) -> list[Transform]:
+        metadata = {
+            "model": model_params.name,
+            "stream": (model_params.streaming == StreamingMode.ON),
+            "max_completion_tokens": model_params.max_new_tokens,
+            "temperature": model_params.temperature,
+            "top_p": model_params.top_p,
+            "top_k": model_params.top_k,
+            "repetition_penalty": model_params.repetition_penalty,
+        }
+
+        return [
+            ColumnFilter(
+                required_columns=["prompt"],
+                optional_columns=["system"],
+            ),
+            AddStaticColumns(metadata),
+        ]
 
     @classmethod
     def encode_query(cls, query: Query) -> bytes:

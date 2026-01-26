@@ -25,19 +25,17 @@ from . import presets
 logger = getLogger(__name__)
 
 
-class LiveCodeBench(
+class CNNDailyMail(
     Dataset,
-    dataset_id="livecodebench",
+    dataset_id="cnn_dailymail",
 ):
-    """LiveCodeBench
-
-    Link: https://github.com/LiveCodeBench/LiveCodeBench
-    Paper: https://arxiv.org/abs/2403.07974
+    """CNN/DailyMail Dataset
+    Reference: https://huggingface.co/datasets/abisee/cnn_dailymail
     """
 
     COLUMN_NAMES = [
-        "question",
-        "starter_code",
+        "article",
+        "highlights",
     ]
 
     PRESETS = presets
@@ -46,14 +44,29 @@ class LiveCodeBench(
     def generate(
         cls,
         datasets_dir: Path,
-        variant: str = "release_v6",
         seed: int = 0,
         max_samples: int | None = None,
         force: bool = False,
     ) -> pd.DataFrame:
-        """Generates the LiveCodeBench reference dataset for accuracy evaluation."""
-        filename = f"{cls.DATASET_ID}_{variant}.parquet"
-        dst_path = datasets_dir / cls.DATASET_ID / variant / filename
+        """Generates the CNN/DailyMail reference dataset for accuracy evaluation.
+
+        The dataset variant is pulled from HuggingFace and is processed by extracting the correct answer and saving to a parquet file.
+
+        Args:
+            datasets_dir: The root datasets directory to save the dataset under. A
+                subdirectory with the name and variant of the dataset will be created if
+                it does not exist.
+            seed: The random seed to use for sampling the dataset. Defaults to 0.
+            max_samples: The maximum number of samples save to the file. If None, the
+                entire dataset will be used as-is without shuffling. Otherwise, `max_samples`
+                samples will be randomly sampled from the dataset.
+            force: If True, the dataset will be regenerated even if it already exists.
+
+        Returns:
+            A pandas dataframe containing the dataset.
+        """
+        filename = f"{cls.DATASET_ID}.parquet"
+        dst_path = datasets_dir / cls.DATASET_ID / filename
         if not dst_path.parent.exists():
             dst_path.parent.mkdir(parents=True)
 
@@ -63,12 +76,10 @@ class LiveCodeBench(
 
         try:
             df = load_from_huggingface(
-                "livecodebench/code_generation_lite",
-                split="test",
-                cache_dir=datasets_dir / "hf_cache" / f"{cls.DATASET_ID}_{variant}",
-                load_options={
-                    "version_tag": variant,
-                },
+                "abisee/cnn_dailymail",
+                dataset_name="3.0.0",
+                split="validation",
+                cache_dir=datasets_dir / "hf_cache" / "cnndailymail",
             )
         except Exception as e:
             logger.error(f"Error loading dataset: {e}")
@@ -76,21 +87,7 @@ class LiveCodeBench(
             logger.error("Run: huggingface-cli login")
             raise
 
-        logger.info(f"Loaded {len(df)} samples from {variant} variant of LiveCodeBench")
-
-        # Following pre-processing steps from GPT-OSS side branch for parity with MLPerf Inference v6.0 GPT-OSS:
-        # https://github.com/v-shobhit/gpt-oss/blob/feat/mlperf_integration/gpt_oss/evals/livecodebench_eval.py#L75
-
-        keep = [
-            "question_id",
-            "question_content",
-            "starter_code",
-            "public_test_cases",
-            "private_test_cases",
-            "platform",
-        ]
-        df = df[keep]
-        df.rename(columns={"question_content": "question"}, inplace=True)
+        logger.info(f"Loaded {len(df)} samples from CNN/DailyMail")
 
         # If max_samples is specified, sample 'max_samples' rows from the dataset
         if max_samples is not None and max_samples < len(df):
@@ -103,3 +100,6 @@ class LiveCodeBench(
         df.to_parquet(dst_path)
         logger.info(f"Saved {len(df)} samples to {dst_path}")
         return df
+
+
+__all__ = ["CNNDailyMail"]

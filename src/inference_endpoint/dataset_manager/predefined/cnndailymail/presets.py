@@ -14,7 +14,7 @@
 # limitations under the License.
 
 
-"""Preset transforms for the GPQA dataset."""
+"""Preset transforms for the CNN/DailyMail dataset."""
 
 from inference_endpoint.dataset_manager.transforms import (
     Transform,
@@ -22,17 +22,17 @@ from inference_endpoint.dataset_manager.transforms import (
 )
 
 
-def gptoss() -> list[Transform]:
+def llama3_8b(
+    stream: bool = True,
+    max_new_tokens: int = 128,
+    temperature: float = 0.0,
+    top_p: float = 1.0,
+    top_k: int = 1,
+) -> list[Transform]:
     return [
-        # Step 1: Format the prompt from question and choices
+        # Step 1: Format the prompt from "article"
         UserPromptFormatter(
-            user_prompt_format=(
-                "{question}\n\n"
-                "(A) {choice1}\n"
-                "(B) {choice2}\n"
-                "(C) {choice3}\n"
-                "(D) {choice4}\n\n"
-                "Express your final answer as the corresponding option 'A', 'B', 'C', or 'D'."
-            ),
+            user_prompt_format=f"Summarize the following news article in {max_new_tokens} tokens. Please output the summary only, without any other text.\n\nArticle:\n{{article}}\n\nSummary:",
+            output_column="prompt",
         ),
     ]

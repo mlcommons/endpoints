@@ -23,10 +23,7 @@ from urllib.parse import urljoin
 
 from inference_endpoint.config.schema import APIType
 from inference_endpoint.core.types import Query, QueryResult
-from inference_endpoint.endpoint_client.configs import (
-    AioHttpConfig,
-    HTTPClientConfig,
-)
+from inference_endpoint.endpoint_client.config import HTTPClientConfig
 from inference_endpoint.endpoint_client.http_client import HTTPEndpointClient
 from inference_endpoint.exceptions import (
     ExecutionError,
@@ -46,7 +43,7 @@ async def run_probe_command(args: argparse.Namespace) -> None:
     3. Report validation status
     """
     # Extract arguments
-    endpoint = args.endpoint
+    endpoints = args.endpoints
     num_requests = args.requests
     test_prompt = args.prompt
     api_type = APIType(getattr(args, "api_type", "openai"))
@@ -58,21 +55,24 @@ async def run_probe_command(args: argparse.Namespace) -> None:
         raise InputValidationError("Model required: --model NAME")
     # Note: API key handling would go in HTTP client config if needed
 
-    logger.info(f"Probing: {endpoint}")
+    logger.info(f"Probing: {endpoints}")
 
     client = None
 
     # TODO (Rashid): Add a health check with a separate timeout.
     try:
         # Setup HTTP client with futures support
+        # Disable warmup for probe - it's a quick health check
         http_config = HTTPClientConfig(
-            endpoint_url=urljoin(endpoint, api_type.default_route()),
+            endpoint_urls=[
+                urljoin(e, api_type.default_route()) for e in endpoints.split(",")
+            ],
             api_type=api_type,
             num_workers=1,
+            warmup_connections=False,
         )
-        aiohttp_config = AioHttpConfig()
         # Client creates its own event loop in a separate thread
-        client = HTTPEndpointClient(http_config, aiohttp_config)
+        client = HTTPEndpointClient(http_config)
 
         logger.info(f"Sending {num_requests} requests...")
 

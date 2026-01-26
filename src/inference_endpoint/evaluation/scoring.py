@@ -90,7 +90,12 @@ class Scorer(ABC):
         self.dataset = dataset
         self.report_dir = Path(report_dir)
         self.extractor = extractor
+        # If the dataset was transformed with a preset, we still treat it as the original
+        # dataset name for the purposes of scoring
+        if "::" in dataset_name:
+            dataset_name = dataset_name.split("::")[0]
         self.dataset_name = dataset_name
+
         self.ground_truth_column = (
             ground_truth_column if ground_truth_column is not None else "ground_truth"
         )
@@ -197,6 +202,96 @@ class StringMatchScorer(Scorer, scorer_id="string_match"):
 
 
 ExactMatchScorer = PassAt1Scorer
+
+
+class RougeScorer(Scorer, scorer_id="rouge"):
+    """Implements ROUGE scoring for text generation evaluation.
+    ROUGE (Recall-Oriented Understudy for Gisting Evaluation) measures the overlap
+    between generated text and reference text. Returns the ROUGE-L F1 score.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        try:
+            import importlib.util as _importlib_util
+
+            if (
+                _importlib_util.find_spec("evaluate") is None
+                or _importlib_util.find_spec("nltk") is None
+                or _importlib_util.find_spec("rouge_score") is None
+            ):
+                raise ImportError
+
+            import evaluate
+            import nltk
+
+            self.metric = evaluate.load("rouge")
+            self.nltk = nltk
+
+        except ImportError:
+            raise ImportError(
+                "nltk, evaluate, and rouge_score are required for ROUGE scoring. "
+                "Install with: pip install nltk evaluate rouge_score"
+            ) from None
+
+    def postprocess_text(self, texts):
+        texts = [text.strip() for text in texts]
+        # rougeLSum expects newline after each sentence
+        texts = ["\n".join(self.nltk.sent_tokenize(text)) for text in texts]
+        return texts
+
+    def score_single_sample(self, value: str, ground_truth: str) -> float:
+        # This method is not used
+        raise RuntimeError(
+            "ROUGE scoring requires batch processing for accurate aggregation. "
+            "Call score() to compute metrics across the entire dataset instead of "
+            "per-sample scoring."
+        )
+
+    def score(self) -> tuple[float, int]:
+        df = self.get_outputs()
+
+        # Outputs are for all samples, not just the target dataset
+        valid_uuids = self.sample_index_map.keys()
+        df = df[df["sample_uuid"].isin(valid_uuids)]
+
+        # Match to sample index from dataset
+        df = df.apply(self.match_sample_index, axis=1)
+
+        empirical = df["output"].tolist()
+
+        order = df["sample_index"].to_numpy().astype(int)
+        assert (
+            self.ground_truth_column in self.dataset.dataframe.columns
+        ), f"Ground truth column {self.ground_truth_column} not found in dataset {self.dataset}"
+
+        ground_truths = list(
+            self.dataset.dataframe[self.ground_truth_column].to_numpy()[order]
+        )
+
+        empirical = self.postprocess_text(empirical)
+        ground_truths = self.postprocess_text(ground_truths)
+
+        result = self.metric.compute(
+            predictions=empirical,
+            references=ground_truths,
+            use_stemmer=True,
+            use_aggregator=False,
+        )
+
+        result = {k: f"{round(np.mean(v) * 100, 4)}" for k, v in result.items()}
+        prediction_lens = [len(pred) for pred in empirical]
+        gen_num = len(empirical)
+
+        result = {
+            **result,
+            "gen_len": f"{np.sum(prediction_lens)}",
+            "gen_num": gen_num,
+        }
+
+        # TODO: return only rouge1 for now to align with other scorers
+        # Return the rest of the metrics later
+        return result, 1
 
 
 class LiveCodeBenchScorer(Scorer, scorer_id="code_bench_scorer"):

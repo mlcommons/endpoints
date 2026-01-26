@@ -206,7 +206,7 @@ The HTTP client uses 4 workers by default:
 
 ```python
 http_config = HTTPClientConfig(
-    endpoint_url=SGLANG_ENDPOINT,
+    endpoint_urls=[SGLANG_ENDPOINT],
     num_workers=4,
     api_type="sglang",
 )

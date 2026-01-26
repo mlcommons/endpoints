@@ -25,6 +25,8 @@ import asyncio
 import logging
 import sys
 
+import uvloop
+
 from inference_endpoint.cli import main as cli_main
 from inference_endpoint.utils.logging import setup_logging
 
@@ -43,7 +45,11 @@ def run() -> None:
     setup_logging()
 
     try:
-        asyncio.run(main())
+        # Use eager task factory for immediate coroutine execution
+        # Tasks start executing synchronously until first await
+        with asyncio.Runner(loop_factory=uvloop.new_event_loop) as runner:
+            runner.get_loop().set_task_factory(asyncio.eager_task_factory)
+            runner.run(main())
     except KeyboardInterrupt:
         logger.info("Application interrupted by user")
         sys.exit(130)  # 128 + SIGINT

@@ -57,10 +57,8 @@ from inference_endpoint.config.schema import (
 from inference_endpoint.config.yaml_loader import ConfigError, ConfigLoader
 from inference_endpoint.core.types import QueryResult
 from inference_endpoint.dataset_manager.factory import DataLoaderFactory
-from inference_endpoint.endpoint_client.configs import (
-    AioHttpConfig,
-    HTTPClientConfig,
-)
+from inference_endpoint.endpoint_client.config import HTTPClientConfig
+from inference_endpoint.endpoint_client.cpu_affinity import pin_loadgen
 from inference_endpoint.endpoint_client.http_client import HTTPEndpointClient
 from inference_endpoint.endpoint_client.http_sample_issuer import HttpClientSampleIssuer
 from inference_endpoint.evaluation import Extractor
@@ -77,7 +75,6 @@ from inference_endpoint.load_generator import (
     WithoutReplacementSampleOrder,
 )
 from inference_endpoint.load_generator.scheduler import Scheduler
-from inference_endpoint.utils.cpu_affinity import get_fastest_cpu, set_loadgen_cpu
 
 # Suppress HuggingFace warnings about missing PyTorch/TensorFlow
 transformers_logging.set_verbosity_error()
@@ -322,8 +319,9 @@ def _build_config_from_cli(
                 dataloader_random_seed=42,
             ),
             client=ClientSettings(
-                workers=args.workers if args.workers else 4,
+                workers=args.workers if args.workers else -1,
                 log_level="DEBUG" if verbose_level >= 2 else "INFO",
+                warmup_connections=getattr(args, "warmup_connections", True),
             ),
         ),
         model_params=ModelParams(
@@ -339,7 +337,9 @@ def _build_config_from_cli(
             streaming=StreamingMode(getattr(args, "streaming", "auto")),
         ),
         endpoint_config=EndpointConfig(
-            endpoint=args.endpoint, api_key=args.api_key, api_type=api_type
+            endpoints=[e.strip() for e in args.endpoints.split(",") if e.strip()],
+            api_key=args.api_key,
+            api_type=api_type,
         ),
         metrics=Metrics(),
         baseline=None,  # CLI mode doesn't use baseline
@@ -394,14 +394,13 @@ def _run_benchmark(
         ExecutionError: If benchmark execution fails after successful setup.
         KeyboardInterrupt: If user interrupts with Ctrl+C (re-raised for CLI handler).
     """
-    # Pin loadgen process to configured or fastest CPU for stable timing
-    loadgen_cpu = (
-        config.loadgen_cpu_affinity
-        if config.loadgen_cpu_affinity is not None
-        else get_fastest_cpu()
-    )
-    if loadgen_cpu is not None:
-        set_loadgen_cpu(loadgen_cpu)
+    # CPU affinity: compute plan and pin loadgen
+    affinity_plan = None
+    if config.cpu_affinity == -1:
+        # Auto: compute optimal plan based on system topology
+        affinity_plan = pin_loadgen(config.settings.client.workers)
+    elif isinstance(config.cpu_affinity, list) and config.cpu_affinity:
+        raise NotImplementedError("manual-affinity-override not yet enabled")
 
     # Load tokenizer if model name is provided
     # Priority: CLI args (offline/online modes) > config submission_ref (from-config mode)
@@ -409,8 +408,7 @@ def _run_benchmark(
     model_name = config.model_params.name
     if not model_name and config.submission_ref:
         model_name = config.submission_ref.model
-    if not model_name and config.model_params.name:
-        model_name = config.model_params.name
+        config.model_params.name = model_name
 
     if config.report_dir:
         report_dir = Path(config.report_dir)
@@ -419,8 +417,6 @@ def _run_benchmark(
 
     report_dir.mkdir(parents=True, exist_ok=True)
     config.to_yaml_file(report_dir / "config.yaml")
-
-    max_tokens = config.model_params.max_new_tokens
 
     if model_name:
         try:
@@ -449,8 +445,10 @@ def _run_benchmark(
         enable_streaming = benchmark_mode == TestType.ONLINE
         if enable_streaming:
             logger.info("Streaming: enabled (auto, online mode)")
+            config.model_params.streaming = StreamingMode.ON
         else:
             logger.info("Streaming: disabled (auto, offline mode)")
+            config.model_params.streaming = StreamingMode.OFF
 
     # Get dataset - from CLI or from config
     # TODO: Dataset Logic is not yet fully implemented
@@ -466,40 +464,28 @@ def _run_benchmark(
     accuracy_datasets = []
     eval_configs = []
     if len(accuracy_configs) > 0:
-        # TODO configure metadata for accuracy datasets - should be done in the dataset config
-        metadata = {
-            "model": model_name,
-            "stream": enable_streaming,
-            "max_completion_tokens": max_tokens,
-            "temperature": config.model_params.temperature,
-            "top_p": config.model_params.top_p,
-            "top_k": config.model_params.top_k,
-            "repetition_penalty": config.model_params.repetition_penalty,
-        }
-
         # Pack the evaluation parameters for each accuracy dataset
         for acc_config in accuracy_configs:
-            extractor = Extractor.get(acc_config.accuracy_config.extractor)
-            ground_truth_column = acc_config.accuracy_config.ground_truth
-            scorer = Scorer.get(acc_config.accuracy_config.eval_method)
-            num_repeats = acc_config.accuracy_config.num_repeats
             dataset = DataLoaderFactory.create_loader(
-                acc_config, metadata=metadata, num_repeats=num_repeats
+                acc_config, num_repeats=acc_config.accuracy_config.num_repeats
             )
             accuracy_datasets.append(dataset)
             # TODO add tests and defaults
             eval_configs.append(
                 AccuracyConfiguration(
-                    scorer,
-                    extractor,
+                    Scorer.get(acc_config.accuracy_config.eval_method),
+                    Extractor.get(acc_config.accuracy_config.extractor),
                     acc_config.name,
                     dataset,
                     config.report_dir,
-                    ground_truth_column,
-                    num_repeats,
+                    acc_config.accuracy_config.ground_truth,
+                    acc_config.accuracy_config.num_repeats,
                 )
             )
-            dataset.load()
+            dataset.load(
+                api_type=config.endpoint_config.api_type,
+                model_params=config.model_params,
+            )
             logger.info(f"Loaded {dataset} - {dataset.num_samples()} samples")
 
     else:
@@ -511,18 +497,11 @@ def _run_benchmark(
 
     try:
         dataloader = DataLoaderFactory.create_loader(
-            performance_configs[0],
-            metadata={
-                "model": model_name,
-                "stream": enable_streaming,
-                "max_completion_tokens": max_tokens,
-                "temperature": config.model_params.temperature,
-                "top_p": config.model_params.top_p,
-                "top_k": config.model_params.top_k,
-                "repetition_penalty": config.model_params.repetition_penalty,
-            },
+            performance_configs[0]
+        )  # Do not repeat perf datasets
+        dataloader.load(
+            api_type=config.endpoint_config.api_type, model_params=config.model_params
         )
-        dataloader.load()
         logger.info(f"Loaded {dataloader.num_samples()} samples")
     except FileNotFoundError as e:
         logger.error(f"Dataset file not found: {performance_configs[0].path}")
@@ -574,27 +553,27 @@ def _run_benchmark(
     )
 
     # Create endpoint client
-    endpoint = config.endpoint_config.endpoint
+    endpoints = config.endpoint_config.endpoints
     num_workers = config.settings.client.workers
 
-    logger.info(f"Connecting: {endpoint}")
+    logger.info(f"Connecting: {endpoints}")
     tmp_dir = tempfile.mkdtemp(prefix="inference_endpoint_")
 
     try:
         http_config = HTTPClientConfig(
-            endpoint_url=urljoin(
-                endpoint, config.endpoint_config.api_type.default_route()
-            ),
+            endpoint_urls=[
+                urljoin(e, config.endpoint_config.api_type.default_route())
+                for e in endpoints
+            ],
             api_type=config.endpoint_config.api_type,
             num_workers=num_workers,
             record_worker_events=config.settings.client.record_worker_events,
             event_logs_dir=report_dir,
             log_level=config.settings.client.log_level,
-            cpu_affinity=config.settings.client.cpu_affinity,
+            cpu_affinity=affinity_plan,
+            warmup_connections=config.settings.client.warmup_connections,
         )
-        aiohttp_config = AioHttpConfig()
-
-        http_client = HTTPEndpointClient(http_config, aiohttp_config)
+        http_client = HTTPEndpointClient(http_config)
         sample_issuer = HttpClientSampleIssuer(http_client)
 
     except Exception as e:
@@ -687,7 +666,7 @@ def _run_benchmark(
         try:
             results = {
                 "config": {
-                    "endpoint": endpoint,
+                    "endpoint": endpoints,
                     "mode": test_mode,
                     "target_qps": target_qps,
                 },
