@@ -14,7 +14,7 @@
 # limitations under the License.
 
 
-import json
+import inspect
 import os
 import subprocess
 import sys
@@ -23,6 +23,7 @@ import uuid
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from pathlib import Path
+from typing import ClassVar
 
 import numpy as np
 import orjson
@@ -39,6 +40,46 @@ class Scorer(ABC):
     can be compared against the ground truth.
     """
 
+    PREDEFINED: ClassVar[dict[str, type["Scorer"]]] = {}
+
+    def __init_subclass__(
+        cls,
+        scorer_id: str | None = None,
+        **kwargs,
+    ):
+        super().__init_subclass__(**kwargs)
+
+        if not inspect.isabstract(cls):
+            if scorer_id is None:
+                scorer_id = cls.__name__
+            cls.SCORER_ID = scorer_id
+            Scorer.PREDEFINED[scorer_id] = cls
+
+    @classmethod
+    def get(cls, name: str) -> type["Scorer"]:
+        """Look up an Scorer subclass by its registered name.
+
+        Args:
+            name: str, the registered scorer name
+
+        Returns:
+            Scorer subclass
+
+        Raises:
+            KeyError: If no scorer with the given name is found
+        """
+        try:
+            return Scorer.PREDEFINED[name]
+        except KeyError as e:
+            raise KeyError(
+                f"Scorer '{name}' is not registered - available scorers: {Scorer.available_scorers()}"
+            ) from e
+
+    @classmethod
+    def available_scorers(cls) -> list[str]:
+        """Return the list of registered scorer names."""
+        return list(Scorer.PREDEFINED.keys())
+
     def __init__(
         self,
         dataset_name: str,
@@ -50,7 +91,12 @@ class Scorer(ABC):
         self.dataset = dataset
         self.report_dir = Path(report_dir)
         self.extractor = extractor
+        # If the dataset was transformed with a preset, we still treat it as the original
+        # dataset name for the purposes of scoring
+        if "::" in dataset_name:
+            dataset_name = dataset_name.split("::")[0]
         self.dataset_name = dataset_name
+
         self.ground_truth_column = (
             ground_truth_column if ground_truth_column is not None else "ground_truth"
         )
@@ -131,7 +177,7 @@ class Scorer(ABC):
         return np.mean(scores), n_repeats
 
 
-class PassAt1Scorer(Scorer):
+class PassAt1Scorer(Scorer, scorer_id="pass_at_1"):
     """Implements pass@1 scoring as defined by Artificial Analysis.
     pass@1 means the model gets exactly one attempt to produce the correct answer.
     The score is 1 if the output matches the ground truth exactly, 0 otherwise.
@@ -146,10 +192,110 @@ class PassAt1Scorer(Scorer):
         return 1.0 if value == ground_truth else 0.0
 
 
+class StringMatchScorer(Scorer, scorer_id="string_match"):
+    """Implements exact string match scoring.
+    The score is 1 if the output matches the ground truth exactly, 0 otherwise.
+    This is useful for debugging and development.
+    """
+
+    def score_single_sample(self, value: str, ground_truth: str) -> float:
+        return 1.0 if value.strip() == ground_truth.strip() else 0.0
+
+
 ExactMatchScorer = PassAt1Scorer
 
 
-class LiveCodeBenchScorer(Scorer):
+class RougeScorer(Scorer, scorer_id="rouge"):
+    """Implements ROUGE scoring for text generation evaluation.
+    ROUGE (Recall-Oriented Understudy for Gisting Evaluation) measures the overlap
+    between generated text and reference text. Returns the ROUGE-L F1 score.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        try:
+            import importlib.util as _importlib_util
+
+            if (
+                _importlib_util.find_spec("evaluate") is None
+                or _importlib_util.find_spec("nltk") is None
+                or _importlib_util.find_spec("rouge_score") is None
+            ):
+                raise ImportError
+
+            import evaluate
+            import nltk
+
+            self.metric = evaluate.load("rouge")
+            self.nltk = nltk
+
+        except ImportError:
+            raise ImportError(
+                "nltk, evaluate, and rouge_score are required for ROUGE scoring. "
+                "Install with: pip install nltk evaluate rouge_score"
+            ) from None
+
+    def postprocess_text(self, texts):
+        texts = [text.strip() for text in texts]
+        # rougeLSum expects newline after each sentence
+        texts = ["\n".join(self.nltk.sent_tokenize(text)) for text in texts]
+        return texts
+
+    def score_single_sample(self, value: str, ground_truth: str) -> float:
+        # This method is not used
+        raise RuntimeError(
+            "ROUGE scoring requires batch processing for accurate aggregation. "
+            "Call score() to compute metrics across the entire dataset instead of "
+            "per-sample scoring."
+        )
+
+    def score(self) -> tuple[float, int]:
+        df = self.get_outputs()
+
+        # Outputs are for all samples, not just the target dataset
+        valid_uuids = self.sample_index_map.keys()
+        df = df[df["sample_uuid"].isin(valid_uuids)]
+
+        # Match to sample index from dataset
+        df = df.apply(self.match_sample_index, axis=1)
+
+        empirical = df["output"].tolist()
+
+        order = df["sample_index"].to_numpy().astype(int)
+        assert (
+            self.ground_truth_column in self.dataset.dataframe.columns
+        ), f"Ground truth column {self.ground_truth_column} not found in dataset {self.dataset}"
+
+        ground_truths = list(
+            self.dataset.dataframe[self.ground_truth_column].to_numpy()[order]
+        )
+
+        empirical = self.postprocess_text(empirical)
+        ground_truths = self.postprocess_text(ground_truths)
+
+        result = self.metric.compute(
+            predictions=empirical,
+            references=ground_truths,
+            use_stemmer=True,
+            use_aggregator=False,
+        )
+
+        result = {k: f"{round(np.mean(v) * 100, 4)}" for k, v in result.items()}
+        prediction_lens = [len(pred) for pred in empirical]
+        gen_num = len(empirical)
+
+        result = {
+            **result,
+            "gen_len": f"{np.sum(prediction_lens)}",
+            "gen_num": gen_num,
+        }
+
+        # TODO: return only rouge1 for now to align with other scorers
+        # Return the rest of the metrics later
+        return result["rouge1"], 1
+
+
+class LiveCodeBenchScorer(Scorer, scorer_id="code_bench_scorer"):
     """Scorer for LiveCodeBench code generation tasks.
 
     Uses the lcb_runner evaluation framework to execute generated code against test cases.
@@ -171,9 +317,9 @@ class LiveCodeBenchScorer(Scorer):
         question_id_column: Column name in dataset containing question IDs
         show_lcb_runner_output: Whether to show output during evaluation
         lcb_websocket_port: Port for WebSocket service on localhost (default: 13835)
-                           Set to None to disable WebSocket and use subprocess only.
-                           Why is the default port 13835? It's short for LCB WebSocket:
-                           1=L, 3rd letter=C, 8=B, 3 rotated sideways=W, 5=S
+                            Set to None to disable WebSocket and use subprocess only.
+                            Why is the default port 13835? It's short for LCB WebSocket:
+                            1=L, 3rd letter=C, 8=B, 3 rotated sideways=W, 5=S
     """
 
     def __init__(
@@ -261,7 +407,7 @@ class LiveCodeBenchScorer(Scorer):
                     "codes_dict": codes_dict,
                     "timeout_sec": self.timeout,
                 }
-                ws.send(json.dumps(request))
+                ws.send(orjson.dumps(request).decode("utf-8"))
 
                 print(f"Connected to WebSocket service: {self.lcb_websocket_url}")
                 print(
@@ -282,7 +428,7 @@ class LiveCodeBenchScorer(Scorer):
                             # Connection closed cleanly
                             break
 
-                        data = json.loads(message)
+                        data = orjson.loads(message)
                         status = data.get("status")
 
                         if status == "started":
