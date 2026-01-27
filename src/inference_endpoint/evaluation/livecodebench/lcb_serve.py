@@ -177,6 +177,9 @@ class LCBTestLoader:
 
         self.load_test_case = lru_cache(maxsize=cache_limit)(self._load_test_case)
 
+        # Surface cache_info method for convenience
+        self.cache_info = self.load_test_case.cache_info
+
     def _load_test_case(self, question_id: str) -> str:
         """Loads a test case for a given question ID.
 
@@ -374,6 +377,10 @@ class LCBServe:
         if preload_test_cases:
             for qid in self.df["question_id"].values:
                 self.test_loader[qid]  # Accessing will populate the cache
+
+    def cache_info(self) -> dict[str, int]:
+        """Returns the cache information for the test loader."""
+        return self.test_loader.cache_info()
 
     def evaluate(
         self,

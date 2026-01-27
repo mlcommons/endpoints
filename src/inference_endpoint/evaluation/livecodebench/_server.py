@@ -218,6 +218,9 @@ class EvaluationSession:
                 for results in result_dict.values()
             )
 
+            logger.info(f"Completed {self.total_samples} ({total_passed} passed)")
+            logger.info(f"lcb_serve cache stats: {self.lcb_serve.cache_info()!r}")
+
             # Send final result
             await self.send_message(
                 ProgressMessage(

@@ -42,7 +42,6 @@ class LiveCodeBench(
         "question_id",
         "question",
         "starter_code",
-        "difficulty",
     ]
 
     PRESETS = presets
@@ -95,6 +94,9 @@ class LiveCodeBench(
                 [str(python_executable), "-m", "pip", "install", "datasets==3.6.0"],
                 check=True,
                 capture_output=True,
+            )
+            logger.info(
+                f"datasets==3.6.0 installed in virtual environment at {venv_path}"
             )
 
         return python_executable
@@ -161,19 +163,11 @@ class LiveCodeBench(
         # Execute subprocess
         logger.info(f"Generating dataset with command: {' '.join(cmd)}")
         try:
-            result = subprocess.run(
-                cmd,
-                check=True,
-                capture_output=True,
-                text=True,
-            )
+            subprocess.run(cmd, check=True)
             logger.info("Dataset generation completed successfully")
-            logger.debug(f"Subprocess stdout: {result.stdout}")
         except subprocess.CalledProcessError as e:
             logger.error(f"Dataset generation failed with exit code {e.returncode}")
-            logger.error(f"Subprocess stdout: {e.stdout}")
-            logger.error(f"Subprocess stderr: {e.stderr}")
-            raise RuntimeError(f"Dataset generation failed: {e.stderr}") from e
+            raise RuntimeError("Dataset generation failed") from e
 
         # Load and return the generated dataset
         if dst_path.exists():
@@ -182,56 +176,3 @@ class LiveCodeBench(
             raise FileNotFoundError(
                 f"Dataset generation reported success, but dataset not found at {dst_path}"
             )
-
-
-if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser(
-        description="Generate the LiveCodeBench dataset using an isolated Python environment"
-    )
-    parser.add_argument(
-        "--datasets-dir",
-        type=Path,
-        required=True,
-        help="Path to the base datasets directory where all datasets are stored",
-    )
-    parser.add_argument(
-        "--variant",
-        type=str,
-        default="release_v6",
-        help="The variant of the dataset to generate (default: release_v6)",
-    )
-    parser.add_argument(
-        "--force",
-        action="store_true",
-        help="Force regeneration of the dataset even if it already exists",
-    )
-    parser.add_argument(
-        "--save-test-cases",
-        action="store_true",
-        help="Save test cases as separate JSON files",
-    )
-    args = parser.parse_args()
-
-    # Configure logging
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    )
-
-    # Generate the dataset
-    logger.info(f"Generating LiveCodeBench dataset (variant: {args.variant})")
-    logger.info(f"Datasets directory: {args.datasets_dir}")
-    logger.info(f"Force: {args.force}")
-    logger.info(f"Save test cases: {args.save_test_cases}")
-
-    df = LiveCodeBench.generate(
-        datasets_dir=args.datasets_dir,
-        variant=args.variant,
-        force=args.force,
-        save_test_cases=args.save_test_cases,
-    )
-
-    logger.info(f"Successfully generated dataset with {len(df)} samples")
-    logger.info(f"Columns: {list(df.columns)}")
