@@ -376,7 +376,9 @@ class LCBServe:
         )
         if preload_test_cases and test_suite_cache_limit is None:
             for qid in self.df["question_id"].values:
-                self.test_loader[qid]  # Accessing will populate the cache
+                self.test_loader.load_test_case(
+                    qid
+                )  # Accessing will populate the cache
 
     def cache_info(self) -> dict[str, int]:
         """Returns the cache information for the test loader."""
@@ -464,12 +466,15 @@ class LCBServe:
         for _, row in df.iterrows():
             codes_dict[row["question_id"]].append(row["extracted_code"])
 
-        # Evaluate and get number of passed samples
-        num_passed = self.evaluate(
+        # Evaluate and get results dictionary
+        results_dict = self.evaluate(
             codes_dict=codes_dict,
             timeout_sec=timeout_sec,
             on_problem_complete=on_problem_complete,
         )
+
+        # Count number of passed samples. Note values are lists of booleans, so we can sum them directly.
+        num_passed = sum(sum(results) for results in results_dict.values())
 
         # Calculate pass@1
         total_samples = len(df)

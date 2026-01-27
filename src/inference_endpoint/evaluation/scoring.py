@@ -509,7 +509,7 @@ class LiveCodeBenchScorer(Scorer, scorer_id="code_bench_scorer"):
                 "--version-tag",
                 self.lcb_version,
                 "--datasets-dir",
-                "datasets/livecodebench/release_v6",
+                f"datasets/livecodebench/{self.lcb_version}",
                 "--timeout",
                 str(self.timeout),
             ]
