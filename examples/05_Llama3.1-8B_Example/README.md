@@ -1,6 +1,6 @@
 # Running Endpoints with [Llama3.1-8B](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct)
 
-## Download dataset
+## [Optional] Download dataset
 
 The Llama3.1-8B benchmark uses the [cnn/dailymail](https://huggingface.co/datasets/abisee/cnn_dailymail) dataset (for summarization). Download, modify the input prompt and save it using the following command:
 
@@ -39,7 +39,7 @@ docker run --runtime nvidia --gpus all -v ${HF_HOME}:/root/.cache/huggingface --
 
 ### To run Offline mode
 
-**Note** Double-check the config file for correct parameters
+**Note** Double-check the config file for correct parameters such as the model name in the config
 
 - Launch the benchmark with config yaml
 
@@ -51,7 +51,7 @@ inference-endpoint benchmark from-config -c offline_llama3_8b_cnn.yaml --timeout
 
 **Note** Double-check the config file for correct parameters
 
-- Launch the benchmark with config yaml
+- Launch the benchmark with config yaml (For performance only, remove the accuracy dataset entry in the `online_llama3_8b_cnn.yaml`)
 
 ```
 inference-endpoint benchmark from-config -c online_llama3_8b_cnn.yaml --timeout 600
