@@ -374,7 +374,7 @@ class LCBServe:
         self.test_loader = LCBTestLoader(
             self.datasets_dir, cache_limit=test_suite_cache_limit
         )
-        if preload_test_cases:
+        if preload_test_cases and test_suite_cache_limit is None:
             for qid in self.df["question_id"].values:
                 self.test_loader[qid]  # Accessing will populate the cache
 
