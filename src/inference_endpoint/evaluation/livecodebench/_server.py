@@ -265,6 +265,8 @@ async def startup_event():
     - LCB_DATASETS_DIR (default: "/opt/LiveCodeBench_Datasets")
     - LCB_AUTO_GENERATE_DATASET (default: "true")
     - LCB_SERVER_DEBUG (default: not set, enables DEBUG logging if set)
+    - LCB_TEST_CACHE_SIZE (default: None, no limit)
+    - LCB_PRELOAD_TESTS (default: "false")
     """
     global lcb_serve
 
@@ -292,18 +294,39 @@ async def startup_event():
     auto_generate_str = os.getenv("LCB_AUTO_GENERATE_DATASET", "false").lower()
     auto_generate_dataset = auto_generate_str in ("true", "1", "yes", "on")
 
+    # Parse test_case_cache_limit (None or int)
+    test_cache_size_str = os.getenv("LCB_TEST_CACHE_SIZE")
+    if not test_cache_size_str or test_cache_size_str.lower() in (
+        "none",
+        "inf",
+        "infinity",
+        "unlimited",
+    ):
+        test_suite_cache_limit = None
+    else:
+        test_suite_cache_limit = int(test_cache_size_str)
+        if test_suite_cache_limit <= 0:
+            raise ValueError("LCB_TEST_CACHE_SIZE must be a positive integer")
+
+    # Parse boolean for preload_test_cases
+    preload_tests_str = os.getenv("LCB_PRELOAD_TESTS", "true").lower()
+    preload_test_cases = preload_tests_str in ("true", "1", "yes", "on")
+
     logger.info("Initializing LCBServe with configuration:")
     logger.info(f"  version_tag: {version_tag}")
     logger.info(f"  n_workers: {n_workers or 'auto-detect'}")
     logger.info(f"  datasets_dir: {datasets_dir}")
     logger.info(f"  auto_generate_dataset: {auto_generate_dataset}")
+    logger.info(f"  test_suite_cache_limit: {test_suite_cache_limit or 'unlimited'}")
+    logger.info(f"  preload_test_cases: {preload_test_cases}")
 
     lcb_serve = LCBServe(
         version_tag=version_tag,
-        use_lite=True,  # Non-lite version of LCB is not supported
         n_workers=n_workers,
         datasets_dir=datasets_dir,
         auto_generate_dataset=auto_generate_dataset,
+        test_suite_cache_limit=test_suite_cache_limit,
+        preload_test_cases=preload_test_cases,
     )
     logger.info("LCBServe initialized successfully")
 

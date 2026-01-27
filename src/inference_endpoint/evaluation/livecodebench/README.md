@@ -297,7 +297,6 @@ The following environment variables can be configured when running the LCB-Servi
 - `LCB_VERSION_TAG`: Specify the version of LiveCodeBench to use. By default this is `release_v6`.
 - `LCB_AUTO_GENERATE_DATASET`: If this is set to `true`, then if there is no dataset located in the `LCB_DATASETS_DIR`, it will automatically be generated when
   the service starts. This is useful when used in conjunction with `LCB_VERSION_TAG` and `LCB_DATASETS_DIR`. For instance, the following can be used to do a 1-time test run of LiveCodeBench v4:
-- `LCB_SERVER_DEBUG`: When set to any value (e.g., `true`, `1`, `yes`), enables DEBUG level logging for the server. By default, only INFO level logs and above are shown. This is useful for troubleshooting and development purposes.
 
 ```
 ...
@@ -307,6 +306,13 @@ The following environment variables can be configured when running the LCB-Servi
 -e LCB_DATASETS_DIR=/opt/lcb_release_v4 \
 ...
 ```
+
+- `LCB_SERVER_DEBUG`: When set to any value (e.g., `true`, `1`, `yes`), enables DEBUG level logging for the server. By default, only INFO level logs and above are shown. This is useful for troubleshooting and development purposes.
+- `LCB_TEST_CACHE_SIZE`: Controls the maximum number of problems to cache test suites for in memory. By default (if not set), there is no limit and all test cases will be cached.
+  Set to a positive integer to limit the cache size (e.g., `100` to cache only test suites of the 100 most recently used problems). Set to `none`, `inf`, `infinity`, or `unlimited` to explicitly disable the limit.
+  This is useful for memory-constrained environments where caching all test cases would consume too much memory.
+- `LCB_PRELOAD_TESTS`: If set to `true` (or `1`, `yes`, `on`), all test cases will be preloaded into the cache during service startup.
+  This can improve performance for the first evaluation run at the cost of longer startup time and higher initial memory usage. By default, this is `true`.
 
 ---
 

@@ -42,6 +42,7 @@ import traceback
 from collections import defaultdict
 from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from functools import lru_cache
 from pathlib import Path
 
 import pandas as pd
@@ -147,14 +148,98 @@ def run_code_subprocess(
         return res, metadata
 
 
+class LCBTestLoader:
+    """Handles loading and preloading of test cases for LiveCodeBench.
+
+    This class's operations are not thread-safe, and should only be used in a single-threaded context.
+    """
+
+    def __init__(
+        self, datasets_dir: Path, cache_limit: int | None = None, strict: bool = True
+    ):
+        """
+        Initializes the test case loader.
+
+        Args:
+            datasets_dir: The directory containing the datasets.
+            cache_limit: The maximum number of test cases to cache. If None, no caching is done.
+            strict: Whether to raise an error if a test case is not found. If False, an empty test case is returned.
+        """
+        self.datasets_dir = datasets_dir
+        self.test_cases_dir = datasets_dir / "test_cases"
+        self.strict = strict
+
+        if not self.test_cases_dir.exists():
+            raise FileNotFoundError(
+                f"Test cases directory not found: {self.test_cases_dir}. "
+                "Please regenerate the dataset with test cases enabled."
+            )
+
+        self.load_test_case = lru_cache(maxsize=cache_limit)(self._load_test_case)
+
+    def _load_test_case(self, question_id: str) -> str:
+        """Loads a test case for a given question ID.
+
+        Args:
+            question_id: The question ID to load the test case for.
+
+        Returns:
+            The test case as a JSON string to be consumed by the test runner.
+        """
+        test_case_path = self.test_cases_dir / f"{question_id}.json"
+        if not test_case_path.exists():
+            if self.strict:
+                raise FileNotFoundError(
+                    f"Test case file not found: {test_case_path}. "
+                    "Please regenerate the dataset."
+                )
+            else:
+                return json.dumps(
+                    {
+                        "inputs": [],
+                        "outputs": [],
+                        "fn_name": None,
+                    }
+                )
+
+        with test_case_path.open(encoding="utf-8", mode="r") as f:
+            test_case_data = json.load(f)
+
+        test_inputs = []
+        test_outputs = []
+        for test_case in (
+            test_case_data["public_test_cases"] + test_case_data["private_test_cases"]
+        ):
+            test_inputs.append(test_case["input"])
+            test_outputs.append(test_case["output"])
+
+        info = {
+            "inputs": test_inputs,
+            "outputs": test_outputs,
+            "fn_name": test_case_data["func_name"],
+        }
+        return json.dumps(info)
+
+    def __getitem__(self, question_id: str) -> str:
+        """Gets a test case for a given question ID.
+
+        Args:
+            question_id: The question ID to get the test case for.
+
+        Returns:
+            The test case as a JSON string to be consumed by the test runner.
+        """
+        return self.load_test_case(question_id)
+
+
 class _LCBWorker:
     def __init__(
         self,
-        test_suites: dict[str, str],
+        test_loader: LCBTestLoader,
         n_lcb_workers: int = 1,
         worker_timeout_sec: int = 60,
     ):
-        self.test_suites = test_suites
+        self.test_loader = test_loader
         self.n_lcb_workers = n_lcb_workers
         self.worker_timeout_sec = worker_timeout_sec
 
@@ -183,11 +268,11 @@ class _LCBWorker:
 
         with ProcessPoolExecutor(max_workers=self.n_lcb_workers) as executor:
             for qid, test_codes in zip(question_ids, codes, strict=False):
-                test_suite = self.test_suites[qid]
+                test_suite_json = self.test_loader[qid]
                 for i, code in enumerate(test_codes):
                     future = executor.submit(
                         run_code_subprocess,
-                        test_suite,
+                        test_suite_json,
                         code,
                         timeout_sec=self.worker_timeout_sec,
                     )
@@ -234,13 +319,25 @@ class LCBServe:
     def __init__(
         self,
         version_tag: str = "release_v6",
-        use_lite: bool = True,
         n_workers: int | None = None,
         datasets_dir: Path = Path("/opt/LiveCodeBench_Datasets"),
         auto_generate_dataset: bool = True,
+        test_suite_cache_limit: int | None = None,
+        preload_test_cases: bool = False,
     ):
+        """
+        Initializes an LCBServe instance to evaluate a set of LiveCodeBench problems.
+
+        Args:
+            version_tag: The version tag of the LiveCodeBench dataset to use.
+            n_workers: The number of workers to use for evaluation. If None, the number of workers is set to the number of CPU cores divided by 2.
+            datasets_dir: The directory containing the LiveCodeBench datasets.
+            auto_generate_dataset: Whether to generate the dataset if it does not exist.
+            test_suite_cache_limit: The maximum number of test suites to cache. If None, the cache will not have a maximum size.
+            preload_test_cases: If the cache limit is not None, this does nothing. Otherwise, if True, all question IDs will be preloaded into
+                the test case cache on initialization.
+        """
         self.version_tag = version_tag
-        self.use_lite = use_lite
         self.datasets_dir = Path(datasets_dir)
 
         if n_workers is None:
@@ -258,61 +355,25 @@ class LCBServe:
                 raise FileNotFoundError(
                     f"Dataset file {self.path_to_dataset} does not exist"
                 )
-
-            logger.info("Generating dataset... This may take a while...")
-            self.df = generate_dataset(
-                datasets_dir=self.datasets_dir,
-                variant=version_tag,
-            )
+            else:
+                logger.info("Generating dataset... This may take a while...")
+                self.df = generate_dataset(
+                    datasets_dir=self.datasets_dir,
+                    variant=version_tag,
+                )
 
         # Load the dataset - All test cases should already be extracted
         if self.df is None:
             logger.info("Reading parquet from %s", self.path_to_dataset)
             self.df = pd.read_parquet(self.path_to_dataset)
             logger.info("Loaded %d records", len(self.df))
-        self.test_suites = self.consolidate_test_cases()
 
-    def consolidate_test_cases(self) -> dict[str, str]:
-        # Consolidate the inputs and outputs of the test cases into a JSON string.
-        # Reference: https://github.com/LiveCodeBench/LiveCodeBench/blob/28fef95ea8c9f7a547c8329f2cd3d32b92c1fa24/lcb_runner/benchmarks/code_generation.py#L106
-        test_suites = {}
-
-        test_cases_dir = self.datasets_dir / "test_cases"
-        if not test_cases_dir.exists():
-            raise FileNotFoundError(
-                f"Test cases directory not found: {test_cases_dir}. "
-                "Please regenerate the dataset with test cases enabled."
-            )
-
-        for _, row in self.df.iterrows():
-            q_id = row["question_id"]
-
-            # Load test cases from external JSON files
-            test_case_path = test_cases_dir / f"{q_id}.json"
-            if not test_case_path.exists():
-                raise FileNotFoundError(
-                    f"Test case file not found: {test_case_path}. "
-                    "Please regenerate the dataset."
-                )
-            with open(test_case_path, encoding="utf-8") as f:
-                test_case_data = json.load(f)
-
-            test_inputs = []
-            test_outputs = []
-            for test_case in (
-                test_case_data["public_test_cases"]
-                + test_case_data["private_test_cases"]
-            ):
-                test_inputs.append(test_case["input"])
-                test_outputs.append(test_case["output"])
-
-            info = {
-                "inputs": test_inputs,
-                "outputs": test_outputs,
-                "fn_name": test_case_data["func_name"],
-            }
-            test_suites[q_id] = json.dumps(info)
-        return test_suites
+        self.test_loader = LCBTestLoader(
+            self.datasets_dir, cache_limit=test_suite_cache_limit
+        )
+        if preload_test_cases:
+            for qid in self.df["question_id"].values:
+                self.test_loader[qid]  # Accessing will populate the cache
 
     def evaluate(
         self,
@@ -355,7 +416,7 @@ class LCBServe:
         codes = [codes_dict[qid] for qid in qids]
 
         worker = _LCBWorker(
-            self.test_suites,
+            self.test_loader,
             n_lcb_workers=self.n_workers,
             worker_timeout_sec=timeout_sec,
         )
