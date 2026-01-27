@@ -71,7 +71,16 @@ class Extractor(ABC):
 
     @classmethod
     @abstractmethod
-    def extract(cls, text: str) -> str | None:
+    def extract(cls, text: str, default: str | None = None) -> str | None:
+        """Extract value from text.
+
+        Args:
+            text: The text to extract from
+            default: Default value to return if extraction fails (instead of None)
+
+        Returns:
+            Extracted value, or default if extraction fails, or None if no default provided
+        """
         raise NotImplementedError
 
 
@@ -175,7 +184,7 @@ class ABCDExtractor(Extractor, extractor_id="abcd_extractor"):
     ]
 
     @classmethod
-    def extract(cls, text: str) -> str | None:
+    def extract(cls, text: str, default: str | None = None) -> str | None:
         matches = []
         for prio, pat in enumerate(cls.PATTERNS):
             m = pat.search(text)
@@ -205,7 +214,7 @@ class ABCDExtractor(Extractor, extractor_id="abcd_extractor"):
             abcd_choice = stripped[0].upper()
             return choice_map[abcd_choice]
 
-        return ""
+        return default if default is not None else ""
 
 
 class BoxedMathExtractor(Extractor, extractor_id="boxed_math_extractor"):
@@ -215,7 +224,7 @@ class BoxedMathExtractor(Extractor, extractor_id="boxed_math_extractor"):
     """
 
     @classmethod
-    def extract(cls, text: str) -> str | None:
+    def extract(cls, text: str, default: str | None = None) -> str | None:
         pattern = r"boxed{(.*?)}|framebox{(.*?)}"
         matches = re.findall(pattern, text, re.DOTALL)
         if matches:
@@ -228,14 +237,14 @@ class BoxedMathExtractor(Extractor, extractor_id="boxed_math_extractor"):
         matches = re.findall(pattern, text, re.DOTALL)
         if matches:
             return matches[-1]
-        return None
+        return default
 
 
 class IdentityExtractor(Extractor, extractor_id="identity_extractor"):
     """Extract identity answer from response text."""
 
     @classmethod
-    def extract(cls, text: str) -> str | None:
+    def extract(cls, text: str, _: str | None = None) -> str | None:
         return text
 
 
@@ -251,25 +260,28 @@ class PythonCodeExtractor(Extractor, extractor_id="python_code_extractor"):
 
     Args:
         text: Response text containing code blocks
+        default: Default value to return if extraction fails (instead of None)
 
     Returns:
-        Extracted Python code or None if no code block found
+        Extracted Python code, or default if provided and extraction fails, or None otherwise
 
     Examples:
         >>> PythonCodeExtractor.extract("```python\\ndef foo():\\n    pass\\n```")
         'def foo():\\n    pass'
         >>> PythonCodeExtractor.extract("```\\nprint('hello')\\n```")
         "print('hello')"
+        >>> PythonCodeExtractor.extract("no code here", default="# FAILED")
+        '# FAILED'
     """
 
     @classmethod
-    def extract(cls, text: str) -> str | None:
+    def extract(cls, text: str, default: str | None = None) -> str | None:
         if not text or not isinstance(text, str):
-            return None
+            return default
 
         text = text.strip()
         if not text:
-            return None
+            return default
 
         # Try ```python blocks first (most specific)
         python_matches = list(re.finditer(r"```python(.*?)```", text, re.DOTALL))
@@ -285,4 +297,4 @@ class PythonCodeExtractor(Extractor, extractor_id="python_code_extractor"):
             code = re.sub(r"^(?:python|py)\s*\n", "", code, flags=re.IGNORECASE)
             return code
 
-        return None
+        return default

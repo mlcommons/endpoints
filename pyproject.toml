@@ -26,33 +26,64 @@ classifiers = [
 ]
 requires-python = ">=3.12"
 dependencies = [
-    "asyncio",
+    # Core Python dependencies
     "typing-extensions>=4.0.0",
-    "orjson==3.11.5",
+    # System utilities
+    "psutil==6.1.1",
+    # Async and networking
     "pyzmq==27.1.0",
     "uvloop==0.22.1",
-    "msgspec==0.20.0",
     "httptools==0.7.1",
+    "websocket-client==1.9.0",
+    # Data handling
+    "duckdb==1.4.0",
+    "orjson==3.11.5",
+    "msgspec==0.20.0",
+    "pydantic==2.12.0",
+    "pydantic_core==2.41.1",
+    # Needed for tokenization and OSL reporting
+    "transformers==4.57.1",
+    "numpy==2.3.4",
+    "datasets==4.1.1",
+    "sentencepiece==0.2.1",
+    "protobuf==6.33.0",
+    "openai_harmony==0.0.8",
+    # Color support for cross-platform terminals
+    "colorama==0.4.6",
+    # Fix pytz-2024 import warning
+    "pytz==2025.2",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=7.0.0",
-    "pytest-asyncio>=0.21.0",
-    "pytest-cov>=4.0.0",
-    "black>=23.0.0",
-    "isort>=5.12.0",
-    "flake8>=6.0.0",
-    "mypy>=1.0.0",
+    # Code quality
+    "ruff>=0.3.0",
+    # Development tools
     "pre-commit>=3.0.0",
+    # Profiling tools
+    "line-profiler==5.0.0",
+    "Pympler==1.1",
+    # Documentation
+    "sphinx>=7.0.0",
+    "sphinx-rtd-theme>=2.0.0",
+    "sphinx-autodoc-typehints>=1.25.0",
+    "myst-parser>=2.0.0",
 ]
 test = [
+    # Testing framework
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",
     "pytest-cov>=4.0.0",
     "pytest-benchmark>=4.0.0",
+    "pytest-timeout==2.4.0",
     "pytest-xdist==3.8.0",
-    "PyYAML>=6.0",
+    # Test utilities
+    "coverage>=7.0.0",
+    "line-profiler==5.0.0",
+    "Pympler==1.1",
+    "scipy==1.16.3",
+    # HTTP server and client for mock server fixture
+    "aiohttp==3.13.3",
 ]
 performance = [
     "pytest-benchmark>=4.0.0",
@@ -73,6 +104,12 @@ where = ["src"]
 
 [tool.setuptools.package-dir]
 "" = "src"
+
+[tool.setuptools.package-data]
+inference_endpoint = ["config/templates/*.yaml"]
+
+[tool.setuptools.exclude-package-data]
+"inference_endpoint.evaluation.livecodebench" = ["_server.py"]
 
 [tool.autopep8]
 max_line_length = 88
