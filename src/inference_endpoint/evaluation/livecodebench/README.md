@@ -48,6 +48,15 @@ The following dependencies are automatically installed in the container:
 - **Internet Access**: Required during build for package installation and dataset downloads. No internet access is required during
   container execution.
 
+### Host-Side Dataset Generation
+
+The `LiveCodeBench.generate()` method on the host side creates an isolated Python virtual environment with `datasets==3.6.0` to
+create the dataset. By default, the host side generate method will have the `--no-test-cases` flag set, as the host only needs
+to send the input to the endpoint, and the output is evaluated within the lcb-service container.
+
+To enable local evaluation fallback (**NOT RECOMMENDED**), set `save_test_cases` to True. This can be done by manually calling
+the [generate method](/src/inference_endpoint/dataset_manager/predefined/livecodebench/__init__.py).
+
 ---
 
 ## Why Containerization is Required
@@ -194,16 +203,12 @@ section.
 docker run \
   --rm \
   -p 13835:13835 \
-  -v datasets/livecodebench/release_v6:/mnt/datasets \
   lcb-service
 ```
 
 #### Hardened Run Command
 
-Automated creation of isolated docker network configuration is currently work-in-progress, but you are able to do so, please add your private network to the command.
-
-Additionally, the current `LiveCodeBench.generate()` method on the host side uses a writable volume mount to copy the dataset file from container to host. This will
-be changed in a later version, so the `-v ...:/mnt/datasets` flag will no longer be required in the future as it is a possible attack vector.
+Automated creation of isolated docker network configuration is currently work-in-progress, but if you are able to do so, please add your private network to the command.
 
 ```bash
 docker run \
@@ -212,7 +217,6 @@ docker run \
   --read-only \
   --tmpfs /tmp:rw,noexec,nosuid,size=1g \
   -p 127.0.0.1:13835:13835 \
-  -v /path/to/datasets/livecodebench/release_v6:/mnt/datasets \
   --security-opt=no-new-privileges:true \
   --security-opt apparmor=docker-default \
   --memory=32g \
@@ -264,11 +268,12 @@ docker rmi lcb-service:latest
    - Check logs: `docker logs livecodebench`
    - Verify port 13835 is not already in use
 
-2. **Dataset not found or HuggingFace errors**
+2. **Dataset generation errors on host side**
 
-   - Verify the subdirectory mount path: `/mnt/datasets` should map to `<datasets_dir>/livecodebench/release_v6`
-   - Check file permissions on mounted volumes. The `/mnt/datasets` volume must be writable from the container
-   - Ensure HF_TOKEN was provided during build
+   - Ensure the host has internet access to download datasets from HuggingFace
+   - If the error is a rate limit, ensure that the `HF_TOKEN` environment variable is set to your HuggingFace API key
+   - Check that the virtual environment was created successfully at `<datasets_dir>/livecodebench/venv`
+   - Verify that `datasets==3.6.0` was installed correctly in the venv
 
 3. **WebSocket connection issues**
 

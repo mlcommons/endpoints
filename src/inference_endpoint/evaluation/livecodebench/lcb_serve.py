@@ -36,6 +36,7 @@ running in.
 
 import argparse
 import json
+import logging
 import multiprocessing as mp
 import traceback
 from collections import defaultdict
@@ -47,6 +48,8 @@ import pandas as pd
 from tqdm import tqdm
 
 from .generate import generate_dataset
+
+logger = logging.getLogger(__name__)
 
 
 def execute_code_single(test_suite_json: str, code: str, timeout_sec: int = 60):
@@ -197,7 +200,9 @@ class _LCBWorker:
                 qid, code_idx = futures[future]
                 res, metadata = future.result()
                 if "error" in metadata:
-                    print(metadata)
+                    logger.warning(
+                        f"Test execution error for question {qid}: {metadata}"
+                    )
 
                 # LCB uses any result > 0 as a 'pass' since:
                 # Negative numbers indicate error codes
@@ -216,10 +221,11 @@ class _LCBWorker:
                     try:
                         on_problem_complete([qid])
                     except Exception as e:
-                        print(
-                            f"Error occurred during on_problem_complete callback: {e!r}"
+                        logger.error(
+                            "Error occurred during on_problem_complete callback: %r",
+                            e,
+                            exc_info=True,
                         )
-                        traceback.print_exc()
 
         return results
 
@@ -235,14 +241,15 @@ class LCBServe:
     ):
         self.version_tag = version_tag
         self.use_lite = use_lite
+        self.datasets_dir = Path(datasets_dir)
 
         if n_workers is None:
             n_workers = mp.cpu_count() // 2
-        print(f"Using {n_workers} workers for LCB eval...")
+        logger.info("Using %d workers for LCB eval", n_workers)
         self.n_workers = n_workers
 
         self.path_to_dataset = (
-            Path(datasets_dir) / f"livecodebench_{version_tag}.parquet"
+            self.datasets_dir / f"livecodebench_{version_tag}.parquet"
         )
 
         self.df = None
@@ -252,39 +259,58 @@ class LCBServe:
                     f"Dataset file {self.path_to_dataset} does not exist"
                 )
 
-            print("Generating dataset... This may take a while...")
+            logger.info("Generating dataset... This may take a while...")
             self.df = generate_dataset(
-                datasets_dir=datasets_dir,
+                datasets_dir=self.datasets_dir,
                 variant=version_tag,
             )
 
         # Load the dataset - All test cases should already be extracted
         if self.df is None:
-            print("Reading parquet...")
+            logger.info("Reading parquet from %s", self.path_to_dataset)
             self.df = pd.read_parquet(self.path_to_dataset)
-            print(f"Loaded {len(self.df)}")
+            logger.info("Loaded %d records", len(self.df))
         self.test_suites = self.consolidate_test_cases()
 
     def consolidate_test_cases(self) -> dict[str, str]:
         # Consolidate the inputs and outputs of the test cases into a JSON string.
         # Reference: https://github.com/LiveCodeBench/LiveCodeBench/blob/28fef95ea8c9f7a547c8329f2cd3d32b92c1fa24/lcb_runner/benchmarks/code_generation.py#L106
         test_suites = {}
+
+        test_cases_dir = self.datasets_dir / "test_cases"
+        if not test_cases_dir.exists():
+            raise FileNotFoundError(
+                f"Test cases directory not found: {test_cases_dir}. "
+                "Please regenerate the dataset with test cases enabled."
+            )
+
         for _, row in self.df.iterrows():
             q_id = row["question_id"]
 
-            # Decode test cases
-            public_test_cases = json.loads(row["public_test_cases"])
-            private_test_cases = json.loads(row["private_test_cases"])
+            # Load test cases from external JSON files
+            test_case_path = test_cases_dir / f"{q_id}.json"
+            if not test_case_path.exists():
+                raise FileNotFoundError(
+                    f"Test case file not found: {test_case_path}. "
+                    "Please regenerate the dataset."
+                )
+            with open(test_case_path, encoding="utf-8") as f:
+                test_case_data = json.load(f)
+
+            test_inputs = []
+            test_outputs = []
+            for test_case in (
+                test_case_data["public_test_cases"]
+                + test_case_data["private_test_cases"]
+            ):
+                test_inputs.append(test_case["input"])
+                test_outputs.append(test_case["output"])
 
             info = {
-                "inputs": [],
-                "outputs": [],
-                "fn_name": row["func_name"] if row["func_name"] else None,
+                "inputs": test_inputs,
+                "outputs": test_outputs,
+                "fn_name": test_case_data["func_name"],
             }
-            for test_case in public_test_cases + private_test_cases:
-                info["inputs"].append(test_case["input"])
-                info["outputs"].append(test_case["output"])
-
             test_suites[q_id] = json.dumps(info)
         return test_suites
 

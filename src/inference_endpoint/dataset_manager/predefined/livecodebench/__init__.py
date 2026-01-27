@@ -13,18 +13,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import json
-import os
-import urllib.request
-from logging import getLogger
+import logging
+import subprocess
+import sys
+import venv
 from pathlib import Path
 
 import pandas as pd
+from inference_endpoint.dataset_manager.dataset import Dataset
+from inference_endpoint.evaluation.livecodebench.generate import SCRIPT_PATH
 
-from ...dataset import Dataset
 from . import presets
 
-logger = getLogger(__name__)
+logger = logging.getLogger(__name__)
 
 
 class LiveCodeBench(
@@ -42,14 +43,61 @@ class LiveCodeBench(
         "question",
         "starter_code",
         "difficulty",
-        "public_test_cases",
-        "private_test_cases",
-        "func_name",
     ]
 
     PRESETS = presets
 
-    SERVER_ADDRESS = os.getenv("LCB_SERVER_ADDRESS", "127.0.0.1:13835")
+    @classmethod
+    def _ensure_venv(cls, venv_path: Path) -> Path:
+        """Ensure a virtual environment exists with datasets==3.6.0 installed.
+
+        Args:
+            venv_path: Path to the virtual environment directory.
+
+        Returns:
+            Path to the Python executable in the virtual environment.
+        """
+        if not venv_path.exists():
+            logger.info(f"Creating virtual environment at {venv_path}")
+            venv.create(venv_path, with_pip=True, clear=True)
+
+        # Determine Python executable path based on platform
+        if sys.platform == "win32":
+            python_executable = venv_path / "Scripts" / "python.exe"
+        else:
+            python_executable = venv_path / "bin" / "python"
+
+        if not python_executable.exists():
+            raise RuntimeError(f"Python executable not found at {python_executable}")
+
+        # Check if datasets package is installed with correct version
+        try:
+            result = subprocess.run(
+                [
+                    str(python_executable),
+                    "-c",
+                    "import datasets; print(datasets.__version__)",
+                ],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            installed_version = result.stdout.strip()
+            if installed_version != "3.6.0":
+                logger.info(
+                    f"datasets version {installed_version} found, reinstalling 3.6.0"
+                )
+                raise ValueError("Wrong version")
+        except (subprocess.CalledProcessError, ValueError):
+            # Install datasets==3.6.0
+            logger.info("Installing datasets==3.6.0 in virtual environment")
+            subprocess.run(
+                [str(python_executable), "-m", "pip", "install", "datasets==3.6.0"],
+                check=True,
+                capture_output=True,
+            )
+
+        return python_executable
 
     @classmethod
     def generate(
@@ -57,24 +105,21 @@ class LiveCodeBench(
         datasets_dir: Path,
         variant: str = "release_v6",
         force: bool = False,
+        save_test_cases: bool = False,
         **kwargs,
     ) -> pd.DataFrame:
-        """Generates the LiveCodeBench reference dataset for accuracy evaluation. LiveCodeBench
-        requires a container to be running in the background as a webservice. The base container
-        contains a copy of the dataset inside at /opt/LiveCodeBench_Datasets/livecodebench_release_v6.parquet.
+        """Generates the LiveCodeBench reference dataset. By default, since evaluation should be run via the
+        lcb-service container, only the necessary model inputs are saved.
 
-        You can either copy it out via `docker cp`, or use this method, which requires the
-        container to be running, and the local <datasets_dir>/livecodebench/release_v6 directory
-        to be mounted on the container at /mnt/datasets.
-
-        ** NOTE ** It is the SUBDIRECTORY in the datasets_dir that must be mounted, not the entire datasets_dir
-
-        If the copy fails, or this directory is not mounted correctly, this method will raise an exception,
+        This method creates an isolated Python virtual environment with datasets==3.6.0
+        and invokes the dataset generation script as a subprocess. The venv is created
+        at datasets_dir/livecodebench/venv.
 
         Args:
             datasets_dir: Path to the base datasets directory where all datasets are stored.
             variant: The variant of the dataset to generate. (Default: "release_v6")
             force: Whether to force the generation of the dataset. (Default: False)
+            save_test_cases: Whether to save test cases as separate JSON files. (Default: False)
             **kwargs: Additional keyword arguments to pass to the dataset generation method. These are ignored.
 
         Returns:
@@ -82,7 +127,7 @@ class LiveCodeBench(
 
         Raises:
             FileNotFoundError: If the dataset is not found at the destination path.
-            RuntimeError: If the dataset copy fails.
+            RuntimeError: If the dataset generation fails.
         """
         filename = f"{cls.DATASET_ID}_{variant}.parquet"
         dst_path = datasets_dir / cls.DATASET_ID / variant / filename
@@ -93,23 +138,100 @@ class LiveCodeBench(
             logger.info(f"Dataset already exists at {dst_path}. Loading from file.")
             return pd.read_parquet(dst_path)
 
-        # Try to get dataset from LCB server endpoint first
-        lcb_server_url = f"http://{cls.SERVER_ADDRESS}"
-        logger.info(f"Attempting to copy dataset from LCB server at {lcb_server_url}")
-        req = urllib.request.Request(f"{lcb_server_url}/copy_dataset", method="GET")
+        # Ensure venv exists with correct dependencies
+        venv_path = datasets_dir / cls.DATASET_ID / "venv"
+        python_executable = cls._ensure_venv(venv_path)
 
-        # Any error that occurs here should be fatal, up to caller to handle gracefully.
-        with urllib.request.urlopen(req, timeout=30) as response:
-            response_data = response.read()
-            result = json.loads(response_data)
+        # Build subprocess command
+        cmd = [
+            str(python_executable),
+            str(SCRIPT_PATH),
+            "--datasets-dir",
+            str(dst_path.parent),
+            "--variant",
+            variant,
+        ]
 
-            if result.get("success"):
-                # Dataset was successfully copied to /mnt/datasets
-                if dst_path.exists():
-                    return pd.read_parquet(dst_path)
-                else:
-                    raise FileNotFoundError(
-                        f"Server-side copy succeeded, but dataset not found at {dst_path}, is it mounted correctly?"
-                    )
-            else:
-                raise RuntimeError(f"LCB server copy failed: {result.get('error')}")
+        if force:
+            cmd.append("--force")
+
+        if not save_test_cases:
+            cmd.append("--no-test-cases")
+
+        # Execute subprocess
+        logger.info(f"Generating dataset with command: {' '.join(cmd)}")
+        try:
+            result = subprocess.run(
+                cmd,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            logger.info("Dataset generation completed successfully")
+            logger.debug(f"Subprocess stdout: {result.stdout}")
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Dataset generation failed with exit code {e.returncode}")
+            logger.error(f"Subprocess stdout: {e.stdout}")
+            logger.error(f"Subprocess stderr: {e.stderr}")
+            raise RuntimeError(f"Dataset generation failed: {e.stderr}") from e
+
+        # Load and return the generated dataset
+        if dst_path.exists():
+            return pd.read_parquet(dst_path)
+        else:
+            raise FileNotFoundError(
+                f"Dataset generation reported success, but dataset not found at {dst_path}"
+            )
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Generate the LiveCodeBench dataset using an isolated Python environment"
+    )
+    parser.add_argument(
+        "--datasets-dir",
+        type=Path,
+        required=True,
+        help="Path to the base datasets directory where all datasets are stored",
+    )
+    parser.add_argument(
+        "--variant",
+        type=str,
+        default="release_v6",
+        help="The variant of the dataset to generate (default: release_v6)",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Force regeneration of the dataset even if it already exists",
+    )
+    parser.add_argument(
+        "--save-test-cases",
+        action="store_true",
+        help="Save test cases as separate JSON files",
+    )
+    args = parser.parse_args()
+
+    # Configure logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
+
+    # Generate the dataset
+    logger.info(f"Generating LiveCodeBench dataset (variant: {args.variant})")
+    logger.info(f"Datasets directory: {args.datasets_dir}")
+    logger.info(f"Force: {args.force}")
+    logger.info(f"Save test cases: {args.save_test_cases}")
+
+    df = LiveCodeBench.generate(
+        datasets_dir=args.datasets_dir,
+        variant=args.variant,
+        force=args.force,
+        save_test_cases=args.save_test_cases,
+    )
+
+    logger.info(f"Successfully generated dataset with {len(df)} samples")
+    logger.info(f"Columns: {list(df.columns)}")

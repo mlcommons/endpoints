@@ -23,7 +23,6 @@ import asyncio
 import json
 import logging
 import os
-import shutil
 import traceback
 from pathlib import Path
 from typing import Literal
@@ -340,92 +339,6 @@ async def get_info():
             content={
                 "success": False,
                 "error": f"Error retrieving info: {e!s}",
-                "traceback": traceback.format_exc(),
-            },
-        )
-
-
-@app.get("/copy_dataset")
-async def copy_dataset():
-    """Copy dataset file from LCB_DATASETS_DIR to /mnt/datasets.
-
-    Returns:
-        JSON response with status and details about the copy operation.
-    """
-    if lcb_serve is None:
-        return JSONResponse(
-            status_code=503,
-            content={
-                "success": False,
-                "error": "LCBServe not initialized",
-            },
-        )
-
-    try:
-        # Get the source dataset directory and version tag
-        datasets_dir = lcb_serve.datasets_dir
-        version_tag = lcb_serve.version_tag
-
-        # Construct the source file path
-        source_file = datasets_dir / f"livecodebench_{version_tag}.parquet"
-
-        # Check if source file exists
-        if not source_file.exists():
-            return JSONResponse(
-                status_code=404,
-                content={
-                    "success": False,
-                    "error": f"Dataset file not found: {source_file}",
-                },
-            )
-
-        # Check if destination directory exists
-        dest_dir = Path("/mnt/datasets")
-        if not dest_dir.exists():
-            return JSONResponse(
-                status_code=404,
-                content={
-                    "success": False,
-                    "error": f"Destination directory does not exist: {dest_dir}",
-                },
-            )
-
-        # Construct destination file path
-        dest_file = dest_dir / source_file.name
-
-        # Copy the file
-        shutil.copy2(source_file, dest_file)
-
-        return JSONResponse(
-            status_code=200,
-            content={
-                "success": True,
-                "message": "Dataset copied successfully",
-            },
-        )
-
-    except PermissionError as e:
-        return JSONResponse(
-            status_code=403,
-            content={
-                "success": False,
-                "error": f"Permission denied: {e!s}",
-            },
-        )
-    except OSError as e:
-        return JSONResponse(
-            status_code=500,
-            content={
-                "success": False,
-                "error": f"OS error during copy: {e!s}",
-            },
-        )
-    except Exception as e:
-        return JSONResponse(
-            status_code=500,
-            content={
-                "success": False,
-                "error": f"Unexpected error: {e!s}",
                 "traceback": traceback.format_exc(),
             },
         )

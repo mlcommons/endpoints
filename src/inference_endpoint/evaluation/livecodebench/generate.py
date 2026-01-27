@@ -37,11 +37,55 @@ import pickle
 import random
 import zlib
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 from datasets import load_dataset
 
 logger = logging.getLogger(__name__)
+
+
+SCRIPT_PATH = Path(__file__)
+
+
+def deserialize_private_test(private_test_cases: str) -> list[dict[str, Any]]:
+    """Unpack the private test cases. In most cases, the private test cases are stored as either a
+    JSON string, or a Base64-encoded zlib-compressed pickle'd string, which needs to be JSON decoded.
+    Reference: https://github.com/LiveCodeBench/LiveCodeBench/blob/28fef95ea8c9f7a547c8329f2cd3d32b92c1fa24/lcb_runner/benchmarks/code_generation.py#L64-L74
+
+    If any error is raised, the dataset is probably malformed, and should be a fatal error.
+    The error type indicates the step in the deserialization process that failed.
+
+    Args:
+        private_test_cases: The encoded string of private test cases to unpack.
+
+    Returns:
+        The unpacked private test cases.
+    """
+    try:
+        # Check if it is already JSON - if it is, do nothing.
+        deserialized_private_test_cases = json.loads(private_test_cases)
+        return deserialized_private_test_cases
+    except json.JSONDecodeError as json_error:
+        # Otherwise, it is a Base64-encoded zlib-compressed pickle'd string.
+        # If any steps fail, the dataset is probably malformed, and should be a fatal error.
+
+        # Decode the Base64 string
+        decoded_bytes = base64.b64decode(private_test_cases.encode("utf-8"))
+
+        # Uncompress the bytes
+        uncompressed_bytes = zlib.decompress(decoded_bytes)
+
+        # Unpickle the bytes
+        unpickled_obj = pickle.loads(uncompressed_bytes)
+
+        if not isinstance(unpickled_obj, str):
+            raise ValueError(
+                "Invalid private_test_cases format. Is the dataset malformed?"
+            ) from json_error
+
+        # Check if is valid JSON and decode
+        return json.loads(unpickled_obj)
 
 
 def generate_dataset(
@@ -50,6 +94,7 @@ def generate_dataset(
     seed: int = 0,
     max_samples: int | None = None,
     force: bool = False,
+    save_test_cases: bool = True,
 ) -> pd.DataFrame:
     """Generates the LiveCodeBench dataset.
 
@@ -59,6 +104,8 @@ def generate_dataset(
         seed: The seed to use for the random number generator.
         max_samples: The maximum number of samples to generate.
         force: Whether to force the generation of the dataset.
+        save_test_cases: Whether to save test cases as separate JSON files.
+            If True, test cases are saved to datasets_dir/test_cases/<question_id>.json
     """
 
     if not datasets_dir.exists():
@@ -90,49 +137,6 @@ def generate_dataset(
         ]
     )
 
-    # Unpack the private test cases. In most cases, the private test cases are stored as either a
-    # JSON string, or a Base64-encoded zlib-compressed pickle'd string, which needs to be JSON decoded.
-    # Reference: https://github.com/LiveCodeBench/LiveCodeBench/blob/28fef95ea8c9f7a547c8329f2cd3d32b92c1fa24/lcb_runner/benchmarks/code_generation.py#L64-L74
-    def deserialize_private_test(private_test_cases: str) -> str:
-        try:
-            # Check if it is already JSON - if it is, do nothing.
-            _ = json.loads(private_test_cases)
-            return private_test_cases
-        except json.JSONDecodeError as json_error:
-            # Otherwise, it is a Base64-encoded zlib-compressed pickle'd string.
-            # If any steps fail, the dataset is probably malformed, and should be a fatal error.
-
-            # Decode the Base64 string
-            decoded_bytes = base64.b64decode(private_test_cases.encode("utf-8"))
-
-            # Uncompress the bytes
-            uncompressed_bytes = zlib.decompress(decoded_bytes)
-
-            # Unpickle the bytes
-            unpickled_obj = pickle.loads(uncompressed_bytes)
-
-            if not isinstance(unpickled_obj, str):
-                raise ValueError(
-                    "Invalid private_test_cases format. Is the dataset malformed?"
-                ) from json_error
-
-            # Check if is valid JSON
-            _ = json.loads(unpickled_obj)
-            return unpickled_obj
-
-    df["private_test_cases"] = df["private_test_cases"].apply(deserialize_private_test)
-
-    # The only important metadata field for evaluation is the 'func_name' field
-    def get_func_name(metadata_json: str) -> str:
-        try:
-            metadata = json.loads(metadata_json)
-            return metadata.get("func_name", "")
-        except json.JSONDecodeError:
-            return ""
-
-    df["func_name"] = df["metadata"].apply(get_func_name)
-    df = df.drop(columns=["metadata"])
-
     # If max_samples is specified, sample 'max_samples' rows from the dataset
     if max_samples is not None and max_samples < len(df):
         rng = random.Random(seed)
@@ -140,11 +144,47 @@ def generate_dataset(
         df = df.iloc[sampled_indices].reset_index(drop=True)
         logger.info(f"Sampled {max_samples} questions")
 
-    # Save to parquet file
-    df.to_parquet(dst_path)
-    logger.info(f"Saved {len(df)} samples to {dst_path}")
+    # Process and save test cases if requested
+    if save_test_cases:
+        # Save test cases to separate JSON files
+        test_cases_dir = datasets_dir / "test_cases"
+        test_cases_dir.mkdir(parents=True, exist_ok=True)
 
-    return df
+        for _, row in df.iterrows():
+            question_id = row["question_id"]
+            test_case_json_path = test_cases_dir / f"{question_id}.json"
+
+            public_cases = json.loads(row["public_test_cases"])
+            private_cases = deserialize_private_test(row["private_test_cases"])
+            func_name = None
+
+            try:
+                metadata = json.loads(row["metadata"])
+                func_name = metadata.get("func_name", None)
+            except json.JSONDecodeError:
+                logger.info(f"Failed to load metadata for question {question_id}.")
+
+            test_case_data = {
+                "public_test_cases": public_cases,
+                "private_test_cases": private_cases,
+                "func_name": func_name,
+            }
+
+            with test_case_json_path.open("w", encoding="utf-8") as f:
+                json.dump(test_case_data, f, indent=2)
+
+        logger.info(f"Saved test cases to {test_cases_dir}")
+
+    # Drop test case columns from the dataframe before saving to parquet
+    df_to_save = df.drop(
+        columns=["public_test_cases", "private_test_cases", "metadata"]
+    )
+
+    # Save to parquet file with pyarrow engine for better performance
+    df_to_save.to_parquet(dst_path, engine="pyarrow")
+    logger.info(f"Saved {len(df_to_save)} samples to {dst_path}")
+
+    return df_to_save
 
 
 if __name__ == "__main__":
@@ -178,6 +218,12 @@ if __name__ == "__main__":
         action="store_true",
         help="Whether to force the generation of the dataset",
     )
+    parser.add_argument(
+        "--no-test-cases",
+        action="store_true",
+        default=False,
+        help="Do not save test cases as separate JSON files",
+    )
     args = parser.parse_args()
 
     generate_dataset(
@@ -186,4 +232,5 @@ if __name__ == "__main__":
         seed=args.seed,
         max_samples=args.max_samples,
         force=args.force,
+        save_test_cases=not args.no_test_cases,
     )
