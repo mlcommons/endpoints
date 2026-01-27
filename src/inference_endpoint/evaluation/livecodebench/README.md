@@ -124,15 +124,17 @@ For resource limiting, there are a few caveats:
 
 - When using `--cpus` to limit the number of CPUs, you must set the number of workers manually via the `LCB_N_WORKERS` environment variable (see [Environment Variables](#environment-variables)). This is because Python's `os.cpu_count()` function reads from `/proc/cpuinfo` which is derived from the host, and is unaware of any cgroup or other CPU restricting functions.
 - If using `--memory`, the value should be set to at least `32g`.
-  - The dataset file itself is rather large (5.5GB when stored as Parquet).
-  - During `pandas.read_parquet`, around 21gb is used at the maximal memory usage during decompression.
+  - By default, all test suites will be loaded into memory and cached upon the launching of the service.
+  - During loading, around 21GiB is used at the maximal memory usage.
   - After loading, the service will consume around 17-18 GiB while idle.
-  - During eval, memory usage of up to 31GB is observed with the configuration provided in the [sample command](#hardened-run-command) during a _single_ `/evaluate` connection.
-  - If multiple `/evaluate` connections are expected or required, it is recommended to increase the `--memory` limit greatly (by 16GB per expected connection).
+  - During eval, memory usage of up to 31GiB is observed with the configuration provided in the [sample command](#hardened-run-command) during a _single_ `/evaluate` connection.
+  - Setting the `LCB_TEST_CACHE_SIZE` environment variable to a lower value will greatly reduce the memory footprint at the cost of longer evaluate queries. See [Environment Variables](#environment-variables) for more details.
+    - The full dataset size consists of 1055 test suites. Reducing the cache size to 512 or 256 will reduce the memory capacity requirements.
+  - If multiple `/evaluate` connections are expected or required, it is recommended to increase the `--memory` limit greatly (by 16GB per expected connection) and also reduce the cache size (see above).
     - Currently there is no programmatic limit on the number of concurrent `/evaluate` connections.
   - It is advised to set `--memory-swap` to the same value as `--memory` to disable swap memory unless your machine does not have enough system memory to support the workload, in which case you should increase the `--memory-swap` limit accordingly.
 - Process limits: For most cases, `--pids-limit=4096` is fine, but it is recommended to increase this value by at least double if multiple concurrent `/evaluate` connections are expected.
-- For best practices, when performing evaluation, to reduce the memory and PID footprint of the container, it is best to reduce the size of each `/evaluate` query to 1000 or fewer code generation samples. The [sample command](#hardened-run-command) was tested with 3 repeats of LiveCodeBench Lite v6 (3165 code generation samples) in a single query, but due to variance in the generated code, this is not recommended and may not always work.
+- For best practices, when performing evaluation, to reduce the memory and PID footprint of the container, it is also best to reduce the size of each `/evaluate` query to 1000 or fewer code generation samples. The [sample command](#hardened-run-command) was tested with 3 repeats of LiveCodeBench Lite v6 (3165 code generation samples) in a single query, but due to variance in the generated code, this is not recommended and may not always work.
 
 ---
 
