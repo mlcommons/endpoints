@@ -471,6 +471,7 @@ class Report:
     def display(
         self,
         fn: Callable[[str], None] = print,
+        summary_only: bool = False,
         newline: str = "",
     ) -> None:
         """Displays the report in a human-readable format.
@@ -495,6 +496,10 @@ class Report:
 
         if self.tps is not None:
             fn(f"TPS: {self.tps:.2f}{newline}")
+
+        if summary_only:
+            fn(f"----------------- End of Summary -----------------{newline}")
+            return
 
         fn(f"\n\n------------------- Latency Breakdowns -------------------{newline}")
         if len(self.latency) > 0 and self.ttft == 0:
