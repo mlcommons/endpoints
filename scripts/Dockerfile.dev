@@ -1,7 +1,7 @@
 # Development Dockerfile for the MLPerf Inference Endpoint Benchmarking System
 # From project root:
 # docker build -f scripts/Dockerfile.dev --build-arg USER_ID=$(id -u) --build-arg GROUP_ID=$(id -g) -t inference-endpoint-dev .
-# docker run -e HF_TOKEN=$HF_TOKEN --net host --gpus all -v $(pwd):/mnt/inference-endpoint -it --shm-size=1024m inference-endpoint-dev bash
+# docker run -v $(pwd):/mnt/inference-endpoint -it --shm-size=512m inference-endpoint-dev bash
 
 FROM python:3.12-slim
 
@@ -9,19 +9,17 @@ FROM python:3.12-slim
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    HF_TOKEN=${HF_TOKEN}
+    PIP_DISABLE_PIP_VERSION_CHECK=1
 
 # Install system dependencies
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends build-essential procps git sudo \
+    apt-get install -y  --no-install-recommends build-essential procps \
     && rm -rf /var/lib/apt/lists/*
 
 RUN mkdir /mnt/inference-endpoint
 WORKDIR /mnt/inference-endpoint
 COPY pyproject.toml .
 COPY src/ ./src/
-COPY examples/ ./examples/
 
 # Create a non-root user for security
 # Accept UID and GID as build arguments to match host user
@@ -34,11 +32,6 @@ RUN if ! getent group ${GROUP_ID}; then \
     chown -R ${USER_ID}:${GROUP_ID} /mnt/inference-endpoint
 USER appuser
 ENV PATH="/home/appuser/.local/bin:$PATH"
-
-# Grant passwordless sudo access to appuser
-USER root
-RUN echo "appuser ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
-USER appuser
 
 RUN pip install -e .[dev]
 RUN pip install .[test]
