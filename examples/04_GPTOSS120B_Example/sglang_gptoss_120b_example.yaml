@@ -1,3 +1,18 @@
+# Select the model to benchmark
+# export MODEL_NAME=openai/gpt-oss-120b
+# export MODEL_NAME=nvidia/DeepSeek-R1-0528-FP4-v2
+# export MODEL_NAME=openai/gpt-oss-120b
+
+# Set the Hugging Face token
+# export HF_TOKEN=<YOUR_HF_TOKEN>
+
+# Launch the server
+# SGLang
+# docker run --runtime nvidia --gpus all --net host  -v ${HF_HOME}:/root/.cache/huggingface     --env "HUGGING_FACE_HUB_TOKEN=$HF_TOKEN"     --ipc=host lmsysorg/sglang:latest python3 -m sglang.launch_server --model-path ${MODEL_NAME} --host 0.0.0.0  --port 30000 --data-parallel-size=8 --max-running-requests 512 --mem-fraction-static 0.85 --chunked-prefill-size 16384 --ep-size=1 --enable-metrics --stream-interval 500
+
+# vLLM
+# docker run --runtime nvidia --gpus all     -v ${HF_HOME}:/root/.cache/huggingface     --env "HUGGING_FACE_HUB_TOKEN=$HF_TOKEN"     -p 8000:8000     --ipc=host     vllm/vllm-openai:latest --model ${MODEL_NAME} --gpu_memory_utilization 0.95 --tensor_parallel_size 4
+
 name: "gpt-oss-120b-benchmark"
 version: "1.0"
 type: "online"
@@ -16,13 +31,14 @@ datasets:
     path: "examples/04_GPTOSS120B_Example/data/perf_eval_ref.parquet"
     parser:
       input_tokens: "input_tokens"
+    # num_samples: 10
   # LCB should be supported when benchmark launched from container.
-  # - name: "livecodebench_gptoss_sglang"
-  #   type: "accuracy"
-  #   accuracy_config:
-  #     eval_method: "code_bench_scorer"
-  #     extractor: "python_code_extractor"
-  #     num_repeats: 3
+  - name: "livecodebench::gptoss"
+    type: "accuracy"
+    accuracy_config:
+      eval_method: "code_bench_scorer"
+      extractor: "python_code_extractor"
+      num_repeats: 3
   - name: "aime25::gptoss"
     type: "accuracy"
     accuracy_config:
@@ -35,6 +51,7 @@ datasets:
     accuracy_config:
       eval_method: "pass_at_1"
       extractor: "abcd_extractor"
+      ground_truth: "ground_truth"
       num_repeats: 5
 settings:
   runtime:
@@ -64,4 +81,4 @@ endpoint_config:
   api_key: null
   api_type: "sglang"
 
-report_dir: "results/sglang_gptoss_120b_benchmark/"
+report_dir: "results/sglang_gptoss_120b_benchmark_full/"
