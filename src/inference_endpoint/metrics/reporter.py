@@ -414,6 +414,7 @@ class Report:
         unit: str = "",
         max_bar_length: int = 30,
         scale_factor: float = 1.0,
+        newline: str = "",
     ) -> None:
         """Displays a metric dictionary in a human-readable format.
 
@@ -423,6 +424,7 @@ class Report:
             unit: The string representing the unit of the metric
             max_bar_length: The maximum length of the bar to display for the histogram
             scale_factor: The factor to scale metric values by. (Default: 1.0)
+            newline: The newline character to append to each line. Set to "\\n" for file.write. (Default: "")
         """
         for name, key in [
             ("Min", "min"),
@@ -431,8 +433,8 @@ class Report:
             ("Avg.", "avg"),
             ("Std Dev.", "std_dev"),
         ]:
-            fn(f"  {name}: {metric_dict[key] * scale_factor:.2f} {unit}")
-        fn("\n  Histogram:")
+            fn(f"  {name}: {metric_dict[key] * scale_factor:.2f} {unit}{newline}")
+        fn(f"\n  Histogram:{newline}")
 
         # Display histogram
         buckets = metric_dict["histogram"]["buckets"]
@@ -453,47 +455,56 @@ class Report:
 
             for bucket_str, count in zip(bucket_strs, counts, strict=False):
                 bar_length = int(count * normalize_factor)
-                fn(f"  {bucket_str:>{max_bucket_str_len}} |{'#' * bar_length} {count}")
+                fn(
+                    f"  {bucket_str:>{max_bucket_str_len}} |{'#' * bar_length} {count}{newline}"
+                )
 
-            fn("\n  Percentiles:")
+            fn(f"\n  Percentiles:{newline}")
             max_percentile_str_len = max(
                 len(str(p)) for p in metric_dict["percentiles"].keys()
             )
             for percentile, value in metric_dict["percentiles"].items():
                 fn(
-                    f"  {percentile:>{max_percentile_str_len}}: {value * scale_factor:.2f} {unit}"
+                    f"  {percentile:>{max_percentile_str_len}}: {value * scale_factor:.2f} {unit}{newline}"
                 )
 
     def display(
         self,
         fn: Callable[[str], None] = print,
+        summary_only: bool = False,
+        newline: str = "",
     ) -> None:
         """Displays the report in a human-readable format.
 
         Args:
             fn: The function to call to print a string, such as logging.info, file.write, etc. (Default: `print`)
+            newline: The newline character to append to each line. Set to "\\n" for file.write. (Default: "")
         """
 
-        fn("----------------- Summary -----------------")
-        fn(f"Total samples issued: {self.n_samples_issued}")
-        fn(f"Total samples completed: {self.n_samples_completed}")
+        fn(f"----------------- Summary -----------------{newline}")
+        fn(f"Total samples issued: {self.n_samples_issued}{newline}")
+        fn(f"Total samples completed: {self.n_samples_completed}{newline}")
         if self.duration_ns is not None:
-            fn(f"Duration: {self.duration_ns / 1e9:.2f} seconds")
+            fn(f"Duration: {self.duration_ns / 1e9:.2f} seconds{newline}")
         else:
-            fn("Duration: N/A (no performance samples were issued)")
+            fn(f"Duration: N/A (no performance samples were issued){newline}")
 
         if self.qps is not None:
-            fn(f"QPS: {self.qps:.2f}")
+            fn(f"QPS: {self.qps:.2f}{newline}")
         else:
-            fn("QPS: N/A (no performance samples were issued)")
+            fn(f"QPS: N/A (no performance samples were issued){newline}")
 
         if self.tps is not None:
-            fn(f"TPS: {self.tps:.2f}")
+            fn(f"TPS: {self.tps:.2f}{newline}")
 
-        fn("\n\n------------------- Latency Breakdowns -------------------")
+        if summary_only:
+            fn(f"----------------- End of Summary -----------------{newline}")
+            return
+
+        fn(f"\n\n------------------- Latency Breakdowns -------------------{newline}")
         if len(self.latency) > 0 and self.ttft == 0:
             fn(
-                "WARNING: Non-streaming-based Issuer used. TTFT metrics cannot be calculated"
+                f"WARNING: Non-streaming-based Issuer used. TTFT metrics cannot be calculated{newline}"
             )
 
         for section_name, metric_dict, unit, scale_factor in [
@@ -504,14 +515,15 @@ class Report:
         ]:
             if metric_dict is None or len(metric_dict) == 0:
                 continue
-            fn(f"{section_name}:")
+            fn(f"{section_name}:{newline}")
             Report._display_metric(
                 metric_dict,
                 fn=fn,
                 unit=unit,
                 scale_factor=scale_factor,
+                newline=newline,
             )
-            fn("\n")
+            fn(f"\n{newline}")
 
 
 def _output_sequence_to_str(output_sequence: str | list[str]) -> str | None:

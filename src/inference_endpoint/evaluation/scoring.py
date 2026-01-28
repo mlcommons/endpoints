@@ -334,6 +334,7 @@ class LiveCodeBenchScorer(Scorer, scorer_id="code_bench_scorer"):
         dataset: Dataset,
         report_dir: os.PathLike,
         extractor: type[Extractor] = PythonCodeExtractor,
+        ground_truth_column: str | None = None,
         lcb_version: str = "release_v6",
         timeout: int = 60,
         question_id_column: str = "question_id",
@@ -342,6 +343,9 @@ class LiveCodeBenchScorer(Scorer, scorer_id="code_bench_scorer"):
     ):
         # Note: LiveCodeBench doesn't use ground_truth_column the same way
         # but we need to pass something to the parent
+        assert (
+            ground_truth_column is None
+        ), "ground_truth_column should be None for LiveCodeBenchScorer"
         super().__init__(
             dataset_name=dataset_name,
             dataset=dataset,

@@ -217,7 +217,7 @@ class AccuracyConfig(BaseModel):
     """
 
     eval_method: str | None = None
-    ground_truth: str = "ground_truth"
+    ground_truth: str | None = None
     extractor: str | None = None
     num_repeats: int = 1
 
