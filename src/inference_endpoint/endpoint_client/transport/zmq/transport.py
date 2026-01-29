@@ -521,7 +521,7 @@ class _ZmqWorkerConnector(WorkerConnector):
             responses.close()
             # linger=0 to force immediate shutdown
             # without waiting for pending messages
-            self._context.destroy(linger=0)
+            context.destroy(linger=0)
 
 
 # =============================================================================

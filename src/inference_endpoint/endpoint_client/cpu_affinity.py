@@ -20,6 +20,7 @@ Each process gets all hyperthreads (SMT siblings) of its assigned physical
 cores to prevent cross-process cache thrashing.
 
 Overview In: docs/PERF_ARCHITECTURE.md
+TODO:(vir): dump out hw-view in verbose mode
 """
 
 import logging

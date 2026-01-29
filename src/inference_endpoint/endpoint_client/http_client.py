@@ -92,6 +92,7 @@ class AsyncHttpEndpointClient:
         """Initialize worker manager and transports."""
         # CPython GIL provides atomic boolean writes, no need for asyncio.Event()
         self._shutdown: bool = False
+        self._dropped_requests: int = 0
 
         # WorkerManager creates and owns all transports
         self.worker_manager = WorkerManager(self.config, self.loop)
@@ -103,8 +104,10 @@ class AsyncHttpEndpointClient:
         Issue query to endpoint (round-robin to workers).
         Non-blocking - buffers if socket would block.
         """
-        if not self._shutdown:
-            # NOTE(vir): silently drop requests during shutdown
+        if self._shutdown:
+            # NOTE(vir): drop requests during shutdown
+            self._dropped_requests += 1
+        else:
             self.pool.send(next(self._worker_cycle), query)
 
     def poll(self) -> QueryResult | StreamChunk | None:
@@ -134,6 +137,10 @@ class AsyncHttpEndpointClient:
         if self._loop_thread is not None:
             self.loop.call_soon(self.loop.stop)
 
+        if self._dropped_requests > 0:
+            logger.info(
+                f"[{self.client_id}] Dropped {self._dropped_requests} requests during shutdown"
+            )
         logger.info(f"[{self.client_id}] Shutdown complete.")
 
 
