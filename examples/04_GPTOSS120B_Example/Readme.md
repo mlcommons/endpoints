@@ -16,7 +16,7 @@ export MODEL_NAME=openai/gpt-oss-120b
 `vLLM` can be launched via:
 
 ```
-docker run --runtime nvidia --gpus all -v ${HF_HOME}:/root/.cache/huggingface --env "HUGGING_FACE_HUB_TOKEN=$HF_TOKEN" -p 8000:8000 --ipc=host vllm/vllm-openai:latest --model ${MODEL_NAME} --gpu_memory_utilization 0.95
+docker run --runtime nvidia --gpus all -v ${HF_HOME}:/root/.cache/huggingface --env "HUGGING_FACE_HUB_TOKEN=$HF_TOKEN" -p 3000:3000 --ipc=host vllm/vllm-openai:latest --model ${MODEL_NAME} --gpu_memory_utilization 0.95
 ```
 
 `SGLang` can be launched via:
