@@ -22,7 +22,8 @@ repos:
     rev: v1.9.0
     hooks:
       - id: mypy
-        args: [--config-file=./pyproject.toml]
+        args: [--config-file=./pyproject.toml, src, tests]
+        pass_filenames: false
         verbose: true
         entry: bash -c 'mypy "$@" || true' --
 
