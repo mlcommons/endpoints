@@ -148,7 +148,7 @@ class BenchmarkSession:
                     tokenizer = tokenizer_override
                 if has_model:
                     model = getattr(self.runtime_settings, "model", None)
-                    if tokenizer is None:
+                    if tokenizer is None and model is not None:
                         try:
                             tokenizer = AutoTokenizer.from_pretrained(
                                 model if isinstance(model, str) else model.name
@@ -184,7 +184,7 @@ class BenchmarkSession:
                     report.to_json(save_to=Path(report_dir) / "result_summary.json")
 
                     # Dump runtime settings to report directory
-                    rt_settings_data = {
+                    rt_settings_data: dict[str, int | str | None] = {
                         "min_duration_ms": self.runtime_settings.min_duration_ms,
                         "max_duration_ms": self.runtime_settings.max_duration_ms,
                         "n_samples_from_dataset": self.runtime_settings.n_samples_from_dataset,
@@ -218,12 +218,15 @@ class BenchmarkSession:
                     if dump_events_log:
                         reporter.dump_to_json(Path(report_dir) / "events.jsonl")
 
-                # Dump report to text file
-                report_path = Path(report_dir) / "report.txt"
+                # Display report to console
                 report.display(fn=print, summary_only=True)
-                with open(report_path, "w") as f:
-                    report.display(fn=f.write, summary_only=False, newline="\n")
-                logger.info(f"Report saved to {report_path}")
+
+                # Dump report to text file if report_dir is provided
+                if report_dir:
+                    report_path = Path(report_dir) / "report.txt"
+                    with open(report_path, "w") as f:
+                        report.display(fn=f.write, summary_only=False, newline="\n")
+                    logger.info(f"Report saved to {report_path}")
 
     def wait_for_test_end(self, timeout: float | None = None) -> bool:
         """
@@ -310,8 +313,8 @@ class BenchmarkSession:
                 accuracy_test_generators[ds_name] = load_generator_cls(
                     sample_issuer,
                     ds,
-                    acc_sched,
-                    *args,  # type: ignore[arg-type]
+                    acc_sched,  # type: ignore[arg-type]
+                    *args,
                 )
 
         session.thread = threading.Thread(

@@ -47,6 +47,7 @@ class Scorer(ABC):
     """
 
     PREDEFINED: ClassVar[dict[str, type["Scorer"]]] = {}
+    SCORER_ID: ClassVar[str]
 
     def __init_subclass__(
         cls,
@@ -146,11 +147,12 @@ class Scorer(ABC):
     def score_single_sample(self, value: str, ground_truth: str) -> float:
         raise NotImplementedError
 
-    def score(self) -> tuple[float, int]:
+    def score(self) -> tuple[float | None, int]:
         """Scores the dataset and returns the mean score and the number of repeats.
 
         Returns:
-            tuple[float, int]: The mean score and the number of repeats.
+            tuple[float | None, int]: The mean score and the number of repeats.
+                Returns None as the score if evaluation fails.
         """
         df = self.get_outputs()
 
@@ -635,7 +637,7 @@ class LiveCodeBenchScorer(Scorer, scorer_id="code_bench_scorer"):
                     print(
                         f"Server evaluated {total_samples} samples but returned an empty summary"
                     )
-                    return None
+                    return None, n_repeats
 
                 total_passed = sum(
                     sum(code_passed) for code_passed in per_problem_results.values()

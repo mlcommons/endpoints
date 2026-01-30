@@ -41,7 +41,6 @@ from inference_endpoint.config.schema import (
     APIType,
     BenchmarkConfig,
     ClientSettings,
-    Dataset,
     DatasetType,
     EndpointConfig,
     LoadPattern,
@@ -55,8 +54,12 @@ from inference_endpoint.config.schema import (
     TestMode,
     TestType,
 )
+from inference_endpoint.config.schema import (
+    Dataset as DatasetConfig,
+)
 from inference_endpoint.config.yaml_loader import ConfigError, ConfigLoader
 from inference_endpoint.core.types import QueryResult
+from inference_endpoint.dataset_manager.dataset import Dataset
 from inference_endpoint.dataset_manager.factory import DataLoaderFactory
 from inference_endpoint.endpoint_client.config import HTTPClientConfig
 from inference_endpoint.endpoint_client.cpu_affinity import pin_loadgen
@@ -293,7 +296,7 @@ def _build_config_from_cli(
         version="1.0",
         type=TestType.OFFLINE if benchmark_mode == "offline" else TestType.ONLINE,
         datasets=[
-            Dataset(
+            DatasetConfig(
                 name=args.dataset.stem,
                 type=DatasetType.PERFORMANCE,
                 path=str(args.dataset),
@@ -466,6 +469,16 @@ def _run_benchmark(
             assert (
                 acc_config.accuracy_config is not None
             ), f"accuracy_config must be set for dataset {acc_config.name}"
+            # Type narrowing: ensure required fields are not None
+            assert (
+                acc_config.accuracy_config.eval_method is not None
+            ), f"eval_method must be set for dataset {acc_config.name}"
+            assert (
+                acc_config.accuracy_config.extractor is not None
+            ), f"extractor must be set for dataset {acc_config.name}"
+            assert (
+                acc_config.accuracy_config.ground_truth is not None
+            ), f"ground_truth must be set for dataset {acc_config.name}"
 
             dataset = DataLoaderFactory.create_loader(
                 acc_config, num_repeats=acc_config.accuracy_config.num_repeats
@@ -478,7 +491,7 @@ def _run_benchmark(
                     Extractor.get(acc_config.accuracy_config.extractor),
                     acc_config.name,
                     dataset,
-                    config.report_dir,
+                    report_dir,
                     acc_config.accuracy_config.ground_truth,
                     acc_config.accuracy_config.num_repeats,
                 )
@@ -625,6 +638,7 @@ def _run_benchmark(
                 ground_truth_column=eval_config.ground_truth_column,
             )
             score, n_repeats = scorer_instance.score()
+            assert eval_config.dataset.data is not None
             accuracy_scores[eval_config.dataset_name] = {
                 "dataset_name": eval_config.dataset_name,
                 "num_samples": len(eval_config.dataset.data),

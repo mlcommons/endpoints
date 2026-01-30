@@ -158,7 +158,9 @@ def run_performance_test(
     # - Streaming (server mode): Use Poisson scheduler to simulate realistic load arrival
     # - Offline: Use max throughput scheduler to stress test the system
     if stream:
-        sched_cls = PoissonDistributionScheduler
+        sched_cls: type[PoissonDistributionScheduler] | type[MaxThroughputScheduler] = (
+            PoissonDistributionScheduler
+        )
     else:
         sched_cls = MaxThroughputScheduler
     scheduler = sched_cls(rt_settings, WithoutReplacementSampleOrder)

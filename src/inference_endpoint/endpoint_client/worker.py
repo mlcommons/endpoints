@@ -178,7 +178,7 @@ class Worker:
             # Tasks start executing synchronously until first await
             # NOTE(vir): CRITICAL for minimizing TFB/TTFT
             assert self._loop is not None
-            self._loop.set_task_factory(asyncio.eager_task_factory)
+            self._loop.set_task_factory(asyncio.eager_task_factory)  # type: ignore[arg-type]
 
             # Initialize HTTP template from URL components
             self._http_template = HttpRequestTemplate.from_url(
@@ -400,7 +400,7 @@ class Worker:
                 error_body = await conn.protocol.read_body()
                 # Release connection early - done with socket I/O
                 assert self._pool is not None
-                self._pool.release(req.connection)
+                self._pool.release(conn)
                 req.connection = None
                 await self._handle_error(
                     req.query_id,
@@ -447,6 +447,7 @@ class Worker:
         query_id = req.query_id
 
         # Create accumulator for streaming response
+        assert self.http_config.accumulator is not None
         accumulator = self.http_config.accumulator(
             query_id, self.http_config.stream_all_chunks
         )

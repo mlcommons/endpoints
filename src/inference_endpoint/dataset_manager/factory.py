@@ -19,11 +19,12 @@ TODO: Very simple factory for now. Will be expanded to support multiple formats 
 """
 
 import logging
+from typing import cast
 
 from inference_endpoint.config.schema import Dataset as DatasetConfig
 from inference_endpoint.dataset_manager.dataset import Dataset, DatasetFormat
 
-from .transforms import ColumnRemap, MakeAdapterCompatible
+from .transforms import ColumnRemap, MakeAdapterCompatible, Transform
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +94,7 @@ class DataLoaderFactory:
         if file_format is not None:
             format_enum = DatasetFormat(file_format)
 
-        transforms = []
+        transforms: list[Transform] = []
         if remap is not None:
             transforms.append(ColumnRemap(remap))  # type: ignore[arg-type]
         transforms.append(MakeAdapterCompatible())
@@ -103,7 +104,7 @@ class DataLoaderFactory:
 
         return Dataset.load_from_file(
             Path(dataset_path),
-            transforms=transforms,
+            transforms=cast(list[Transform], transforms),
             format=format_enum,
             num_repeats=num_repeats,
         )

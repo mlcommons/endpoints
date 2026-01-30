@@ -77,7 +77,7 @@ class AsyncHttpEndpointClient:
         # CRITICAL for http-client performance
         # ensures issue() does not get starved by other threads under load
         assert self.loop is not None
-        self.loop.set_task_factory(asyncio.eager_task_factory)
+        self.loop.set_task_factory(asyncio.eager_task_factory)  # type: ignore[arg-type]
 
         # Initialize on event loop
         asyncio.run_coroutine_threadsafe(self._initialize(), self.loop).result()
@@ -100,6 +100,7 @@ class AsyncHttpEndpointClient:
         self._dropped_requests: int = 0
 
         # WorkerManager creates and owns all transports
+        assert self.loop is not None
         self.worker_manager = WorkerManager(self.config, self.loop)
         await self.worker_manager.initialize()
         self.pool = self.worker_manager.pool_transport

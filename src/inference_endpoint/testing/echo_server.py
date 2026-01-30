@@ -249,10 +249,13 @@ class EchoServer(HTTPServer):
                 raw_payload = await request.text()
                 json_payload = json.loads(raw_payload)
             completion_request = CreateChatCompletionRequest(**json_payload)
+            raw_request = ""
             if completion_request.messages and len(completion_request.messages) > 0:
                 for message in completion_request.messages:
                     if str(message.root.role.value) == "user":
-                        raw_request = message.root.content
+                        content = message.root.content
+                        # Convert content to string - handle various content types
+                        raw_request = str(content) if content is not None else ""
                         break
             else:
                 raise ValueError("Request must contain at least one message")

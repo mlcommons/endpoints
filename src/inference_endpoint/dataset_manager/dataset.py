@@ -104,7 +104,7 @@ class DatafileLoader(ABC):
         self,
         *args,
         **kwargs,
-    ):
+    ) -> None:
         super().__init__(*args, **kwargs)
         self.dataframe: pd.DataFrame | None = None
 
@@ -143,7 +143,7 @@ class ParquetLoader(DatafileLoader, format=DatasetFormat.PARQUET):
         file_path: Path | str,
         *args,
         **kwargs,
-    ):
+    ) -> None:
         super().__init__(*args, **kwargs)
         self.parquet_path = Path(file_path)
 
@@ -158,7 +158,7 @@ class HuggingFaceLoader(DatafileLoader, format=DatasetFormat.HF):
         file_path: Path | str | None = None,
         *args,
         **kwargs,
-    ):
+    ) -> None:
         super().__init__(*args, **kwargs)
         self.file_path = file_path
         self.dataset_name = kwargs.get("dataset_name", None)
@@ -183,7 +183,7 @@ class CSVLoader(DatafileLoader, format=DatasetFormat.CSV):
         csv_path: Path | str,
         *args,
         **kwargs,
-    ):
+    ) -> None:
         super().__init__(*args, **kwargs)
         self.csv_path = Path(csv_path)
 
@@ -197,7 +197,7 @@ class PickleListLoader(DatafileLoader, format=DatasetFormat.PICKLE):
         file_path: Path | str,
         *args,
         **kwargs,
-    ):
+    ) -> None:
         super().__init__(*args, **kwargs)
         self.pickle_path = Path(file_path)
 
@@ -211,7 +211,7 @@ class JsonlLoader(DatafileLoader, format=DatasetFormat.JSONL):
         jsonl_path: Path | str,
         *args,
         **kwargs,
-    ):
+    ) -> None:
         super().__init__(*args, **kwargs)
         self.jsonl_path = Path(jsonl_path)
 
@@ -225,7 +225,7 @@ class JsonLoader(DatafileLoader, format=DatasetFormat.JSON):
         json_path: Path | str,
         *args,
         **kwargs,
-    ):
+    ) -> None:
         super().__init__(*args, **kwargs)
         self.json_path = Path(json_path)
 
@@ -295,6 +295,9 @@ class Dataset:
     PREDEFINED: ClassVar[dict[str, type["Dataset"]]] = {}
     """A dictionary of predefined datasets, as subclasses of Dataset."""
 
+    DATASET_ID: ClassVar[str]
+    """The unique identifier for the dataset. Automatically set by __init_subclass__."""
+
     def __init_subclass__(
         cls,
         dataset_id: str | None = None,
@@ -313,7 +316,7 @@ class Dataset:
         dataframe: pd.DataFrame | None = None,
         transforms: list[Transform] | None = None,
         repeats: int = 1,
-    ):
+    ) -> None:
         if self.__class__.COLUMN_NAMES is not None:
             if dataframe is None:
                 raise ValueError(
@@ -330,6 +333,7 @@ class Dataset:
         self.logger = getLogger(__name__)
         self.transforms = transforms
         self.repeats = repeats
+        self.data: list[dict[str, Any]] | None = None
 
     @classmethod
     def load_from_file(
@@ -422,9 +426,11 @@ class Dataset:
             IndexError: If index is out of range.
             IOError: If data cannot be loaded from disk.
         """
+        assert self.data is not None, "Dataset not loaded. Call load() first."
         return self.data[index]
 
     def num_samples(self) -> int:
+        assert self.data is not None, "Dataset not loaded. Call load() first."
         return len(self.data)
 
     @classmethod
@@ -453,11 +459,11 @@ class Dataset:
 class EmptyDataset(Dataset):
     """Empty dataset to be used as performance dataset when running only accuracy tests."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__(None)
 
-    def load_sample(self, index: int):
+    def load_sample(self, index: int) -> None:
         return None
 
-    def num_samples(self):
+    def num_samples(self) -> int:
         return 0

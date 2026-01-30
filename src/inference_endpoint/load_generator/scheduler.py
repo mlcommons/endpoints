@@ -280,7 +280,7 @@ class Scheduler:
                 rng=self.runtime_settings.rng_sample_index,
             )
         )
-        self.delay_fn = None  # Subclasses must set this
+        self.delay_fn: Callable[[], int] | None = None  # Subclasses must set this
 
     def __iter__(self):
         """Iterate over (sample_index, delay_ns) pairs.
@@ -392,8 +392,8 @@ class ConcurrencyScheduler(Scheduler, load_pattern=LoadPatternType.CONCURRENCY):
         # Register completion hook - free up slot when query completes
         SampleEventHandler.register_hook(SampleEvent.COMPLETE, self._release_slot)
 
-        # Unused (required by Scheduler interface)
-        self.delay_fn = lambda: None
+        # Unused (required by Scheduler interface) - returns 0 delay
+        self.delay_fn = lambda: 0
 
     def _release_slot(self, result=None):
         """Release a concurrency slot and notify waiting threads.

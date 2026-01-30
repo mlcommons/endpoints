@@ -41,12 +41,16 @@ class FuturesHttpClient(HTTPEndpointClient):
 
         # Start response handler on client's loop
         self._pending: dict[str | int, concurrent.futures.Future] = {}
+        assert (
+            self.loop is not None
+        ), "Client loop should be initialized by parent __init__"
         self._handler_future = asyncio.run_coroutine_threadsafe(
             self._handle_responses(), self.loop
         )
         self._is_shutting_down = False
 
-    def issue(self, query: Query) -> concurrent.futures.Future[QueryResult]:
+    # TODO (vir): fix this type ignore since the base class doesn't have a return value
+    def issue(self, query: Query) -> concurrent.futures.Future[QueryResult]:  # type: ignore[override]
         """Issue query and return a future for the result."""
         if self._is_shutting_down:
             raise RuntimeError("Cannot issue query: client is shutting down")

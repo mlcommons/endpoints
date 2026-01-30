@@ -48,7 +48,7 @@ def run() -> None:
         # Use eager task factory for immediate coroutine execution
         # Tasks start executing synchronously until first await
         with asyncio.Runner(loop_factory=uvloop.new_event_loop) as runner:
-            runner.get_loop().set_task_factory(asyncio.eager_task_factory)
+            runner.get_loop().set_task_factory(asyncio.eager_task_factory)  # type: ignore[arg-type]
             runner.run(main())
     except KeyboardInterrupt:
         logger.info("Application interrupted by user")

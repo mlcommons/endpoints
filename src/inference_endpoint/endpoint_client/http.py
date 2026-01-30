@@ -178,7 +178,12 @@ class HttpResponseProtocol(asyncio.Protocol):
     # asyncio.Protocol callbacks
     # -------------------------------------------------------------------------
 
-    def connection_made(self, transport: asyncio.Transport) -> None:
+    def connection_made(self, transport: asyncio.Transport) -> None:  # type: ignore[override]
+        """Called by asyncio when connection is established.
+
+        Note: We intentionally narrow the transport type from BaseTransport to Transport
+        for better type safety, as we know we're using TCP transports with specific features.
+        """
         self._transport = transport
         self._parser = httptools.HttpResponseParser(self)
 
@@ -252,6 +257,8 @@ class HttpResponseProtocol(asyncio.Protocol):
         )
 
     def on_headers_complete(self) -> None:
+        # Parser is always set when this callback is invoked by httptools
+        assert self._parser is not None
         self._status_code = self._parser.get_status_code()
         # Check if server wants to close connection (Connection: close or HTTP/1.0)
         self._should_close = not self._parser.should_keep_alive()
