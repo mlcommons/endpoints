@@ -315,6 +315,10 @@ class Dataset:
         repeats: int = 1,
     ):
         if self.__class__.COLUMN_NAMES is not None:
+            if dataframe is None:
+                raise ValueError(
+                    f"dataframe cannot be None when COLUMN_NAMES is specified for {self.__class__.__name__}"
+                )
             common = set(self.__class__.COLUMN_NAMES) & set(dataframe.columns)
             if len(common) != len(self.__class__.COLUMN_NAMES):
                 missing = set(self.__class__.COLUMN_NAMES) - common
@@ -375,6 +379,10 @@ class Dataset:
             return
 
         df = self.dataframe
+        if df is None:
+            raise ValueError(
+                f"Cannot load dataset {self.__class__.__name__}: dataframe is None"
+            )
 
         transforms = []
         if self.transforms is not None:
@@ -382,9 +390,9 @@ class Dataset:
 
         # If adapter is specified, use it to get transforms, otherwise fallback to use APIType to
         # get transforms.
-        if adapter is not None:
+        if adapter is not None and model_params is not None:
             transforms.extend(adapter.dataset_transforms(model_params))
-        elif api_type is not None:
+        elif api_type is not None and model_params is not None:
             transforms.extend(get_transforms_for_api_type(api_type, model_params))
 
         if transforms:

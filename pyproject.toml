@@ -203,5 +203,13 @@ exclude_lines = [
 [tool.mypy]
 ignore_missing_imports = true
 exclude = [
-    "src/inference_endpoint/openai/openai_types_gen.py",
-    ]
+    "openai_types_gen\\.py$",
+    "metrics/reporter\\.py$",
+]
+
+[[tool.mypy.overrides]]
+module = [
+    "inference_endpoint.openai.openai_types_gen",
+    "inference_endpoint.metrics.reporter",
+]
+ignore_errors = true

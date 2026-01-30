@@ -462,6 +462,11 @@ def _run_benchmark(
     if len(accuracy_configs) > 0:
         # Pack the evaluation parameters for each accuracy dataset
         for acc_config in accuracy_configs:
+            # Type narrowing: ensure accuracy_config is not None
+            assert (
+                acc_config.accuracy_config is not None
+            ), f"accuracy_config must be set for dataset {acc_config.name}"
+
             dataset = DataLoaderFactory.create_loader(
                 acc_config, num_repeats=acc_config.accuracy_config.num_repeats
             )
@@ -562,10 +567,7 @@ def _run_benchmark(
         api_type: APIType = config.endpoint_config.api_type
         assert api_type is not None
         http_config = HTTPClientConfig(
-            endpoint_urls=[
-                urljoin(e, api_type.default_route())
-                for e in endpoints
-            ],
+            endpoint_urls=[urljoin(e, api_type.default_route()) for e in endpoints],
             api_type=api_type,
             num_workers=num_workers,
             record_worker_events=config.settings.client.record_worker_events,

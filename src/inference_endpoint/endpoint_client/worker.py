@@ -29,6 +29,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from inference_endpoint.core.types import Query, QueryResult
+from inference_endpoint.endpoint_client.adapter_protocol import HttpRequestAdapter
 from inference_endpoint.endpoint_client.config import HTTPClientConfig
 from inference_endpoint.endpoint_client.http import (
     ConnectionPool,
@@ -36,7 +37,6 @@ from inference_endpoint.endpoint_client.http import (
     InFlightRequest,
     PooledConnection,
 )
-from inference_endpoint.endpoint_client.adapter_protocol import HttpRequestAdapter
 from inference_endpoint.endpoint_client.transport import (
     ReceiverTransport,
     SenderTransport,
@@ -177,6 +177,7 @@ class Worker:
             # Use eager task factory for immediate coroutine execution
             # Tasks start executing synchronously until first await
             # NOTE(vir): CRITICAL for minimizing TFB/TTFT
+            assert self._loop is not None
             self._loop.set_task_factory(asyncio.eager_task_factory)
 
             # Initialize HTTP template from URL components
@@ -316,6 +317,7 @@ class Worker:
                         continue
 
                     # Process response asynchronously
+                    assert self._loop is not None
                     task = self._loop.create_task(self._process_response(prepared))
 
                     # Keep task alive to prevent GC
@@ -337,6 +339,7 @@ class Worker:
         is_streaming = query.data.get("stream", False)
 
         # Build complete HTTP request bytes
+        assert self._http_template is not None
         http_bytes = self._http_template.build_request(
             body_bytes,
             is_streaming,
@@ -368,6 +371,7 @@ class Worker:
 
         try:
             # Acquire connection from pool
+            assert self._pool is not None
             conn = await self._pool.acquire()
 
             # Write request bytes directly to transport
@@ -388,12 +392,14 @@ class Worker:
         """Process response for a fired request."""
         try:
             conn = req.connection
+            assert conn is not None, "Connection should be set by _fire_request"
 
             # Await headers and handle error status
             status_code, _ = await conn.protocol.read_headers()
             if status_code != 200:
                 error_body = await conn.protocol.read_body()
                 # Release connection early - done with socket I/O
+                assert self._pool is not None
                 self._pool.release(req.connection)
                 req.connection = None
                 await self._handle_error(
@@ -415,6 +421,7 @@ class Worker:
         finally:
             # Release connection back to pool if not already released
             if req.connection:
+                assert self._pool is not None
                 self._pool.release(req.connection)
                 req.connection = None
 
@@ -428,12 +435,15 @@ class Worker:
                 )
 
             # Clean up task reference
-            self._active_tasks.discard(asyncio.current_task())
+            current_task = asyncio.current_task()
+            if current_task is not None:
+                self._active_tasks.discard(current_task)
 
     @profile
     async def _handle_streaming_body(self, req: InFlightRequest) -> None:
         """Handle streaming (SSE) response body."""
         conn = req.connection
+        assert conn is not None
         query_id = req.query_id
 
         # Create accumulator for streaming response
@@ -442,6 +452,7 @@ class Worker:
         )
 
         # Process SSE stream - yields batches of chunks
+        assert self._responses is not None
         async for chunk_batch in self._iter_sse_lines(conn):
             for delta in chunk_batch:
                 if stream_chunk := accumulator.add_chunk(delta):
@@ -456,6 +467,7 @@ class Worker:
                         )
 
         # Release connection early - done with socket I/O
+        assert self._pool is not None
         self._pool.release(conn)
         req.connection = None
 
@@ -473,12 +485,14 @@ class Worker:
     async def _handle_non_streaming_body(self, req: InFlightRequest) -> None:
         """Handle non-streaming response body."""
         conn = req.connection
+        assert conn is not None
         query_id = req.query_id
 
         # Read entire response body
         response_bytes = await conn.protocol.read_body()
 
         # Release connection early - done with socket I/O
+        assert self._pool is not None
         self._pool.release(conn)
         req.connection = None
 
@@ -486,6 +500,7 @@ class Worker:
         result = self._adapter.decode_response(response_bytes, query_id)
 
         # Send result back to main rank
+        assert self._responses is not None
         self._responses.send(result)
         if self.http_config.record_worker_events:
             EventRecorder.record_event(

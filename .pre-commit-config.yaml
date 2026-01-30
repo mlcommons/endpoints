@@ -23,7 +23,6 @@ repos:
     hooks:
       - id: mypy
         args: [--config-file=./pyproject.toml]
-        exclude: ^(src/inference_endpoint/openai/openai_types_gen.py)$
         verbose: true
         entry: bash -c 'mypy "$@" || true' --
 

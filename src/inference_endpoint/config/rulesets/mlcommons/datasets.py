@@ -64,4 +64,4 @@ def _disallow_instantiation(cls, *args, **kwargs):
     )
 
 
-_Dataset.__new__ = _disallow_instantiation
+_Dataset.__new__ = _disallow_instantiation  # type: ignore[method-assign]

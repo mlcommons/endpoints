@@ -169,6 +169,9 @@ class Scorer(ABC):
         # Get ground truths
         order = df["sample_index"].to_numpy()
         assert (
+            self.dataset.dataframe is not None
+        ), f"Dataset {self.dataset} has no dataframe loaded"
+        assert (
             self.ground_truth_column in self.dataset.dataframe.columns
         ), f"Ground truth column {self.ground_truth_column} not found in dataset {self.dataset}"
         ground_truths = self.dataset.dataframe[self.ground_truth_column].to_numpy()[
@@ -268,6 +271,9 @@ class RougeScorer(Scorer, scorer_id="rouge"):
         empirical = df["output"].tolist()
 
         order = df["sample_index"].to_numpy().astype(int)
+        assert (
+            self.dataset.dataframe is not None
+        ), f"Dataset {self.dataset} has no dataframe loaded"
         assert (
             self.ground_truth_column in self.dataset.dataframe.columns
         ), f"Ground truth column {self.ground_truth_column} not found in dataset {self.dataset}"
@@ -535,6 +541,9 @@ class LiveCodeBenchScorer(Scorer, scorer_id="code_bench_scorer"):
 
                 # Collect stdout while displaying it character-by-character to support
                 # progress bars that use carriage returns
+                if process.stdout is None:
+                    raise RuntimeError("Failed to capture subprocess stdout")
+
                 stdout_buffer = []
                 while True:
                     char = process.stdout.read(1)
@@ -589,13 +598,19 @@ class LiveCodeBenchScorer(Scorer, scorer_id="code_bench_scorer"):
         df = df.apply(self.match_sample_index, axis=1)
 
         # Get question IDs
+        assert (
+            self.dataset.dataframe is not None
+        ), f"Dataset {self.dataset} has no dataframe loaded"
+
         def get_question_id(sample_index: int) -> str:
+            assert self.dataset.dataframe is not None
             return self.dataset.dataframe.iloc[sample_index][self.question_id_column]
 
         df["question_id"] = df["sample_index"].apply(get_question_id)
 
         # Extract code from outputs with default value for failed extractions
         # Use a comment that will fail all tests instead of None to maintain uniform list lengths
+        assert self.extractor is not None, "Extractor must be set for code extraction"
         df["extracted_code"] = df["output"].apply(
             lambda x: self.extractor.extract(x, default="# FAILED TO EXTRACT CODE")
         )

@@ -147,7 +147,7 @@ class BenchmarkSession:
                 if tokenizer_override is not None:
                     tokenizer = tokenizer_override
                 if has_model:
-                    model = self.runtime_settings.model
+                    model = getattr(self.runtime_settings, "model", None)
                     if tokenizer is None:
                         try:
                             tokenizer = AutoTokenizer.from_pretrained(
@@ -196,9 +196,9 @@ class BenchmarkSession:
                     # to retrieve the seed values. The best way to do this is probably a custom random.Random
                     # class that stores the original seed as a read-only property, and unable to set the seed
                     # after initialization.
-                    if has_model:
+                    if has_model and model is not None:
                         rt_settings_data["model"] = (
-                            model if isinstance(model, str) else model.name
+                            model if isinstance(model, str) else str(model.name)
                         )
 
                     # TODO: After Zhihan's MR is merged, grab the scheduler class and other LG init settings
@@ -219,7 +219,7 @@ class BenchmarkSession:
                         reporter.dump_to_json(Path(report_dir) / "events.jsonl")
 
                 # Dump report to text file
-                report_path = report_dir / "report.txt"
+                report_path = Path(report_dir) / "report.txt"
                 report.display(fn=print, summary_only=True)
                 with open(report_path, "w") as f:
                     report.display(fn=f.write, summary_only=False, newline="\n")
@@ -278,7 +278,7 @@ class BenchmarkSession:
             The new BenchmarkSession.
         """
         session = cls(runtime_settings, session_id=name)
-        load_generator = load_generator_cls(sample_issuer, dataset, scheduler, *args)
+        load_generator = load_generator_cls(sample_issuer, dataset, scheduler, *args)  # type: ignore[arg-type]
 
         # Create accuracy test generators
         accuracy_test_generators = None
@@ -295,7 +295,7 @@ class BenchmarkSession:
                     metric_target=runtime_settings.metric_target,
                     reported_metrics=runtime_settings.reported_metrics,
                     min_duration_ms=0,
-                    max_duration_ms=None,
+                    max_duration_ms=None,  # type: ignore[arg-type]
                     n_samples_from_dataset=ds.num_samples(),
                     n_samples_to_issue=ds.num_samples() * ds.repeats,
                     min_sample_count=ds.num_samples() * ds.repeats,
@@ -308,7 +308,10 @@ class BenchmarkSession:
                 )
 
                 accuracy_test_generators[ds_name] = load_generator_cls(
-                    sample_issuer, ds, acc_sched, *args
+                    sample_issuer,
+                    ds,
+                    acc_sched,
+                    *args,  # type: ignore[arg-type]
                 )
 
         session.thread = threading.Thread(

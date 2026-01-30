@@ -76,13 +76,15 @@ class AsyncHttpEndpointClient:
         # NOTE(vir):
         # CRITICAL for http-client performance
         # ensures issue() does not get starved by other threads under load
+        assert self.loop is not None
         self.loop.set_task_factory(asyncio.eager_task_factory)
 
         # Initialize on event loop
-        assert self.loop is not None
         asyncio.run_coroutine_threadsafe(self._initialize(), self.loop).result()
 
         assert self.config.adapter is not None
+        assert self.config.accumulator is not None
+        assert self.config.worker_pool_transport is not None
         logger.info(
             f"EndpointClient initialized with num_workers={self.config.num_workers}, "
             f"endpoints={self.config.endpoint_urls}, "
