@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from enum import Enum
 from pathlib import Path
+from typing import ClassVar
 
 import yaml
 from pydantic import BaseModel, Field
@@ -31,7 +32,8 @@ from .ruleset_base import BenchmarkSuiteRuleset
 
 
 class SystemDefaults(BaseModel):
-    timeout: float = 300.0
+    DEFAULT_TIMEOUT: ClassVar[float] = 300.0
+    DEFAULT_METRIC: ClassVar[metrics.Metric] = metrics.Throughput(0.0)
 
 
 class APIType(str, Enum):

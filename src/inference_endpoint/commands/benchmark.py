@@ -614,7 +614,7 @@ def _run_benchmark(
             accuracy_datasets=accuracy_datasets,
             max_shutdown_timeout_s=config.timeout
             if config.timeout
-            else SystemDefaults.timeout,
+            else SystemDefaults.DEFAULT_TIMEOUT,
             dump_events_log=True,
         )
 

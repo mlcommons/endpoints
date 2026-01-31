@@ -23,6 +23,8 @@ import random
 from dataclasses import dataclass, field
 from enum import Enum
 
+from endpoints.src.inference_endpoint.config.schema import SystemDefaults
+
 from .... import metrics
 from ...ruleset_base import BenchmarkSuiteRuleset
 from ...runtime_settings import RuntimeSettings
@@ -209,7 +211,7 @@ class RoundRuleset(BenchmarkSuiteRuleset):
         return _RuntimeSettings(
             metric_target=metric_target
             if metric_target is not None
-            else metrics.Throughput(0.0),
+            else SystemDefaults.DEFAULT_METRIC,
             reported_metrics=reported_metrics,
             min_duration_ms=min_duration_ms,
             max_duration_ms=max_duration_ms,
