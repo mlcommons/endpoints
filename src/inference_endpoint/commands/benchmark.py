@@ -51,6 +51,7 @@ from inference_endpoint.config.schema import (
     RuntimeConfig,
     Settings,
     StreamingMode,
+    SystemDefaults,
     TestMode,
     TestType,
 )
@@ -611,7 +612,9 @@ def _run_benchmark(
             report_dir=report_dir,
             tokenizer_override=tokenizer,
             accuracy_datasets=accuracy_datasets,
-            max_shutdown_timeout_s=config.timeout,
+            max_shutdown_timeout_s=config.timeout
+            if config.timeout
+            else SystemDefaults.timeout,
             dump_events_log=True,
         )
 

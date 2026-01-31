@@ -30,6 +30,10 @@ from .. import metrics
 from .ruleset_base import BenchmarkSuiteRuleset
 
 
+class SystemDefaults(BaseModel):
+    timeout: float = 300.0
+
+
 class APIType(str, Enum):
     OPENAI = "openai"
     SGLANG = "sglang"
@@ -379,7 +383,7 @@ class BenchmarkConfig(BaseModel):
     # workers are assigned endpoints in a round-robin manner
     endpoint_config: EndpointConfig = Field(default_factory=EndpointConfig)
     report_dir: Path | None = None
-    timeout: float = 300.0  # default timeout of 300 seconds
+    timeout: float | None = None
     verbose: bool = False
     # CPU affinity for loadgen and worker processes:
     #   - True = auto (compute optimal NUMA-aware plan)
