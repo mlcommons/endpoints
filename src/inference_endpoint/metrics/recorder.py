@@ -475,7 +475,7 @@ def record_exception(
     EventRecorder.record_event(
         SessionEvent.ERROR,
         time.monotonic_ns(),
-        sample_uuid=sample_uuid or "",
+        sample_uuid=sample_uuid or "<NO_SAMPLE_UUID>",
         data={
             "error_type": exc_value.__class__.__name__,
             "error_message": str(exc_value),

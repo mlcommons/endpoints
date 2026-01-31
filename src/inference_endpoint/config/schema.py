@@ -379,7 +379,7 @@ class BenchmarkConfig(BaseModel):
     # workers are assigned endpoints in a round-robin manner
     endpoint_config: EndpointConfig = Field(default_factory=EndpointConfig)
     report_dir: Path | None = None
-    timeout: float | None = None
+    timeout: float = 300.0  # default timeout of 300 seconds
     verbose: bool = False
     # CPU affinity for loadgen and worker processes:
     #   - True = auto (compute optimal NUMA-aware plan)

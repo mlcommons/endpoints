@@ -165,13 +165,9 @@ async def run_probe_command(args: argparse.Namespace) -> None:
                 latency_ms = (time.time() - start_times[query_id]) * 1000
 
                 # Normalize response_output for logging
-                response_output: str = ""
-                if isinstance(result.response_output, tuple):
-                    response_output = "".join(result.response_output)
-                elif isinstance(result.response_output, dict):
-                    response_output = str(result.response_output)
-                elif isinstance(result.response_output, str):
-                    response_output = result.response_output
+                response_output = result.get_response_output_string()
+                if response_output is None:
+                    response_output = ""
 
                 if result.error:
                     errors.append(f"{query_id}: {result.error}")

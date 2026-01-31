@@ -19,7 +19,6 @@ TODO: Very simple factory for now. Will be expanded to support multiple formats 
 """
 
 import logging
-from typing import cast
 
 from inference_endpoint.config.schema import Dataset as DatasetConfig
 from inference_endpoint.dataset_manager.dataset import Dataset, DatasetFormat
@@ -104,7 +103,7 @@ class DataLoaderFactory:
 
         return Dataset.load_from_file(
             Path(dataset_path),
-            transforms=cast(list[Transform], transforms),
+            transforms=transforms,
             format=format_enum,
             num_repeats=num_repeats,
         )

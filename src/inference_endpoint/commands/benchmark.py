@@ -611,7 +611,7 @@ def _run_benchmark(
             report_dir=report_dir,
             tokenizer_override=tokenizer,
             accuracy_datasets=accuracy_datasets,
-            max_shutdown_timeout_s=config.timeout if config.timeout else 300.0,
+            max_shutdown_timeout_s=config.timeout,
             dump_events_log=True,
         )
 
