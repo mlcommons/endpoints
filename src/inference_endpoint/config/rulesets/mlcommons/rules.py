@@ -23,11 +23,10 @@ import random
 from dataclasses import dataclass, field
 from enum import Enum
 
-from endpoints.src.inference_endpoint.config.schema import SystemDefaults
-
 from .... import metrics
 from ...ruleset_base import BenchmarkSuiteRuleset
 from ...runtime_settings import RuntimeSettings
+from ...schema import SystemDefaults
 from ...user_config import UserConfig
 from . import models
 
