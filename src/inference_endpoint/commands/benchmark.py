@@ -152,7 +152,7 @@ class AccuracyConfiguration:
     dataset_name: str
     dataset: Dataset
     report_dir: os.PathLike
-    ground_truth_column: str
+    ground_truth_column: str | None
     num_repeats: int
 
 
@@ -477,9 +477,6 @@ def _run_benchmark(
             assert (
                 acc_config.accuracy_config.extractor is not None
             ), f"extractor must be set for dataset {acc_config.name}"
-            assert (
-                acc_config.accuracy_config.ground_truth is not None
-            ), f"ground_truth must be set for dataset {acc_config.name}"
 
             dataset = DataLoaderFactory.create_loader(
                 acc_config, num_repeats=acc_config.accuracy_config.num_repeats

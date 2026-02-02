@@ -93,7 +93,7 @@ class Scorer(ABC):
         dataset: Dataset,
         report_dir: os.PathLike,
         extractor: type[Extractor] | None = None,
-        ground_truth_column: str = "ground_truth",
+        ground_truth_column: str | None = "ground_truth",
     ):
         self.dataset = dataset
         self.report_dir = Path(report_dir)

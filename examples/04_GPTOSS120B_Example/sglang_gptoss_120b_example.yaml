@@ -1,6 +1,7 @@
 name: "gpt-oss-120b-benchmark"
 version: "1.0"
 type: "online"
+timeout: 60000
 
 model_params:
   name: "openai/gpt-oss-120b"
@@ -38,8 +39,8 @@ datasets:
       num_repeats: 5
 settings:
   runtime:
-    min_duration_ms: 300
-    max_duration_ms: 6000
+    min_duration_ms: 3000
+    max_duration_ms: 60000
     scheduler_random_seed: 42
     dataloader_random_seed: 42
 
