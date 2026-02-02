@@ -25,7 +25,6 @@ repos:
         args: [--config-file=./pyproject.toml, src, tests]
         pass_filenames: false
         verbose: true
-        entry: mypy
         additional_dependencies:
           - types-PyYAML==6.0.12
           - types-requests>=2.32.4
