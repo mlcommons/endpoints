@@ -716,10 +716,7 @@ class HttpRequestTemplate:
             self._extra_headers_cache[cache_key] = "".join(
                 f"{k}: {v}\r\n" for k, v in headers.items()
             ).encode("utf-8", "surrogateescape")
-            self.extra_cached_headers = (b"\r\n").join(
-                list(self._extra_headers_cache.values())
-            )
-        logger.debug(f"Extra headers cached: {self.extra_cached_headers!r}")
+            self.extra_cached_headers = b"".join(self._extra_headers_cache.values())
 
     def build_request(
         self,
@@ -748,8 +745,8 @@ class HttpRequestTemplate:
             return b"".join(
                 [
                     self.static_prefix,
-                    content_type_headers,
                     self.extra_cached_headers,
+                    content_type_headers,
                     content_length,
                     body,
                 ]
@@ -761,13 +758,12 @@ class HttpRequestTemplate:
             extra = "".join(f"{k}: {v}\r\n" for k, v in extra_headers.items()).encode(
                 "utf-8", "surrogateescape"
             )
-            self._extra_headers_cache[cache_key] = extra
 
         return b"".join(
             [
                 self.static_prefix,
-                content_type_headers,
                 self.extra_cached_headers,
+                content_type_headers,
                 extra,
                 content_length,
                 body,
