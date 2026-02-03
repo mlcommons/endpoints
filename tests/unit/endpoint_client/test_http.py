@@ -192,6 +192,21 @@ class TestHttpRequestTemplate:
         cached_bytes = template._extra_headers_cache[cache_key]
         assert b"Authorization: Bearer pre-cached-token\r\n" == cached_bytes
 
+    def test_build_request_with_cache_headers_pre_caches(self):
+        """build_request() with cache_headers() pre-caches headers before runtime use."""
+        template = HttpRequestTemplate.from_url("localhost", 8080, "/v1/chat")
+        headers_to_cache = {"Authorization": "Bearer pre-cached-token"}
+        body = b'{"model": "test"}'
+
+        # Pre-cache headers
+        template.cache_headers(headers_to_cache)
+        request = template.build_request(body, streaming=False)
+        assert b"Authorization: Bearer pre-cached-token\r\n" in request
+        assert b"Host: localhost:8080" in request
+        assert b"Content-Type: application/json" in request
+        assert b"Content-Length: 17" in request
+        assert b'{"model": "test"}' in request
+
     def test_build_request_without_extra_headers(self):
         """Request without extra headers uses fast path."""
         template = HttpRequestTemplate.from_url("localhost", 8080, "/v1/chat")
