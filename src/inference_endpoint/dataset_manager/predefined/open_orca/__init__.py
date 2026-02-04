@@ -84,7 +84,8 @@ class OpenOrca(
         dataset_url = "https://inference.mlcommons-storage.org/metadata/llama-2-70b-open-orca-dataset.uri"
 
         # Download the r2-downloader script into a temp file in the target dir
-        downloader_url = "https://raw.githubusercontent.com/mlcommons/r2-downloader/refs/heads/main/mlc-r2-downloader.sh"
+        COMMIT_HASH = "27da4421877f2831eeb615b43ee5098c4b70be7e"
+        downloader_url = f"https://raw.githubusercontent.com/mlcommons/r2-downloader/{COMMIT_HASH}/mlc-r2-downloader.sh"
         download_dir = dst_path.parent
         script_path = dst_path.parent / "mlc-r2-downloader.sh"
         r = requests.get(downloader_url, timeout=30)
