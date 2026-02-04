@@ -26,6 +26,7 @@ from enum import Enum
 from .... import metrics
 from ...ruleset_base import BenchmarkSuiteRuleset
 from ...runtime_settings import RuntimeSettings
+from ...schema import SystemDefaults
 from ...user_config import UserConfig
 from . import models
 
@@ -38,8 +39,12 @@ class PerModelRuleset:
     min_duration_ms_valid: int = (
         10 * 60 * 1000
     )  # Minimum duration in milliseconds required for a valid run
-    max_duration_ms_valid: int = None  # Maximum duration in milliseconds. Used as a timeout / kill for a benchmark run. Set to None for no timeout.
-    min_sample_count_valid: int = None  # Minimum number of samples required to be sent to the SUT for a valid run, if None, no minimum is enforced
+    max_duration_ms_valid: int | None = (
+        None  # Maximum duration in milliseconds. Used as a timeout / kill for a benchmark run. Set to None for no timeout.
+    )
+    min_sample_count_valid: int | None = (
+        None  # Minimum number of samples required to be sent to the SUT for a valid run, if None, no minimum is enforced
+    )
     metric: type[metrics.Metric] | None = (
         None  # any subclass of Metric. Used as metric to evaluate the performance of the benchmark.
     )
@@ -55,7 +60,9 @@ class PerQueryRuleset(PerModelRuleset):
     target_latency_percentile: float = (
         99.0  # Percentile of per-query latencies to use for metric comparison
     )
-    max_latency_threshold_ms: int = None  # Maximum latency threshold in milliseconds for the specified percentile latency allowed for a valid run.
+    max_latency_threshold_ms: int | None = (
+        None  # Maximum latency threshold in milliseconds for the specified percentile latency allowed for a valid run.
+    )
     reported_metrics: list[type[metrics.Metric]] = field(
         default_factory=lambda: [metrics.Throughput]
     )
@@ -65,10 +72,10 @@ class PerQueryRuleset(PerModelRuleset):
 class TokenBasedRuleset(PerModelRuleset):
     min_sample_count_valid: int = 270336
     metric: type[metrics.Metric] = metrics.Throughput
-    max_ttft_latency_ms: int = (
+    max_ttft_latency_ms: int | None = (
         None  # Maximum TTFT latency in milliseconds allowed for a valid run
     )
-    max_tpot_latency_ms: int = (
+    max_tpot_latency_ms: int | None = (
         None  # Maximum TPoT latency in milliseconds allowed for a valid run
     )
     reported_metrics: list[type[metrics.Metric]] = field(
@@ -148,17 +155,19 @@ class RoundRuleset(BenchmarkSuiteRuleset):
 
         ruleset = self.benchmark_rulesets[model][opt_prio]
 
-        metric_target = None
-        if user_config.user_metric_target:
+        metric_target: metrics.Metric | None = None
+        if user_config.user_metric_target and ruleset.metric:
             metric_target = ruleset.metric(user_config.user_metric_target)
 
-        reported_metrics = []
+        reported_metrics: list[metrics.Metric] = []
         for mtype in ruleset.reported_metrics:
-            if mtype == ruleset.metric:
+            if mtype == ruleset.metric and metric_target:
                 reported_metrics.append(metric_target)
             elif mtype == metrics.TTFT:
+                assert isinstance(ruleset, TokenBasedRuleset)
                 reported_metrics.append(metrics.TTFT(ruleset.max_ttft_latency_ms))
             elif mtype == metrics.TPOT:
+                assert isinstance(ruleset, TokenBasedRuleset)
                 reported_metrics.append(metrics.TPOT(ruleset.max_tpot_latency_ms))
             elif mtype == metrics.QueryLatency and ruleset.metric == metrics.Throughput:
                 # If we specify throughput and want to also report per query latency, infer latency from inverting qps.
@@ -166,6 +175,7 @@ class RoundRuleset(BenchmarkSuiteRuleset):
                     metrics.QueryLatency(target_qps=user_config.user_metric_target)
                 )
             elif mtype == metrics.Throughput and ruleset.metric == metrics.QueryLatency:
+                assert user_config.user_metric_target is not None
                 # If we specify per query latency, infer qps by inverting
                 target_qps = 1000 / user_config.user_metric_target
                 reported_metrics.append(metrics.Throughput(target_qps=target_qps))
@@ -182,7 +192,7 @@ class RoundRuleset(BenchmarkSuiteRuleset):
         if user_config.max_duration_ms is not None:
             max_duration_ms = user_config.max_duration_ms
         assert (
-            max_duration_ms >= min_duration_ms
+            max_duration_ms is not None and max_duration_ms >= min_duration_ms
         ), "Max duration must be greater than or equal to min duration"
 
         n_samples_from_dataset = model.dataset.size
@@ -198,13 +208,15 @@ class RoundRuleset(BenchmarkSuiteRuleset):
             min_sample_count = user_config.min_sample_count
 
         return _RuntimeSettings(
-            metric_target=metric_target,
+            metric_target=metric_target
+            if metric_target is not None
+            else SystemDefaults.DEFAULT_METRIC,
             reported_metrics=reported_metrics,
             min_duration_ms=min_duration_ms,
             max_duration_ms=max_duration_ms,
             n_samples_from_dataset=n_samples_from_dataset,
             n_samples_to_issue=total_sample_count,
-            min_sample_count=min_sample_count,
+            min_sample_count=min_sample_count if min_sample_count is not None else 1,
             rng_sched=random.Random(self.scheduler_rng_seed),
             rng_sample_index=random.Random(self.sample_index_rng_seed),
             load_pattern=None,  # not part user config

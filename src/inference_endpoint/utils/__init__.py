@@ -64,7 +64,7 @@ def byte_quantity_to_str(
     while n_bytes >= 1024:
         if suffixes[suffix_idx] == max_unit or suffix_idx >= len(suffixes) - 1:
             break
-        n_bytes /= 1024
+        n_bytes //= 1024
         suffix_idx += 1
     n_bytes = int(n_bytes)
     suffix = suffixes[suffix_idx]

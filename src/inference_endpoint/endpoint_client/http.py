@@ -21,6 +21,7 @@ import asyncio
 import logging
 import select
 import socket
+import ssl
 import time
 from collections import OrderedDict
 from collections.abc import AsyncGenerator
@@ -178,7 +179,12 @@ class HttpResponseProtocol(asyncio.Protocol):
     # asyncio.Protocol callbacks
     # -------------------------------------------------------------------------
 
-    def connection_made(self, transport: asyncio.Transport) -> None:
+    def connection_made(self, transport: asyncio.Transport) -> None:  # type: ignore[override]
+        """Called by asyncio when connection is established.
+
+        Note: We intentionally narrow the transport type from BaseTransport to Transport
+        for better type safety, as we know we're using TCP transports with specific features.
+        """
         self._transport = transport
         self._parser = httptools.HttpResponseParser(self)
 
@@ -252,6 +258,8 @@ class HttpResponseProtocol(asyncio.Protocol):
         )
 
     def on_headers_complete(self) -> None:
+        # Parser is always set when this callback is invoked by httptools
+        assert self._parser is not None
         self._status_code = self._parser.get_status_code()
         # Check if server wants to close connection (Connection: close or HTTP/1.0)
         self._should_close = not self._parser.should_keep_alive()
@@ -440,13 +448,14 @@ class ConnectionPool:
         loop: asyncio.AbstractEventLoop,
         max_connections: int | None = None,  # None means no limit
         max_idle_time: float = 4.0,  # Discard connections idle longer than this
+        ssl_context: ssl.SSLContext | None = None,
     ):
         self._host = host
         self._port = port
         self._loop = loop
         self._max_connections = max_connections
         self._max_idle_time = max_idle_time
-
+        self._ssl_context = ssl_context
         # Connection tracking
         self._idle_stack: list[PooledConnection] = []
         self._all_connections: set[PooledConnection] = set()
@@ -534,6 +543,7 @@ class ConnectionPool:
                 protocol_factory,
                 host=self._host,
                 port=self._port,
+                ssl=self._ssl_context,
             )
 
             # Apply/Override socket defaults
@@ -650,7 +660,7 @@ class HttpRequestTemplate:
         static_prefix: Pre-merged request line + host header bytes
     """
 
-    __slots__ = ("static_prefix", "_extra_headers_cache")
+    __slots__ = ("static_prefix", "_extra_headers_cache", "extra_cached_headers")
 
     # Pre-encoded general headers
     HEADERS_STREAMING = (
@@ -663,6 +673,7 @@ class HttpRequestTemplate:
     def __init__(self, static_prefix: bytes):
         self.static_prefix = static_prefix
         self._extra_headers_cache: dict[frozenset, bytes] = {}
+        self.extra_cached_headers = b""
 
     @classmethod
     def from_url(cls, host: str, port: int, path: str = "/") -> HttpRequestTemplate:
@@ -705,6 +716,7 @@ class HttpRequestTemplate:
             self._extra_headers_cache[cache_key] = "".join(
                 f"{k}: {v}\r\n" for k, v in headers.items()
             ).encode("utf-8", "surrogateescape")
+            self.extra_cached_headers = b"".join(self._extra_headers_cache.values())
 
     def build_request(
         self,
@@ -731,7 +743,13 @@ class HttpRequestTemplate:
         # Fast path: no extra headers
         if not extra_headers:
             return b"".join(
-                [self.static_prefix, content_type_headers, content_length, body]
+                [
+                    self.static_prefix,
+                    self.extra_cached_headers,
+                    content_type_headers,
+                    content_length,
+                    body,
+                ]
             )
 
         # Slow path: extra headers (~1us uncached, ~50ns per extra-header cached)
@@ -743,7 +761,14 @@ class HttpRequestTemplate:
             self._extra_headers_cache[cache_key] = extra
 
         return b"".join(
-            [self.static_prefix, content_type_headers, extra, content_length, body]
+            [
+                self.static_prefix,
+                self.extra_cached_headers,
+                content_type_headers,
+                extra,
+                content_length,
+                body,
+            ]
         )
 
 

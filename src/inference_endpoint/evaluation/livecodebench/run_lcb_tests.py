@@ -296,7 +296,7 @@ def grade_call_based(
 
     all_outputs = [json.loads(output) for output in all_outputs]
 
-    total_execution = 0
+    total_execution = 0.0
     all_results = []
     for gt_inp, gt_out in zip(all_inputs, all_outputs, strict=False):
         signal.alarm(timeout)
@@ -377,7 +377,7 @@ def grade_stdio(
         return
 
     all_results = []
-    total_execution_time = 0
+    total_execution_time = 0.0
     for gt_inp, gt_out in zip(all_inputs, all_outputs, strict=False):
         signal.alarm(timeout)
         faulthandler.enable()

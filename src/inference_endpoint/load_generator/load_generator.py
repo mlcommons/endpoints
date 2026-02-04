@@ -135,10 +135,10 @@ class LoadGenerator(ABC):
         self.sample_issuer = sample_issuer
         self.dataloader = dataloader
         self.name = name
-        self.uuid_to_index_map = {}
+        self.uuid_to_index_map: dict[str, int] = {}
 
     @abstractmethod
-    def __next__(self) -> tuple[Sample, int]:
+    def __next__(self) -> IssuedSample:
         """Issue the next sample according to the load generation strategy.
 
         This method should:
@@ -152,9 +152,7 @@ class LoadGenerator(ABC):
         It should only return AFTER the sample has been issued.
 
         Returns:
-            Tuple of (sample, timestamp_ns):
-            - sample: The Sample object that was issued
-            - timestamp_ns: Monotonic nanosecond timestamp when issued
+            IssuedSample object containing the sample, index, and issue timestamp.
 
         Raises:
             StopIteration: When all samples have been issued.
@@ -287,7 +285,8 @@ class SchedulerBasedLoadGenerator(LoadGenerator):
             StopIteration: When scheduler has no more samples to issue.
         """
         # Let raised StopIteration be propagated up the stack
-        s_idx, delay_ns = next(self._iterator)
+        # Ignore mypy error complaining that self._iterator maybe None
+        s_idx, delay_ns = next(self._iterator)  # type: ignore[call-overload]
 
         # Data loading is not timed for Time-to-Token metrics. It is assumed that the
         # hypothetical user would have put the data into memory available for a network

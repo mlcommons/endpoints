@@ -136,6 +136,7 @@ async def run_probe_command(args: argparse.Namespace) -> None:
         ):
             try:
                 # Schedule receive on client's event loop and await the result
+                assert client.loop is not None, "Client loop should be initialized"
                 future = asyncio.run_coroutine_threadsafe(client.recv(), client.loop)
                 result = await asyncio.wrap_future(future)
 
@@ -163,11 +164,18 @@ async def run_probe_command(args: argparse.Namespace) -> None:
                     continue
                 latency_ms = (time.time() - start_times[query_id]) * 1000
 
+                # Normalize response_output for logging
+                response_output = result.get_response_output_string()
+                if response_output is None:
+                    response_output = ""
+
                 if result.error:
                     errors.append(f"{query_id}: {result.error}")
                 else:
                     latencies.append(latency_ms)
-                    responses.append((query_id, result.response_output))
+                    responses.append(
+                        (query_id, response_output if response_output else "<EMPTY>")
+                    )
 
                 # Simple progress indicator
                 if (
@@ -175,9 +183,7 @@ async def run_probe_command(args: argparse.Namespace) -> None:
                     or len(received_ids) == num_expected
                 ):
                     output_preview = (
-                        result.response_output[:100]
-                        if result.response_output
-                        else "(no output)"
+                        response_output[:100] if response_output else "(no output)"
                     )
                     logger.info(
                         f"  Processed {len(received_ids)}/{num_expected} responses : {query_id} : {output_preview}"

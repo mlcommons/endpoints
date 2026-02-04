@@ -31,6 +31,9 @@ class Extractor(ABC):
     # This allows registering new extractors that can be instantiated via config/lookup.
     PREDEFINED: ClassVar[dict[str, type["Extractor"]]] = {}
 
+    EXTRACTOR_ID: ClassVar[str]
+    """The unique identifier for the extractor. Automatically set by __init_subclass__."""
+
     def __init_subclass__(
         cls,
         extractor_id: str | None = None,

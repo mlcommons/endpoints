@@ -169,7 +169,7 @@ class WithReplacementSampleOrder(SampleOrder):
 
 
 def uniform_delay_fn(
-    max_delay_ns: int = 0, rng: random.Random = random
+    max_delay_ns: int = 0, rng: random.Random | None = None
 ) -> Callable[[], float]:
     """Create a uniform delay function for schedulers.
 
@@ -184,6 +184,7 @@ def uniform_delay_fn(
     Returns:
         Function that returns delay in nanoseconds (float).
     """
+    rng = rng or random.Random()
 
     def _fn():
         if max_delay_ns == 0:
@@ -194,7 +195,7 @@ def uniform_delay_fn(
 
 
 def poisson_delay_fn(
-    expected_queries_per_second: float, rng: random.Random = random
+    expected_queries_per_second: float, rng: random.Random | None = None
 ) -> Callable[[], float]:
     """Create a Poisson-distributed delay function for realistic online benchmarking.
 
@@ -213,6 +214,7 @@ def poisson_delay_fn(
     Returns:
         Function that returns delay in nanoseconds (float).
     """
+    rng = rng or random.Random()
     queries_per_ns = expected_queries_per_second / 1e9
 
     def _fn():
@@ -278,7 +280,7 @@ class Scheduler:
                 rng=self.runtime_settings.rng_sample_index,
             )
         )
-        self.delay_fn = None  # Subclasses must set this
+        self.delay_fn: Callable[[], int] | None = None  # Subclasses must set this
 
     def __iter__(self):
         """Iterate over (sample_index, delay_ns) pairs.
@@ -375,7 +377,7 @@ class ConcurrencyScheduler(Scheduler, load_pattern=LoadPatternType.CONCURRENCY):
 
     def __init__(self, runtime_settings: RuntimeSettings, sample_order_cls):
         super().__init__(runtime_settings, sample_order_cls)
-
+        assert runtime_settings.load_pattern is not None
         target_concurrency = runtime_settings.load_pattern.target_concurrency
         if target_concurrency is None or target_concurrency <= 0:
             raise ValueError(
@@ -390,7 +392,7 @@ class ConcurrencyScheduler(Scheduler, load_pattern=LoadPatternType.CONCURRENCY):
         # Register completion hook - free up slot when query completes
         SampleEventHandler.register_hook(SampleEvent.COMPLETE, self._release_slot)
 
-        # Unused (required by Scheduler interface)
+        # Unused (required by Scheduler interface) - returns 0 delay
         self.delay_fn = lambda: 0
 
     def _release_slot(self, result=None):

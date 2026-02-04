@@ -51,7 +51,7 @@ class BenchmarkSession:
 
         # EventRecorder will set this when all samples complete, helps avoid busy-waiting
         self.end_event = threading.Event()
-        self.thread = None
+        self.thread: threading.Thread | None = None
 
         # CPython GIL provides atomic boolean writes, no need for threading.Event()
         self.stop_requested = False
@@ -62,7 +62,7 @@ class BenchmarkSession:
         # Will be populated after the test finishes by _run_test
         self.report = None
 
-        self.sample_uuid_map = None
+        self.sample_uuid_map: dict[str, dict[str, int]] | None = None
 
     @property
     def is_running(self):
@@ -147,8 +147,8 @@ class BenchmarkSession:
                 if tokenizer_override is not None:
                     tokenizer = tokenizer_override
                 if has_model:
-                    model = self.runtime_settings.model
-                    if tokenizer is None:
+                    model = getattr(self.runtime_settings, "model", None)
+                    if tokenizer is None and model is not None:
                         try:
                             tokenizer = AutoTokenizer.from_pretrained(
                                 model if isinstance(model, str) else model.name
@@ -184,7 +184,7 @@ class BenchmarkSession:
                     report.to_json(save_to=Path(report_dir) / "result_summary.json")
 
                     # Dump runtime settings to report directory
-                    rt_settings_data = {
+                    rt_settings_data: dict[str, int | str | None] = {
                         "min_duration_ms": self.runtime_settings.min_duration_ms,
                         "max_duration_ms": self.runtime_settings.max_duration_ms,
                         "n_samples_from_dataset": self.runtime_settings.n_samples_from_dataset,
@@ -196,9 +196,9 @@ class BenchmarkSession:
                     # to retrieve the seed values. The best way to do this is probably a custom random.Random
                     # class that stores the original seed as a read-only property, and unable to set the seed
                     # after initialization.
-                    if has_model:
+                    if has_model and model is not None:
                         rt_settings_data["model"] = (
-                            model if isinstance(model, str) else model.name
+                            model if isinstance(model, str) else str(model.name)
                         )
 
                     # TODO: After Zhihan's MR is merged, grab the scheduler class and other LG init settings
@@ -218,12 +218,15 @@ class BenchmarkSession:
                     if dump_events_log:
                         reporter.dump_to_json(Path(report_dir) / "events.jsonl")
 
-                # Dump report to text file
-                report_path = report_dir / "report.txt"
+                # Display report to console
                 report.display(fn=print, summary_only=True)
-                with open(report_path, "w") as f:
-                    report.display(fn=f.write, summary_only=False, newline="\n")
-                logger.info(f"Report saved to {report_path}")
+
+                # Dump report to text file if report_dir is provided
+                if report_dir:
+                    report_path = Path(report_dir) / "report.txt"
+                    with open(report_path, "w") as f:
+                        report.display(fn=f.write, summary_only=False, newline="\n")
+                    logger.info(f"Report saved to {report_path}")
 
     def wait_for_test_end(self, timeout: float | None = None) -> bool:
         """
@@ -235,6 +238,8 @@ class BenchmarkSession:
         Returns:
             bool: True if the test thread has completed, False if it timed out.
         """
+        if not self.thread:
+            return False
         self.thread.join(timeout=timeout)
         return not self.thread.is_alive()
 
@@ -276,7 +281,7 @@ class BenchmarkSession:
             The new BenchmarkSession.
         """
         session = cls(runtime_settings, session_id=name)
-        load_generator = load_generator_cls(sample_issuer, dataset, scheduler, *args)
+        load_generator = load_generator_cls(sample_issuer, dataset, scheduler, *args)  # type: ignore[arg-type]
 
         # Create accuracy test generators
         accuracy_test_generators = None
@@ -293,7 +298,7 @@ class BenchmarkSession:
                     metric_target=runtime_settings.metric_target,
                     reported_metrics=runtime_settings.reported_metrics,
                     min_duration_ms=0,
-                    max_duration_ms=None,
+                    max_duration_ms=None,  # type: ignore[arg-type]
                     n_samples_from_dataset=ds.num_samples(),
                     n_samples_to_issue=ds.num_samples() * ds.repeats,
                     min_sample_count=ds.num_samples() * ds.repeats,
@@ -306,7 +311,10 @@ class BenchmarkSession:
                 )
 
                 accuracy_test_generators[ds_name] = load_generator_cls(
-                    sample_issuer, ds, acc_sched, *args
+                    sample_issuer,
+                    ds,
+                    acc_sched,  # type: ignore[arg-type]
+                    *args,
                 )
 
         session.thread = threading.Thread(

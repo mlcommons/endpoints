@@ -101,10 +101,10 @@ class EventRow:
         )
 
 
-def register_cleanup(file_path: str):
+def register_cleanup(file_path: Path):
     if multiprocessing.parent_process() is not None:
         return
-    atexit.register(partial(Path(file_path).unlink, missing_ok=True))
+    atexit.register(partial(file_path.unlink, missing_ok=True))
     logger.debug(f"Registered at-exit cleanup for {file_path}")
 
 
@@ -163,7 +163,7 @@ class EventRecorder:
 
         if self.connection_name not in EventRecorder._created_session_dbs:
             register_cleanup(self.connection_name)
-            EventRecorder._created_session_dbs.add(self.connection_name)
+            EventRecorder._created_session_dbs.add(str(self.connection_name))
 
         if not Path(self.connection_name).parent.exists():
             raise FileNotFoundError(
@@ -475,7 +475,7 @@ def record_exception(
     EventRecorder.record_event(
         SessionEvent.ERROR,
         time.monotonic_ns(),
-        sample_uuid=sample_uuid,
+        sample_uuid=sample_uuid or "<NO_SAMPLE_UUID>",
         data={
             "error_type": exc_value.__class__.__name__,
             "error_message": str(exc_value),

@@ -48,20 +48,21 @@ class RandomDataset(Dataset, dataset_id="random"):
         rng = np.random.default_rng(random_seed)
         data = []
         # Generate the input sequence lengths given the range ratio
-        input_seq_length = rng.integers(
+        input_seq_lengths = rng.integers(
             int(input_seq_length * range_ratio),
             input_seq_length + 1,
             num_sequences,
         )
         # Generate the input starts randomly from the vocab size
-        input_starts = rng.integers(0, tokenizer.vocab_size, num_sequences)
+        input_starts_array = rng.integers(0, tokenizer.vocab_size, num_sequences)
 
         # Generate the input sequences
         for i in range(num_sequences):
             # Generate the input sequence by adding the input starts to the input sequence lengths and modding by the vocab size
+            seq_len = int(input_seq_lengths[i])
+            start_val = int(input_starts_array[i])
             input_sequence = [
-                (input_starts[i] + j) % tokenizer.vocab_size
-                for j in range(input_seq_length[i])
+                (start_val + j) % tokenizer.vocab_size for j in range(seq_len)
             ]
             # Decode the input sequence to get the text prompt
             prompt = tokenizer.decode(input_sequence, add_special_tokens=False)
@@ -76,7 +77,7 @@ class RandomDataset(Dataset, dataset_id="random"):
                 {
                     "prompt": prompt,
                     "input_tokens": input_tokens,
-                    "input_seq_length": input_seq_length[i],
+                    "input_seq_length": seq_len,
                 }
             )
 

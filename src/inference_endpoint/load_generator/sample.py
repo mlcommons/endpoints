@@ -107,7 +107,9 @@ class _SampleEventHandler:
         self.complete_hooks = []
 
     def register_hook(
-        self, event_type: SampleEvent, hook: Callable[[StreamChunk | QueryResult], None]
+        self,
+        event_type: SampleEvent,
+        hook: Callable[[StreamChunk], None] | Callable[[QueryResult], None],
     ) -> None:
         if event_type == SampleEvent.FIRST_CHUNK:
             self.first_chunk_hooks.append(hook)

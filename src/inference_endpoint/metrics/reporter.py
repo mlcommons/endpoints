@@ -152,7 +152,7 @@ class RollupQueryTable:
         if self.repeats is None:
             return len(self.rows)
         else:
-            return int(self.repeats.sum())
+            return int(sum(self.repeats))
 
     def filter_uuid(self, uuid: str, only_first: bool = False) -> Any:
         """Returns the values for the given sample UUID.

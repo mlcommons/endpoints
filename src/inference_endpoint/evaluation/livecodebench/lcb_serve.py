@@ -77,7 +77,9 @@ def execute_code_single(test_suite_json: str, code: str, timeout_sec: int = 60):
     return fixed_types, metadata
 
 
-def execute_code_single_suppressed_errors(*args, resp_buffer: list = None, **kwargs):
+def execute_code_single_suppressed_errors(
+    *args, resp_buffer: list | None = None, **kwargs
+):
     """Wrapper around execute code so that all errors are resurfaced as failed tests"""
     try:
         res, metadata = execute_code_single(*args, **kwargs)
@@ -264,9 +266,9 @@ class _LCBWorker:
             dict[str, list[bool]]: Dictionary mapping question IDs to lists of boolean results for each code sample.
         """
         # Create results dict with the expected size
-        results = {}
+        results: dict[str, list[bool]] = {}
         for qid, test_codes in zip(question_ids, codes, strict=False):
-            results[qid] = [None] * len(test_codes)
+            results[qid] = [False] * len(test_codes)
         futures = {}
 
         with ProcessPoolExecutor(max_workers=self.n_lcb_workers) as executor:
@@ -380,7 +382,7 @@ class LCBServe:
                     qid
                 )  # Accessing will populate the cache
 
-    def cache_info(self) -> dict[str, int]:
+    def cache_info(self):
         """Returns the cache information for the test loader."""
         return self.test_loader.cache_info()
 
@@ -406,6 +408,7 @@ class LCBServe:
             KeyError: If any question_id is not found in the loaded test suites.
         """
         # Validate all question IDs exist in test suites
+        assert self.df is not None, "Dataset not loaded"
         invalid_ids = [
             qid for qid in codes_dict.keys() if qid not in self.df["question_id"].values
         ]

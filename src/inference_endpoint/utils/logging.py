@@ -22,6 +22,7 @@ This module provides centralized logging setup and configuration.
 import logging
 import os
 import sys
+from typing import Literal
 
 from colorama import Fore, Style
 from colorama import init as _colorama_init
@@ -49,7 +50,7 @@ class ColoredFormatter(logging.Formatter):
         self,
         fmt: str | None = None,
         datefmt: str | None = None,
-        style: str = "%",
+        style: Literal["%", "{", "$"] = "%",
         use_color: bool = False,
     ):
         """Initialize the formatter.

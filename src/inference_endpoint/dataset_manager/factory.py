@@ -23,7 +23,7 @@ import logging
 from inference_endpoint.config.schema import Dataset as DatasetConfig
 from inference_endpoint.dataset_manager.dataset import Dataset, DatasetFormat
 
-from .transforms import ColumnRemap, MakeAdapterCompatible
+from .transforms import ColumnRemap, MakeAdapterCompatible, Transform
 
 logger = logging.getLogger(__name__)
 
@@ -89,17 +89,21 @@ class DataLoaderFactory:
                 f"Dataset {name} is not predefined and no dataset path provided - predefined datasets are: {list(Dataset.PREDEFINED.keys())}"
             )
 
+        format_enum: DatasetFormat | None = None
         if file_format is not None:
-            file_format = DatasetFormat(file_format)
+            format_enum = DatasetFormat(file_format)
 
-        transforms = []
+        transforms: list[Transform] = []
         if remap is not None:
-            transforms.append(ColumnRemap(remap))
+            transforms.append(ColumnRemap(remap))  # type: ignore[arg-type]
         transforms.append(MakeAdapterCompatible())
 
+        assert dataset_path is not None
+        from pathlib import Path
+
         return Dataset.load_from_file(
-            dataset_path,
+            Path(dataset_path),
             transforms=transforms,
-            format=file_format,
+            format=format_enum,
             num_repeats=num_repeats,
         )

@@ -50,6 +50,8 @@ class WorkerManager:
         self.http_config = http_config
 
         # Create pool transport via factory
+        # worker_pool_transport is guaranteed to be set by HTTPClientConfig.__post_init__
+        assert http_config.worker_pool_transport is not None
         self.pool_transport: WorkerPoolTransport = (
             http_config.worker_pool_transport.create(
                 loop, num_workers=http_config.num_workers
@@ -71,6 +73,9 @@ class WorkerManager:
             for i in range(self.http_config.num_workers):
                 process = self._spawn_worker(i, connector)
                 self.workers.append(process)
+                assert (
+                    process.pid is not None
+                ), "Worker process should have a PID after spawning"
                 self.worker_pids[i] = process.pid
 
             # Apply CPU affinity after all workers are started

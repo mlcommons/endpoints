@@ -28,6 +28,7 @@ import tempfile
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 from urllib.parse import urljoin
 
 from tqdm import tqdm
@@ -40,7 +41,6 @@ from inference_endpoint.config.schema import (
     APIType,
     BenchmarkConfig,
     ClientSettings,
-    Dataset,
     DatasetType,
     EndpointConfig,
     LoadPattern,
@@ -51,11 +51,16 @@ from inference_endpoint.config.schema import (
     RuntimeConfig,
     Settings,
     StreamingMode,
+    SystemDefaults,
     TestMode,
     TestType,
 )
+from inference_endpoint.config.schema import (
+    Dataset as DatasetConfig,
+)
 from inference_endpoint.config.yaml_loader import ConfigError, ConfigLoader
 from inference_endpoint.core.types import QueryResult
+from inference_endpoint.dataset_manager.dataset import Dataset
 from inference_endpoint.dataset_manager.factory import DataLoaderFactory
 from inference_endpoint.endpoint_client.config import HTTPClientConfig
 from inference_endpoint.endpoint_client.cpu_affinity import pin_loadgen
@@ -134,7 +139,7 @@ class ResponseCollector:
             if self.pbar:
                 self.pbar.set_postfix(refresh=True, errors=len(self.errors))
         elif self.collect_responses:
-            self.responses[result.id] = result.response_output
+            self.responses[result.id] = result.get_response_output_string()
 
         if self.pbar:
             self.pbar.update(1)
@@ -147,7 +152,7 @@ class AccuracyConfiguration:
     dataset_name: str
     dataset: Dataset
     report_dir: os.PathLike
-    ground_truth_column: str
+    ground_truth_column: str | None
     num_repeats: int
 
 
@@ -227,9 +232,7 @@ async def run_benchmark_command(args: argparse.Namespace) -> None:
     elif benchmark_mode_str in ("offline", "online"):
         # ===== CLI MODE - Build config from CLI params =====
         benchmark_mode = TestType(benchmark_mode_str)  # TestType values are lowercase
-        effective_config: BenchmarkConfig = _build_config_from_cli(
-            args, benchmark_mode_str
-        )
+        effective_config = _build_config_from_cli(args, benchmark_mode_str)
         test_mode = (
             TestMode(args.mode) if getattr(args, "mode", None) else TestMode.PERF
         )
@@ -294,7 +297,7 @@ def _build_config_from_cli(
         version="1.0",
         type=TestType.OFFLINE if benchmark_mode == "offline" else TestType.ONLINE,
         datasets=[
-            Dataset(
+            DatasetConfig(
                 name=args.dataset.stem,
                 type=DatasetType.PERFORMANCE,
                 path=str(args.dataset),
@@ -343,7 +346,6 @@ def _build_config_from_cli(
             api_type=api_type,
         ),
         metrics=Metrics(),
-        baseline=None,  # CLI mode doesn't use baseline
         report_dir=report_dir,
         timeout=timeout,
         verbose=verbose_level > 0,
@@ -464,6 +466,18 @@ def _run_benchmark(
     if len(accuracy_configs) > 0:
         # Pack the evaluation parameters for each accuracy dataset
         for acc_config in accuracy_configs:
+            # Type narrowing: ensure accuracy_config is not None
+            assert (
+                acc_config.accuracy_config is not None
+            ), f"accuracy_config must be set for dataset {acc_config.name}"
+            # Type narrowing: ensure required fields are not None
+            assert (
+                acc_config.accuracy_config.eval_method is not None
+            ), f"eval_method must be set for dataset {acc_config.name}"
+            assert (
+                acc_config.accuracy_config.extractor is not None
+            ), f"extractor must be set for dataset {acc_config.name}"
+
             dataset = DataLoaderFactory.create_loader(
                 acc_config, num_repeats=acc_config.accuracy_config.num_repeats
             )
@@ -475,7 +489,7 @@ def _run_benchmark(
                     Extractor.get(acc_config.accuracy_config.extractor),
                     acc_config.name,
                     dataset,
-                    config.report_dir,
+                    report_dir,
                     acc_config.accuracy_config.ground_truth,
                     acc_config.accuracy_config.num_repeats,
                 )
@@ -554,18 +568,18 @@ def _run_benchmark(
 
     # Create endpoint client
     endpoints = config.endpoint_config.endpoints
+    assert endpoints is not None
     num_workers = config.settings.client.workers
 
     logger.info(f"Connecting: {endpoints}")
     tmp_dir = tempfile.mkdtemp(prefix="inference_endpoint_")
 
     try:
+        api_type: APIType = config.endpoint_config.api_type
+        assert api_type is not None
         http_config = HTTPClientConfig(
-            endpoint_urls=[
-                urljoin(e, config.endpoint_config.api_type.default_route())
-                for e in endpoints
-            ],
-            api_type=config.endpoint_config.api_type,
+            endpoint_urls=[urljoin(e, api_type.default_route()) for e in endpoints],
+            api_type=api_type,
             num_workers=num_workers,
             record_worker_events=config.settings.client.record_worker_events,
             event_logs_dir=report_dir,
@@ -573,6 +587,7 @@ def _run_benchmark(
             cpu_affinity=affinity_plan,
             warmup_connections=config.settings.client.warmup_connections,
             max_connections=config.settings.client.max_connections,
+            api_key=config.endpoint_config.api_key,
         )
         http_client = HTTPEndpointClient(http_config)
         sample_issuer = HttpClientSampleIssuer(http_client)
@@ -595,7 +610,9 @@ def _run_benchmark(
             report_dir=report_dir,
             tokenizer_override=tokenizer,
             accuracy_datasets=accuracy_datasets,
-            max_shutdown_timeout_s=config.timeout if config.timeout else None,
+            max_shutdown_timeout_s=config.timeout
+            if config.timeout
+            else SystemDefaults.DEFAULT_TIMEOUT,
             dump_events_log=True,
         )
 
@@ -622,6 +639,7 @@ def _run_benchmark(
                 ground_truth_column=eval_config.ground_truth_column,
             )
             score, n_repeats = scorer_instance.score()
+            assert eval_config.dataset.data is not None
             accuracy_scores[eval_config.dataset_name] = {
                 "dataset_name": eval_config.dataset_name,
                 "num_samples": len(eval_config.dataset.data),
@@ -665,7 +683,7 @@ def _run_benchmark(
                     logger.warning(f"  ... +{len(response_collector.errors) - 3} more")
 
         try:
-            results = {
+            results: dict[str, Any] = {
                 "config": {
                     "endpoint": endpoints,
                     "mode": test_mode,

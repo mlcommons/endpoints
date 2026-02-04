@@ -26,7 +26,7 @@ import msgspec
 # ============================================================================
 
 
-class SamplingParams(msgspec.Struct, kw_only=True, omit_defaults=True):
+class SamplingParams(msgspec.Struct, kw_only=True, omit_defaults=True):  # type: ignore[call-arg]
     max_new_tokens: int = 32768
     """int: Maximum number of tokens to generate per request (1-32768)"""
 
@@ -40,13 +40,13 @@ class SamplingParams(msgspec.Struct, kw_only=True, omit_defaults=True):
     """float: Top-p/nucleus sampling (cumulative probability threshold). 0.0-1.0, typically 1.0 for no filterin"""
 
 
-class SGLangGenerateRequest(msgspec.Struct, kw_only=True, omit_defaults=True):
+class SGLangGenerateRequest(msgspec.Struct, kw_only=True, omit_defaults=True):  # type: ignore[call-arg]
     input_ids: list[int]
     sampling_params: SamplingParams
     stream: bool
 
 
-class MetaInfo(msgspec.Struct, kw_only=True, omit_defaults=True):
+class MetaInfo(msgspec.Struct, kw_only=True, omit_defaults=True):  # type: ignore[call-arg]
     id: str
     finish_reason: dict[str, Any]
     prompt_tokens: int
@@ -57,7 +57,7 @@ class MetaInfo(msgspec.Struct, kw_only=True, omit_defaults=True):
     e2e_latency: float
 
 
-class SGLangGenerateResponse(msgspec.Struct, kw_only=True, omit_defaults=True):
+class SGLangGenerateResponse(msgspec.Struct, kw_only=True, omit_defaults=True):  # type: ignore[call-arg]
     text: str
     output_ids: list[int]
     meta_info: MetaInfo

@@ -231,16 +231,17 @@ def compute_affinity_plan(
         worker_phys_cores.append((primary_numa, phys))
 
     # Sort other NUMA nodes by their best core's performance
-    other_numas = sorted(
+    other_numas: list[int] = sorted(
         (numa for numa in numa_cores if numa != primary_numa),
         key=lambda n: min(core_perf_rank(n, p) for p in numa_cores[n]),
     )
 
     # Add cores from other NUMAs (each NUMA's cores sorted by perf)
     for numa in other_numas:
+        numa_id = numa  # Capture numa in local variable for lambda closure
         sorted_cores = sorted(
             numa_cores[numa].keys(),
-            key=lambda p: core_perf_rank(numa, p),
+            key=lambda p: core_perf_rank(numa_id, p),
         )
         for phys in sorted_cores:
             worker_phys_cores.append((numa, phys))
@@ -253,7 +254,7 @@ def compute_affinity_plan(
 
     # Log NUMA distribution for workers
     if worker_phys_cores:
-        numa_distribution = {}
+        numa_distribution: dict[int, int] = {}
         for numa, _ in worker_phys_cores:
             numa_distribution[numa] = numa_distribution.get(numa, 0) + 1
         logger.debug(f"Worker cores by NUMA: {numa_distribution}")
@@ -363,7 +364,7 @@ def _parse_cpulist(cpulist_str: str) -> set[int]:
     """Parse a CPU list string (e.g., '0-3,8-11') into a set."""
     if not cpulist_str:
         return set()
-    cpus = set()
+    cpus: set[int] = set()
     for part in cpulist_str.split(","):
         if "-" in (p := part.strip()):
             start, end = p.split("-", 1)
