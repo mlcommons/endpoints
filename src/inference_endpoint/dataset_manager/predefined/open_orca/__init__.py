@@ -23,6 +23,7 @@ import pandas as pd
 import requests
 
 from ...dataset import Dataset
+from . import presets
 
 logger = getLogger(__name__)
 
@@ -32,6 +33,8 @@ class OpenOrca(
     dataset_id="open_orca",
 ):
     """OpenOrca GPT4 tokenized dataset for accuracy evaluation."""
+
+    PRESETS = presets
 
     @classmethod
     def generate(
@@ -82,6 +85,7 @@ class OpenOrca(
 
         # Download the r2-downloader script into a temp file in the target dir
         downloader_url = "https://raw.githubusercontent.com/mlcommons/r2-downloader/refs/heads/main/mlc-r2-downloader.sh"
+        download_dir = dst_path.parent
         script_path = dst_path.parent / "mlc-r2-downloader.sh"
         r = requests.get(downloader_url, timeout=30)
         r.raise_for_status()
@@ -93,7 +97,7 @@ class OpenOrca(
             # Use absolute path for the script to avoid path doubling when cwd is set
             script_abs = str(script_path.resolve())
             result = subprocess.run(
-                ["bash", script_abs, dataset_url],
+                ["bash", script_abs, "-d", str(download_dir), dataset_url],
                 stdout=subprocess.DEVNULL,  # Suppress normal output
                 stderr=subprocess.PIPE,  # Capture errors
                 text=True,
@@ -107,14 +111,14 @@ class OpenOrca(
             raise RuntimeError(f"R2 downloader failed: {e}") from e
 
         # Script will generate a new 'open_orca' subdirectory with gzip'd pickle files
-        gzip_dir = dst_path.parent
+        gzip_dir = download_dir
         if (gzip_dir / "open_orca").exists():
             gzip_dir = gzip_dir / "open_orca"
 
         for gz_path in gzip_dir.glob("*.pkl.gz"):
             # Note: .with_suffix removes only one suffix, .pkl.gz -> .pkl
             pkl_filename = gz_path.with_suffix("").name
-            pkl_path = dst_path.parent / pkl_filename
+            pkl_path = download_dir / pkl_filename
             if pkl_path.exists():
                 continue
 
@@ -124,7 +128,7 @@ class OpenOrca(
 
         logger.info(
             "OpenOrca dataset downloaded and extracted to: %s",
-            dst_path.parent.resolve(),
+            download_dir.resolve(),
         )
 
         # Check if the specific file exists
