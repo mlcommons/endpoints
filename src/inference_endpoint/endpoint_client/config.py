@@ -45,6 +45,7 @@ class HTTPClientConfig:
 
     endpoint_urls: list[str]
     api_type: APIType = APIType.OPENAI
+    api_key: str | None = None
 
     # Number of worker processes (-1 for automatic detection)
     #   - -1 for "auto": min(max(8, loadgen_numa_domain_size - 1), 24)

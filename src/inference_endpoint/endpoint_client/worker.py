@@ -21,6 +21,7 @@ import logging
 import multiprocessing
 import os
 import signal
+import ssl
 import sys
 import time
 import traceback
@@ -151,6 +152,11 @@ class Worker:
         self._host = parsed.hostname or "localhost"
         self._port = parsed.port or (443 if parsed.scheme == "https" else 80)
         self._path = parsed.path or "/"
+        self._scheme = parsed.scheme
+        self._ssl_context = None
+
+        if self._scheme == "https":
+            self._ssl_context = ssl.create_default_context()
 
         # HTTP components
         self._pool: ConnectionPool | None = None
@@ -184,6 +190,11 @@ class Worker:
             self._http_template = HttpRequestTemplate.from_url(
                 self._host, self._port, self._path
             )
+            if self.http_config.api_key:
+                self._http_template.cache_headers(
+                    {"Authorization": "Bearer " + self.http_config.api_key}
+                )
+
             logger.debug(
                 f"HTTP template initialized: path={self._path}, "
                 f"host={self._host}:{self._port}"
@@ -200,6 +211,7 @@ class Worker:
                 loop=self._loop,
                 max_connections=connections_per_worker,
                 max_idle_time=self.http_config.max_idle_time,
+                ssl_context=self._ssl_context,
             )
 
             # Signal handlers for graceful shutdown

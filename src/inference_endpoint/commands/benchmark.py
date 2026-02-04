@@ -587,6 +587,7 @@ def _run_benchmark(
             cpu_affinity=affinity_plan,
             warmup_connections=config.settings.client.warmup_connections,
             max_connections=config.settings.client.max_connections,
+            api_key=config.endpoint_config.api_key,
         )
         http_client = HTTPEndpointClient(http_config)
         sample_issuer = HttpClientSampleIssuer(http_client)
