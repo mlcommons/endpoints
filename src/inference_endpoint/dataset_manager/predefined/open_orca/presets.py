@@ -23,7 +23,10 @@ from inference_endpoint.dataset_manager.transforms import (
 
 
 def llama2_70b() -> list[Transform]:
-    remap: dict[str, str] = {"question": "prompt", "system_prompt": "system"}
+    remap: dict[str | tuple[str, ...], str] = {
+        "question": "prompt",
+        "system_prompt": "system",
+    }
     return [
         ColumnRemap(remap=remap),
     ]
