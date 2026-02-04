@@ -758,6 +758,7 @@ class HttpRequestTemplate:
             extra = "".join(f"{k}: {v}\r\n" for k, v in extra_headers.items()).encode(
                 "utf-8", "surrogateescape"
             )
+            self._extra_headers_cache[cache_key] = extra
 
         return b"".join(
             [
