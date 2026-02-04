@@ -29,6 +29,7 @@ from ..config.runtime_settings import RuntimeSettings
 from ..dataset_manager.dataset import Dataset
 from ..metrics.recorder import EventRecorder
 from ..metrics.reporter import MetricsReporter
+from ..utils.version import get_version_info
 from .events import SessionEvent
 from .load_generator import LoadGenerator, SampleIssuer, SchedulerBasedLoadGenerator
 from .scheduler import Scheduler, WithoutReplacementSampleOrder
@@ -86,7 +87,9 @@ class BenchmarkSession:
         with self.event_recorder:
             try:
                 EventRecorder.record_event(
-                    SessionEvent.TEST_STARTED, time.monotonic_ns()
+                    SessionEvent.TEST_STARTED,
+                    time.monotonic_ns(),
+                    data=get_version_info(),
                 )
 
                 for _ in perf_test_generator:
