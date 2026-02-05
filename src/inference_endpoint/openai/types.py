@@ -74,6 +74,7 @@ class ChatCompletionRequest(msgspec.Struct, kw_only=True, omit_defaults=True):  
     frequency_penalty: float | None = None
     logit_bias: dict[str, float] | None = None
     user: str | None = None
+    chat_template: str | None = None
 
 
 class ChatCompletionResponseMessage(msgspec.Struct, kw_only=True, omit_defaults=True):  # type: ignore[call-arg]
