@@ -33,5 +33,4 @@ RUN if ! getent group ${GROUP_ID}; then \
 USER appuser
 ENV PATH="/home/appuser/.local/bin:$PATH"
 
-RUN pip install -e .[dev]
-RUN pip install .[test]
+RUN pip install -e .[dev,test]

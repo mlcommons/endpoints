@@ -29,11 +29,11 @@ import msgspec
 import pytest
 import uvloop
 import zmq
-from inference_endpoint.core.types import Query, QueryResult, StreamChunk
-from inference_endpoint.endpoint_client.transport.zmq.transport import (
+from inference_endpoint.async_utils.transport.zmq.transport import (
     _ZmqReceiverTransport,
     _ZmqSenderTransport,
 )
+from inference_endpoint.core.types import Query, QueryResult, StreamChunk
 
 # =============================================================================
 # Config

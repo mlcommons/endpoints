@@ -23,8 +23,8 @@ import asyncio
 
 import pytest
 import pytest_asyncio
+from inference_endpoint.async_utils.transport import ZmqWorkerPoolTransport
 from inference_endpoint.core.types import Query, QueryResult
-from inference_endpoint.endpoint_client.transport import ZmqWorkerPoolTransport
 
 # =============================================================================
 # Fixtures

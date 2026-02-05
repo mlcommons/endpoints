@@ -29,6 +29,11 @@ from collections.abc import AsyncGenerator
 from typing import Any
 from urllib.parse import urlparse
 
+from inference_endpoint.async_utils.transport import (
+    ReceiverTransport,
+    SenderTransport,
+    WorkerConnector,
+)
 from inference_endpoint.core.types import Query, QueryResult
 from inference_endpoint.endpoint_client.adapter_protocol import HttpRequestAdapter
 from inference_endpoint.endpoint_client.config import HTTPClientConfig
@@ -37,11 +42,6 @@ from inference_endpoint.endpoint_client.http import (
     HttpRequestTemplate,
     InFlightRequest,
     PooledConnection,
-)
-from inference_endpoint.endpoint_client.transport import (
-    ReceiverTransport,
-    SenderTransport,
-    WorkerConnector,
 )
 from inference_endpoint.load_generator.events import SampleEvent
 from inference_endpoint.metrics.recorder import EventRecorder

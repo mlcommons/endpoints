@@ -20,9 +20,9 @@ import logging
 import time
 from multiprocessing import Process
 
+from inference_endpoint.async_utils.transport import WorkerPoolTransport
 from inference_endpoint.endpoint_client.config import HTTPClientConfig
 from inference_endpoint.endpoint_client.cpu_affinity import set_cpu_affinity
-from inference_endpoint.endpoint_client.transport import WorkerPoolTransport
 from inference_endpoint.endpoint_client.worker import worker_main
 
 logger = logging.getLogger(__name__)

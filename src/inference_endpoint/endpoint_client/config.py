@@ -20,12 +20,12 @@ from importlib import import_module
 from pathlib import Path
 from typing import Literal
 
+from inference_endpoint.async_utils.transport.protocol import WorkerPoolTransport
 from inference_endpoint.config.schema import APIType
 
 from .accumulator_protocol import SSEAccumulatorProtocol
 from .adapter_protocol import HttpRequestAdapter
 from .cpu_affinity import AffinityPlan, get_cpus_in_numa_node, get_current_numa_node
-from .transport.protocol import WorkerPoolTransport
 from .utils import get_ephemeral_port_limit, get_ephemeral_port_range
 
 ADAPTER_MAP = {
@@ -153,7 +153,7 @@ class HTTPClientConfig:
 
         if self.worker_pool_transport is None:
             # Default to ZMQ worker pool transport
-            from .transport import ZmqWorkerPoolTransport
+            from inference_endpoint.async_utils.transport import ZmqWorkerPoolTransport
 
             self.worker_pool_transport = ZmqWorkerPoolTransport
 

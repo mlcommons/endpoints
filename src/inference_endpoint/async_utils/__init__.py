@@ -13,4 +13,4 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for the endpoint client transport module."""
+"""Async utilities for the inference endpoint."""

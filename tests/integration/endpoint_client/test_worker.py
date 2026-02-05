@@ -19,9 +19,9 @@ import asyncio
 import signal
 
 import pytest
+from inference_endpoint.async_utils.transport import ZmqWorkerPoolTransport
 from inference_endpoint.core.types import Query, QueryResult, StreamChunk
 from inference_endpoint.endpoint_client.config import HTTPClientConfig
-from inference_endpoint.endpoint_client.transport import ZmqWorkerPoolTransport
 from inference_endpoint.endpoint_client.worker import Worker
 
 
