@@ -1,4 +1,5 @@
 # Running Endpoints with [Llama3.1-8B](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct)
+
 It is recommended to use a config file such as [online_llama3_8b_cnn.yaml](online_llama3_8b_cnn.yaml) to run the benchmark.
 
 ## [Optional] Download dataset
@@ -25,7 +26,8 @@ export MODEL_NAME=<model to run, for instance meta-llama/Llama-3.1-8B-Instruct>
 It is convenient to download the model prior to launch so that the container can reuse the model instead of having to download it post-launch. This can be done via `hf download $MODEL_NAME`. The models downloaded can be verified via `hf cache scan`
 
 ### [vLLM](https://github.com/vllm-project/vllm)
-**Note**: To generate same outputs as the ones produced from submissions with legacy loadgen, we need to apply a custom chat template (this is taken care of automatically by the cnn-dailymail dataset preset; The flag `--trust-request-chat-template` is also required.
+
+**Note**: To generate same outputs as the ones produced from submissions with legacy loadgen, we need to apply a custom chat template (this is taken care of automatically by the cnn-dailymail dataset preset). The flag `--trust-request-chat-template` is also required.
 
 We can launch the latest docker image for vllm using the command below:
 
