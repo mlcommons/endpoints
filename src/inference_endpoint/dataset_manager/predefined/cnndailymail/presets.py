@@ -33,12 +33,12 @@ def llama3_8b(
     top_k: int = 1,
 ) -> list[Transform]:
     # Define custom chat template for Llama 3.1-8b (to sync with tokenized prompts from legacy implementation)
-    template = """
-    {{- bos_token }}
-    {%- for message in messages %}
-    {{ message['content'] | trim }}
-    {%- endfor %}
-    """
+    template = (
+        "{{- bos_token }}"
+        "{%- for message in messages %}"
+        "{{ message['content'] | trim }}"
+        "{%- endfor %}"
+    )
     chat_template: dict[str, Any] = {"chat_template": template}
     return [
         # Step 1: Format the prompt from "article"
