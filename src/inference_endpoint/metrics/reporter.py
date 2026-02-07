@@ -1225,7 +1225,7 @@ class MetricsReporter:
         WHERE event_type = '{SessionEvent.TEST_STARTED.value}'
         LIMIT 1
         """
-        result = self._cursor.execute(query).fetchone()
+        result = self.cur_.execute(query).fetchone()
         if result and result[0]:
             try:
                 return orjson.loads(result[0])

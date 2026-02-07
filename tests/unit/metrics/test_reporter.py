@@ -18,6 +18,7 @@ import math
 
 import orjson
 import pytest
+
 from inference_endpoint.load_generator.events import SampleEvent, SessionEvent
 from inference_endpoint.metrics.recorder import sqlite3_cursor
 from inference_endpoint.metrics.reporter import (
@@ -342,6 +343,8 @@ def test_reporter_json(events_db):
     json_dict = json.loads(json_str)
 
     expected_keys = [
+        "version",
+        "git_sha",
         "n_samples_issued",
         "n_samples_completed",
         "duration_ns",
@@ -401,7 +404,9 @@ def test_display_report(events_db):
     lines = s.splitlines()
 
     assert "- Summary -" in lines[0]
-    assert lines[1].startswith("Total samples issued:")
+    assert lines[1].startswith("Version:")
+    # Git SHA may or may not be present, so Total samples issued can be on line 2 or 3
+    assert any(line.startswith("Total samples issued:") for line in lines[2:4])
 
 
 def test_stop_performance_tracking_timestamp_property(tmp_path, sample_uuids):
