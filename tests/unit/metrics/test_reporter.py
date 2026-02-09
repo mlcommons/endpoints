@@ -18,7 +18,6 @@ import math
 
 import orjson
 import pytest
-
 from inference_endpoint.load_generator.events import SampleEvent, SessionEvent
 from inference_endpoint.metrics.recorder import sqlite3_cursor
 from inference_endpoint.metrics.reporter import (
