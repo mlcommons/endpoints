@@ -1,0 +1,1251 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+"""
+HTTP client performance testing utility.
+
+Benchmarks send/recv rate of the HTTPEndpointClient using uvloop.
+Can auto-launch a MaxThroughputServer or connect to an external endpoint.
+
+Usage (see all available args in --help):
+    python -m inference_endpoint.utils.benchmark_httpclient -w 8 -c 512 -d 20
+    python -m inference_endpoint.utils.benchmark_httpclient --endpoint http://host:8080/v1/chat/completions
+    python -m inference_endpoint.utils.benchmark_httpclient --no-pin --track-memory
+
+Sweep modes (-w, -c, -l accept ranges; endpoints always included):
+    -w 4:12           every int in [4, 12]
+    -c 100:500:100    start:stop:step  -> [100, 200, 300, 400, 500]
+    -w 1:32::12       start:stop::N    -> 12 evenly-spaced points in [1, 32]
+    -l 32,128,512     explicit values
+    -w 1:32::12 -c 100:500::4          cartesian product sweep
+    --full                             preset sweep of common worker counts x prompt lengths
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import gc
+import itertools
+import os
+import re
+import signal
+import sys
+import threading
+import time
+from dataclasses import dataclass
+
+from inference_endpoint.core.types import Query, QueryResult
+from inference_endpoint.endpoint_client.config import HTTPClientConfig
+from inference_endpoint.endpoint_client.cpu_affinity import compute_affinity_plan
+from inference_endpoint.endpoint_client.http_client import AsyncHttpEndpointClient
+from inference_endpoint.testing.max_throughput_server import (
+    MaxThroughputServer,
+    build_non_streaming_response,
+    build_streaming_response,
+)
+
+
+@dataclass(slots=True)
+class BenchmarkStats:
+    """Snapshot of benchmark statistics."""
+
+    sent: int = 0
+    received: int = 0
+    errors: int = 0
+    send_elapsed_ns: int = 0  # Send phase duration
+    total_elapsed_ns: int = 0  # Total duration including drain
+    peak_inflight: int = 0  # Max observed in-flight count
+    stall_ns: int = 0  # Total time spent waiting on back-pressure
+    # Per-interval samples (populated by LiveDisplay)
+    send_rate_samples: list[float] | None = None
+    recv_rate_samples: list[float] | None = None
+
+
+@dataclass(slots=True)
+class MemoryStats:
+    """Memory statistics for a process."""
+
+    pid: int
+    rss_mb: float
+    shm_mb: float
+
+
+@dataclass(slots=True)
+class SweepResult:
+    """Result of a single benchmark run within a parameter sweep."""
+
+    param_values: dict[str, int]  # swept param name -> value for this run
+    stats: BenchmarkStats
+    send_rate: float  # req/s (mean)
+    recv_rate: float  # resp/s (mean)
+    outstanding: int  # sent - received - errors
+    error_rate: float  # errors/sent (%)
+    stall_pct: float  # back-pressure stall time / send time (%)
+    # Variation bounds from per-second samples
+    send_rate_min: float = 0.0
+    send_rate_max: float = 0.0
+    recv_rate_min: float = 0.0
+    recv_rate_max: float = 0.0
+
+
+# ---------------------------------------------------------------------------
+# Parsing helpers
+# ---------------------------------------------------------------------------
+
+
+def _linspace_int(start: int, stop: int, n: int) -> list[int]:
+    """Generate *n* evenly-spaced integers from *start* to *stop* (inclusive).
+
+    Intermediate values are rounded to the nearest integer, but *start* and
+    *stop* are always included exactly.
+    """
+    if n <= 0:
+        raise argparse.ArgumentTypeError(f"Number of points must be positive, got {n}")
+    if n == 1:
+        return [start]
+    points: list[int] = []
+    for i in range(n):
+        points.append(round(start + (stop - start) * i / (n - 1)))
+    # Deduplicate while preserving order (can happen with small ranges)
+    return list(dict.fromkeys(points))
+
+
+def int_or_range(value: str) -> list[int]:
+    """Parse an integer, range, or list specification. Endpoints always included.
+
+    Formats:
+        8            single value
+        4:12         every integer from 4 to 12
+        100:500:100  start:stop:step  -> [100, 200, 300, 400, 500]
+        1:32::12     start:stop::N    -> 12 evenly-spaced points in [1, 32]
+        1,4,8,16     explicit values
+    """
+    # Detect comma-separated values: "1,4,8,16"
+    if "," in value:
+        try:
+            return [int(v.strip()) for v in value.split(",") if v.strip()]
+        except ValueError as e:
+            raise argparse.ArgumentTypeError(
+                f"Invalid integer in comma-separated list {value!r}: {e}"
+            ) from e
+
+    # Detect linspace syntax: "start:end::N"
+    if "::" in value:
+        halves = value.split("::")
+        if len(halves) != 2 or ":" not in halves[0]:
+            raise argparse.ArgumentTypeError(
+                f"Linspace syntax must be start:end::N, got {value!r}"
+            )
+        try:
+            left = halves[0].split(":")
+            start, stop = int(left[0]), int(left[1])
+            num_points = int(halves[1])
+        except (ValueError, IndexError) as e:
+            raise argparse.ArgumentTypeError(
+                f"Invalid integer in linspace spec {value!r}: {e}"
+            ) from e
+        if start > stop:
+            raise argparse.ArgumentTypeError(
+                f"Range start ({start}) must be <= stop ({stop})"
+            )
+        return _linspace_int(start, stop, num_points)
+
+    parts = value.split(":")
+    try:
+        if len(parts) == 1:
+            return [int(parts[0])]
+        elif len(parts) == 2:
+            start, stop = int(parts[0]), int(parts[1])
+            if start > stop:
+                raise argparse.ArgumentTypeError(
+                    f"Range start ({start}) must be <= stop ({stop})"
+                )
+            return list(range(start, stop + 1))
+        elif len(parts) == 3:
+            start, stop, step = int(parts[0]), int(parts[1]), int(parts[2])
+            if step <= 0:
+                raise argparse.ArgumentTypeError(f"Step must be positive, got {step}")
+            if start > stop:
+                raise argparse.ArgumentTypeError(
+                    f"Range start ({start}) must be <= stop ({stop})"
+                )
+            result = list(range(start, stop + 1, step))
+            if result[-1] != stop:
+                result.append(stop)
+            return result
+        else:
+            raise argparse.ArgumentTypeError(f"Too many ':' in range spec: {value!r}")
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(
+            f"Invalid integer in range spec {value!r}: {e}"
+        ) from e
+
+
+def collect_sweep_params(
+    workers: list[int],
+    connections: list[int],
+    prompt_lengths: list[int],
+    stream_intervals: list[int] | None = None,
+) -> list[tuple[str, list[int]]]:
+    """Collect parameters that have ranges (more than one value)."""
+    candidates = [
+        ("num_workers", workers),
+        ("max_connections", connections),
+        ("prompt_length", prompt_lengths),
+    ]
+    if stream_intervals is not None:
+        candidates.append(("stream_interval", stream_intervals))
+    return [(name, vals) for name, vals in candidates if len(vals) > 1]
+
+
+# ---------------------------------------------------------------------------
+# Arithmetic helpers
+# ---------------------------------------------------------------------------
+
+
+def _safe_div(numerator: float, denominator: float) -> float:
+    """Division with zero-denominator guard."""
+    return numerator / denominator if denominator > 0 else 0.0
+
+
+def _stall_pct(stats: BenchmarkStats) -> float:
+    """Back-pressure stall time as a percentage of send phase."""
+    if stats.send_elapsed_ns <= 0:
+        return 0.0
+    return _safe_div(stats.stall_ns, stats.send_elapsed_ns) * 100
+
+
+def _compute_derived_stats(
+    stats: BenchmarkStats,
+) -> tuple[float, float, float, float, int]:
+    """Compute derived metrics from raw benchmark stats.
+
+    Returns (send_elapsed_sec, total_elapsed_sec, send_rate, recv_rate, outstanding).
+    """
+    send_elapsed_sec = stats.send_elapsed_ns / 1e9
+    total_elapsed_sec = stats.total_elapsed_ns / 1e9
+    return (
+        send_elapsed_sec,
+        total_elapsed_sec,
+        _safe_div(stats.sent, send_elapsed_sec),
+        _safe_div(stats.received, total_elapsed_sec),
+        stats.sent - stats.received - stats.errors,
+    )
+
+
+# ---------------------------------------------------------------------------
+# /proc memory helpers
+# ---------------------------------------------------------------------------
+
+
+def get_process_memory(pid: int) -> MemoryStats | None:
+    """Get RSS and shared memory for a process from /proc."""
+    try:
+        with open(f"/proc/{pid}/statm") as f:
+            parts = f.read().split()
+            # statm fields: size resident shared text lib data dt (in pages)
+            page_size = os.sysconf("SC_PAGE_SIZE")
+            rss_pages = int(parts[1])
+            shared_pages = int(parts[2])
+            return MemoryStats(
+                pid=pid,
+                rss_mb=(rss_pages * page_size) / (1024 * 1024),
+                shm_mb=(shared_pages * page_size) / (1024 * 1024),
+            )
+    except (OSError, IndexError, ValueError):
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Live display
+# ---------------------------------------------------------------------------
+
+
+class LiveDisplay:
+    """Live statistics display with optional memory tracking."""
+
+    def __init__(
+        self,
+        stats_ref: BenchmarkStats,
+        track_memory: bool = False,
+        interval: float = 1.0,
+    ):
+        self.stats = stats_ref
+        self.track_memory = track_memory
+        self.interval = interval
+        self._shutdown = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._last_sent = 0
+        self._last_received = 0
+        self._last_time = time.monotonic()
+        self._main_pid = os.getpid()
+        self._worker_pids: list[int] = []
+
+    def set_worker_pids(self, pids: list[int]) -> None:
+        """Set worker PIDs for memory tracking."""
+        self._worker_pids = pids
+
+    def start(self) -> None:
+        """Start the display thread."""
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        """Stop the display thread."""
+        self._shutdown.set()
+        if self._thread:
+            self._thread.join(timeout=2.0)
+
+    def _run(self) -> None:
+        """Display loop."""
+        while not self._shutdown.wait(self.interval):
+            self._print_stats()
+        # Final stats (partial interval — print but don't record sample)
+        self._print_stats(record_sample=False)
+
+    def _print_stats(self, record_sample: bool = True) -> None:
+        """Print current statistics and optionally record samples."""
+        now = time.monotonic()
+        elapsed = now - self._last_time
+
+        sent = self.stats.sent
+        received = self.stats.received
+        errors = self.stats.errors
+        in_flight = sent - received - errors
+
+        send_rate = (sent - self._last_sent) / elapsed if elapsed > 0 else 0
+        recv_rate = (received - self._last_received) / elapsed if elapsed > 0 else 0
+
+        self._last_sent = sent
+        self._last_received = received
+        self._last_time = now
+
+        # Record per-interval samples for variation analysis
+        # (skip partial intervals, e.g. the final stop() call)
+        if record_sample:
+            if self.stats.send_rate_samples is None:
+                self.stats.send_rate_samples = []
+            if self.stats.recv_rate_samples is None:
+                self.stats.recv_rate_samples = []
+            self.stats.send_rate_samples.append(send_rate)
+            self.stats.recv_rate_samples.append(recv_rate)
+
+        # Build output line
+        line = (
+            f"[Stats] Send/s: {send_rate:>9,.0f} | "
+            f"Recv/s: {recv_rate:>9,.0f} | "
+            f"InFlight: {in_flight:>8,} | "
+            f"Recv: {received:>10,} | "
+            f"Err: {errors:>5,}"
+        )
+
+        if self.track_memory:
+            mem_info = self._get_memory_info()
+            line += f" | {mem_info}"
+
+        print(line, flush=True)
+
+    def _get_memory_info(self) -> str:
+        """Get memory info string."""
+        main_mem = get_process_memory(self._main_pid)
+        if main_mem is None:
+            return "Mem: N/A"
+
+        total_rss = main_mem.rss_mb
+        total_shm = main_mem.shm_mb
+
+        # Get worker memory if available
+        for pid in self._worker_pids:
+            worker_mem = get_process_memory(pid)
+            if worker_mem:
+                total_rss += worker_mem.rss_mb
+                total_shm += worker_mem.shm_mb
+
+        return f"RSS: {total_rss:>7.1f}MB | SHM: {total_shm:>7.1f}MB"
+
+
+# ---------------------------------------------------------------------------
+# Benchmark core
+# ---------------------------------------------------------------------------
+
+
+_SEND_BATCH = 32  # Max requests issued per event-loop yield
+
+
+def build_prompt(length: int) -> str:
+    """Build a prompt of specified length using repeated 'hello world '."""
+    base = "hello world "
+    repeats = (length // len(base)) + 1
+    return (base * repeats)[:length]
+
+
+def _create_client(
+    endpoint_url: str,
+    num_workers: int,
+    max_connections: int,
+    streaming: bool,
+    prompt: str,
+    enable_affinity: bool,
+    verbose: bool = True,
+) -> tuple:
+    """Create an endpoint client and query data dict.
+
+    Returns (client, query_data). Caller must shut down the client.
+    """
+    cpu_affinity_plan = None
+    if enable_affinity:
+        effective = num_workers if num_workers > 0 else -1
+        tmp = HTTPClientConfig(endpoint_urls=[endpoint_url], num_workers=effective)
+        cpu_affinity_plan = compute_affinity_plan(tmp.num_workers)
+        if cpu_affinity_plan.loadgen_cpus:
+            os.sched_setaffinity(os.getpid(), set(cpu_affinity_plan.loadgen_cpus))
+        if verbose:
+            print(f"CPU Affinity Plan ({tmp.num_workers} workers):")
+            for line in cpu_affinity_plan.summary().split("\n"):
+                print(f"  {line}")
+    elif verbose:
+        print("CPU Affinity: disabled")
+
+    config = HTTPClientConfig(
+        endpoint_urls=[endpoint_url],
+        num_workers=num_workers if num_workers > 0 else -1,
+        max_connections=max_connections if max_connections > 0 else -1,
+        warmup_connections=False,
+        worker_gc_mode="relaxed",
+        log_level="CRITICAL",
+        cpu_affinity=cpu_affinity_plan,
+    )
+
+    if verbose:
+        print(
+            f"Config: workers={config.num_workers}, "
+            f"max_connections={config.max_connections}, stream={streaming}"
+        )
+
+    client = AsyncHttpEndpointClient(config)
+    query_data = {
+        "prompt": prompt,
+        "model": "benchmark-model",
+        "max_completion_tokens": 100,
+        "stream": streaming,
+    }
+
+    return client, query_data
+
+
+def run_benchmark(
+    endpoint_url: str,
+    duration: float,
+    num_workers: int,
+    max_connections: int,
+    prompt: str,
+    track_memory: bool,
+    streaming: bool = False,
+    max_concurrency: int = 100_000,
+    send_batch: int = _SEND_BATCH,
+    enable_affinity: bool = False,
+) -> BenchmarkStats:
+    """
+    Run the HTTP client benchmark.
+
+    Args:
+        endpoint_url: Target endpoint URL
+        duration: Benchmark duration in seconds
+        num_workers: Number of worker processes (-1 for auto)
+        max_connections: Max TCP connections (-1 for auto)
+        prompt: Prompt string to send
+        track_memory: Whether to track memory usage
+        streaming: Whether to use streaming mode
+        max_concurrency: Maximum in-flight requests for back-pressure
+        send_batch: Max requests issued per event-loop yield; auto-tuned at startup
+
+    Returns:
+        Final benchmark statistics
+    """
+    client, query_data = _create_client(
+        endpoint_url,
+        num_workers,
+        max_connections,
+        streaming,
+        prompt,
+        enable_affinity,
+    )
+    loop = client.loop
+    stats = BenchmarkStats()
+    display = LiveDisplay(stats, track_memory=track_memory)
+
+    if track_memory:
+        worker_pids = list(client.worker_manager.worker_pids.values())
+        display.set_worker_pids(worker_pids)
+
+    display.start()
+
+    # Suppress GC during measurement to avoid collection pauses
+    gc_was_enabled = gc.isenabled()
+    gc.collect()
+    gc.disable()
+
+    async def benchmark_main():
+        """Main benchmark coroutine running on event loop."""
+        nonlocal stats
+
+        send_done = False
+        start_ns = time.monotonic_ns()
+        send_deadline = time.monotonic() + duration
+        stall_timeout = 5.0
+        last_recv_time = time.monotonic()
+
+        qid = 0
+
+        async def sender():
+            nonlocal qid, send_done
+            while time.monotonic() < send_deadline:
+                # Back-pressure: wait if too many in-flight
+                in_flight = stats.sent - stats.received - stats.errors
+                if in_flight > stats.peak_inflight:
+                    stats.peak_inflight = in_flight
+                if in_flight >= max_concurrency:
+                    stall_start = time.monotonic_ns()
+                    await asyncio.sleep(0.0001)
+                    stats.stall_ns += time.monotonic_ns() - stall_start
+                    continue
+
+                # Burst up to send_batch requests before yielding
+                for _ in range(min(send_batch, max_concurrency - in_flight)):
+                    query = Query(id=str(qid), data=query_data)
+                    client.issue(query)
+                    stats.sent += 1
+                    qid += 1
+
+                # Yield to let receiver process
+                await asyncio.sleep(0)
+
+            stats.send_elapsed_ns = time.monotonic_ns() - start_ns
+            send_done = True
+
+        async def receiver():
+            nonlocal last_recv_time
+            while True:
+                result = client.poll()
+                if result is not None:
+                    last_recv_time = time.monotonic()
+                    if isinstance(result, QueryResult):
+                        if result.error:
+                            stats.errors += 1
+                        else:
+                            stats.received += 1
+                else:
+                    # Check completion
+                    if send_done and (stats.received + stats.errors) >= stats.sent:
+                        break
+                    # Check stall
+                    if (
+                        send_done
+                        and (time.monotonic() - last_recv_time) > stall_timeout
+                    ):
+                        print(f"\nStalled for {stall_timeout}s, stopping")
+                        break
+                    # Yield to sender
+                    await asyncio.sleep(0)
+
+        # Run sender and receiver concurrently
+        await asyncio.gather(sender(), receiver())
+
+        stats.total_elapsed_ns = time.monotonic_ns() - start_ns
+
+    try:
+        future = asyncio.run_coroutine_threadsafe(benchmark_main(), loop)
+        future.result()  # Block until complete
+    except KeyboardInterrupt:
+        print("\nInterrupted...")
+
+    display.stop()
+
+    # Restore GC state after measurement
+    if gc_was_enabled:
+        gc.enable()
+    gc.collect()
+
+    asyncio.run_coroutine_threadsafe(client.shutdown(), loop).result(timeout=10.0)
+
+    return stats
+
+
+# ---------------------------------------------------------------------------
+# Server lifecycle
+# ---------------------------------------------------------------------------
+
+
+_TOKENS_PER_CHUNK = 4
+_FULL_WORKERS = [1, 2, 4, 8, 10, 12, 14, 16]
+_FULL_PROMPT_LENGTHS = [
+    1,
+    32,
+    128,
+    512,
+    1024,
+    8192,
+    16384,
+    32768,
+    65536,
+    131072,
+]
+
+
+def _restart_server(
+    server: MaxThroughputServer, num_chunks: int, stream_interval: int = 1
+) -> None:
+    """Stop, reconfigure response payload, and restart workers."""
+    server.stop()
+    effective_chunks = max(1, num_chunks // stream_interval)
+    effective_tpc = _TOKENS_PER_CHUNK * stream_interval
+    server._streaming = build_streaming_response(effective_chunks, effective_tpc)
+    server._non_streaming = build_non_streaming_response(num_chunks * _TOKENS_PER_CHUNK)
+    # Reset shutdown flags and worker lists so _start_workers can re-use them
+    server._shutdown.clear()
+    server._workers.clear()
+    server._ready_events.clear()
+    server._start_workers()
+    time.sleep(0.3)  # Let workers bind
+
+
+# ---------------------------------------------------------------------------
+# Single-run mode
+# ---------------------------------------------------------------------------
+
+
+def run_single(
+    args: argparse.Namespace,
+    endpoint_url: str,
+    server: MaxThroughputServer | None = None,
+) -> None:
+    """Run a single benchmark (original behavior)."""
+    mode = "streaming" if args.streaming else "non-streaming"
+    prompt_length = args.prompt_length[0]
+    prompt = build_prompt(prompt_length)
+    mode_info = f"Mode: {mode}  |  Prompt length: {len(prompt)} chars"
+    if args.streaming and args.stream_interval[0] > 1:
+        mode_info += f"  |  Stream interval: {args.stream_interval[0]}"
+    print(mode_info)
+
+    if server and args.streaming:
+        _restart_server(server, prompt_length, args.stream_interval[0])
+
+    print(f"\nStarting benchmark for {args.duration}s...")
+    print("=" * 70)
+
+    stats = run_benchmark(
+        endpoint_url=endpoint_url,
+        duration=args.duration,
+        num_workers=args.num_workers[0],
+        max_connections=args.max_connections[0],
+        prompt=prompt,
+        track_memory=args.track_memory,
+        streaming=args.streaming,
+        max_concurrency=args.max_concurrency,
+        send_batch=args.send_batch,
+        enable_affinity=args.pin,
+    )
+
+    send_elapsed, total_elapsed, send_rate, recv_rate, outstanding = (
+        _compute_derived_stats(stats)
+    )
+    print("=" * 70)
+    print("\nFinal Results:")
+    print(f"  Send Duration:  {send_elapsed:.2f}s")
+    print(f"  Total Duration: {total_elapsed:.2f}s")
+    print(f"  Total Sent:     {stats.sent:,}")
+    print(f"  Total Recv:     {stats.received:,}")
+    print(f"  Errors:         {stats.errors:,}")
+    print(f"  Outstanding:    {outstanding:,}")
+    print(f"  Send Rate:      {send_rate:,.0f} req/s")
+    print(f"  Recv Rate:      {recv_rate:,.0f} resp/s")
+    print(f"  Peak InFlight:  {stats.peak_inflight:,} / {args.max_concurrency:,}")
+    print(f"  Stall%:         {_stall_pct(stats):.1f}%")
+    if outstanding > 0:
+        print(f"  WARNING: {outstanding:,} queries did not complete")
+
+
+# ---------------------------------------------------------------------------
+# Sweep mode
+# ---------------------------------------------------------------------------
+
+
+def run_sweep(
+    args: argparse.Namespace,
+    sweeps: list[tuple[str, list[int]]],
+    endpoint_url: str,
+    server: MaxThroughputServer | None = None,
+) -> None:
+    """Run a parameter sweep (cartesian product), print summary, and plot."""
+    sweep_names = [s[0] for s in sweeps]
+    sweep_values = [s[1] for s in sweeps]
+    combinations = list(itertools.product(*sweep_values))
+
+    mode = "streaming" if args.streaming else "non-streaming"
+    print(f"Mode: {mode}")
+    for name, vals in sweeps:
+        print(f"  {name} = {vals}")
+    print(
+        f"Cartesian product: {len(combinations)} iterations "
+        f"of {args.duration}s each\n"
+    )
+
+    default_workers = args.num_workers[0]
+    default_connections = args.max_connections[0]
+    default_prompt_length = args.prompt_length[0]
+    default_stream_interval = args.stream_interval[0]
+
+    results: list[SweepResult] = []
+    last_prompt_length: int | None = None
+    last_stream_interval: int | None = None
+
+    for i, combo in enumerate(combinations):
+        pv = dict(zip(sweep_names, combo, strict=False))
+        label = ", ".join(f"{k}={v}" for k, v in pv.items())
+
+        print(f"\n{'='*70}")
+        print(f"  Sweep {i+1}/{len(combinations)}: {label}")
+        print(f"{'='*70}")
+
+        workers: int = pv.get("num_workers", default_workers)  # type: ignore[assignment]
+        connections: int = pv.get("max_connections", default_connections)  # type: ignore[assignment]
+        prompt_length: int = pv.get("prompt_length", default_prompt_length)  # type: ignore[assignment]
+        stream_interval: int = pv.get("stream_interval", default_stream_interval)  # type: ignore[assignment]
+
+        # Restart server when prompt_length or stream_interval changes (streaming only)
+        if (
+            server
+            and args.streaming
+            and (
+                prompt_length != last_prompt_length
+                or stream_interval != last_stream_interval
+            )
+        ):
+            _restart_server(server, prompt_length, stream_interval)
+            last_prompt_length = prompt_length
+            last_stream_interval = stream_interval
+
+        prompt = build_prompt(prompt_length)
+
+        stats = run_benchmark(
+            endpoint_url=endpoint_url,
+            duration=args.duration,
+            num_workers=workers,
+            max_connections=connections,
+            prompt=prompt,
+            track_memory=args.track_memory,
+            streaming=args.streaming,
+            max_concurrency=args.max_concurrency,
+            send_batch=args.send_batch,
+            enable_affinity=args.pin,
+        )
+
+        _, _, send_rate, recv_rate, outstanding = _compute_derived_stats(stats)
+
+        sr = stats.send_rate_samples or []
+        rr = stats.recv_rate_samples or []
+
+        results.append(
+            SweepResult(
+                param_values=pv,
+                stats=stats,
+                send_rate=send_rate,
+                recv_rate=recv_rate,
+                outstanding=outstanding,
+                error_rate=_safe_div(stats.errors, stats.sent) * 100,
+                stall_pct=_stall_pct(stats),
+                send_rate_min=min(sr) if sr else send_rate,
+                send_rate_max=max(sr) if sr else send_rate,
+                recv_rate_min=min(rr) if rr else recv_rate,
+                recv_rate_max=max(rr) if rr else recv_rate,
+            )
+        )
+
+    print_sweep_summary(sweep_names, results)
+    generate_sweep_plot(sweeps, results, args)
+
+
+def print_sweep_summary(sweep_names: list[str], results: list[SweepResult]) -> None:
+    """Print a formatted summary table of sweep results."""
+    # Build dynamic param columns
+    param_headers = [f"{n:>14}" for n in sweep_names]
+    param_sep = " | ".join(param_headers)
+    header = (
+        f"{param_sep} | {'Send Rate':>12} | {'Recv Rate':>12} | "
+        f"{'Outstanding':>11} | {'Stall%':>7} | {'Errors':>8}"
+    )
+    width = len(header)
+    print(f"\n{'='*width}")
+    print(f"Sweep Summary: {', '.join(sweep_names)}")
+    print(f"{'='*width}")
+    print(header)
+    print(f"{'-'*width}")
+    for r in results:
+        param_cols = " | ".join(f"{r.param_values[n]:>14,}" for n in sweep_names)
+        print(
+            f"{param_cols} | {r.send_rate:>12,.0f} | "
+            f"{r.recv_rate:>12,.0f} | "
+            f"{r.outstanding:>11,} | {r.stall_pct:>6.1f}% | {r.error_rate:>7.1f}%"
+        )
+    print(f"{'='*width}")
+
+
+# ---------------------------------------------------------------------------
+# Plot generation
+# ---------------------------------------------------------------------------
+
+
+def _plot_config(args: argparse.Namespace) -> list[str]:
+    """Return list of 'key=val' strings for non-swept run parameters."""
+    return [
+        f"duration={args.duration}",
+        f"max_concurrency={args.max_concurrency}",
+        *(["streaming=True"] if args.streaming else []),
+        *(
+            [f"stream_interval={args.stream_interval[0]}"]
+            if args.streaming and args.stream_interval[0] > 1
+            else []
+        ),
+        *(["pin=False"] if not args.pin else []),
+    ]
+
+
+def _annotate_peak(ax: object, x: list[int], y: list[float], color: str) -> None:
+    """Add a subtle peak label to an axes object."""
+    if not y:
+        return
+    peak_idx = y.index(max(y))
+    ax.annotate(  # type: ignore[attr-defined]
+        f"{y[peak_idx]:,.0f}",
+        xy=(x[peak_idx], y[peak_idx]),
+        xytext=(0, 8),
+        textcoords="offset points",
+        ha="center",
+        va="bottom",
+        fontsize=8,
+        fontweight="bold",
+        color=color,
+        clip_on=True,
+    )
+
+
+def generate_sweep_plot(
+    sweeps: list[tuple[str, list[int]]],
+    results: list[SweepResult],
+    args: argparse.Namespace,
+) -> None:
+    """Generate sweep plots (Send Rate + Recv Rate).
+
+    Layout adapts to the number of swept parameters:
+      1 param:  1x2 — single line per subplot, with peak annotation.
+      2 params: 1x2 — x-axis=param1, colored lines per param2 value.
+      3 params: Nx2 facet grid — one row per param3 value, x-axis=param1,
+                colored lines per param2 value.
+      4 params: NxMx2 facet grid — rows=param3, columns=param4,
+                each cell is a (Send Rate, Recv Rate) pair.
+    """
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.colors as mcolors
+        import matplotlib.pyplot as plt
+        import matplotlib.ticker as ticker
+    except ImportError:
+        print("\nMatplotlib not installed. Skipping plot generation.")
+        print("  Install with: pip install matplotlib")
+        return
+
+    try:
+        plt.style.use("seaborn-v0_8-paper")
+    except OSError:
+        pass  # Fall back to default style
+
+    comma_fmt = ticker.FuncFormatter(lambda v, _: f"{v:,.0f}")
+    marker_kw: dict[str, object] = {
+        "marker": "o",
+        "markersize": 5,
+        "linewidth": 2,
+        "zorder": 3,
+    }
+
+    # 1 param: x-axis only. 2 params: x + colored lines.
+    # 3 params: x + colored lines + facet rows.
+    # 4 params: x + colored lines + facet rows + facet columns.
+    # Priority: x prefers workers, lines prefer prompt_length.
+    swept = dict(sweeps)
+    x_pref = ["num_workers", "max_connections", "prompt_length", "stream_interval"]
+    line_pref = ["prompt_length", "stream_interval", "max_connections", "num_workers"]
+
+    x_param = next((p for p in x_pref if p in swept), sweeps[0][0])
+    remaining = [(n, v) for n, v in sweeps if n != x_param]
+
+    line_param: str | None = None
+    line_values: list[int] = []
+    facet_param: str | None = None
+    facet_values: list[int] = []
+    facet_col_param: str | None = None
+    facet_col_values: list[int] = []
+
+    if remaining:
+        line_param = next(
+            (p for p in line_pref if p in dict(remaining)), remaining[0][0]
+        )
+        line_values = dict(remaining)[line_param]
+        remaining = [(n, v) for n, v in remaining if n != line_param]
+    if remaining:
+        facet_param, facet_values = remaining[0]
+        remaining = [(n, v) for n, v in remaining if n != facet_param]
+    if remaining:
+        facet_col_param, facet_col_values = remaining[0]
+
+    xlabel = x_param.replace("_", " ").title()
+
+    nrows = len(facet_values) if facet_param else 1
+    ncols_facet = len(facet_col_values) if facet_col_param else 1
+    fig, axes = plt.subplots(
+        nrows,
+        ncols_facet * 2,
+        figsize=(max(16, 8 * ncols_facet), max(6, 4 * nrows + 2)),
+        squeeze=False,
+    )
+
+    config = _plot_config(args)
+    sweep_desc = ", ".join(f"{name}=[{vals[0]}..{vals[-1]}]" for name, vals in sweeps)
+    subtitle = f"{sweep_desc}  |  {', '.join(config)}"
+
+    cycle_colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+    has_stall = any(r.stall_pct > 1 for r in results)
+
+    # Use gradient colormap when line param has many values (>6)
+    use_cmap = line_param is not None and len(line_values) > 6
+    cmap = None
+    norm = None
+    if use_cmap:
+        cmap = plt.get_cmap("viridis")
+        lo, hi = max(min(line_values), 1), max(line_values)
+        norm = (
+            mcolors.LogNorm(vmin=lo, vmax=hi)
+            if hi / lo > 10
+            else mcolors.Normalize(vmin=lo, vmax=hi)
+        )
+
+    def _line_color(li: int, lv: int | None) -> str:
+        if use_cmap and lv is not None:
+            return cmap(norm(max(lv, 1)))  # type: ignore[misc]
+        return cycle_colors[li % len(cycle_colors)]
+
+    # Index results: (facet_row_val, facet_col_val, line_val, x_val) -> result
+    result_idx: dict[tuple[int | None, int | None, int | None, int], SweepResult] = {}
+    for r in results:
+        fv = r.param_values.get(facet_param) if facet_param else None
+        fcv = r.param_values.get(facet_col_param) if facet_col_param else None
+        lv = r.param_values.get(line_param) if line_param else None
+        result_idx[(fv, fcv, lv, r.param_values[x_param])] = r
+
+    x_values = swept[x_param]
+    facet_iter = facet_values if facet_param else [None]  # type: ignore
+    facet_col_iter = facet_col_values if facet_col_param else [None]  # type: ignore
+    mean_maxes: dict[int, float] = {}  # id(ax) -> max mean value
+
+    for row, fv in enumerate(facet_iter):
+        for col, fcv in enumerate(facet_col_iter):
+            ax_send = axes[row, col * 2]
+            ax_recv = axes[row, col * 2 + 1]
+
+            if facet_param and col == 0:
+                facet_label = facet_param.replace("_", " ").title()
+                ax_send.set_ylabel(f"{facet_label}={fv}\nreq/s", fontsize=10)
+            elif col == 0:
+                ax_send.set_ylabel("req/s", fontsize=10)
+            ax_recv.set_ylabel("resp/s" if col == 0 else "", fontsize=10)
+
+            ax_stall: object | None = None
+            if has_stall:
+                ax_stall = ax_send.twinx()
+                ax_stall.set_ylim(0, 100)  # type: ignore[union-attr]
+                ax_stall.set_ylabel("stall %", fontsize=8, color="#cc4444", alpha=0.7)  # type: ignore[union-attr]
+                ax_stall.tick_params(  # type: ignore[union-attr]
+                    axis="y",
+                    labelcolor="#cc4444",
+                    labelsize=7,
+                    length=3,
+                )
+
+            line_iter = line_values if line_param else [None]  # type: ignore
+
+            for li, lv in enumerate(line_iter):
+                color = _line_color(li, lv)
+                group = [
+                    result_idx[(fv, fcv, lv, xv)]
+                    for xv in x_values
+                    if (fv, fcv, lv, xv) in result_idx
+                ]
+                if not group:
+                    continue
+
+                x = [r.param_values[x_param] for r in group]
+                label = f"{line_param}={lv}" if (line_param and not use_cmap) else None
+
+                n_lines = len(line_iter)
+                band_alpha = 0.15 if n_lines <= 3 else max(0.03, 0.15 / (n_lines / 3))
+                for ax, attr, attr_min, attr_max in [
+                    (ax_send, "send_rate", "send_rate_min", "send_rate_max"),
+                    (ax_recv, "recv_rate", "recv_rate_min", "recv_rate_max"),
+                ]:
+                    y = [getattr(r, attr) for r in group]
+                    y_lo = [getattr(r, attr_min) for r in group]
+                    y_hi = [getattr(r, attr_max) for r in group]
+                    ax.plot(x, y, color=color, label=label, **marker_kw)
+                    ax.fill_between(
+                        x,
+                        y_lo,
+                        y_hi,
+                        color=color,
+                        alpha=band_alpha,
+                        linewidth=0,
+                        zorder=2,
+                    )
+                    ax_id = id(ax)
+                    mean_maxes[ax_id] = max(mean_maxes.get(ax_id, 0), max(y))
+                    if len(line_iter) == 1:
+                        _annotate_peak(ax, x, y, color)
+
+                if ax_stall is not None:
+                    stall_pcts = [r.stall_pct for r in group]
+                    ax_stall.fill_between(  # type: ignore[attr-defined]
+                        x,
+                        0,
+                        stall_pcts,
+                        color="#cc4444",
+                        alpha=0.06,
+                        linewidth=0,
+                        zorder=0,
+                    )
+
+            # Format both axes in this cell
+            for ax, title in [(ax_send, "Send Rate"), (ax_recv, "Recv Rate")]:
+                if row == 0:
+                    col_prefix = (
+                        f"{facet_col_param.replace('_', ' ').title()}={fcv}\n"
+                        if facet_col_param
+                        else ""
+                    )
+                    ax.set_title(f"{col_prefix}{title}", fontsize=12, pad=8)
+                ax.set_xlabel(xlabel, fontsize=10)
+                max_mean = mean_maxes.get(id(ax), 0)
+                if max_mean > 0:
+                    ax.set_ylim(bottom=0, top=max_mean * 1.15)
+                else:
+                    ax.set_ylim(bottom=0)
+                ax.yaxis.set_major_formatter(comma_fmt)
+                ax.grid(True, alpha=0.15, linewidth=0.5)
+                ax.tick_params(labelsize=9)
+                if line_param and not use_cmap and col == 0:
+                    ax.legend(fontsize=8, loc="best", framealpha=0.8)
+
+    # Explicit margins; reserve right edge for colorbar when present
+    left = 0.06
+    right = 0.87 if use_cmap else 0.97
+    fig.subplots_adjust(
+        top=0.85,
+        bottom=0.10,
+        left=left,
+        right=right,
+        wspace=0.32,
+    )
+
+    # Center title/subtitle over the full figure
+    fig.suptitle(
+        "HTTP Client Benchmark Sweep",
+        fontsize=14,
+        fontweight="bold",
+        x=0.5,
+        y=0.98,
+    )
+    fig.text(0.5, 0.93, subtitle, ha="center", fontsize=9, color="0.4")
+
+    if use_cmap:
+        assert line_param is not None
+        sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+        sm.set_array([])
+        cbar_label = line_param.replace("_", " ").title()
+        cbar = fig.colorbar(
+            sm,
+            ax=axes.ravel().tolist(),
+            pad=0.03,
+            aspect=30,
+            shrink=0.9,
+        )
+        cbar.set_label(cbar_label, fontsize=10)
+        cbar.ax.tick_params(labelsize=8)
+
+    # Build filename
+    name_parts = [f"{name}_{vals[0]}-{vals[-1]}" for name, vals in sweeps]
+    filename = f"/tmp/sweep_{'_x_'.join(name_parts)}_{'_'.join(config)}.png"
+
+    fig.savefig(filename, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"\nPlot saved to: {filename}")
+
+
+# ---------------------------------------------------------------------------
+# CLI entry point
+# ---------------------------------------------------------------------------
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="HTTP client performance benchmark",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    # Allow values like "-1,2048" to be parsed as arg values, not flags.
+    parser._negative_number_matcher = re.compile(r"^-\d")
+    parser.add_argument(
+        "--endpoint",
+        type=str,
+        default=None,
+        help="Endpoint URL. If not provided, launches MaxThroughputServer at localhost:12345",
+    )
+    parser.add_argument(
+        "--no-pin",
+        action="store_false",
+        dest="pin",
+        help="Disable CPU affinity pinning for workers (enabled by default)",
+    )
+    parser.add_argument(
+        "-l",
+        "--prompt-length",
+        "--prompt-len",
+        type=int_or_range,
+        default=[-1],
+        dest="prompt_length",
+        help="Prompt length in characters, or range (e.g. 500:2000:500). Default: 1000",
+    )
+    parser.add_argument(
+        "-c",
+        "--max-connections",
+        type=int_or_range,
+        default=[-1],
+        help="Max TCP connections, or range (e.g. 100:500:100). -1 for auto. Default: -1",
+    )
+    parser.add_argument(
+        "-w",
+        "--num-workers",
+        type=int_or_range,
+        default=[-1],
+        help="Number of worker processes, or range (e.g. 4:12). -1 for auto. Default: -1",
+    )
+    parser.add_argument(
+        "-d",
+        "--duration",
+        type=float,
+        default=5.0,
+        help="Benchmark duration in seconds (default: 5)",
+    )
+    parser.add_argument(
+        "--track-memory",
+        action="store_true",
+        help="Track memory/SHM usage (adds overhead)",
+    )
+    parser.add_argument(
+        "--server-workers",
+        type=int,
+        default=4,
+        help="Number of server workers if auto-launching (default: 4)",
+    )
+    parser.add_argument(
+        "--stream",
+        "--streaming",
+        dest="streaming",
+        action="store_true",
+        help="Use streaming mode for queries (default: non-streaming)",
+    )
+    parser.add_argument(
+        "--stream-interval",
+        type=int_or_range,
+        default=[1],
+        dest="stream_interval",
+        help="Group N chunks into 1 in streaming mode (supports ranges). Default: 1",
+    )
+    parser.add_argument(
+        "--max-concurrency",
+        type=int,
+        default=100_000,
+        dest="max_concurrency",
+        help="Maximum in-flight requests for back-pressure (default: 100000)",
+    )
+    parser.add_argument(
+        "--full",
+        action="store_true",
+        help="Preset sweep of common worker counts x prompt lengths",
+    )
+    args = parser.parse_args()
+
+    if args.full:
+        if args.num_workers == [-1]:
+            args.num_workers = _FULL_WORKERS
+        if args.prompt_length == [-1]:
+            args.prompt_length = _FULL_PROMPT_LENGTHS
+
+    if args.prompt_length == [-1]:
+        args.prompt_length = [1000]
+
+    sweeps = collect_sweep_params(
+        args.num_workers,
+        args.max_connections,
+        args.prompt_length,
+        stream_intervals=args.stream_interval if args.streaming else None,
+    )
+
+    gc.set_threshold(70000, 10, 100)
+
+    import uvloop
+
+    uvloop.install()
+
+    server: MaxThroughputServer | None = None
+    if args.endpoint:
+        endpoint_url = args.endpoint
+        print(f"Using external endpoint: {endpoint_url}")
+    else:
+        server = MaxThroughputServer(
+            host="127.0.0.1",
+            port=12345,
+            num_chunks=1,
+            tokens_per_chunk=_TOKENS_PER_CHUNK,
+            num_workers=args.server_workers,
+            stats=False,
+            quiet=False,
+        )
+        server.start()
+        endpoint_url = f"{server.url}/v1/chat/completions"
+        print(f"Launched MaxThroughputServer: {endpoint_url}")
+
+    def sig_handler(signum, frame):
+        print("\nReceived signal, shutting down...")
+        if server:
+            server.stop()
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, sig_handler)
+    signal.signal(signal.SIGINT, sig_handler)
+
+    args.send_batch = _SEND_BATCH
+
+    try:
+        if sweeps:
+            run_sweep(args, sweeps, endpoint_url, server)
+        else:
+            run_single(args, endpoint_url, server)
+    finally:
+        if server:
+            server.stop()
+            print("\nServer stopped.")
+
+
+if __name__ == "__main__":
+    main()

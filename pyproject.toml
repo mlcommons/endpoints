@@ -84,6 +84,8 @@ test = [
     "scipy==1.16.3",
     # HTTP server and client for mock server fixture
     "aiohttp==3.13.3",
+    # Plotting for benchmark sweep mode
+    "matplotlib>=3.8.0",
 ]
 performance = [
     "pytest-benchmark>=4.0.0",

@@ -46,3 +46,37 @@ cpu_affinity: -1 # Auto: physical core isolation with SMT siblings
 - **Linux only**: Uses `os.sched_setaffinity()` and sysfs for topology detection
 - **Non-Linux**: Affinity settings are skipped with a warning
 - **Performance ranking**: Uses ACPI CPPC `highest_perf`, ARM `cpu_capacity`, or `cpuinfo_max_freq` (in order of preference)
+
+## Finding Optimal Worker Count
+
+Optimal worker count depends on your workload — prompt size, streaming mode, and connection count all affect throughput. Use the benchmark script to sweep worker counts against your expected prompt lengths and pick the configuration that maximizes recv rate.
+
+### Full sweep
+
+```bash
+python -m inference_endpoint.utils.benchmark_httpclient --full -d 5
+```
+
+Runs all common worker counts against a range of prompt lengths (CPU pinning is on by default). Produces a plot at `/tmp/sweep_*.png` showing send/recv rate per configuration, with shaded variation bands and a stall% overlay.
+
+### Targeted sweeps
+
+```bash
+# Sweep workers for a specific prompt length
+python -m inference_endpoint.utils.benchmark_httpclient -w 1:16 -l 4096 -d 10
+
+# Sweep workers with explicit values
+python -m inference_endpoint.utils.benchmark_httpclient -w 1,2,4,8,12,16 -l 4096 -d 10
+
+# Cartesian product: workers x prompt lengths
+python -m inference_endpoint.utils.benchmark_httpclient -w 1:16::8 -l 128,1024,8192 -d 5
+```
+
+### Reading the results
+
+- **Send Rate**: requests/s the client can issue. Higher is better.
+- **Recv Rate**: responses/s received. This is the effective throughput.
+- **Stall%**: fraction of send time spent blocked on back-pressure (inflight limit). High stall% means the client is sending faster than responses return — adding workers won't help, the bottleneck is downstream.
+- **Variation bands**: shaded region shows min/max per-second rate during each run. Wide bands indicate instability.
+
+Pick the worker count where recv rate peaks and stall% is low. Beyond that point, adding workers adds overhead without throughput gain.
