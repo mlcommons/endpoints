@@ -189,7 +189,7 @@ class RollupQueryTable:
 
     def summarize(
         self,
-        percentiles: Iterable[float] = (99.9, 99, 95, 90, 80, 75, 50, 25, 10, 5, 1),
+        percentiles: Iterable[float] = (99.9, 99, 97, 95, 90, 80, 75, 50, 25, 10, 5, 1),
     ) -> dict[str, float]:
         if len(self._sorted_vals) == 0:
             return {
@@ -349,6 +349,8 @@ class RollupQueryTable:
 class Report:
     """Represents a summarized report of metrics"""
 
+    version: str
+    git_sha: str | None
     n_samples_issued: int
     n_samples_completed: int
     duration_ns: int
@@ -482,6 +484,9 @@ class Report:
         """
 
         fn(f"----------------- Summary -----------------{newline}")
+        fn(f"Version: {self.version}{newline}")
+        if self.git_sha:
+            fn(f"Git SHA: {self.git_sha}{newline}")
         fn(f"Total samples issued: {self.n_samples_issued}{newline}")
         fn(f"Total samples completed: {self.n_samples_completed}{newline}")
         if self.duration_ns is not None:
@@ -1209,6 +1214,25 @@ class MetricsReporter:
     def __exit__(self, exc_type, exc_value, traceback):
         self.close()
 
+    def _get_version_info(self) -> dict[str, str | None]:
+        """Extract version info from TEST_STARTED event data.
+
+        Returns:
+            Dictionary with 'version' and 'git_sha' keys.
+        """
+        query = f"""
+        SELECT data FROM events
+        WHERE event_type = '{SessionEvent.TEST_STARTED.value}'
+        LIMIT 1
+        """
+        result = self.cur_.execute(query).fetchone()
+        if result and result[0]:
+            try:
+                return orjson.loads(result[0])
+            except Exception:
+                pass
+        return {"version": "unknown", "git_sha": None}
+
     def create_report(
         self,
         tokenizer: Tokenizer | None = None,
@@ -1248,7 +1272,13 @@ class MetricsReporter:
             ttft_summary = None
         else:
             ttft_summary = ttft_rollup.summarize()
+
+        # Extract version information
+        version_info = self._get_version_info()
+
         return Report(
+            version=version_info.get("version", "unknown"),
+            git_sha=version_info.get("git_sha"),
             n_samples_issued=sample_statuses["total_sent"],
             n_samples_completed=sample_statuses["completed"],
             duration_ns=self.derive_duration(),
