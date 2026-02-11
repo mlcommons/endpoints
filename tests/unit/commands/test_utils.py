@@ -37,8 +37,8 @@ from inference_endpoint.commands.utils import (
     run_init_command,
     run_validate_command,
 )
-from inference_endpoint.utils import monotime_to_datetime
 from inference_endpoint.exceptions import InputValidationError
+from inference_endpoint.utils import monotime_to_datetime
 
 
 class TestRunInfoCommand:
