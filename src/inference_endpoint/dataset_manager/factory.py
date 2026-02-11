@@ -59,7 +59,19 @@ class DataLoaderFactory:
             format = DatasetFormat(format)
 
         if remap is None:
-            remap = {"prompt": "text_input"}
+            print("Using default remap ***")
+
+            # It seems this was never correct for the way data in create_dummy_packet.py was created.
+            # see ColumnNameRemap
+            #     key is the original col name
+            #     value is the new name
+
+            # remap = {"prompt": "text_input"}          # orig remap code
+            remap = {
+                "text_input": "prompt"
+            }  # reverse it while using the original code in create_dummy_dataset.py and this works
+        else:
+            print("Using user supplied remap ***")
 
         transforms = [ColumnNameRemap(remap)]
         if metadata is not None:
