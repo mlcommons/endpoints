@@ -354,6 +354,7 @@ def test_reporter_json(events_db):
         "tpot_reporting_mode",
         "qps",
         "tps",
+        'test_started_at',
     ]
     assert set(json_dict.keys()) == set(expected_keys)
     assert json_dict["n_samples_issued"] == report.n_samples_issued
