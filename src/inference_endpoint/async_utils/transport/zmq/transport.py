@@ -41,6 +41,7 @@ Notes:
 from __future__ import annotations
 
 import asyncio
+import atexit
 import errno
 import logging
 import os
@@ -68,8 +69,26 @@ from ..protocol import (
 logger = logging.getLogger(__name__)
 
 
+# Create temporary directory for IPC sockets; keep a reference so it is not
+# garbage-collected (which would delete the directory immediately).
+# Use short prefix to keep socket paths under IPC_PATH_MAX_LEN (typically 107).
+_ZMQ_SOCKET_DIR_OBJ = tempfile.TemporaryDirectory(prefix="zmq_")
+ZMQ_SOCKET_DIR = _ZMQ_SOCKET_DIR_OBJ.name
+
+
+def _cleanup_zmq_socket_dir() -> None:
+    try:
+        _ZMQ_SOCKET_DIR_OBJ.cleanup()
+    except (OSError, FileNotFoundError):
+        pass
+
+
+atexit.register(_cleanup_zmq_socket_dir)
+
+
 __all__ = [
     "ZmqWorkerPoolTransport",
+    "ZMQ_SOCKET_DIR",
 ]
 
 
@@ -547,8 +566,7 @@ class ZmqWorkerPoolTransport(WorkerPoolTransport):
     Main process transport for worker pool communication.
     Provides fan-out (send to workers) and fan-in (receive from workers).
 
-    Creates and manages its own temporary directory for IPC sockets.
-    The directory is cleaned up automatically on cleanup().
+    Uses the process-wide ZMQ_SOCKET_DIR for IPC sockets (cleaned up at process exit).
 
     Usage:
         pool = ZmqWorkerPoolTransport.create(loop, num_workers=4)
@@ -576,24 +594,18 @@ class ZmqWorkerPoolTransport(WorkerPoolTransport):
         self._num_workers = num_workers
         self._closed = False
         self._context = zmq.Context(io_threads=config.io_threads)
-
-        # Create temporary directory for IPC sockets
-        # Use short prefix to keep socket paths under IPC_PATH_MAX_LEN (typically 107)
-        self._tmp_dir = tempfile.TemporaryDirectory(prefix="zmq_")
-        scratch_path = self._tmp_dir.name
         suffix = uuid.uuid4().hex[:8]
 
         # Generate addresses
         self._request_addrs = [
-            f"ipc://{scratch_path}/req_{suffix}_{i}" for i in range(num_workers)
+            f"ipc://{ZMQ_SOCKET_DIR}/req_{suffix}_{i}" for i in range(num_workers)
         ]
-        self._response_addr = f"ipc://{scratch_path}/resp_{suffix}"
-        self._readiness_addr = f"ipc://{scratch_path}/ready_{suffix}"
+        self._response_addr = f"ipc://{ZMQ_SOCKET_DIR}/resp_{suffix}"
+        self._readiness_addr = f"ipc://{ZMQ_SOCKET_DIR}/ready_{suffix}"
 
         # Validate path lengths
         for addr in self._request_addrs + [self._response_addr, self._readiness_addr]:
             if len(addr) > zmq.IPC_PATH_MAX_LEN:
-                self._tmp_dir.cleanup()
                 raise ValueError(
                     f"IPC path too long ({len(addr)} > {zmq.IPC_PATH_MAX_LEN}): {addr}"
                 )
@@ -711,13 +723,6 @@ class ZmqWorkerPoolTransport(WorkerPoolTransport):
         # linger=0 to force immediate shutdown
         # without waiting for pending messages
         self._context.destroy(linger=0)
-
-        # Cleanup temp directory
-        try:
-            self._tmp_dir.cleanup()
-        except (OSError, FileNotFoundError):
-            # Already cleaned up or missing
-            pass
 
     def __del__(self) -> None:
         """Best-effort cleanup on garbage collection."""
