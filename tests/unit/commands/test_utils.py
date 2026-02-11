@@ -25,12 +25,15 @@ Testing these commands ensures users have a smooth experience when setting
 up and validating their benchmark configurations.
 """
 
+import time
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 from inference_endpoint import __version__
 from inference_endpoint.commands.utils import (
+    monotime_to_datetime,
     run_info_command,
     run_init_command,
     run_validate_command,
@@ -201,3 +204,31 @@ class TestRunInitCommand:
                 assert output_file.stat().st_size > 0
             finally:
                 output_file.unlink(missing_ok=True)
+
+
+class TestMonotimeToDatetime:
+    """Test monotime_to_datetime conversion for past and current monotonic times."""
+
+    def test_monotime_to_datetime_backward_past_time(self):
+        """Past monotonic time converts to a datetime in the past relative to now."""
+        # Monotonic time 2 seconds ago
+        mono_now_ns = time.monotonic_ns()
+        past_mono_ns = mono_now_ns - 2 * 10**9  # 2 seconds in nanoseconds
+
+        result = monotime_to_datetime(past_mono_ns)
+        now = datetime.now()
+        delta = now - result
+
+        # Result should be roughly 2 seconds before now (allow 0.5s tolerance)
+        assert timedelta(seconds=1.5) <= delta <= timedelta(seconds=2.5)
+
+    def test_monotime_to_datetime_forward_current_time(self):
+        """Current monotonic time converts to a datetime close to now."""
+        mono_now_ns = time.monotonic_ns()
+
+        result = monotime_to_datetime(mono_now_ns)
+        now = datetime.now()
+        delta = abs((now - result).total_seconds())
+
+        # Result should be within 5 second of now (conversion and execution delay)
+        assert delta <= 5.0
