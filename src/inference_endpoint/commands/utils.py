@@ -314,24 +314,3 @@ def get_default_report_path() -> Path:
     return Path(
         f"{tempfile.gettempdir()}/reports_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     )
-
-
-def monotime_to_datetime(monotime_ns: int) -> datetime:
-    """Convert a monotonic timestamp to a datetime object.
-
-    Monotonic time is not wall-clock time; this uses the current offset between
-    wall clock and monotonic clock to approximate the wall-clock time that
-    corresponded to the given monotonic instant. Accurate only if the system
-    clock has not been adjusted since that instant.
-
-    Args:
-        monotime_ns: The monotonic timestamp in nanoseconds.
-
-    Returns:
-        The datetime object corresponding to the approximate wall-clock timestamp.
-    """
-    wall_now_ns = time.time_ns()
-    mono_now_ns = time.monotonic_ns()
-    offset_ns = wall_now_ns - mono_now_ns
-    wall_time_ns = monotime_ns + offset_ns
-    return datetime.fromtimestamp(wall_time_ns / 1e9)

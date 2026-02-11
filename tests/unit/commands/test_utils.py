@@ -33,11 +33,11 @@ from unittest.mock import MagicMock
 import pytest
 from inference_endpoint import __version__
 from inference_endpoint.commands.utils import (
-    monotime_to_datetime,
     run_info_command,
     run_init_command,
     run_validate_command,
 )
+from inference_endpoint.utils import monotime_to_datetime
 from inference_endpoint.exceptions import InputValidationError
 
 
