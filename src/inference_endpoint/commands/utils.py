@@ -16,7 +16,6 @@
 """Utility commands: info, validate, init."""
 
 import argparse
-import datetime
 import logging
 import os
 import platform
@@ -24,6 +23,8 @@ import shutil
 import socket
 import sys
 import tempfile
+import time
+from datetime import datetime
 from pathlib import Path
 
 import psutil
@@ -311,5 +312,22 @@ def get_default_report_path() -> Path:
         The default report path as a Path object.
     """
     return Path(
-        f"{tempfile.gettempdir()}/reports_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        f"{tempfile.gettempdir()}/reports_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     )
+
+
+def monotime_to_datetime(monotime_ns: int) -> datetime:
+    """Convert a monotonic timestamp to a datetime object.
+
+    Args:
+        monotime_ns: The monotonic timestamp in nanoseconds.
+
+    Returns:
+        The datetime object corresponding to the approximate wall-clock timestamp.
+    """
+    # get current timestamp in nanoseconds, get current absolute time, add the difference to the monotime_ns to get the approximate absolute time
+    current_timestamp_ns = time.time_ns()
+    current_absolute_time = datetime.fromtimestamp(current_timestamp_ns / 1e9)
+    difference = current_absolute_time - datetime.fromtimestamp(monotime_ns / 1e9)
+    approximate_absolute_time = monotime_ns + difference.total_seconds() * 1e9
+    return datetime.fromtimestamp(approximate_absolute_time / 1e9)
