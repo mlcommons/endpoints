@@ -463,6 +463,16 @@ def run_benchmark(
     Returns:
         Final benchmark statistics
     """
+    # Save original affinity before _create_client pins us to loadgen CPUs.
+    # Without this, subsequent sweep iterations see only the restricted set
+    # and compute_affinity_plan detects fewer physical cores than exist.
+    saved_affinity: set[int] | None = None
+    if enable_affinity:
+        try:
+            saved_affinity = os.sched_getaffinity(os.getpid())
+        except OSError:
+            pass
+
     client, query_data = _create_client(
         endpoint_url,
         num_workers,
@@ -568,6 +578,13 @@ def run_benchmark(
     gc.collect()
 
     asyncio.run_coroutine_threadsafe(client.shutdown(), loop).result(timeout=10.0)
+
+    # Restore original affinity so the next sweep iteration sees all CPUs
+    if saved_affinity is not None:
+        try:
+            os.sched_setaffinity(os.getpid(), saved_affinity)
+        except OSError:
+            pass
 
     return stats
 
