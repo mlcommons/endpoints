@@ -276,7 +276,9 @@ def _build_config_from_cli(
     # Parse concurrency argument (can be single value or comma-separated list)
     concurrency_value: int | list[int] | None = None
     if concurrency_str := getattr(args, "concurrency", None):
-        if "," in concurrency_str:
+        if isinstance(concurrency_str, int):
+            concurrency_value = concurrency_str
+        elif "," in concurrency_str:
             # Parse comma-separated list
             try:
                 concurrency_value = [int(c.strip()) for c in concurrency_str.split(",")]
