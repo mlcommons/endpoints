@@ -16,7 +16,6 @@
 """Utility commands: info, validate, init."""
 
 import argparse
-import datetime
 import logging
 import os
 import platform
@@ -24,6 +23,7 @@ import shutil
 import socket
 import sys
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
 import psutil
@@ -311,5 +311,5 @@ def get_default_report_path() -> Path:
         The default report path as a Path object.
     """
     return Path(
-        f"{tempfile.gettempdir()}/reports_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        f"{tempfile.gettempdir()}/reports_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     )
