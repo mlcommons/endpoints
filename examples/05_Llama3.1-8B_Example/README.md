@@ -27,7 +27,7 @@ It is convenient to download the model prior to launch so that the container can
 
 ### [vLLM](https://github.com/vllm-project/vllm)
 
-**Note**: To generate same outputs as the ones produced from submissions with legacy loadgen, we need to apply a custom chat template (this is taken care of automatically by the cnn-dailymail dataset preset). The flag `--trust-request-chat-template` is also required.
+**Note**: To generate same outputs as the ones produced from submissions with legacy loadgen, we need to apply a custom chat template (this is taken care of automatically by the cnn-dailymail dataset preset). The flag `--trust-request-chat-template` is also required for this behavior. **Security warning:** `--trust-request-chat-template` allows execution of request-provided chat templates and should only be used in trusted environments or when all requests are controlled by the benchmark harness/preset. Do not enable this flag on publicly exposed endpoints receiving untrusted traffic.
 
 We can launch the latest docker image for vllm using the command below:
 
