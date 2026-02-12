@@ -32,7 +32,7 @@ It is convenient to download the model prior to launch so that the container can
 We can launch the latest docker image for vllm using the command below:
 
 ```
-docker run --runtime nvidia --gpus all -v ${HF_HOME}:/root/.cache/huggingface --env "HUGGING_FACE_HUB_TOKEN=$HF_TOKEN" -p 8000:8000 --ipc=host vllm/vllm-openai:latest  --model ${MODEL_NAME} --trust-request-chat-template
+docker run --runtime nvidia --gpus all -v ${HF_HOME}:/root/.cache/huggingface --env "HUGGING_FACE_HUB_TOKEN=$HF_TOKEN" -p 8000:8000 --ipc=host vllm/vllm-openai:latest --model ${MODEL_NAME} --trust-request-chat-template
 ```
 
 ### To run Offline mode
