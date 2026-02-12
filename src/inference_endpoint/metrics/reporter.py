@@ -491,7 +491,7 @@ class Report:
         # Approximate absolute time of the test started at using monotime_to_datetime from utils.py
         test_started_at_approx = monotime_to_datetime(self.test_started_at)
         fn(
-            f"Test started at: {self.test_started_at}, approx: ({test_started_at_approx.strftime('%Y-%m-%d %H:%M:%S')}){newline}"
+            f"Test started at: (timestamp_ns):{self.test_started_at}, approx. wall-clock time: ({test_started_at_approx.strftime('%Y-%m-%d %H:%M:%S')}){newline}"
         )
         fn(f"Total samples issued: {self.n_samples_issued}{newline}")
         fn(f"Total samples completed: {self.n_samples_completed}{newline}")
@@ -1243,12 +1243,13 @@ class MetricsReporter:
         """Gets the timestamp of the TEST_STARTED event.
 
         Returns:
-            int: The timestamp of the TEST_STARTED event.
+            int|None: The timestamp of the TEST_STARTED event in nanoseconds, or None if not found.
         """
         query = f"""
         SELECT timestamp_ns FROM events
         WHERE event_type = '{SessionEvent.TEST_STARTED.value}'
-        LIMIT 1"""
+        LIMIT 1
+        ORDER BY timestamp_ns ASC"""
         result = self.cur_.execute(query).fetchone()
         if result and result[0]:
             return result[0]
