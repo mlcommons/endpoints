@@ -6,7 +6,7 @@ It is recommended to use a config file such as [online_llama3_8b_cnn.yaml](onlin
 
 The Llama3.1-8B benchmark uses the [cnn/dailymail](https://huggingface.co/datasets/abisee/cnn_dailymail) dataset (for summarization). If using a config (such as provided) to run the benchmark, the (validation) dataset is downloaded automatically by specifying dataset name as `- name: cnn_dailymail::llama3_8b` under the `dataset` entry.
 
-- For post-training quantization, users can use the [cnn-dailymail-calibration-list](https://github.com/mlcommons/inference/blob/v4.0/calibration/CNNDailyMail/calibration-list.txt) to select samples for the calibration.
+For post-training quantization, users can use the [cnn-dailymail-calibration-list](https://github.com/mlcommons/inference/blob/v4.0/calibration/CNNDailyMail/calibration-list.txt) to select samples for the calibration.
 
 ```
 curl -OL https://raw.githubusercontent.com/mlcommons/inference/v4.0/calibration/CNNDailyMail/calibration-list.txt
