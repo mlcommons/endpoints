@@ -1248,8 +1248,8 @@ class MetricsReporter:
         query = f"""
         SELECT timestamp_ns FROM events
         WHERE event_type = '{SessionEvent.TEST_STARTED.value}'
-        LIMIT 1
-        ORDER BY timestamp_ns ASC"""
+        ORDER BY timestamp_ns ASC
+        LIMIT 1"""
         result = self.cur_.execute(query).fetchone()
         if result and result[0]:
             return result[0]
