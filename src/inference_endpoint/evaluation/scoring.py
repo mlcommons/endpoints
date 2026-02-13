@@ -25,8 +25,8 @@ from collections import defaultdict
 from pathlib import Path
 from typing import ClassVar
 
+import msgspec.json
 import numpy as np
-import orjson
 import pandas as pd
 from tqdm import tqdm
 
@@ -117,7 +117,7 @@ class Scorer(ABC):
             )
 
         with sample_index_map_path.open("r") as f:
-            d = orjson.loads(f.read())
+            d = msgspec.json.decode(f.read())
             return d[self.dataset_name]  # Implicitly raises KeyError
 
     def get_outputs(self):
@@ -131,7 +131,7 @@ class Scorer(ABC):
         outputs = []
         with events_log_path.open("r") as f:
             for line in f:
-                event = orjson.loads(line.strip())
+                event = msgspec.json.decode(line.strip())
                 if event["event_type"] == SampleEvent.COMPLETE.value:
                     outputs.append(event)
         df = pd.DataFrame(outputs, columns=["sample_uuid", "value"])
@@ -418,7 +418,7 @@ class LiveCodeBenchScorer(Scorer, scorer_id="code_bench_scorer"):
                     "codes_dict": codes_dict,
                     "timeout_sec": self.timeout,
                 }
-                ws.send(orjson.dumps(request).decode("utf-8"))
+                ws.send(msgspec.json.encode(request).decode("utf-8"))
 
                 print(f"Connected to WebSocket service: {self.lcb_websocket_url}")
                 print(
@@ -438,7 +438,7 @@ class LiveCodeBenchScorer(Scorer, scorer_id="code_bench_scorer"):
                             # Connection closed cleanly
                             break
 
-                        data = orjson.loads(message)
+                        data = msgspec.json.decode(message)
                         status = data.get("status")
 
                         if status == "started":
@@ -570,14 +570,14 @@ class LiveCodeBenchScorer(Scorer, scorer_id="code_bench_scorer"):
                 for line in reversed(lines):
                     line = line.strip()
                     if line.startswith("{") and line.endswith("}"):
-                        output = orjson.loads(line.encode("utf-8"))
+                        output = msgspec.json.decode(line.encode("utf-8"))
                         return output["pass_at_1"]
 
                 # No JSON found, try parsing the whole output
-                output = orjson.loads(stdout_text.encode("utf-8"))
+                output = msgspec.json.decode(stdout_text.encode("utf-8"))
                 return output["pass_at_1"]
 
-            except (subprocess.CalledProcessError, orjson.JSONDecodeError, KeyError):
+            except (subprocess.CalledProcessError, msgspec.DecodeError, KeyError):
                 # Return None if subprocess fails or JSON parsing fails
                 return None
 

@@ -30,7 +30,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any, ClassVar
 
-import orjson
+import msgspec.json
 
 from ..load_generator.events import Event, SampleEvent, SessionEvent
 from ..profiling import profile
@@ -386,14 +386,14 @@ class EventRecorder:
         encoded_bytes: bytes = b""
         try:
             if data is not None:
-                encoded_bytes = orjson.dumps(data)
-        except orjson.JSONEncodeError as e:
+                encoded_bytes = msgspec.json.encode(data)
+        except msgspec.EncodeError as e:
             rec_inst.event_queue.put(
                 (
                     sample_uuid,
                     SessionEvent.ERROR.value,
                     time.monotonic_ns(),
-                    orjson.dumps(
+                    msgspec.json.encode(
                         {
                             "error_type": "JSONEncodeError",
                             "error_message": str(e),

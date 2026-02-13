@@ -16,7 +16,6 @@
 import time
 
 import msgspec
-import orjson
 from inference_endpoint.core.types import Query, QueryResult
 from inference_endpoint.endpoint_client.adapter_protocol import HttpRequestAdapter
 
@@ -148,15 +147,15 @@ class OpenAIAdapter(HttpRequestAdapter):
 
     @classmethod
     def encode_request(cls, request: CreateChatCompletionRequest) -> bytes:
-        """Encode request to JSON bytes using orjson."""
-        return orjson.dumps(request.model_dump(mode="json"))
+        """Encode request to JSON bytes using msgspec."""
+        return msgspec.json.encode(request.model_dump(mode="json"))
 
     @classmethod
     def decode_endpoint_response(
         cls, response_bytes: bytes
     ) -> CreateChatCompletionResponse:
-        """Decode response from JSON bytes using orjson."""
-        response_dict = orjson.loads(response_bytes)
+        """Decode response from JSON bytes using msgspec."""
+        response_dict = msgspec.json.decode(response_bytes)
 
         # Set default values for optional fields if missing
         response_dict["choices"][0]["message"]["refusal"] = "None"

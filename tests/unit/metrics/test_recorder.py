@@ -19,7 +19,7 @@ import uuid
 from collections import namedtuple
 from unittest.mock import patch
 
-import orjson
+import msgspec.json
 import pytest
 from inference_endpoint.load_generator.events import SampleEvent, SessionEvent
 from inference_endpoint.metrics.recorder import (
@@ -114,7 +114,7 @@ def test_event_row_to_insert_params(sample_uuids):
         sample_uuid=uuid1,
         event_type=SampleEvent.FIRST_CHUNK,
         timestamp_ns=10000,
-        data=orjson.dumps(test_data),
+        data=msgspec.json.encode(test_data),
     )
 
     params = event_row.to_insert_params()
@@ -127,7 +127,7 @@ def test_event_row_to_insert_params(sample_uuids):
     assert params[0] == uuid1
     assert params[1] == SampleEvent.FIRST_CHUNK.value
     assert params[2] == 10000
-    assert params[3] == orjson.dumps(test_data)
+    assert params[3] == msgspec.json.encode(test_data)
 
 
 def test_event_row_to_insert_params_empty_data(sample_uuids):
@@ -173,13 +173,13 @@ def test_event_row_integration_with_sqlite(sample_uuids):
             sample_uuid=uuid2,
             event_type=SampleEvent.FIRST_CHUNK,
             timestamp_ns=10100,
-            data=orjson.dumps({"chunk": "Hello"}),
+            data=msgspec.json.encode({"chunk": "Hello"}),
         ),
         EventRow(
             sample_uuid=uuid2,
             event_type=SampleEvent.COMPLETE,
             timestamp_ns=10200,
-            data=orjson.dumps({"output": ["Hello", " World"]}),
+            data=msgspec.json.encode({"output": ["Hello", " World"]}),
         ),
     ]
 
@@ -205,13 +205,13 @@ def test_event_row_integration_with_sqlite(sample_uuids):
     assert rows[1][0] == uuid2
     assert rows[1][1] == SampleEvent.FIRST_CHUNK.value
     assert rows[1][2] == 10100
-    assert orjson.loads(rows[1][3]) == {"chunk": "Hello"}
+    assert msgspec.json.decode(rows[1][3]) == {"chunk": "Hello"}
 
     # Verify third row (with complex JSON data)
     assert rows[2][0] == uuid2
     assert rows[2][1] == SampleEvent.COMPLETE.value
     assert rows[2][2] == 10200
-    assert orjson.loads(rows[2][3]) == {"output": ["Hello", " World"]}
+    assert msgspec.json.decode(rows[2][3]) == {"output": ["Hello", " World"]}
 
     cursor.close()
     conn.close()

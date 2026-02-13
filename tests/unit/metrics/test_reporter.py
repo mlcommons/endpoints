@@ -16,7 +16,7 @@
 import json
 import math
 
-import orjson
+import msgspec.json
 import pytest
 from inference_endpoint.load_generator.events import SampleEvent, SessionEvent
 from inference_endpoint.metrics.recorder import sqlite3_cursor
@@ -857,13 +857,13 @@ def test_get_output_sequence_lengths_with_stop_performance_tracking(
                     uuid1,
                     SampleEvent.COMPLETE.value,
                     10211,
-                    orjson.dumps({"output": ["Hello, ", "world"]}),
+                    msgspec.json.encode({"output": ["Hello, ", "world"]}),
                 ),
                 (
                     uuid2,
                     SampleEvent.COMPLETE.value,
                     10219,
-                    orjson.dumps({"output": ["And ", "goodbye."]}),
+                    msgspec.json.encode({"output": ["And ", "goodbye."]}),
                 ),
                 ("", SessionEvent.STOP_PERFORMANCE_TRACKING.value, 10150, b""),
                 (uuid3, SessionEvent.LOADGEN_ISSUE_CALLED.value, 10200, b""),
@@ -871,7 +871,7 @@ def test_get_output_sequence_lengths_with_stop_performance_tracking(
                     uuid3,
                     SampleEvent.COMPLETE.value,
                     10250,
-                    orjson.dumps({"output": ["Extra ", "sample"]}),
+                    msgspec.json.encode({"output": ["Extra ", "sample"]}),
                 ),
                 ("", SessionEvent.TEST_ENDED.value, 10300, b""),
             ],
@@ -913,13 +913,13 @@ def test_create_report_with_stop_performance_tracking(
                     uuid1,
                     SampleEvent.COMPLETE.value,
                     10211,
-                    orjson.dumps({"output": ["Hello, ", "world"]}),
+                    msgspec.json.encode({"output": ["Hello, ", "world"]}),
                 ),
                 (
                     uuid2,
                     SampleEvent.COMPLETE.value,
                     10219,
-                    orjson.dumps({"output": ["And ", "goodbye."]}),
+                    msgspec.json.encode({"output": ["And ", "goodbye."]}),
                 ),
                 ("", SessionEvent.STOP_PERFORMANCE_TRACKING.value, 10150, b""),
                 (uuid3, SessionEvent.LOADGEN_ISSUE_CALLED.value, 10200, b""),
@@ -928,7 +928,7 @@ def test_create_report_with_stop_performance_tracking(
                     uuid3,
                     SampleEvent.COMPLETE.value,
                     10250,
-                    orjson.dumps({"output": ["Extra ", "sample"]}),
+                    msgspec.json.encode({"output": ["Extra ", "sample"]}),
                 ),
                 ("", SessionEvent.TEST_ENDED.value, 10300, b""),
             ],

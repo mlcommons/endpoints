@@ -30,9 +30,9 @@ from inference_endpoint.endpoint_client.worker_manager import WorkerManager
 logger = logging.getLogger(__name__)
 
 
-class AsyncHttpEndpointClient:
+class HTTPEndpointClient:
     """
-    Async HTTP client for LLM inference.
+    HTTP client for LLM inference.
 
     Architecture:
     - Main process: Accepts requests, distributes to workers, handles responses
@@ -45,10 +45,12 @@ class AsyncHttpEndpointClient:
 
     Usage:
         with ManagedZMQContext.scoped() as zmq_ctx:
-            client = AsyncHttpEndpointClient(config, zmq_context=zmq_ctx)
+            client = HTTPEndpointClient(config, zmq_context=zmq_ctx)
             client.issue(query)
-            response = await client.recv()
-            await client.shutdown()
+            response = client.poll()        # Non-blocking, returns None if nothing ready
+            responses = client.drain()      # Drain all available responses
+            # response = await client.recv()  # Blocking; only if caller provides its own loop
+            client.shutdown()               # Blocks until workers stop
     """
 
     def __init__(
@@ -60,6 +62,8 @@ class AsyncHttpEndpointClient:
         self.client_id = uuid.uuid4().hex[:8]
         self.config = config
         self._worker_cycle = cycle(range(self.config.num_workers))
+
+        # TODO(vir): make context setup/teardown part of transport protocol
         if config.worker_pool_transport is ZmqWorkerPoolTransport:
             if zmq_context is None:
                 raise ValueError(
@@ -85,9 +89,6 @@ class AsyncHttpEndpointClient:
         # Initialize on event loop
         asyncio.run_coroutine_threadsafe(self._initialize(), self.loop).result()
 
-        assert self.config.adapter is not None
-        assert self.config.accumulator is not None
-        assert self.config.worker_pool_transport is not None
         logger.info(
             f"EndpointClient initialized with num_workers={self.config.num_workers}, "
             f"endpoints={self.config.endpoint_urls}, "
@@ -131,15 +132,19 @@ class AsyncHttpEndpointClient:
 
     def drain(self) -> list[QueryResult | StreamChunk]:
         """Non-blocking. Returns all available responses."""
-        results: list[QueryResult | StreamChunk] = []
-        while (r := self.poll()) is not None:
-            results.append(r)
-        return results
+        return list(iter(self.poll, None))
 
-    async def shutdown(self) -> None:
-        """Gracefully shutdown client."""
-        logger.info(f"[{self.client_id}] Shutting down...")
+    def shutdown(self) -> None:
+        """Gracefully shutdown client. Synchronous — blocks the caller until complete."""
+        if self._shutdown:  # Already shutdown, no-op
+            return
+        asyncio.run_coroutine_threadsafe(self._shutdown_async(), self.loop).result()
+
+    async def _shutdown_async(self) -> None:
+        """Async shutdown internals - must be called on the event loop."""
         self._shutdown = True
+
+        logger.info(f"[{self.client_id}] Shutting down...")
 
         # Shutdown workers
         await self.worker_manager.shutdown()
@@ -154,27 +159,3 @@ class AsyncHttpEndpointClient:
                 f"[{self.client_id}] Dropped {self._dropped_requests} requests during shutdown"
             )
         logger.info(f"[{self.client_id}] Shutdown complete.")
-
-
-class HTTPEndpointClient(AsyncHttpEndpointClient):
-    """
-    Sync HTTP client for LLM inference.
-    Inherits from AsyncHttpEndpointClient and provides sync interface.
-
-    Usage:
-        client = HTTPEndpointClient(config)
-        client.issue(query)
-    """
-
-    def issue(self, query: Query) -> None:  # type: ignore[override]
-        """Issue query."""
-        # Schedule on event loop thread
-        assert self.loop is not None
-        self.loop.call_soon_threadsafe(
-            lambda: super(HTTPEndpointClient, self).issue(query)
-        )
-
-    def shutdown(self) -> None:  # type: ignore[override]
-        """Sync shutdown wrapper - blocks until base class async shutdown completes."""
-        assert self.loop is not None
-        asyncio.run_coroutine_threadsafe(super().shutdown(), self.loop).result()
