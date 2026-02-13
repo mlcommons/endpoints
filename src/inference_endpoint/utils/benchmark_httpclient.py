@@ -622,26 +622,27 @@ _FULL_PROMPT_LENGTHS = [
 _FULL_STREAM_INTERVAL_PCTS = [0.0, 0.5, 1.0]
 
 
-def _resolve_stream_intervals(num_chunks: int, fractions: list[float]) -> list[int]:
-    """Map fractions to absolute stream_interval values, deduped and sorted.
+def _resolve_stream_intervals(output_length: int, fractions: list[float]) -> list[int]:
+    """Map fractions to absolute stream_interval (chars-per-event) values, deduped and sorted.
 
-    0.0 -> 1 (every chunk); 0.5 -> num_chunks//2; 1.0 -> num_chunks.
+    0.0 -> 1 (1 char/event, finest); 0.5 -> output_length//2; 1.0 -> output_length (1 event total).
     """
     vals: list[int] = []
     for f in fractions:
         if f <= 0.0:
             vals.append(1)
         else:
-            vals.append(max(1, round(num_chunks * f)))
+            vals.append(max(1, round(output_length * f)))
     return sorted(set(vals))
 
 
-def _sse_events_per_response(output_length: int) -> int:
+def _sse_events_per_response(output_length: int, stream_interval: int = 1) -> int:
     """Compute the number of SSE events the server sends per streaming response.
 
-    One SSE event per character, plus 1 finish event and 1 [DONE] sentinel.
+    ``ceil(output_length / stream_interval)`` content events, plus 1 finish
+    event and 1 [DONE] sentinel.
     """
-    return output_length + 2  # +1 finish_reason=stop, +1 [DONE]
+    return -(-output_length // stream_interval) + 2  # ceil division + 2
 
 
 def _restart_server(
@@ -685,7 +686,11 @@ def run_single(
     if server:
         _restart_server(server, prompt_length, args.streaming, stream_interval)
 
-    epr = _sse_events_per_response(prompt_length) if args.streaming else 1
+    epr = (
+        _sse_events_per_response(prompt_length, stream_interval)
+        if args.streaming
+        else 1
+    )
 
     print(f"\nStarting benchmark for {args.duration}s...")
     print("=" * 70)
@@ -861,7 +866,11 @@ def run_sweep(
                 last_stream_interval = stream_interval
 
             prompt = build_prompt(prompt_length)
-            epr = _sse_events_per_response(prompt_length) if args.streaming else 1
+            epr = (
+                _sse_events_per_response(prompt_length, stream_interval)
+                if args.streaming
+                else 1
+            )
 
             stats = run_benchmark(
                 endpoint_url=endpoint_url,
@@ -1308,7 +1317,8 @@ def main() -> None:
         type=int_or_range,
         default=[1],
         dest="stream_interval",
-        help="Group N chunks into 1 in streaming mode (supports ranges). Default: 1",
+        help="Characters per SSE event (supports ranges). "
+        "Total events = ceil(output_length / stream_interval). Default: 1",
     )
     parser.add_argument(
         "--max-concurrency",

@@ -13,7 +13,7 @@ Usage::
     # CLI — non-streaming (offline) mode with live stats
     python -m inference_endpoint.testing.max_throughput_server --port 12345 --stats
 
-    # CLI — SSE streaming mode, 50 SSE events per HTTP chunk
+    # CLI — SSE streaming mode, 50 characters per SSE event
     python -m inference_endpoint.testing.max_throughput_server --stream --stream-interval 50 --stats
 
     # Python — as a context manager in tests / scripts
@@ -97,13 +97,13 @@ def build_streaming_response(
 ) -> bytes:
     """Build complete SSE streaming response (chunked encoding).
 
-    Each character of the response becomes one SSE event (``delta.content``
-    = single char).  *stream_interval* controls how many SSE events are
-    packed into each HTTP chunked frame.
+    *stream_interval* controls how many characters are packed into each SSE
+    event.  Total SSE content events = ``ceil(output_length / stream_interval)``.
+    Each event is sent in its own HTTP chunked frame.
 
     Args:
-        output_length: Total characters in the response (one SSE event per char).
-        stream_interval: SSE events per HTTP chunked frame.
+        output_length: Total characters in the response.
+        stream_interval: Characters per SSE event (1 = finest granularity).
         model: Model name in the response JSON.
     """
     headers = (
@@ -114,13 +114,13 @@ def build_streaming_response(
         b"Connection: keep-alive\r\n\r\n"
     )
     created = int(time.time())
-    single_event = _sse_event(model, created, {"content": "x"})
 
-    # Batch events into HTTP chunked frames
+    # Each SSE event carries `stream_interval` chars (last may be shorter)
     chunks: list[bytes] = []
     for i in range(0, output_length, stream_interval):
-        batch_size = min(stream_interval, output_length - i)
-        chunks.append(_chunked(single_event * batch_size))
+        chars = min(stream_interval, output_length - i)
+        event = _sse_event(model, created, {"content": "x" * chars})
+        chunks.append(_chunked(event))
 
     # Finish event + [DONE] sentinel in one final chunk
     finish = _sse_event(model, created, {}, "stop")
@@ -183,7 +183,7 @@ def build_response(
     Args:
         output_length: Characters in the response content.
         stream: SSE streaming (True) or single JSON (False).
-        stream_interval: SSE events per HTTP chunked frame (streaming only).
+        stream_interval: Characters per SSE event (streaming only).
         model: Model name in the response JSON.
     """
     if stream:
@@ -341,10 +341,9 @@ class MaxThroughputServer:
         port: Bind port (0 for auto-assign).
         output_length: Characters in the response content.
         stream: Return SSE streaming responses (default: non-streaming JSON).
-            Each character becomes one SSE event; *stream_interval* controls
-            how many events are batched per HTTP chunked frame.
-        stream_interval: SSE events per HTTP chunked frame (only with *stream=True*).
-            1 = one event per frame, 50 = fifty 1-char events per frame.
+        stream_interval: Characters per SSE event (only with *stream=True*).
+            Total events = ceil(output_length / stream_interval).
+            1 = one char per event (finest), output_length = one big event.
         num_workers: Worker processes (SO_REUSEPORT kernel load-balancing).
         stats: Enable live req/s and throughput stats on stdout.
         stats_interval: Seconds between stats prints.
@@ -499,8 +498,9 @@ def main():
         "--stream-interval",
         type=int,
         default=1,
-        help="SSE events per HTTP chunked frame (only with --stream). "
-        "Each char is one SSE event; this controls batching into HTTP packets.",
+        help="Characters per SSE event (only with --stream). "
+        "Total events = ceil(output_length / stream_interval). "
+        "1 = one char per event (finest), output_length = one big event.",
     )
     parser.add_argument("--num-workers", "-w", type=int, default=4)
     parser.add_argument("--stats", action="store_true")
