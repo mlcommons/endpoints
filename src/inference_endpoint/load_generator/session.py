@@ -22,7 +22,7 @@ import time
 import uuid
 from pathlib import Path
 
-import orjson
+import msgspec.json
 from transformers import AutoTokenizer
 
 from ..config.runtime_settings import RuntimeSettings
@@ -208,15 +208,19 @@ class BenchmarkSession:
                     # from the runtime settings object
                     with (Path(report_dir) / "runtime_settings.json").open("w") as f:
                         f.write(
-                            orjson.dumps(
-                                rt_settings_data,
-                                option=orjson.OPT_INDENT_2 | orjson.OPT_SORT_KEYS,
+                            msgspec.json.format(
+                                msgspec.json.encode(
+                                    dict(sorted(rt_settings_data.items()))
+                                ),
+                                indent=2,
                             ).decode("utf-8")
                         )
 
                     # Save the UUID mapping for output verification
                     with (Path(report_dir) / "sample_idx_map.json").open("w") as f:
-                        f.write(orjson.dumps(self.sample_uuid_map).decode("utf-8"))
+                        f.write(
+                            msgspec.json.encode(self.sample_uuid_map).decode("utf-8")
+                        )
 
                     if dump_events_log:
                         reporter.dump_to_json(Path(report_dir) / "events.jsonl")

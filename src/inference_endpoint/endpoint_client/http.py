@@ -562,7 +562,10 @@ class ConnectionPool:
             self._creating -= 1
 
     def release(self, conn: PooledConnection) -> None:
-        """Return connection to pool for reuse and notify waiters."""
+        """Return connection to pool for reuse and notify waiters (idempotent)."""
+        if not conn.in_use:
+            return
+
         # Must close if: dead, server requested close, or error occurred
         if not conn.is_alive() or conn.protocol.should_close:
             self._close_connection(conn)
@@ -780,10 +783,10 @@ class InFlightRequest:
         query_id: Correlates response back to original Query.
         http_bytes: Serialized HTTP request for socket.write().
         is_streaming: Whether this is a streaming (SSE) request or not.
-        connection: PooledConnection if any assigned to this request.
+        connection: PooledConnection assigned to this request (set once request is fired).
     """
 
     query_id: str
     http_bytes: bytes
     is_streaming: bool
-    connection: PooledConnection | None = field(default=None, repr=False)
+    connection: PooledConnection = field(default=None, repr=False)  # type: ignore[assignment]
