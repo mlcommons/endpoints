@@ -20,6 +20,7 @@ import contextlib
 import dataclasses
 import logging
 import multiprocessing
+import os
 import queue
 import shutil
 import sqlite3
@@ -58,39 +59,118 @@ def sqlite3_cursor(path: Path):
         conn.close()
 
 
+@contextlib.contextmanager
+def psycopg3_cursor(conninfo: str):
+    """Context manager for psycopg3 cursor that properly handles connection lifecycle.
+
+    Args:
+        conninfo: PostgreSQL connection string (DSN or URI).
+
+    Yields:
+        A tuple of (cursor, connection) matching the sqlite3_cursor interface.
+    """
+    print("import psycopg3")
+    # conninfo = "postgresql://postgres:[password]@db.[project-ref].supabase.co:5432/postgres"
+    #
+    # password = "8+_3!KXa+sL$g2x"
+    #
+    # postgresql://postgres:[YOUR-PASSWORD]@db.lczeskqdhwkfdgbgttqr.supabase.co:5432/postgres
+    #
+    ###################################################
+
+    import psycopg
+    # password = quote_plus("8+_3!KXa+sL$g2x")
+    # conninfo1 = "postgresql://postgres:{password}@db.[project-ref].supabase.co:5432/postgres"
+    # conninfo1 = f"postgresql://postgres:{password}@db.lczeskqdhwkfdgbgttqr.supabase.co:5432/postgres"
+
+    # 2/11
+    password1 = "YyM77YSsFGgdkURA"
+    # spooler connection
+    conninfo1 = f"postgresql://postgres.lczeskqdhwkfdgbgttqr:{password1}@aws-1-us-east-2.pooler.supabase.com:6543/postgres"
+
+    print(f"connecting to supabase ORIG {conninfo}")
+    print(f"connecting to supabase NEW {conninfo1}")
+    # conn = psycopg.connect(conninfo, autocommit=False)
+    conn = psycopg.connect(conninfo1, autocommit=False)
+    cursor = conn.cursor()
+    print(f" psycopg3_cursor: {cursor}")
+    try:
+        print("supabase: return cursor, conn from iterator")
+        yield cursor, conn
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def register_pg_cleanup(conninfo: str, table_name: str):
+    """Register at-exit cleanup to drop a Postgres session table."""
+    if multiprocessing.parent_process() is not None:
+        return
+
+    def _drop_table():
+        try:
+            import psycopg
+        except ImportError:
+            return
+
+        try:
+            with psycopg.connect(conninfo) as conn:
+                conn.execute(f"DROP TABLE IF EXISTS {table_name}")
+                conn.commit()
+        except Exception:
+            pass
+
+    atexit.register(_drop_table)  # del Postgres table
+    logger.debug(f"Registered at-exit cleanup for Postgres table {table_name}")
+
+
 @dataclasses.dataclass
 class EventRow:
-    sample_uuid: str = dataclasses.field(metadata={"sql_type": "TEXT"})
+    sample_uuid: str = dataclasses.field(
+        metadata={"sql_type": "TEXT", "pg_sql_type": "TEXT"}
+    )
     """UUID string identifier for the sample"""
 
-    event_type: Event = dataclasses.field(metadata={"sql_type": "TEXT"})
+    event_type: Event = dataclasses.field(
+        metadata={"sql_type": "TEXT", "pg_sql_type": "TEXT"}
+    )
     """The type of event to record"""
 
-    timestamp_ns: int = dataclasses.field(metadata={"sql_type": "INTEGER"})
+    timestamp_ns: int = dataclasses.field(
+        metadata={"sql_type": "INTEGER", "pg_sql_type": "BIGINT"}
+    )
     """The timestamp of the event in nanoseconds. Note that this is a monotonic timestamp, so the value itself
     is not meaningful, but the differences between timestamps are accurate."""
 
-    data: bytes = dataclasses.field(default=b"", metadata={"sql_type": "BLOB"})
+    data: bytes = dataclasses.field(
+        default=b"", metadata={"sql_type": "BLOB", "pg_sql_type": "BYTEA"}
+    )
     """The data, if any, associated with the event, encoded as JSON bytes."""
 
     @staticmethod
-    def to_table_query() -> str:
+    def to_table_query(table_name: str = "events", backend: str = "sqlite") -> str:
         # Dynamically construct table query based on the dataclass fields
+        type_key = "pg_sql_type" if backend == "postgres" else "sql_type"
         fields = []
-        for field in dataclasses.fields(EventRow):
-            sql_type = field.metadata.get("sql_type", "BLOB")
+        for field in dataclasses.fields(EventRow):  # call stack is here
+            sql_type = field.metadata.get(
+                type_key, field.metadata.get("sql_type", "BLOB")
+            )
             fields.append(f"{field.name} {sql_type}")
 
         field_str = ", ".join(fields)
-        return f"CREATE TABLE IF NOT EXISTS events ({field_str})"
+        return f"CREATE TABLE IF NOT EXISTS {table_name} ({field_str})"
 
     @staticmethod
-    def insert_query() -> str:
+    def insert_query(table_name: str = "events", backend: str = "sqlite") -> str:
         fields = dataclasses.fields(EventRow)
         names = [field.name for field in fields]
         names_str = ", ".join(names)
-        placeholders = ", ".join(["?"] * len(fields))
-        return f"INSERT INTO events ({names_str}) VALUES ({placeholders})"
+        if backend == "postgres":
+            placeholders = ", ".join(["%s"] * len(fields))
+        else:
+            placeholders = ", ".join(["?"] * len(fields))
+        return f"INSERT INTO {table_name} ({names_str}) VALUES ({placeholders})"
 
     def to_insert_params(self) -> tuple[str, str, int, bytes]:
         return (
@@ -104,7 +184,7 @@ class EventRow:
 def register_cleanup(file_path: str):
     if multiprocessing.parent_process() is not None:
         return
-    atexit.register(partial(Path(file_path).unlink, missing_ok=True))
+    atexit.register(partial(Path(file_path).unlink, missing_ok=True))  # del sqlite db
     logger.debug(f"Registered at-exit cleanup for {file_path}")
 
 
@@ -120,12 +200,16 @@ class EventRecorderSingletonViolation(RuntimeError):
 
 
 class EventRecorder:
-    """Records events to a shared memory database, which can be accessed across multiple processes.
+    """Records events to a database, which can be accessed across multiple processes.
+
+    Supports two backends:
+    - sqlite (default): Stores events in /dev/shm for shared-memory access.
+    - postgres: Stores events in a PostgreSQL database (e.g. Supabase).
 
     An optional session id can be provided to connect to an existing database. If the database does not exist, it will first check if /dev/shm has enough free space to
-    create a new database.
+    create a new database (sqlite only).
 
-    This class uses a dedicated writer thread to handle all SQLite operations, making it thread-safe.
+    This class uses a dedicated writer thread to handle all database operations, making it thread-safe.
     Events are queued via record_event() and processed asynchronously by the writer thread.
 
     Only 1 EventRecorder can be actively writing events at a time.
@@ -146,6 +230,8 @@ class EventRecorder:
         min_memory_req_bytes: int = 512 * 1024 * 1024,
         notify_idle: threading.Event | None = None,
         close_timeout_s: float = 10.0,
+        backend: str = "sqlite",
+        pg_conninfo: str | None = None,
     ):
         """Creates a new EventRecorder.
 
@@ -155,40 +241,63 @@ class EventRecorder:
             min_memory_req_bytes: The minimum amount of free space (in bytes) in /dev/shm required to create a new database. (Default: 1GB)
             notify_idle: Optional threading.Event. If provided, EventRecorder will set when the number of inflight samples is 0.
             close_timeout_s: The timeout in seconds to wait for the writer thread to finish processing when calling close(). (Default: 10.0)
+            backend: Database backend — "sqlite" (default) or "postgres".
+            pg_conninfo: PostgreSQL connection string. Required when backend="postgres", or set DATABASE_URL env var.
         """
         if session_id is None:
             session_id = uuid.uuid4().hex
 
         self.session_id = session_id
+        self.backend = backend
+        self.pg_conninfo = pg_conninfo
 
-        if self.connection_name not in EventRecorder._created_session_dbs:
-            register_cleanup(self.connection_name)
-            EventRecorder._created_session_dbs.add(self.connection_name)
+        if backend == "sqlite":
+            if self.connection_name not in EventRecorder._created_session_dbs:
+                # remove this to keep sqlite persistent at /dev/shm/
+                #
+                # register_cleanup(self.connection_name)                           # set callback to do cleanup on sqlite only
+                EventRecorder._created_session_dbs.add(self.connection_name)
 
-        if not Path(self.connection_name).parent.exists():
-            raise FileNotFoundError(
-                "Cannot create shm db, POSIX shm dir at /dev/shm does not exist"
-            )
-
-        if not Path(self.connection_name).exists():
-            # If we're creating a new db, we require a minimum of 1GB of shared memory
-            logging.debug(f"Creating new events db at {self.connection_name}")
-            shm_stats = shutil.disk_usage("/dev/shm")
-            logging.debug(
-                f"/dev/shm usage stats: total={shm_stats.total}B, free={shm_stats.free}B"
-            )
-
-            min_memory_req_str = byte_quantity_to_str(min_memory_req_bytes)
-            if shm_stats.total < min_memory_req_bytes:
-                raise MemoryError(
-                    f"A minimum of {min_memory_req_str} of total space in /dev/shm is required. Use --shm-size={min_memory_req_str} in `docker run` if using docker."
+            if not Path(self.connection_name).parent.exists():
+                raise FileNotFoundError(
+                    "Cannot create shm db, POSIX shm dir at /dev/shm does not exist"
                 )
 
-            if shm_stats.free < min_memory_req_bytes:
-                free_space_str = byte_quantity_to_str(shm_stats.free)
-                raise MemoryError(
-                    f"A minimum of {min_memory_req_str} of free space in /dev/shm is required, but only {free_space_str} is free. Please free up space or increase the /dev/shm size limit."
+            if not Path(self.connection_name).exists():
+                # If we're creating a new db, we require a minimum of 1GB of shared memory
+                logging.debug(f"Creating new events db at {self.connection_name}")
+                shm_stats = shutil.disk_usage("/dev/shm")
+                logging.debug(
+                    f"/dev/shm usage stats: total={shm_stats.total}B, free={shm_stats.free}B"
                 )
+
+                min_memory_req_str = byte_quantity_to_str(min_memory_req_bytes)
+                if shm_stats.total < min_memory_req_bytes:
+                    raise MemoryError(
+                        f"A minimum of {min_memory_req_str} of total space in /dev/shm is required. Use --shm-size={min_memory_req_str} in `docker run` if using docker."
+                    )
+
+                if shm_stats.free < min_memory_req_bytes:
+                    free_space_str = byte_quantity_to_str(shm_stats.free)
+                    raise MemoryError(
+                        f"A minimum of {min_memory_req_str} of free space in /dev/shm is required, but only {free_space_str} is free. Please free up space or increase the /dev/shm size limit."
+                    )
+
+        elif backend == "postgres":
+            if pg_conninfo is None:
+                pg_conninfo = os.environ.get("DATABASE_URL")
+            if not pg_conninfo:
+                raise ValueError(
+                    "Postgres backend requires a connection string via pg_conninfo "
+                    "parameter or DATABASE_URL env var"
+                )
+            self.pg_conninfo = pg_conninfo
+            register_pg_cleanup(self.pg_conninfo, self.table_name)
+
+        else:
+            raise ValueError(
+                f"Invalid backend: {backend}. Must be 'sqlite' or 'postgres'"
+            )
 
         # Queue for thread-safe event recording
         self.event_queue: queue.Queue = queue.Queue()
@@ -204,9 +313,21 @@ class EventRecorder:
         self.should_check_idle = False
 
     @property
-    def connection_name(self) -> Path:
-        # To support accessing in multiple processes, we store the db in /dev/shm
-        # Otherwise, using mode=memory&cache=shared only works within the same process
+    def table_name(self) -> str:
+        """Returns the table name for this session's events."""
+        if self.backend == "postgres":
+            return f"events_{self.session_id}"
+        return "events"
+
+    @property
+    def connection_name(self) -> Path | str:
+        """Returns the connection identifier for this recorder.
+
+        For sqlite: path to the /dev/shm database file.
+        For postgres: the connection string.
+        """
+        if self.backend == "postgres":
+            return self.pg_conninfo
         return EventRecorder.db_path(self.session_id)
 
     @staticmethod
@@ -224,19 +345,32 @@ class EventRecorder:
     def _writer_loop(self):
         """Writer thread loop that processes events from the queue and commits them to the database.
 
-        This method runs in a dedicated thread and owns the SQLite connection and cursor.
+        This method runs in a dedicated thread and owns the database connection and cursor.
         It processes events from the queue, buffering them until the buffer is full or a force commit is requested.
         """
         logging.debug(f"Writer thread started for {self.connection_name}")
 
-        with sqlite3_cursor(self.connection_name) as (cur, conn):
+        if self.backend == "postgres":
+            print(f"Set up postgres cursor {self.pg_conninfo}")
+            ctx = psycopg3_cursor(self.pg_conninfo)
+            print(f"after psycopg3 ctx = {ctx}")
+        else:
+            ctx = sqlite3_cursor(self.connection_name)
+
+        with ctx as (cur, conn):
             # Initialize the database table
-            cur.execute(EventRow.to_table_query())
+            cur.execute(
+                EventRow.to_table_query(
+                    table_name=self.table_name, backend=self.backend
+                )
+            )
             conn.commit()
 
             event_buffer = []
 
-            insert_query = EventRow.insert_query()
+            insert_query = EventRow.insert_query(
+                table_name=self.table_name, backend=self.backend
+            )
 
             def commit_buffer():
                 """Helper to commit and clear the event buffer."""
@@ -316,7 +450,7 @@ class EventRecorder:
         self._writer_started = True
 
     def wait_for_writes(self, force_commit: bool = True):
-        """Blocks until all queued events are processed.
+        """Blocks until all queued events are processed.                 # How does this work when the writes are going to supabase ???
 
         Args:
             force_commit: Whether to force commit the current buffer immediately. (Default: True)
@@ -325,7 +459,9 @@ class EventRecorder:
             return
 
         if force_commit:
+            print("mf log wait_for_writes event_queue.put() ")  #  Stuck here
             self.event_queue.put(self._FORCE_COMMIT_SENTINEL)
+            print(" after put")
         self.event_queue.join()
 
     @profile

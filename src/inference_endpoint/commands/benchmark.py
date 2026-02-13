@@ -21,6 +21,7 @@ Benchmark command implementation."""
 import argparse
 import json
 import logging
+import os
 import shutil
 import signal
 import tempfile
@@ -38,6 +39,8 @@ from inference_endpoint.config.schema import (
     APIType,
     BenchmarkConfig,
     ClientSettings,
+    DatabaseBackend,
+    DatabaseConfig,
     Dataset,
     DatasetType,
     EndpointConfig,
@@ -313,6 +316,10 @@ def _build_config_from_cli(
                 workers=args.workers if args.workers else 4,
                 log_level="DEBUG" if verbose_level >= 2 else "INFO",
             ),
+            database=DatabaseConfig(
+                backend=DatabaseBackend(getattr(args, "db_backend", "sqlite")),
+                connection_string=getattr(args, "db_connection_string", None),
+            ),
         ),
         model_params=ModelParams(
             name=args.model,
@@ -555,7 +562,9 @@ def _run_benchmark(
                 "repetition_penalty": config.model_params.repetition_penalty,
             },
         )
+        print("before dataloader")
         dataloader.load()
+        print("after dataloader")
         logger.info(f"Loaded {dataloader.num_samples()} samples")
     except FileNotFoundError as e:
         logger.error(f"Dataset file not found: {performance_configs[0].path}")
@@ -564,7 +573,7 @@ def _run_benchmark(
         ) from e
     except Exception as e:
         logger.error("Dataset load failed")
-        raise SetupError(f"Failed to load dataset: {e}") from e
+        raise SetupError(f"xFailed to load dataset: {e}") from e  # we are here
 
     # Setup runtime settings using factory method
     rt_settings = RuntimeSettings.from_config(config, dataloader.num_samples())
@@ -611,6 +620,17 @@ def _run_benchmark(
     logger.info(f"Connecting: {endpoint}")
     tmp_dir = tempfile.mkdtemp(prefix="inference_endpoint_")
 
+    # Resolve database backend config
+    db_backend = config.settings.database.backend.value
+    db_conninfo = config.settings.database.connection_string
+    if db_backend == "postgres" and not db_conninfo:
+        db_conninfo = os.environ.get("DATABASE_URL")
+        if not db_conninfo:
+            raise SetupError(
+                "Postgres backend requires DATABASE_URL env var or "
+                "database.connection_string in config"
+            )
+
     try:
         http_config = HTTPClientConfig(
             endpoint_url=urljoin(
@@ -622,6 +642,8 @@ def _run_benchmark(
             event_logs_dir=report_dir,
             log_level=config.settings.client.log_level,
             cpu_affinity=config.settings.client.cpu_affinity,
+            db_backend=db_backend,
+            db_conninfo=db_conninfo,
         )
         aiohttp_config = AioHttpConfig()
         zmq_config = ZMQConfig(
@@ -653,6 +675,8 @@ def _run_benchmark(
             accuracy_datasets=accuracy_datasets,
             max_shutdown_timeout_s=config.timeout if config.timeout else None,
             dump_events_log=True,
+            db_backend=db_backend,
+            db_conninfo=db_conninfo,
         )
 
         # Wait for test end with ability to interrupt
@@ -748,7 +772,7 @@ def _run_benchmark(
             if response_collector.errors:
                 results["errors"] = response_collector.errors
             # Save results to JSON file
-            results_path = report_dir / "results.json"
+            results_path = report_dir / "results.json"  # raw data is dump to this file
             with open(results_path, "w") as f:
                 json.dump(results, f, indent=2)
             logger.info(f"Saved: {results_path}")

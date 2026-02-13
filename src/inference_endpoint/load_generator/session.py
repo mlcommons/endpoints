@@ -44,10 +44,14 @@ class BenchmarkSession:
         self,
         runtime_settings: RuntimeSettings,
         session_id: str | None = None,
+        db_backend: str = "sqlite",
+        db_conninfo: str | None = None,
     ):
         self.logger = logging.getLogger(__name__)
         self.runtime_settings = runtime_settings
         self.session_id = session_id if session_id else uuid.uuid4().hex
+        self.db_backend = db_backend
+        self.db_conninfo = db_conninfo
 
         # EventRecorder will set this when all samples complete, helps avoid busy-waiting
         self.end_event = threading.Event()
@@ -57,7 +61,10 @@ class BenchmarkSession:
         self.stop_requested = False
 
         self.event_recorder = EventRecorder(
-            session_id=self.session_id, notify_idle=self.end_event
+            session_id=self.session_id,
+            notify_idle=self.end_event,
+            backend=db_backend,
+            pg_conninfo=db_conninfo,
         )
         # Will be populated after the test finishes by _run_test
         self.report = None
@@ -137,10 +144,29 @@ class BenchmarkSession:
             finally:
                 EventRecorder.record_event(SessionEvent.TEST_ENDED, time.monotonic_ns())
 
+            print("before _runtest.wait_for_write()")  # we are here
             self.event_recorder.wait_for_writes()
+            print("after .wait_for_write()")  # we see this
 
             # Handle reporting
-            with MetricsReporter(self.event_recorder.connection_name) as reporter:
+            if self.db_backend == "postgres":
+                reporter_client = "postgres"
+                reporter_table = self.event_recorder.table_name
+                print(f"reporter_table = {self.event_recorder.table_name}")
+            else:
+                reporter_client = "duckdb"
+                reporter_table = "events"
+
+            # Does this handle reporting for end of run ??
+            print(
+                f"BenchmarkSession connection_name  = {self.event_recorder.connection_name}"
+            )
+            print(f"reporter_table = {self.event_recorder.table_name}")
+            with MetricsReporter(
+                self.event_recorder.connection_name,
+                client_type=reporter_client,
+                table_name=reporter_table,
+            ) as reporter:
                 has_model = hasattr(self.runtime_settings, "model")
                 tokenizer = None
                 if tokenizer_override is not None:
@@ -248,6 +274,8 @@ class BenchmarkSession:
         report_dir: os.PathLike | None = None,
         tokenizer_override: AutoTokenizer | None = None,
         dump_events_log: bool = False,
+        db_backend: str = "sqlite",
+        db_conninfo: str | None = None,
     ) -> BenchmarkSession:
         """Start a new BenchmarkSession in a thread.
 
@@ -270,7 +298,12 @@ class BenchmarkSession:
         Returns:
             The new BenchmarkSession.
         """
-        session = cls(runtime_settings, session_id=name)
+        session = cls(
+            runtime_settings,
+            session_id=name,
+            db_backend=db_backend,
+            db_conninfo=db_conninfo,
+        )
         load_generator = load_generator_cls(sample_issuer, dataset, scheduler, *args)
 
         # Create accuracy test generators

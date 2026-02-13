@@ -336,10 +336,28 @@ class Worker:
                 worker_db_name = f"worker_report_{self.worker_id}_{pid}"
                 report_path = self.http_config.event_logs_dir / f"{worker_db_name}.csv"
                 logger.debug("About to generate report")
-                with EventRecorder(session_id=worker_db_name) as event_recorder:
+                with EventRecorder(
+                    session_id=worker_db_name,
+                    backend=self.http_config.db_backend,
+                    pg_conninfo=self.http_config.db_conninfo,
+                ) as event_recorder:
                     await self._main_loop()
+                    print("calling run wait_for_writes")
+
                     event_recorder.wait_for_writes(force_commit=True)
-                    with MetricsReporter(event_recorder.connection_name) as reporter:
+
+                    if self.http_config.db_backend == "postgres":
+                        reporter_client = "postgres"
+                        reporter_table = event_recorder.table_name
+                    else:
+                        reporter_client = "sqlite"
+                        reporter_table = "events"
+
+                    with MetricsReporter(
+                        event_recorder.connection_name,
+                        client_type=reporter_client,
+                        table_name=reporter_table,
+                    ) as reporter:
                         logger.debug(f"About to dump report to {report_path}")
                         reporter.dump_all_to_csv(report_path)
                         logger.debug(f"Report dumped to {report_path}")

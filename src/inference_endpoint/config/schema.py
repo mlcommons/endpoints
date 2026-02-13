@@ -78,6 +78,13 @@ class EvalMethod(str, Enum):
     JUDGE = "judge"
 
 
+class DatabaseBackend(str, Enum):
+    """Database backend for event recording."""
+
+    SQLITE = "sqlite"
+    POSTGRES = "postgres"
+
+
 class TestMode(str, Enum):
     """Test mode determining what to collect.
 
@@ -278,12 +285,24 @@ class ClientSettings(BaseModel):
     cpu_affinity: list[int] | str | None = "auto"
 
 
+class DatabaseConfig(BaseModel):
+    """Database configuration for event recording.
+
+    For SQLite (default), no configuration needed — events are stored in /dev/shm.
+    For Postgres, provide a connection string via this config or DATABASE_URL env var.
+    """
+
+    backend: DatabaseBackend = DatabaseBackend.SQLITE
+    connection_string: str | None = None
+
+
 class Settings(BaseModel):
     """Test settings (can be overridden by CLI)."""
 
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
     load_pattern: LoadPattern = Field(default_factory=LoadPattern)
     client: ClientSettings = Field(default_factory=ClientSettings)
+    database: DatabaseConfig = Field(default_factory=DatabaseConfig)
 
 
 def _default_metrics() -> list[str]:

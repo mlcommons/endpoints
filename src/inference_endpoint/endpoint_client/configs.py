@@ -60,6 +60,10 @@ class HTTPClientConfig:
     # CPU affinity: None (disabled), "auto" (1 core per worker), or list[int] (specific cores)
     cpu_affinity: list[int] | str | None = "auto"
 
+    # Database backend for worker event recording ("sqlite" or "postgres")
+    db_backend: str = "sqlite"
+    db_conninfo: str | None = None
+
     # Worker lifecycle timeouts
     worker_initialization_timeout: float = 40.0  # init
     worker_graceful_shutdown_wait: float = 0.5  # post-run
