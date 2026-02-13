@@ -80,6 +80,7 @@ def _cleanup_zmq_socket_dir() -> None:
     try:
         _ZMQ_SOCKET_DIR_OBJ.cleanup()
     except (OSError, FileNotFoundError):
+        # Temp dir already cleaned up or inaccessible at process exit.
         pass
 
 
@@ -214,6 +215,7 @@ class _ZmqReceiverTransport(ReceiverTransport):
                     if self._sock.getsockopt(zmq.EVENTS) & zmq.POLLIN:
                         self._soon_call = self._loop.call_soon(self._on_readable)
                 except zmq.ZMQError:
+                    # Socket may be closed; ignore.
                     pass
 
     def poll(self) -> Any | None:
@@ -325,6 +327,7 @@ class _ZmqSenderTransport(SenderTransport):
                 self._sock.send(serialized, zmq.NOBLOCK, copy=False, track=False)
                 return
             except zmq.Again:
+                # Socket would block; fall through to buffer and use writer.
                 pass
             except zmq.ZMQError as e:
                 if e.errno not in (errno.EAGAIN, errno.EINTR):

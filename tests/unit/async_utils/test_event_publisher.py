@@ -35,6 +35,7 @@ import zmq
 from inference_endpoint.async_utils.event_publisher import EventPublisherService
 from inference_endpoint.async_utils.loop_manager import LoopManager
 from inference_endpoint.async_utils.transport.record import (
+    TOPIC_FRAME_SIZE,
     EventRecord,
     SampleEventType,
     SessionEventType,
@@ -74,7 +75,6 @@ class CollectingEventSubscriber(ZmqEventRecordSubscriber):
 
     async def process(self, records: list[EventRecord]) -> None:
         """Append received records and set wait event if target reached."""
-        print(f"Processing {len(records)} records")
         self.received.extend(records)
         if (
             self._wait_event is not None
@@ -170,12 +170,16 @@ class TestEventPublisherService:
             # Yield so the publisher's event loop can drain the send buffer
             await asyncio.sleep(0.1)
             loop = asyncio.get_event_loop()
-            parts = await asyncio.wait_for(
-                loop.run_in_executor(None, sub.recv_multipart),
+            # Publisher sends a single frame: padded_topic (TOPIC_FRAME_SIZE bytes) + payload
+            frame = await asyncio.wait_for(
+                loop.run_in_executor(None, sub.recv),
                 timeout=_WAIT_RECORDS_TIMEOUT,
             )
-            assert len(parts) == 2, "Expected (topic, payload) multipart message"
-            topic_bytes, payload = parts
+            assert (
+                len(frame) > TOPIC_FRAME_SIZE
+            ), "Expected single frame (topic + payload)"
+            topic_bytes = frame[:TOPIC_FRAME_SIZE].rstrip(b"\x00")
+            payload = frame[TOPIC_FRAME_SIZE:]
             assert topic_bytes == b"session.started"
             rec = decode_event_record(bytes(payload))
             assert rec.event_type.value == SessionEventType.STARTED.value

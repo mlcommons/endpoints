@@ -92,6 +92,7 @@ class FileSubscriber(ZmqEventRecordSubscriber):
             try:
                 self._file.close()
             except OSError:
+                # File may already be closed or I/O error on close (e.g. disk full).
                 pass
             self._file = None
         super().close()

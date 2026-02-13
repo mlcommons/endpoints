@@ -24,6 +24,7 @@ from inference_endpoint.async_utils.transport.protocol import (
     EventRecordPublisher,
     EventRecordSubscriber,
 )
+from inference_endpoint.async_utils.transport.record import TOPIC_FRAME_SIZE
 
 logger = logging.getLogger(__name__)
 
@@ -58,27 +59,32 @@ class ZmqEventRecordPublisher(EventRecordPublisher):
         logger.info(f"Publisher bound to {self.bind_address}")
 
         self._fd = self._socket.getsockopt(zmq.FD)
-        self._buffer: deque[tuple[str, bytes]] = deque()
+        self._buffer: deque[bytes] = deque()
         self._writing = False
 
-    def send(self, topic: str, payload: bytes) -> None:
+    def send(self, topic: bytes, payload: bytes) -> None:
         """Send the message via zmq.
 
         Args:
             topic: The topic of the message.
             payload: The payload of the message.
         """
+        # Combine into a single frame to avoid overhead of .send_multipart()
+        frame = topic + payload
 
         # Attempt direct send:
         if not self._buffer:
             mode = zmq.NOBLOCK if self.loop else 0
             try:
-                self._socket.send_multipart(
-                    [topic.encode("utf-8"), payload],
+                self._socket.send(
+                    frame,
                     flags=mode,
+                    copy=False,
+                    track=False,
                 )
                 return
             except zmq.Again:
+                # Socket would block; fall through to buffer and use writer.
                 pass
 
         if self.loop is None:
@@ -89,7 +95,7 @@ class ZmqEventRecordPublisher(EventRecordPublisher):
             )
 
         # Add to buffer since socket is blocked.
-        self._buffer.append((topic, payload))
+        self._buffer.append(frame)
         if not self._writing:
             # Add writer callback to asyncio loop to drain the buffer when writable.
             self._writing = True
@@ -115,11 +121,13 @@ class ZmqEventRecordPublisher(EventRecordPublisher):
         try:
             while self._buffer:
                 # Do not pre-emptively pop in case of errors
-                topic, payload = self._buffer[0]
+                frame = self._buffer[0]
                 mode = 0 if force else zmq.NOBLOCK
-                self._socket.send_multipart(
-                    [topic.encode("utf-8"), payload],
+                self._socket.send(
+                    frame,
                     flags=mode,
+                    copy=False,
+                    track=False,
                 )
                 self._buffer.popleft()
         except zmq.Again:
@@ -134,6 +142,7 @@ class ZmqEventRecordPublisher(EventRecordPublisher):
                 try:
                     self.loop.remove_writer(self._fd)
                 except (ValueError, OSError):
+                    # Writer already removed or fd invalid (e.g. during shutdown).
                     pass
 
     def close(self) -> None:
@@ -158,6 +167,7 @@ class ZmqEventRecordPublisher(EventRecordPublisher):
             self._socket.close()
             self._context.term()
         except zmq.ZMQError:
+            # Socket/context already closed or teardown error; ignore.
             pass
 
         # Cleanup IPC socket file
@@ -167,6 +177,7 @@ class ZmqEventRecordPublisher(EventRecordPublisher):
                 if os.path.exists(socket_path):
                     os.unlink(socket_path)
             except OSError:
+                # IPC path already removed or unlink failed (e.g. permissions).
                 pass
 
 
@@ -195,7 +206,7 @@ class ZmqEventRecordSubscriber(EventRecordSubscriber):
         logger.info(f"Subscriber connected to {self.connect_address}")
 
         self._fd = self._socket.getsockopt(zmq.FD)
-        self._buffer: deque[tuple[str, bytes]] = deque()
+        self._buffer: deque[bytes] = deque()
 
         # Reader is added in .start(); do not add here.
 
@@ -205,13 +216,13 @@ class ZmqEventRecordSubscriber(EventRecordSubscriber):
             return None
 
         try:
-            parts = self._socket.recv_multipart(flags=zmq.NOBLOCK, copy=False)
+            frame = self._socket.recv(flags=zmq.NOBLOCK)
         except zmq.Again as e:
             raise StopIteration from e
 
-        if len(parts) == 2:
-            # Should be (topic, payload). Return the payload bytes.
-            return parts[1]
+        if len(frame) > TOPIC_FRAME_SIZE:
+            # Should be (padded_topic + payload). Return the payload bytes.
+            return frame[TOPIC_FRAME_SIZE:]
         return None
 
     def close(self) -> None:
@@ -228,4 +239,5 @@ class ZmqEventRecordSubscriber(EventRecordSubscriber):
             self._socket.close()
             self._context.term()
         except zmq.ZMQError:
+            # Socket/context already closed or teardown error; ignore.
             pass

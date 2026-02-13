@@ -15,9 +15,20 @@
 
 import enum
 import time
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Final
 
 import msgspec
+
+TOPIC_FRAME_SIZE: Final[int] = 40
+"""int: Fixed bytesize for the encoded topic string. PUB messages will be prefixed by a
+topic string corresponding to the EventType. This topic will be null-padded to this fixed
+size to allow the publisher to use single-frame sends for performance optimization.
+Using a fixed size also allows subscribers to strip a fixed prefix size without needing
+to inspect the message itself.
+
+The fixed sized is chosen to be the smallest multiple of 8 bytes that is greater than or
+equal to the length of the longest topic string.
+"""
 
 
 class EventTypeMeta(enum.EnumMeta):
@@ -49,6 +60,14 @@ class EventTypeMeta(enum.EnumMeta):
 
         for member in enum_cls:
             member.topic = f"{category}.{member._value_}"
+            member.topic_bytes = member.topic.encode("utf-8")
+            if len(member.topic_bytes) > TOPIC_FRAME_SIZE:
+                raise TypeError(
+                    f"Topic '{member.topic}' is too long to fit in the topic frame size of {TOPIC_FRAME_SIZE} bytes."
+                )
+            member.topic_bytes_padded = member.topic_bytes.ljust(
+                TOPIC_FRAME_SIZE, b"\0"
+            )
 
             # Update _value2member_map_ so that ChildEventType("category.value") will
             # return the correct member.
@@ -139,9 +158,17 @@ _ENCODER = msgspec.msgpack.Encoder(enc_hook=EventType.encode_hook)
 _DECODER = msgspec.msgpack.Decoder(type=EventRecord, dec_hook=EventType.decode_hook)
 
 
-def encode_event_record(event_record: EventRecord) -> tuple[str, bytes]:
-    # MyPy doesn't recognize that the .topic attribute is defined by __new__ in the metaclass.
-    return event_record.event_type.topic, _ENCODER.encode(event_record)  # type: ignore[attr-defined]
+def encode_event_record(event_record: EventRecord) -> tuple[bytes, bytes]:
+    """Encodes an EventRecord into a tuple of (topic_bytes_padded, payload_bytes).
+
+    Args:
+        event_record: The EventRecord to encode.
+
+    Returns:
+        A tuple of (topic_bytes_padded, payload_bytes).
+    """
+    # MyPy doesn't recognize custom attributes defined by __new__ in the metaclass.
+    return event_record.event_type.topic_bytes_padded, _ENCODER.encode(event_record)  # type: ignore[attr-defined]
 
 
 def decode_event_record(payload: bytes) -> EventRecord:

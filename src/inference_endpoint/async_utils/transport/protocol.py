@@ -237,7 +237,7 @@ class EventRecordPublisher(ABC):
         self.send(topic, payload)
 
     @abstractmethod
-    def send(self, topic: str, payload: bytes) -> None:
+    def send(self, topic: bytes, payload: bytes) -> None:
         """Send the message via the implemented transport layer.
 
         Args:
@@ -315,6 +315,7 @@ class EventRecordSubscriber(ABC):
             try:
                 self.loop.remove_reader(self._fd)
             except (ValueError, OSError):
+                # Reader already removed or fd invalid (e.g. during shutdown).
                 pass
 
     def _on_readable(self) -> None:

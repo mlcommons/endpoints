@@ -20,6 +20,7 @@ import time
 import msgspec
 import pytest
 from inference_endpoint.async_utils.transport.record import (
+    TOPIC_FRAME_SIZE,
     ErrorEventType,
     EventRecord,
     EventType,
@@ -68,30 +69,36 @@ class TestEventRecordConstruction:
 
 
 class TestEncodeEventRecord:
-    def test_returns_tuple_of_topic_str_and_payload_bytes_with_valid_msgpack(self):
+    def test_returns_tuple_of_topic_bytes_padded_and_payload_bytes_with_valid_msgpack(
+        self,
+    ):
+        """encode_event_record returns (topic_bytes_padded, payload) for single-frame ZMQ."""
         record = EventRecord(
             event_type=SampleEventType.ISSUED,
             sample_uuid="test-uuid",
             data={"key": "value"},
         )
-        topic, payload = encode_event_record(record)
-        assert isinstance(topic, str)
-        assert topic == "sample.issued"
+        topic_bytes, payload = encode_event_record(record)
+        assert isinstance(topic_bytes, bytes)
+        assert len(topic_bytes) == TOPIC_FRAME_SIZE
+        assert topic_bytes.rstrip(b"\x00") == b"sample.issued"
         assert isinstance(payload, bytes)
         decoded = msgspec.msgpack.decode(payload)
         assert isinstance(decoded, dict)
         assert decoded.get("sample_uuid") == "test-uuid"
         assert decoded.get("data") == {"key": "value"}
 
-    def test_topic_matches_event_type_for_session_sample_error(self):
+    def test_topic_bytes_padded_matches_event_type_for_session_sample_error(self):
+        """Topic is null-padded to TOPIC_FRAME_SIZE for single-frame ZMQ sends."""
         for ev, expected_prefix in [
             (SessionEventType.STARTED, "session.started"),
             (SessionEventType.ENDED, "session.ended"),
             (SampleEventType.COMPLETE, "sample.complete"),
             (ErrorEventType.GENERIC, "error.generic"),
         ]:
-            topic, _ = encode_event_record(EventRecord(event_type=ev))
-            assert topic == expected_prefix
+            topic_bytes, _ = encode_event_record(EventRecord(event_type=ev))
+            assert len(topic_bytes) == TOPIC_FRAME_SIZE
+            assert topic_bytes.rstrip(b"\x00") == expected_prefix.encode("utf-8")
 
 
 class TestEventRecordRoundTrip:
