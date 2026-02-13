@@ -41,8 +41,7 @@ from inference_endpoint.endpoint_client.cpu_affinity import compute_affinity_pla
 from inference_endpoint.endpoint_client.http_client import AsyncHttpEndpointClient
 from inference_endpoint.testing.max_throughput_server import (
     MaxThroughputServer,
-    build_non_streaming_response,
-    build_streaming_response,
+    build_response,
 )
 
 
@@ -57,6 +56,7 @@ class BenchmarkStats:
     total_elapsed_ns: int = 0  # Total duration including drain
     peak_inflight: int = 0  # Max observed in-flight count
     stall_ns: int = 0  # Total time spent waiting on back-pressure
+    sse_events_per_response: int = 1  # SSE events per response (set for streaming)
     # Per-interval samples (populated by LiveDisplay)
     send_rate_samples: list[float] | None = None
     recv_rate_samples: list[float] | None = None
@@ -79,6 +79,7 @@ class SweepResult:
     stats: BenchmarkStats
     send_rate: float  # req/s (mean)
     recv_rate: float  # resp/s (mean)
+    sse_rate: float  # SSE pkts/s (mean, streaming only)
     outstanding: int  # sent - received - errors
     error_rate: float  # errors/sent (%)
     stall_pct: float  # back-pressure stall time / send time (%)
@@ -87,6 +88,8 @@ class SweepResult:
     send_rate_max: float = 0.0
     recv_rate_min: float = 0.0
     recv_rate_max: float = 0.0
+    sse_rate_min: float = 0.0
+    sse_rate_max: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -218,10 +221,11 @@ def _stall_pct(stats: BenchmarkStats) -> float:
 
 def _compute_derived_stats(
     stats: BenchmarkStats,
-) -> tuple[float, float, float, float, int]:
+) -> tuple[float, float, float, float, float, int]:
     """Compute derived metrics from raw benchmark stats.
 
-    Returns (send_elapsed_sec, total_elapsed_sec, send_rate, recv_rate, outstanding).
+    Returns (send_elapsed_sec, total_elapsed_sec, send_rate, recv_rate,
+             sse_rate, outstanding).
     """
     send_elapsed_sec = stats.send_elapsed_ns / 1e9
     total_elapsed_sec = stats.total_elapsed_ns / 1e9
@@ -230,6 +234,7 @@ def _compute_derived_stats(
         total_elapsed_sec,
         _safe_div(stats.sent, send_elapsed_sec),
         _safe_div(stats.received, total_elapsed_sec),
+        _safe_div(stats.received * stats.sse_events_per_response, total_elapsed_sec),
         stats.sent - stats.received - stats.errors,
     )
 
@@ -269,10 +274,12 @@ class LiveDisplay:
         self,
         stats_ref: BenchmarkStats,
         track_memory: bool = False,
+        streaming: bool = False,
         interval: float = 1.0,
     ):
         self.stats = stats_ref
         self.track_memory = track_memory
+        self.streaming = streaming
         self.interval = interval
         self._shutdown = threading.Event()
         self._thread: threading.Thread | None = None
@@ -332,9 +339,11 @@ class LiveDisplay:
             self.stats.recv_rate_samples.append(recv_rate)
 
         # Build output line
-        line = (
-            f"[Stats] Send/s: {send_rate:>9,.0f} | "
-            f"Recv/s: {recv_rate:>9,.0f} | "
+        line = f"[Stats] Send/s: {send_rate:>9,.0f} | " f"Recv/s: {recv_rate:>9,.0f} | "
+        if self.streaming:
+            sse_rate = recv_rate * self.stats.sse_events_per_response
+            line += f"SSE-pkts/s: {sse_rate:>9,.0f} | "
+        line += (
             f"InFlight: {in_flight:>8,} | "
             f"Recv: {received:>10,} | "
             f"Err: {errors:>5,}"
@@ -445,6 +454,7 @@ def run_benchmark(
     max_concurrency: int = 100_000,
     send_batch: int = _SEND_BATCH,
     enable_affinity: bool = False,
+    sse_events_per_response: int = 1,
 ) -> BenchmarkStats:
     """
     Run the HTTP client benchmark.
@@ -459,6 +469,7 @@ def run_benchmark(
         streaming: Whether to use streaming mode
         max_concurrency: Maximum in-flight requests for back-pressure
         send_batch: Max requests issued per event-loop yield; auto-tuned at startup
+        sse_events_per_response: Number of SSE events per streaming response (for rate derivation)
 
     Returns:
         Final benchmark statistics
@@ -482,8 +493,8 @@ def run_benchmark(
         enable_affinity,
     )
     loop = client.loop
-    stats = BenchmarkStats()
-    display = LiveDisplay(stats, track_memory=track_memory)
+    stats = BenchmarkStats(sse_events_per_response=sse_events_per_response)
+    display = LiveDisplay(stats, track_memory=track_memory, streaming=streaming)
 
     if track_memory:
         worker_pids = list(client.worker_manager.worker_pids.values())
@@ -594,7 +605,6 @@ def run_benchmark(
 # ---------------------------------------------------------------------------
 
 
-_TOKENS_PER_CHUNK = 4
 _FULL_WORKERS = [1, 2, 4, 8, 10, 12, 14, 16]
 _FULL_PROMPT_LENGTHS = [
     1,
@@ -609,16 +619,41 @@ _FULL_PROMPT_LENGTHS = [
     131072,
 ]
 
+_FULL_STREAM_INTERVAL_PCTS = [0.0, 0.5, 1.0]
+
+
+def _resolve_stream_intervals(num_chunks: int, fractions: list[float]) -> list[int]:
+    """Map fractions to absolute stream_interval values, deduped and sorted.
+
+    0.0 -> 1 (every chunk); 0.5 -> num_chunks//2; 1.0 -> num_chunks.
+    """
+    vals: list[int] = []
+    for f in fractions:
+        if f <= 0.0:
+            vals.append(1)
+        else:
+            vals.append(max(1, round(num_chunks * f)))
+    return sorted(set(vals))
+
+
+def _sse_events_per_response(output_length: int) -> int:
+    """Compute the number of SSE events the server sends per streaming response.
+
+    One SSE event per character, plus 1 finish event and 1 [DONE] sentinel.
+    """
+    return output_length + 2  # +1 finish_reason=stop, +1 [DONE]
+
 
 def _restart_server(
-    server: MaxThroughputServer, num_chunks: int, stream_interval: int = 1
+    server: MaxThroughputServer,
+    output_length: int,
+    stream: bool,
+    stream_interval: int = 1,
 ) -> None:
     """Stop, reconfigure response payload, and restart workers."""
     server.stop()
-    effective_chunks = max(1, num_chunks // stream_interval)
-    effective_tpc = _TOKENS_PER_CHUNK * stream_interval
-    server._streaming = build_streaming_response(effective_chunks, effective_tpc)
-    server._non_streaming = build_non_streaming_response(num_chunks * _TOKENS_PER_CHUNK)
+    server.stream = stream
+    server._response = build_response(output_length, stream, stream_interval)
     # Reset shutdown flags and worker lists so _start_workers can re-use them
     server._shutdown.clear()
     server._workers.clear()
@@ -641,13 +676,16 @@ def run_single(
     mode = "streaming" if args.streaming else "non-streaming"
     prompt_length = args.prompt_length[0]
     prompt = build_prompt(prompt_length)
+    stream_interval = args.stream_interval[0]
     mode_info = f"Mode: {mode}  |  Prompt length: {len(prompt)} chars"
-    if args.streaming and args.stream_interval[0] > 1:
-        mode_info += f"  |  Stream interval: {args.stream_interval[0]}"
+    if args.streaming and stream_interval > 1:
+        mode_info += f"  |  Stream interval: {stream_interval}"
     print(mode_info)
 
-    if server and args.streaming:
-        _restart_server(server, prompt_length, args.stream_interval[0])
+    if server:
+        _restart_server(server, prompt_length, args.streaming, stream_interval)
+
+    epr = _sse_events_per_response(prompt_length) if args.streaming else 1
 
     print(f"\nStarting benchmark for {args.duration}s...")
     print("=" * 70)
@@ -663,9 +701,10 @@ def run_single(
         max_concurrency=args.max_concurrency,
         send_batch=args.send_batch,
         enable_affinity=args.pin,
+        sse_events_per_response=epr,
     )
 
-    send_elapsed, total_elapsed, send_rate, recv_rate, outstanding = (
+    send_elapsed, total_elapsed, send_rate, recv_rate, sse_rate, outstanding = (
         _compute_derived_stats(stats)
     )
     print("=" * 70)
@@ -678,6 +717,8 @@ def run_single(
     print(f"  Outstanding:    {outstanding:,}")
     print(f"  Send Rate:      {send_rate:,.0f} req/s")
     print(f"  Recv Rate:      {recv_rate:,.0f} resp/s")
+    if args.streaming:
+        print(f"  SSE-pkts/s:     {sse_rate:,.0f}")
     print(f"  Peak InFlight:  {stats.peak_inflight:,} / {args.max_concurrency:,}")
     print(f"  Stall%:         {_stall_pct(stats):.1f}%")
     if outstanding > 0:
@@ -689,108 +730,171 @@ def run_single(
 # ---------------------------------------------------------------------------
 
 
+def _make_sweep_result(pv: dict[str, int], stats: BenchmarkStats) -> SweepResult:
+    """Build a SweepResult from param values and raw benchmark stats."""
+    _, _, send_rate, recv_rate, sse_rate, outstanding = _compute_derived_stats(stats)
+    sr = stats.send_rate_samples or []
+    rr = stats.recv_rate_samples or []
+    epr = stats.sse_events_per_response
+    return SweepResult(
+        param_values=pv,
+        stats=stats,
+        send_rate=send_rate,
+        recv_rate=recv_rate,
+        sse_rate=sse_rate,
+        outstanding=outstanding,
+        error_rate=_safe_div(stats.errors, stats.sent) * 100,
+        stall_pct=_stall_pct(stats),
+        send_rate_min=min(sr) if sr else send_rate,
+        send_rate_max=max(sr) if sr else send_rate,
+        recv_rate_min=min(rr) if rr else recv_rate,
+        recv_rate_max=max(rr) if rr else recv_rate,
+        sse_rate_min=min(rr) * epr if rr else sse_rate,
+        sse_rate_max=max(rr) * epr if rr else sse_rate,
+    )
+
+
 def run_sweep(
     args: argparse.Namespace,
     sweeps: list[tuple[str, list[int]]],
     endpoint_url: str,
     server: MaxThroughputServer | None = None,
 ) -> None:
-    """Run a parameter sweep (cartesian product), print summary, and plot."""
+    """Run a parameter sweep (cartesian product), print summary, and plot.
+
+    When ``args._stream_interval_pcts`` is set, stream_interval is resolved
+    as a *dependent* inner loop per prompt_length rather than a static
+    cartesian dimension. This avoids redundant runs for small prompt_lengths
+    where the fractional intervals collapse (e.g. prompt_length=1 → [1]).
+    """
+    si_pcts: list[float] | None = getattr(args, "_stream_interval_pcts", None)
+
     sweep_names = [s[0] for s in sweeps]
     sweep_values = [s[1] for s in sweeps]
     combinations = list(itertools.product(*sweep_values))
-
-    mode = "streaming" if args.streaming else "non-streaming"
-    print(f"Mode: {mode}")
-    for name, vals in sweeps:
-        print(f"  {name} = {vals}")
-    print(
-        f"Cartesian product: {len(combinations)} iterations "
-        f"of {args.duration}s each\n"
-    )
 
     default_workers = args.num_workers[0]
     default_connections = args.max_connections[0]
     default_prompt_length = args.prompt_length[0]
     default_stream_interval = args.stream_interval[0]
 
+    # Build effective sweep info (includes stream_interval when pct-based)
+    if si_pcts is not None:
+        effective_sweep_names = [*sweep_names, "stream_interval"]
+        all_si: set[int] = set()
+        for combo in combinations:
+            pv = dict(zip(sweep_names, combo, strict=False))
+            pl: int = pv.get("prompt_length", default_prompt_length)  # type: ignore[assignment]
+            all_si.update(_resolve_stream_intervals(pl, si_pcts))
+        effective_sweeps: list[tuple[str, list[int]]] = [
+            *sweeps,
+            ("stream_interval", sorted(all_si)),
+        ]
+        total_iterations = sum(
+            len(
+                _resolve_stream_intervals(
+                    dict(zip(sweep_names, c, strict=False)).get(
+                        "prompt_length",
+                        default_prompt_length,  # type: ignore[arg-type]
+                    ),
+                    si_pcts,
+                )
+            )
+            for c in combinations
+        )
+    else:
+        effective_sweep_names = sweep_names
+        effective_sweeps = list(sweeps)
+        total_iterations = len(combinations)
+
+    mode = "streaming" if args.streaming else "non-streaming"
+    print(f"Mode: {mode}")
+    for name, vals in effective_sweeps:
+        suffix = ""
+        if name == "stream_interval" and si_pcts is not None:
+            pct_strs = ", ".join(f"{p:.0%}" for p in si_pcts)
+            suffix = f"  (auto: {pct_strs} of prompt_length)"
+        print(f"  {name} = {vals}{suffix}")
+    print(f"Total: {total_iterations} iterations of {args.duration}s each\n")
+
     results: list[SweepResult] = []
     last_prompt_length: int | None = None
     last_stream_interval: int | None = None
+    iteration = 0
 
-    for i, combo in enumerate(combinations):
-        pv = dict(zip(sweep_names, combo, strict=False))
-        label = ", ".join(f"{k}={v}" for k, v in pv.items())
+    for combo in combinations:
+        pv_base = dict(zip(sweep_names, combo, strict=False))
 
-        print(f"\n{'='*70}")
-        print(f"  Sweep {i+1}/{len(combinations)}: {label}")
-        print(f"{'='*70}")
+        workers: int = pv_base.get("num_workers", default_workers)  # type: ignore[assignment]
+        connections: int = pv_base.get("max_connections", default_connections)  # type: ignore[assignment]
+        prompt_length: int = pv_base.get("prompt_length", default_prompt_length)  # type: ignore[assignment]
 
-        workers: int = pv.get("num_workers", default_workers)  # type: ignore[assignment]
-        connections: int = pv.get("max_connections", default_connections)  # type: ignore[assignment]
-        prompt_length: int = pv.get("prompt_length", default_prompt_length)  # type: ignore[assignment]
-        stream_interval: int = pv.get("stream_interval", default_stream_interval)  # type: ignore[assignment]
+        # Resolve stream_interval values for this prompt_length
+        if si_pcts is not None:
+            si_values = _resolve_stream_intervals(prompt_length, si_pcts)
+        else:
+            si_val: int = pv_base.get("stream_interval", default_stream_interval)  # type: ignore[assignment]
+            si_values = [si_val]
 
-        # Restart server when prompt_length or stream_interval changes (streaming only)
-        if (
-            server
-            and args.streaming
-            and (
-                prompt_length != last_prompt_length
-                or stream_interval != last_stream_interval
+        for stream_interval in si_values:
+            iteration += 1
+            pv = {**pv_base}
+            if si_pcts is not None:
+                pv["stream_interval"] = stream_interval
+
+            label = ", ".join(f"{k}={v}" for k, v in pv.items())
+            print(f"\n{'='*70}")
+            print(f"  Sweep {iteration}/{total_iterations}: {label}")
+            print(f"{'='*70}")
+
+            # Restart server when prompt_length or stream_interval changes
+            if (
+                server
+                and args.streaming
+                and (
+                    prompt_length != last_prompt_length
+                    or stream_interval != last_stream_interval
+                )
+            ):
+                _restart_server(server, prompt_length, args.streaming, stream_interval)
+                last_prompt_length = prompt_length
+                last_stream_interval = stream_interval
+
+            prompt = build_prompt(prompt_length)
+            epr = _sse_events_per_response(prompt_length) if args.streaming else 1
+
+            stats = run_benchmark(
+                endpoint_url=endpoint_url,
+                duration=args.duration,
+                num_workers=workers,
+                max_connections=connections,
+                prompt=prompt,
+                track_memory=args.track_memory,
+                streaming=args.streaming,
+                max_concurrency=args.max_concurrency,
+                send_batch=args.send_batch,
+                enable_affinity=args.pin,
+                sse_events_per_response=epr,
             )
-        ):
-            _restart_server(server, prompt_length, stream_interval)
-            last_prompt_length = prompt_length
-            last_stream_interval = stream_interval
 
-        prompt = build_prompt(prompt_length)
+            results.append(_make_sweep_result(pv, stats))
 
-        stats = run_benchmark(
-            endpoint_url=endpoint_url,
-            duration=args.duration,
-            num_workers=workers,
-            max_connections=connections,
-            prompt=prompt,
-            track_memory=args.track_memory,
-            streaming=args.streaming,
-            max_concurrency=args.max_concurrency,
-            send_batch=args.send_batch,
-            enable_affinity=args.pin,
-        )
-
-        _, _, send_rate, recv_rate, outstanding = _compute_derived_stats(stats)
-
-        sr = stats.send_rate_samples or []
-        rr = stats.recv_rate_samples or []
-
-        results.append(
-            SweepResult(
-                param_values=pv,
-                stats=stats,
-                send_rate=send_rate,
-                recv_rate=recv_rate,
-                outstanding=outstanding,
-                error_rate=_safe_div(stats.errors, stats.sent) * 100,
-                stall_pct=_stall_pct(stats),
-                send_rate_min=min(sr) if sr else send_rate,
-                send_rate_max=max(sr) if sr else send_rate,
-                recv_rate_min=min(rr) if rr else recv_rate,
-                recv_rate_max=max(rr) if rr else recv_rate,
-            )
-        )
-
-    print_sweep_summary(sweep_names, results)
-    generate_sweep_plot(sweeps, results, args)
+    print_sweep_summary(effective_sweep_names, results, streaming=args.streaming)
+    generate_sweep_plot(effective_sweeps, results, args)
 
 
-def print_sweep_summary(sweep_names: list[str], results: list[SweepResult]) -> None:
+def print_sweep_summary(
+    sweep_names: list[str],
+    results: list[SweepResult],
+    streaming: bool = False,
+) -> None:
     """Print a formatted summary table of sweep results."""
     # Build dynamic param columns
     param_headers = [f"{n:>14}" for n in sweep_names]
     param_sep = " | ".join(param_headers)
+    sse_hdr = f" | {'SSE-pkts/s':>12}" if streaming else ""
     header = (
-        f"{param_sep} | {'Send Rate':>12} | {'Recv Rate':>12} | "
+        f"{param_sep} | {'Send Rate':>12} | {'Recv Rate':>12}{sse_hdr} | "
         f"{'Outstanding':>11} | {'Stall%':>7} | {'Errors':>8}"
     )
     width = len(header)
@@ -801,9 +905,10 @@ def print_sweep_summary(sweep_names: list[str], results: list[SweepResult]) -> N
     print(f"{'-'*width}")
     for r in results:
         param_cols = " | ".join(f"{r.param_values[n]:>14,}" for n in sweep_names)
+        sse_col = f" | {r.sse_rate:>12,.0f}" if streaming else ""
         print(
             f"{param_cols} | {r.send_rate:>12,.0f} | "
-            f"{r.recv_rate:>12,.0f} | "
+            f"{r.recv_rate:>12,.0f}{sse_col} | "
             f"{r.outstanding:>11,} | {r.stall_pct:>6.1f}% | {r.error_rate:>7.1f}%"
         )
     print(f"{'='*width}")
@@ -816,13 +921,14 @@ def print_sweep_summary(sweep_names: list[str], results: list[SweepResult]) -> N
 
 def _plot_config(args: argparse.Namespace) -> list[str]:
     """Return list of 'key=val' strings for non-swept run parameters."""
+    si_pcts = getattr(args, "_stream_interval_pcts", None)
     return [
         f"duration={args.duration}",
         f"max_concurrency={args.max_concurrency}",
         *(["streaming=True"] if args.streaming else []),
         *(
             [f"stream_interval={args.stream_interval[0]}"]
-            if args.streaming and args.stream_interval[0] > 1
+            if args.streaming and si_pcts is None and args.stream_interval[0] > 1
             else []
         ),
         *(["pin=False"] if not args.pin else []),
@@ -853,15 +959,15 @@ def generate_sweep_plot(
     results: list[SweepResult],
     args: argparse.Namespace,
 ) -> None:
-    """Generate sweep plots (Send Rate + Recv Rate).
+    """Generate sweep plots (Send Rate + Recv Rate, plus SSE Rate when streaming).
 
     Layout adapts to the number of swept parameters:
-      1 param:  1x2 — single line per subplot, with peak annotation.
-      2 params: 1x2 — x-axis=param1, colored lines per param2 value.
-      3 params: Nx2 facet grid — one row per param3 value, x-axis=param1,
+      1 param:  1xN — single line per subplot, with peak annotation.
+      2 params: 1xN — x-axis=param1, colored lines per param2 value.
+      3 params: MxN facet grid — one row per param3 value, x-axis=param1,
                 colored lines per param2 value.
-      4 params: NxMx2 facet grid — rows=param3, columns=param4,
-                each cell is a (Send Rate, Recv Rate) pair.
+      4 params: MxNxK facet grid — rows=param3, columns=param4.
+    Where N = 2 (non-streaming) or 3 (streaming, adds SSE Rate).
     """
     try:
         import matplotlib
@@ -922,10 +1028,14 @@ def generate_sweep_plot(
 
     nrows = len(facet_values) if facet_param else 1
     ncols_facet = len(facet_col_values) if facet_col_param else 1
+    metrics_per_cell = 3 if args.streaming else 2
     fig, axes = plt.subplots(
         nrows,
-        ncols_facet * 2,
-        figsize=(max(16, 8 * ncols_facet), max(6, 4 * nrows + 2)),
+        ncols_facet * metrics_per_cell,
+        figsize=(
+            max(8 * metrics_per_cell, 8 * ncols_facet * metrics_per_cell // 2),
+            max(6, 4 * nrows + 2),
+        ),
         squeeze=False,
     )
 
@@ -969,8 +1079,10 @@ def generate_sweep_plot(
 
     for row, fv in enumerate(facet_iter):
         for col, fcv in enumerate(facet_col_iter):
-            ax_send = axes[row, col * 2]
-            ax_recv = axes[row, col * 2 + 1]
+            base = col * metrics_per_cell
+            ax_send = axes[row, base]
+            ax_recv = axes[row, base + 1]
+            ax_sse = axes[row, base + 2] if args.streaming else None
 
             if facet_param and col == 0:
                 facet_label = facet_param.replace("_", " ").title()
@@ -978,6 +1090,8 @@ def generate_sweep_plot(
             elif col == 0:
                 ax_send.set_ylabel("req/s", fontsize=10)
             ax_recv.set_ylabel("resp/s" if col == 0 else "", fontsize=10)
+            if ax_sse is not None:
+                ax_sse.set_ylabel("SSE-pkts/s" if col == 0 else "", fontsize=10)
 
             ax_stall: object | None = None
             if has_stall:
@@ -1008,10 +1122,15 @@ def generate_sweep_plot(
 
                 n_lines = len(line_iter)
                 band_alpha = 0.15 if n_lines <= 3 else max(0.03, 0.15 / (n_lines / 3))
-                for ax, attr, attr_min, attr_max in [
+                metric_axes = [
                     (ax_send, "send_rate", "send_rate_min", "send_rate_max"),
                     (ax_recv, "recv_rate", "recv_rate_min", "recv_rate_max"),
-                ]:
+                ]
+                if ax_sse is not None:
+                    metric_axes.append(
+                        (ax_sse, "sse_rate", "sse_rate_min", "sse_rate_max")
+                    )
+                for ax, attr, attr_min, attr_max in metric_axes:
                     y = [getattr(r, attr) for r in group]
                     y_lo = [getattr(r, attr_min) for r in group]
                     y_hi = [getattr(r, attr_max) for r in group]
@@ -1042,8 +1161,11 @@ def generate_sweep_plot(
                         zorder=0,
                     )
 
-            # Format both axes in this cell
-            for ax, title in [(ax_send, "Send Rate"), (ax_recv, "Recv Rate")]:
+            # Format all metric axes in this cell
+            titles = [("Send Rate", ax_send), ("Recv Rate", ax_recv)]
+            if ax_sse is not None:
+                titles.append(("SSE Rate", ax_sse))
+            for title, ax in titles:
                 if row == 0:
                     col_prefix = (
                         f"{facet_col_param.replace('_', ' ').title()}={fcv}\n"
@@ -1202,11 +1324,15 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    args._stream_interval_pcts = None
+
     if args.full:
         if args.num_workers == [-1]:
             args.num_workers = _FULL_WORKERS
         if args.prompt_length == [-1]:
             args.prompt_length = _FULL_PROMPT_LENGTHS
+        if args.streaming and args.stream_interval == [1]:
+            args._stream_interval_pcts = _FULL_STREAM_INTERVAL_PCTS
 
     if args.prompt_length == [-1]:
         args.prompt_length = [1000]
@@ -1215,7 +1341,11 @@ def main() -> None:
         args.num_workers,
         args.max_connections,
         args.prompt_length,
-        stream_intervals=args.stream_interval if args.streaming else None,
+        stream_intervals=(
+            args.stream_interval
+            if args.streaming and args._stream_interval_pcts is None
+            else None
+        ),
     )
 
     gc.set_threshold(70000, 10, 100)
@@ -1232,11 +1362,7 @@ def main() -> None:
         server = MaxThroughputServer(
             host="127.0.0.1",
             port=12345,
-            num_chunks=1,
-            tokens_per_chunk=_TOKENS_PER_CHUNK,
             num_workers=args.server_workers,
-            stats=False,
-            quiet=False,
         )
         server.start()
         endpoint_url = f"{server.url}/v1/chat/completions"

@@ -10,8 +10,11 @@ compute overhead, making it a good target for roofline benchmarks and parameter 
 
 Usage::
 
-    # CLI — standalone server with live stats
+    # CLI — non-streaming (offline) mode with live stats
     python -m inference_endpoint.testing.max_throughput_server --port 12345 --stats
+
+    # CLI — SSE streaming mode, 50 SSE events per HTTP chunk
+    python -m inference_endpoint.testing.max_throughput_server --stream --stream-interval 50 --stats
 
     # Python — as a context manager in tests / scripts
     with MaxThroughputServer(port=0, num_workers=2) as srv:
@@ -68,10 +71,41 @@ def _chunked(data: bytes) -> bytes:
     return f"{len(data):x}\r\n".encode() + data + b"\r\n" if data else b"0\r\n\r\n"
 
 
-def build_streaming_response(
-    num_chunks: int = 10, tokens_per_chunk: int = 4, model: str = "max-tp"
+def _sse_event(
+    model: str, created: int, delta: dict, finish_reason: str | None = None
 ) -> bytes:
-    """Build complete SSE streaming response (chunked encoding)."""
+    """Encode a single SSE data frame."""
+    return (
+        b"data: "
+        + msgspec.json.encode(
+            {
+                "id": "r",
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [
+                    {"index": 0, "delta": delta, "finish_reason": finish_reason}
+                ],
+            }
+        )
+        + b"\n\n"
+    )
+
+
+def build_streaming_response(
+    output_length: int = 160, stream_interval: int = 1, model: str = "max-tp"
+) -> bytes:
+    """Build complete SSE streaming response (chunked encoding).
+
+    Each character of the response becomes one SSE event (``delta.content``
+    = single char).  *stream_interval* controls how many SSE events are
+    packed into each HTTP chunked frame.
+
+    Args:
+        output_length: Total characters in the response (one SSE event per char).
+        stream_interval: SSE events per HTTP chunked frame.
+        model: Model name in the response JSON.
+    """
     headers = (
         b"HTTP/1.1 200 OK\r\n"
         b"Content-Type: text/event-stream\r\n"
@@ -79,38 +113,32 @@ def build_streaming_response(
         b"Transfer-Encoding: chunked\r\n"
         b"Connection: keep-alive\r\n\r\n"
     )
-    token = "tok " * tokens_per_chunk
     created = int(time.time())
-    chunks = []
+    single_event = _sse_event(model, created, {"content": "x"})
 
-    for _ in range(num_chunks):
-        chunk = {
-            "id": "r",
-            "object": "chat.completion.chunk",
-            "created": created,
-            "model": model,
-            "choices": [
-                {"index": 0, "delta": {"content": token}, "finish_reason": None}
-            ],
-        }
-        chunks.append(_chunked(b"data: " + msgspec.json.encode(chunk) + b"\n\n"))
+    # Batch events into HTTP chunked frames
+    chunks: list[bytes] = []
+    for i in range(0, output_length, stream_interval):
+        batch_size = min(stream_interval, output_length - i)
+        chunks.append(_chunked(single_event * batch_size))
 
-    final = {
-        "id": "r",
-        "object": "chat.completion.chunk",
-        "created": created,
-        "model": model,
-        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
-    }
-    chunks.append(_chunked(b"data: " + msgspec.json.encode(final) + b"\n\n"))
-    chunks.append(_chunked(b"data: [DONE]\n\n"))
+    # Finish event + [DONE] sentinel in one final chunk
+    finish = _sse_event(model, created, {}, "stop")
+    chunks.append(_chunked(finish + b"data: [DONE]\n\n"))
     chunks.append(b"0\r\n\r\n")
 
     return headers + b"".join(chunks)
 
 
-def build_non_streaming_response(num_tokens: int = 40, model: str = "max-tp") -> bytes:
-    """Build complete non-streaming JSON response."""
+def build_non_streaming_response(
+    output_length: int = 160, model: str = "max-tp"
+) -> bytes:
+    """Build complete non-streaming JSON response.
+
+    Args:
+        output_length: Number of characters in the response content.
+        model: Model name in the response JSON.
+    """
     body = msgspec.json.encode(
         {
             "id": "r",
@@ -122,7 +150,7 @@ def build_non_streaming_response(num_tokens: int = 40, model: str = "max-tp") ->
                     "index": 0,
                     "message": {
                         "role": "assistant",
-                        "content": "tok " * num_tokens,
+                        "content": "x" * output_length,
                         "refusal": None,
                     },
                     "finish_reason": "stop",
@@ -130,8 +158,8 @@ def build_non_streaming_response(num_tokens: int = 40, model: str = "max-tp") ->
             ],
             "usage": {
                 "prompt_tokens": 10,
-                "completion_tokens": num_tokens,
-                "total_tokens": num_tokens + 10,
+                "completion_tokens": output_length,
+                "total_tokens": output_length + 10,
             },
             "system_fingerprint": None,
         }
@@ -142,6 +170,25 @@ def build_non_streaming_response(num_tokens: int = 40, model: str = "max-tp") ->
         + b"\r\nConnection: keep-alive\r\n\r\n"
         + body
     )
+
+
+def build_response(
+    output_length: int = 160,
+    stream: bool = False,
+    stream_interval: int = 1,
+    model: str = "max-tp",
+) -> bytes:
+    """Build a pre-compiled HTTP response.
+
+    Args:
+        output_length: Characters in the response content.
+        stream: SSE streaming (True) or single JSON (False).
+        stream_interval: SSE events per HTTP chunked frame (streaming only).
+        model: Model name in the response JSON.
+    """
+    if stream:
+        return build_streaming_response(output_length, stream_interval, model)
+    return build_non_streaming_response(output_length, model)
 
 
 class RequestParser:
@@ -182,20 +229,16 @@ class ServerProtocol(asyncio.Protocol):
 
     __slots__ = (
         "transport",
-        "streaming_resp",
-        "non_streaming_resp",
-        "streaming_size",
-        "non_streaming_size",
+        "response",
+        "response_size",
         "_parser",
         "_request",
     )
 
-    def __init__(self, streaming_resp: bytes, non_streaming_resp: bytes):
+    def __init__(self, response: bytes):
         self.transport = None
-        self.streaming_resp = streaming_resp
-        self.non_streaming_resp = non_streaming_resp
-        self.streaming_size = len(streaming_resp)
-        self.non_streaming_size = len(non_streaming_resp)
+        self.response = response
+        self.response_size = len(response)
         self._request: RequestParser | None = None
         self._parser: httptools.HttpRequestParser | None = None
 
@@ -225,20 +268,11 @@ class ServerProtocol(asyncio.Protocol):
         if request.done():
             _counter_add(_req_counter)
 
-            streaming = (
-                b'"stream":true' in request.body or b'"stream": true' in request.body
-            )
-            resp, size = (
-                (self.streaming_resp, self.streaming_size)
-                if streaming
-                else (self.non_streaming_resp, self.non_streaming_size)
-            )
-
             transport = self.transport
             if transport and not transport.is_closing():
-                transport.write(resp)  # type: ignore[union-attr]
+                transport.write(self.response)  # type: ignore[union-attr]
                 _counter_add(_resp_counter)
-                _counter_add(_byte_counter, size)
+                _counter_add(_byte_counter, self.response_size)
 
             # Reset for next request (HTTP/1.1 keep-alive)
             self._request = RequestParser()
@@ -254,12 +288,19 @@ def _worker(
     wid: int,
     host: str,
     port: int,
-    streaming: bytes,
-    non_streaming: bytes,
+    response: bytes,
     ready: multiprocessing.synchronize.Event,
     shutdown: multiprocessing.synchronize.Event,
+    counters: tuple[_SyncInt | None, _SyncInt | None, _SyncInt | None] = (
+        None,
+        None,
+        None,
+    ),
 ):
     """Worker process entry point."""
+    global _req_counter, _resp_counter, _byte_counter
+    _req_counter, _resp_counter, _byte_counter = counters
+
     import gc
 
     gc.disable()
@@ -269,7 +310,7 @@ def _worker(
         loop = asyncio.get_running_loop()
 
         def protocol_factory():
-            return ServerProtocol(streaming, non_streaming)
+            return ServerProtocol(response)
 
         server = await loop.create_server(
             protocol_factory,
@@ -298,8 +339,12 @@ class MaxThroughputServer:
     Args:
         host: Bind address.
         port: Bind port (0 for auto-assign).
-        num_chunks: Number of SSE chunks in streaming responses.
-        tokens_per_chunk: Tokens emitted per SSE chunk.
+        output_length: Characters in the response content.
+        stream: Return SSE streaming responses (default: non-streaming JSON).
+            Each character becomes one SSE event; *stream_interval* controls
+            how many events are batched per HTTP chunked frame.
+        stream_interval: SSE events per HTTP chunked frame (only with *stream=True*).
+            1 = one event per frame, 50 = fifty 1-char events per frame.
         num_workers: Worker processes (SO_REUSEPORT kernel load-balancing).
         stats: Enable live req/s and throughput stats on stdout.
         stats_interval: Seconds between stats prints.
@@ -311,14 +356,16 @@ class MaxThroughputServer:
         *,
         host: str = "127.0.0.1",
         port: int = 0,
-        num_chunks: int = 10,
-        tokens_per_chunk: int = 4,
+        output_length: int = 160,
+        stream: bool = False,
+        stream_interval: int = 1,
         num_workers: int = 4,
         stats: bool = False,
         stats_interval: float = 1.0,
         quiet: bool = False,
     ):
         self.host, self.port, self.num_workers = host, port, num_workers
+        self.stream = stream
         self.stats, self.stats_interval = stats, stats_interval
         self.quiet = quiet
         self._port: int | None = None
@@ -328,10 +375,7 @@ class MaxThroughputServer:
         self._worker_shutdown: multiprocessing.synchronize.Event | None = None
         self._stats_thread: threading.Thread | None = None
 
-        self._streaming = build_streaming_response(num_chunks, tokens_per_chunk)
-        self._non_streaming = build_non_streaming_response(
-            num_chunks * tokens_per_chunk
-        )
+        self._response = build_response(output_length, stream, stream_interval)
 
         global _req_counter, _resp_counter, _byte_counter
         if stats:
@@ -363,10 +407,10 @@ class MaxThroughputServer:
                     i,
                     self.host,
                     self._port,
-                    self._streaming,
-                    self._non_streaming,
+                    self._response,
                     ready,
                     self._worker_shutdown,
+                    (_req_counter, _resp_counter, _byte_counter),
                 ),
                 daemon=True,
             )
@@ -410,11 +454,11 @@ class MaxThroughputServer:
             self._stats_thread.start()
 
         if not self.quiet:
+            mode = "streaming" if self.stream else "non-streaming"
             print(
                 f"MaxThroughputServer @ {self.url} "
-                f"(workers={self.num_workers}, "
-                f"streaming={len(self._streaming)}B, "
-                f"non-streaming={len(self._non_streaming)}B)"
+                f"(workers={self.num_workers}, mode={mode}, "
+                f"response={len(self._response)}B)"
             )
 
     def stop(self):
@@ -440,21 +484,36 @@ def main():
     parser = argparse.ArgumentParser(description="Max throughput test server")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=12345)
-    parser.add_argument("--num-chunks", type=int, default=1000)
-    parser.add_argument("--tokens-per-chunk", type=int, default=4)
+    parser.add_argument(
+        "--output-length",
+        type=int,
+        default=4000,
+        help="Characters in the response content",
+    )
+    parser.add_argument(
+        "--stream",
+        action="store_true",
+        help="SSE streaming mode (default: non-streaming JSON)",
+    )
+    parser.add_argument(
+        "--stream-interval",
+        type=int,
+        default=1,
+        help="SSE events per HTTP chunked frame (only with --stream). "
+        "Each char is one SSE event; this controls batching into HTTP packets.",
+    )
     parser.add_argument("--num-workers", "-w", type=int, default=4)
     parser.add_argument("--stats", action="store_true")
-    parser.add_argument("--stats-interval", type=float, default=1.0)
     args = parser.parse_args()
 
     server = MaxThroughputServer(
         host=args.host,
         port=args.port,
-        num_chunks=args.num_chunks,
-        tokens_per_chunk=args.tokens_per_chunk,
+        output_length=args.output_length,
+        stream=args.stream,
+        stream_interval=args.stream_interval,
         num_workers=args.num_workers,
         stats=args.stats,
-        stats_interval=args.stats_interval,
     )
 
     def sig_handler(signum, frame):
