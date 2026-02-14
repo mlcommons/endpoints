@@ -233,6 +233,11 @@ def _add_shared_benchmark_args(parser):
     parser.add_argument(
         "--report-dir", type=Path, help="Path to save detailed benchmark report"
     )
+    parser.add_argument(
+        "--ensure-submission-checker-compatibility",
+        action="store_true",
+        help="Enable loadgen compatibility mode for submission checker",
+    )
 
 
 def _add_online_specific_args(parser):

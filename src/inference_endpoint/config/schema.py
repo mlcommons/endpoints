@@ -387,6 +387,7 @@ class BenchmarkConfig(BaseModel):
     report_dir: Path | None = None
     timeout: float | None = None
     verbose: bool = False
+    ensure_submission_checker_compatibility: bool = False
     # CPU affinity for loadgen and worker processes:
     #   - True = auto (compute optimal NUMA-aware plan)
     #   - False = disabled (no CPU pinning)

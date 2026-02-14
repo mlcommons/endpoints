@@ -35,7 +35,11 @@ from tqdm import tqdm
 from transformers import AutoTokenizer
 from transformers.utils import logging as transformers_logging
 
-from inference_endpoint.commands.utils import get_default_report_path
+from inference_endpoint.commands.utils import (
+    generate_mlperf_log_details_submission_checker,
+    generate_user_conf_submission_checker,
+    get_default_report_path,
+)
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import (
     APIType,
@@ -291,6 +295,9 @@ def _build_config_from_cli(
     timeout = getattr(args, "timeout", None)
     verbose_level = getattr(args, "verbose", 0)
     api_type = APIType(getattr(args, "api_type", "openai"))
+    ensure_submission_checker_compatibility = getattr(
+        args, "ensure_submission_checker_compatibility", False
+    )
     # Build BenchmarkConfig from CLI params
     return BenchmarkConfig(
         name=f"cli_{benchmark_mode}",
@@ -349,6 +356,7 @@ def _build_config_from_cli(
         report_dir=report_dir,
         timeout=timeout,
         verbose=verbose_level > 0,
+        ensure_submission_checker_compatibility=ensure_submission_checker_compatibility,
     )
 
 
@@ -711,6 +719,24 @@ def _run_benchmark(
             logger.info(f"Saved: {results_path}")
         except Exception as e:
             logger.error(f"Save failed: {e}")
+
+        if config.ensure_submission_checker_compatibility:
+            try:
+                # convert the runtime_settings.json to user.conf format and
+                generate_user_conf_submission_checker(report_dir)
+            except Exception as e:
+                logger.error(
+                    f"Failed to generate user conf for submission checker: {e}"
+                )
+                raise
+            try:
+                # generate mlperf_log_details.txt from summary.json
+                generate_mlperf_log_details_submission_checker(report_dir, strict=True)
+            except Exception as e:
+                logger.error(
+                    f"Failed to generate mlperf_log_details.txt for submission checker: {e}"
+                )
+                raise
 
     except KeyboardInterrupt:
         logger.warning("Benchmark interrupted by user")
