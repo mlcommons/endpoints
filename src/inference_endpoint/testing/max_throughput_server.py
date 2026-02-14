@@ -326,7 +326,17 @@ def _worker(
         server.close()
         await server.wait_closed()
 
-    asyncio.run(run())
+    try:
+        asyncio.run(run())
+    except Exception as exc:
+        import sys
+
+        print(
+            f"[MaxThroughputServer] Worker {wid} failed: {exc}",
+            file=sys.stderr,
+            flush=True,
+        )
+        sys.exit(1)
 
 
 class MaxThroughputServer:
@@ -395,6 +405,21 @@ class MaxThroughputServer:
             s.close()
         else:
             self._port = self.port
+            # Fail fast if port is already in use or SO_REUSEPORT unavailable
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                try:
+                    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+                except (AttributeError, OSError) as e:
+                    raise RuntimeError(
+                        f"SO_REUSEPORT not available (required for multi-worker): {e}"
+                    ) from e
+                try:
+                    s.bind((self.host, self._port))
+                except OSError as e:
+                    raise RuntimeError(
+                        f"Port {self._port} is not available: {e}"
+                    ) from e
 
         self._worker_shutdown = multiprocessing.Event()
         for i in range(self.num_workers):
@@ -416,9 +441,27 @@ class MaxThroughputServer:
             p.start()
             self._workers.append(p)
 
-        for i, e in enumerate(self._ready_events):
-            if not e.wait(timeout=5.0):
-                raise RuntimeError(f"Worker {i} failed to start")
+        # Poll for readiness — detect crashes early, allow slow starts
+        for i, evt in enumerate(self._ready_events):
+            worker = self._workers[i]
+            deadline = time.monotonic() + 30.0
+            while time.monotonic() < deadline:
+                if evt.wait(timeout=0.2):
+                    break
+                if not worker.is_alive():
+                    # Brief pause to let stderr flush from dying worker
+                    time.sleep(0.2)
+                    msg = f"Worker {i} crashed (exit code {worker.exitcode})"
+                    self._cleanup_workers()
+                    raise RuntimeError(msg)
+            else:
+                if not evt.is_set():
+                    msg = (
+                        f"Worker {i} timed out after 30s waiting for ready "
+                        f"signal (pid={worker.pid}, alive={worker.is_alive()})"
+                    )
+                    self._cleanup_workers()
+                    raise RuntimeError(msg)
 
     def _stats_loop(self):
         last_req, last_resp, last_bytes, last_t = 0, 0, 0, time.monotonic()
@@ -460,15 +503,26 @@ class MaxThroughputServer:
                 f"response={len(self._response)}B)"
             )
 
+    def _cleanup_workers(self):
+        """Terminate and join all workers, escalating to kill if needed."""
+        for w in self._workers:
+            if w.is_alive():
+                w.terminate()
+                w.join(timeout=1.0)
+            if w.is_alive():
+                w.kill()
+                w.join(timeout=1.0)
+
     def stop(self):
         """Stop server."""
         self._shutdown.set()
         if self._worker_shutdown:
             self._worker_shutdown.set()
+        # Give workers a chance to exit gracefully
         for w in self._workers:
-            w.join(timeout=1.0)
-            if w.is_alive():
-                w.terminate()
+            w.join(timeout=2.0)
+        # Escalate: terminate, then kill any stragglers
+        self._cleanup_workers()
 
     def __enter__(self):
         self.start()

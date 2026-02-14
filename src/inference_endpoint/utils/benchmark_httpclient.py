@@ -30,6 +30,7 @@ import itertools
 import os
 import re
 import signal
+import socket
 import sys
 import threading
 import time
@@ -455,6 +456,7 @@ def run_benchmark(
     send_batch: int = _SEND_BATCH,
     enable_affinity: bool = False,
     sse_events_per_response: int = 1,
+    max_total_time: float = 15.0,
 ) -> BenchmarkStats:
     """
     Run the HTTP client benchmark.
@@ -470,6 +472,7 @@ def run_benchmark(
         max_concurrency: Maximum in-flight requests for back-pressure
         send_batch: Max requests issued per event-loop yield; auto-tuned at startup
         sse_events_per_response: Number of SSE events per streaming response (for rate derivation)
+        max_total_time: Hard cap on total run time (send + drain) in seconds
 
     Returns:
         Final benchmark statistics
@@ -514,6 +517,7 @@ def run_benchmark(
         send_done = False
         start_ns = time.monotonic_ns()
         send_deadline = time.monotonic() + duration
+        overall_deadline = time.monotonic() + max_total_time
         stall_timeout = 5.0
         last_recv_time = time.monotonic()
 
@@ -556,6 +560,17 @@ def run_benchmark(
                             stats.errors += 1
                         else:
                             stats.received += 1
+                            # Periodic deadline check on receive path
+                            if (
+                                stats.received % 128 == 0
+                                and last_recv_time > overall_deadline
+                            ):
+                                outstanding = stats.sent - stats.received - stats.errors
+                                print(
+                                    f"\nTime limit ({max_total_time:.0f}s) reached, "
+                                    f"stopping ({outstanding:,} in-flight)"
+                                )
+                                return
                 else:
                     # Check completion
                     if send_done and (stats.received + stats.errors) >= stats.sent:
@@ -566,6 +581,14 @@ def run_benchmark(
                         and (time.monotonic() - last_recv_time) > stall_timeout
                     ):
                         print(f"\nStalled for {stall_timeout}s, stopping")
+                        break
+                    # Check overall time limit
+                    if time.monotonic() > overall_deadline:
+                        outstanding = stats.sent - stats.received - stats.errors
+                        print(
+                            f"\nTime limit ({max_total_time:.0f}s) reached, "
+                            f"stopping ({outstanding:,} in-flight)"
+                        )
                         break
                     # Yield to sender
                     await asyncio.sleep(0)
@@ -645,6 +668,24 @@ def _sse_events_per_response(output_length: int, stream_interval: int = 1) -> in
     return -(-output_length // stream_interval) + 2  # ceil division + 2
 
 
+def _wait_for_port_free(host: str, port: int, timeout: float = 5.0) -> None:
+    """Wait until *port* is bindable on *host* (old workers may linger in kernel)."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+            except (AttributeError, OSError):
+                pass  # SO_REUSEPORT unavailable — _start_workers will report
+            try:
+                s.bind((host, port))
+                return  # port is free
+            except OSError:
+                time.sleep(0.1)
+    # Don't raise — proceed anyway and let _start_workers report the real error
+
+
 def _restart_server(
     server: MaxThroughputServer,
     output_length: int,
@@ -653,6 +694,9 @@ def _restart_server(
 ) -> None:
     """Stop, reconfigure response payload, and restart workers."""
     server.stop()
+    # Wait for port to become available (old workers may linger in kernel)
+    if server._port is not None:
+        _wait_for_port_free(server.host, server._port)
     server.stream = stream
     server._response = build_response(output_length, stream, stream_interval)
     # Reset shutdown flags and worker lists so _start_workers can re-use them
@@ -660,7 +704,6 @@ def _restart_server(
     server._workers.clear()
     server._ready_events.clear()
     server._start_workers()
-    time.sleep(0.3)  # Let workers bind
 
 
 # ---------------------------------------------------------------------------
@@ -707,6 +750,7 @@ def run_single(
         send_batch=args.send_batch,
         enable_affinity=args.pin,
         sse_events_per_response=epr,
+        max_total_time=args.duration + 10,
     )
 
     send_elapsed, total_elapsed, send_rate, recv_rate, sse_rate, outstanding = (
@@ -884,6 +928,7 @@ def run_sweep(
                 send_batch=args.send_batch,
                 enable_affinity=args.pin,
                 sse_events_per_response=epr,
+                max_total_time=args.duration + 10,
             )
 
             results.append(_make_sweep_result(pv, stats))
@@ -944,22 +989,38 @@ def _plot_config(args: argparse.Namespace) -> list[str]:
     ]
 
 
+def _fmt_si(v: float) -> str:
+    """Format a value with SI suffixes for annotations."""
+    abs_v = abs(v)
+    if abs_v >= 1e9:
+        return f"{v / 1e9:.2f}B" if v % 1e8 else f"{v / 1e9:.1f}B"
+    if abs_v >= 1e6:
+        return f"{v / 1e6:.2f}M" if v % 1e5 else f"{v / 1e6:.1f}M"
+    if abs_v >= 1e3:
+        return f"{v / 1e3:.1f}K" if v % 1e3 else f"{v / 1e3:.0f}K"
+    return f"{v:,.0f}"
+
+
 def _annotate_peak(ax: object, x: list[int], y: list[float], color: str) -> None:
     """Add a subtle peak label to an axes object."""
     if not y:
         return
     peak_idx = y.index(max(y))
+    # Shift label left if peak is at rightmost point to avoid clipping
+    is_rightmost = peak_idx == len(x) - 1
+    ha = "right" if is_rightmost else "center"
+    x_offset = -6 if is_rightmost else 0
     ax.annotate(  # type: ignore[attr-defined]
-        f"{y[peak_idx]:,.0f}",
+        _fmt_si(y[peak_idx]),
         xy=(x[peak_idx], y[peak_idx]),
-        xytext=(0, 8),
+        xytext=(x_offset, 8),
         textcoords="offset points",
-        ha="center",
+        ha=ha,
         va="bottom",
         fontsize=8,
         fontweight="bold",
         color=color,
-        clip_on=True,
+        clip_on=False,
     )
 
 
@@ -995,7 +1056,7 @@ def generate_sweep_plot(
     except OSError:
         pass  # Fall back to default style
 
-    comma_fmt = ticker.FuncFormatter(lambda v, _: f"{v:,.0f}")
+    si_fmt = ticker.FuncFormatter(lambda v, _pos: _fmt_si(v))
     marker_kw: dict[str, object] = {
         "marker": "o",
         "markersize": 5,
@@ -1042,8 +1103,8 @@ def generate_sweep_plot(
         nrows,
         ncols_facet * metrics_per_cell,
         figsize=(
-            max(8 * metrics_per_cell, 8 * ncols_facet * metrics_per_cell // 2),
-            max(6, 4 * nrows + 2),
+            max(7 * metrics_per_cell, 7 * ncols_facet * metrics_per_cell // 2),
+            max(5 * nrows + 1.5, 6),
         ),
         squeeze=False,
     )
@@ -1106,13 +1167,14 @@ def generate_sweep_plot(
             if has_stall:
                 ax_stall = ax_send.twinx()
                 ax_stall.set_ylim(0, 100)  # type: ignore[union-attr]
-                ax_stall.set_ylabel("stall %", fontsize=8, color="#cc4444", alpha=0.7)  # type: ignore[union-attr]
+                ax_stall.set_ylabel("stall %", fontsize=8, color="#cc4444", alpha=0.6)  # type: ignore[union-attr]
                 ax_stall.tick_params(  # type: ignore[union-attr]
                     axis="y",
                     labelcolor="#cc4444",
                     labelsize=7,
                     length=3,
                 )
+                ax_stall.yaxis.set_major_locator(ticker.MaxNLocator(5))  # type: ignore[union-attr]
 
             line_iter = line_values if line_param else [None]  # type: ignore
 
@@ -1160,12 +1222,21 @@ def generate_sweep_plot(
 
                 if ax_stall is not None:
                     stall_pcts = [r.stall_pct for r in group]
+                    ax_stall.plot(  # type: ignore[attr-defined]
+                        x,
+                        stall_pcts,
+                        color="#cc4444",
+                        alpha=0.5,
+                        linewidth=1.2,
+                        linestyle="--",
+                        zorder=1,
+                    )
                     ax_stall.fill_between(  # type: ignore[attr-defined]
                         x,
                         0,
                         stall_pcts,
                         color="#cc4444",
-                        alpha=0.06,
+                        alpha=0.03,
                         linewidth=0,
                         zorder=0,
                     )
@@ -1185,24 +1256,24 @@ def generate_sweep_plot(
                 ax.set_xlabel(xlabel, fontsize=10)
                 max_mean = mean_maxes.get(id(ax), 0)
                 if max_mean > 0:
-                    ax.set_ylim(bottom=0, top=max_mean * 1.15)
+                    ax.set_ylim(bottom=0, top=max_mean * 1.18)
                 else:
                     ax.set_ylim(bottom=0)
-                ax.yaxis.set_major_formatter(comma_fmt)
+                ax.yaxis.set_major_formatter(si_fmt)
                 ax.grid(True, alpha=0.15, linewidth=0.5)
                 ax.tick_params(labelsize=9)
                 if line_param and not use_cmap and col == 0:
                     ax.legend(fontsize=8, loc="best", framealpha=0.8)
 
     # Explicit margins; reserve right edge for colorbar when present
-    left = 0.06
-    right = 0.87 if use_cmap else 0.97
+    left = 0.07
+    right = 0.87 if use_cmap else 0.95
     fig.subplots_adjust(
-        top=0.85,
-        bottom=0.10,
+        top=0.86,
+        bottom=0.11,
         left=left,
         right=right,
-        wspace=0.32,
+        wspace=0.35,
     )
 
     # Center title/subtitle over the full figure
@@ -1211,9 +1282,9 @@ def generate_sweep_plot(
         fontsize=14,
         fontweight="bold",
         x=0.5,
-        y=0.98,
+        y=0.97,
     )
-    fig.text(0.5, 0.93, subtitle, ha="center", fontsize=9, color="0.4")
+    fig.text(0.5, 0.925, subtitle, ha="center", fontsize=9, color="0.4")
 
     if use_cmap:
         assert line_param is not None
