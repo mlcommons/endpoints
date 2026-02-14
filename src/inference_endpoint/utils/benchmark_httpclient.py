@@ -18,7 +18,8 @@ Sweep modes (-w, -c, -l accept ranges; endpoints always included):
     -w 1:32::12       start:stop::N    -> 12 evenly-spaced points in [1, 32]
     -l 32,128,512     explicit values
     -w 1:32::12 -c 100:500::4          cartesian product sweep
-    --full                             preset sweep of common worker counts x prompt lengths
+    --full                             preset sweep of common worker counts x prompt lengths (non-streaming)
+    --full --stream                    preset sweep of common worker counts x prompt lengths (streaming)
 """
 
 from __future__ import annotations
@@ -56,7 +57,7 @@ class BenchmarkStats:
     send_elapsed_ns: int = 0  # Send phase duration
     total_elapsed_ns: int = 0  # Total duration including drain
     peak_inflight: int = 0  # Max observed in-flight count
-    stall_ns: int = 0  # Total time spent waiting on back-pressure
+    stall_ns: int = 0  # Client overhead: time blocked waiting for responses to drain
     sse_events_per_response: int = 1  # SSE events per response (set for streaming)
     # Per-interval samples (populated by LiveDisplay)
     send_rate_samples: list[float] | None = None
@@ -83,7 +84,7 @@ class SweepResult:
     sse_rate: float  # SSE pkts/s (mean, streaming only)
     outstanding: int  # sent - received - errors
     error_rate: float  # errors/sent (%)
-    stall_pct: float  # back-pressure stall time / send time (%)
+    stall_pct: float  # client overhead: % of send time blocked on drain (%)
     # Variation bounds from per-second samples
     send_rate_min: float = 0.0
     send_rate_max: float = 0.0
@@ -214,7 +215,7 @@ def _safe_div(numerator: float, denominator: float) -> float:
 
 
 def _stall_pct(stats: BenchmarkStats) -> float:
-    """Back-pressure stall time as a percentage of send phase."""
+    """Client-side stall time (blocked on drain) as a percentage of send phase."""
     if stats.send_elapsed_ns <= 0:
         return 0.0
     return _safe_div(stats.stall_ns, stats.send_elapsed_ns) * 100
