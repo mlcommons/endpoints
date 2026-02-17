@@ -35,6 +35,7 @@ from tqdm import tqdm
 from transformers import AutoTokenizer
 from transformers.utils import logging as transformers_logging
 
+from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
 from inference_endpoint.commands.utils import get_default_report_path
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import (
@@ -572,165 +573,169 @@ def _run_benchmark(
     num_workers = config.settings.client.workers
 
     logger.info(f"Connecting: {endpoints}")
-    tmp_dir = tempfile.mkdtemp(prefix="inference_endpoint_")
-
-    try:
-        api_type: APIType = config.endpoint_config.api_type
-        assert api_type is not None
-        http_config = HTTPClientConfig(
-            endpoint_urls=[urljoin(e, api_type.default_route()) for e in endpoints],
-            api_type=api_type,
-            num_workers=num_workers,
-            record_worker_events=config.settings.client.record_worker_events,
-            event_logs_dir=report_dir,
-            log_level=config.settings.client.log_level,
-            cpu_affinity=affinity_plan,
-            warmup_connections=config.settings.client.warmup_connections,
-            max_connections=config.settings.client.max_connections,
-            api_key=config.endpoint_config.api_key,
-        )
-        http_client = HTTPEndpointClient(http_config)
-        sample_issuer = HttpClientSampleIssuer(http_client)
-
-    except Exception as e:
-        logger.error("Connection failed")
-        raise SetupError(f"Failed to connect to endpoint: {e}") from e
-
-    # Run benchmark
-    logger.info("Running...")
-
-    sess = None
-    try:
-        sess = BenchmarkSession.start(
-            rt_settings,
-            dataloader,
-            sample_issuer,
-            scheduler,
-            name=f"cli_benchmark_{uuid.uuid4().hex[0:8]}",
-            report_dir=report_dir,
-            tokenizer_override=tokenizer,
-            accuracy_datasets=accuracy_datasets,
-            max_shutdown_timeout_s=config.timeout
-            if config.timeout
-            else SystemDefaults.DEFAULT_TIMEOUT,
-            dump_events_log=True,
-        )
-
-        # Wait for test end with ability to interrupt
-        def signal_handler(signum, frame):
-            logger.warning("Interrupt signal received, stopping benchmark...")
-            # Raise KeyboardInterrupt to break out of wait_for_test_end()
-            raise KeyboardInterrupt()
-
-        # Install our handler, save old one
-        old_handler = signal.signal(signal.SIGINT, signal_handler)
-        try:
-            sess.wait_for_test_end()
-        finally:
-            # Always restore original handler
-            signal.signal(signal.SIGINT, old_handler)
-        accuracy_scores = {}
-        for eval_config in eval_configs:
-            scorer_instance = eval_config.scorer(
-                eval_config.dataset_name,
-                eval_config.dataset,
-                eval_config.report_dir,
-                extractor=eval_config.extractor,
-                ground_truth_column=eval_config.ground_truth_column,
-            )
-            score, n_repeats = scorer_instance.score()
-            assert eval_config.dataset.data is not None
-            accuracy_scores[eval_config.dataset_name] = {
-                "dataset_name": eval_config.dataset_name,
-                "num_samples": len(eval_config.dataset.data),
-                "extractor": eval_config.extractor.__name__,
-                "ground_truth_column": eval_config.ground_truth_column,
-                "score": score,
-                "n_repeats": n_repeats,
-            }
-            logger.info(
-                f"Score for {eval_config.dataset_name}: {score} ({n_repeats} repeats)"
-            )
-
-        # Prefer authoritative metrics from the session report
-        report = getattr(sess, "report", None)
-        if report is None:
-            logger.error(
-                "Session report missing — benchmark reporter failed to produce results"
-            )
-            raise ExecutionError(
-                "Session report missing — cannot produce benchmark results"
-            )
-
-        elapsed_time = report.duration_ns / 1e9
-        total = report.n_samples_issued
-        success_count = report.n_samples_completed
-
-        # qps will be None if duration was 0, so fall back to 0.0
-        estimated_qps = report.qps or 0.0
-
-        # Report results
-        logger.info(f"Completed in {elapsed_time:.1f}s")
-        logger.info(f"Results: {success_count}/{total} successful")
-        logger.info(f"Estimated QPS: {estimated_qps:.1f}")
-
-        if response_collector.errors:
-            logger.warning(f"Errors: {len(response_collector.errors)}")
-            if config.verbose:
-                for error in response_collector.errors[:3]:
-                    logger.warning(f"  {error}")
-                if len(response_collector.errors) > 3:
-                    logger.warning(f"  ... +{len(response_collector.errors) - 3} more")
+    # Scope ZMQ context so transport and sockets are cleaned up when the block exits.
+    with ManagedZMQContext.scoped() as zmq_ctx:
+        tmp_dir = tempfile.mkdtemp(prefix="inference_endpoint_")
 
         try:
-            results: dict[str, Any] = {
-                "config": {
-                    "endpoint": endpoints,
-                    "mode": test_mode,
-                    "target_qps": target_qps,
-                },
-                "results": {
-                    "total": total,
-                    "successful": success_count,
-                    "failed": total - success_count,
-                    "elapsed_time": elapsed_time,
-                    "qps": estimated_qps,
-                },
-            }
-            if accuracy_scores:
-                results["accuracy_scores"] = accuracy_scores
-            if collect_responses:
-                results["responses"] = response_collector.responses
-            # Always save all errors (useful for debugging)
+            api_type: APIType = config.endpoint_config.api_type
+            assert api_type is not None
+            http_config = HTTPClientConfig(
+                endpoint_urls=[urljoin(e, api_type.default_route()) for e in endpoints],
+                api_type=api_type,
+                num_workers=num_workers,
+                record_worker_events=config.settings.client.record_worker_events,
+                event_logs_dir=report_dir,
+                log_level=config.settings.client.log_level,
+                cpu_affinity=affinity_plan,
+                warmup_connections=config.settings.client.warmup_connections,
+                max_connections=config.settings.client.max_connections,
+                api_key=config.endpoint_config.api_key,
+            )
+            http_client = HTTPEndpointClient(http_config, zmq_context=zmq_ctx)
+            sample_issuer = HttpClientSampleIssuer(http_client)
+
+        except Exception as e:
+            logger.error("Connection failed")
+            raise SetupError(f"Failed to connect to endpoint: {e}") from e
+
+        # Run benchmark
+        logger.info("Running...")
+
+        sess = None
+        try:
+            sess = BenchmarkSession.start(
+                rt_settings,
+                dataloader,
+                sample_issuer,
+                scheduler,
+                name=f"cli_benchmark_{uuid.uuid4().hex[0:8]}",
+                report_dir=report_dir,
+                tokenizer_override=tokenizer,
+                accuracy_datasets=accuracy_datasets,
+                max_shutdown_timeout_s=config.timeout
+                if config.timeout
+                else SystemDefaults.DEFAULT_TIMEOUT,
+                dump_events_log=True,
+            )
+
+            # Wait for test end with ability to interrupt
+            def signal_handler(signum, frame):
+                logger.warning("Interrupt signal received, stopping benchmark...")
+                # Raise KeyboardInterrupt to break out of wait_for_test_end()
+                raise KeyboardInterrupt()
+
+            # Install our handler, save old one
+            old_handler = signal.signal(signal.SIGINT, signal_handler)
+            try:
+                sess.wait_for_test_end()
+            finally:
+                # Always restore original handler
+                signal.signal(signal.SIGINT, old_handler)
+                accuracy_scores = {}
+            for eval_config in eval_configs:
+                scorer_instance = eval_config.scorer(
+                    eval_config.dataset_name,
+                    eval_config.dataset,
+                    eval_config.report_dir,
+                    extractor=eval_config.extractor,
+                    ground_truth_column=eval_config.ground_truth_column,
+                )
+                score, n_repeats = scorer_instance.score()
+                assert eval_config.dataset.data is not None
+                accuracy_scores[eval_config.dataset_name] = {
+                    "dataset_name": eval_config.dataset_name,
+                    "num_samples": len(eval_config.dataset.data),
+                    "extractor": eval_config.extractor.__name__,
+                    "ground_truth_column": eval_config.ground_truth_column,
+                    "score": score,
+                    "n_repeats": n_repeats,
+                }
+                logger.info(
+                    f"Score for {eval_config.dataset_name}: {score} ({n_repeats} repeats)"
+                )
+
+            # Prefer authoritative metrics from the session report
+            report = getattr(sess, "report", None)
+            if report is None:
+                logger.error(
+                    "Session report missing — benchmark reporter failed to produce results"
+                )
+                raise ExecutionError(
+                    "Session report missing — cannot produce benchmark results"
+                )
+
+            elapsed_time = report.duration_ns / 1e9
+            total = report.n_samples_issued
+            success_count = report.n_samples_completed
+
+            # qps will be None if duration was 0, so fall back to 0.0
+            estimated_qps = report.qps or 0.0
+
+            # Report results
+            logger.info(f"Completed in {elapsed_time:.1f}s")
+            logger.info(f"Results: {success_count}/{total} successful")
+            logger.info(f"Estimated QPS: {estimated_qps:.1f}")
+
             if response_collector.errors:
-                results["errors"] = response_collector.errors
-            # Save results to JSON file
-            results_path = report_dir / "results.json"
-            with open(results_path, "w") as f:
-                json.dump(results, f, indent=2)
-            logger.info(f"Saved: {results_path}")
-        except Exception as e:
-            logger.error(f"Save failed: {e}")
+                logger.warning(f"Errors: {len(response_collector.errors)}")
+                if config.verbose:
+                    for error in response_collector.errors[:3]:
+                        logger.warning(f"  {error}")
+                    if len(response_collector.errors) > 3:
+                        logger.warning(
+                            f"  ... +{len(response_collector.errors) - 3} more"
+                        )
 
-    except KeyboardInterrupt:
-        logger.warning("Benchmark interrupted by user")
-        raise
-    except ExecutionError:
-        # Re-raise our own exceptions
-        raise
-    except Exception as e:
-        logger.error("Benchmark failed")
-        raise ExecutionError(f"Benchmark execution failed: {e}") from e
-    finally:
-        # Cleanup - always execute
-        logger.info("Cleaning up...")
-        try:
-            if sess is not None:
-                sess.stop()
-            pbar.close()
-            sample_issuer.shutdown()
-            http_client.shutdown()
-            shutil.rmtree(tmp_dir, ignore_errors=True)
+            try:
+                results: dict[str, Any] = {
+                    "config": {
+                        "endpoint": endpoints,
+                        "mode": test_mode,
+                        "target_qps": target_qps,
+                    },
+                    "results": {
+                        "total": total,
+                        "successful": success_count,
+                        "failed": total - success_count,
+                        "elapsed_time": elapsed_time,
+                        "qps": estimated_qps,
+                    },
+                }
+                if accuracy_scores:
+                    results["accuracy_scores"] = accuracy_scores
+                if collect_responses:
+                    results["responses"] = response_collector.responses
+                # Always save all errors (useful for debugging)
+                if response_collector.errors:
+                    results["errors"] = response_collector.errors
+                # Save results to JSON file
+                results_path = report_dir / "results.json"
+                with open(results_path, "w") as f:
+                    json.dump(results, f, indent=2)
+                logger.info(f"Saved: {results_path}")
+            except Exception as e:
+                logger.error(f"Save failed: {e}")
+
+        except KeyboardInterrupt:
+            logger.warning("Benchmark interrupted by user")
+            raise
+        except ExecutionError:
+            # Re-raise our own exceptions
+            raise
         except Exception as e:
-            if config.verbose:
-                logger.warning(f"Cleanup error: {e}")
+            logger.error("Benchmark failed")
+            raise ExecutionError(f"Benchmark execution failed: {e}") from e
+        finally:
+            # Cleanup - always execute
+            logger.info("Cleaning up...")
+            try:
+                if sess is not None:
+                    sess.stop()
+                pbar.close()
+                sample_issuer.shutdown()
+                http_client.shutdown()
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+            except Exception as e:
+                if config.verbose:
+                    logger.warning(f"Cleanup error: {e}")

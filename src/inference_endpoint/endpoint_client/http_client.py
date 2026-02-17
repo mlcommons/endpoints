@@ -17,12 +17,12 @@
 
 import asyncio
 import logging
-import threading
 import uuid
 from itertools import cycle
 
-import uvloop
-
+from inference_endpoint.async_utils.autoinit import LOOP_MANAGER
+from inference_endpoint.async_utils.transport import ZmqWorkerPoolTransport
+from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
 from inference_endpoint.core.types import Query, QueryResult, StreamChunk
 from inference_endpoint.endpoint_client.config import HTTPClientConfig
 from inference_endpoint.endpoint_client.worker_manager import WorkerManager
@@ -39,45 +39,48 @@ class AsyncHttpEndpointClient:
     - Worker processes: Make actual HTTP requests to the endpoint
     - Requests are distributed to workers round-robin
 
+    When config uses ZmqWorkerPoolTransport, the caller must scope the client
+    lifetime within ManagedZMQContext.scoped() and pass the context in.
+    The client does not create or own the ZMQ context.
+
     Usage:
-        client = AsyncHttpEndpointClient(config, aiohttp_config)
-        client.issue(query)
-        response = client.poll()        # Non-blocking
-        response = await client.recv()  # Blocking
-        responses = client.drain()      # Drain all available
+        with ManagedZMQContext.scoped() as zmq_ctx:
+            client = AsyncHttpEndpointClient(config, zmq_context=zmq_ctx)
+            client.issue(query)
+            response = await client.recv()
+            await client.shutdown()
     """
 
     def __init__(
         self,
         config: HTTPClientConfig,
         loop: asyncio.AbstractEventLoop | None = None,
+        zmq_context: ManagedZMQContext | None = None,
     ):
         self.client_id = uuid.uuid4().hex[:8]
         self.config = config
         self._worker_cycle = cycle(range(self.config.num_workers))
+        if config.worker_pool_transport is ZmqWorkerPoolTransport:
+            if zmq_context is None:
+                raise ValueError(
+                    "zmq_context is required when using ZmqWorkerPoolTransport; "
+                    "use ManagedZMQContext.scoped() and pass the context in."
+                )
+        self._zmq_context = zmq_context
 
-        # Use provided loop or create own
+        # Use provided loop or create one via LOOP_MANAGER (uvloop + eager task factory)
         self._owns_loop = loop is None
-        self.loop: asyncio.AbstractEventLoop | None = loop
-        self._loop_thread: threading.Thread | None = None
+        self._loop_name: str | None = None
         if loop is None:
-            self.loop = uvloop.new_event_loop()
-            assert self.loop is not None
-            self._loop_thread = threading.Thread(
-                target=self.loop.run_forever,
-                daemon=True,
-                name=f"HttpClient-{self.client_id}",
+            self._loop_name = f"HttpClient-{self.client_id}"
+            self.loop = LOOP_MANAGER.create_loop(
+                name=self._loop_name,
+                backend="uvloop",
+                task_factory_mode="eager",
             )
-            self._loop_thread.start()
-
-        # Use eager task factory for immediate coroutine execution
-        # Tasks start executing synchronously until first await
-        #
-        # NOTE(vir):
-        # CRITICAL for http-client performance
-        # ensures issue() does not get starved by other threads under load
+        else:
+            self.loop = loop
         assert self.loop is not None
-        self.loop.set_task_factory(asyncio.eager_task_factory)  # type: ignore[arg-type]
 
         # Initialize on event loop
         asyncio.run_coroutine_threadsafe(self._initialize(), self.loop).result()
@@ -95,13 +98,15 @@ class AsyncHttpEndpointClient:
 
     async def _initialize(self) -> None:
         """Initialize worker manager and transports."""
-        # CPython GIL provides atomic boolean writes, no need for asyncio.Event()
         self._shutdown: bool = False
         self._dropped_requests: int = 0
 
-        # WorkerManager creates and owns all transports
         assert self.loop is not None
-        self.worker_manager = WorkerManager(self.config, self.loop)
+        additional_args = []
+        if self.config.worker_pool_transport is ZmqWorkerPoolTransport:
+            assert self._zmq_context is not None
+            additional_args.append(self._zmq_context)
+        self.worker_manager = WorkerManager(self.config, self.loop, *additional_args)
         await self.worker_manager.initialize()
         self.pool = self.worker_manager.pool_transport
 
@@ -139,9 +144,10 @@ class AsyncHttpEndpointClient:
         # Shutdown workers
         await self.worker_manager.shutdown()
 
-        # Stop event loop if we own it (scheduled to run after this coroutine completes)
-        if self._owns_loop and self.loop is not None:
-            self.loop.call_soon(self.loop.stop)
+        # Stop event loop if we own it (LOOP_MANAGER will stop and remove it)
+        if self._owns_loop and self._loop_name is not None:
+            LOOP_MANAGER.stop_loop(self._loop_name)
+            self._loop_name = None
 
         if self._dropped_requests > 0:
             logger.info(

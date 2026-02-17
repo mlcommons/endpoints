@@ -6,7 +6,7 @@
 ZMQ Pub-Sub Demo using async_utils (EventRecord, EventPublisherService, etc.)
 
 Demonstrates the intended control flow:
-- Publisher auto-starts upon importing async_utils.autoinit (EVENT_PUBLISHER).
+- Publisher should be created within a ManagedZMQContext.scoped() context manager.
 - Each subscriber has its own event loop (LoopManager.create_loop); init does NOT start processing.
 - When ready, .start() is called on each subscriber to add the reader and begin receiving.
 - process(records) is async and scheduled via create_task so it does not block the socket.
@@ -25,13 +25,14 @@ import time
 import uuid
 from pathlib import Path
 
-# Auto-start publisher and loop manager so EVENT_PUBLISHER.bind_address is available.
-from inference_endpoint.async_utils import autoinit  # noqa: F401
+from inference_endpoint.async_utils.autoinit import LOOP_MANAGER
+from inference_endpoint.async_utils.event_publisher import EventPublisherService
 from inference_endpoint.async_utils.transport.record import (
     EventRecord,
     SampleEventType,
     SessionEventType,
 )
+from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
 from inference_endpoint.async_utils.transport.zmq.pubsub import ZmqEventRecordSubscriber
 
 logging.basicConfig(
@@ -141,9 +142,8 @@ class DurationSubscriber(ZmqEventRecordSubscriber):
 # =============================================================================
 
 
-async def publish_test_events() -> None:
-    """Publish hard-coded events using EVENT_PUBLISHER and EventRecord."""
-    publisher = autoinit.EVENT_PUBLISHER
+async def publish_test_events(publisher) -> None:
+    """Publish hard-coded events using EventPublisherService and EventRecord."""
     logger.info("Waiting for subscribers to connect...")
     await asyncio.sleep(0.5)
 
@@ -259,57 +259,60 @@ async def main() -> None:
     logger.info("=" * 80)
 
     output_file = Path("/tmp/zmq_events_async_utils_output.csv")
-    manager = autoinit.LOOP_MANAGER
-    publisher = autoinit.EVENT_PUBLISHER
-    connect_address = publisher.bind_address
+    with ManagedZMQContext.scoped() as zmq_ctx:
+        publisher = EventPublisherService(zmq_ctx)
+        connect_address = publisher.bind_address
 
-    # Each subscriber has its own event loop (not shared with the publisher).
-    console_loop = manager.create_loop("demo_console")
-    file_loop = manager.create_loop("demo_file")
-    duration_loop = manager.create_loop("demo_duration")
+        # Each subscriber has its own event loop (not shared with the publisher).
+        console_loop = LOOP_MANAGER.create_loop("demo_console")
+        file_loop = LOOP_MANAGER.create_loop("demo_file")
+        duration_loop = LOOP_MANAGER.create_loop("demo_duration")
 
-    logger.info("Creating subscribers (init does NOT start processing)...")
-    console_sub = ConsoleSubscriber(
-        connect_address=connect_address,
-        loop=console_loop,
-        topics=None,
-    )
-    file_sub = FileSubscriber(
-        output_file,
-        connect_address=connect_address,
-        loop=file_loop,
-        topics=None,
-    )
-    duration_sub = DurationSubscriber(
-        connect_address=connect_address,
-        loop=duration_loop,
-        topics=[
-            SampleEventType.ISSUED.topic,
-            SampleEventType.COMPLETE.topic,
-            SessionEventType.ENDED.topic,
-        ],
-    )
-    logger.info("Subscribers created")
+        logger.info("Creating subscribers (init does NOT start processing)...")
+        console_sub = ConsoleSubscriber(
+            connect_address=connect_address,
+            zmq_context=zmq_ctx,
+            loop=console_loop,
+            topics=None,
+        )
+        file_sub = FileSubscriber(
+            output_file,
+            connect_address=connect_address,
+            zmq_context=zmq_ctx,
+            loop=file_loop,
+            topics=None,
+        )
+        duration_sub = DurationSubscriber(
+            connect_address=connect_address,
+            zmq_context=zmq_ctx,
+            loop=duration_loop,
+            topics=[
+                SampleEventType.ISSUED.topic,
+                SampleEventType.COMPLETE.topic,
+                SessionEventType.ENDED.topic,
+            ],
+        )
+        logger.info("Subscribers created")
 
-    # Start listening (add reader to each loop).
-    logger.info("Starting subscribers (.start())...")
-    console_loop.call_soon_threadsafe(console_sub.start)
-    file_loop.call_soon_threadsafe(file_sub.start)
-    duration_loop.call_soon_threadsafe(duration_sub.start)
+        # Start listening (add reader to each loop).
+        logger.info("Starting subscribers (.start())...")
+        console_loop.call_soon_threadsafe(console_sub.start)
+        file_loop.call_soon_threadsafe(file_sub.start)
+        duration_loop.call_soon_threadsafe(duration_sub.start)
 
-    try:
-        await publish_test_events()
-    except KeyboardInterrupt:
-        logger.info("Interrupted by user")
-    finally:
-        logger.info("Cleaning up (closing subscribers)...")
-        console_sub.close()
-        file_sub.close()
-        duration_sub.close()
-        logger.info("=" * 80)
-        logger.info(f"Output file written to: {output_file}")
-        logger.info("Demo complete")
-        logger.info("=" * 80)
+        try:
+            await publish_test_events(publisher)
+        except KeyboardInterrupt:
+            logger.info("Interrupted by user")
+        finally:
+            logger.info("Cleaning up (closing subscribers)...")
+            console_sub.close()
+            file_sub.close()
+            duration_sub.close()
+            logger.info("=" * 80)
+            logger.info(f"Output file written to: {output_file}")
+            logger.info("Demo complete")
+            logger.info("=" * 80)
 
 
 if __name__ == "__main__":

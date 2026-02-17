@@ -34,6 +34,7 @@ from inference_endpoint.async_utils.transport import (
     SenderTransport,
     WorkerConnector,
 )
+from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
 from inference_endpoint.core.types import Query, QueryResult
 from inference_endpoint.endpoint_client.adapter_protocol import HttpRequestAdapter
 from inference_endpoint.endpoint_client.config import HTTPClientConfig
@@ -293,55 +294,62 @@ class Worker:
         # Reclaim any garbage before connecting/signaling readiness
         gc.collect(2)
 
-        # Connect and signal readiness as we enter recv() loop
-        async with self._connector.connect(self.worker_id) as (requests, responses):
-            self._requests = requests
-            self._responses = responses
-            logger.debug("Connected and ready")
+        # Connect and signal readiness as we enter recv() loop. Scope ZMQ context
+        # for this process so transports are cleaned up when the block exits.
+        with ManagedZMQContext.scoped() as zmq_ctx:
+            async with self._connector.connect(self.worker_id, zmq_ctx) as (
+                requests,
+                responses,
+            ):
+                self._requests = requests
+                self._responses = responses
+                logger.debug("Connected and ready")
 
-            # TODO(vir):
-            # batch-poll transport before await to reduce event loop yields under burst traffic.
-            # Use requests.poll() in a while loop to drain all available queries synchronously,
-            # only falling back to await requests.recv() when queue is empty.
-            # Similar pattern to iter_body() sync drain optimization.
-            while not self._shutdown:
-                try:
-                    # Pull query from queue (blocks until message or transport closed)
-                    query = await requests.recv()
+                # TODO(vir):
+                # batch-poll transport before await to reduce event loop yields under burst traffic.
+                # Use requests.poll() in a while loop to drain all available queries synchronously,
+                # only falling back to await requests.recv() when queue is empty.
+                # Similar pattern to iter_body() sync drain optimization.
+                while not self._shutdown:
+                    try:
+                        # Pull query from queue (blocks until message or transport closed)
+                        query = await requests.recv()
 
-                    # Transport closed (shutdown called)
-                    if query is None:
+                        # Transport closed (shutdown called)
+                        if query is None:
+                            break
+
+                        if self.http_config.record_worker_events:
+                            EventRecorder.record_event(
+                                SampleEvent.ZMQ_REQUEST_RECEIVED,
+                                time.monotonic_ns(),
+                                sample_uuid=query.id,
+                                assert_active=True,
+                            )
+
+                        # Prepare request
+                        prepared = self._prepare_request(query)
+
+                        # Fire request
+                        if not await self._fire_request(prepared):
+                            continue
+
+                        # Process response asynchronously
+                        assert self._loop is not None
+                        task = self._loop.create_task(self._process_response(prepared))
+
+                        # Keep task alive to prevent GC
+                        # Cleaned up in _process_response finally block
+                        self._active_tasks.add(task)
+
+                    except asyncio.CancelledError:
                         break
 
-                    if self.http_config.record_worker_events:
-                        EventRecorder.record_event(
-                            SampleEvent.ZMQ_REQUEST_RECEIVED,
-                            time.monotonic_ns(),
-                            sample_uuid=query.id,
-                            assert_active=True,
+                    except Exception as e:
+                        # Don't exit on errors in the main loop, just log and continue
+                        logger.error(
+                            f"Error in main loop: {type(e).__name__}: {str(e)}"
                         )
-
-                    # Prepare request
-                    prepared = self._prepare_request(query)
-
-                    # Fire request
-                    if not await self._fire_request(prepared):
-                        continue
-
-                    # Process response asynchronously
-                    assert self._loop is not None
-                    task = self._loop.create_task(self._process_response(prepared))
-
-                    # Keep task alive to prevent GC
-                    # Cleaned up in _process_response finally block
-                    self._active_tasks.add(task)
-
-                except asyncio.CancelledError:
-                    break
-
-                except Exception as e:
-                    # Don't exit on errors in the main loop, just log and continue
-                    logger.error(f"Error in main loop: {type(e).__name__}: {str(e)}")
 
     @profile
     def _prepare_request(self, query: Query) -> InFlightRequest:

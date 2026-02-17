@@ -18,11 +18,12 @@ import os
 import uuid
 
 from inference_endpoint.async_utils.loop_manager import LoopManager
+from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
 from inference_endpoint.async_utils.transport.zmq.pubsub import ZmqEventRecordPublisher
-from inference_endpoint.async_utils.transport.zmq.transport import ZMQ_SOCKET_DIR
+from inference_endpoint.utils import SingletonMixin
 
 
-class EventPublisherService(ZmqEventRecordPublisher):
+class EventPublisherService(SingletonMixin, ZmqEventRecordPublisher):
     """Singleton publisher for publishing event records.
 
     By default, the publisher will be run on the main thread's event loop. Since the
@@ -37,22 +38,13 @@ class EventPublisherService(ZmqEventRecordPublisher):
        an auto-generated temp directory is used.
     """
 
-    _instance: "EventPublisherService | None" = None
-
-    def __new__(cls) -> "EventPublisherService":
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-        return cls._instance
-
-    def __init__(self):
+    def __init__(self, managed_zmq_context: ManagedZMQContext):
         if getattr(self, "_initialized", False):
             return
         self._initialized = True
 
-        # Set up sockets
-        sock_dir = os.environ.get("EV_PUB_SOCK_DIR")
-        if not sock_dir:
-            sock_dir = ZMQ_SOCKET_DIR
+        # Set up sockets: use ManagedZMQContext for context and socket directory
+        sock_dir = os.environ.get("EV_PUB_SOCK_DIR") or managed_zmq_context.socket_dir
         bind_addr = f"ipc://{sock_dir}/ev_pub_{uuid.uuid4().hex[:8]}"
 
         # Set up event loop settings
@@ -62,4 +54,4 @@ class EventPublisherService(ZmqEventRecordPublisher):
             loop = LoopManager().create_loop("ev_pub")
         else:
             loop = LoopManager().default_loop
-        super().__init__(bind_addr, loop=loop)
+        super().__init__(bind_addr, managed_zmq_context, loop=loop)

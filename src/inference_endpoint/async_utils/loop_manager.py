@@ -24,10 +24,12 @@ from typing import Literal
 
 import uvloop
 
+from inference_endpoint.utils import SingletonMixin
+
 ManagedLoop = namedtuple("ManagedLoop", ["loop", "thread"])
 
 
-class LoopManager:
+class LoopManager(SingletonMixin):
     """Manages asyncio event loops within the main process.
 
     This class is a singleton - any new constructor calls will return the same
@@ -42,13 +44,6 @@ class LoopManager:
     This also means that other threads can still enqueue tasks onto the main thread's
     event loop, which is useful for notifying shutdowns or synchronizing states.
     """
-
-    _instance: "LoopManager | None" = None
-
-    def __new__(cls, default_backend: str = "uvloop") -> "LoopManager":
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-        return cls._instance
 
     def __init__(self, default_backend: str = "uvloop"):
         if getattr(self, "_initialized", False):

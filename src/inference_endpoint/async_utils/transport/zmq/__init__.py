@@ -15,6 +15,7 @@
 
 """ZMQ Transport Package."""
 
+from .context import ManagedZMQContext
 from .transport import ZmqWorkerPoolTransport
 
-__all__ = ["ZmqWorkerPoolTransport"]
+__all__ = ["ManagedZMQContext", "ZmqWorkerPoolTransport"]

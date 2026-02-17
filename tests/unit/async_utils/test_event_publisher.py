@@ -41,6 +41,7 @@ from inference_endpoint.async_utils.transport.record import (
     SessionEventType,
     decode_event_record,
 )
+from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
 from inference_endpoint.async_utils.transport.zmq.pubsub import ZmqEventRecordSubscriber
 
 # Default timeout when waiting for records in tests.
@@ -106,14 +107,21 @@ def event_loop():
 
 
 @pytest.fixture
-def event_publisher_service(sock_dir, event_loop, monkeypatch):
+def ev_pub_zmq_context():
+    """Scoped ZMQ context for EventPublisherService; lifecycle tied to tests that use it."""
+    with ManagedZMQContext.scoped() as zmq_ctx:
+        yield zmq_ctx
+
+
+@pytest.fixture
+def event_publisher_service(sock_dir, event_loop, monkeypatch, ev_pub_zmq_context):
     """Create EventPublisherService with a known socket dir and default loop."""
     monkeypatch.setenv("EV_PUB_SOCK_DIR", sock_dir)
     monkeypatch.setenv("EV_PUB_EXTRA_EAGER", "0")
     monkeypatch.setenv("EV_PUB_SEP_THREAD", "0")
     # Ensure singleton is reset so we get a new publisher bound to sock_dir
     EventPublisherService._instance = None
-    service = EventPublisherService()
+    service = EventPublisherService(ev_pub_zmq_context)
     yield service
     service.close()
     EventPublisherService._instance = None
@@ -127,10 +135,11 @@ def subscriber_loop():
 
 
 @pytest.fixture
-def collecting_subscriber(event_publisher_service, subscriber_loop):
+def collecting_subscriber(event_publisher_service, subscriber_loop, ev_pub_zmq_context):
     """Create a subscriber with its own loop; schedule .start() on that loop."""
     subscriber = CollectingEventSubscriber(
         connect_address=event_publisher_service.bind_address,
+        zmq_context=ev_pub_zmq_context,
         loop=subscriber_loop,
         topics=None,
     )
@@ -151,47 +160,45 @@ class TestEventPublisherService:
     """Tests for EventPublisherService."""
 
     @pytest.mark.asyncio
-    async def test_publish_sends_data_on_ipc_socket(self, event_publisher_service):
+    async def test_publish_sends_data_on_ipc_socket(
+        self, event_publisher_service, ev_pub_zmq_context
+    ):
         """Manual ZMQ SUB socket reader verifies data is sent when publish() is called."""
-        ctx = zmq.Context()
-        sub = ctx.socket(zmq.SUB)
+        sub = ev_pub_zmq_context.socket(zmq.SUB)
         sub.setsockopt(zmq.RCVTIMEO, int(_WAIT_RECORDS_TIMEOUT * 1000))
         sub.setsockopt(zmq.SUBSCRIBE, b"")
         sub.connect(event_publisher_service.bind_address)
-        try:
-            # Allow ZMQ slow-joiner to establish connection
-            await asyncio.sleep(0.05)
-            record = EventRecord(
-                event_type=SessionEventType.STARTED,
-                sample_uuid="",
-                data={"manual_socket": True},
-            )
-            event_publisher_service.publish(record)
-            # Yield so the publisher's event loop can drain the send buffer
-            await asyncio.sleep(0.1)
-            loop = asyncio.get_event_loop()
-            # Publisher sends a single frame: padded_topic (TOPIC_FRAME_SIZE bytes) + payload
-            frame = await asyncio.wait_for(
-                loop.run_in_executor(None, sub.recv),
-                timeout=_WAIT_RECORDS_TIMEOUT,
-            )
-            assert (
-                len(frame) > TOPIC_FRAME_SIZE
-            ), "Expected single frame (topic + payload)"
-            topic_bytes = frame[:TOPIC_FRAME_SIZE].rstrip(b"\x00")
-            payload = frame[TOPIC_FRAME_SIZE:]
-            assert topic_bytes == b"session.started"
-            rec = decode_event_record(bytes(payload))
-            assert rec.event_type.value == SessionEventType.STARTED.value
-            assert rec.data == {"manual_socket": True}
-        finally:
-            sub.close()
-            ctx.term()
+        # Allow ZMQ slow-joiner to establish connection
+        await asyncio.sleep(0.05)
+        record = EventRecord(
+            event_type=SessionEventType.STARTED,
+            sample_uuid="",
+            data={"manual_socket": True},
+        )
+        event_publisher_service.publish(record)
+        # Yield so the publisher's event loop can drain the send buffer
+        await asyncio.sleep(0.1)
+        loop = asyncio.get_event_loop()
+        # Publisher sends a single frame: padded_topic (TOPIC_FRAME_SIZE bytes) + payload
+        frame = await asyncio.wait_for(
+            loop.run_in_executor(None, sub.recv),
+            timeout=_WAIT_RECORDS_TIMEOUT,
+        )
+        assert len(frame) > TOPIC_FRAME_SIZE, "Expected single frame (topic + payload)"
+        topic_bytes = frame[:TOPIC_FRAME_SIZE].rstrip(b"\x00")
+        payload = frame[TOPIC_FRAME_SIZE:]
+        assert topic_bytes == b"session.started"
+        rec = decode_event_record(bytes(payload))
+        assert rec.event_type.value == SessionEventType.STARTED.value
+        assert rec.data == {"manual_socket": True}
+        # Socket is closed by ManagedZMQContext.cleanup() in ev_pub_zmq_context fixture teardown.
 
-    def test_singleton_returns_same_instance(self, event_publisher_service):
-        """Multiple EventPublisherService() calls return the same instance."""
-        p1 = EventPublisherService()
-        p2 = EventPublisherService()
+    def test_singleton_returns_same_instance(
+        self, event_publisher_service, ev_pub_zmq_context
+    ):
+        """Multiple EventPublisherService(ctx) calls return the same instance."""
+        p1 = event_publisher_service
+        p2 = EventPublisherService(ev_pub_zmq_context)
         assert p1 is p2
         assert p1 is event_publisher_service
 

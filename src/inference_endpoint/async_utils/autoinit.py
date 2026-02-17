@@ -14,14 +14,10 @@
 # limitations under the License.
 
 
-from .event_publisher import EventPublisherService
 from .loop_manager import LoopManager
 
 # Initialize loop manager
 LOOP_MANAGER = LoopManager()
 
-# Initialize event publisher
-EVENT_PUBLISHER = EventPublisherService()
 
-
-__all__ = ["LOOP_MANAGER", "EVENT_PUBLISHER"]
+__all__ = ["LOOP_MANAGER"]

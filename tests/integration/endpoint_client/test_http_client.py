@@ -21,6 +21,7 @@ import time
 import pytest
 import zmq
 import zmq.asyncio
+from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
 from inference_endpoint.core.types import Query
 
 from .conftest import create_futures_client
@@ -149,44 +150,47 @@ class TestHttpEndpointClientScaleOut:
         for num_workers in worker_counts:
             print(f"\nTesting with {num_workers} workers...")
 
-            client = create_futures_client(
-                f"{mock_http_echo_server.url}/v1/chat/completions",
-                num_workers=num_workers,
-                max_connections=num_workers * 10,  # ensure each worker has connections
-                warmup_connections=False,
-            )
+            with ManagedZMQContext.scoped() as zmq_ctx:
+                client = create_futures_client(
+                    f"{mock_http_echo_server.url}/v1/chat/completions",
+                    num_workers=num_workers,
+                    max_connections=num_workers
+                    * 10,  # ensure each worker has connections
+                    warmup_connections=False,
+                    zmq_context=zmq_ctx,
+                )
 
-            try:
-                num_requests = actual_max_concurrency
-                futures = []
+                try:
+                    num_requests = actual_max_concurrency
+                    futures = []
 
-                start_time = time.time()
-                for i in range(num_requests):
-                    query = Query(
-                        id=f"worker-test-{i}",
-                        data={
-                            "prompt": f"Testing {num_workers} workers - request {i}",
-                            "model": "gpt-3.5-turbo",
-                        },
+                    start_time = time.time()
+                    for i in range(num_requests):
+                        query = Query(
+                            id=f"worker-test-{i}",
+                            data={
+                                "prompt": f"Testing {num_workers} workers - request {i}",
+                                "model": "gpt-3.5-turbo",
+                            },
+                        )
+                        future = client.issue(query)
+                        futures.append(future)
+
+                    # Wait for all
+                    results = await asyncio.gather(
+                        *[asyncio.wrap_future(f) for f in futures]
                     )
-                    future = client.issue(query)
-                    futures.append(future)
+                    duration = time.time() - start_time
 
-                # Wait for all
-                results = await asyncio.gather(
-                    *[asyncio.wrap_future(f) for f in futures]
-                )
-                duration = time.time() - start_time
+                    # Verify
+                    assert len(results) == num_requests
+                    print(
+                        f"  Completed {num_requests} requests in {duration:.2f}s "
+                        f"({num_requests / duration:.0f} req/s)"
+                    )
 
-                # Verify
-                assert len(results) == num_requests
-                print(
-                    f"  Completed {num_requests} requests in {duration:.2f}s "
-                    f"({num_requests / duration:.0f} req/s)"
-                )
-
-            finally:
-                client.shutdown()
+                finally:
+                    client.shutdown()
 
 
 class TestHTTPEndpointClientFunctionality:
@@ -212,30 +216,32 @@ class TestHTTPEndpointClientFunctionality:
         await server.start_server()
 
         try:
-            client = create_futures_client(
-                f"http://localhost:{server.port}/v1/chat/completions",
-                num_workers=1,
-            )
-
-            # Issue requests that will hang
-            num_requests = 5
-            futures = [
-                client.issue(
-                    Query(id=f"test-{i}", data={"prompt": "x", "model": "test"})
+            with ManagedZMQContext.scoped() as zmq_ctx:
+                client = create_futures_client(
+                    f"http://localhost:{server.port}/v1/chat/completions",
+                    num_workers=1,
+                    zmq_context=zmq_ctx,
                 )
-                for i in range(num_requests)
-            ]
 
-            # Wait for at least one request to reach server
-            await request_received.wait()
+                # Issue requests that will hang
+                num_requests = 5
+                futures = [
+                    client.issue(
+                        Query(id=f"test-{i}", data={"prompt": "x", "model": "test"})
+                    )
+                    for i in range(num_requests)
+                ]
 
-            # Shutdown should cancel all futures
-            client.shutdown()
+                # Wait for at least one request to reach server
+                await request_received.wait()
 
-            cancelled = sum(1 for f in futures if f.cancelled())
-            assert (
-                cancelled == num_requests
-            ), f"Expected {num_requests} cancelled, got {cancelled}"
+                # Shutdown should cancel all futures
+                client.shutdown()
+
+                cancelled = sum(1 for f in futures if f.cancelled())
+                assert (
+                    cancelled == num_requests
+                ), f"Expected {num_requests} cancelled, got {cancelled}"
 
         finally:
             await server.close()
@@ -243,31 +249,33 @@ class TestHTTPEndpointClientFunctionality:
     @pytest.mark.asyncio
     async def test_error_response_propagation(self):
         """Test that error responses are propagated as exceptions in futures."""
-        client = create_futures_client(
-            "http://invalid-host-does-not-exist:9999/v1/chat/completions",
-        )
-
-        try:
-            # Send request to invalid endpoint
-            query = Query(
-                id="2001",
-                data={
-                    "prompt": "Test error",
-                    "model": "gpt-3.5-turbo",
-                },
+        with ManagedZMQContext.scoped() as zmq_ctx:
+            client = create_futures_client(
+                "http://invalid-host-does-not-exist:9999/v1/chat/completions",
+                zmq_context=zmq_ctx,
             )
 
-            future = client.issue(query)
+            try:
+                # Send request to invalid endpoint
+                query = Query(
+                    id="2001",
+                    data={
+                        "prompt": "Test error",
+                        "model": "gpt-3.5-turbo",
+                    },
+                )
 
-            # Should get error
-            with pytest.raises(Exception) as exc_info:
-                await asyncio.wrap_future(future)
+                future = client.issue(query)
 
-            # Error message might be empty string, just verify exception was raised
-            assert exc_info.value is not None  # Exception was raised
+                # Should get error
+                with pytest.raises(Exception) as exc_info:
+                    await asyncio.wrap_future(future)
 
-        finally:
-            client.shutdown()
+                # Error message might be empty string, just verify exception was raised
+                assert exc_info.value is not None  # Exception was raised
+
+            finally:
+                client.shutdown()
 
     @pytest.mark.asyncio
     async def test_response_handler_error_recovery(self, futures_http_client):
@@ -318,30 +326,32 @@ class TestHTTPEndpointClientFunctionality:
     @pytest.mark.asyncio
     async def test_streaming_error_propagation(self):
         """Test error propagation in streaming responses."""
-        # Use invalid endpoint to trigger errors
-        client = create_futures_client(
-            "http://invalid-endpoint-12345:9999/v1/chat/completions",
-            warmup_connections=False,
-        )
-
-        try:
-            query = Query(
-                id="test-error",
-                data={
-                    "prompt": "This will fail",
-                    "model": "gpt-3.5-turbo",
-                    "stream": True,
-                },
+        with ManagedZMQContext.scoped() as zmq_ctx:
+            # Use invalid endpoint to trigger errors
+            client = create_futures_client(
+                "http://invalid-endpoint-12345:9999/v1/chat/completions",
+                warmup_connections=False,
+                zmq_context=zmq_ctx,
             )
 
-            future = client.issue(query)
+            try:
+                query = Query(
+                    id="test-error",
+                    data={
+                        "prompt": "This will fail",
+                        "model": "gpt-3.5-turbo",
+                        "stream": True,
+                    },
+                )
 
-            # Complete response should fail
-            with pytest.raises(Exception):  # noqa: B017 Worker wraps errors in generic Exception
-                await asyncio.wrap_future(future)
+                future = client.issue(query)
 
-        finally:
-            client.shutdown()
+                # Complete response should fail
+                with pytest.raises(Exception):  # noqa: B017 Worker wraps errors in generic Exception
+                    await asyncio.wrap_future(future)
+
+            finally:
+                client.shutdown()
 
     @pytest.mark.asyncio
     async def test_concurrent_streaming_requests(self, futures_http_client):

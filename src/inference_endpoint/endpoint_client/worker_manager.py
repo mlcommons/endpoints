@@ -19,6 +19,7 @@ import asyncio
 import logging
 import time
 from multiprocessing import Process
+from typing import Any
 
 from inference_endpoint.async_utils.transport import WorkerPoolTransport
 from inference_endpoint.endpoint_client.config import HTTPClientConfig
@@ -34,28 +35,35 @@ class WorkerManager:
     Creates and owns:
     - WorkerPoolTransport for IPC
     - Worker processes
+
+    Transport-specific arguments (e.g. ManagedZMQContext for ZMQ) are forwarded
+    via *args and **kwargs to transport_cls.create(). The caller is responsible
+    for scoping the lifetime of any context (e.g. ManagedZMQContext.scoped()).
     """
 
     def __init__(
         self,
         http_config: HTTPClientConfig,
         loop: asyncio.AbstractEventLoop,
+        *args: Any,
+        **kwargs: Any,
     ):
         """Initialize worker manager.
 
         Args:
             http_config: HTTP client configuration.
             loop: Event loop for transport registration.
+            *args: Forwarded to transport_cls.create(loop, *args, ...).
+            **kwargs: Forwarded to transport_cls.create(..., **kwargs).
+                     num_workers is set from http_config if not provided.
         """
         self.http_config = http_config
 
         # Create pool transport via factory
-        # worker_pool_transport is guaranteed to be set by HTTPClientConfig.__post_init__
         assert http_config.worker_pool_transport is not None
-        self.pool_transport: WorkerPoolTransport = (
-            http_config.worker_pool_transport.create(
-                loop, num_workers=http_config.num_workers
-            )
+        transport_cls = http_config.worker_pool_transport
+        self.pool_transport: WorkerPoolTransport = transport_cls.create(
+            loop, http_config.num_workers, *args, **kwargs
         )
 
         # Worker processes

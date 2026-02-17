@@ -25,7 +25,7 @@ import asyncio
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import msgspec
 
@@ -36,6 +36,9 @@ from inference_endpoint.async_utils.transport.record import (
     encode_event_record,
 )
 from inference_endpoint.core.types import Query, QueryResult, StreamChunk
+
+if TYPE_CHECKING:
+    from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
 
 
 @runtime_checkable
@@ -91,7 +94,7 @@ class WorkerConnector(Protocol):
 
     @asynccontextmanager
     async def connect(
-        self, worker_id: int
+        self, worker_id: int, zmq_context: ManagedZMQContext
     ) -> AsyncIterator[tuple[ReceiverTransport, SenderTransport]]:
         """Connect worker transports and signal readiness.
 
@@ -100,6 +103,7 @@ class WorkerConnector(Protocol):
 
         Args:
             worker_id: Unique identifier for this worker.
+            zmq_context: Managed ZMQ context (e.g. from ManagedZMQContext.scoped() in this process).
 
         Yields:
             Tuple of (request_receiver, response_sender) transports.
@@ -116,7 +120,8 @@ class WorkerPoolTransport(Protocol):
     Provides fan-out (send to workers) and fan-in (receive from workers).
 
     Usage:
-        pool = ZmqWorkerPoolTransport.create(loop, num_workers=4)
+        with ManagedZMQContext.scoped() as zmq_ctx:
+            pool = ZmqWorkerPoolTransport.create(loop, 4, zmq_ctx)
 
         # Spawn workers with connector
         for i in range(4):
@@ -139,14 +144,16 @@ class WorkerPoolTransport(Protocol):
         cls,
         loop: asyncio.AbstractEventLoop,
         num_workers: int,
-        **overrides: Any,
+        *args: Any,
+        **kwargs: Any,
     ) -> WorkerPoolTransport:
         """Factory to create a worker pool transport.
 
         Args:
             loop: Event loop for transport registration.
-            num_workers: Number of workers.
-            **overrides: Transport-specific config overrides.
+            num_workers: Number of workers (required).
+            *args: Transport-specific positional arguments (e.g. ManagedZMQContext for ZMQ).
+            **kwargs: Transport-specific config overrides.
 
         Returns:
             Configured WorkerPoolTransport instance.

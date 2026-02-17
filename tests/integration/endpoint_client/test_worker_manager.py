@@ -19,8 +19,11 @@ import asyncio
 import os
 import signal
 import subprocess
+from contextlib import nullcontext
 
 import pytest
+from inference_endpoint.async_utils.transport import ZmqWorkerPoolTransport
+from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
 from inference_endpoint.endpoint_client.config import HTTPClientConfig
 from inference_endpoint.endpoint_client.worker_manager import WorkerManager
 
@@ -119,29 +122,31 @@ class TestWorkerLifecycle:
         http_config = manager_config
         loop = asyncio.get_running_loop()
 
-        manager = WorkerManager(
-            http_config=http_config,
-            loop=loop,
-        )
+        ctx_manager = nullcontext()
+        if http_config.worker_pool_transport is ZmqWorkerPoolTransport:
+            ctx_manager = ManagedZMQContext.scoped()
 
-        # Initialize manager (spawns workers)
-        await manager.initialize()
+        with ctx_manager as ctx_obj:
+            manager = WorkerManager(http_config, loop, ctx_obj)
 
-        # Verify workers were spawned
-        assert len(manager.workers) == http_config.num_workers
-        assert len(manager.worker_pids) == http_config.num_workers
+            # Initialize manager (spawns workers)
+            await manager.initialize()
 
-        # Verify all workers are alive
-        for worker in manager.workers:
-            assert worker.is_alive()
-            assert worker.pid > 0
+            # Verify workers were spawned
+            assert len(manager.workers) == http_config.num_workers
+            assert len(manager.worker_pids) == http_config.num_workers
 
-        # Shutdown manager
-        await manager.shutdown()
+            # Verify all workers are alive
+            for worker in manager.workers:
+                assert worker.is_alive()
+                assert worker.pid > 0
 
-        # Verify workers are terminated
-        for worker in manager.workers:
-            assert not worker.is_alive()
+            # Shutdown manager
+            await manager.shutdown()
+
+            # Verify workers are terminated
+            for worker in manager.workers:
+                assert not worker.is_alive()
 
     @pytest.mark.parametrize(
         "signal_type,signal_method",
@@ -161,49 +166,50 @@ class TestWorkerLifecycle:
         http_config.num_workers = 1
         loop = asyncio.get_running_loop()
 
-        manager = WorkerManager(
-            http_config=http_config,
-            loop=loop,
-        )
+        ctx_manager = nullcontext()
+        if http_config.worker_pool_transport is ZmqWorkerPoolTransport:
+            ctx_manager = ManagedZMQContext.scoped()
 
-        # Initialize manager
-        await manager.initialize()
+        with ctx_manager as ctx_obj:
+            manager = WorkerManager(http_config, loop, ctx_obj)
 
-        worker = manager.workers[0]
-        worker_pid = worker.pid
-        assert worker.is_alive()
+            # Initialize manager
+            await manager.initialize()
 
-        # Send signal based on type
-        if signal_method == "terminate":
-            worker.terminate()  # SIGTERM
-        elif signal_method == "kill":
-            worker.kill()  # SIGKILL
-        elif isinstance(signal_method, int):
-            os.kill(worker_pid, signal_method)  # SIGINT or other
+            worker = manager.workers[0]
+            worker_pid = worker.pid
+            assert worker.is_alive()
 
-        # Give time for signal to be processed
-        await asyncio.sleep(TEST_WORKER_POST_KILL_DELAY_S)
+            # Send signal based on type
+            if signal_method == "terminate":
+                worker.terminate()  # SIGTERM
+            elif signal_method == "kill":
+                worker.kill()  # SIGKILL
+            elif isinstance(signal_method, int):
+                os.kill(worker_pid, signal_method)  # SIGINT or other
 
-        # Check zombie state before shutdown
-        zombies_before = check_for_zombies([worker_pid])
-        if zombies_before:
-            print(f"✓ Worker {worker_pid} became zombie after {signal_type}")
-        elif not worker.is_alive():
-            print(f"✓ Worker {worker_pid} exited after {signal_type}")
-        else:
-            print(f"⚠ Worker {worker_pid} still running after {signal_type}")
+            # Give time for signal to be processed
+            await asyncio.sleep(TEST_WORKER_POST_KILL_DELAY_S)
 
-        # Shutdown should handle the worker properly
-        await manager.shutdown()
+            # Check zombie state before shutdown
+            zombies_before = check_for_zombies([worker_pid])
+            if zombies_before:
+                print(f"✓ Worker {worker_pid} became zombie after {signal_type}")
+            elif not worker.is_alive():
+                print(f"✓ Worker {worker_pid} exited after {signal_type}")
+            else:
+                print(f"⚠ Worker {worker_pid} still running after {signal_type}")
 
-        # Verify worker is dead and reaped
-        assert not worker.is_alive(), f"Worker should be dead after {signal_type}"
-        assert (
-            worker.exitcode is not None
-        ), f"Worker should be reaped after {signal_type}"
-        assert_no_zombies([worker_pid])
+            # Shutdown should handle the worker properly
+            await manager.shutdown()
 
-        print(f"✓ Worker properly handled {signal_type} and was reaped")
+            # Verify worker is dead and reaped
+            assert not worker.is_alive(), f"Worker should be dead after {signal_type}"
+            assert (
+                worker.exitcode is not None
+            ), f"Worker should be reaped after {signal_type}"
+            assert_no_zombies([worker_pid])
+            print(f"✓ Worker properly handled {signal_type} and was reaped")
 
     @pytest.mark.asyncio
     async def test_multiple_workers_with_mixed_signals(self, manager_config):
@@ -212,42 +218,46 @@ class TestWorkerLifecycle:
         http_config.num_workers = 3
         loop = asyncio.get_running_loop()
 
-        manager = WorkerManager(
-            http_config=http_config,
-            loop=loop,
-        )
+        ctx_manager = nullcontext()
+        if http_config.worker_pool_transport is ZmqWorkerPoolTransport:
+            ctx_manager = ManagedZMQContext.scoped()
 
-        # Initialize manager
-        await manager.initialize()
+        with ctx_manager as ctx_obj:
+            manager = WorkerManager(http_config, loop, ctx_obj)
 
-        assert len(manager.workers) == 3
-        worker_pids = [w.pid for w in manager.workers]
+            # Initialize manager
+            await manager.initialize()
 
-        # Kill workers with different signals (realistic mixed scenario)
-        manager.workers[0].kill()  # SIGKILL - immediate death
-        manager.workers[1].terminate()  # SIGTERM - graceful
-        os.kill(manager.workers[2].pid, signal.SIGINT)  # SIGINT - interrupt
+            assert len(manager.workers) == 3
+            worker_pids = [w.pid for w in manager.workers]
 
-        # Give time for signal to be processed
-        await asyncio.sleep(TEST_WORKER_POST_KILL_DELAY_S)
+            # Kill workers with different signals (realistic mixed scenario)
+            manager.workers[0].kill()  # SIGKILL - immediate death
+            manager.workers[1].terminate()  # SIGTERM - graceful
+            os.kill(manager.workers[2].pid, signal.SIGINT)  # SIGINT - interrupt
 
-        # Check which became zombies
-        zombies_before = check_for_zombies(worker_pids)
-        print(
-            f"Mixed signals: {len(zombies_before)}/{len(worker_pids)} zombies before shutdown"
-        )
+            # Give time for signal to be processed
+            await asyncio.sleep(TEST_WORKER_POST_KILL_DELAY_S)
 
-        # Shutdown should handle all workers regardless of how they died
-        await manager.shutdown()
+            # Check which became zombies
+            zombies_before = check_for_zombies(worker_pids)
+            print(
+                f"Mixed signals: {len(zombies_before)}/{len(worker_pids)} zombies before shutdown"
+            )
 
-        # Verify all workers are dead and reaped
-        for i, worker in enumerate(manager.workers):
-            assert not worker.is_alive(), f"Worker {i} should be dead"
-            assert worker.exitcode is not None, f"Worker {i} should be reaped"
+            # Shutdown should handle all workers regardless of how they died
+            await manager.shutdown()
 
-        # No zombies should remain
-        assert_no_zombies(worker_pids)
-        print(f"✓ All {len(worker_pids)} workers properly reaped after mixed signals")
+            # Verify all workers are dead and reaped
+            for i, worker in enumerate(manager.workers):
+                assert not worker.is_alive(), f"Worker {i} should be dead"
+                assert worker.exitcode is not None, f"Worker {i} should be reaped"
+
+            # No zombies should remain
+            assert_no_zombies(worker_pids)
+            print(
+                f"✓ All {len(worker_pids)} workers properly reaped after mixed signals"
+            )
 
 
 class TestWorkerDeathScenarios:
@@ -270,59 +280,60 @@ class TestWorkerDeathScenarios:
         http_config = worker_death_config
         loop = asyncio.get_running_loop()
 
-        manager = WorkerManager(
-            http_config=http_config,
-            loop=loop,
-        )
+        ctx_manager = nullcontext()
+        if http_config.worker_pool_transport is ZmqWorkerPoolTransport:
+            ctx_manager = ManagedZMQContext.scoped()
 
-        # Initialize manager
-        await manager.initialize()
+        with ctx_manager as ctx_obj:
+            manager = WorkerManager(http_config, loop, ctx_obj)
 
-        # Kill all workers forcefully to create zombies
-        original_pids = [worker.pid for worker in manager.workers]
-        for worker in manager.workers:
-            worker.kill()
+            # Initialize manager
+            await manager.initialize()
 
-        # Give time for signal to be processed
-        await asyncio.sleep(TEST_WORKER_POST_KILL_DELAY_S)
+            # Kill all workers forcefully to create zombies
+            original_pids = [worker.pid for worker in manager.workers]
+            for worker in manager.workers:
+                worker.kill()
 
-        # Verify all workers are dead
-        for worker in manager.workers:
-            assert not worker.is_alive()
+            # Give time for signal to be processed
+            await asyncio.sleep(TEST_WORKER_POST_KILL_DELAY_S)
 
-        # Verify workers are same objects (not replaced)
-        for i, worker in enumerate(manager.workers):
-            assert worker.pid == original_pids[i]
-            assert not worker.is_alive()
+            # Verify all workers are dead
+            for worker in manager.workers:
+                assert not worker.is_alive()
 
-        # CRITICAL: Check for zombies BEFORE shutdown
-        zombies_before = check_for_zombies(original_pids)
-        print(
-            f"Workers before shutdown: {len(original_pids)} total, {len(zombies_before)} zombies"
-        )
-        if zombies_before:
+            # Verify workers are same objects (not replaced)
+            for i, worker in enumerate(manager.workers):
+                assert worker.pid == original_pids[i]
+                assert not worker.is_alive()
+
+            # CRITICAL: Check for zombies BEFORE shutdown
+            zombies_before = check_for_zombies(original_pids)
             print(
-                f"✓ Verified: {len(zombies_before)} zombie(s) exist before shutdown: {zombies_before}"
+                f"Workers before shutdown: {len(original_pids)} total, {len(zombies_before)} zombies"
             )
-        else:
-            print("⚠ All workers auto-reaped by OS before shutdown check")
+            if zombies_before:
+                print(
+                    f"✓ Verified: {len(zombies_before)} zombie(s) exist before shutdown: {zombies_before}"
+                )
+            else:
+                print("⚠ All workers auto-reaped by OS before shutdown check")
 
-        # Shutdown should reap all zombies
-        await manager.shutdown()
+            # Shutdown should reap all zombies
+            await manager.shutdown()
 
-        # CRITICAL: Verify NO zombies after shutdown
-        zombies_after = check_for_zombies(original_pids)
-        assert (
-            len(zombies_after) == 0
-        ), f"Shutdown failed to reap {len(zombies_after)} zombie(s): {zombies_after}"
+            # CRITICAL: Verify NO zombies after shutdown
+            zombies_after = check_for_zombies(original_pids)
+            assert (
+                len(zombies_after) == 0
+            ), f"Shutdown failed to reap {len(zombies_after)} zombie(s): {zombies_after}"
 
-        # Verify all zombies were reaped using assert_no_zombies
-        assert_no_zombies(original_pids)
-
-        if zombies_before:
-            print(
-                f"✓ Verified: All {len(zombies_before)} zombie(s) were reaped by shutdown"
-            )
+            # Verify all zombies were reaped using assert_no_zombies
+            assert_no_zombies(original_pids)
+            if zombies_before:
+                print(
+                    f"✓ Verified: All {len(zombies_before)} zombie(s) were reaped by shutdown"
+                )
 
     @pytest.mark.asyncio
     async def test_shutdown_with_preexisting_dead_worker(self, worker_death_config):
@@ -330,45 +341,48 @@ class TestWorkerDeathScenarios:
         http_config = worker_death_config
         loop = asyncio.get_running_loop()
 
-        manager = WorkerManager(
-            http_config=http_config,
-            loop=loop,
-        )
+        ctx_manager = nullcontext()
+        if http_config.worker_pool_transport is ZmqWorkerPoolTransport:
+            ctx_manager = ManagedZMQContext.scoped()
 
-        # Initialize manager
-        await manager.initialize()
+        with ctx_manager as ctx_obj:
+            manager = WorkerManager(http_config, loop, ctx_obj)
 
-        # Track all PIDs for zombie verification
-        all_pids = [worker.pid for worker in manager.workers]
-        dead_pid = manager.workers[0].pid
+            # Initialize manager
+            await manager.initialize()
 
-        # Kill first worker
-        manager.workers[0].terminate()
+            # Track all PIDs for zombie verification
+            all_pids = [worker.pid for worker in manager.workers]
+            dead_pid = manager.workers[0].pid
 
-        # Give time for signal to be processed
-        await asyncio.sleep(TEST_WORKER_POST_KILL_DELAY_S)
+            # Kill first worker
+            manager.workers[0].terminate()
 
-        # Check for zombies before shutdown
-        zombies_before = check_for_zombies([dead_pid])
-        if zombies_before:
-            print(f"✓ Verified: Worker {dead_pid} is zombie before shutdown")
+            # Give time for signal to be processed
+            await asyncio.sleep(TEST_WORKER_POST_KILL_DELAY_S)
 
-        # Immediately shutdown manager (should handle dead worker gracefully)
-        await manager.shutdown()
+            # Check for zombies before shutdown
+            zombies_before = check_for_zombies([dead_pid])
+            if zombies_before:
+                print(f"✓ Verified: Worker {dead_pid} is zombie before shutdown")
 
-        # If we reached here, shutdown completed without hanging
+            # Immediately shutdown manager (should handle dead worker gracefully)
+            await manager.shutdown()
 
-        # Verify all workers are dead and reaped (no zombies)
-        for worker in manager.workers:
-            assert not worker.is_alive()
-            assert (
-                worker.exitcode is not None
-            ), "Worker should have exit code (been reaped)"
+            # If we reached here, shutdown completed without hanging
 
-        # Verify no zombies in process table after shutdown
-        assert_no_zombies(all_pids)
+            # Verify all workers are dead and reaped (no zombies)
+            for worker in manager.workers:
+                assert not worker.is_alive()
+                assert (
+                    worker.exitcode is not None
+                ), "Worker should have exit code (been reaped)"
 
-        if zombies_before:
-            zombies_after = check_for_zombies([dead_pid])
-            assert len(zombies_after) == 0, f"Shutdown failed to reap zombie {dead_pid}"
-            print(f"✓ Verified: Zombie {dead_pid} was reaped by shutdown")
+            # Verify no zombies in process table after shutdown
+            assert_no_zombies(all_pids)
+            if zombies_before:
+                zombies_after = check_for_zombies([dead_pid])
+                assert (
+                    len(zombies_after) == 0
+                ), f"Shutdown failed to reap zombie {dead_pid}"
+                print(f"✓ Verified: Zombie {dead_pid} was reaped by shutdown")

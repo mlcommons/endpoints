@@ -26,6 +26,8 @@ from inference_endpoint.async_utils.transport.protocol import (
 )
 from inference_endpoint.async_utils.transport.record import TOPIC_FRAME_SIZE
 
+from .context import ManagedZMQContext
+
 logger = logging.getLogger(__name__)
 
 
@@ -33,6 +35,7 @@ class ZmqEventRecordPublisher(EventRecordPublisher):
     def __init__(
         self,
         bind_address: str,
+        zmq_context: ManagedZMQContext,
         loop: asyncio.AbstractEventLoop | None = None,
     ):
         super().__init__(bind_address, loop)
@@ -44,8 +47,7 @@ class ZmqEventRecordPublisher(EventRecordPublisher):
                     f"IPC path too long ({len(bind_address)} > {zmq.IPC_PATH_MAX_LEN})"
                 )
 
-        self._context = zmq.Context()
-        self._socket = self._context.socket(zmq.PUB)
+        self._socket = zmq_context.socket(zmq.PUB)
 
         # One of the guarantees of event records is that if it is published,
         # it must be eventually received by all live subscribers.
@@ -163,12 +165,7 @@ class ZmqEventRecordPublisher(EventRecordPublisher):
                 self._drain_buffer(force=True)
                 self._buffer.clear()  # This should be a no-op, but just in case.
 
-        try:
-            self._socket.close()
-            self._context.term()
-        except zmq.ZMQError:
-            # Socket/context already closed or teardown error; ignore.
-            pass
+        # Socket is closed by ManagedZMQContext.cleanup() when the context scope exits.
 
         # Cleanup IPC socket file
         if self.bind_address.startswith("ipc://"):
@@ -185,13 +182,13 @@ class ZmqEventRecordSubscriber(EventRecordSubscriber):
     def __init__(
         self,
         connect_address: str,
+        zmq_context: ManagedZMQContext,
         loop: asyncio.AbstractEventLoop,
         topics: list[str] | None = None,
     ):
         super().__init__(connect_address, loop, topics)
 
-        self._context = zmq.Context()
-        self._socket = self._context.socket(zmq.SUB)
+        self._socket = zmq_context.socket(zmq.SUB)
 
         self._socket.setsockopt(zmq.RCVHWM, 0)
 
@@ -226,18 +223,11 @@ class ZmqEventRecordSubscriber(EventRecordSubscriber):
         return None
 
     def close(self) -> None:
-        """Close the subscriber, remove the loop reader, and release the ZMQ socket/context.
-        Idempotent; safe to call multiple times.
+        """Close the subscriber and remove the loop reader. Idempotent; safe to call multiple times.
+        Socket is closed by ManagedZMQContext.cleanup() when the context scope exits.
         """
         if self.is_closed:
             return
         self.is_closed = True
 
         super().close()
-
-        try:
-            self._socket.close()
-            self._context.term()
-        except zmq.ZMQError:
-            # Socket/context already closed or teardown error; ignore.
-            pass
