@@ -49,6 +49,7 @@ class LoopManager(SingletonMixin):
         if getattr(self, "_initialized", False):
             return
         self.loops: dict[str, ManagedLoop] = {}
+        self._lock = threading.Lock()
 
         # Create default loop
         # MyPy doesn't behave well with Literal
@@ -83,30 +84,35 @@ class LoopManager(SingletonMixin):
         Returns:
             The new event loop.
         """
-        if name in self.loops:
-            return self.loops[name].loop
+        with self._lock:
+            if name in self.loops:
+                loop = self.loops[name].loop
+            else:
+                if backend == "uvloop":
+                    loop = uvloop.new_event_loop()
+                elif backend == "asyncio":
+                    loop = asyncio.new_event_loop()
+                else:
+                    raise ValueError(f"Invalid backend: {backend}")
 
-        if backend == "uvloop":
-            loop = uvloop.new_event_loop()
-        elif backend == "asyncio":
-            loop = asyncio.new_event_loop()
-        else:
-            raise ValueError(f"Invalid backend: {backend}")
+                if task_factory_mode == "eager":
+                    loop.set_task_factory(asyncio.eager_task_factory)
 
-        if task_factory_mode == "eager":
-            loop.set_task_factory(asyncio.eager_task_factory)
-
-        if name == "default":
-            asyncio.set_event_loop(loop)
-            self.loops[name] = ManagedLoop(loop=loop, thread=None)
-        else:
-            thread = threading.Thread(
-                target=loop.run_forever,
-                daemon=True,
-                name=f"ManagedEventLoop-{name}",
-            )
-            self.loops[name] = ManagedLoop(loop=loop, thread=thread)
-            thread.start()
+                if name == "default":
+                    asyncio.set_event_loop(loop)
+                    self.loops[name] = ManagedLoop(loop=loop, thread=None)
+                else:
+                    thread = threading.Thread(
+                        target=loop.run_forever,
+                        daemon=True,
+                        name=f"ManagedEventLoop-{name}",
+                    )
+                    self.loops[name] = ManagedLoop(loop=loop, thread=thread)
+                    # Starting within the lock won't have a deadlock here,
+                    # loop.run_forever won't interact with LoopManager - tasks are
+                    # only enqueued from the main thread, which should be a synchronous
+                    # operation with create_loop()
+                    thread.start()
         return loop
 
     def get_loop(self, name: str) -> asyncio.AbstractEventLoop:
@@ -118,7 +124,31 @@ class LoopManager(SingletonMixin):
         Returns:
             The event loop.
         """
-        return self.loops[name].loop
+        with self._lock:
+            return self.loops[name].loop
+
+    def _del_loop_unsafe(self, loop: asyncio.AbstractEventLoop, name: str) -> None:
+        """Removes a loop from the LoopManager.
+
+        This method is not thread-safe and should only be used within the lock.
+
+        Args:
+            loop: The loop to delete.
+            name: The name of the loop.
+        """
+        self.loops.pop(name)
+        if loop.is_running():
+            loop.stop()
+
+    def _del_loop(self, loop: asyncio.AbstractEventLoop, name: str) -> None:
+        """Helper method to be used as a partial for thread-safe removal.
+
+        Args:
+            loop: The loop to delete.
+            name: The name of the loop.
+        """
+        with self._lock:
+            self._del_loop_unsafe(loop, name)
 
     def stop_loop(self, name: str, immediate: bool = False) -> None:
         """Stop a loop by name. The main event loop cannot be stopped.
@@ -131,10 +161,10 @@ class LoopManager(SingletonMixin):
         if name == "default":
             raise ValueError("The main event loop cannot be stopped.")
 
-        loop: asyncio.AbstractEventLoop = self.get_loop(name)
-        if immediate:
-            loop.stop()
-            self.loops.pop(name)
-        else:
-            loop.call_soon_threadsafe(loop.stop)
-            self.default_loop.call_soon_threadsafe(partial(self.loops.pop, name))
+        with self._lock:
+            # Do not use .get_loop() to avoid deadlock.
+            loop: asyncio.AbstractEventLoop = self.loops[name].loop
+            if immediate:
+                self._del_loop_unsafe(loop, name)
+            else:
+                loop.call_soon_threadsafe(partial(self._del_loop, loop, name))
