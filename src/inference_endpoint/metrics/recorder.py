@@ -84,17 +84,20 @@ def psycopg3_cursor(conninfo: str):
     # conninfo1 = f"postgresql://postgres:{password}@db.lczeskqdhwkfdgbgttqr.supabase.co:5432/postgres"
 
     # 2/11
-    password1 = "YyM77YSsFGgdkURA"
+    # password1 = "YyM77YSsFGgdkURA"
+    # 2/16
+    #    password1 = "wGodMlFrBJz1HGm7"
     # spooler connection
-    conninfo1 = f"postgresql://postgres.lczeskqdhwkfdgbgttqr:{password1}@aws-1-us-east-2.pooler.supabase.com:6543/postgres"
+    #    conninfo1 = f"postgresql://postgres.lczeskqdhwkfdgbgttqr:{password1}@aws-1-us-east-2.pooler.supabase.com:6543/postgres"
 
     print(f"connecting to supabase ORIG {conninfo}")
-    print(f"connecting to supabase NEW {conninfo1}")
-    # conn = psycopg.connect(conninfo, autocommit=False)
-    conn = psycopg.connect(conninfo1, autocommit=False)
+    #    print(f"connecting to supabase NEW {conninfo1}")
+
+    # done allow any prepared messages
     conn = psycopg.connect(
         conninfo, prepare_threshold=None, autocommit=False, connect_timeout=5
-    )
+    )  # note orig. autocommit=False
+    #    conn = psycopg.connect(conninfo1, autocommit=True)                       # ""         ""
     cursor = conn.cursor()
     print(f" psycopg3_cursor: {cursor}")
     try:
@@ -117,6 +120,7 @@ def register_pg_cleanup(conninfo: str, table_name: str):
             return
 
         try:
+            print("DROP TABLE if it EXISTS ")
             with psycopg.connect(conninfo) as conn:
                 conn.execute(f"DROP TABLE IF EXISTS {table_name}")
                 conn.commit()
@@ -295,6 +299,8 @@ class EventRecorder:
                     "parameter or DATABASE_URL env var"
                 )
             self.pg_conninfo = pg_conninfo
+
+            # comment this out to keep the DB persistent
             register_pg_cleanup(self.pg_conninfo, self.table_name)
 
         else:
@@ -352,13 +358,14 @@ class EventRecorder:
         It processes events from the queue, buffering them until the buffer is full or a force commit is requested.
         """
         logging.debug(f"Writer thread started for {self.connection_name}")
+        print(f"Writer thread started for {self.connection_name}")
 
         if self.backend == "postgres":
             print(f"Set up postgres cursor {self.pg_conninfo}")
             ctx = psycopg3_cursor(self.pg_conninfo)
             print(f"after psycopg3 ctx = {ctx}")
         else:
-            ctx = sqlite3_cursor(self.connection_name)
+            ctx = sqlite3_cursor(self.connection_name)  # return cur, conn
 
         with ctx as (cur, conn):
             # Initialize the database table
@@ -377,6 +384,7 @@ class EventRecorder:
 
             def commit_buffer():
                 """Helper to commit and clear the event buffer."""
+                print("start of commit_buffer() ")
                 if event_buffer:
                     cur.executemany(insert_query, event_buffer)
                     conn.commit()
@@ -408,6 +416,7 @@ class EventRecorder:
                     should_commit = True
                 else:
                     # Regular event - add to buffer
+                    print("event_buffer.append() now being called")
                     event_buffer.append(item)
                     should_commit = len(event_buffer) >= self.txn_buffer_size
 
@@ -416,6 +425,7 @@ class EventRecorder:
                     logging.debug(
                         f"Committing {len(event_buffer)} transactions (max buffer size: {self.txn_buffer_size})"
                     )
+                    print("buff FULL; forcing commit !! ")
                     commit_buffer()
                 self.event_queue.task_done()
 
@@ -429,7 +439,8 @@ class EventRecorder:
 
                 if item is EventRecorder._STOP_SENTINEL:
                     break
-        logging.debug(f"Writer thread stopped for {self.connection_name}")
+        # logging.debug(f"Writer thread stopped for {self.connection_name}")
+        print(f"Writer thread stopped for {self.connection_name}")
 
     def _start_writer_thread(self):
         """Starts the writer thread if not already started."""
@@ -556,6 +567,9 @@ class EventRecorder:
         This method signals the writer thread to stop, waits for it to finish processing
         all queued events, and then joins the thread.
         """
+
+        print("close writer thread")
+
         if EventRecorder.LIVE is not self:
             raise EventRecorderSingletonViolation(
                 f"EventRecorder {self.session_id} is not active, cannot close"
@@ -587,6 +601,7 @@ class EventRecorder:
 
     def __enter__(self):
         """Context manager entry - starts the writer thread."""
+        print("__enter__ start of routine")
         if not self._writer_started:
             self._start_writer_thread()
         return self
