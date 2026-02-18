@@ -140,7 +140,9 @@ class ManagedZMQContext(SingletonMixin):
             own = False
 
         if own:
-            context = cls(*args, **kwargs)
+            # Instantiate the concrete ManagedZMQContext directly to avoid
+            # relying on potential non-callable behavior from SingletonMixin.
+            context = ManagedZMQContext(*args, **kwargs)
 
         try:
             yield context
