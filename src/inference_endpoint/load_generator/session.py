@@ -164,6 +164,7 @@ class BenchmarkSession:
             print(f"reporter_table = {self.event_recorder.table_name}")
             with MetricsReporter(
                 self.event_recorder.connection_name,
+                # "postgresql://postgres.lczeskqdhwkfdgbgttqr:wGodMlFrBJz1HGm7@aws-1-us-east-2.pooler.supabase.com:6543/postgres",
                 client_type=reporter_client,
                 table_name=reporter_table,
             ) as reporter:
