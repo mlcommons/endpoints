@@ -351,6 +351,7 @@ class Report:
 
     version: str
     git_sha: str | None
+    test_started_at: int
     n_samples_issued: int
     n_samples_completed: int
     duration_ns: int
@@ -487,6 +488,11 @@ class Report:
         fn(f"Version: {self.version}{newline}")
         if self.git_sha:
             fn(f"Git SHA: {self.git_sha}{newline}")
+        # Approximate absolute time of the test started at using monotime_to_datetime from utils.py
+        test_started_at_approx = monotime_to_datetime(self.test_started_at)
+        fn(
+            f"Test started at: (timestamp_ns):{self.test_started_at}, approx. wall-clock time: ({test_started_at_approx.strftime('%Y-%m-%d %H:%M:%S')}){newline}"
+        )
         fn(f"Total samples issued: {self.n_samples_issued}{newline}")
         fn(f"Total samples completed: {self.n_samples_completed}{newline}")
         if self.duration_ns is not None:
@@ -1233,6 +1239,22 @@ class MetricsReporter:
                 pass
         return {"version": "unknown", "git_sha": None}
 
+    def get_test_started_at(self) -> int | None:
+        """Gets the timestamp of the TEST_STARTED event.
+
+        Returns:
+            int|None: The timestamp of the TEST_STARTED event in nanoseconds, or None if not found.
+        """
+        query = f"""
+        SELECT timestamp_ns FROM events
+        WHERE event_type = '{SessionEvent.TEST_STARTED.value}'
+        ORDER BY timestamp_ns ASC
+        LIMIT 1"""
+        result = self.cur_.execute(query).fetchone()
+        if result and result[0]:
+            return result[0]
+        return None
+
     def create_report(
         self,
         tokenizer: Tokenizer | None = None,
@@ -1247,6 +1269,10 @@ class MetricsReporter:
         Returns:
             Report: A Report object containing the metrics.
         """
+        test_started_at = self.get_test_started_at()
+        if test_started_at is None:
+            raise RuntimeError("TEST_STARTED event not found in database")
+
         sample_statuses = self.get_sample_statuses()
         ttft_rollup = self.derive_TTFT()
         sample_latency_rollup = self.derive_sample_latency()
@@ -1279,6 +1305,7 @@ class MetricsReporter:
         return Report(
             version=version_info.get("version", "unknown"),
             git_sha=version_info.get("git_sha"),
+            test_started_at=test_started_at,
             n_samples_issued=sample_statuses["total_sent"],
             n_samples_completed=sample_statuses["completed"],
             duration_ns=self.derive_duration(),

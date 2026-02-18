@@ -46,3 +46,49 @@ cpu_affinity: -1 # Auto: physical core isolation with SMT siblings
 - **Linux only**: Uses `os.sched_setaffinity()` and sysfs for topology detection
 - **Non-Linux**: Affinity settings are skipped with a warning
 - **Performance ranking**: Uses ACPI CPPC `highest_perf`, ARM `cpu_capacity`, or `cpuinfo_max_freq` (in order of preference)
+
+## Finding Optimal Worker Count
+
+Optimal worker count depends on your workload — prompt size, streaming mode, and connection count all affect throughput. Use the benchmark script to sweep worker counts against your expected prompt lengths and pick the configuration that maximizes recv rate.
+
+### Full sweep
+
+```bash
+python -m inference_endpoint.utils.benchmark_httpclient --full -d 5
+python -m inference_endpoint.utils.benchmark_httpclient --full -d 5 --stream
+```
+
+Runs all common worker counts against a range of prompt lengths (CPU pinning is on by default). Produces a plot at `/tmp/sweep_*.png` showing send/recv rate per configuration, with shaded variation bands and a stall% overlay.
+
+With `--stream`, the full sweep also varies stream interval (0%, 50%, 100% of prompt length) and adds an SSE-pkts/s subplot. Streaming typically requires more workers to sustain the same recv rate because each response involves many SSE events that must be parsed individually.
+
+### Targeted sweeps
+
+```bash
+# Sweep workers for a specific prompt length
+python -m inference_endpoint.utils.benchmark_httpclient -w 1:16 -l 4096 -d 10
+
+# Sweep workers with explicit values
+python -m inference_endpoint.utils.benchmark_httpclient -w 1,2,4,8,12,16 -l 4096 -d 10
+
+# Cartesian product: workers x prompt lengths
+python -m inference_endpoint.utils.benchmark_httpclient -w 1:16::8 -l 128,1024,8192 -d 5
+
+# Streaming: sweep workers with a fixed stream interval (chars per SSE event)
+python -m inference_endpoint.utils.benchmark_httpclient -w 1:16 -l 4096 --stream --stream-interval 100 -d 5
+
+# Streaming: sweep stream intervals (total events = ceil(output_length / interval))
+python -m inference_endpoint.utils.benchmark_httpclient -w 8 --stream --stream-interval 1,50,500 -d 5
+```
+
+### Reading the results
+
+- **Send Rate**: requests/s the client can issue. Higher is better.
+- **Recv Rate**: responses/s received. This is the effective throughput.
+- **SSE-pkts/s**: SSE events received per second (streaming mode only). Derived from `recv_rate * events_per_response`. Use this to gauge how the client handles high packet rates at different stream intervals.
+- **Stall%**: fraction of send time spent blocked on back-pressure (inflight limit). High stall% indicates client-side overhead — the client can't process responses fast enough to make room for new sends. The target server (MaxThroughputServer) returns pre-built responses with no compute, so stall is purely client overhead.
+- **Variation bands**: shaded region shows min/max per-second rate during each run. Wide bands indicate instability.
+
+Pick the worker count where recv rate peaks and stall% is low.
+
+For streaming workloads, also watch **SSE-pkts/s** — a small stream interval (fine-grained events) dramatically increases packet rate and may require more workers to keep up. If SSE-pkts/s plateaus while recv rate drops, the client is bottlenecked on SSE parsing overhead.
