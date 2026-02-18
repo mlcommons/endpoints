@@ -94,6 +94,7 @@ class ManagedZMQContext(SingletonMixin):
                 try:
                     sock.close()
                 except (zmq.ZMQError, OSError):
+                    # Socket already closed or invalid. Ignore.
                     pass
             self._sockets.clear()
 
@@ -102,7 +103,7 @@ class ManagedZMQContext(SingletonMixin):
             try:
                 self.ctx.term()
             except (zmq.ZMQError, OSError):
-                # Context already closed or process tearing down; ignore.
+                # Context already closed or process tearing down. Ignore.
                 pass
             finally:
                 self.ctx = None
