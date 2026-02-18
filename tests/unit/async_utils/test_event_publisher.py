@@ -26,11 +26,9 @@ Follows the same flow as scripts/zmq_pubsub_async_utils_demo.py:
 """
 
 import asyncio
-import tempfile
 import time
 
 import pytest
-import pytest_asyncio
 import zmq
 from inference_endpoint.async_utils.event_publisher import EventPublisherService
 from inference_endpoint.async_utils.loop_manager import LoopManager
@@ -91,22 +89,6 @@ class CollectingEventSubscriber(ZmqEventRecordSubscriber):
 
 
 @pytest.fixture
-def sock_dir():
-    """Temporary directory for IPC sockets (avoids collision with other tests)."""
-    with tempfile.TemporaryDirectory(prefix="ev_pub_test_") as d:
-        yield d
-
-
-@pytest_asyncio.fixture
-def event_loop():
-    """Default loop (used by the publisher and by the test coroutine)."""
-    manager = LoopManager()
-    loop = manager.default_loop
-    assert loop is not None
-    return loop
-
-
-@pytest.fixture
 def ev_pub_zmq_context():
     """Scoped ZMQ context for EventPublisherService; lifecycle tied to tests that use it."""
     with ManagedZMQContext.scoped() as zmq_ctx:
@@ -114,12 +96,8 @@ def ev_pub_zmq_context():
 
 
 @pytest.fixture
-def event_publisher_service(sock_dir, event_loop, monkeypatch, ev_pub_zmq_context):
-    """Create EventPublisherService with a known socket dir and default loop."""
-    monkeypatch.setenv("EV_PUB_SOCK_DIR", sock_dir)
-    monkeypatch.setenv("EV_PUB_EXTRA_EAGER", "0")
-    monkeypatch.setenv("EV_PUB_SEP_THREAD", "0")
-    # Ensure singleton is reset so we get a new publisher bound to sock_dir
+def event_publisher_service(ev_pub_zmq_context):
+    """Create EventPublisherService; socket directory comes from zmq_context."""
     EventPublisherService._instance = None
     service = EventPublisherService(ev_pub_zmq_context)
     yield service

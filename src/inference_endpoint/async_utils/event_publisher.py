@@ -14,7 +14,6 @@
 # limitations under the License.
 
 
-import os
 import uuid
 
 from inference_endpoint.async_utils.loop_manager import LoopManager
@@ -24,33 +23,40 @@ from inference_endpoint.utils import SingletonMixin
 
 
 class EventPublisherService(SingletonMixin, ZmqEventRecordPublisher):
-    """Singleton publisher for publishing event records.
+    """Singleton publisher for publishing event records."""
 
-    By default, the publisher will be run on the main thread's event loop. Since the
-    publisher is created at startup, several environment variables are used to configure
-    the publisher service:
-     - EV_PUB_EXTRA_EAGER=1 will make it so that calls to .publish() will not be buffered and non-async.
-       This means that the publisher will ignore any event loop and .publish() will block until the
-       message has been successfully sent. In most cases, this should not be turned on.
-     - EV_PUB_SEP_THREAD=1 will create a separate event loop specific to the publisher on its own
-       thread.
-     - EV_PUB_SOCK_DIR: If set, is used as the base directory for pub-sub IPC sockets. Otherwise,
-       an auto-generated temp directory is used.
-    """
+    def __init__(
+        self,
+        managed_zmq_context: ManagedZMQContext,
+        extra_eager: bool = False,
+        isolated_event_loop: bool = False,
+    ):
+        """Creates a new EventPublisherService.
 
-    def __init__(self, managed_zmq_context: ManagedZMQContext):
+        By default, the publisher will be run on the main thread's event loop (i.e. the default loop).
+
+        Args:
+            managed_zmq_context (ManagedZMQContext): The managed ZMQ context to use for the publisher.
+            extra_eager (bool): If True, the publisher will be a blocking call and calls to .publish()
+                will block until the message has been successfully sent. In most cases, this should not
+                be turned on, but it is useful for testing, or specifically in the use case where
+                EventRecords are being used as a synchronization mechanism (i.e. sending a specific
+                EventRecord as a STOP signal to subscribers to ensure the ordering of cleanup.)
+            isolated_event_loop (bool): If True, the publisher will be run in a separate event loop.
+        """
         if getattr(self, "_initialized", False):
             return
         self._initialized = True
 
         # Set up sockets: use ManagedZMQContext for context and socket directory
-        sock_dir = os.environ.get("EV_PUB_SOCK_DIR") or managed_zmq_context.socket_dir
-        bind_addr = f"ipc://{sock_dir}/ev_pub_{uuid.uuid4().hex[:8]}"
+        bind_addr = (
+            f"ipc://{managed_zmq_context.socket_dir}/ev_pub_{uuid.uuid4().hex[:8]}"
+        )
 
         # Set up event loop settings
-        if os.environ.get("EV_PUB_EXTRA_EAGER", "0") == "1":
+        if extra_eager:
             loop = None
-        elif os.environ.get("EV_PUB_SEP_THREAD", "0") == "1":
+        elif isolated_event_loop:
             loop = LoopManager().create_loop("ev_pub")
         else:
             loop = LoopManager().default_loop

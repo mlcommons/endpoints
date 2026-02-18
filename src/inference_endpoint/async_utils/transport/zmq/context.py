@@ -48,18 +48,15 @@ class ManagedZMQContext(SingletonMixin):
     multiprocessing start methods.
     """
 
-    def __init__(self, io_threads: int = 1, reuse_parent: bool = True) -> None:
+    def __init__(self, io_threads: int = 1) -> None:
         if getattr(self, "_initialized", False):
             # If mp.start_method is 'spawn', the child process will always create its own singleton
             # since it will not share the parent's memory.
             # However, if mp.start_method is 'fork', we need to check if the PID matches and create
-            # a new singleton if reuse_parent is False and we are in a child process.
-            if os.getpid() == self.pid or self.reuse_parent:
+            # a new singleton if we are in a child process.
+            if os.getpid() == self.pid:
                 return
-        self._initialized = True
-
         self.pid: int = os.getpid()
-        self.reuse_parent: bool = reuse_parent
 
         self.ctx: zmq.Context | None = zmq.Context(io_threads=io_threads)
         self._tmp_dir: tempfile.TemporaryDirectory | None = tempfile.TemporaryDirectory(
@@ -67,6 +64,8 @@ class ManagedZMQContext(SingletonMixin):
         )
         self.socket_dir: str | None = self._tmp_dir.name
         self._sockets: list[zmq.Socket] = []
+
+        self._initialized = True
 
     def socket(self, socket_type: int) -> zmq.Socket:
         """Create a ZMQ socket and register it for cleanup.

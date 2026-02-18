@@ -20,7 +20,7 @@ import logging
 import uuid
 from itertools import cycle
 
-from inference_endpoint.async_utils.autoinit import LOOP_MANAGER
+from inference_endpoint.async_utils.loop_manager import LoopManager
 from inference_endpoint.async_utils.transport import ZmqWorkerPoolTransport
 from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
 from inference_endpoint.core.types import Query, QueryResult, StreamChunk
@@ -68,12 +68,12 @@ class AsyncHttpEndpointClient:
                 )
         self._zmq_context = zmq_context
 
-        # Use provided loop or create one via LOOP_MANAGER (uvloop + eager task factory)
+        # Use provided loop or create one via LoopManager (uvloop + eager task factory)
         self._owns_loop = loop is None
         self._loop_name: str | None = None
         if loop is None:
             self._loop_name = f"HttpClient-{self.client_id}"
-            self.loop = LOOP_MANAGER.create_loop(
+            self.loop = LoopManager().create_loop(
                 name=self._loop_name,
                 backend="uvloop",
                 task_factory_mode="eager",
@@ -144,9 +144,9 @@ class AsyncHttpEndpointClient:
         # Shutdown workers
         await self.worker_manager.shutdown()
 
-        # Stop event loop if we own it (LOOP_MANAGER will stop and remove it)
+        # Stop event loop if we own it
         if self._owns_loop and self._loop_name is not None:
-            LOOP_MANAGER.stop_loop(self._loop_name)
+            LoopManager().stop_loop(self._loop_name)
             self._loop_name = None
 
         if self._dropped_requests > 0:
