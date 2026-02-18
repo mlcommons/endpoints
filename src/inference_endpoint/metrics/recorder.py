@@ -301,7 +301,7 @@ class EventRecorder:
             self.pg_conninfo = pg_conninfo
 
             # comment this out to keep the DB persistent
-            register_pg_cleanup(self.pg_conninfo, self.table_name)
+            # register_pg_cleanup(self.pg_conninfo, self.table_name)
 
         else:
             raise ValueError(
