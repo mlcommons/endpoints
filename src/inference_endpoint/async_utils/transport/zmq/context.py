@@ -34,6 +34,7 @@ import os
 import tempfile
 from collections.abc import Generator
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any
 
 import zmq
@@ -48,7 +49,16 @@ class ManagedZMQContext(SingletonMixin):
     multiprocessing start methods.
     """
 
-    def __init__(self, io_threads: int = 1) -> None:
+    def __init__(self, io_threads: int = 1, socket_dir: str | None = None) -> None:
+        """Creates a new ManagedZMQContext.
+
+        Args:
+            io_threads (int): The number of IO threads to use for the ZMQ context.
+            socket_dir (str | None): The directory to use for the ZMQ sockets. If None, a temporary directory will be created.
+                If set, the directory must be writable and must already exist.
+                If not set, a temporary directory will be created and used.
+                This directory will be cleaned up when the context is cleaned up.
+        """
         if getattr(self, "_initialized", False):
             # If mp.start_method is 'spawn', the child process will always create its own singleton
             # since it will not share the parent's memory.
@@ -59,10 +69,22 @@ class ManagedZMQContext(SingletonMixin):
         self.pid: int = os.getpid()
 
         self.ctx: zmq.Context | None = zmq.Context(io_threads=io_threads)
-        self._tmp_dir: tempfile.TemporaryDirectory | None = tempfile.TemporaryDirectory(
-            prefix="zmq_"
-        )
-        self.socket_dir: str | None = self._tmp_dir.name
+
+        if socket_dir is None:
+            self._tmp_dir: tempfile.TemporaryDirectory | None = (
+                tempfile.TemporaryDirectory(prefix="zmq_")
+            )
+            self.socket_dir: str | None = self._tmp_dir.name
+        else:
+            path = Path(socket_dir)
+            if not path.exists():
+                raise FileNotFoundError(f"Socket directory {path} does not exist")
+            if not path.is_dir():
+                raise NotADirectoryError(f"Socket directory {path} is not a directory")
+            if not os.access(path, os.W_OK):
+                raise PermissionError(f"Socket directory {path} is not writable")
+            self._tmp_dir = None
+            self.socket_dir: str | None = path.as_posix()  # type: ignore[no-redef]
         self._sockets: list[zmq.Socket] = []
 
         self._initialized = True
@@ -115,7 +137,7 @@ class ManagedZMQContext(SingletonMixin):
                 pass
             finally:
                 self._tmp_dir = None
-                self.socket_dir = None
+        self.socket_dir = None
 
         self._initialized = False
 

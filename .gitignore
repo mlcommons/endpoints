@@ -191,3 +191,6 @@ examples/03_BenchmarkComparison/vllm_venv/
 
 # Cursor artifacts (local development only)
 .cursor_artifacts/
+
+# User-specific Cursor rule (local Docker dev); do not commit
+.cursor/rules/local-docker-dev.mdc
