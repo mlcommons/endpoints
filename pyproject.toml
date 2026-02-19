@@ -51,6 +51,8 @@ dependencies = [
     "colorama==0.4.6",
     # Fix pytz-2024 import warning
     "pytz==2025.2",
+    # SQL event logger (swappable backends, default sqlite)
+    "sqlalchemy>=2.0.0",
 ]
 
 [project.optional-dependencies]

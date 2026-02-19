@@ -12,12 +12,16 @@ Demonstrates the intended control flow:
 - process(records) is async and scheduled via create_task so it does not block the socket.
 - Cleanup: .close() on subscribers when the session has ended.
 
+The demo runs the event_logger with both JSONL and SQL writers, then opens the SQLite
+database and prints its contents to verify SQLWriter worked.
+
 Usage:
     python scripts/zmq_pubsub_demo.py
 """
 
 import asyncio
 import logging
+import sqlite3
 import subprocess
 import sys
 import time
@@ -247,7 +251,7 @@ async def main() -> None:
         publisher = EventPublisherService(zmq_ctx)
         connect_address = publisher.bind_address
 
-        # Start event_logger as a subprocess (logs events to JSONL under event_log_dir).
+        # Start event_logger as a subprocess (logs to both JSONL and SQL under event_log_dir).
         event_logger_cmd = [
             sys.executable,
             "-m",
@@ -256,6 +260,9 @@ async def main() -> None:
             str(event_log_dir),
             "--socket-address",
             connect_address,
+            "--writers",
+            "jsonl",
+            "sql",
         ]
         logger.info("Starting event_logger subprocess: %s", " ".join(event_logger_cmd))
         event_logger_proc = subprocess.Popen(
@@ -311,6 +318,46 @@ async def main() -> None:
             if event_logger_proc.poll() is None:
                 event_logger_proc.terminate()
                 event_logger_proc.wait(timeout=2)
+
+            # Verify SQLWriter: open the SQLite DB and show contents.
+            events_db = event_log_dir / "events.db"
+            if events_db.exists():
+                logger.info("=" * 80)
+                logger.info("SQLWriter verification: contents of %s", events_db)
+                logger.info("=" * 80)
+                conn = sqlite3.connect(str(events_db))
+                try:
+                    cur = conn.execute(
+                        "SELECT id, sample_uuid, event_type, timestamp_ns, data FROM events ORDER BY id"
+                    )
+                    rows = cur.fetchall()
+                    for row in rows:
+                        row_id, sample_uuid, event_type, timestamp_ns, data = row
+                        sample_short = (
+                            (sample_uuid[:8] + "..") if sample_uuid else "N/A"
+                        )
+                        data_preview = (
+                            data[:60] + b"..."
+                            if data and len(data) > 60
+                            else data or b""
+                        ) or b""
+                        logger.info(
+                            "  id=%s | event_type=%s | sample=%s | timestamp_ns=%s | data=%s",
+                            row_id,
+                            event_type,
+                            sample_short,
+                            timestamp_ns,
+                            data_preview.decode("utf-8", errors="replace"),
+                        )
+                    logger.info("Total rows: %s", len(rows))
+                finally:
+                    conn.close()
+            else:
+                logger.warning(
+                    "SQL DB not found at %s (SQL writer may not have been used)",
+                    events_db,
+                )
+
             logger.info("=" * 80)
             logger.info("Event log directory: %s", event_log_dir)
             logger.info("Demo complete")

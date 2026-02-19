@@ -18,128 +18,31 @@
 
 Currently supported:
     - JSONL file
-
-Planned:
-    - SQL-compatible Database
+    - SQL database (SQLAlchemy; default sqlite, swappable backends)
 """
 
 import argparse
 import asyncio
 import os
-from abc import ABC, abstractmethod
 from pathlib import Path
 
-import msgspec
 from inference_endpoint.async_utils.loop_manager import LoopManager
 from inference_endpoint.async_utils.transport.record import (
     ErrorEventType,
     EventRecord,
-    EventType,
     SessionEventType,
 )
 from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
 from inference_endpoint.async_utils.transport.zmq.pubsub import ZmqEventRecordSubscriber
 
+from .sql_writer import SQLWriter
+from .writer import JSONLWriter, RecordWriter
 
-class RecordWriter(ABC):
-    """Abstract base class for writing event records.
-
-    Supports an optional flush interval: after every N records written via
-    write_record(), the writer is automatically flushed.
-    """
-
-    def __init__(self, *args, flush_interval: int | None = None):
-        """Initialize the writer.
-
-        Args:
-            flush_interval: If set, flush after every this many records written.
-                None means no automatic flushing.
-        """
-        self._flush_interval = flush_interval
-        self._n_since_last_flush = 0
-
-    def write_record(self, record: EventRecord) -> None:
-        """Write a record and optionally flush based on flush_interval."""
-        self.write(record)
-        self._n_since_last_flush += 1
-        if (
-            self._flush_interval is not None
-            and self._n_since_last_flush >= self._flush_interval
-        ):
-            self.flush()
-
-    @abstractmethod
-    def write(self, record: EventRecord) -> None:
-        """Write an event record."""
-        raise NotImplementedError("Subclasses must implement this method.")
-
-    @abstractmethod
-    def close(self) -> None:
-        """Close the writer and release resources."""
-        raise NotImplementedError("Subclasses must implement this method.")
-
-    def flush(self) -> None:
-        """Flush the writer to ensure all data is written to the underlying storage.
-
-        Also resets the flush-interval count so the next flush happens after
-        another N records (whether flush was triggered by the interval or manually).
-        """
-        self._n_since_last_flush = 0
-
-
-class FileWriter(RecordWriter):
-    """Writer for writing event records to a file."""
-
-    def __init__(
-        self,
-        file_path: Path,
-        mode: str = "w",
-        flush_interval: int | None = None,
-        **kwargs: object,
-    ):
-        super().__init__(flush_interval=flush_interval)
-        self.file_path = Path(file_path)
-        # No idea what the 'IO' type MyPy thinks this is, apparently even io.IOBase does not work, so just ignore.
-        self.file_obj = self.file_path.open(mode=mode)  # type: ignore[assignment]
-
-    def close(self) -> None:
-        if self.file_obj is not None:
-            try:
-                self.flush()
-                self.file_obj.close()
-            except (OSError, FileNotFoundError):
-                # File may already be closed or I/O error on close (e.g. disk full).
-                pass
-            finally:
-                self.file_obj = None  # type: ignore[assignment]
-
-    def record_to_line(self, record: EventRecord) -> str:
-        """Convert an event record to a line of text."""
-        raise NotImplementedError("Subclasses must implement this method.")
-
-    def write(self, record: EventRecord) -> None:
-        if self.file_obj is not None:
-            self.file_obj.write(self.record_to_line(record) + "\n")
-
-    def flush(self) -> None:
-        if self.file_obj is not None:
-            self.file_obj.flush()
-        super().flush()
-
-
-class JSONLWriter(FileWriter):
-    """Writes to a JSONL file."""
-
-    extension = ".jsonl"
-
-    def __init__(self, file_path: Path, *args, **kwargs):
-        super().__init__(file_path.with_suffix(self.extension), *args, **kwargs)
-
-        # EventRecords are msgspec structs so we can use the built-in JSON encoder
-        self.encoder = msgspec.json.Encoder(enc_hook=EventType.encode_hook)
-
-    def record_to_line(self, record: EventRecord) -> str:
-        return self.encoder.encode(record).decode("utf-8")
+# CLI writer names to writer classes (for --writers flag)
+_WRITER_REGISTRY: dict[str, type[RecordWriter]] = {
+    "jsonl": JSONLWriter,
+    "sql": SQLWriter,
+}
 
 
 def _is_error_event(record: EventRecord) -> bool:
@@ -150,8 +53,8 @@ def _is_error_event(record: EventRecord) -> bool:
 class EventLoggerService(ZmqEventRecordSubscriber):
     """Event logger service for logging event records.
 
-    When SessionEventType.ENDED is received, the service stops accepting
-    further events (except Error events), closes writers, and stops the event loop.
+    When SessionEventType.ENDED is received (topic 'session.ended'), the service stops
+    accepting further events (except Error events), closes writers, and stops the event loop.
     Writers are only closed after the current batch is fully processed, so error
     events that appear in the same batch after ENDED are still written.
     """
@@ -234,8 +137,17 @@ async def main() -> None:
         required=True,
         help="ZMQ socket address to connect to",
     )
+    parser.add_argument(
+        "--writers",
+        nargs="+",
+        choices=list(_WRITER_REGISTRY),
+        default=["jsonl"],
+        metavar="WRITER",
+        help="Writers to use: jsonl, sql (default: jsonl). Can specify multiple, e.g. --writers jsonl sql",
+    )
     args = parser.parse_args()
 
+    writer_classes = tuple(_WRITER_REGISTRY[name] for name in args.writers)
     shutdown_event = asyncio.Event()
     loop = LoopManager().default_loop
     with ManagedZMQContext.scoped(socket_dir=args.log_dir.parent) as zmq_ctx:
@@ -245,6 +157,7 @@ async def main() -> None:
             zmq_ctx,
             loop,
             topics=None,  # Subscribe to all topics for logging
+            writer_classes=writer_classes,
             shutdown_event=shutdown_event,
         )
 
