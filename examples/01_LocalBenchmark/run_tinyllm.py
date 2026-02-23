@@ -21,7 +21,7 @@ import threading
 import inference_endpoint.config.rulesets.mlcommons.models as mlcommons_models
 from inference_endpoint.config.rulesets.mlcommons.rules import CURRENT
 from inference_endpoint.config.user_config import UserConfig
-from inference_endpoint.core.types import QueryResult, StreamChunk
+from inference_endpoint.core.types import QueryResult, StreamChunk, TextModelOutput
 from inference_endpoint.dataset_manager.dataset import Dataset
 from inference_endpoint.load_generator import (
     BenchmarkSession,
@@ -167,9 +167,13 @@ class SerialSampleIssuer(SampleIssuer):
                 )
                 SampleEventHandler.stream_chunk_complete(stream_chunk)
                 first = False
-            query_result = QueryResult(id=sample.uuid, response_output=chunks)
+            query_result = QueryResult(
+                id=sample.uuid,
+                response_output=TextModelOutput(output=chunks, reasoning=None),
+            )
         else:
             response = self.compute_func(sample.data)
+            # str response_output supported but deprecated; prefer TextModelOutput
             query_result = QueryResult(id=sample.uuid, response_output=response)
         SampleEventHandler.query_result_complete(query_result)
 

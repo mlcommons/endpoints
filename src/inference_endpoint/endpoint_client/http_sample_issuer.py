@@ -69,7 +69,12 @@ class HttpClientSampleIssuer(SampleIssuer):
                     case QueryResult(error=err):
                         SampleEventHandler.query_result_complete(response)
                         if err is not None:
-                            logger.error(f"Error in request {response.id}: {err}")
+                            err_str = (
+                                f"{err.error_type}: {err.error_message}"
+                                if err.error_message
+                                else err.error_type
+                            )
+                            logger.error(f"Error in request {response.id}: {err_str}")
 
                     case None:
                         # Transport closed or shutdown

@@ -19,7 +19,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 
 import msgspec
-from inference_endpoint.async_utils.transport.record import EventRecord, EventType
+from inference_endpoint.core.record import EventRecord, EventType
 
 
 class RecordWriter(ABC):

@@ -35,7 +35,7 @@ from inference_endpoint.async_utils.transport import (
     WorkerConnector,
 )
 from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
-from inference_endpoint.core.types import Query, QueryResult
+from inference_endpoint.core.types import ErrorData, Query, QueryResult
 from inference_endpoint.endpoint_client.adapter_protocol import HttpRequestAdapter
 from inference_endpoint.endpoint_client.config import HTTPClientConfig
 from inference_endpoint.endpoint_client.http import (
@@ -515,11 +515,17 @@ class Worker:
         if self._shutdown or not self._responses:
             return
 
-        error_message = repr(error) if isinstance(error, Exception) else error
+        if isinstance(error, Exception):
+            error_data = ErrorData(
+                error_type=type(error).__name__,
+                error_message=repr(error),
+            )
+        else:
+            error_data = ErrorData(error_type="error", error_message=error)
         error_response = QueryResult(
             id=query_id,
             response_output=None,
-            error=error_message,
+            error=error_data,
         )
         self._responses.send(error_response)
         if self.http_config.record_worker_events:

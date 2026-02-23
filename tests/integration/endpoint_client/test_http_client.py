@@ -170,7 +170,7 @@ class TestHttpEndpointClientScaleOut:
         for name, size, future in futures:
             result = await asyncio.wrap_future(future)
             assert result.id == f"payload-{name}"
-            assert len(result.response_output) == size
+            assert len(result.get_response_output_string()) == size
             print(f"\nSuccessfully processed {name} payload ({size} bytes)")
 
     @pytest.mark.asyncio
@@ -430,7 +430,7 @@ class TestHTTPEndpointClientFunctionality:
         for name, prompt, future in futures:
             result = await asyncio.wrap_future(future)
             assert (
-                "".join(result.response_output["output"]) == prompt
+                result.get_response_output_string() == prompt
             ), f"Mismatch for test case '{name}'"
 
 

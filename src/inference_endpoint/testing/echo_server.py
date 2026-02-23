@@ -284,7 +284,7 @@ class EchoServer(HTTPServer):
                     id, request, completion_request, raw_response
                 )
             else:
-                # Non-streaming: return QueryResult as before
+                # Non-streaming: return QueryResult (str response_output supported but deprecated; prefer TextModelOutput)
                 response = QueryResult(
                     id=id,
                     response_output=raw_response,

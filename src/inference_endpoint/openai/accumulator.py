@@ -17,7 +17,7 @@
 
 import logging
 
-from inference_endpoint.core.types import QueryResult, StreamChunk
+from inference_endpoint.core.types import QueryResult, StreamChunk, TextModelOutput
 from inference_endpoint.endpoint_client.accumulator_protocol import (
     SSEAccumulatorProtocol,
 )
@@ -69,32 +69,29 @@ class OpenAISSEAccumulator(SSEAccumulatorProtocol):
             return None
 
     def get_final_output(self) -> QueryResult:
-        response_output: dict = {"output": []}
         if self.reasoning_chunks:
             # If there are reasoning chunks, then the first chunk received
             # is the first reasoning chunk. The rest of the reasoning chunks,
             # as well as the output chunks can be joined together.
-            resp_reasoning = [self.reasoning_chunks[0]]
+            resp_reasoning: list[str] = [self.reasoning_chunks[0]]
             if len(self.reasoning_chunks) > 1:
                 resp_reasoning.append("".join(self.reasoning_chunks[1:]))
-
-            response_output = {
-                "output": "".join(self.output_chunks),
-                "reasoning": resp_reasoning,
-            }
+            text_output = TextModelOutput(
+                output="".join(self.output_chunks),
+                reasoning=resp_reasoning,
+            )
         elif self.output_chunks:
-            # If there are only output chunks, the first chunk is the used for
+            # If there are only output chunks, the first chunk is used for
             # TTFT calculations. The rest are joined together.
             resp_output: list[str] = [self.output_chunks[0]]
             if len(self.output_chunks) > 1:
                 resp_output.append("".join(self.output_chunks[1:]))
-
-            response_output = {
-                "output": resp_output,
-            }
+            text_output = TextModelOutput(output=resp_output, reasoning=None)
+        else:
+            text_output = TextModelOutput(output=[], reasoning=None)
         return QueryResult(
             id=self.query_id,
-            response_output=response_output,
+            response_output=text_output,
             metadata={
                 "first_chunk": not self.first_chunk_sent,
                 "final_chunk": True,

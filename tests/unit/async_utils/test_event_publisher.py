@@ -32,15 +32,15 @@ import pytest
 import zmq
 from inference_endpoint.async_utils.event_publisher import EventPublisherService
 from inference_endpoint.async_utils.loop_manager import LoopManager
-from inference_endpoint.async_utils.transport.record import (
+from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
+from inference_endpoint.async_utils.transport.zmq.pubsub import ZmqEventRecordSubscriber
+from inference_endpoint.core.record import (
     TOPIC_FRAME_SIZE,
     EventRecord,
     SampleEventType,
     SessionEventType,
     decode_event_record,
 )
-from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
-from inference_endpoint.async_utils.transport.zmq.pubsub import ZmqEventRecordSubscriber
 
 # Default timeout when waiting for records in tests.
 _WAIT_RECORDS_TIMEOUT = 1

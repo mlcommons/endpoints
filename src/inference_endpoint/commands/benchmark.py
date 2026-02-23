@@ -136,7 +136,13 @@ class ResponseCollector:
         """
         self.count += 1
         if result.error:
-            self.errors.append(f"Sample {result.id}: {result.error}")
+            err = result.error
+            err_str = (
+                f"{err.error_type}: {err.error_message}"
+                if err.error_message
+                else err.error_type
+            )
+            self.errors.append(f"Sample {result.id}: {err_str}")
             if self.pbar:
                 self.pbar.set_postfix(refresh=True, errors=len(self.errors))
         elif self.collect_responses:

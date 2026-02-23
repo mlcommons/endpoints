@@ -205,7 +205,7 @@ class OpenAIMsgspecAdapter(HttpRequestAdapter):
                     index=0,
                     message=ChatCompletionResponseMessage(
                         role="assistant",
-                        content=result.response_output,
+                        content=result.get_response_output_string(),
                     ),
                     finish_reason="stop",
                 )

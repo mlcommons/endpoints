@@ -18,7 +18,7 @@
 from pathlib import Path
 
 import orjson
-from inference_endpoint.async_utils.transport.record import EventRecord
+from inference_endpoint.core.record import EventRecord
 from sqlalchemy import BigInteger, Integer, LargeBinary, String, create_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 

@@ -100,6 +100,7 @@ class SGLangGenerateAdapter(HttpRequestAdapter):
     @classmethod
     def decode_response(cls, response_bytes: bytes, query_id: str) -> QueryResult:
         resp = cls._response_decoder.decode(response_bytes)
+        # str response_output supported but deprecated; prefer TextModelOutput
         return QueryResult(
             id=query_id,
             response_output=resp.text,

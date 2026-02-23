@@ -27,13 +27,13 @@ import os
 from pathlib import Path
 
 from inference_endpoint.async_utils.loop_manager import LoopManager
-from inference_endpoint.async_utils.transport.record import (
+from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
+from inference_endpoint.async_utils.transport.zmq.pubsub import ZmqEventRecordSubscriber
+from inference_endpoint.core.record import (
     ErrorEventType,
     EventRecord,
     SessionEventType,
 )
-from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
-from inference_endpoint.async_utils.transport.zmq.pubsub import ZmqEventRecordSubscriber
 
 from .sql_writer import SQLWriter
 from .writer import JSONLWriter, RecordWriter

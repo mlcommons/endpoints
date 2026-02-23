@@ -30,14 +30,14 @@ from pathlib import Path
 
 from inference_endpoint.async_utils.event_publisher import EventPublisherService
 from inference_endpoint.async_utils.loop_manager import LoopManager
-from inference_endpoint.async_utils.transport.record import (
+from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
+from inference_endpoint.async_utils.transport.zmq.pubsub import ZmqEventRecordSubscriber
+from inference_endpoint.core.record import (
     ErrorEventType,
     EventRecord,
     SampleEventType,
     SessionEventType,
 )
-from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
-from inference_endpoint.async_utils.transport.zmq.pubsub import ZmqEventRecordSubscriber
 
 logging.basicConfig(
     level=logging.INFO,

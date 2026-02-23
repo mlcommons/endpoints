@@ -134,7 +134,9 @@ class OpenAIAdapter(HttpRequestAdapter):
                     finish_reason=FinishReason.stop,
                     index=0,
                     message=ChatCompletionResponseMessage(
-                        content=result.response_output, role=Role6.assistant, refusal=""
+                        content=result.get_response_output_string(),
+                        role=Role6.assistant,
+                        refusal="",
                     ),
                     logprobs=Logprobs(content=[], refusal=[]),
                 )

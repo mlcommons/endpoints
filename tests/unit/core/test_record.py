@@ -19,7 +19,7 @@ import time
 
 import msgspec
 import pytest
-from inference_endpoint.async_utils.transport.record import (
+from inference_endpoint.core.record import (
     TOPIC_FRAME_SIZE,
     ErrorEventType,
     EventRecord,

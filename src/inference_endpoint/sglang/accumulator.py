@@ -74,6 +74,7 @@ class SGLangSSEAccumulator(SSEAccumulatorProtocol):
             return None
 
     def get_final_output(self) -> QueryResult:
+        # str response_output supported but deprecated; prefer TextModelOutput
         return QueryResult(
             id=self.query_id,
             response_output=self.text,

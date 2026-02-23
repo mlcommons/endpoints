@@ -80,7 +80,7 @@ class TestQueryResult:
     """Test the QueryResult dataclass."""
 
     def test_query_result_creation(self) -> None:
-        """Test creating a query result."""
+        """Test creating a query result (str response_output; will be deprecated)."""
         result = QueryResult(id="test-123", response_output="Test response")
 
         assert result.id == "test-123"

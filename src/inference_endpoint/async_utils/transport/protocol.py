@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import msgspec
 
-from inference_endpoint.async_utils.transport.record import (
+from inference_endpoint.core.record import (
     ErrorEventType,
     EventRecord,
     decode_event_record,
