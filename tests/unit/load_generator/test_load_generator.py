@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import random
+import time
 from collections import defaultdict
 from unittest.mock import patch
 
@@ -173,3 +174,53 @@ def test_full_run(record_event_mock):
     assert (
         len(seen_uuids) == rt_settings.n_samples_to_issue
     ), f"Should have seen {rt_settings.n_samples_to_issue} unique uuids, but saw {len(seen_uuids)}"
+
+
+@patch("inference_endpoint.load_generator.load_generator.EventRecorder.record_event")
+@patch(
+    "inference_endpoint.load_generator.load_generator.LoadGenerator.load_sample_data"
+)
+def test_max_duration_ms_stops_issuance(load_sample_data_mock, event_recorder_mock):
+    """max_duration_ms should stop iteration before n_samples_to_issue is exhausted."""
+    load_sample_data_mock.side_effect = lambda index, _uuid: index
+    event_recorder_mock.return_value = True
+
+    max_duration_ms = 50
+    rt_settings = RuntimeSettings(
+        metrics.Throughput(5000),
+        reported_metrics=[],
+        min_duration_ms=0,
+        max_duration_ms=max_duration_ms,
+        n_samples_from_dataset=100,
+        n_samples_to_issue=1_000_000,
+        min_sample_count=100,
+        rng_sched=random.Random(42),
+        rng_sample_index=random.Random(42),
+        load_pattern=LoadPattern(type=LoadPatternType.MAX_THROUGHPUT),
+    )
+
+    issued_count = 0
+
+    class CountingIssuer(SampleIssuer):
+        def issue(self, sample):
+            pass
+
+    load_generator = SchedulerBasedLoadGenerator(
+        CountingIssuer(),
+        None,
+        scheduler=MaxThroughputScheduler(rt_settings, WithoutReplacementSampleOrder),
+    )
+
+    start = time.monotonic()
+    for _ in load_generator:
+        issued_count += 1
+    elapsed_s = time.monotonic() - start
+
+    # Should have stopped well before issuing 1,000,000 samples
+    assert issued_count < 1_000_000, (
+        f"Expected timeout to stop issuance, but {issued_count} samples were issued"
+    )
+    # Elapsed wall-clock should be close to max_duration_ms (allow generous upper bound)
+    assert elapsed_s < (max_duration_ms / 1000) * 10, (
+        f"Elapsed time {elapsed_s:.3f}s far exceeds max_duration_ms={max_duration_ms}ms"
+    )
