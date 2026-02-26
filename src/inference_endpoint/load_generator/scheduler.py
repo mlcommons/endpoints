@@ -298,7 +298,7 @@ class Scheduler:
         """Async iterate over sample indices with precise timing.
 
         Accumulates absolute target times to avoid drift. Uses asyncio.sleep
-        for the wait — proven equivalent to call_at+Future up to 500k QPS.
+        for the wait — proven accurate up to 500k QPS.
 
         Yields:
             Sample index to issue next (timing is handled internally).
