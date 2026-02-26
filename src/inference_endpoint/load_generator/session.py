@@ -20,13 +20,17 @@ import os
 import threading
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import orjson
 from transformers import AutoTokenizer
 
 from ..config.runtime_settings import RuntimeSettings
+from ..config.schema import BenchmarkConfig, LoadPatternType, TestMode, TestType
 from ..dataset_manager.dataset import Dataset
+from ..endpoint_client.config import HTTPClientConfig
 from ..metrics.recorder import EventRecorder
 from ..metrics.reporter import MetricsReporter
 from ..utils.version import get_version_info
@@ -35,6 +39,35 @@ from .load_generator import LoadGenerator, SampleIssuer, SchedulerBasedLoadGener
 from .scheduler import Scheduler, WithoutReplacementSampleOrder
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class SessionConfig:
+    """All prepared state needed by a benchmark runner.
+
+    Created by ``setup_benchmark()`` in ``benchmark.py`` and consumed by
+    ``BenchmarkSession.from_config()`` or the async runner directly.
+    """
+
+    config: BenchmarkConfig
+    tokenizer: Any
+    report_dir: Path
+    dataloader: Dataset
+    scheduler: Scheduler
+    rt_settings: RuntimeSettings
+    http_config: HTTPClientConfig
+    total_samples: int
+    collect_responses: bool
+    enable_streaming: bool
+    affinity_plan: Any
+    accuracy_datasets: list[Dataset]
+    eval_configs: list[Any]
+    model_name: str
+    load_pattern_type: LoadPatternType
+    endpoints: list[str]
+    test_mode: TestMode
+    benchmark_mode: TestType | None
+
 
 # poll interval for checking if test-session should end
 SHUTDOWN_POLL_INTERVAL_S = 10.0
@@ -333,3 +366,36 @@ class BenchmarkSession:
         )
         session.thread.start()
         return session
+
+    @classmethod
+    def from_config(
+        cls,
+        setup: SessionConfig,
+        sample_issuer: SampleIssuer,
+        *,
+        name: str | None = None,
+        dump_events_log: bool = False,
+    ) -> BenchmarkSession:
+        """Start a BenchmarkSession from a SessionConfig.
+
+        Convenience wrapper around :meth:`start` that extracts the required
+        fields from a fully-populated :class:`SessionConfig`.
+        """
+        from inference_endpoint.config.schema import SystemDefaults
+
+        return cls.start(
+            setup.rt_settings,
+            setup.dataloader,
+            sample_issuer,
+            setup.scheduler,
+            accuracy_datasets=setup.accuracy_datasets,
+            name=name,
+            max_shutdown_timeout_s=(
+                setup.config.timeout
+                if setup.config.timeout
+                else SystemDefaults.DEFAULT_TIMEOUT
+            ),
+            report_dir=setup.report_dir,
+            tokenizer_override=setup.tokenizer,
+            dump_events_log=dump_events_log,
+        )

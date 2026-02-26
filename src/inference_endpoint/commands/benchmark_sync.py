@@ -31,7 +31,6 @@ from typing import Any
 from tqdm import tqdm
 
 from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
-from inference_endpoint.config.schema import SystemDefaults
 from inference_endpoint.endpoint_client.http_client import HTTPEndpointClient
 from inference_endpoint.endpoint_client.http_sample_issuer import HttpClientSampleIssuer
 from inference_endpoint.exceptions import ExecutionError, SetupError
@@ -39,14 +38,15 @@ from inference_endpoint.load_generator import (
     BenchmarkSession,
     SampleEvent,
     SampleEventHandler,
+    SessionConfig,
 )
 
-from .benchmark import BenchmarkSetup, ResponseCollector
+from .benchmark import ResponseCollector
 
 logger = logging.getLogger(__name__)
 
 
-def run_benchmark(setup: BenchmarkSetup) -> tuple[Any, ResponseCollector]:
+def run_benchmark(setup: SessionConfig) -> tuple[Any, ResponseCollector]:
     """Execute a benchmark session using the threaded (sync) runner.
 
     This is the execution-only counterpart to ``setup_benchmark()`` — it
@@ -58,7 +58,7 @@ def run_benchmark(setup: BenchmarkSetup) -> tuple[Any, ResponseCollector]:
     after this function returns.
 
     Args:
-        setup: A fully-populated :class:`BenchmarkSetup` produced by
+        setup: A fully-populated :class:`SessionConfig` produced by
             ``setup_benchmark()``.
 
     Returns:
@@ -103,18 +103,10 @@ def run_benchmark(setup: BenchmarkSetup) -> tuple[Any, ResponseCollector]:
 
         sess = None
         try:
-            sess = BenchmarkSession.start(
-                setup.rt_settings,
-                setup.dataloader,
+            sess = BenchmarkSession.from_config(
+                setup,
                 sample_issuer,
-                setup.scheduler,
                 name=f"cli_benchmark_{uuid.uuid4().hex[0:8]}",
-                report_dir=setup.report_dir,
-                tokenizer_override=setup.tokenizer,
-                accuracy_datasets=setup.accuracy_datasets,
-                max_shutdown_timeout_s=setup.config.timeout
-                if setup.config.timeout
-                else SystemDefaults.DEFAULT_TIMEOUT,
                 dump_events_log=True,
             )
 

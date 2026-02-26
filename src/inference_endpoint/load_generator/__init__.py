@@ -32,7 +32,7 @@ from .scheduler import (
     WithoutReplacementSampleOrder,
     WithReplacementSampleOrder,
 )
-from .session import BenchmarkSession
+from .session import BenchmarkSession, SessionConfig
 
 __all__ = [
     "Event",
@@ -52,4 +52,5 @@ __all__ = [
     "SampleIssuer",
     "SchedulerBasedLoadGenerator",
     "BenchmarkSession",
+    "SessionConfig",
 ]

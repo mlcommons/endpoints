@@ -67,6 +67,7 @@ from inference_endpoint.exceptions import (
     SetupError,
 )
 from inference_endpoint.load_generator import (
+    SessionConfig,
     WithoutReplacementSampleOrder,
 )
 from inference_endpoint.load_generator.scheduler import Scheduler
@@ -146,39 +147,15 @@ class AccuracyConfiguration:
     num_repeats: int
 
 
-@dataclass
-class BenchmarkSetup:
-    """All prepared state needed by a benchmark runner."""
-
-    config: BenchmarkConfig
-    tokenizer: Any
-    report_dir: Path
-    dataloader: Dataset
-    scheduler: Scheduler
-    rt_settings: RuntimeSettings
-    http_config: HTTPClientConfig
-    total_samples: int
-    collect_responses: bool
-    enable_streaming: bool
-    affinity_plan: Any
-    accuracy_datasets: list[Dataset]
-    eval_configs: list[AccuracyConfiguration]
-    model_name: str
-    load_pattern_type: LoadPatternType
-    endpoints: list[str]
-    test_mode: TestMode
-    benchmark_mode: TestType | None
-
-
 def setup_benchmark(
     config: BenchmarkConfig,
     test_mode: TestMode,
     benchmark_mode: TestType | None,
-) -> BenchmarkSetup:
+) -> SessionConfig:
     """Common setup for both sync and async benchmark runners.
 
     Handles: CPU affinity, tokenizer, report dir, streaming, datasets,
-    scheduler, HTTP client config. Returns a BenchmarkSetup with all
+    scheduler, HTTP client config. Returns a SessionConfig with all
     prepared state.
     """
     collect_responses = test_mode in [TestMode.ACC, TestMode.BOTH]
@@ -341,7 +318,7 @@ def setup_benchmark(
         api_key=config.endpoint_config.api_key,
     )
 
-    return BenchmarkSetup(
+    return SessionConfig(
         config=config,
         tokenizer=tokenizer,
         report_dir=report_dir,
@@ -364,7 +341,7 @@ def setup_benchmark(
 
 
 def post_benchmark(
-    setup: BenchmarkSetup,
+    setup: SessionConfig,
     report: Any,
     response_collector: ResponseCollector,
 ) -> None:

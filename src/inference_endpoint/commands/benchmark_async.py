@@ -34,14 +34,15 @@ from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQConte
 from inference_endpoint.config.schema import LoadPatternType
 from inference_endpoint.endpoint_client.http_client import AsyncHttpEndpointClient
 from inference_endpoint.exceptions import ExecutionError
+from inference_endpoint.load_generator import SessionConfig
 
-from .benchmark import BenchmarkSetup, ResponseCollector
+from .benchmark import ResponseCollector
 
 logger = logging.getLogger(__name__)
 
 
 async def run_benchmark(
-    setup: BenchmarkSetup,
+    setup: SessionConfig,
 ) -> tuple[Any, ResponseCollector]:
     """Execute benchmark on a single uvloop -- no threads in the main process.
 
@@ -54,7 +55,7 @@ async def run_benchmark(
     - Unified receiver: poll() + sleep(0) when idle (benchmark_httpclient.py pattern)
 
     Args:
-        setup: BenchmarkSetup containing all prepared state from setup_benchmark().
+        setup: SessionConfig containing all prepared state from setup_benchmark().
 
     Returns:
         Tuple of (report, response_collector) where report is the MetricsReporter
