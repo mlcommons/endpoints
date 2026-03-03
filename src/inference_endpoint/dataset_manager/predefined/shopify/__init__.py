@@ -17,7 +17,6 @@
 
 import base64
 import json
-from collections import Counter
 from logging import getLogger
 from pathlib import Path
 from typing import Any
