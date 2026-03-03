@@ -17,7 +17,17 @@
 msgspec types for OpenAI API serialization/deserialization.
 """
 
+from typing import Any, Union
+
 import msgspec
+
+# ============================================================================
+# Multimodal content (OpenAI vision format)
+# ============================================================================
+
+# prompt/system content: str for text, list[dict] for multimodal
+# e.g. [{"type": "text", "text": "..."}, {"type": "image_url", "image_url": {"url": "data:image/...;base64,..."}}]
+ChatMessageContent = Union[str, list[dict[str, Any]]]
 
 # ============================================================================
 # SSE (Server-Sent Events) Types for OpenAI streaming format
@@ -50,10 +60,13 @@ class SSEMessage(msgspec.Struct):
 
 
 class ChatMessage(msgspec.Struct, kw_only=True, omit_defaults=True):  # type: ignore[call-arg]
-    """Chat message in OpenAI format."""
+    """Chat message in OpenAI format.
+
+    content: str for text-only messages; list[dict] for multimodal (vision).
+    """
 
     role: str
-    content: str
+    content: ChatMessageContent
     name: str | None = None
 
 
