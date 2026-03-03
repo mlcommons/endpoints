@@ -26,8 +26,8 @@ from .predefined.cnndailymail import CNNDailyMail
 from .predefined.gpqa import GPQA
 from .predefined.livecodebench import LiveCodeBench
 from .predefined.open_orca import OpenOrca
-from .predefined.shopify import Shopify
 from .predefined.random import RandomDataset
+from .predefined.shopify import Shopify
 from .transforms import (
     AddStaticColumns,
     ColumnFilter,

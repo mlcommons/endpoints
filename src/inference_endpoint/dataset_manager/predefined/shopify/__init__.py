@@ -106,7 +106,9 @@ class Shopify(
                 split=s,
                 load_options=load_options,
             )
-            logger.info(f"Loaded {len(df)} samples from Shopify product catalogue ({s})")
+            logger.info(
+                f"Loaded {len(df)} samples from Shopify product catalogue ({s})"
+            )
 
             # Convert product_image (dict with bytes/path) to base64 for parquet storage.
 
@@ -130,14 +132,15 @@ class Shopify(
                 if hasattr(categories, "tolist"):
                     categories = categories.tolist()
 
-                all_rows.append({
-                    "product_title": row.get("product_title", ""),
-                    "product_description": row.get("product_description", ""),
-                    "product_image_base64": image_base64,
-                    "product_image_format": image_format,
-                    "potential_product_categories": json.dumps(categories),
-                })
-
+                all_rows.append(
+                    {
+                        "product_title": row.get("product_title", ""),
+                        "product_description": row.get("product_description", ""),
+                        "product_image_base64": image_base64,
+                        "product_image_format": image_format,
+                        "potential_product_categories": json.dumps(categories),
+                    }
+                )
 
         df = pd.DataFrame(all_rows)
 

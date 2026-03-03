@@ -17,7 +17,7 @@
 msgspec types for OpenAI API serialization/deserialization.
 """
 
-from typing import Any, Union
+from typing import Any
 
 import msgspec
 
@@ -27,7 +27,7 @@ import msgspec
 
 # prompt/system content: str for text, list[dict] for multimodal
 # e.g. [{"type": "text", "text": "..."}, {"type": "image_url", "image_url": {"url": "data:image/...;base64,..."}}]
-ChatMessageContent = Union[str, list[dict[str, Any]]]
+ChatMessageContent = str | list[dict[str, Any]]
 
 # ============================================================================
 # SSE (Server-Sent Events) Types for OpenAI streaming format

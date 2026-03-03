@@ -118,12 +118,14 @@ The following are the possible product categories:
         ]
 
         if image_base64:
-            content_parts.append({
-                "type": "image_url",
-                "image_url": {
-                    "url": f"data:image/{image_format};base64,{image_base64}",
-                },
-            })
+            content_parts.append(
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/{image_format};base64,{image_base64}",
+                    },
+                }
+            )
 
         row["system"] = system
         row["prompt"] = content_parts
