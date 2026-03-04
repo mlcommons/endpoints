@@ -43,7 +43,7 @@ def sglang_futures_client():
         endpoint_urls=[SGLANG_ENDPOINT],
         num_workers=4,
         api_type="sglang",
-        warmup_connections=False,
+        warmup_connections=0,
     )
 
     client = FuturesHttpClient(http_config)

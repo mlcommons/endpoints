@@ -292,7 +292,8 @@ class ClientSettings(BaseModel):
     log_level: str = "INFO"
 
     # Pre-establish TCP connections during init for reuse at runtime.
-    warmup_connections: bool = True
+    # Values: -1 = auto (50% of pool), 0 = disabled, >0 = explicit total count
+    warmup_connections: int = -1
 
     # Maximum concurrent TCP connections per worker.
     # -1 = unlimited (bound by system ephemeral port limit)

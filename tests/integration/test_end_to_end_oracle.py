@@ -45,7 +45,7 @@ class DeepSeekR1SampleIssuer(HttpClientSampleIssuer):
     def __init__(self, tmp_path: Path, url: str, zmq_context: ManagedZMQContext):
         self.http_config = HTTPClientConfig(
             endpoint_urls=[urljoin(url, "/v1/chat/completions")],
-            warmup_connections=False,
+            warmup_connections=0,
         )
         super().__init__(HTTPEndpointClient(self.http_config, zmq_context=zmq_context))
 
