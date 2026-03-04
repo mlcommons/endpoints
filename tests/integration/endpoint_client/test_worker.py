@@ -36,7 +36,7 @@ class TestWorkerBasicFunctionality:
             endpoint_urls=[f"{mock_http_echo_server.url}/v1/chat/completions"],
             num_workers=1,
             max_connections=10,
-            warmup_connections=False,
+            warmup_connections=0,
         )
         return http_config
 
@@ -229,7 +229,7 @@ class TestWorkerErrorHandling:
             endpoint_urls=[f"{mock_http_echo_server.url}/v1/chat/completions"],
             num_workers=1,
             max_connections=10,
-            warmup_connections=False,
+            warmup_connections=0,
         )
         return http_config
 
@@ -240,7 +240,7 @@ class TestWorkerErrorHandling:
             endpoint_urls=["http://localhost:59999/v1/chat/completions"],
             num_workers=1,
             max_connections=10,
-            warmup_connections=False,
+            warmup_connections=0,
         )
         return http_config
 
@@ -416,7 +416,7 @@ class TestWorkerErrorHandling:
                 endpoint_urls=[f"http://localhost:{server.port}/malformed"],
                 num_workers=1,
                 max_connections=10,
-                warmup_connections=False,
+                warmup_connections=0,
             )
 
             worker = Worker(

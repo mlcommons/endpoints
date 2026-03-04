@@ -325,7 +325,7 @@ def _build_config_from_cli(
             client=ClientSettings(
                 workers=args.workers if args.workers else -1,
                 log_level="DEBUG" if verbose_level >= 2 else "INFO",
-                warmup_connections=getattr(args, "warmup_connections", True),
+                warmup_connections=getattr(args, "warmup_connections", -1),
                 max_connections=getattr(args, "max_connections", None) or -1,
             ),
         ),

@@ -112,7 +112,7 @@ class TestWorkerLifecycle:
             endpoint_urls=[f"{mock_http_echo_server.url}/v1/chat/completions"],
             num_workers=2,
             max_connections=10,
-            warmup_connections=False,
+            warmup_connections=0,
         )
         return http_config
 
@@ -270,7 +270,7 @@ class TestWorkerDeathScenarios:
             endpoint_urls=["http://localhost:59999/advanced"],
             num_workers=2,
             max_connections=10,
-            warmup_connections=False,
+            warmup_connections=0,
         )
         return http_config
 

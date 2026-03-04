@@ -26,7 +26,7 @@ def create_futures_client(
     url: str,
     num_workers: int = 1,
     max_connections: int = 10,
-    warmup_connections: bool = False,
+    warmup_connections: int = 0,
     zmq_context=None,
 ) -> FuturesHttpClient:
     """Helper to create a FuturesHttpClient with specific config.
@@ -35,7 +35,7 @@ def create_futures_client(
         url: The endpoint URL to connect to
         num_workers: Number of worker processes (default: 1)
         max_connections: Max connections per worker (default: 10 for tests)
-        warmup_connections: Whether to warmup connections (default: False for tests)
+        warmup_connections: Warmup connection count (0 = disabled, -1 = auto, >0 = explicit)
         zmq_context: ManagedZMQContext when using ZMQ transport (required by default config).
 
     Returns:
