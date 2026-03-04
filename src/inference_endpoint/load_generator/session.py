@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
 import os
 import threading
@@ -81,7 +82,7 @@ class BenchmarkSession:
         # wakeup _run_test if needed, short-circuit SHUTDOWN_POLL_INTERVAL_S
         self.end_event.set()
 
-    def _run_test(
+    def _run_test(  # _run_thread called as param to a thread at the base of this file
         self,
         perf_test_generator: LoadGenerator,
         accuracy_test_generators: dict[str, LoadGenerator] | None = None,
@@ -90,13 +91,19 @@ class BenchmarkSession:
         tokenizer_override: AutoTokenizer | None = None,
         dump_events_log: bool = False,
     ):
+        print("\nSTART of _run_test\n")
+
         with self.event_recorder:
             try:
                 EventRecorder.record_event(
                     SessionEvent.TEST_STARTED, time.monotonic_ns()
                 )
 
-                for _ in perf_test_generator:
+                # it looks like this issues requests to host LLM
+                #
+                for _ in (
+                    perf_test_generator
+                ):  # LoadGenerator is passed in and run here; generates some data
                     # Actual issue is done during next(generator). Nothing else to do here, just pass.
                     pass
 
@@ -162,12 +169,16 @@ class BenchmarkSession:
                 f"BenchmarkSession connection_name  = {self.event_recorder.connection_name}"
             )
             print(f"reporter_table = {self.event_recorder.table_name}")
-            with MetricsReporter(
-                self.event_recorder.connection_name,
-                client_type=reporter_client,
-                table_name=reporter_table,
-            ) as reporter:
-                has_model = hasattr(self.runtime_settings, "model")
+            with (
+                MetricsReporter(
+                    self.event_recorder.connection_name,  # Here reporter_client is coming from PostGres
+                    client_type=reporter_client,
+                    table_name=reporter_table,
+                ) as reporter
+            ):  # reporter has JSON data we will write down for
+                has_model = hasattr(
+                    self.runtime_settings, "model"
+                )  #      result_summary.json
                 tokenizer = None
                 if tokenizer_override is not None:
                     tokenizer = tokenizer_override
@@ -183,7 +194,12 @@ class BenchmarkSession:
                                 f"Error loading tokenizer for model {model}: {e}"
                             )
                             tokenizer = None
-                report = reporter.create_report(tokenizer)
+
+                # here is where report is created
+                report = reporter.create_report(
+                    tokenizer
+                )  # call into reporter.create_report()  I think this is all
+                #    created using DB. Used below to create result_summary.json
 
                 # Store report on session so external callers can use it
                 self.report = report
@@ -194,8 +210,13 @@ class BenchmarkSession:
                     if perf_test_generator.name
                     else "performance"
                 )
-                sample_idx_map = {
-                    perf_name: perf_test_generator.uuid_to_index_map,
+
+                # perf_test_generator data stored here and
+                # eventually written down to   <>.json           AGAIN it does not look like this comes from DB. Inline as test is run.
+                #
+                #####################################################
+                sample_idx_map = {  # data written to 'sample_idx_map.json'
+                    perf_name: perf_test_generator.uuid_to_index_map,  # not clear where this data comes from - PostGres ??  passed in.
                 }
                 if accuracy_test_generators:
                     for default_name, generator in accuracy_test_generators.items():
@@ -205,12 +226,18 @@ class BenchmarkSession:
 
                 # Save to report directory if provided
                 if report_dir:
+                    print("\nsave files to report dir /tmp/report* \n")
                     Path(report_dir).mkdir(parents=True, exist_ok=True)
-                    report.to_json(save_to=Path(report_dir) / "result_summary.json")
+
+                    curr_method = inspect.currentframe().f_code.co_name
+                    print(f"SAVE result_summary.json call from {curr_method}")
+                    report.to_json(
+                        save_to=Path(report_dir) / "result_summary.json"
+                    )  ## save result_summary.json   TTFT, TPOT, etc
 
                     # Dump runtime settings to report directory
-                    rt_settings_data = {
-                        "min_duration_ms": self.runtime_settings.min_duration_ms,
+                    rt_settings_data = {  # this is the data to be saved in 'runtime_settings.json'
+                        "min_duration_ms": self.runtime_settings.min_duration_ms,  # DB not required for this; defined run params
                         "max_duration_ms": self.runtime_settings.max_duration_ms,
                         "n_samples_from_dataset": self.runtime_settings.n_samples_from_dataset,
                         "n_samples_to_issue": self.runtime_settings.n_samples_to_issue,
@@ -228,22 +255,33 @@ class BenchmarkSession:
 
                     # TODO: After Zhihan's MR is merged, grab the scheduler class and other LG init settings
                     # from the runtime settings object
+
+                    curr_method = inspect.currentframe().f_code.co_name
+                    print(f"SAVE runtime_settings.json call from {curr_method}")
                     with (Path(report_dir) / "runtime_settings.json").open("w") as f:
                         f.write(
-                            orjson.dumps(
-                                rt_settings_data,
+                            orjson.dumps(  # orjson - fast json    Passed in; NOT from DB
+                                rt_settings_data,  # this is the data written down to 'runtime_settings.json'
                                 option=orjson.OPT_INDENT_2 | orjson.OPT_SORT_KEYS,
                             ).decode("utf-8")
                         )
 
-                    # Save the UUID mapping for output verification
+                    # Save the UUID mapping for output verification       Data for this JSON is a map UUID -> index; created by the generator as it
+                    #                                                       is creating requests    IE not read from DB
+                    curr_method = inspect.currentframe().f_code.co_name
+                    print(f"SAVE sample_idx_map.json call from {curr_method}")
                     with (Path(report_dir) / "sample_idx_map.json").open("w") as f:
-                        f.write(orjson.dumps(self.sample_uuid_map).decode("utf-8"))
+                        f.write(orjson.dumps(self.sample_uuid_map).decode("utf-8"))  #
 
+                    curr_method = inspect.currentframe().f_code.co_name
+                    print(f"SAVE events.jsonl call from {curr_method}")
                     if dump_events_log:
-                        reporter.dump_to_json(Path(report_dir) / "events.jsonl")
-
+                        reporter.dump_to_json(
+                            Path(report_dir) / "events.jsonl"
+                        )  # biggest file; looks like the individual transactions;
+                        #   comes FROM DB
                 # Print summary
+                print("dump out summary data which in turn should save files to /tmp")
                 report.display()
 
     def wait_for_test_end(self, timeout: float | None = None) -> bool:
@@ -268,7 +306,9 @@ class BenchmarkSession:
         scheduler: Scheduler,
         *args,
         accuracy_datasets: list[Dataset] | None = None,
-        load_generator_cls: type[LoadGenerator] = SchedulerBasedLoadGenerator,
+        load_generator_cls: type[
+            LoadGenerator
+        ] = SchedulerBasedLoadGenerator,  # see load_generator.py
         name: str | None = None,
         max_shutdown_timeout_s: float = 300.0,
         report_dir: os.PathLike | None = None,
@@ -338,8 +378,8 @@ class BenchmarkSession:
                 )
 
         session.thread = threading.Thread(
-            target=session._run_test,
-            args=(load_generator,),
+            target=session._run_test,  # _run_test started here
+            args=(load_generator,),  # pass iterator in
             kwargs={
                 "accuracy_test_generators": accuracy_test_generators,
                 "max_shutdown_timeout_s": max_shutdown_timeout_s,
