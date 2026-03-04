@@ -82,7 +82,7 @@ class ChatCompletionResponseMessage(msgspec.Struct, kw_only=True, omit_defaults=
 
     role: str
     content: str | None
-    refusal: str | None
+    refusal: str | None = None
 
 
 class ChatCompletionChoice(msgspec.Struct, kw_only=True, omit_defaults=True):  # type: ignore[call-arg]
@@ -109,5 +109,5 @@ class ChatCompletionResponse(msgspec.Struct, kw_only=True, omit_defaults=True): 
     created: int
     model: str
     choices: list[ChatCompletionChoice]
-    usage: CompletionUsage | None
-    system_fingerprint: str | None
+    usage: CompletionUsage | None = None
+    system_fingerprint: str | None = None
