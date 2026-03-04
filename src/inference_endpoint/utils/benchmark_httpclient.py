@@ -37,6 +37,7 @@ import threading
 import time
 from dataclasses import dataclass
 
+from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
 from inference_endpoint.core.types import Query, QueryResult
 from inference_endpoint.endpoint_client.config import HTTPClientConfig
 from inference_endpoint.endpoint_client.cpu_affinity import compute_affinity_plan
@@ -399,6 +400,7 @@ def _create_client(
     prompt: str,
     enable_affinity: bool,
     verbose: bool = True,
+    zmq_context: ManagedZMQContext | None = None,
 ) -> tuple:
     """Create an endpoint client and query data dict.
 
@@ -422,7 +424,7 @@ def _create_client(
         endpoint_urls=[endpoint_url],
         num_workers=num_workers if num_workers > 0 else -1,
         max_connections=max_connections if max_connections > 0 else -1,
-        warmup_connections=False,
+        warmup_connections=0,
         worker_gc_mode="relaxed",
         log_level="CRITICAL",
         cpu_affinity=cpu_affinity_plan,
@@ -434,7 +436,7 @@ def _create_client(
             f"max_connections={config.max_connections}, stream={streaming}"
         )
 
-    client = AsyncHttpEndpointClient(config)
+    client = AsyncHttpEndpointClient(config, zmq_context=zmq_context)
     query_data = {
         "prompt": prompt,
         "model": "benchmark-model",
@@ -488,6 +490,9 @@ def run_benchmark(
         except OSError:
             pass
 
+    zmq_ctx_manager = ManagedZMQContext.scoped()
+    zmq_ctx = zmq_ctx_manager.__enter__()
+
     client, query_data = _create_client(
         endpoint_url,
         num_workers,
@@ -495,6 +500,7 @@ def run_benchmark(
         streaming,
         prompt,
         enable_affinity,
+        zmq_context=zmq_ctx,
     )
     loop = client.loop
     stats = BenchmarkStats(sse_events_per_response=sse_events_per_response)
@@ -613,6 +619,7 @@ def run_benchmark(
     gc.collect()
 
     asyncio.run_coroutine_threadsafe(client.shutdown(), loop).result(timeout=10.0)
+    zmq_ctx_manager.__exit__(None, None, None)
 
     # Restore original affinity so the next sweep iteration sees all CPUs
     if saved_affinity is not None:
