@@ -19,6 +19,7 @@ TODO: PoC only, subject to change!
 Benchmark command implementation."""
 
 import argparse
+import inspect
 import json
 import logging
 import os
@@ -456,6 +457,9 @@ def _run_benchmark(
         report_dir = get_default_report_path()
 
     report_dir.mkdir(parents=True, exist_ok=True)
+
+    curr_method = inspect.currentframe().f_code.co_name
+    print(f"SAVE config.yaml call from {curr_method}")
     config.to_yaml_file(report_dir / "config.yaml")
 
     max_tokens = config.model_params.max_new_tokens
@@ -775,6 +779,10 @@ def _run_benchmark(
             results_path = report_dir / "results.json"  # raw data is dump to this file
             with open(results_path, "w") as f:
                 json.dump(results, f, indent=2)
+
+            # save at least results.json to /tmp
+            curr_method = inspect.currentframe().f_code.co_name
+            print(f"SAVE results.json  call from {curr_method}")
             logger.info(f"Saved: {results_path}")
         except Exception as e:
             logger.error(f"Save failed: {e}")
