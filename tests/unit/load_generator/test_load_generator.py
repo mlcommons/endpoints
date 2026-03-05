@@ -217,10 +217,10 @@ def test_max_duration_ms_stops_issuance(load_sample_data_mock, event_recorder_mo
     elapsed_s = time.monotonic() - start
 
     # Should have stopped well before issuing 1,000,000 samples
-    assert issued_count < 1_000_000, (
-        f"Expected timeout to stop issuance, but {issued_count} samples were issued"
-    )
+    assert (
+        issued_count < 1_000_000
+    ), f"Expected timeout to stop issuance, but {issued_count} samples were issued"
     # Elapsed wall-clock should be close to max_duration_ms (allow generous upper bound)
-    assert elapsed_s < (max_duration_ms / 1000) * 10, (
-        f"Elapsed time {elapsed_s:.3f}s far exceeds max_duration_ms={max_duration_ms}ms"
-    )
+    assert (
+        elapsed_s < (max_duration_ms / 1000) * 10
+    ), f"Elapsed time {elapsed_s:.3f}s far exceeds max_duration_ms={max_duration_ms}ms"
