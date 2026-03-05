@@ -72,7 +72,7 @@ async def run_probe_command(args: argparse.Namespace) -> None:
                 ],
                 api_type=api_type,
                 num_workers=1,
-                warmup_connections=False,
+                warmup_connections=0,
             )
             # Client creates its own event loop in a separate thread
             client = HTTPEndpointClient(http_config, zmq_context=zmq_ctx)
