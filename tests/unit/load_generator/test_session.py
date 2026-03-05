@@ -103,7 +103,7 @@ def test_session_start(clean_sample_event_hooks):
         metrics.Throughput(5000),
         [metrics.Throughput(5000)],
         min_duration_ms=1000,
-        max_duration_ms=10_000,
+        max_duration_ms=None,
         n_samples_from_dataset=100,
         n_samples_to_issue=10_000,
         min_sample_count=100,

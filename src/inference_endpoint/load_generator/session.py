@@ -301,7 +301,7 @@ class BenchmarkSession:
                     metric_target=runtime_settings.metric_target,
                     reported_metrics=runtime_settings.reported_metrics,
                     min_duration_ms=0,
-                    max_duration_ms=None,  # type: ignore[arg-type]
+                    max_duration_ms=None,
                     n_samples_from_dataset=ds.num_samples(),
                     n_samples_to_issue=ds.num_samples() * ds.repeats,
                     min_sample_count=ds.num_samples() * ds.repeats,
