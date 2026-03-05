@@ -388,6 +388,7 @@ def test_reporter_create_report(events_db, fake_outputs, tokenizer):
 
     assert report.n_samples_issued == 3
     assert report.n_samples_completed == 2
+    assert report.n_samples_failed == 3  # 3 ERROR events for uuid3 in fixture
     assert report.duration_ns == (10300 - 5000)
 
     for k, expected in ttft_rollup.summarize().items():
@@ -428,6 +429,7 @@ def test_reporter_json(events_db):
         "git_sha",
         "n_samples_issued",
         "n_samples_completed",
+        "n_samples_failed",
         "duration_ns",
         "ttft",
         "tpot",
@@ -441,6 +443,7 @@ def test_reporter_json(events_db):
     assert set(json_dict.keys()) == set(expected_keys)
     assert json_dict["n_samples_issued"] == report.n_samples_issued
     assert json_dict["n_samples_completed"] == report.n_samples_completed
+    assert json_dict["n_samples_failed"] == report.n_samples_failed
     assert json_dict["duration_ns"] == report.duration_ns
     assert json_dict["qps"] == report.qps
     assert json_dict["tps"] == report.tps

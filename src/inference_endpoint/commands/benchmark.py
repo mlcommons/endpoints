@@ -697,7 +697,7 @@ def _run_benchmark(
                     "results": {
                         "total": total,
                         "successful": success_count,
-                        "failed": total - success_count,
+                        "failed": report.n_samples_failed,
                         "elapsed_time": elapsed_time,
                         "qps": estimated_qps,
                     },

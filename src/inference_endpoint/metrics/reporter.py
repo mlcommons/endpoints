@@ -354,6 +354,7 @@ class Report:
     test_started_at: int
     n_samples_issued: int
     n_samples_completed: int
+    n_samples_failed: int
     duration_ns: int
 
     # For the following metrics, the key is a rollup statistic (i.e. mean, median, etc.)
@@ -495,6 +496,7 @@ class Report:
         )
         fn(f"Total samples issued: {self.n_samples_issued}{newline}")
         fn(f"Total samples completed: {self.n_samples_completed}{newline}")
+        fn(f"Total samples failed: {self.n_samples_failed}{newline}")
         if self.duration_ns is not None:
             fn(f"Duration: {self.duration_ns / 1e9:.2f} seconds{newline}")
         else:
@@ -1312,6 +1314,7 @@ class MetricsReporter:
             test_started_at=test_started_at,
             n_samples_issued=sample_statuses["total_sent"],
             n_samples_completed=sample_statuses["completed"],
+            n_samples_failed=self.get_error_count(),
             duration_ns=self.derive_duration(),
             ttft=ttft_summary,
             tpot=tpot_summary,
