@@ -20,6 +20,7 @@ from typing import Any
 
 from inference_endpoint.dataset_manager.transforms import (
     AddStaticColumns,
+    Harmonize,
     Transform,
     UserPromptFormatter,
 )
@@ -47,4 +48,29 @@ def llama3_8b(
             output_column="prompt",
         ),
         AddStaticColumns(chat_template),
+    ]
+
+
+def llama3_8b_sglang(
+    stream: bool = True,
+    max_new_tokens: int = 128,
+    temperature: float = 0.0,
+    top_p: float = 1.0,
+    top_k: int = 1,
+    tokenizer_name: str = "meta-llama/Llama-3.1-8B-Instruct",
+) -> list[Transform]:
+    return [
+        # Step 1: Format the prompt from "article"
+        UserPromptFormatter(
+            user_prompt_format=f"Summarize the following news article in {max_new_tokens} tokens. Please output the summary only, without any other text.\n\nArticle:\n{{article}}\n\nSummary:",
+            output_column="prompt",
+        ),
+        # Step 2: Tokenize the raw prompt via Harmonize in plain mode.
+        Harmonize(
+            tokenizer_name=tokenizer_name,
+            prompt_column="prompt",
+            tokenized_column="input_tokens",
+            harmonized_column=None,
+            mode="plain",
+        ),
     ]
