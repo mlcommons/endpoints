@@ -156,7 +156,7 @@ class TestHttpEndpointClientScaleOut:
                     num_workers=num_workers,
                     max_connections=num_workers
                     * 10,  # ensure each worker has connections
-                    warmup_connections=False,
+                    warmup_connections=0,
                     zmq_context=zmq_ctx,
                 )
 
@@ -330,7 +330,7 @@ class TestHTTPEndpointClientFunctionality:
             # Use invalid endpoint to trigger errors
             client = create_futures_client(
                 "http://invalid-endpoint-12345:9999/v1/chat/completions",
-                warmup_connections=False,
+                warmup_connections=0,
                 zmq_context=zmq_ctx,
             )
 

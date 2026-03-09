@@ -59,7 +59,7 @@ def http_client(perf_http_echo_server):
     http_config = HTTPClientConfig(
         endpoint_urls=[f"{perf_http_echo_server.url}/v1/chat/completions"],
         num_workers=1,
-        warmup_connections=False,
+        warmup_connections=0,
     )
 
     client = HTTPEndpointClient(config=http_config)
