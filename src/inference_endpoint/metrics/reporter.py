@@ -1078,7 +1078,9 @@ class MetricsReporter:
             if isinstance(output_sequence, str):
                 output_sequence = [output_sequence]
             if not isinstance(output_sequence, list):
-                logging.warning(f"Output sequence for sample {sample_uuid} is not a list but {type(output_sequence)}: {output_sequence}")
+                logging.warning(
+                    f"Output sequence for sample {sample_uuid} is not a list but {type(output_sequence)}: {output_sequence}"
+                )
                 continue
 
             all_chunks = output_sequence

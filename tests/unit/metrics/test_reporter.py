@@ -112,7 +112,9 @@ def test_derive_tpot_with_string_output(tmp_path, sample_uuids, tokenizer):
     assert tpot_rows is None
 
 
-def test_derive_tpot_string_output_with_list_reasoning(tmp_path, sample_uuids, tokenizer):
+def test_derive_tpot_string_output_with_list_reasoning(
+    tmp_path, sample_uuids, tokenizer
+):
     """Test that derive_TPOT computes TPOT when string output is paired with a list reasoning sequence.
 
     The fix wraps string outputs into a single-element list so they can be combined with
@@ -137,7 +139,9 @@ def test_derive_tpot_string_output_with_list_reasoning(tmp_path, sample_uuids, t
                     uuid1,
                     SampleEvent.COMPLETE.value,
                     10211,
-                    orjson.dumps({"output": "the answer", "reasoning": ["thought step"]}),
+                    orjson.dumps(
+                        {"output": "the answer", "reasoning": ["thought step"]}
+                    ),
                 ),
                 ("", SessionEvent.TEST_ENDED.value, 10300, b""),
             ],
