@@ -253,6 +253,7 @@ class TestHttpResponseProtocol:
         assert protocol._headers["content-length"] == str(len(body))
         assert protocol._message_complete
         assert b"".join(protocol._body_chunks) == body
+        assert protocol.transport is not None
 
         loop.close()
 
@@ -360,6 +361,143 @@ class TestHttpResponseProtocol:
         with pytest.raises(ConnectionResetError):
             await headers_task
 
+        # Verify eof_received also marks connection as lost
+        protocol2 = HttpResponseProtocol(loop)
+        protocol2.connection_made(MockTransport())
+        assert not protocol2._connection_lost
+        result = protocol2.eof_received()
+        assert protocol2._connection_lost is True
+        assert result is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "exc,expected_error",
+        [
+            (OSError("broken pipe"), OSError),
+            (None, ConnectionResetError),
+        ],
+        ids=["with_exception", "clean_close"],
+    )
+    async def test_connection_lost_before_body_complete(self, exc, expected_error):
+        """connection_lost propagates errors to pending body_future."""
+        loop = asyncio.get_running_loop()
+        protocol = HttpResponseProtocol(loop)
+        protocol.connection_made(MockTransport())
+
+        protocol.data_received(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n")
+
+        if exc is None:
+            protocol.data_received(b"partial")  # partial body for clean close case
+
+        body_task = asyncio.create_task(protocol.read_body())
+        await asyncio.sleep(0)
+
+        protocol.connection_lost(exc)
+
+        with pytest.raises(expected_error):
+            await body_task
+
+    @pytest.mark.asyncio
+    async def test_connection_lost_after_message_complete(self):
+        """connection_lost(None) after message_complete resolves body future normally."""
+        loop = asyncio.get_running_loop()
+        protocol = HttpResponseProtocol(loop)
+        protocol.connection_made(MockTransport())
+
+        body_content = b'{"ok": true}'
+        # Send full response (headers + complete body)
+        protocol.data_received(
+            b"HTTP/1.1 200 OK\r\n"
+            b"Content-Length: " + str(len(body_content)).encode() + b"\r\n"
+            b"\r\n" + body_content
+        )
+
+        # Start read_body task
+        body_task = asyncio.create_task(protocol.read_body())
+        await asyncio.sleep(0.01)
+
+        # Connection lost after message already complete
+        protocol.connection_lost(None)
+
+        result = await body_task
+        assert result == body_content
+
+    @pytest.mark.asyncio
+    async def test_connection_lost_message_complete_body_future_pending(self):
+        """connection_lost resolves body_future when message was already complete."""
+        loop = asyncio.get_running_loop()
+        protocol = HttpResponseProtocol(loop)
+        protocol.connection_made(MockTransport())
+        # Manually set up state: message complete, body has data, but body_future is pending
+        protocol._message_complete = True
+        protocol._body_chunks = [b"test data"]
+        protocol._body_future = loop.create_future()
+        protocol.connection_lost(None)
+        result = await protocol._body_future
+        assert result == b"test data"
+
+    @pytest.mark.asyncio
+    async def test_data_received_parser_error(self):
+        """Garbage data causes HttpParserError on pending headers future."""
+        loop = asyncio.get_running_loop()
+        protocol = HttpResponseProtocol(loop)
+        protocol.connection_made(MockTransport())
+
+        # Start waiting for headers
+        headers_task = asyncio.create_task(protocol.read_headers())
+        await asyncio.sleep(0.01)
+
+        # Feed garbage data that is not valid HTTP
+        protocol.data_received(b"NOT HTTP AT ALL")
+
+        with pytest.raises(httptools.HttpParserError):
+            await headers_task
+
+    @pytest.mark.asyncio
+    async def test_data_received_parser_error_with_body_future(self):
+        """Parser error propagates to body_future when headers already received."""
+        loop = asyncio.get_running_loop()
+        protocol = HttpResponseProtocol(loop)
+        protocol.connection_made(MockTransport())
+        # Use chunked encoding so parser validates chunk framing
+        protocol.data_received(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
+        # Start read_body (creates _body_future)
+        body_task = asyncio.create_task(protocol.read_body())
+        await asyncio.sleep(0)
+        # Feed invalid chunk framing — triggers HttpParserError on body_future
+        protocol.data_received(b"ZZZZ\r\nNOT A VALID CHUNK\r\n")
+        with pytest.raises(httptools.HttpParserError):
+            await body_task
+
+    @pytest.mark.asyncio
+    async def test_read_body_completes_on_message_complete(self):
+        """read_body() future resolved by on_message_complete callback."""
+        loop = asyncio.get_running_loop()
+        protocol = HttpResponseProtocol(loop)
+        protocol.connection_made(MockTransport())
+        # Send headers only
+        protocol.data_received(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n")
+        # Start body read BEFORE body arrives
+        body_task = asyncio.create_task(protocol.read_body())
+        await asyncio.sleep(0)
+        assert not body_task.done()
+        # Now send body — triggers on_message_complete → sets body_future result
+        protocol.data_received(b"hello")
+        result = await body_task
+        assert result == b"hello"
+
+    @pytest.mark.asyncio
+    async def test_read_headers_fast_path(self):
+        """read_headers() returns immediately if headers already parsed."""
+        loop = asyncio.get_running_loop()
+        protocol = HttpResponseProtocol(loop)
+        protocol.connection_made(MockTransport())
+        # Feed complete response synchronously
+        protocol.data_received(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
+        # Headers already complete — should return instantly
+        status, headers = await protocol.read_headers()
+        assert status == 200
+
 
 # =============================================================================
 # ConnectionPool Tests
@@ -460,6 +598,212 @@ class TestConnectionPool:
         assert pool.total_count == 0
         assert pool.idle_count == 0
         assert waiter_task.cancelled() or waiter_task.done()
+
+    @pytest.mark.asyncio
+    async def test_stale_connection_discarded_on_acquire(self, pool):
+        """_try_get_idle discards dead connections and creates fresh ones."""
+        # Acquire and release a connection so it sits in the idle stack
+        conn1 = await pool.acquire()
+        pool.release(conn1)
+        assert pool.idle_count == 1
+        assert pool.total_count == 1
+
+        # Simulate server-side close by marking protocol as connection lost
+        # (is_alive() checks _connection_lost flag)
+        conn1.protocol._connection_lost = True
+
+        # Next acquire should discard the dead connection and create a new one
+        conn2 = await pool.acquire()
+        assert conn2 is not conn1
+        assert pool.total_count == 1  # Old one removed, new one added
+
+        pool.release(conn2)
+
+    @pytest.mark.asyncio
+    async def test_idle_timeout_discards_connection(self, echo_server):
+        """Connections idle longer than max_idle_time are discarded on acquire."""
+        loop = asyncio.get_running_loop()
+        parsed = urlparse(echo_server.url)
+        short_idle_pool = ConnectionPool(
+            host=parsed.hostname,
+            port=parsed.port,
+            loop=loop,
+            max_connections=4,
+            max_idle_time=0.1,
+        )
+        try:
+            # Acquire and release a connection
+            conn1 = await short_idle_pool.acquire()
+            short_idle_pool.release(conn1)
+            assert short_idle_pool.idle_count == 1
+
+            # Wait for the idle timeout to expire
+            await asyncio.sleep(0.15)
+
+            # Next acquire should discard the expired connection and create new
+            conn2 = await short_idle_pool.acquire()
+            assert conn2 is not conn1
+            assert short_idle_pool.total_count == 1
+
+            short_idle_pool.release(conn2)
+        finally:
+            await short_idle_pool.close()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "count,expected",
+        [(3, 3), (None, 4)],
+        ids=["explicit_count", "none_uses_max"],
+    )
+    async def test_warmup_creates_connections(self, pool, count, expected):
+        """warmup() pre-establishes connections and returns them to idle."""
+        result = await pool.warmup(count=count)
+
+        assert result == expected
+        assert pool.idle_count == expected
+        assert pool.total_count == expected
+
+    @pytest.mark.asyncio
+    async def test_warmup_exceeding_max_raises(self, pool):
+        """warmup() raises ValueError when count exceeds max_connections."""
+        with pytest.raises(ValueError, match="max_connections"):
+            await pool.warmup(count=5)
+
+    @pytest.mark.asyncio
+    async def test_pool_close_cancels_waiters(self, pool):
+        """close() cancels all pending waiters and clears the waiter queue."""
+        # Acquire all 4 connections to saturate the pool
+        _conns = [await pool.acquire() for _ in range(4)]
+
+        # Create 2 waiter tasks that will block on acquire
+        task1 = asyncio.create_task(pool.acquire())
+        task2 = asyncio.create_task(pool.acquire())
+
+        # Let them register as waiters
+        await asyncio.sleep(0.01)
+        assert pool.waiting_count == 2
+
+        # Close pool — should cancel waiters and clean up
+        await pool.close()
+
+        # Let cancellation propagate through task wrappers
+        await asyncio.sleep(0)
+
+        assert task1.done()
+        assert task2.done()
+        assert pool.waiting_count == 0
+
+    @pytest.mark.asyncio
+    async def test_release_idempotent(self, pool):
+        """Releasing a connection twice is a no-op the second time."""
+        conn = await pool.acquire()
+        assert pool.in_use_count == 1
+
+        # First release returns it to idle
+        pool.release(conn)
+        assert pool.idle_count == 1
+        assert pool.in_use_count == 0
+
+        # Second release is a no-op (conn.in_use is already False)
+        pool.release(conn)
+        assert pool.idle_count == 1  # Still 1, not 2
+        assert pool.total_count == 1
+
+    @pytest.mark.asyncio
+    async def test_unlimited_pool(self, echo_server):
+        """Pool with max_connections=None allows unlimited connections and warmup returns 0."""
+        loop = asyncio.get_running_loop()
+        parsed = urlparse(echo_server.url)
+        unlimited_pool = ConnectionPool(
+            host=parsed.hostname,
+            port=parsed.port,
+            loop=loop,
+            max_connections=None,
+        )
+        try:
+            # Unlimited pool allows arbitrary number of connections
+            conns = [await unlimited_pool.acquire() for _ in range(8)]
+            assert unlimited_pool.total_count == 8
+            for c in conns:
+                unlimited_pool.release(c)
+
+            # warmup(None) with max_connections=None returns 0 (nothing to warm)
+            result = await unlimited_pool.warmup(count=None)
+            assert result == 0
+        finally:
+            await unlimited_pool.close()
+
+    @pytest.mark.asyncio
+    async def test_waiter_creates_new_connection(self, pool):
+        """When waiter wakes up with no idle connections, it creates a new one."""
+        # Acquire all 4, then close one (destroys it, doesn't idle it)
+        conns = [await pool.acquire() for _ in range(4)]
+        # Start waiter
+        waiter_task = asyncio.create_task(pool.acquire())
+        await asyncio.sleep(0.01)
+        assert pool.waiting_count == 1
+        # Close transport on one conn (so it gets destroyed on release, not idled)
+        conns[0].transport.close()
+        pool.release(conns[0])  # destroyed, not idled — frees a slot
+        # Waiter should create a NEW connection (no idle available)
+        conn = await waiter_task
+        assert conn is not conns[0]  # Different connection
+        pool.release(conn)
+        for c in conns[1:]:
+            pool.release(c)
+
+    @pytest.mark.asyncio
+    async def test_is_stale_various_conditions(self, pool):
+        """is_stale() returns correct results for different connection states."""
+        import time as time_mod
+
+        conn = await pool.acquire()
+        pool.release(conn)
+
+        # 1. Recently used — fast path returns False
+        assert not conn.is_stale()
+
+        # 2. Age past 1s, healthy connection — not stale
+        conn.last_used = time_mod.monotonic() - 2.0
+        assert not conn.is_stale()
+
+        # 3. Transport is None — stale
+        saved_transport = conn.transport
+        conn.transport = None  # type: ignore[assignment]
+        conn.last_used = time_mod.monotonic() - 2.0
+        assert conn.is_stale()
+        conn.transport = saved_transport  # restore
+
+        # 4. get_extra_info("socket") returns None — stale
+        conn.transport = saved_transport  # ensure transport is restored
+        orig_get_extra = conn.transport.get_extra_info
+        conn.transport.get_extra_info = lambda name, default=None: None  # type: ignore[assignment]
+        conn.last_used = time_mod.monotonic() - 2.0
+        assert conn.is_stale()
+        conn.transport.get_extra_info = orig_get_extra  # type: ignore[assignment]
+
+        # 5. fd < 0 — stale
+        from unittest.mock import MagicMock
+
+        mock_sock = MagicMock()
+        mock_sock.fileno.return_value = -1
+        conn.transport = saved_transport
+        conn.transport.get_extra_info = (
+            lambda name, default=None: mock_sock if name == "socket" else default
+        )  # type: ignore[assignment]
+        conn.last_used = time_mod.monotonic() - 2.0
+        assert conn.is_stale()
+
+        # 6. OSError from fileno/select — stale
+        mock_sock2 = MagicMock()
+        mock_sock2.fileno.side_effect = OSError("bad fd")
+        conn.transport.get_extra_info = (
+            lambda name, default=None: mock_sock2 if name == "socket" else default
+        )  # type: ignore[assignment]
+        conn.last_used = time_mod.monotonic() - 2.0
+        assert conn.is_stale()
+
+        conn.transport.get_extra_info = orig_get_extra  # type: ignore[assignment]
 
 
 # =============================================================================

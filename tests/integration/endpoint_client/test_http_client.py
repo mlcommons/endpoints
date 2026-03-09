@@ -561,6 +561,51 @@ class TestDrain:
         assert elapsed < 1.0
 
 
+class TestInit:
+    """Test initialization behavior."""
+
+    def test_missing_zmq_context_raises(self):
+        """HTTPEndpointClient raises ValueError without zmq_context."""
+        config = HTTPClientConfig(
+            endpoint_urls=["http://localhost:8080/v1/chat/completions"],
+            num_workers=1,
+            max_connections=10,
+            warmup_connections=0,
+        )
+        with pytest.raises(ValueError, match="zmq_context is required"):
+            HTTPEndpointClient(config)
+
+    def test_external_loop_used(self, mock_http_echo_server):
+        """HTTPEndpointClient uses provided external loop."""
+        from inference_endpoint.async_utils.loop_manager import LoopManager
+
+        manager = LoopManager()
+        loop = manager.create_loop(
+            name="test-external-loop",
+            backend="uvloop",
+            task_factory_mode="eager",
+        )
+        try:
+            with ManagedZMQContext.scoped() as zmq_ctx:
+                client = HTTPEndpointClient(
+                    HTTPClientConfig(
+                        endpoint_urls=[
+                            f"{mock_http_echo_server.url}/v1/chat/completions"
+                        ],
+                        num_workers=1,
+                        max_connections=10,
+                        warmup_connections=0,
+                    ),
+                    loop=loop,
+                    zmq_context=zmq_ctx,
+                )
+                assert client.loop is loop
+                assert not client._owns_loop  # Didn't create it, doesn't own it
+                client.shutdown()
+        finally:
+            manager.stop_loop("test-external-loop")
+
+
 class TestShutdown:
     """Test shutdown behavior."""
 
@@ -583,3 +628,13 @@ class TestShutdown:
             )
             client.shutdown()
             client.issue(_make_query("post-shutdown"))
+
+    def test_shutdown_logs_dropped_requests(self, mock_http_echo_server):
+        """Shutdown logs count of dropped requests when > 0."""
+        with ManagedZMQContext.scoped() as zmq_ctx:
+            client = _create_client(
+                f"{mock_http_echo_server.url}/v1/chat/completions",
+                zmq_context=zmq_ctx,
+            )
+            client._dropped_requests = 3
+            client.shutdown()
