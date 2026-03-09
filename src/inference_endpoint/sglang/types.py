@@ -26,7 +26,9 @@ import msgspec
 # ============================================================================
 
 
-class SamplingParams(msgspec.Struct, kw_only=True, omit_defaults=True):  # type: ignore[call-arg]
+class SamplingParams(
+    msgspec.Struct, frozen=True, kw_only=True, omit_defaults=True, gc=False
+):  # type: ignore[call-arg]
     max_new_tokens: int = 32768
     """int: Maximum number of tokens to generate per request (1-32768)"""
 
@@ -37,16 +39,18 @@ class SamplingParams(msgspec.Struct, kw_only=True, omit_defaults=True):  # type:
     """int: Top-k sampling (number of highest probability tokens to consider). -1 = disable"""
 
     top_p: float = 1.0
-    """float: Top-p/nucleus sampling (cumulative probability threshold). 0.0-1.0, typically 1.0 for no filterin"""
+    """float: Top-p/nucleus sampling (cumulative probability threshold). 0.0-1.0, typically 1.0 for no filtering"""
 
 
-class SGLangGenerateRequest(msgspec.Struct, kw_only=True, omit_defaults=True):  # type: ignore[call-arg]
+class SGLangGenerateRequest(
+    msgspec.Struct, frozen=True, kw_only=True, omit_defaults=True, gc=False
+):  # type: ignore[call-arg]
     input_ids: list[int]
     sampling_params: SamplingParams
     stream: bool
 
 
-class MetaInfo(msgspec.Struct, kw_only=True, omit_defaults=True):  # type: ignore[call-arg]
+class MetaInfo(msgspec.Struct, frozen=True, kw_only=True, omit_defaults=True, gc=False):  # type: ignore[call-arg]
     id: str
     finish_reason: dict[str, Any]
     prompt_tokens: int
@@ -57,13 +61,17 @@ class MetaInfo(msgspec.Struct, kw_only=True, omit_defaults=True):  # type: ignor
     e2e_latency: float
 
 
-class SGLangGenerateResponse(msgspec.Struct, kw_only=True, omit_defaults=True):  # type: ignore[call-arg]
+class SGLangGenerateResponse(
+    msgspec.Struct, frozen=True, kw_only=True, omit_defaults=True, gc=False
+):  # type: ignore[call-arg]
     text: str
     output_ids: list[int]
     meta_info: MetaInfo
 
 
-class SGLangSSEDelta(msgspec.Struct):
+class SGLangSSEDelta(
+    msgspec.Struct, frozen=True, kw_only=True, omit_defaults=True, gc=False
+):  # type: ignore[call-arg]
     text: str = ""
     token_delta: list[int] = msgspec.field(default_factory=list)
     total_completion_tokens: int = 0
