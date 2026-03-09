@@ -75,6 +75,88 @@ def test_derive_tpot(events_db, sample_uuids, fake_outputs, tokenizer):
     assert all(tpot == expected_tpot2 for tpot in tpot2)
 
 
+def test_derive_tpot_with_string_output(tmp_path, sample_uuids, tokenizer):
+    """Test that derive_TPOT handles a plain string output gracefully.
+
+    A single-string output has only one chunk, so TPOT cannot be computed.
+    The reporter should not raise an exception and should return None.
+    """
+    test_db = str(tmp_path / "test_string_output.db")
+    uuid1 = sample_uuids(1)
+
+    with sqlite3_cursor(test_db) as (cursor, conn):
+        cursor.execute(
+            "CREATE TABLE IF NOT EXISTS events (sample_uuid VARCHAR(32), event_type VARCHAR(32), timestamp_ns INTEGER, data BLOB)"
+        )
+        cursor.executemany(
+            "INSERT INTO events (sample_uuid, event_type, timestamp_ns, data) VALUES (?, ?, ?, ?)",
+            [
+                ("", SessionEvent.TEST_STARTED.value, 5000, b""),
+                (uuid1, SessionEvent.LOADGEN_ISSUE_CALLED.value, 10000, b""),
+                (uuid1, SampleEvent.FIRST_CHUNK.value, 10010, b""),
+                (
+                    uuid1,
+                    SampleEvent.COMPLETE.value,
+                    10211,
+                    orjson.dumps({"output": "the final answer"}),
+                ),
+                ("", SessionEvent.TEST_ENDED.value, 10300, b""),
+            ],
+        )
+        conn.commit()
+
+    with MetricsReporter(test_db) as reporter:
+        tpot_rows = reporter.derive_TPOT(tokenizer)
+
+    # A single-string output produces only 1 chunk — TPOT requires at least 2
+    assert tpot_rows is None
+
+
+def test_derive_tpot_string_output_with_list_reasoning(
+    tmp_path, sample_uuids, tokenizer
+):
+    """Test that derive_TPOT computes TPOT when string output is paired with a list reasoning sequence.
+
+    The fix wraps string outputs into a single-element list so they can be combined with
+    reasoning chunks. Without the fix, the string output causes the sample to be silently
+    skipped before reasoning is considered, so TPOT returns None even though there are
+    enough chunks (output + reasoning) to compute it.
+    """
+    test_db = str(tmp_path / "test_string_output_with_reasoning.db")
+    uuid1 = sample_uuids(1)
+
+    with sqlite3_cursor(test_db) as (cursor, conn):
+        cursor.execute(
+            "CREATE TABLE IF NOT EXISTS events (sample_uuid VARCHAR(32), event_type VARCHAR(32), timestamp_ns INTEGER, data BLOB)"
+        )
+        cursor.executemany(
+            "INSERT INTO events (sample_uuid, event_type, timestamp_ns, data) VALUES (?, ?, ?, ?)",
+            [
+                ("", SessionEvent.TEST_STARTED.value, 5000, b""),
+                (uuid1, SessionEvent.LOADGEN_ISSUE_CALLED.value, 10000, b""),
+                (uuid1, SampleEvent.FIRST_CHUNK.value, 10010, b""),
+                (
+                    uuid1,
+                    SampleEvent.COMPLETE.value,
+                    10211,
+                    orjson.dumps(
+                        {"output": "the answer", "reasoning": ["thought step"]}
+                    ),
+                ),
+                ("", SessionEvent.TEST_ENDED.value, 10300, b""),
+            ],
+        )
+        conn.commit()
+
+    with MetricsReporter(test_db) as reporter:
+        tpot_rows = reporter.derive_TPOT(tokenizer)
+
+    # String output ("the answer") + list reasoning (["thought step"]) = 2 chunks total,
+    # which is enough for TPOT computation.
+    assert tpot_rows is not None
+    assert len(tpot_rows) == 1
+
+
 def test_derive_sample_latency(events_db, sample_uuids):
     uuid1 = sample_uuids(1)
     uuid2 = sample_uuids(2)
