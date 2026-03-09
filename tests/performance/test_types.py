@@ -62,6 +62,7 @@ def make_instance(type_name: str, text: str):
         return StreamChunk(id="test-id", response_chunk=text, metadata={})
 
 
+@pytest.mark.performance
 @pytest.mark.parametrize("size_name,text", TEXT_SIZES.items(), ids=TEXT_SIZES.keys())
 @pytest.mark.parametrize("type_name", ["Query", "QueryResult", "StreamChunk"])
 def test_encode(benchmark, type_name, size_name, text):
@@ -71,6 +72,7 @@ def test_encode(benchmark, type_name, size_name, text):
     benchmark(ENCODER.encode, instance)
 
 
+@pytest.mark.performance
 @pytest.mark.parametrize("size_name,text", TEXT_SIZES.items(), ids=TEXT_SIZES.keys())
 @pytest.mark.parametrize("type_name", ["Query", "QueryResult", "StreamChunk"])
 def test_decode(benchmark, type_name, size_name, text):

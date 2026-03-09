@@ -39,7 +39,7 @@ class SamplingParams(
     """int: Top-k sampling (number of highest probability tokens to consider). -1 = disable"""
 
     top_p: float = 1.0
-    """float: Top-p/nucleus sampling (cumulative probability threshold). 0.0-1.0, typically 1.0 for no filterin"""
+    """float: Top-p/nucleus sampling (cumulative probability threshold). 0.0-1.0, typically 1.0 for no filtering"""
 
 
 class SGLangGenerateRequest(

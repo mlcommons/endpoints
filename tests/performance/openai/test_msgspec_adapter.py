@@ -79,6 +79,7 @@ def make_sse_bytes(text: str) -> bytes:
     ).encode()
 
 
+@pytest.mark.performance
 @pytest.mark.parametrize("size_name,text", TEXT_SIZES.items(), ids=TEXT_SIZES.keys())
 def test_encode_query(benchmark, size_name, text):
     """Benchmark encode_query (Query -> HTTP bytes)."""
@@ -87,6 +88,7 @@ def test_encode_query(benchmark, size_name, text):
     benchmark(OpenAIMsgspecAdapter.encode_query, query)
 
 
+@pytest.mark.performance
 @pytest.mark.parametrize("size_name,text", TEXT_SIZES.items(), ids=TEXT_SIZES.keys())
 def test_decode_response(benchmark, size_name, text):
     """Benchmark decode_response (HTTP bytes -> QueryResult)."""
@@ -95,6 +97,7 @@ def test_decode_response(benchmark, size_name, text):
     benchmark(OpenAIMsgspecAdapter.decode_response, response_bytes, "test-id")
 
 
+@pytest.mark.performance
 @pytest.mark.parametrize("size_name,text", TEXT_SIZES.items(), ids=TEXT_SIZES.keys())
 def test_decode_sse(benchmark, size_name, text):
     """Benchmark decode_sse_message (SSE bytes -> content)."""

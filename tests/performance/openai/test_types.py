@@ -59,12 +59,12 @@ JSON_DECODER_RESPONSE = msgspec.json.Decoder(ChatCompletionResponse)
 def make_sse_message(text: str) -> SSEMessage:
     """Create SSEMessage for benchmarks."""
     return SSEMessage(
-        choices=[
+        choices=(
             SSEChoice(
                 delta=SSEDelta(content=text, reasoning=""),
                 finish_reason=None,
-            )
-        ]
+            ),
+        )
     )
 
 
@@ -108,6 +108,7 @@ def make_chat_response(text: str) -> ChatCompletionResponse:
 
 
 # SSE Message benchmarks
+@pytest.mark.performance
 @pytest.mark.parametrize("size_name,text", TEXT_SIZES.items(), ids=TEXT_SIZES.keys())
 def test_sse_encode(benchmark, size_name, text):
     """Benchmark SSEMessage encoding."""
@@ -116,6 +117,7 @@ def test_sse_encode(benchmark, size_name, text):
     benchmark(JSON_ENCODER.encode, instance)
 
 
+@pytest.mark.performance
 @pytest.mark.parametrize("size_name,text", TEXT_SIZES.items(), ids=TEXT_SIZES.keys())
 def test_sse_decode(benchmark, size_name, text):
     """Benchmark SSEMessage decoding."""
@@ -126,6 +128,7 @@ def test_sse_decode(benchmark, size_name, text):
 
 
 # ChatCompletionRequest benchmarks
+@pytest.mark.performance
 @pytest.mark.parametrize("size_name,text", TEXT_SIZES.items(), ids=TEXT_SIZES.keys())
 def test_request_encode(benchmark, size_name, text):
     """Benchmark ChatCompletionRequest encoding."""
@@ -134,6 +137,7 @@ def test_request_encode(benchmark, size_name, text):
     benchmark(JSON_ENCODER.encode, instance)
 
 
+@pytest.mark.performance
 @pytest.mark.parametrize("size_name,text", TEXT_SIZES.items(), ids=TEXT_SIZES.keys())
 def test_request_decode(benchmark, size_name, text):
     """Benchmark ChatCompletionRequest decoding."""
@@ -144,6 +148,7 @@ def test_request_decode(benchmark, size_name, text):
 
 
 # ChatCompletionResponse benchmarks
+@pytest.mark.performance
 @pytest.mark.parametrize("size_name,text", TEXT_SIZES.items(), ids=TEXT_SIZES.keys())
 def test_response_encode(benchmark, size_name, text):
     """Benchmark ChatCompletionResponse encoding."""
@@ -152,6 +157,7 @@ def test_response_encode(benchmark, size_name, text):
     benchmark(JSON_ENCODER.encode, instance)
 
 
+@pytest.mark.performance
 @pytest.mark.parametrize("size_name,text", TEXT_SIZES.items(), ids=TEXT_SIZES.keys())
 def test_response_decode(benchmark, size_name, text):
     """Benchmark ChatCompletionResponse decoding."""
