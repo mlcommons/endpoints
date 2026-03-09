@@ -98,7 +98,7 @@ def test_derive_tpot_with_string_output(tmp_path, sample_uuids, tokenizer):
                     uuid1,
                     SampleEvent.COMPLETE.value,
                     10211,
-                    orjson.dumps({"output": "the final answer"}),
+                    msgspec.json.encode({"output": "the final answer"}),
                 ),
                 ("", SessionEvent.TEST_ENDED.value, 10300, b""),
             ],
@@ -139,7 +139,7 @@ def test_derive_tpot_string_output_with_list_reasoning(
                     uuid1,
                     SampleEvent.COMPLETE.value,
                     10211,
-                    orjson.dumps(
+                    msgspec.json.encode(
                         {"output": "the answer", "reasoning": ["thought step"]}
                     ),
                 ),
