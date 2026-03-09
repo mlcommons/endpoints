@@ -30,7 +30,6 @@ To compare against saved results:
 
 import msgspec
 import pytest
-
 from inference_endpoint.openai.types import (
     ChatCompletionChoice,
     ChatCompletionRequest,
