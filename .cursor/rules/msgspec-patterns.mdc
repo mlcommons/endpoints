@@ -1,0 +1,534 @@
+---
+description: python performance critical code ; python msgspec usage guide
+alwaysApply: false
+---
+## 2. Use Structs for Structured Data
+
+**Rule:** Always prefer `msgspec.Struct` over `dict`, `dataclasses`, or `attrs` for structured data with a known schema.
+
+**Why:** Structs are 5-60x faster for common operations and are optimized for encoding/decoding.
+
+```python
+# BAD: Using dict or dataclass
+from dataclasses import dataclass
+
+@dataclass
+class UserBad:
+    name:  str
+    email: str
+    age: int
+
+# GOOD: Using msgspec. Struct
+import msgspec
+
+class User(msgspec. Struct):
+    name: str
+    email: str
+    age: int
+
+# Usage
+user = User(name="alice", email="alice@example.com", age=30)
+data = msgspec.json.encode(user)
+decoded = msgspec.json.decode(data, type=User)
+```
+
+---
+
+## 3. Omit Default Values
+
+**Rule:** Set `omit_defaults=True` on Struct definitions when default values are known on both encoding and decoding ends.
+
+**Why:** Reduces encoded message size and improves both encoding and decoding performance.
+
+```python
+# BAD:  Encoding all fields including defaults
+class ConfigBad(msgspec.Struct):
+    host: str = "localhost"
+    port: int = 8080
+    debug: bool = False
+    timeout: int = 30
+
+# GOOD:  Omit default values
+class Config(msgspec. Struct, omit_defaults=True):
+    host: str = "localhost"
+    port: int = 8080
+    debug: bool = False
+    timeout: int = 30
+
+# Only non-default values are encoded
+config = Config(host="production.example.com")
+data = msgspec.json.encode(config)
+# Result: b'{"host":"production.example.com"}' instead of full object
+```
+
+---
+
+## 4. Avoid Decoding Unused Fields
+
+**Rule:** Define smaller "view" Struct types that only contain the fields you actually need.
+
+**Why:** msgspec skips decoding fields not defined in your Struct, reducing allocations and CPU time.
+
+```python
+# BAD:  Decoding entire large object when you only need a few fields
+class FullTweet(msgspec. Struct):
+    id: int
+    id_str: str
+    full_text: str
+    user: dict
+    entities: dict
+    extended_entities: dict
+    retweet_count:  int
+    favorite_count: int
+    # ...  many more fields
+
+# GOOD: Define minimal structs for your use case
+class User(msgspec. Struct):
+    name: str
+
+class TweetView(msgspec.Struct):
+    user: User
+    full_text: str
+    favorite_count: int
+
+# Only these 3 fields are decoded, rest is skipped
+tweet = msgspec.json.decode(large_json_response, type=TweetView)
+print(tweet.user. name)  # Access only what you need
+```
+
+---
+
+## 5. Use encode_into for Buffer Reuse
+
+**Rule:** Compare and try-use `Encoder.encode_into()` with a pre-allocated `bytearray` in hot loops instead of `encode()`.
+
+**Why:** Avoids allocating a new `bytes` object for each encode operation.
+
+```python
+# BAD:  New bytes object allocated for each message
+def send_messages_bad(socket, msgs):
+    encoder = msgspec.msgpack.Encoder()
+    for msg in msgs:
+        data = encoder.encode(msg)  # New bytes object each time
+        socket. sendall(data)
+
+# POSSIBLY-GOOD ALWAYS MEASURE:  Reuse a buffer
+def send_messages_good(socket, msgs):
+    encoder = msgspec.msgpack.Encoder()
+    buffer = bytearray(1024)  # Pre-allocate once
+
+    for msg in msgs:
+        n = encoder.encode_into(msg, buffer)  # Reuse buffer
+        socket.sendall(memoryview(buffer)[:n])  # Send only encoded bytes
+```
+
+---
+
+## 6. Line-Delimited JSON (NDJSON)
+
+**Rule:** Compare and try use `encode_into()` with `buffer.extend()` for line-delimited JSON to avoid copies.
+
+**Why:** Avoids unnecessary copying when appending newlines to JSON messages.
+
+```python
+# BAD: Unnecessary copy with string concatenation
+def write_ndjson_bad(file, messages):
+    for msg in messages:
+        json_msg = msgspec. json.encode(msg)
+        full_payload = json_msg + b'\n'  # Creates a copy
+        file. write(full_payload)
+
+# POSSIBLY-GOOD ALWAYS MEASURE: Zero-copy with encode_into
+def write_ndjson_good(file, messages):
+    encoder = msgspec.json.Encoder()
+    buffer = bytearray(64)  # Pre-allocate with reasonable size
+
+    for msg in messages:
+        n = encoder.encode_into(msg, buffer)
+        file.write(memoryview(buffer)[:n])  # Write only encoded bytes
+        file.write(b"\n")
+```
+
+---
+
+## 7. Length-Prefix Framing
+
+**Rule:** Use `encode_into()` with an offset for length-prefix framing.
+
+**Why:** Efficiently prepends message length without extra copies.
+
+```python
+import msgspec
+
+def send_length_prefixed(socket, msg):
+    encoder = msgspec.msgpack.Encoder()
+    buffer = bytearray(64)
+
+    # Encode into buffer, leaving 4 bytes at front for length prefix
+    n = encoder.encode_into(msg, buffer, 4)
+
+    # Write message length as 4-byte big-endian integer at the start
+    buffer[:4] = n.to_bytes(4, "big")
+
+    socket.sendall(memoryview(buffer)[:4 + n])
+
+async def prefixed_send(stream, buffer:  bytes) -> None:
+    """Write a length-prefixed buffer to an async stream"""
+    prefix = len(buffer).to_bytes(4, "big")
+    stream.write(prefix)
+    stream.write(buffer)
+    await stream.drain()
+
+async def prefixed_recv(stream) -> bytes:
+    """Read a length-prefixed buffer from an async stream"""
+    prefix = await stream.readexactly(4)
+    n = int.from_bytes(prefix, "big")
+    return await stream.readexactly(n)
+```
+
+---
+
+## 8. Use MessagePack Instead of JSON
+
+**Rule:** Consider using `msgspec.msgpack` instead of `msgspec.json` for internal APIs.
+
+**Why:** MessagePack is a more compact binary format and can be more performant than JSON.
+
+```python
+import msgspec
+
+class Event(msgspec. Struct):
+    type: str
+    data: dict
+    timestamp: float
+
+# Use MessagePack for internal service communication
+encoder = msgspec.msgpack.Encoder()
+decoder = msgspec.msgpack. Decoder(Event)
+
+event = Event(type="user_login", data={"user_id": 123}, timestamp=1703424000.0)
+packed = encoder.encode(event)  # More compact than JSON
+decoded = decoder.decode(packed)
+```
+
+---
+
+## 9. Use gc=False for Long-Lived Objects
+
+**Rule:** Set `gc=False` on Struct types that will never participate in reference cycles and are long-lived.
+
+**Why:** Reduces garbage collector overhead and pause times by up to 75x.
+
+### What is gc=False?
+
+The `gc=False` option tells Python's garbage collector to never track instances of that Struct type.
+By default, Python's cyclic garbage collector tracks objects that could potentially participate in reference cycles.
+When you set `gc=False`, you're telling msgspec:  "I guarantee these objects will never be part of a reference cycle, so don't bother tracking them."
+
+### Performance Impact
+
+Key takeaways:
+- `gc=False` reduces GC pause time by 75x compared to standard classes
+- `gc=False` saves 16 bytes per instance (no GC header needed)
+- Regular msgspec structs are already 6x faster for GC than standard classes
+
+### When to Use gc=False
+
+Use `gc=False` when:
+- You're allocating a large number of Struct objects at once (e.g., decoding a large JSON response with thousands of items)
+- You have long-lived Struct objects in memory (e.g., a large cache of data objects)
+- Your Struct only contains scalar/primitive values (ints, floats, strings, bools, bytes)
+- You are 100% certain the Struct will NEVER participate in a reference cycle
+
+DO NOT use `gc=False` when:
+- Your Struct contains references to itself or other Structs (potential cycles)
+- Your Struct is part of a parent-child relationship where parent references child and child references parent
+- You're unsure whether cycles could occur
+
+ALWAYS MEASURE performance impact.
+
+### Decision Tree:  Should I Use gc=False?
+
+```
+Should I use gc=False?
+|
++-- Does your Struct only contain scalar types (int, float, str, bool, bytes)?
+|   +-- YES --> SAFE to use gc=False
+|
++-- Does your Struct contain lists/dicts but YOU control what goes in them?
+|   +-- Will you EVER put the struct itself (or a parent) into those containers?
+|       +-- NO --> Probably safe, but test carefully
+|       +-- YES/MAYBE --> Do NOT use gc=False
+|
++-- Does your Struct have a reference to another Struct of the same type?
+|   +-- YES --> Do NOT use gc=False (e.g., tree nodes, linked lists)
+|
++-- Is your Struct part of a parent-child bidirectional relationship?
+|   +-- YES --> Do NOT use gc=False
+|
++-- When in doubt --> Do NOT use gc=False
+```
+
+### Examples
+
+```python
+# SAFE: Simple data objects with only scalar values
+class Point(msgspec. Struct, gc=False):
+    x: float
+    y: float
+    z: float
+
+class LogEntry(msgspec. Struct, gc=False):
+    timestamp: float
+    level: str
+    message: str
+    source: str
+
+class CacheEntry(msgspec.Struct, gc=False):
+    key: str
+    value: str
+    ttl: int
+    created_at: float
+
+# SAFE:  Structs containing only tuples of scalars
+class Package(msgspec. Struct, gc=False):
+    name: str
+    version:  str
+    depends: tuple[str, ...]  # immutable tuple of strings
+    size: int
+
+# UNSAFE: Self-referential structures - DO NOT use gc=False
+class TreeNode(msgspec. Struct):  # NO gc=False here!
+    value: int
+    children: list["TreeNode"]
+    parent: "TreeNode | None" = None
+```
+
+### Real-World Example:  Decoding Large JSON
+
+```python
+import msgspec
+from typing import Union
+
+# When decoding large JSON files (like package repositories),
+# gc=False significantly improves performance
+class Package(msgspec. Struct, gc=False):
+    build:  str
+    build_number: int
+    depends: tuple[str, ...]  # Use tuple, not list - immutable
+    md5: str
+    name: str
+    sha256: str
+    subdir: str
+    version: str
+    license: str = ""
+    noarch: Union[str, bool, None] = None
+    size: int = 0
+    timestamp: int = 0
+
+class RepoData(msgspec. Struct, gc=False):
+    repodata_version: int
+    info: dict
+    packages: dict[str, Package]
+    removed:  tuple[str, ...]  # Use tuple, not list
+
+# Create a typed decoder for maximum performance
+decoder = msgspec.json.Decoder(RepoData)
+
+def load_repo_data(path: str) -> RepoData:
+    with open(path, "rb") as f:
+        return decoder.decode(f.read())
+```
+
+## 10. Use array_like=True for Maximum Performance
+
+**Rule:** Set `array_like=True` when both ends know the field schema and you need maximum performance.
+
+**Why:** Encodes structs as arrays instead of objects, removing field names from the message.
+
+```python
+# Standard encoding includes field names
+class PointStandard(msgspec. Struct):
+    x: float
+    y: float
+    z: float
+
+# Encodes as:  b'{"x": 1.0,"y":2.0,"z":3.0}'
+
+# Array-like encoding removes field names
+class Point(msgspec. Struct, array_like=True):
+    x: float
+    y: float
+    z: float
+
+point = Point(1.0, 2.0, 3.0)
+data = msgspec.json.encode(point)
+# Result: b'[1.0,2.0,3.0]' - smaller and faster
+
+decoded = msgspec.json.decode(data, type=Point)
+# Works correctly: Point(x=1.0, y=2.0, z=3.0)
+```
+
+---
+
+## 11. Tagged Unions for Polymorphic Types
+
+**Rule:** Use `tag=True` on Struct types when handling multiple message types in a single union.
+
+**Why:** Enables efficient discrimination between types during decoding.
+
+```python
+import msgspec
+
+# Define request types with tagging
+class GetRequest(msgspec. Struct, tag=True):
+    key: str
+
+class PutRequest(msgspec.Struct, tag=True):
+    key: str
+    value: str
+
+class DeleteRequest(msgspec.Struct, tag=True):
+    key: str
+
+class ListRequest(msgspec.Struct, tag=True):
+    prefix: str = ""
+
+# Union type for all requests
+Request = GetRequest | PutRequest | DeleteRequest | ListRequest
+
+# Single decoder handles all types
+decoder = msgspec.msgpack.Decoder(Request)
+
+# Decoding automatically determines the correct type
+data = msgspec.msgpack.encode(PutRequest(key="foo", value="bar"))
+request = decoder.decode(data)
+
+match request:
+    case GetRequest(key):
+        print(f"Get:  {key}")
+    case PutRequest(key, value):
+        print(f"Put: {key}={value}")
+    case DeleteRequest(key):
+        print(f"Delete: {key}")
+    case ListRequest(prefix):
+        print(f"List: {prefix}")
+```
+
+---
+
+## 12. Use Struct Configuration Options
+
+**Rule:** Combine Struct options for cleaner, more robust code.
+
+```python
+import msgspec
+
+class Base(
+    msgspec. Struct,
+    omit_defaults=True,          # Don't encode default values
+    forbid_unknown_fields=True,  # Error on unknown fields (good for config files)
+    rename="kebab",              # Use kebab-case in JSON (my_field -> my-field)
+):
+    """Base class with common configuration."""
+    pass
+
+class ServerConfig(Base):
+    host: str = "localhost"
+    port: int = 8080
+    max_connections: int = 100
+    enable_ssl: bool = False
+
+# Decodes kebab-case JSON:  {"host": "prod", "max-connections": 500}
+config = msgspec.json.decode(
+    b'{"host":"prod","max-connections":  500}',
+    type=ServerConfig
+)
+# Result: ServerConfig(host='prod', port=8080, max_connections=500, enable_ssl=False)
+```
+
+---
+
+## 13. TOML Configuration Files
+
+**Rule:** Use msgspec for parsing pyproject.toml and other TOML config files with validation.
+
+```python
+import msgspec
+from typing import Any
+
+class BuildSystem(msgspec. Struct, omit_defaults=True, rename="kebab"):
+    requires:  list[str] = []
+    build_backend: str | None = None
+
+class Project(msgspec. Struct, omit_defaults=True, rename="kebab"):
+    name: str | None = None
+    version: str | None = None
+    description: str | None = None
+    requires_python: str | None = None
+    dependencies: list[str] = []
+
+class PyProject(msgspec. Struct, omit_defaults=True, rename="kebab"):
+    build_system: BuildSystem | None = None
+    project:  Project | None = None
+    tool: dict[str, dict[str, Any]] = {}
+
+def load_pyproject(path: str) -> PyProject:
+    with open(path, "rb") as f:
+        return msgspec.toml.decode(f.read(), type=PyProject)
+```
+
+## Common Patterns
+
+### API Response Handler
+
+```python
+import msgspec
+from typing import TypeVar, Generic
+
+T = TypeVar('T')
+
+class APIResponse(msgspec. Struct, Generic[T], omit_defaults=True):
+    data: T | None = None
+    error: str | None = None
+    status: int = 200
+
+class User(msgspec. Struct):
+    id: int
+    name: str
+    email: str
+
+# Create typed decoder for specific response type
+user_response_decoder = msgspec. json.Decoder(APIResponse[User])
+
+def parse_user_response(raw:  bytes) -> APIResponse[User]:
+    return user_response_decoder.decode(raw)
+```
+
+## Struct Configuration Options Summary
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `omit_defaults` | Omit fields with default values when encoding | `False` |
+| `forbid_unknown_fields` | Error on unknown fields when decoding | `False` |
+| `frozen` | Make instances immutable and hashable | `False` |
+| `order` | Generate ordering methods (`__lt__`, etc.) | `False` |
+| `eq` | Generate equality methods | `True` |
+| `kw_only` | Make all fields keyword-only | `False` |
+| `tag` | Enable tagged union support | `None` |
+| `tag_field` | Field name for the tag | `"type"` |
+| `rename` | Rename fields for encoding/decoding | `None` |
+| `array_like` | Encode/decode as arrays instead of objects | `False` |
+| `gc` | Enable garbage collector tracking | `True` |
+| `weakref` | Enable weak reference support | `False` |
+| `dict` | Add `__dict__` attribute | `False` |
+| `cache_hash` | Cache the hash value | `False` |
+
+---
+
+## References
+
+- Official Documentation: https://jcristharif.com/msgspec/
+- Performance Tips: https://jcristharif.com/msgspec/perf-tips.html
+- Structs Documentation: https://jcristharif.com/msgspec/structs.html
+- GC Configuration: https://jcristharif.com/msgspec/structs.html#struct-gc
