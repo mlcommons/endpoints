@@ -63,6 +63,7 @@ def make_instance(type_name: str, text: str):
 
 
 @pytest.mark.performance
+@pytest.mark.xdist_group(name="serial_performance")
 @pytest.mark.parametrize("size_name,text", TEXT_SIZES.items(), ids=TEXT_SIZES.keys())
 @pytest.mark.parametrize("type_name", ["Query", "QueryResult", "StreamChunk"])
 def test_encode(benchmark, type_name, size_name, text):
@@ -73,6 +74,7 @@ def test_encode(benchmark, type_name, size_name, text):
 
 
 @pytest.mark.performance
+@pytest.mark.xdist_group(name="serial_performance")
 @pytest.mark.parametrize("size_name,text", TEXT_SIZES.items(), ids=TEXT_SIZES.keys())
 @pytest.mark.parametrize("type_name", ["Query", "QueryResult", "StreamChunk"])
 def test_decode(benchmark, type_name, size_name, text):

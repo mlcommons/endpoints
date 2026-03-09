@@ -80,6 +80,7 @@ def make_sse_bytes(text: str) -> bytes:
 
 
 @pytest.mark.performance
+@pytest.mark.xdist_group(name="serial_performance")
 @pytest.mark.parametrize("size_name,text", TEXT_SIZES.items(), ids=TEXT_SIZES.keys())
 def test_encode_query(benchmark, size_name, text):
     """Benchmark encode_query (Query -> HTTP bytes)."""
@@ -89,6 +90,7 @@ def test_encode_query(benchmark, size_name, text):
 
 
 @pytest.mark.performance
+@pytest.mark.xdist_group(name="serial_performance")
 @pytest.mark.parametrize("size_name,text", TEXT_SIZES.items(), ids=TEXT_SIZES.keys())
 def test_decode_response(benchmark, size_name, text):
     """Benchmark decode_response (HTTP bytes -> QueryResult)."""
@@ -98,6 +100,7 @@ def test_decode_response(benchmark, size_name, text):
 
 
 @pytest.mark.performance
+@pytest.mark.xdist_group(name="serial_performance")
 @pytest.mark.parametrize("size_name,text", TEXT_SIZES.items(), ids=TEXT_SIZES.keys())
 def test_decode_sse(benchmark, size_name, text):
     """Benchmark decode_sse_message (SSE bytes -> content)."""

@@ -84,6 +84,7 @@ RESPONSE_SIZES = {
 
 
 @pytest.mark.performance
+@pytest.mark.xdist_group(name="serial_performance")
 @pytest.mark.parametrize(
     "size_name,input_tokens", TOKEN_SIZES.items(), ids=TOKEN_SIZES.keys()
 )
@@ -95,6 +96,7 @@ def test_encode_query(benchmark, size_name, input_tokens):
 
 
 @pytest.mark.performance
+@pytest.mark.xdist_group(name="serial_performance")
 @pytest.mark.parametrize(
     "size_name,text_and_tokens", RESPONSE_SIZES.items(), ids=RESPONSE_SIZES.keys()
 )
@@ -107,6 +109,7 @@ def test_decode_response(benchmark, size_name, text_and_tokens):
 
 
 @pytest.mark.performance
+@pytest.mark.xdist_group(name="serial_performance")
 @pytest.mark.parametrize(
     "size_name,text_and_tokens", RESPONSE_SIZES.items(), ids=RESPONSE_SIZES.keys()
 )
