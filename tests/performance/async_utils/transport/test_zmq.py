@@ -30,9 +30,9 @@ import pytest
 import uvloop
 from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
 from inference_endpoint.async_utils.transport.zmq.transport import (
-    _ZMQSocketConfig,
     _create_receiver,
     _create_sender,
+    _ZMQSocketConfig,
 )
 from inference_endpoint.core.types import Query, QueryResult, StreamChunk
 
