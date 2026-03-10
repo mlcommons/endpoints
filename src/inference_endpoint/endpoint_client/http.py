@@ -727,6 +727,8 @@ class HttpRequestTemplate:
         encoded = "".join(f"{k}: {v}\r\n" for k, v in headers.items()).encode(
             "utf-8", "surrogateescape"
         )
+        # Substring dedup: safe because this is called once at setup with
+        # full header lines (e.g. "Authorization: Bearer ...\r\n"), not arbitrary fragments.
         if encoded not in self.cached_headers:
             self.cached_headers += encoded
 
