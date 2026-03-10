@@ -370,6 +370,8 @@ class PooledConnection:
         "last_used",
         "in_use",
         "idle_time_on_acquire",
+        "_fd",
+        "_stale_poller",
     )
 
     def __init__(
@@ -384,6 +386,11 @@ class PooledConnection:
         self.last_used = created_at
         self.in_use = True
         self.idle_time_on_acquire = 0.0
+
+        # Cache fd for stale checks — stable for the lifetime of the connection
+        sock = transport.get_extra_info("socket")
+        self._fd: int = sock.fileno() if sock is not None else -1
+        self._stale_poller: select.poll | None = None
 
     def is_alive(self) -> bool:
         """Check if the connection is still usable.
@@ -405,31 +412,34 @@ class PooledConnection:
         For idle HTTP keep-alive connections, there should be no pending data.
         If the socket is readable, it means the server sent FIN (EOF).
 
-        Optimization: Skip check for recently-used connections (< 1 second).
+        Uses poll() instead of select() to avoid FD_SETSIZE limit on high fds.
+        Poller is created lazily on first call and reused (fd is stable per connection).
         """
         # Skip stale check for recently-used connections
         # Server unlikely to close within 1 second of last use
         if time.monotonic() - self.last_used < 1.0:
             return False
 
-        if self.transport is None:
-            return True
+        # Fast path: poller already registered from a previous call
+        if self._stale_poller is not None:
+            try:
+                return bool(self._stale_poller.poll(0))
+            except (OSError, ValueError):
+                # fd closed or invalid — connection is dead, treat as stale
+                return True
 
-        # Get the socket file descriptor
-        sock = self.transport.get_extra_info("socket")
-        if sock is None:
+        # Slow path: first call — create poller and register fd
+        if self._fd < 0:
             return True
 
         try:
-            fd = sock.fileno()
-            if fd < 0:
-                return True
-
-            # Use select with zero timeout - avoids poll() object creation overhead
-            readable, _, exceptional = select.select([fd], [], [fd], 0)
-            return bool(readable or exceptional)
+            poller = select.poll()
+            poller.register(self._fd, select.POLLIN | select.POLLERR | select.POLLHUP)
+            self._stale_poller = poller
+            return bool(poller.poll(0))
 
         except (OSError, ValueError):
+            # fd closed or invalid — connection is dead, treat as stale
             return True
 
 
@@ -663,7 +673,7 @@ class HttpRequestTemplate:
         static_prefix: Pre-merged request line + host header bytes
     """
 
-    __slots__ = ("static_prefix", "_extra_headers_cache", "extra_cached_headers")
+    __slots__ = ("static_prefix", "cached_headers")
 
     # Pre-encoded general headers
     HEADERS_STREAMING = (
@@ -675,8 +685,7 @@ class HttpRequestTemplate:
 
     def __init__(self, static_prefix: bytes):
         self.static_prefix = static_prefix
-        self._extra_headers_cache: dict[frozenset, bytes] = {}
-        self.extra_cached_headers = b""
+        self.cached_headers = b""
 
     @classmethod
     def from_url(cls, host: str, port: int, path: str = "/") -> HttpRequestTemplate:
@@ -714,12 +723,11 @@ class HttpRequestTemplate:
         Args:
             headers: Headers to pre-encode and cache
         """
-        cache_key = frozenset(headers.items())
-        if cache_key not in self._extra_headers_cache:
-            self._extra_headers_cache[cache_key] = "".join(
-                f"{k}: {v}\r\n" for k, v in headers.items()
-            ).encode("utf-8", "surrogateescape")
-            self.extra_cached_headers = b"".join(self._extra_headers_cache.values())
+        encoded = "".join(f"{k}: {v}\r\n" for k, v in headers.items()).encode(
+            "utf-8", "surrogateescape"
+        )
+        if encoded not in self.cached_headers:
+            self.cached_headers += encoded
 
     def build_request(
         self,
@@ -748,25 +756,22 @@ class HttpRequestTemplate:
             return b"".join(
                 [
                     self.static_prefix,
-                    self.extra_cached_headers,
+                    self.cached_headers,
                     content_type_headers,
                     content_length,
                     body,
                 ]
             )
 
-        # Slow path: extra headers (~1us uncached, ~50ns per extra-header cached)
-        cache_key = frozenset(extra_headers.items())
-        if (extra := self._extra_headers_cache.get(cache_key)) is None:
-            extra = "".join(f"{k}: {v}\r\n" for k, v in extra_headers.items()).encode(
-                "utf-8", "surrogateescape"
-            )
-            self._extra_headers_cache[cache_key] = extra
-
+        # Slow path: extra headers are encoded per-call;
+        # use cache_headers() at setup time for headers that repeat every request.
+        extra = "".join(f"{k}: {v}\r\n" for k, v in extra_headers.items()).encode(
+            "utf-8", "surrogateescape"
+        )
         return b"".join(
             [
                 self.static_prefix,
-                self.extra_cached_headers,
+                self.cached_headers,
                 content_type_headers,
                 extra,
                 content_length,

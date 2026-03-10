@@ -61,7 +61,7 @@ logger = logging.getLogger(__name__)
 # - uvloop requires use of 'spawn'
 try:
     multiprocessing.set_start_method("spawn", force=False)
-except RuntimeError:
+except RuntimeError:  # pragma: no cover
     # Already set, which is fine (likely in tests or when importing multiple times)
     pass
 
