@@ -636,7 +636,7 @@ def run_benchmark(
 # ---------------------------------------------------------------------------
 
 
-_FULL_WORKERS = [1, 2, 4, 8, 10, 12, 14, 16]
+_FULL_WORKERS = [1, 2, 4, 6, 8, 10, 12, 14, 16]
 _FULL_PROMPT_LENGTHS = [
     1,
     32,
@@ -905,13 +905,9 @@ def run_sweep(
             print(f"{'='*70}")
 
             # Restart server when prompt_length or stream_interval changes
-            if (
-                server
-                and args.streaming
-                and (
-                    prompt_length != last_prompt_length
-                    or stream_interval != last_stream_interval
-                )
+            if server and (
+                prompt_length != last_prompt_length
+                or stream_interval != last_stream_interval
             ):
                 _restart_server(server, prompt_length, args.streaming, stream_interval)
                 last_prompt_length = prompt_length
