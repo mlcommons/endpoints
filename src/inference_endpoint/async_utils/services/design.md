@@ -305,8 +305,8 @@ stateDiagram-v2
 
 ### 6.2 Metrics aggregator
 
-- **Role**: [To be filled in by the implementer.]
-  Subscribes to EventRecords and derives real-time metrics (e.g. TTFT, sample latency, token counts). May use a tokenizer pool for token-based metrics. Output is typically JSONL (e.g. `JsonlMetricRecorder`). Shuts down on **session.ended**.
+- **Role**: Subscribes to EventRecords and derives real-time metrics (e.g. TTFT, sample latency, token counts). May use a tokenizer pool for token-based metrics. Shuts down on **session.ended**.
+- **Outputs**: Planned is to push real time metrics to Prometheus via PushGateway. Currently, logging / writing final report to JSON is sufficient legacy behavior.
 - **Process**: Run as a **subprocess**; given `--metrics-dir`, `--socket-address`, and optional tokenizer options. Uses a dedicated event loop and `ManagedZMQContext.scoped(socket_dir=...)` so it can connect to the publisher's IPC address.
 
 ---
