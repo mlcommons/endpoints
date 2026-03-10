@@ -1,3 +1,2 @@
 examples/04_GPTOSS120B_Example/data/perf_eval_ref.parquet filter=lfs diff=lfs merge=lfs -text
 examples/04_GPTOSS120B_Example/data/acc_eval_ref.parquet filter=lfs diff=lfs merge=lfs -text
-docs/html/*.html filter=lfs diff=lfs merge=lfs -text
