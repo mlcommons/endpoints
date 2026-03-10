@@ -17,7 +17,7 @@
 
 from pathlib import Path
 
-import orjson
+import msgspec
 from inference_endpoint.core.record import EventRecord
 from sqlalchemy import BigInteger, Integer, LargeBinary, String, create_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
@@ -55,17 +55,13 @@ class EventRowModel(Base):
 
 
 def _record_to_row(record: EventRecord) -> EventRowModel:
-    """Convert an EventRecord to an EventRowModel using EventType topic strings."""
-    data_bytes = b""
-    if record.data:
-        data_bytes = orjson.dumps(record.data)
     # event_type.topic is set by EventTypeMeta on each enum member
     topic = record.event_type.topic  # type: ignore[attr-defined]
     return EventRowModel(
         sample_uuid=record.sample_uuid,
         event_type=topic,
         timestamp_ns=record.timestamp_ns,
-        data=data_bytes,
+        data=msgspec.json.encode(record.data),
     )
 
 

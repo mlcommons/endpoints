@@ -19,6 +19,8 @@ from typing import Any, ClassVar, Final
 
 import msgspec
 
+from .types import OUTPUT_TYPE, ErrorData
+
 TOPIC_FRAME_SIZE: Final[int] = 40
 """int: Fixed bytesize for the encoded topic string. PUB messages will be prefixed by a
 topic string corresponding to the EventType. This topic will be null-padded to this fixed
@@ -151,7 +153,7 @@ class EventRecord(msgspec.Struct, kw_only=True):  # type: ignore[call-arg]
     event_type: EventType
     timestamp_ns: int = msgspec.field(default_factory=time.monotonic_ns)
     sample_uuid: str = ""
-    data: dict[str, Any] = msgspec.field(default_factory=dict)
+    data: OUTPUT_TYPE | ErrorData | None = None
 
 
 _ENCODER = msgspec.msgpack.Encoder(enc_hook=EventType.encode_hook)

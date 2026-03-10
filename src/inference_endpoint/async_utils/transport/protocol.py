@@ -35,7 +35,7 @@ from inference_endpoint.core.record import (
     decode_event_record,
     encode_event_record,
 )
-from inference_endpoint.core.types import Query, QueryResult, StreamChunk
+from inference_endpoint.core.types import ErrorData, Query, QueryResult, StreamChunk
 
 if TYPE_CHECKING:
     from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
@@ -341,14 +341,12 @@ class EventRecordSubscriber(ABC):
                 try:
                     event_record = decode_event_record(payload)
                 except msgspec.DecodeError as e:
-                    # Record an error instead
-                    # TODO: Make `data` field more rigidly typed
                     event_record = EventRecord(
                         event_type=ErrorEventType.GENERIC,
-                        data={
-                            "error_type": "msgspec.DecodeError",
-                            "error_message": str(e),
-                        },
+                        data=ErrorData(
+                            error_type="msgspec.DecodeError",
+                            error_message=str(e),
+                        ),
                     )
                 records.append(event_record)
         except StopIteration:

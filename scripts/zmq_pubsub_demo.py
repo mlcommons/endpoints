@@ -153,13 +153,11 @@ async def publish_test_events(publisher) -> None:
             event_type=SampleEventType.RECV_FIRST,
             timestamp_ns=10010,
             sample_uuid=uuid1,
-            data={"ttft_ms": 10.0},
         ),
         EventRecord(
             event_type=SampleEventType.RECV_FIRST,
             timestamp_ns=10190,
             sample_uuid=uuid2,
-            data={"ttft_ms": 187.0},
         ),
         EventRecord(
             event_type=SampleEventType.RECV_NON_FIRST,
@@ -190,7 +188,7 @@ async def publish_test_events(publisher) -> None:
             event_type=SampleEventType.COMPLETE,
             timestamp_ns=10211,
             sample_uuid=uuid1,
-            data={"tokens": 50},
+            data="Hello world",
         ),
         EventRecord(
             event_type=SampleEventType.RECV_NON_FIRST,
@@ -211,7 +209,7 @@ async def publish_test_events(publisher) -> None:
             event_type=SampleEventType.COMPLETE,
             timestamp_ns=10219,
             sample_uuid=uuid2,
-            data={"tokens": 75},
+            data="Sample output for uuid2",
         ),
     ]
 

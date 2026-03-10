@@ -51,9 +51,6 @@ class QueryStatus(Enum):
 OUTPUT_ELEM_TYPE = str | tuple[str, ...]
 """Type for a single output or reasoning value: string (non-streaming) or tuple of strings (streaming)."""
 
-_OUTPUT_DICT_TYPE = dict[str, str | list[str]]
-_OUTPUT_RESULT_TYPE = str | tuple[str, ...] | _OUTPUT_DICT_TYPE | None
-
 
 class TextModelOutput(msgspec.Struct, tag=True, kw_only=True):  # type: ignore[call-arg]
     """Structured output from a text model.

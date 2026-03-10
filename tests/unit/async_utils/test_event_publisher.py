@@ -151,7 +151,7 @@ class TestEventPublisherService:
         record = EventRecord(
             event_type=SessionEventType.STARTED,
             sample_uuid="",
-            data={"manual_socket": True},
+            data="manual_socket_test",
         )
         event_publisher_service.publish(record)
         # Yield so the publisher's event loop can drain the send buffer
@@ -168,7 +168,7 @@ class TestEventPublisherService:
         assert topic_bytes == b"session.started"
         rec = decode_event_record(bytes(payload))
         assert rec.event_type.value == SessionEventType.STARTED.value
-        assert rec.data == {"manual_socket": True}
+        assert rec.data == "manual_socket_test"
         # Socket is closed by ManagedZMQContext.cleanup() in ev_pub_zmq_context fixture teardown.
 
     def test_singleton_returns_same_instance(
@@ -190,7 +190,7 @@ class TestEventPublisherService:
         record = EventRecord(
             event_type=SessionEventType.STARTED,
             sample_uuid="",
-            data={"key": "value"},
+            data="value",
         )
         event_publisher_service.publish(record)
         await asyncio.sleep(0.05)  # Let publisher drain send buffer
@@ -198,7 +198,7 @@ class TestEventPublisherService:
         assert len(collecting_subscriber.received) == 1
         rec = collecting_subscriber.received[0]
         assert rec.event_type.value == SessionEventType.STARTED.value
-        assert rec.data == {"key": "value"}
+        assert rec.data == "value"
 
     @pytest.mark.asyncio
     async def test_publish_sample_event_received_by_subscriber(
@@ -210,7 +210,7 @@ class TestEventPublisherService:
         record = EventRecord(
             event_type=SampleEventType.COMPLETE,
             sample_uuid="sample-1",
-            data={"latency_ns": 42},
+            data="sample output",
         )
         event_publisher_service.publish(record)
         await asyncio.sleep(0.05)  # Let publisher drain send buffer
@@ -219,7 +219,7 @@ class TestEventPublisherService:
         rec = collecting_subscriber.received[0]
         assert rec.event_type.value == SampleEventType.COMPLETE.value
         assert rec.sample_uuid == "sample-1"
-        assert rec.data == {"latency_ns": 42}
+        assert rec.data == "sample output"
 
     @pytest.mark.asyncio
     async def test_multiple_events_received_in_order(
@@ -232,7 +232,6 @@ class TestEventPublisherService:
             record = EventRecord(
                 event_type=SampleEventType.ISSUED,
                 sample_uuid=f"sample-{i}",
-                data={"seq": i},
             )
             event_publisher_service.publish(record)
             await asyncio.sleep(0.05)  # Small delay between events (demo-style)
@@ -240,4 +239,4 @@ class TestEventPublisherService:
         assert len(collecting_subscriber.received) == 3
         for i in range(3):
             assert collecting_subscriber.received[i].sample_uuid == f"sample-{i}"
-            assert collecting_subscriber.received[i].data.get("seq") == i
+            assert collecting_subscriber.received[i].data is None
