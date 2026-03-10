@@ -670,7 +670,8 @@ class HttpRequestTemplate:
     that remain constant across requests to a given endpoint.
 
     Attributes:
-        static_prefix: Pre-merged request line + host header bytes
+        static_prefix: Pre-merged request line + host header bytes.
+        cached_headers: Pre-encoded headers from cache_headers(), included in every request.
     """
 
     __slots__ = ("static_prefix", "cached_headers")

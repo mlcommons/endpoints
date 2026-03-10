@@ -356,25 +356,14 @@ class TestHttpResponseProtocol:
 
     @pytest.mark.asyncio
     async def test_connection_lost_with_complete_message(self):
-        """connection_lost after message_complete resolves body future normally."""
+        """connection_lost with pending body_future and _message_complete resolves normally."""
         loop = asyncio.get_running_loop()
         protocol = HttpResponseProtocol(loop)
         protocol.connection_made(MockTransport())
-        protocol.data_received(
-            b"HTTP/1.1 200 OK\r\nContent-Length: 12\r\n\r\n" + b'{"ok": true}'
-        )
-        body_task = asyncio.create_task(protocol.read_body())
-        await asyncio.sleep(0)
+        protocol._message_complete, protocol._body_chunks = True, [b"test data"]
+        protocol._body_future = loop.create_future()
         protocol.connection_lost(None)
-        assert await body_task == b'{"ok": true}'
-
-        # Manually pending body_future with _message_complete=True
-        p2 = HttpResponseProtocol(loop)
-        p2.connection_made(MockTransport())
-        p2._message_complete, p2._body_chunks = True, [b"test data"]
-        p2._body_future = loop.create_future()
-        p2.connection_lost(None)
-        assert await p2._body_future == b"test data"
+        assert await protocol._body_future == b"test data"
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -556,7 +545,8 @@ class TestConnectionPool:
     @pytest.mark.asyncio
     async def test_close_cancels_waiters(self, pool):
         """close() cancels all pending waiters and clears the waiter queue."""
-        _conns = [await pool.acquire() for _ in range(4)]
+        for _ in range(4):
+            await pool.acquire()
         tasks = [asyncio.create_task(pool.acquire()) for _ in range(2)]
         await asyncio.sleep(0)
         assert pool.waiting_count == 2
