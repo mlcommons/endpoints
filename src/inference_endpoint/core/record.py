@@ -147,7 +147,7 @@ class SampleEventType(EventType):
     TRANSPORT_RECV = "transport_recv"
 
 
-class EventRecord(msgspec.Struct, kw_only=True, frozen=True):  # type: ignore[call-arg]
+class EventRecord(msgspec.Struct, kw_only=True, frozen=True, gc=False):  # type: ignore[call-arg]
     """A record of an event that occurs throughout the inference process."""
 
     event_type: EventType

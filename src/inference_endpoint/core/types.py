@@ -59,6 +59,7 @@ class TextModelOutput(
     frozen=True,
     omit_defaults=True,
     array_like=True,
+    gc=False,
 ):  # type: ignore[call-arg]
     """Structured output from a text model.
 
@@ -109,6 +110,7 @@ class ErrorData(
     frozen=True,
     omit_defaults=True,
     array_like=True,
+    gc=False,
 ):  # type: ignore[call-arg]
     """Structured error information.
 
@@ -175,6 +177,7 @@ class Query(
     created_at: float = msgspec.field(default_factory=time.time)
 
 
+# gc=False: audit 2026-03: metadata dict is only ever read, never mutated after construction.
 class QueryResult(
     msgspec.Struct,
     tag="query_result",
@@ -185,6 +188,10 @@ class QueryResult(
     gc=False,
 ):  # type: ignore[call-arg]
     """Result of a completed inference query.
+
+    AT-RISK (gc=False): Has mutable container field `metadata`. Any change that
+    mutates `metadata` after construction or stores this struct in a container
+    referenced by this struct must be audited; if so, remove gc=False.
 
     Represents the outcome of processing a Query, including the response text,
     metadata, and any error information. The completed_at timestamp is
