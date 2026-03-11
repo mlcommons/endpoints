@@ -1,0 +1,47 @@
+# Online Latency Benchmark - Qwen3-VL-235B-A22B on Shopify Product Catalogue
+# MLPerf Inference Q3VL benchmark: multimodal product taxonomy classification
+name: "offline-qwen3-vl-235b-a22b-shopify-benchmark"
+version: "1.0"
+type: "offline"
+timeout: 7200
+
+model_params:
+  name: "nvidia/Qwen3-VL-235B-A22B-Instruct-NVFP4-MLPerf-Inference-Closed-V6.0"
+  temperature: 0
+  top_p: 1
+  max_new_tokens: 150
+
+datasets:
+  - name: shopify_product_catalogue::q3vl
+    type: "performance"
+    force: true
+
+settings:
+  runtime:
+    min_duration_ms: 60000 # 1 minute
+    n_samples_to_issue: 48289 # Limit queries for testing (remove or increase for full run)
+    scheduler_random_seed: 42 # For Poisson/distribution sampling
+    dataloader_random_seed: 42 # For dataset shuffling
+
+  load_pattern:
+    type: "max_throughput"
+
+  client:
+    workers: 2
+    # Cap connections to avoid overwhelming server. Default -1 uses ~25k (ephemeral ports),
+    # causing warmup failures and connection timeouts. 256-512 is typical for vLLM.
+    max_connections: 2048
+
+metrics:
+  collect:
+    - "throughput"
+    - "latency"
+    - "ttft"
+    - "tpot"
+
+endpoint_config:
+  endpoints:
+    - "http://localhost:8000"
+  api_key: null
+
+report_dir: results/qwen3_vl_235b_a22b_shopify_benchmark_mlperf_2/
