@@ -52,18 +52,18 @@ class _SocketConfig:
     # Connection keepalive-probe settings for long-lived connections
     # client kernel sends probe, server's kernel ACKs - no application overhead
     #
-    # TODO(vir): we want to detect failed requests as early as possible to then retry
+    # TODO(vir): verify impact on failure-detection, we want to fail fast
     # detection time: KEEPIDLE + (KEEPCNT × KEEPINTVL) = 1 + 5×1 = 5s
     SO_KEEPALIVE: int = 1  # Enable keepalive at socket level
-    TCP_KEEPIDLE: int = 1  # Probe after 5s idle
-    TCP_KEEPCNT: int = 5  # 3 failed probes = dead
+    TCP_KEEPIDLE: int = 1  # Probe after 1s idle
+    TCP_KEEPCNT: int = 5  # 5 failed probes = dead
     TCP_KEEPINTVL: int = 1  # 1s between probes
 
     # Socket buffer sizing: sliding windows, not full-message buffers.
     # The event loop reads eagerly so the buffer only holds data between
     # kernel delivery and application read — typically one RTT worth.
     #
-    # 128KB = 131,072 bytes ≈ 128K chars buffered in-flight at any instant.
+    # 128KB ≈ 128K chars buffered in-flight at any instant.
     # Responses larger than the buffer stream through fine (TCP sliding window).
     SO_RCVBUF: int = 1024 * 128  # 128KB receive buffer
     SO_SNDBUF: int = 1024 * 128  # 128KB send buffer
