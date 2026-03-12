@@ -46,20 +46,21 @@ Dataset Manager --> Load Generator --> Endpoint Client --> External Endpoint
 
 ### Key Components
 
-| Component | Location | Purpose |
-|-----------|----------|---------|
-| **Load Generator** | `src/inference_endpoint/load_generator/` | Central orchestrator: `BenchmarkSession` owns the lifecycle, `Scheduler` controls timing, `LoadGenerator` issues queries |
-| **Endpoint Client** | `src/inference_endpoint/endpoint_client/` | Multi-process HTTP workers communicating via ZMQ IPC. `HTTPEndpointClient` is the main entry point |
-| **Dataset Manager** | `src/inference_endpoint/dataset_manager/` | Loads pickle, HuggingFace, JSONL datasets. `Dataset` base class with `load_sample()`/`num_samples()` interface |
-| **Metrics** | `src/inference_endpoint/metrics/` | `EventRecorder` writes to SQLite, `MetricsReporter` reads and aggregates (QPS, latency, TTFT, TPOT) |
-| **Config** | `src/inference_endpoint/config/` | Pydantic-based YAML schema (`schema.py`), ruleset registry for MLCommons compliance, `RuntimeSettings` for runtime state |
-| **CLI** | `src/inference_endpoint/cli.py` | argparse-based with subcommands dispatched from `commands/` |
-| **Async Utils** | `src/inference_endpoint/async_utils/` | `LoopManager` (uvloop + eager_task_factory), ZMQ transport layer, event publisher |
-| **OpenAI/SGLang** | `src/inference_endpoint/openai/`, `sglang/` | Protocol adapters and response accumulators for different API formats |
+| Component           | Location                                    | Purpose                                                                                                                  |
+| ------------------- | ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| **Load Generator**  | `src/inference_endpoint/load_generator/`    | Central orchestrator: `BenchmarkSession` owns the lifecycle, `Scheduler` controls timing, `LoadGenerator` issues queries |
+| **Endpoint Client** | `src/inference_endpoint/endpoint_client/`   | Multi-process HTTP workers communicating via ZMQ IPC. `HTTPEndpointClient` is the main entry point                       |
+| **Dataset Manager** | `src/inference_endpoint/dataset_manager/`   | Loads pickle, HuggingFace, JSONL datasets. `Dataset` base class with `load_sample()`/`num_samples()` interface           |
+| **Metrics**         | `src/inference_endpoint/metrics/`           | `EventRecorder` writes to SQLite, `MetricsReporter` reads and aggregates (QPS, latency, TTFT, TPOT)                      |
+| **Config**          | `src/inference_endpoint/config/`            | Pydantic-based YAML schema (`schema.py`), ruleset registry for MLCommons compliance, `RuntimeSettings` for runtime state |
+| **CLI**             | `src/inference_endpoint/cli.py`             | argparse-based with subcommands dispatched from `commands/`                                                              |
+| **Async Utils**     | `src/inference_endpoint/async_utils/`       | `LoopManager` (uvloop + eager_task_factory), ZMQ transport layer, event publisher                                        |
+| **OpenAI/SGLang**   | `src/inference_endpoint/openai/`, `sglang/` | Protocol adapters and response accumulators for different API formats                                                    |
 
 ### Hot-Path Architecture
 
 Multi-process, event-loop design optimized for throughput:
+
 - `BenchmarkSession` thread schedules samples with busy-wait timing
 - Worker processes (N instances) handle HTTP requests via ZMQ IPC
 - Uses `eager_task_factory` and `uvloop` for minimal async overhead
@@ -171,6 +172,7 @@ tests/
 ### Pre-commit Hooks
 
 All of these run automatically on commit:
+
 - trailing-whitespace, end-of-file-fixer, check-yaml, check-merge-conflict, debug-statements
 - `ruff` (lint + autofix) and `ruff-format`
 - `mypy` type checking
@@ -191,6 +193,7 @@ All of these run automatically on commit:
 **Coverage target**: >90% for all new code.
 
 **Test markers:**
+
 ```python
 @pytest.mark.unit           # Unit tests
 @pytest.mark.integration    # Integration tests (may need servers)
@@ -202,6 +205,7 @@ All of these run automatically on commit:
 **Async tests**: Use `@pytest.mark.asyncio(mode="strict")` — the project uses strict asyncio mode.
 
 **Key fixtures** (defined in `tests/conftest.py`):
+
 - `mock_http_echo_server` — real HTTP echo server on dynamic port
 - `mock_http_oracle_server` — dataset-driven response server
 - `dummy_dataset` — in-memory test dataset
@@ -227,15 +231,15 @@ These apply especially to code in the hot path (load generator, endpoint client,
 
 ### Key Dependencies
 
-| Package | Purpose |
-|---------|---------|
-| `uvloop` | Performance-optimized event loop |
-| `httptools` | Fast HTTP parser for custom connection pool |
-| `msgspec` | Fast serialization for core types and ZMQ transport |
-| `pyzmq` | ZMQ IPC between main process and workers |
-| `pydantic` | Configuration validation |
-| `duckdb` | Data aggregation |
-| `transformers` | Tokenization for OSL reporting |
+| Package        | Purpose                                             |
+| -------------- | --------------------------------------------------- |
+| `uvloop`       | Performance-optimized event loop                    |
+| `httptools`    | Fast HTTP parser for custom connection pool         |
+| `msgspec`      | Fast serialization for core types and ZMQ transport |
+| `pyzmq`        | ZMQ IPC between main process and workers            |
+| `pydantic`     | Configuration validation                            |
+| `duckdb`       | Data aggregation                                    |
+| `transformers` | Tokenization for OSL reporting                      |
 
 ### Files to NOT Modify
 
@@ -268,6 +272,7 @@ Update AGENTS.md as part of any PR that includes a **significant refactor**, mea
 ### Reviewer Checklist
 
 When reviewing PRs with significant structural changes, verify:
+
 - [ ] Code Organization tree matches the actual directory structure post-merge
 - [ ] Key Components table reflects any moved/renamed/new components
 - [ ] No references to deleted files, classes, or modules remain
@@ -279,7 +284,7 @@ Known failure modes when AI tools generate code for this project. Reference thes
 ### Architecture & Design
 
 - **Inventing abstractions that don't exist**: AI may introduce new base classes, registries, or factory patterns that don't match the existing architecture. This project uses concrete types and explicit wiring — check that new code follows existing patterns rather than imposing unfamiliar frameworks.
-- **Misunderstanding the multi-process boundary**: The endpoint client uses separate worker *processes* (not threads) communicating over ZMQ. AI-generated code often assumes shared memory, passes unpicklable objects across processes, or adds synchronization primitives (locks, semaphores) that don't work cross-process.
+- **Misunderstanding the multi-process boundary**: The endpoint client uses separate worker _processes_ (not threads) communicating over ZMQ. AI-generated code often assumes shared memory, passes unpicklable objects across processes, or adds synchronization primitives (locks, semaphores) that don't work cross-process.
 - **Confusing hot-path vs. cold-path**: AI tends to treat all code uniformly. Code in `load_generator/`, `endpoint_client/worker.py`, and `async_utils/transport/` is latency-critical. Pydantic validation, excessive logging, or try/except blocks in these paths will degrade throughput.
 
 ### Serialization & Types
@@ -305,7 +310,7 @@ Known failure modes when AI tools generate code for this project. Reference thes
 
 - **Missing license headers**: Every Python file needs the Apache 2.0 SPDX header. AI never generates these — the pre-commit hook will add them, but be aware of this when reviewing diffs.
 - **Importing removed or renamed modules**: After refactors, AI (working from stale context) may import old module paths. Always verify imports resolve to actual files.
-- **Over-documenting**: AI generates verbose docstrings, inline comments explaining obvious code, and type annotations on trivial variables. This project prefers minimal comments — only where the *why* isn't obvious from the code.
+- **Over-documenting**: AI generates verbose docstrings, inline comments explaining obvious code, and type annotations on trivial variables. This project prefers minimal comments — only where the _why_ isn't obvious from the code.
 - **Adding backwards-compatibility shims**: If something was renamed or removed, AI may add re-exports, aliases, or deprecation wrappers. In this project, just delete the old thing and update all call sites.
 
 ### Dependency & Environment
