@@ -191,7 +191,7 @@ def _get_auto_num_workers() -> int:
     Returns:
         Number of workers to use when num_workers is -1 (auto).
     """
-    min_workers = 8
+    min_workers = 10
     max_workers = 24
 
     numa_node = get_current_numa_node()

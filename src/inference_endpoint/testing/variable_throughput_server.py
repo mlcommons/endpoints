@@ -7,20 +7,37 @@ Unlike :class:`MaxThroughputServer` (which returns identical pre-compiled respon
 instantly for roofline testing), this server models realistic LLM inference:
 
 * **Variable output lengths** — lognormal distribution, configurable mean + spread
-* **Variable response rates** — lognormal distribution (responses/sec per request)
+* **Per-request response rate** — lognormal distribution (responses/sec per request)
+* **First-chunk latency (TTFT)** — lognormal delay before first data
 * **Per-chunk latency jitter** — lognormal inter-chunk delays in streaming mode
 
-This makes it suitable for benchmarking client behaviour under realistic workloads
-(request queuing, backpressure, tail-latency handling, etc.).
+Two mutually exclusive timing modes:
+
+* **Response-rate mode** (``--response-rate-mean``): controls total response time
+  per request.  TPOT is derived from ``(1/rate - TTFT) / num_chunks``.
+* **Inter-chunk mode** (``--inter-chunk-latency``): controls per-chunk delay
+  directly.  Total response time = TTFT + num_chunks × TPOT.
 
 Usage::
 
-    # Non-streaming with variable lengths
-    python -m inference_endpoint.testing.variable_response_server --stats
+    # Basic non-streaming
+    python -m inference_endpoint.testing.variable_throughput_server --stats
 
-    # Streaming with chunk jitter
-    python -m inference_endpoint.testing.variable_response_server --stream --stats \\
-        --output-len-mean 256 --response-rate-mean 50 --response-chunk-spread 0.2
+    # Offline with response-rate jitter
+    python -m inference_endpoint.testing.variable_throughput_server --stats \\
+        --output-len-mean 1000 --output-len-spread 0.4 \\
+        --response-rate-mean 10000 --response-rate-spread 2.0
+
+    # Streaming with inter-chunk latency (ms) + TTFT (s)
+    python -m inference_endpoint.testing.variable_throughput_server --stream --stats \\
+        --stream-interval 2 \\
+        --inter-chunk-latency 20 --inter-chunk-spread 0.05 \\
+        --first-chunk-latency 0.1 --first-chunk-spread 0.02
+
+    # Streaming with response-rate + TTFT
+    python -m inference_endpoint.testing.variable_throughput_server --stream --stats \\
+        --response-rate-mean 50 --response-rate-spread 0.2 \\
+        --first-chunk-latency 0.5 --first-chunk-spread 0.1
 
     # Python — as a context manager
     with VariableResponseServer(port=0, num_workers=2) as srv:
@@ -46,14 +63,24 @@ import time
 import httptools
 import uvloop
 
-from .max_throughput_server import (
-    RequestParser,
-    _chunked,
-    _counter_add,
-    _counter_read,
-    _sse_event,
-    build_non_streaming_response,
-)
+try:
+    from .max_throughput_server import (
+        RequestParser,
+        _chunked,
+        _counter_add,
+        _counter_read,
+        _sse_event,
+        build_non_streaming_response,
+    )
+except ImportError:
+    from max_throughput_server import (  # type: ignore[no-redef]
+        RequestParser,
+        _chunked,
+        _counter_add,
+        _counter_read,
+        _sse_event,
+        build_non_streaming_response,
+    )
 
 # Shared counters (multiprocessing.Value for cross-process atomicity)
 type _SyncInt = multiprocessing.sharedctypes.Synchronized[int]  # type: ignore[valid-type]
@@ -87,7 +114,7 @@ class _TokenBucket:
     __slots__ = ("_interval", "_available_at")
 
     def __init__(self, rate: float):
-        self._interval = 1.0 / rate
+        self._interval = 1.0 / rate if rate > 0 else 0.0
         self._available_at = 0.0
 
     async def acquire(self) -> None:
@@ -98,11 +125,21 @@ class _TokenBucket:
             await asyncio.sleep(wait)
 
 
+def _sample_lognormal(
+    rng: random.Random, mu: float, sigma: float, mean: float
+) -> float:
+    """Sample from lognormal, falling back to mean when sigma=0."""
+    if sigma > 0:
+        return rng.lognormvariate(mu, sigma)
+    return mean
+
+
 class VariableResponseProtocol(asyncio.Protocol):
     """asyncio Protocol that samples output length + response time per request.
 
-    Non-streaming: sleeps for ``1/rate`` seconds, then writes the response.
-    Streaming: spreads chunks over ``1/rate`` seconds with optional jitter.
+    Two timing modes:
+    - **rate**: Global token bucket controls overall throughput (responses/sec).
+    - **icl**: Per-request inter-chunk latency, no global rate limit.
 
     Because ``data_received`` is synchronous, async work is dispatched via
     ``loop.create_task``.
@@ -115,22 +152,37 @@ class VariableResponseProtocol(asyncio.Protocol):
         "_loop",
         "_rng",
         "_bucket",
+        "_semaphore",
         "_stream",
         "_stream_interval",
         "_osl_mu",
         "_osl_sigma",
         "_osl_min",
         "_osl_max",
-        "_inter_chunk_latency",
-        "_chunk_cv",
+        "_osl_mean",
         "_model",
+        # Timing mode: "rate" or "icl"
+        "_mode",
+        # First-chunk latency (TTFT) params
+        "_fcl_mu",
+        "_fcl_sigma",
+        "_fcl_mean",
+        # Response-rate params (mode="rate")
+        "_rate_mu",
+        "_rate_sigma",
+        "_rate_mean",
+        # Inter-chunk-latency params (mode="icl")
+        "_icl_mu",
+        "_icl_sigma",
+        "_icl_mean",
     )
 
     def __init__(
         self,
         loop: asyncio.AbstractEventLoop,
         rng: random.Random,
-        bucket: _TokenBucket,
+        bucket: _TokenBucket | None,
+        semaphore: asyncio.Semaphore | None,
         *,
         stream: bool,
         stream_interval: int,
@@ -138,8 +190,17 @@ class VariableResponseProtocol(asyncio.Protocol):
         osl_sigma: float,
         osl_min: int,
         osl_max: int,
-        inter_chunk_latency: float,
-        chunk_cv: float,
+        osl_mean: int,
+        mode: str,
+        fcl_mu: float,
+        fcl_sigma: float,
+        fcl_mean: float,
+        rate_mu: float,
+        rate_sigma: float,
+        rate_mean: float,
+        icl_mu: float,
+        icl_sigma: float,
+        icl_mean: float,
     ):
         self.transport = None
         self._parser: httptools.HttpRequestParser | None = None
@@ -147,15 +208,25 @@ class VariableResponseProtocol(asyncio.Protocol):
         self._loop = loop
         self._rng = rng
         self._bucket = bucket
+        self._semaphore = semaphore
         self._stream = stream
         self._stream_interval = stream_interval
         self._osl_mu = osl_mu
         self._osl_sigma = osl_sigma
         self._osl_min = osl_min
         self._osl_max = osl_max
-        self._inter_chunk_latency = inter_chunk_latency
-        self._chunk_cv = chunk_cv
+        self._osl_mean = osl_mean
         self._model = "variable-resp"
+        self._mode = mode
+        self._fcl_mu = fcl_mu
+        self._fcl_sigma = fcl_sigma
+        self._fcl_mean = fcl_mean
+        self._rate_mu = rate_mu
+        self._rate_sigma = rate_sigma
+        self._rate_mean = rate_mean
+        self._icl_mu = icl_mu
+        self._icl_sigma = icl_sigma
+        self._icl_mean = icl_mean
 
     def connection_made(self, transport):
         self.transport = transport
@@ -186,7 +257,7 @@ class VariableResponseProtocol(asyncio.Protocol):
             osl = int(rng.lognormvariate(self._osl_mu, self._osl_sigma))
             osl = max(self._osl_min, min(osl, self._osl_max))
 
-            # Dispatch async handler (rate governed by shared bucket)
+            # Dispatch async handler
             self._loop.create_task(self._handle_request(osl))
 
             # Reset for next request (HTTP/1.1 keep-alive)
@@ -194,23 +265,63 @@ class VariableResponseProtocol(asyncio.Protocol):
             self._parser = httptools.HttpRequestParser(self._request)
 
     async def _handle_request(self, osl: int):
-        """Handle a single request with rate-limited output."""
+        """Handle a single request with sampled timing."""
         transport = self.transport
         if transport is None or transport.is_closing():
             return
 
+        # Optional concurrency limit — wait for a slot
+        sem = self._semaphore
+        if sem is not None:
+            await sem.acquire()
+
         try:
+            rng = self._rng
+            num_chunks = math.ceil(osl / self._stream_interval) if self._stream else 1
+
+            # Rate mode: global token bucket controls overall throughput
+            if self._mode == "rate":
+                if self._bucket:
+                    await self._bucket.acquire()
+                # Sample TTFT
+                ttft = _sample_lognormal(
+                    rng, self._fcl_mu, self._fcl_sigma, self._fcl_mean
+                )
+                # Derive TPOT from per-request sampled rate
+                rate = _sample_lognormal(
+                    rng, self._rate_mu, self._rate_sigma, self._rate_mean
+                )
+                total_time = 1.0 / rate if rate > 0 else 0.0
+                if self._stream and num_chunks > 1:
+                    tpot = max(0.0, (total_time - ttft) / num_chunks)
+                else:
+                    # Non-streaming or single chunk: total_time is the full delay
+                    ttft = total_time
+                    tpot = 0.0
+            else:  # mode == "icl" — per-request timing, no global rate
+                # Sample TTFT
+                ttft = _sample_lognormal(
+                    rng, self._fcl_mu, self._fcl_sigma, self._fcl_mean
+                )
+                tpot = _sample_lognormal(
+                    rng, self._icl_mu, self._icl_sigma, self._icl_mean
+                )
+
             if self._stream:
-                await self._handle_streaming(transport, osl)
+                await self._handle_streaming(transport, osl, ttft, tpot)
             else:
-                await self._handle_non_streaming(transport, osl)
+                await self._handle_non_streaming(transport, osl, ttft)
         except (RuntimeError, ConnectionError, OSError):
             # Client disconnected — transport closed mid-write. Ignore.
-            return
+            pass
+        finally:
+            if sem is not None:
+                sem.release()
 
-    async def _handle_non_streaming(self, transport, osl: int):
-        """Wait for rate-limit slot, then send complete response."""
-        await self._bucket.acquire()
+    async def _handle_non_streaming(self, transport, osl: int, delay: float):
+        """Wait for delay (TTFT / total_time), then send complete response."""
+        if delay > 0:
+            await asyncio.sleep(delay)
 
         if transport.is_closing():
             return
@@ -220,15 +331,33 @@ class VariableResponseProtocol(asyncio.Protocol):
         _counter_add(_resp_counter)
         _counter_add(_byte_counter, len(response))
 
-    async def _handle_streaming(self, transport, osl: int):
-        """Wait for rate-limit slot, then stream chunks."""
-        await self._bucket.acquire()
-
+    async def _handle_streaming(self, transport, osl: int, ttft: float, tpot: float):
+        """Stream chunks with TTFT + per-chunk TPOT delays."""
         interval = self._stream_interval
         num_events = math.ceil(osl / interval)
         created = int(time.time())
+        model = self._model
 
-        # Streaming response headers
+        # Pre-compile all chunk bytes upfront to keep the hot loop free of encoding.
+        chunks: list[bytes] = []
+        chars_left = osl
+        for _ in range(num_events):
+            chars = min(interval, chars_left)
+            chars_left -= chars
+            event = _sse_event(model, created, {"content": "x" * chars})
+            chunks.append(_chunked(event))
+
+        finish = _sse_event(model, created, {}, "stop")
+        tail = _chunked(finish + b"data: [DONE]\n\n") + b"0\r\n\r\n"
+
+        # TTFT delay before first data
+        if ttft > 0:
+            await asyncio.sleep(ttft)
+
+        if transport.is_closing():
+            return
+
+        # Headers
         headers = (
             b"HTTP/1.1 200 OK\r\n"
             b"Content-Type: text/event-stream\r\n"
@@ -239,37 +368,27 @@ class VariableResponseProtocol(asyncio.Protocol):
         transport.write(headers)
         total_bytes = len(headers)
 
-        rng = self._rng
-        chunk_cv = self._chunk_cv
-        mean_delay = self._inter_chunk_latency
-        model = self._model
-        remaining = osl
+        # Stream chunks with deadline-based TPOT timing.
+        # Uses loop.time() (uvloop high-res monotonic) to avoid drift.
+        loop = self._loop
+        target = loop.time()
 
-        for _ in range(num_events):
+        for i, chunk in enumerate(chunks):
             if transport.is_closing():
                 return
 
-            # Inter-chunk delay (simulates token generation time)
-            if mean_delay > 0:
-                if chunk_cv > 0:
-                    sigma2 = math.log(1.0 + chunk_cv * chunk_cv)
-                    mu = math.log(mean_delay) - sigma2 / 2.0
-                    delay = rng.lognormvariate(mu, math.sqrt(sigma2))
-                else:
-                    delay = mean_delay
-                await asyncio.sleep(delay)
+            # TPOT delay between chunks (skip first — TTFT already applied)
+            if i > 0 and tpot > 0:
+                target += tpot
+                wait = target - loop.time()
+                if wait > 0:
+                    await asyncio.sleep(wait)
 
-            chars = min(interval, remaining)
-            remaining -= chars
-            event = _sse_event(model, created, {"content": "x" * chars})
-            chunk = _chunked(event)
             transport.write(chunk)
             total_bytes += len(chunk)
 
         # Finish event + [DONE] sentinel + terminator
         if not transport.is_closing():
-            finish = _sse_event(model, created, {}, "stop")
-            tail = _chunked(finish + b"data: [DONE]\n\n") + b"0\r\n\r\n"
             transport.write(tail)
             total_bytes += len(tail)
 
@@ -296,9 +415,19 @@ def _worker(
     osl_sigma: float,
     osl_min: int,
     osl_max: int,
+    osl_mean: int,
+    mode: str,
+    fcl_mu: float,
+    fcl_sigma: float,
+    fcl_mean: float,
     rate_per_worker: float,
-    inter_chunk_latency: float,
-    chunk_cv: float,
+    rate_mu: float,
+    rate_sigma: float,
+    rate_mean: float,
+    icl_mu: float,
+    icl_sigma: float,
+    icl_mean: float,
+    max_concurrency: int,
 ):
     """Worker process entry point."""
     global _req_counter, _resp_counter, _byte_counter
@@ -314,21 +443,32 @@ def _worker(
 
     async def run():
         loop = asyncio.get_running_loop()
-        bucket = _TokenBucket(rate_per_worker)
+        bucket = _TokenBucket(rate_per_worker) if rate_per_worker > 0 else None
+        semaphore = asyncio.Semaphore(max_concurrency) if max_concurrency > 0 else None
 
         def protocol_factory():
             return VariableResponseProtocol(
                 loop,
                 rng,
                 bucket,
+                semaphore,
                 stream=stream,
                 stream_interval=stream_interval,
                 osl_mu=osl_mu,
                 osl_sigma=osl_sigma,
                 osl_min=osl_min,
                 osl_max=osl_max,
-                inter_chunk_latency=inter_chunk_latency,
-                chunk_cv=chunk_cv,
+                osl_mean=osl_mean,
+                mode=mode,
+                fcl_mu=fcl_mu,
+                fcl_sigma=fcl_sigma,
+                fcl_mean=fcl_mean,
+                rate_mu=rate_mu,
+                rate_sigma=rate_sigma,
+                rate_mean=rate_mean,
+                icl_mu=icl_mu,
+                icl_sigma=icl_sigma,
+                icl_mean=icl_mean,
             )
 
         server = await loop.create_server(
@@ -359,12 +499,15 @@ def _worker(
 
 
 class VariableResponseServer:
-    """OpenAI-compatible server with variable response lengths and rates.
+    """OpenAI-compatible server with variable response lengths and per-request timing.
 
     Output length is sampled per request from a lognormal distribution.
-    Total server throughput is capped at ``response_rate_mean`` resp/sec
-    via per-worker token buckets.  In streaming mode, ``inter_chunk_latency``
-    controls how fast chunks arrive (simulates token generation speed).
+    Timing is per-request with two mutually exclusive modes:
+
+    * **Response-rate mode**: each request samples its own rate, TPOT is derived.
+    * **Inter-chunk mode**: each request samples its own TPOT directly.
+
+    Both modes support first-chunk latency (TTFT) with optional spread.
 
     Args:
         host: Bind address.
@@ -373,10 +516,12 @@ class VariableResponseServer:
         output_len_spread: Coefficient of variation for output length.
         output_len_min: Minimum output sequence length (chars).
         output_len_max: Maximum output sequence length (chars). None = 8 * mean.
-        response_rate_mean: Total server response rate (responses/sec), split across workers.
-        inter_chunk_latency: Mean delay between SSE chunks in seconds (streaming only).
-            0 = no delay (chunks stream instantly). E.g. 0.02 = ~50 tokens/sec.
-        response_chunk_spread: CoV for jitter on inter-chunk latency (streaming only).
+        response_rate_mean: Per-request response rate mean (responses/sec). 0 = no rate mode.
+        response_rate_spread: CoV for per-request response rate.
+        inter_chunk_latency: Per-chunk delay mean in milliseconds. 0 = no ICL mode.
+        inter_chunk_spread: CoV for per-chunk delay.
+        first_chunk_latency: Mean TTFT in seconds. 0 = no TTFT delay.
+        first_chunk_spread: CoV for TTFT.
         stream: SSE streaming mode.
         stream_interval: Characters per SSE event.
         num_workers: Worker processes (SO_REUSEPORT kernel load-balancing).
@@ -391,19 +536,30 @@ class VariableResponseServer:
         host: str = "localhost",
         port: int = 12345,
         output_len_mean: int = 1000,
-        output_len_spread: float = 0.5,
+        output_len_spread: float = 0.3,
         output_len_min: int = 0,
         output_len_max: int | None = None,
-        response_rate_mean: float = 100.0,
+        response_rate_mean: float = 0.0,
+        response_rate_spread: float = 0.0,
         inter_chunk_latency: float = 0.0,
-        response_chunk_spread: float = 0.0,
+        inter_chunk_spread: float = 0.0,
+        first_chunk_latency: float = 0.0,
+        first_chunk_spread: float = 0.2,
         stream: bool = False,
         stream_interval: int = 1,
+        max_concurrency: int = 0,
         num_workers: int = 10,
         stats: bool = False,
         stats_interval: float = 1.0,
         quiet: bool = False,
     ):
+        # Validate mutual exclusivity
+        if response_rate_mean > 0 and inter_chunk_latency > 0:
+            raise ValueError(
+                "response_rate_mean and inter_chunk_latency are mutually exclusive. "
+                "Use response-rate mode OR inter-chunk-latency mode, not both."
+            )
+
         self.host, self.port, self.num_workers = host, port, num_workers
         self.stream = stream
         self.stream_interval = stream_interval
@@ -416,17 +572,58 @@ class VariableResponseServer:
         self._worker_shutdown: multiprocessing.synchronize.Event | None = None
         self._stats_thread: threading.Thread | None = None
 
-        # Pre-compute lognormal params
+        # Pre-compute lognormal params for output length
         self._osl_mu, self._osl_sigma = _lognormal_params(
             output_len_mean, output_len_spread
         )
         self._osl_min = output_len_min
         self._osl_max = (
-            output_len_max if output_len_max is not None else 8 * output_len_mean
+            output_len_max if output_len_max is not None else 2 * output_len_mean
         )
-        self._rate_per_worker = response_rate_mean / num_workers
-        self._inter_chunk_latency = inter_chunk_latency
-        self._chunk_cv = response_chunk_spread
+        self._osl_mean = output_len_mean
+
+        # Determine timing mode
+        if response_rate_mean > 0:
+            self._mode = "rate"
+        elif inter_chunk_latency > 0:
+            self._mode = "icl"
+        else:
+            # Neither specified — no delays (instant response)
+            self._mode = "rate"
+
+        # First-chunk latency (TTFT) params
+        if first_chunk_latency > 0:
+            self._fcl_mu, self._fcl_sigma = _lognormal_params(
+                first_chunk_latency, first_chunk_spread
+            )
+        else:
+            self._fcl_mu, self._fcl_sigma = 0.0, 0.0
+        self._fcl_mean = first_chunk_latency
+
+        # Response-rate params (global bucket + per-request sampling)
+        if response_rate_mean > 0:
+            self._rate_per_worker = response_rate_mean / num_workers
+            self._rate_mu, self._rate_sigma = _lognormal_params(
+                response_rate_mean, response_rate_spread
+            )
+        else:
+            self._rate_per_worker = 0.0
+            self._rate_mu, self._rate_sigma = 0.0, 0.0
+        self._rate_mean = response_rate_mean
+
+        # Inter-chunk-latency params (convert ms → seconds for asyncio.sleep)
+        icl_s = inter_chunk_latency / 1000.0
+        if icl_s > 0:
+            self._icl_mu, self._icl_sigma = _lognormal_params(icl_s, inter_chunk_spread)
+        else:
+            self._icl_mu, self._icl_sigma = 0.0, 0.0
+        self._icl_mean = icl_s
+
+        # Max concurrency per worker (0 = unlimited)
+        if max_concurrency > 0:
+            self._max_concurrency_per_worker = max(1, max_concurrency // num_workers)
+        else:
+            self._max_concurrency_per_worker = 0
 
         global _req_counter, _resp_counter, _byte_counter
         if stats:
@@ -483,9 +680,19 @@ class VariableResponseServer:
                     "osl_sigma": self._osl_sigma,
                     "osl_min": self._osl_min,
                     "osl_max": self._osl_max,
+                    "osl_mean": self._osl_mean,
+                    "mode": self._mode,
+                    "fcl_mu": self._fcl_mu,
+                    "fcl_sigma": self._fcl_sigma,
+                    "fcl_mean": self._fcl_mean,
                     "rate_per_worker": self._rate_per_worker,
-                    "inter_chunk_latency": self._inter_chunk_latency,
-                    "chunk_cv": self._chunk_cv,
+                    "rate_mu": self._rate_mu,
+                    "rate_sigma": self._rate_sigma,
+                    "rate_mean": self._rate_mean,
+                    "icl_mu": self._icl_mu,
+                    "icl_sigma": self._icl_sigma,
+                    "icl_mean": self._icl_mean,
+                    "max_concurrency": self._max_concurrency_per_worker,
                 },
                 daemon=True,
             )
@@ -547,9 +754,10 @@ class VariableResponseServer:
 
         if not self.quiet:
             mode = "streaming" if self.stream else "non-streaming"
+            timing = self._mode if self._mode == "icl" else "rate"
             print(
                 f"VariableResponseServer @ {self.url} "
-                f"(workers={self.num_workers}, mode={mode})"
+                f"(workers={self.num_workers}, mode={mode}, timing={timing})"
             )
 
     def _cleanup_workers(self):
@@ -595,8 +803,8 @@ def main():
     parser.add_argument(
         "--output-len-spread",
         type=float,
-        default=0.5,
-        help="Coefficient of variation for output length (default: 0.5)",
+        default=0.3,
+        help="Coefficient of variation for output length (default: 0.3)",
     )
     parser.add_argument(
         "--output-len-min",
@@ -610,25 +818,59 @@ def main():
         default=None,
         help="Maximum output sequence length in chars (default: 8 * output-len-mean)",
     )
+
+    # Timing mode A: response-rate
     parser.add_argument(
         "--response-rate-mean",
         type=float,
-        default=100.0,
-        help="Total server response rate in resp/sec (default: 100.0). "
-        "Split evenly across workers via per-worker token bucket.",
+        default=0.0,
+        help="Per-request response rate mean in resp/sec (default: 0 = disabled). "
+        "Mutually exclusive with --inter-chunk-latency.",
     )
+    parser.add_argument(
+        "--response-rate-spread",
+        type=float,
+        default=0.0,
+        help="CoV for per-request response rate (default: 0.0 = deterministic)",
+    )
+
+    # Timing mode B: inter-chunk-latency
     parser.add_argument(
         "--inter-chunk-latency",
         type=float,
         default=0.0,
-        help="Mean delay between SSE chunks in seconds, streaming only (default: 0.0). "
-        "E.g. 0.02 = ~50 tokens/sec per response.",
+        help="Mean per-chunk delay in milliseconds (default: 0 = disabled). "
+        "E.g. 20 = 20ms per chunk ≈ 50 tokens/sec. "
+        "Mutually exclusive with --response-rate-mean.",
     )
     parser.add_argument(
-        "--response-chunk-spread",
+        "--inter-chunk-spread",
         type=float,
         default=0.0,
-        help="CoV for inter-chunk latency, streaming only (default: 0.0)",
+        help="CoV for per-chunk delay (default: 0.0 = deterministic)",
+    )
+
+    # TTFT (first-chunk latency)
+    parser.add_argument(
+        "--first-chunk-latency",
+        type=float,
+        default=0.0,
+        help="Mean first-chunk latency (TTFT) in seconds (default: 0.0). "
+        "Applies in both streaming and non-streaming modes.",
+    )
+    parser.add_argument(
+        "--first-chunk-spread",
+        type=float,
+        default=0.2,
+        help="CoV for first-chunk latency (default: 0.2)",
+    )
+
+    parser.add_argument(
+        "--max-concurrency",
+        type=int,
+        default=0,
+        help="Max concurrent requests per server (0 = unlimited). "
+        "Split evenly across workers.",
     )
     parser.add_argument(
         "--stream",
@@ -653,10 +895,14 @@ def main():
         output_len_min=args.output_len_min,
         output_len_max=args.output_len_max,
         response_rate_mean=args.response_rate_mean,
+        response_rate_spread=args.response_rate_spread,
         inter_chunk_latency=args.inter_chunk_latency,
-        response_chunk_spread=args.response_chunk_spread,
+        inter_chunk_spread=args.inter_chunk_spread,
+        first_chunk_latency=args.first_chunk_latency,
+        first_chunk_spread=args.first_chunk_spread,
         stream=args.stream,
         stream_interval=args.stream_interval,
+        max_concurrency=args.max_concurrency,
         num_workers=args.num_workers,
         stats=args.stats,
     )
