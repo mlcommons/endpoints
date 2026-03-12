@@ -559,46 +559,51 @@ def run_benchmark(
         async def receiver():
             nonlocal last_recv_time
             while True:
+                # Fast drain: poll all available results synchronously
                 result = client.poll()
                 if result is not None:
-                    last_recv_time = time.monotonic()
-                    if isinstance(result, QueryResult):
-                        if result.error:
-                            stats.errors += 1
-                        else:
-                            stats.received += 1
-                            # Periodic deadline check on receive path
-                            if (
-                                stats.received % 128 == 0
-                                and last_recv_time > overall_deadline
-                            ):
-                                outstanding = stats.sent - stats.received - stats.errors
-                                print(
-                                    f"\nTime limit ({max_total_time:.0f}s) reached, "
-                                    f"stopping ({outstanding:,} in-flight)"
-                                )
-                                return
-                else:
-                    # Check completion
-                    if send_done and (stats.received + stats.errors) >= stats.sent:
-                        break
-                    # Check stall
-                    if (
-                        send_done
-                        and (time.monotonic() - last_recv_time) > stall_timeout
-                    ):
-                        print(f"\nStalled for {stall_timeout}s, stopping")
-                        break
-                    # Check overall time limit
-                    if time.monotonic() > overall_deadline:
+                    while result is not None:
+                        last_recv_time = time.monotonic()
+                        if isinstance(result, QueryResult):
+                            if result.error:
+                                stats.errors += 1
+                            else:
+                                stats.received += 1
+                        result = client.poll()
+                    # Deadline check once per drain batch
+                    if last_recv_time > overall_deadline:
                         outstanding = stats.sent - stats.received - stats.errors
                         print(
                             f"\nTime limit ({max_total_time:.0f}s) reached, "
                             f"stopping ({outstanding:,} in-flight)"
                         )
-                        break
-                    # Yield to sender
-                    await asyncio.sleep(0)
+                        return
+                    continue
+
+                # Nothing queued — check termination before blocking
+                if send_done and (stats.received + stats.errors) >= stats.sent:
+                    break
+                if send_done and (time.monotonic() - last_recv_time) > stall_timeout:
+                    print(f"\nStalled for {stall_timeout}s, stopping")
+                    break
+                if time.monotonic() > overall_deadline:
+                    outstanding = stats.sent - stats.received - stats.errors
+                    print(
+                        f"\nTime limit ({max_total_time:.0f}s) reached, "
+                        f"stopping ({outstanding:,} in-flight)"
+                    )
+                    break
+
+                # Block until next response (event-driven, no CPU spin)
+                result = await client.recv()
+                if result is None:
+                    break
+                last_recv_time = time.monotonic()
+                if isinstance(result, QueryResult):
+                    if result.error:
+                        stats.errors += 1
+                    else:
+                        stats.received += 1
 
         # Run sender and receiver concurrently
         await asyncio.gather(sender(), receiver())

@@ -570,7 +570,11 @@ def main():
         stats=args.stats,
     )
 
+    _main_pid = os.getpid()
+
     def sig_handler(signum, frame):
+        if os.getpid() != _main_pid:
+            os._exit(0)
         server.stop()
         os._exit(0)
 
