@@ -285,11 +285,8 @@ class SchedulerBasedLoadGenerator(LoadGenerator):
         Raises:
             StopIteration: When scheduler has no more samples to issue.
         """
-        # Let raised StopIteration be propagated up the stack
-        # Ignore mypy error complaining that self._iterator maybe None
-        s_idx, delay_ns = next(self._iterator)  # type: ignore[call-overload]
-
-        # Check wall-clock timeout before doing any more work
+        # Check wall-clock timeout before advancing the iterator, so we don't
+        # consume a (sample_index, delay) pair that will never be issued.
         max_duration_ms = self.scheduler.runtime_settings.max_duration_ms
         if max_duration_ms is not None and self._start_time_ns is not None:
             elapsed_ns = time.monotonic_ns() - self._start_time_ns
@@ -299,6 +296,10 @@ class SchedulerBasedLoadGenerator(LoadGenerator):
                     f"{elapsed_ns / 1e6:.1f}ms, stopping sample issuance"
                 )
                 raise StopIteration
+
+        # Let raised StopIteration be propagated up the stack
+        # Ignore mypy error complaining that self._iterator maybe None
+        s_idx, delay_ns = next(self._iterator)  # type: ignore[call-overload]
 
         # Data loading is not timed for Time-to-Token metrics. It is assumed that the
         # hypothetical user would have put the data into memory available for a network

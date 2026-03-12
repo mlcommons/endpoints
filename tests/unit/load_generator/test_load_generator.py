@@ -30,6 +30,7 @@ from inference_endpoint.load_generator.load_generator import (
 from inference_endpoint.load_generator.sample import SampleEventHandler
 from inference_endpoint.load_generator.scheduler import (
     MaxThroughputScheduler,
+    PoissonDistributionScheduler,
     SampleOrder,
     WithoutReplacementSampleOrder,
 )
@@ -220,7 +221,73 @@ def test_max_duration_ms_stops_issuance(load_sample_data_mock, event_recorder_mo
     assert (
         issued_count < 1_000_000
     ), f"Expected timeout to stop issuance, but {issued_count} samples were issued"
-    # Elapsed wall-clock should be close to max_duration_ms (allow generous upper bound)
+    # Elapsed wall-clock should be reasonably close to max_duration_ms:
+    # lower bound ensures the timeout (not an early exit) was responsible for stopping,
+    # upper bound is generous to accommodate slow CI runners.
+    max_duration_s = max_duration_ms / 1000
     assert (
-        elapsed_s < (max_duration_ms / 1000) * 10
+        elapsed_s >= max_duration_s * 0.5
+    ), f"Elapsed time {elapsed_s:.3f}s is unexpectedly below max_duration_ms={max_duration_ms}ms"
+    assert (
+        elapsed_s < max_duration_s * 2
+    ), f"Elapsed time {elapsed_s:.3f}s far exceeds max_duration_ms={max_duration_ms}ms"
+
+
+@patch("inference_endpoint.load_generator.load_generator.EventRecorder.record_event")
+@patch(
+    "inference_endpoint.load_generator.load_generator.LoadGenerator.load_sample_data"
+)
+def test_max_duration_ms_stops_issuance_with_poisson_scheduler(
+    load_sample_data_mock, event_recorder_mock
+):
+    """max_duration_ms should stop iteration even when the scheduler has inter-sample delays.
+
+    Uses PoissonDistributionScheduler at low QPS so each inter-sample wait is measurable.
+    No sample should be issued after the wall-clock deadline has elapsed.
+    """
+    load_sample_data_mock.side_effect = lambda index, _uuid: index
+    event_recorder_mock.return_value = True
+
+    max_duration_ms = 200
+    target_qps = 50  # ~20ms average inter-sample delay
+    rt_settings = RuntimeSettings(
+        metrics.Throughput(target_qps),
+        reported_metrics=[],
+        min_duration_ms=0,
+        max_duration_ms=max_duration_ms,
+        n_samples_from_dataset=100,
+        n_samples_to_issue=1_000_000,
+        min_sample_count=1,
+        rng_sched=random.Random(42),
+        rng_sample_index=random.Random(42),
+        load_pattern=LoadPattern(type=LoadPatternType.POISSON, target_qps=target_qps),
+    )
+
+    class CountingIssuer(SampleIssuer):
+        def issue(self, sample):
+            pass
+
+    load_generator = SchedulerBasedLoadGenerator(
+        CountingIssuer(),
+        None,
+        scheduler=PoissonDistributionScheduler(
+            rt_settings, WithoutReplacementSampleOrder
+        ),
+    )
+
+    issued_count = 0
+    start = time.monotonic()
+    for _ in load_generator:
+        issued_count += 1
+    elapsed_s = time.monotonic() - start
+
+    assert (
+        issued_count < 1_000_000
+    ), f"Expected timeout to stop issuance, but {issued_count} samples were issued"
+    max_duration_s = max_duration_ms / 1000
+    assert (
+        elapsed_s >= max_duration_s * 0.5
+    ), f"Elapsed time {elapsed_s:.3f}s is unexpectedly below max_duration_ms={max_duration_ms}ms"
+    assert (
+        elapsed_s < max_duration_s * 3
     ), f"Elapsed time {elapsed_s:.3f}s far exceeds max_duration_ms={max_duration_ms}ms"
