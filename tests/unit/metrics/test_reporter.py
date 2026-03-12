@@ -35,8 +35,12 @@ def test_sample_counting(events_db):
 
 
 def test_error_counting(events_db):
+    """get_error_count returns distinct failed samples, not raw ERROR event count.
+
+    The fixture has 3 ERROR events all belonging to uuid3, so the count should be 1.
+    """
     with MetricsReporter(events_db) as reporter:
-        assert reporter.get_error_count() == 3
+        assert reporter.get_error_count() == 1
 
 
 def test_derive_ttft(events_db, sample_uuids):
@@ -388,7 +392,9 @@ def test_reporter_create_report(events_db, fake_outputs, tokenizer):
 
     assert report.n_samples_issued == 3
     assert report.n_samples_completed == 2
-    assert report.n_samples_failed == 3  # 3 ERROR events for uuid3 in fixture
+    assert (
+        report.n_samples_failed == 1
+    )  # 1 distinct failed sample (uuid3), with 3 ERROR events in fixture
     assert report.duration_ns == (10300 - 5000)
 
     for k, expected in ttft_rollup.summarize().items():
