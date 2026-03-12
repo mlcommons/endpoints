@@ -111,14 +111,12 @@ class TestHttpRequestTemplate:
 
         assert b"Host: example.com\r\n" in template_80.static_prefix
         assert b"Host: example.com\r\n" in template_443.static_prefix
-        # Should NOT include port
         assert b":80" not in template_80.static_prefix
         assert b":443" not in template_443.static_prefix
 
     def test_empty_path_normalized_to_root(self):
         """Empty path normalized to '/' per HTTP/1.1."""
         template = HttpRequestTemplate.from_url("localhost", 8080, "")
-
         assert b"POST / HTTP/1.1" in template.static_prefix
 
     def test_build_request_with_extra_headers(self):
@@ -134,7 +132,6 @@ class TestHttpRequestTemplate:
             body, streaming=False, extra_headers=extra_headers
         )
 
-        # Parse with httptools to verify headers
         parser_state = {"headers": {}}
 
         class Handler:
@@ -152,75 +149,24 @@ class TestHttpRequestTemplate:
 
         assert parser_state["headers"]["authorization"] == "Bearer test-token-123"
         assert parser_state["headers"]["x-custom-header"] == "custom-value"
-        # Standard headers should still be present
         assert parser_state["headers"]["host"] == "localhost:8080"
         assert parser_state["headers"]["content-type"] == "application/json"
 
-    def test_extra_headers_are_cached(self):
-        """Extra headers are cached after first use."""
-        template = HttpRequestTemplate.from_url("localhost", 8080, "/v1/chat")
-        body = b'{"model": "test"}'
-        extra_headers = {"Authorization": "Bearer token"}
-
-        # Cache should be empty initially
-        assert len(template._extra_headers_cache) == 0
-
-        # First call should cache
-        template.build_request(body, streaming=False, extra_headers=extra_headers)
-        assert len(template._extra_headers_cache) == 1
-
-        # Second call with same headers should reuse cache (no new entries)
-        template.build_request(body, streaming=False, extra_headers=extra_headers)
-        assert len(template._extra_headers_cache) == 1
-
-        # Different headers should create new cache entry
-        different_headers = {"Authorization": "Bearer different-token"}
-        template.build_request(body, streaming=False, extra_headers=different_headers)
-        assert len(template._extra_headers_cache) == 2
-
     def test_cache_headers_pre_caches(self):
-        """cache_headers() pre-caches headers before runtime use."""
+        """cache_headers() pre-encodes headers and they appear in built request."""
         template = HttpRequestTemplate.from_url("localhost", 8080, "/v1/chat")
-        headers_to_cache = {"Authorization": "Bearer pre-cached-token"}
-
-        # Pre-cache headers
-        template.cache_headers(headers_to_cache)
-        assert len(template._extra_headers_cache) == 1
-
-        # Verify cached value is correct encoding
-        cache_key = frozenset(headers_to_cache.items())
-        cached_bytes = template._extra_headers_cache[cache_key]
-        assert b"Authorization: Bearer pre-cached-token\r\n" == cached_bytes
-
-    def test_build_request_with_cache_headers_pre_caches(self):
-        """build_request() with cache_headers() pre-caches headers before runtime use."""
-        template = HttpRequestTemplate.from_url("localhost", 8080, "/v1/chat")
-        headers_to_cache = {"Authorization": "Bearer pre-cached-token"}
         body = b'{"model": "test"}'
 
-        # Pre-cache headers
-        template.cache_headers(headers_to_cache)
+        assert template.cached_headers == b""
+        template.cache_headers({"Authorization": "Bearer pre-cached-token"})
+        assert template.cached_headers == b"Authorization: Bearer pre-cached-token\r\n"
+
+        # Cached headers appear in built request on fast path
         request = template.build_request(body, streaming=False)
         assert b"Authorization: Bearer pre-cached-token\r\n" in request
         assert b"Host: localhost:8080" in request
         assert b"Content-Type: application/json" in request
         assert b"Content-Length: 17" in request
-        assert b'{"model": "test"}' in request
-
-    def test_build_request_without_extra_headers(self):
-        """Request without extra headers uses fast path."""
-        template = HttpRequestTemplate.from_url("localhost", 8080, "/v1/chat")
-        body = b'{"model": "test"}'
-
-        # Build without extra headers
-        request = template.build_request(body, streaming=False)
-
-        # Cache should remain empty (fast path)
-        assert len(template._extra_headers_cache) == 0
-
-        # Verify request is valid
-        assert b"POST /v1/chat HTTP/1.1" in request
-        assert b"Host: localhost:8080" in request
 
 
 # =============================================================================
@@ -253,6 +199,7 @@ class TestHttpResponseProtocol:
         assert protocol._headers["content-length"] == str(len(body))
         assert protocol._message_complete
         assert b"".join(protocol._body_chunks) == body
+        assert protocol.transport is not None
 
         loop.close()
 
@@ -286,9 +233,7 @@ class TestHttpResponseProtocol:
         protocol.connection_made(MockTransport())
 
         # Send headers
-        protocol.data_received(
-            b"HTTP/1.1 200 OK\r\n" b"Transfer-Encoding: chunked\r\n" b"\r\n"
-        )
+        protocol.data_received(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
 
         chunk_batches = []
 
@@ -299,14 +244,14 @@ class TestHttpResponseProtocol:
         # Start consumer
         consumer_task = asyncio.create_task(consume())
 
-        # Feed chunks with small delays
-        await asyncio.sleep(0.01)
+        # Feed chunks one at a time
+        await asyncio.sleep(0)
         protocol.data_received(b"5\r\nhello\r\n")
 
-        await asyncio.sleep(0.01)
+        await asyncio.sleep(0)
         protocol.data_received(b"6\r\n world\r\n")
 
-        await asyncio.sleep(0.01)
+        await asyncio.sleep(0)
         protocol.data_received(b"0\r\n\r\n")
 
         await consumer_task
@@ -316,6 +261,26 @@ class TestHttpResponseProtocol:
         assert b"hello" in all_chunks
         assert b" world" in all_chunks
 
+    @pytest.mark.asyncio
+    async def test_iter_body_pre_buffered_and_already_complete(self):
+        """iter_body yields pre-buffered chunks and exits early if message complete."""
+        loop = asyncio.get_running_loop()
+        protocol = HttpResponseProtocol(loop)
+        protocol.connection_made(MockTransport())
+
+        # Feed entire chunked response synchronously before calling iter_body
+        protocol.data_received(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+            b"5\r\nhello\r\n"
+            b"0\r\n\r\n"
+        )
+        assert protocol._message_complete
+
+        all_chunks = []
+        async for batch in protocol.iter_body():
+            all_chunks.extend(batch)
+        assert b"hello" in all_chunks
+
     def test_reset_clears_state_for_reuse(self):
         """reset() clears state for connection reuse."""
         loop = asyncio.new_event_loop()
@@ -323,9 +288,7 @@ class TestHttpResponseProtocol:
 
         # First response
         protocol.connection_made(MockTransport())
-        protocol.data_received(
-            b"HTTP/1.1 200 OK\r\n" b"Content-Length: 4\r\n" b"\r\n" b"test"
-        )
+        protocol.data_received(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\ntest")
 
         assert protocol._message_complete
         assert protocol._status_code == 200
@@ -349,9 +312,7 @@ class TestHttpResponseProtocol:
 
         # Start waiting for headers (won't complete)
         headers_task = asyncio.create_task(protocol.read_headers())
-
-        # Let the task start waiting
-        await asyncio.sleep(0.01)
+        await asyncio.sleep(0)
 
         # Simulate connection lost before headers complete
         protocol.connection_lost(None)
@@ -359,6 +320,97 @@ class TestHttpResponseProtocol:
         # Future should raise
         with pytest.raises(ConnectionResetError):
             await headers_task
+
+        # Verify eof_received also marks connection as lost
+        protocol2 = HttpResponseProtocol(loop)
+        protocol2.connection_made(MockTransport())
+        assert not protocol2._connection_lost
+        result = protocol2.eof_received()
+        assert protocol2._connection_lost is True
+        assert result is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "exc,expected_error,send_partial",
+        [
+            (OSError("broken pipe"), OSError, False),
+            (None, ConnectionResetError, True),
+        ],
+        ids=["with_exception", "clean_close_partial"],
+    )
+    async def test_connection_lost_before_body_complete(
+        self, exc, expected_error, send_partial
+    ):
+        """connection_lost propagates errors to pending body_future."""
+        loop = asyncio.get_running_loop()
+        protocol = HttpResponseProtocol(loop)
+        protocol.connection_made(MockTransport())
+        protocol.data_received(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n")
+        if send_partial:
+            protocol.data_received(b"partial")
+        body_task = asyncio.create_task(protocol.read_body())
+        await asyncio.sleep(0)
+        protocol.connection_lost(exc)
+        with pytest.raises(expected_error):
+            await body_task
+
+    @pytest.mark.asyncio
+    async def test_connection_lost_with_complete_message(self):
+        """connection_lost with pending body_future and _message_complete resolves normally."""
+        loop = asyncio.get_running_loop()
+        protocol = HttpResponseProtocol(loop)
+        protocol.connection_made(MockTransport())
+        protocol._message_complete, protocol._body_chunks = True, [b"test data"]
+        protocol._body_future = loop.create_future()
+        protocol.connection_lost(None)
+        assert await protocol._body_future == b"test data"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "setup_headers,feed_garbage",
+        [
+            (False, b"NOT HTTP AT ALL"),
+            (True, b"ZZZZ\r\nNOT A VALID CHUNK\r\n"),
+        ],
+        ids=["headers_future", "body_future"],
+    )
+    async def test_data_received_parser_error(self, setup_headers, feed_garbage):
+        """HttpParserError propagates to the pending headers or body future."""
+        loop = asyncio.get_running_loop()
+        protocol = HttpResponseProtocol(loop)
+        protocol.connection_made(MockTransport())
+        if setup_headers:
+            protocol.data_received(
+                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+            )
+            task = asyncio.create_task(protocol.read_body())
+        else:
+            task = asyncio.create_task(protocol.read_headers())
+        await asyncio.sleep(0)
+        protocol.data_received(feed_garbage)
+        with pytest.raises(httptools.HttpParserError):
+            await task
+
+    @pytest.mark.asyncio
+    async def test_read_body_and_headers_fast_paths(self):
+        """read_body() resolves via on_message_complete; read_headers() returns
+        immediately when headers already parsed."""
+        loop = asyncio.get_running_loop()
+        # read_body: headers arrive first, body later
+        p1 = HttpResponseProtocol(loop)
+        p1.connection_made(MockTransport())
+        p1.data_received(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n")
+        body_task = asyncio.create_task(p1.read_body())
+        await asyncio.sleep(0)
+        assert not body_task.done()
+        p1.data_received(b"hello")
+        assert await body_task == b"hello"
+        # read_headers fast path: full response already parsed
+        p2 = HttpResponseProtocol(loop)
+        p2.connection_made(MockTransport())
+        p2.data_received(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
+        status, _ = await p2.read_headers()
+        assert status == 200
 
 
 # =============================================================================
@@ -399,13 +451,13 @@ class TestConnectionPool:
 
         # Next acquire should block
         acquire_task = asyncio.create_task(pool.acquire())
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(0)
         assert not acquire_task.done()
         assert pool.waiting_count == 1
 
         # Release one - waiter should get it
         pool.release(conns[0])
-        await asyncio.sleep(0.01)
+        await asyncio.sleep(0)
         assert acquire_task.done()
         assert pool.waiting_count == 0
 
@@ -442,24 +494,165 @@ class TestConnectionPool:
         assert pool.total_count == 0
 
     @pytest.mark.asyncio
-    async def test_close_cleans_up_all(self, pool):
-        """close() closes all connections and cancels waiters."""
-        # Create some connections
+    async def test_stale_connection_discarded_on_acquire(self, pool):
+        """_try_get_idle discards dead connections and creates fresh ones."""
         conn1 = await pool.acquire()
-        _ = await pool.acquire()
         pool.release(conn1)
+        conn1.protocol._connection_lost = True
+        conn2 = await pool.acquire()
+        assert conn2 is not conn1 and pool.total_count == 1
+        pool.release(conn2)
 
-        # Use remaining slots and start a waiter
-        _ = [await pool.acquire() for _ in range(2)]
-        waiter_task = asyncio.create_task(pool.acquire())
-        await asyncio.sleep(0.01)
+    @pytest.mark.asyncio
+    async def test_idle_timeout_discards_connection(self, echo_server):
+        """Connections idle longer than max_idle_time are discarded on acquire."""
+        loop = asyncio.get_running_loop()
+        parsed = urlparse(echo_server.url)
+        p = ConnectionPool(
+            host=parsed.hostname,
+            port=parsed.port,
+            loop=loop,
+            max_connections=4,
+            max_idle_time=0.01,
+        )
+        try:
+            conn1 = await p.acquire()
+            p.release(conn1)
+            await asyncio.sleep(0.05)
+            conn2 = await p.acquire()
+            assert conn2 is not conn1 and p.total_count == 1
+            p.release(conn2)
+        finally:
+            await p.close()
 
-        # Close pool
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "count,expected",
+        [(3, 3), (None, 4), (5, ValueError)],
+        ids=["explicit_count", "none_uses_max", "exceeds_max"],
+    )
+    async def test_warmup(self, pool, count, expected):
+        """warmup() pre-establishes connections, raises on over-limit."""
+        if expected is ValueError:
+            with pytest.raises(ValueError, match="max_connections"):
+                await pool.warmup(count=count)
+        else:
+            result = await pool.warmup(count=count)
+            assert result == expected
+            assert pool.idle_count == expected
+            assert pool.total_count == expected
+
+    @pytest.mark.asyncio
+    async def test_close_cancels_waiters(self, pool):
+        """close() cancels all pending waiters and clears the waiter queue."""
+        for _ in range(4):
+            await pool.acquire()
+        tasks = [asyncio.create_task(pool.acquire()) for _ in range(2)]
+        await asyncio.sleep(0)
+        assert pool.waiting_count == 2
         await pool.close()
+        await asyncio.sleep(0)
+        assert all(t.done() for t in tasks)
+        assert pool.waiting_count == 0
 
-        assert pool.total_count == 0
-        assert pool.idle_count == 0
-        assert waiter_task.cancelled() or waiter_task.done()
+    @pytest.mark.asyncio
+    async def test_release_idempotent(self, pool):
+        """Releasing a connection twice is a no-op the second time."""
+        conn = await pool.acquire()
+        pool.release(conn)
+        pool.release(conn)
+        assert pool.idle_count == 1
+        assert pool.total_count == 1
+
+    @pytest.mark.asyncio
+    async def test_unlimited_pool(self, echo_server):
+        """Pool with max_connections=None allows unlimited connections."""
+        loop = asyncio.get_running_loop()
+        parsed = urlparse(echo_server.url)
+        p = ConnectionPool(
+            host=parsed.hostname,
+            port=parsed.port,
+            loop=loop,
+            max_connections=None,
+        )
+        try:
+            conns = [await p.acquire() for _ in range(8)]
+            assert p.total_count == 8
+            for c in conns:
+                p.release(c)
+            # warmup(None) with unlimited pool returns 0
+            assert await p.warmup(count=None) == 0
+        finally:
+            await p.close()
+
+    @pytest.mark.asyncio
+    async def test_waiter_creates_new_connection(self, pool):
+        """When waiter wakes with no idle connections, it creates a new one."""
+        conns = [await pool.acquire() for _ in range(4)]
+        waiter_task = asyncio.create_task(pool.acquire())
+        await asyncio.sleep(0)
+        assert pool.waiting_count == 1
+        # Destroy connection — destroyed, not idled — frees a slot
+        conns[0].transport.close()
+        pool.release(conns[0])
+        conn = await waiter_task
+        assert conn is not conns[0]
+        pool.release(conn)
+        for c in conns[1:]:
+            pool.release(c)
+
+    @pytest.mark.asyncio
+    async def test_is_stale_various_conditions(self, pool):
+        """is_stale() returns correct results for different connection states."""
+        import time as time_mod
+        from unittest.mock import MagicMock, patch
+
+        conn = await pool.acquire()
+        pool.release(conn)
+        old_ts = time_mod.monotonic() - 2.0
+        mock_poller = MagicMock()
+
+        # Recently used — skip stale check entirely
+        assert not conn.is_stale()
+
+        # Fast path: poller already cached, healthy (poll returns empty) — not stale
+        conn.last_used = old_ts
+        conn._stale_poller = mock_poller
+        mock_poller.poll.return_value = []
+        assert not conn.is_stale()
+
+        # Fast path: server sent FIN (poll returns events) — stale
+        mock_poller.poll.return_value = [(5, 1)]
+        assert conn.is_stale()
+
+        # Fast path: poll raises OSError — stale
+        mock_poller.poll.side_effect = OSError("bad fd")
+        assert conn.is_stale()
+
+        # Slow path: no poller, valid fd — creates poller and caches it
+        conn._stale_poller = None
+        conn.last_used = old_ts
+        with patch("inference_endpoint.endpoint_client.http.select") as mock_select:
+            mock_poll_inst = MagicMock()
+            mock_select.poll.return_value = mock_poll_inst
+            mock_select.POLLIN = 1
+            mock_select.POLLERR = 8
+            mock_select.POLLHUP = 16
+            mock_poll_inst.poll.return_value = []
+            assert not conn.is_stale()
+            assert conn._stale_poller is mock_poll_inst
+
+        # Slow path: no poller, fd < 0 — stale
+        conn._stale_poller = None
+        conn._fd = -1
+        assert conn.is_stale()
+
+        # Slow path: no poller, register raises OSError — stale
+        conn._fd = 999
+        conn._stale_poller = None
+        with patch("inference_endpoint.endpoint_client.http.select") as mock_select:
+            mock_select.poll.side_effect = OSError("bad")
+            assert conn.is_stale()
 
 
 # =============================================================================
@@ -534,7 +727,6 @@ class TestHttpIntegration:
 
         # Run 10 concurrent requests (more than pool size of 4)
         results = await asyncio.gather(*[make_request(i) for i in range(10)])
-
         assert all(status == 200 for status in results)
 
     @pytest.mark.asyncio

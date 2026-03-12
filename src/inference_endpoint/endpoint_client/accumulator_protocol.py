@@ -32,7 +32,9 @@ class SSEAccumulatorProtocol(Protocol):
     is disabled, only the first chunk is emitted via add_chunk().
     """
 
-    def __init__(self, query_id: str, stream_all_chunks: bool) -> None:
+    def __init__(
+        self, query_id: str, stream_all_chunks: bool
+    ) -> None:  # pragma: no cover
         """
         Initialize the accumulator.
 
@@ -40,9 +42,9 @@ class SSEAccumulatorProtocol(Protocol):
             query_id: Unique identifier for the request being accumulated.
             stream_all_chunks: If True, emit all chunks; if False, only first chunk.
         """
-        pass
+        ...
 
-    def add_chunk(self, delta: Any) -> StreamChunk | None:
+    def add_chunk(self, delta: Any) -> StreamChunk | None:  # pragma: no cover
         """
         Process an SSE delta and optionally emit a StreamChunk.
 
@@ -54,9 +56,9 @@ class SSEAccumulatorProtocol(Protocol):
             Returns None for empty deltas, or after first chunk when
             stream_all_chunks=False (TTFT-only mode).
         """
-        pass
+        ...
 
-    def get_final_output(self) -> QueryResult:
+    def get_final_output(self) -> QueryResult:  # pragma: no cover
         """
         Return the final accumulated result after stream completion.
 
@@ -66,4 +68,4 @@ class SSEAccumulatorProtocol(Protocol):
         Returns:
             QueryResult with the complete response output.
         """
-        pass
+        ...

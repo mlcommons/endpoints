@@ -28,7 +28,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-import orjson
+import msgspec.json
 import pytest
 from inference_endpoint import metrics
 from inference_endpoint.config.runtime_settings import RuntimeSettings
@@ -275,7 +275,7 @@ def events_db(tmp_path, sample_uuids, fake_outputs):
             uuid1,
             SampleEvent.COMPLETE.value,
             10211,
-            orjson.dumps({"output": fake_outputs[uuid1]}),
+            msgspec.json.encode({"output": fake_outputs[uuid1]}),
         ),
         (uuid2, SampleEvent.NON_FIRST_CHUNK.value, 10214, b""),
         (uuid3, SessionEvent.ERROR.value, 10216, b""),
@@ -285,7 +285,7 @@ def events_db(tmp_path, sample_uuids, fake_outputs):
             uuid2,
             SampleEvent.COMPLETE.value,
             10219,
-            orjson.dumps({"output": fake_outputs[uuid2]}),
+            msgspec.json.encode({"output": fake_outputs[uuid2]}),
         ),
         (uuid3, SessionEvent.ERROR.value, 10225, b""),
         ("", SessionEvent.TEST_ENDED.value, 10300, b""),

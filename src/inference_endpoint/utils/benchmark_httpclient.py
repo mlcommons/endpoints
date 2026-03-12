@@ -41,7 +41,7 @@ from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQConte
 from inference_endpoint.core.types import Query, QueryResult
 from inference_endpoint.endpoint_client.config import HTTPClientConfig
 from inference_endpoint.endpoint_client.cpu_affinity import compute_affinity_plan
-from inference_endpoint.endpoint_client.http_client import AsyncHttpEndpointClient
+from inference_endpoint.endpoint_client.http_client import HTTPEndpointClient
 from inference_endpoint.testing.max_throughput_server import (
     MaxThroughputServer,
     build_response,
@@ -436,7 +436,7 @@ def _create_client(
             f"max_connections={config.max_connections}, stream={streaming}"
         )
 
-    client = AsyncHttpEndpointClient(config, zmq_context=zmq_context)
+    client = HTTPEndpointClient(config, zmq_context=zmq_context)
     query_data = {
         "prompt": prompt,
         "model": "benchmark-model",
@@ -618,7 +618,7 @@ def run_benchmark(
         gc.enable()
     gc.collect()
 
-    asyncio.run_coroutine_threadsafe(client.shutdown(), loop).result(timeout=10.0)
+    client.shutdown()
     zmq_ctx_manager.__exit__(None, None, None)
 
     # Restore original affinity so the next sweep iteration sees all CPUs
@@ -636,7 +636,7 @@ def run_benchmark(
 # ---------------------------------------------------------------------------
 
 
-_FULL_WORKERS = [1, 2, 4, 8, 10, 12, 14, 16]
+_FULL_WORKERS = [1, 2, 4, 6, 8, 10, 12, 14, 16]
 _FULL_PROMPT_LENGTHS = [
     1,
     32,
@@ -905,13 +905,9 @@ def run_sweep(
             print(f"{'='*70}")
 
             # Restart server when prompt_length or stream_interval changes
-            if (
-                server
-                and args.streaming
-                and (
-                    prompt_length != last_prompt_length
-                    or stream_interval != last_stream_interval
-                )
+            if server and (
+                prompt_length != last_prompt_length
+                or stream_interval != last_stream_interval
             ):
                 _restart_server(server, prompt_length, args.streaming, stream_interval)
                 last_prompt_length = prompt_length

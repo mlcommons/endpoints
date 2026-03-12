@@ -12,16 +12,3 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-"""
-Endpoint Client for the MLPerf Inference Endpoint Benchmarking System.
-This module provides HTTP client implementation.
-"""
-
-from .config import HTTPClientConfig
-from .http_client import HTTPEndpointClient
-
-__all__ = [
-    "HTTPEndpointClient",
-    "HTTPClientConfig",
-]

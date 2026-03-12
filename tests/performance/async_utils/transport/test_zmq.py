@@ -28,11 +28,11 @@ from dataclasses import dataclass
 import msgspec
 import pytest
 import uvloop
-import zmq
 from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
 from inference_endpoint.async_utils.transport.zmq.transport import (
-    _ZmqReceiverTransport,
-    _ZmqSenderTransport,
+    _create_receiver,
+    _create_sender,
+    _ZMQSocketConfig,
 )
 from inference_endpoint.core.types import Query, QueryResult, StreamChunk
 
@@ -44,7 +44,6 @@ from inference_endpoint.core.types import Query, QueryResult, StreamChunk
 TEST_DURATION_SECONDS = 5.0
 
 WARMUP_MESSAGES = 100
-BUFFER_SIZE = 10 * 1024 * 1024
 
 # Payload sizes in chars
 PAYLOAD_SIZES_CHARS = [32, 128, 512, 1024, 4096, 16384, 32768]
@@ -140,27 +139,15 @@ async def benchmark(
 
     loop = asyncio.get_running_loop()
 
-    with ManagedZMQContext.scoped(io_threads=4) as zmq_ctx:
+    config = _ZMQSocketConfig()
+
+    with ManagedZMQContext.scoped(io_threads=config.io_threads) as zmq_ctx:
         with tempfile.TemporaryDirectory(prefix="zmq_") as tmp:
             addr = f"ipc://{tmp}/bench"
 
-            # Sender (main proc perspective)
-            push = zmq_ctx.socket(zmq.PUSH)
-            push.setsockopt(zmq.LINGER, -1)
-            push.setsockopt(zmq.SNDHWM, 0)
-            push.setsockopt(zmq.SNDBUF, BUFFER_SIZE)
-            push.setsockopt(zmq.IMMEDIATE, 1)
-            push.bind(addr)
-            sender = _ZmqSenderTransport(loop, push, msgspec.msgpack.Encoder())
-
-            # Receiver (worker proc perspective)
-            pull = zmq_ctx.socket(zmq.PULL)
-            pull.setsockopt(zmq.LINGER, -1)
-            pull.setsockopt(zmq.RCVHWM, 0)
-            pull.setsockopt(zmq.RCVBUF, BUFFER_SIZE)
-            pull.connect(addr)
-            receiver = _ZmqReceiverTransport(
-                loop, pull, msgspec.msgpack.Decoder(type=msg_type)
+            sender = _create_sender(loop, addr, zmq_ctx, config, bind=True)
+            receiver = _create_receiver(
+                loop, addr, zmq_ctx, config, msg_type, bind=False
             )
 
             await asyncio.sleep(0.01)

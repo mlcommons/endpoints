@@ -29,8 +29,8 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import msgspec.json
 import numpy as np
-import orjson
 
 from ..load_generator.events import SampleEvent, SessionEvent
 from ..profiling import profile
@@ -207,7 +207,7 @@ class RollupQueryTable:
             }
         else:
             # Note values are sorted, we can avoid using np.max and np.min
-            # Need to convert to default Python types since orjson doesn't support numpy dtypes
+            # Need to convert to default Python types since msgspec doesn't support numpy dtypes
             if self.repeats is None:
                 values = self._sorted_vals
                 counts = np.ones(self._sorted_vals.shape, dtype=self._sorted_vals.dtype)
@@ -402,8 +402,8 @@ class Report:
         d = dataclasses.asdict(self)
         d["qps"] = self.qps
         d["tps"] = self.tps
-        json_str = orjson.dumps(
-            d, option=orjson.OPT_INDENT_2 | orjson.OPT_SORT_KEYS
+        json_str = msgspec.json.format(
+            msgspec.json.encode(dict(sorted(d.items()))), indent=2
         ).decode("utf-8")
         if save_to is not None:
             with Path(save_to).open("w") as f:
@@ -571,8 +571,8 @@ def output_sequence_from_data(
         return None, None
 
     try:
-        decoded_data = orjson.loads(data_bytes)
-    except (orjson.JSONDecodeError, TypeError):
+        decoded_data = msgspec.json.decode(data_bytes)
+    except (msgspec.DecodeError, TypeError):
         logging.warning("Failed to decode data bytes")
         return None, None
 
@@ -1195,9 +1195,9 @@ class MetricsReporter:
                         ):
                             # For other event types, just decode and stringify
                             try:
-                                decoded_data = orjson.loads(data_bytes)
+                                decoded_data = msgspec.json.decode(data_bytes)
                                 value = str(decoded_data) if decoded_data else ""
-                            except (orjson.JSONDecodeError, TypeError) as e:
+                            except (msgspec.DecodeError, TypeError) as e:
                                 value = f"<DECODE_ERROR: {e}>"
 
                     approx_datetime_str = monotime_to_datetime(timestamp_ns).isoformat()
@@ -1209,9 +1209,8 @@ class MetricsReporter:
                         "approx_datetime_str": approx_datetime_str,
                         "value": value,
                     }
-                    # Use orjson.dumps for each line
                     f.write(
-                        orjson.dumps(json_obj, option=orjson.OPT_SORT_KEYS).decode(
+                        msgspec.json.encode(dict(sorted(json_obj.items()))).decode(
                             "utf-8"
                         )
                         + "\n"
@@ -1239,7 +1238,7 @@ class MetricsReporter:
         result = self.cur_.execute(query).fetchone()
         if result and result[0]:
             try:
-                return orjson.loads(result[0])
+                return msgspec.json.decode(result[0])
             except Exception:
                 pass
         return {"version": "unknown", "git_sha": None}

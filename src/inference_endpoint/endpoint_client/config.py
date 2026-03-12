@@ -117,13 +117,16 @@ class HTTPClientConfig:
     worker_gc_mode: Literal["disabled", "relaxed", "system"] = "relaxed"
 
     # Request adapter for Query/Response <-> Payload/Response bytes
-    adapter: type[HttpRequestAdapter] | None = None  # None: use default
+    # Default in __post_init__ if None
+    adapter: type[HttpRequestAdapter] = None  # type: ignore[assignment]
 
     # SSE accumulator for streaming responses
-    accumulator: type[SSEAccumulatorProtocol] | None = None  # None: use default
+    # Default in __post_init__ if None
+    accumulator: type[SSEAccumulatorProtocol] = None  # type: ignore[assignment]
 
     # Worker pool transport class for worker IPC
-    worker_pool_transport: type[WorkerPoolTransport] | None = None  # None: use default
+    # Default in __post_init__ if None
+    worker_pool_transport: type[WorkerPoolTransport] = None  # type: ignore[assignment]
 
     def __post_init__(self):
         # set default adapter in __post_init__ to avoid circular dependency

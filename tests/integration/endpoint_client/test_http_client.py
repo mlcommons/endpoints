@@ -22,9 +22,42 @@ import pytest
 import zmq
 import zmq.asyncio
 from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
-from inference_endpoint.core.types import Query
+from inference_endpoint.core.types import Query, QueryResult, StreamChunk
+from inference_endpoint.endpoint_client.config import HTTPClientConfig
+from inference_endpoint.endpoint_client.http_client import HTTPEndpointClient
 
 from .conftest import create_futures_client
+
+
+def _create_client(
+    url: str, zmq_context: ManagedZMQContext | None = None, **kwargs
+) -> HTTPEndpointClient:
+    config = HTTPClientConfig(
+        endpoint_urls=[url],
+        num_workers=kwargs.pop("num_workers", 1),
+        max_connections=kwargs.pop("max_connections", 10),
+        warmup_connections=kwargs.pop("warmup_connections", 0),
+        **kwargs,
+    )
+    return HTTPEndpointClient(config, zmq_context=zmq_context)
+
+
+def _make_query(id: str, prompt: str = "hello", stream: bool = False) -> Query:
+    return Query(
+        id=id,
+        data={"prompt": prompt, "model": "test", "stream": stream},
+    )
+
+
+@pytest.fixture
+def http_client(mock_http_echo_server):
+    with ManagedZMQContext.scoped() as zmq_ctx:
+        client = _create_client(
+            f"{mock_http_echo_server.url}/v1/chat/completions",
+            zmq_context=zmq_ctx,
+        )
+        yield client
+        client.shutdown()
 
 
 class TestHttpEndpointClientScaleOut:
@@ -399,3 +432,154 @@ class TestHTTPEndpointClientFunctionality:
             assert (
                 "".join(result.response_output["output"]) == prompt
             ), f"Mismatch for test case '{name}'"
+
+
+class TestPoll:
+    """Test non-blocking poll() response retrieval."""
+
+    def test_poll_returns_none_when_empty(self, http_client):
+        """poll() returns None when no responses are available."""
+        assert http_client.poll() is None
+
+    def test_poll_returns_response(self, http_client):
+        """poll() returns a QueryResult after issue + wait."""
+        http_client.issue(_make_query("poll-1"))
+
+        result = None
+        for _ in range(100):
+            result = http_client.poll()
+            if result is not None:
+                break
+            time.sleep(0.01)
+
+        assert isinstance(result, QueryResult)
+        assert result.id == "poll-1"
+
+    def test_poll_is_non_blocking(self, http_client):
+        """poll() returns immediately even with no data."""
+        start = time.monotonic()
+        for _ in range(1000):
+            http_client.poll()
+        elapsed = time.monotonic() - start
+        assert elapsed < 1.0
+
+    def test_poll_drains_one_at_a_time(self, http_client):
+        """Each poll() call returns at most one response."""
+        n = 5
+        for i in range(n):
+            http_client.issue(_make_query(f"poll-multi-{i}"))
+
+        time.sleep(1.0)
+
+        results = []
+        while (r := http_client.poll()) is not None:
+            results.append(r)
+            assert isinstance(r, QueryResult | StreamChunk)
+
+        assert len(results) == n
+
+
+class TestRecv:
+    """Test blocking recv() response retrieval."""
+
+    @pytest.mark.asyncio
+    async def test_recv_blocks_until_response(self, http_client):
+        """recv() blocks and returns a response."""
+        http_client.issue(_make_query("recv-1", prompt="recv test"))
+
+        result = await asyncio.wait_for(
+            asyncio.wrap_future(
+                asyncio.run_coroutine_threadsafe(http_client.recv(), http_client.loop)
+            ),
+            timeout=5.0,
+        )
+
+        assert isinstance(result, QueryResult)
+        assert result.id == "recv-1"
+
+    @pytest.mark.asyncio
+    async def test_recv_all_responses_arrive(self, http_client):
+        """recv() delivers all issued responses."""
+        ids = {f"recv-order-{i}" for i in range(5)}
+        for id in ids:
+            http_client.issue(_make_query(id))
+
+        received_ids = set()
+        for _ in range(len(ids)):
+            result = await asyncio.wait_for(
+                asyncio.wrap_future(
+                    asyncio.run_coroutine_threadsafe(
+                        http_client.recv(), http_client.loop
+                    )
+                ),
+                timeout=5.0,
+            )
+            assert isinstance(result, QueryResult)
+            received_ids.add(result.id)
+
+        assert received_ids == ids
+
+
+class TestDrain:
+    """Test non-blocking drain() bulk retrieval."""
+
+    def test_drain_returns_empty_when_no_responses(self, http_client):
+        """drain() returns empty list when nothing is available."""
+        assert http_client.drain() == []
+
+    def test_drain_returns_all_available(self, http_client):
+        """drain() returns all buffered responses at once."""
+        n = 5
+        for i in range(n):
+            http_client.issue(_make_query(f"drain-{i}"))
+
+        time.sleep(1.0)
+
+        results = http_client.drain()
+        assert len(results) == n
+        result_ids = {r.id for r in results if isinstance(r, QueryResult)}
+        expected_ids = {f"drain-{i}" for i in range(n)}
+        assert result_ids == expected_ids
+
+    def test_drain_empties_buffer(self, http_client):
+        """After drain(), subsequent drain() returns empty."""
+        http_client.issue(_make_query("drain-once"))
+        time.sleep(1.0)
+
+        first = http_client.drain()
+        assert len(first) >= 1
+
+        second = http_client.drain()
+        assert second == []
+
+    def test_drain_is_non_blocking(self, http_client):
+        """drain() returns immediately even with no data."""
+        start = time.monotonic()
+        for _ in range(1000):
+            http_client.drain()
+        elapsed = time.monotonic() - start
+        assert elapsed < 1.0
+
+
+class TestShutdown:
+    """Test shutdown behavior."""
+
+    def test_shutdown_is_idempotent(self, mock_http_echo_server):
+        """Calling shutdown() multiple times does not raise."""
+        with ManagedZMQContext.scoped() as zmq_ctx:
+            client = _create_client(
+                f"{mock_http_echo_server.url}/v1/chat/completions",
+                zmq_context=zmq_ctx,
+            )
+            client.shutdown()
+            client.shutdown()
+
+    def test_issue_after_shutdown_drops(self, mock_http_echo_server):
+        """Requests issued after shutdown are silently dropped."""
+        with ManagedZMQContext.scoped() as zmq_ctx:
+            client = _create_client(
+                f"{mock_http_echo_server.url}/v1/chat/completions",
+                zmq_context=zmq_ctx,
+            )
+            client.shutdown()
+            client.issue(_make_query("post-shutdown"))

@@ -95,6 +95,19 @@ class _ZMQSocketConfig:
     recv_buffer_size: int = 4 * 1024 * 1024  # 4MB
     send_buffer_size: int = 4 * 1024 * 1024  # 4MB
 
+    def apply_recv(self, sock: zmq.Socket) -> None:
+        """Apply receiver socket options."""
+        sock.setsockopt(zmq.LINGER, self.linger)
+        sock.setsockopt(zmq.RCVHWM, self.high_water_mark)
+        sock.setsockopt(zmq.RCVBUF, self.recv_buffer_size)
+
+    def apply_send(self, sock: zmq.Socket) -> None:
+        """Apply sender socket options."""
+        sock.setsockopt(zmq.LINGER, self.linger)
+        sock.setsockopt(zmq.SNDHWM, self.high_water_mark)
+        sock.setsockopt(zmq.SNDBUF, self.send_buffer_size)
+        sock.setsockopt(zmq.IMMEDIATE, self.immediate)
+
 
 class _ZmqReceiverTransport(ReceiverTransport):
     """
@@ -122,6 +135,8 @@ class _ZmqReceiverTransport(ReceiverTransport):
         "_waiter",
         "_closing",
         "_soon_call",
+        "_recv_buf",
+        "_recv_view",
     )
 
     def __init__(
@@ -139,6 +154,13 @@ class _ZmqReceiverTransport(ReceiverTransport):
         self._waiter: asyncio.Future[None] | None = None
         self._closing = False
         self._soon_call: asyncio.Handle | None = None
+
+        # NOTE(vir):
+        # zmq recv_into with Pre-allocated buffer.
+        # msgspec can decode in-place, avoiding per-message bytes allocation.
+        recv_buf_size = sock.getsockopt(zmq.RCVBUF)
+        self._recv_buf = bytearray(recv_buf_size)
+        self._recv_view = memoryview(self._recv_buf)
 
         self._loop.add_reader(self._fd, self._on_readable)
 
@@ -170,10 +192,18 @@ class _ZmqReceiverTransport(ReceiverTransport):
             return
 
         count = 0
+        recv_buf = self._recv_buf
+        recv_view = self._recv_view
+        buf_len = len(recv_buf)
         try:
             while True:
-                data = self._sock.recv(zmq.NOBLOCK, copy=False, track=False)
-                self._deque.append(self._decoder.decode(data))
+                nbytes = self._sock.recv_into(recv_buf, flags=zmq.NOBLOCK)
+                if nbytes > buf_len:
+                    raise RuntimeError(
+                        f"ZMQ message truncated ({nbytes} > {buf_len} bytes). "
+                        f"Increase recv_buffer_size in _ZMQSocketConfig."
+                    )
+                self._deque.append(self._decoder.decode(recv_view[:nbytes]))
                 count += 1
         except zmq.Again:
             # Normal: no more messages
@@ -181,7 +211,7 @@ class _ZmqReceiverTransport(ReceiverTransport):
         except zmq.ZMQError as e:
             if e.errno not in (errno.EAGAIN, errno.EINTR, errno.ENOTSOCK):
                 logger.error(f"ZMQ recv error: {e}")
-        except Exception as e:
+        except msgspec.DecodeError as e:
             logger.error(f"Decode error: {e}")
 
         # Wake waiter once after draining (not per message)
@@ -402,9 +432,7 @@ def _create_receiver(
         Configured receiver transport.
     """
     sock = zmq_context.socket(zmq.PULL)
-    sock.setsockopt(zmq.LINGER, config.linger)
-    sock.setsockopt(zmq.RCVHWM, config.high_water_mark)
-    sock.setsockopt(zmq.RCVBUF, config.recv_buffer_size)
+    config.apply_recv(sock)
 
     if bind:
         sock.bind(address)
@@ -429,10 +457,7 @@ def _create_sender(
 ) -> _ZmqSenderTransport:
     """Create a ZMQ sender transport."""
     sock = zmq_context.socket(zmq.PUSH)
-    sock.setsockopt(zmq.LINGER, config.linger)
-    sock.setsockopt(zmq.SNDHWM, config.high_water_mark)
-    sock.setsockopt(zmq.SNDBUF, config.send_buffer_size)
-    sock.setsockopt(zmq.IMMEDIATE, config.immediate)
+    config.apply_send(sock)
 
     if bind:
         sock.bind(address)
