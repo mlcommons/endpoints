@@ -264,6 +264,7 @@ class SchedulerBasedLoadGenerator(LoadGenerator):
         self.scheduler = scheduler
         self._iterator = None
         self.last_issue_timestamp_ns = 0
+        self._start_time_ns: int | None = None
 
     def __next__(self) -> IssuedSample:
         """Issue next sample according to scheduler timing.
@@ -284,6 +285,18 @@ class SchedulerBasedLoadGenerator(LoadGenerator):
         Raises:
             StopIteration: When scheduler has no more samples to issue.
         """
+        # Check wall-clock timeout before advancing the iterator, so we don't
+        # consume a (sample_index, delay) pair that will never be issued.
+        max_duration_ms = self.scheduler.runtime_settings.max_duration_ms
+        if max_duration_ms is not None and self._start_time_ns is not None:
+            elapsed_ns = time.monotonic_ns() - self._start_time_ns
+            if elapsed_ns >= max_duration_ms * 1_000_000:
+                logging.info(
+                    f"max_duration_ms={max_duration_ms}ms reached after "
+                    f"{elapsed_ns / 1e6:.1f}ms, stopping sample issuance"
+                )
+                raise StopIteration
+
         # Let raised StopIteration be propagated up the stack
         # Ignore mypy error complaining that self._iterator maybe None
         s_idx, delay_ns = next(self._iterator)  # type: ignore[call-overload]
@@ -307,5 +320,6 @@ class SchedulerBasedLoadGenerator(LoadGenerator):
             raise RuntimeError(
                 "SchedulerBasedLoadGenerator can only be iterated over once"
             )
+        self._start_time_ns = time.monotonic_ns()
         self._iterator = iter(self.scheduler)
         return super().__iter__()

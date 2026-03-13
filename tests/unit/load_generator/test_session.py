@@ -103,7 +103,7 @@ def test_session_start(clean_sample_event_hooks):
         metrics.Throughput(5000),
         [metrics.Throughput(5000)],
         min_duration_ms=1000,
-        max_duration_ms=10_000,
+        max_duration_ms=None,
         n_samples_from_dataset=100,
         n_samples_to_issue=10_000,
         min_sample_count=100,
@@ -141,9 +141,12 @@ def test_session_start(clean_sample_event_hooks):
             sample_issuer,
             sched,
             name="pytest_test_session_start",
+            max_shutdown_timeout_s=300,
         )
         events_db_path = sess.event_recorder.connection_name
-        sess.wait_for_test_end()
+        assert sess.wait_for_test_end(
+            timeout=120.0
+        ), "Session did not complete within timeout"
 
         # Shutdown the sample issuer to ensure proper cleanup and error propagation
         sample_issuer.shutdown()
