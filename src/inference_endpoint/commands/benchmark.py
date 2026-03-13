@@ -451,6 +451,39 @@ def _run_benchmark(
             logger.info("Streaming: disabled (auto, offline mode)")
             config.model_params.streaming = StreamingMode.OFF
 
+    # Build warmup dataset if configured
+    warmup_dataset = None
+    if config.warmup is not None:
+        if tokenizer is None:
+            raise InputValidationError(
+                "A tokenizer is required to generate the warmup dataset. Ensure model_params.name is set."
+            )
+        from inference_endpoint.dataset_manager.predefined.random import RandomDataset
+
+        warmup_cfg = config.warmup
+        warmup_df = RandomDataset.generate(
+            datasets_dir=None,
+            force=False,
+            num_sequences=warmup_cfg.num_samples,
+            input_seq_length=warmup_cfg.input_seq_length,
+            range_ratio=warmup_cfg.range_ratio,
+            random_seed=warmup_cfg.random_seed,
+            tokenizer=tokenizer,
+        )
+        warmup_dataset = RandomDataset(warmup_df)
+        warmup_model_params = ModelParams(
+            name=config.model_params.name,
+            max_new_tokens=warmup_cfg.output_seq_length,
+        )
+        warmup_dataset.load(
+            api_type=config.endpoint_config.api_type,
+            model_params=warmup_model_params,
+        )
+        logger.info(
+            f"Warmup dataset ready: {warmup_dataset.num_samples()} samples "
+            f"(ISL={warmup_cfg.input_seq_length}, OSL={warmup_cfg.output_seq_length})"
+        )
+
     # Get dataset - from CLI or from config
     # TODO: Dataset Logic is not yet fully implemented
 
@@ -609,6 +642,7 @@ def _run_benchmark(
                 dataloader,
                 sample_issuer,
                 scheduler,
+                warmup_dataset=warmup_dataset,
                 name=f"cli_benchmark_{uuid.uuid4().hex[0:8]}",
                 report_dir=report_dir,
                 tokenizer_override=tokenizer,

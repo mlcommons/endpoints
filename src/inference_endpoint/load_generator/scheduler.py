@@ -168,6 +168,24 @@ class WithReplacementSampleOrder(SampleOrder):
         return self.rng.randint(0, self.n_samples_in_dataset - 1)
 
 
+class SequentialSampleOrder(SampleOrder):
+    """Sample ordering without randomness.
+
+    Issues dataset rows in their natural order and wraps around if more samples are
+    requested than the dataset contains.
+    """
+
+    def next_sample_index(self) -> int:
+        """Get next sample index in dataset order.
+
+        Returns:
+            Sample index from dataset.
+        """
+        if self.n_samples_in_dataset <= 0:
+            raise IndexError("Cannot issue samples from an empty dataset")
+        return self._issued_samples % self.n_samples_in_dataset
+
+
 def uniform_delay_fn(
     max_delay_ns: int = 0, rng: random.Random | None = None
 ) -> Callable[[], float]:

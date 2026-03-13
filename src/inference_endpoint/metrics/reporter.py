@@ -676,6 +676,22 @@ class MetricsReporter:
         self.is_closed = False
 
     @functools.cached_property
+    def test_started_timestamp_ns(self) -> int:
+        """Returns the timestamp_ns of the TEST_STARTED event.
+
+        Returns 0 if the event is not found, which acts as an open lower bound
+        (all samples issued after epoch 0 are included). This keeps the queries
+        correct for event logs that pre-date warmup support.
+        """
+        result = self.cur_.execute(f"""
+        SELECT timestamp_ns FROM events
+        WHERE event_type = '{SessionEvent.TEST_STARTED.value}'
+        ORDER BY timestamp_ns ASC
+        LIMIT 1
+        """).fetchone()
+        return int(result[0]) if result else 0
+
+    @functools.cached_property
     def stop_performance_tracking_timestamp_ns(self) -> float:
         """Returns the timestamp_ns of the STOP_PERFORMANCE_TRACKING event.
 
@@ -708,16 +724,19 @@ class MetricsReporter:
 
     def derive_TTFT(self) -> RollupQueryTable:
         stop_ts = self.stop_performance_tracking_timestamp_ns
+        start_ts = self.test_started_timestamp_ns
 
         # Build the HAVING clause conditionally to handle infinity
         if stop_ts != float("inf"):
             before_stop_ts_clause = f"""
             HAVING COUNT(DISTINCT event_type) = 2
+                AND MAX(CASE WHEN event_type = '{SessionEvent.LOADGEN_ISSUE_CALLED.value}' THEN timestamp_ns END) >= {start_ts}
                 AND MAX(CASE WHEN event_type = '{SessionEvent.LOADGEN_ISSUE_CALLED.value}' THEN timestamp_ns END) < {stop_ts}
             """
         else:
-            before_stop_ts_clause = """
+            before_stop_ts_clause = f"""
             HAVING COUNT(DISTINCT event_type) = 2
+                AND MAX(CASE WHEN event_type = '{SessionEvent.LOADGEN_ISSUE_CALLED.value}' THEN timestamp_ns END) >= {start_ts}
             """
 
         return self.derive_metric(
@@ -870,16 +889,19 @@ class MetricsReporter:
             RollupQueryTable: A table containing per-sample latencies in nanoseconds.
         """
         stop_ts = self.stop_performance_tracking_timestamp_ns
+        start_ts = self.test_started_timestamp_ns
 
         # HAVING clause is different if there is a STOP_PERFORMANCE_TRACKING event
         if stop_ts != float("inf"):
             before_stop_ts_clause = f"""
             HAVING COUNT(DISTINCT event_type) = 2
+                AND MAX(CASE WHEN event_type = '{SessionEvent.LOADGEN_ISSUE_CALLED.value}' THEN timestamp_ns END) >= {start_ts}
                 AND MAX(CASE WHEN event_type = '{SessionEvent.LOADGEN_ISSUE_CALLED.value}' THEN timestamp_ns END) < {stop_ts}
             """
         else:
-            before_stop_ts_clause = """
+            before_stop_ts_clause = f"""
             HAVING COUNT(DISTINCT event_type) = 2
+                AND MAX(CASE WHEN event_type = '{SessionEvent.LOADGEN_ISSUE_CALLED.value}' THEN timestamp_ns END) >= {start_ts}
             """
 
         return self.derive_metric(
@@ -904,15 +926,24 @@ class MetricsReporter:
         - "in_flight" (int): The number of samples in flight
         """
         stop_ts = self.stop_performance_tracking_timestamp_ns
+        start_ts = self.test_started_timestamp_ns
 
-        # Build WHERE clause to filter samples issued before stop_ts
-        where_clause = ""
+        # Build WHERE clause to filter samples in the performance window
         if stop_ts != float("inf"):
             where_clause = f"""
             WHERE sample_uuid IN (
                 SELECT sample_uuid FROM events
                 WHERE event_type = '{SessionEvent.LOADGEN_ISSUE_CALLED.value}'
+                AND timestamp_ns >= {start_ts}
                 AND timestamp_ns < {stop_ts}
+            )
+            """
+        else:
+            where_clause = f"""
+            WHERE sample_uuid IN (
+                SELECT sample_uuid FROM events
+                WHERE event_type = '{SessionEvent.LOADGEN_ISSUE_CALLED.value}'
+                AND timestamp_ns >= {start_ts}
             )
             """
 
@@ -951,14 +982,24 @@ class MetricsReporter:
             Returns an empty list if no COMPLETE events are found.
         """
         stop_ts = self.stop_performance_tracking_timestamp_ns
+        start_ts = self.test_started_timestamp_ns
 
-        # Build WHERE clause to filter samples issued before STOP_PERFORMANCE_TRACKING
+        # Build WHERE clause to filter samples in the performance window
         if performance_only and stop_ts != float("inf"):
             before_stop_ts_clause = f"""
             AND sample_uuid IN (
                 SELECT sample_uuid FROM events
                 WHERE event_type = '{SessionEvent.LOADGEN_ISSUE_CALLED.value}'
+                AND timestamp_ns >= {start_ts}
                 AND timestamp_ns < {stop_ts}
+            )
+            """
+        elif performance_only:
+            before_stop_ts_clause = f"""
+            AND sample_uuid IN (
+                SELECT sample_uuid FROM events
+                WHERE event_type = '{SessionEvent.LOADGEN_ISSUE_CALLED.value}'
+                AND timestamp_ns >= {start_ts}
             )
             """
         else:
@@ -1249,15 +1290,8 @@ class MetricsReporter:
         Returns:
             int|None: The timestamp of the TEST_STARTED event in nanoseconds, or None if not found.
         """
-        query = f"""
-        SELECT timestamp_ns FROM events
-        WHERE event_type = '{SessionEvent.TEST_STARTED.value}'
-        ORDER BY timestamp_ns ASC
-        LIMIT 1"""
-        result = self.cur_.execute(query).fetchone()
-        if result and result[0]:
-            return result[0]
-        return None
+        ts = self.test_started_timestamp_ns
+        return ts if ts != 0 else None
 
     def create_report(
         self,

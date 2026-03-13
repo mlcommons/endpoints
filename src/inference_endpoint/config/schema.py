@@ -234,6 +234,29 @@ class AccuracyConfig(BaseModel):
     num_repeats: int = 1
 
 
+class WarmupConfig(BaseModel):
+    """Configuration for the warmup phase using randomly generated data.
+
+    The warmup phase runs before the timed performance test to prime the
+    endpoint (warm TCP connections, fill KV caches, trigger JIT compilation).
+    Uses randomly generated token sequences with configurable ISL and OSL.
+
+    Fields:
+        num_samples: Number of warmup queries to issue.
+        input_seq_length: Target input sequence length in tokens (ISL).
+        output_seq_length: Max output tokens for warmup requests (OSL).
+        range_ratio: ISL variance factor in [0.0, 1.0]. Generates ISL in
+            the range [input_seq_length * range_ratio, input_seq_length].
+        random_seed: Seed for reproducible warmup data generation.
+    """
+
+    num_samples: int = 100
+    input_seq_length: int = 512
+    output_seq_length: int = 128
+    range_ratio: float = 1.0
+    random_seed: int = 42
+
+
 class RuntimeConfig(BaseModel):
     """Runtime configuration from YAML (user-facing).
 
@@ -392,6 +415,7 @@ class BenchmarkConfig(BaseModel):
     #   - True = auto (compute optimal NUMA-aware plan)
     #   - False = disabled (no CPU pinning)
     enable_cpu_affinity: bool = True
+    warmup: WarmupConfig | None = None
 
     @classmethod
     def from_yaml_file(cls, path: Path) -> BenchmarkConfig:

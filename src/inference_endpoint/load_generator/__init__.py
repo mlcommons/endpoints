@@ -29,6 +29,7 @@ from .scheduler import (
     PoissonDistributionScheduler,
     SampleOrder,
     Scheduler,
+    SequentialSampleOrder,
     WithoutReplacementSampleOrder,
     WithReplacementSampleOrder,
 )
@@ -46,6 +47,7 @@ __all__ = [
     "MaxThroughputScheduler",
     "PoissonDistributionScheduler",
     "SampleOrder",
+    "SequentialSampleOrder",
     "WithReplacementSampleOrder",
     "WithoutReplacementSampleOrder",
     "LoadGenerator",

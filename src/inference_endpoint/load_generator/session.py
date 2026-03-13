@@ -26,13 +26,14 @@ import msgspec.json
 from transformers import AutoTokenizer
 
 from ..config.runtime_settings import RuntimeSettings
+from ..config.schema import LoadPattern, LoadPatternType
 from ..dataset_manager.dataset import Dataset
 from ..metrics.recorder import EventRecorder
 from ..metrics.reporter import MetricsReporter
 from ..utils.version import get_version_info
 from .events import SessionEvent
 from .load_generator import LoadGenerator, SampleIssuer, SchedulerBasedLoadGenerator
-from .scheduler import Scheduler, WithoutReplacementSampleOrder
+from .scheduler import Scheduler, SequentialSampleOrder, WithoutReplacementSampleOrder
 
 logger = logging.getLogger(__name__)
 
@@ -79,13 +80,34 @@ class BenchmarkSession:
         self,
         perf_test_generator: LoadGenerator,
         accuracy_test_generators: dict[str, LoadGenerator] | None = None,
-        max_shutdown_timeout_s: float | None = 300.0,
+        warmup_generator: LoadGenerator | None = None,
+        max_shutdown_timeout_s: float = 300.0,
         report_dir: os.PathLike | None = None,
         tokenizer_override: AutoTokenizer | None = None,
         dump_events_log: bool = False,
     ):
         with self.event_recorder:
             try:
+                # Warmup phase: issue samples before the timed performance window.
+                # Warmup events land in the DB with timestamps before TEST_STARTED,
+                # so they are excluded from all perf metrics.
+                if warmup_generator is not None:
+                    self.logger.info("Warmup: issuing samples...")
+                    for _ in warmup_generator:
+                        pass
+                    self.logger.info(
+                        "Warmup samples issued, waiting for responses to drain..."
+                    )
+                    warmup_start = time.monotonic()
+                    while self.event_recorder.n_inflight_samples != 0:
+                        if time.monotonic() - warmup_start > max_shutdown_timeout_s:
+                            self.logger.warning(
+                                "Warmup drain timeout exceeded, proceeding to performance test"
+                            )
+                            break
+                        time.sleep(0.1)
+                    self.logger.info("Warmup complete")
+
                 EventRecorder.record_event(
                     SessionEvent.TEST_STARTED,
                     time.monotonic_ns(),
@@ -258,6 +280,7 @@ class BenchmarkSession:
         sample_issuer: SampleIssuer,
         scheduler: Scheduler,
         *args,
+        warmup_dataset: Dataset | None = None,
         accuracy_datasets: list[Dataset] | None = None,
         load_generator_cls: type[LoadGenerator] = SchedulerBasedLoadGenerator,
         name: str | None = None,
@@ -289,6 +312,30 @@ class BenchmarkSession:
         """
         session = cls(runtime_settings, session_id=name)
         load_generator = load_generator_cls(sample_issuer, dataset, scheduler, *args)  # type: ignore[arg-type]
+
+        # Create warmup generator (max-throughput, issues all samples at t=0)
+        warmup_generator = None
+        if warmup_dataset is not None:
+            warmup_n = warmup_dataset.num_samples()
+            warmup_rt = RuntimeSettings(
+                metric_target=runtime_settings.metric_target,
+                reported_metrics=runtime_settings.reported_metrics,
+                min_duration_ms=0,
+                max_duration_ms=runtime_settings.max_duration_ms,
+                n_samples_from_dataset=warmup_n,
+                n_samples_to_issue=warmup_n,
+                min_sample_count=warmup_n,
+                rng_sched=runtime_settings.rng_sched,
+                rng_sample_index=runtime_settings.rng_sample_index,
+                load_pattern=LoadPattern(type=LoadPatternType.MAX_THROUGHPUT),
+            )
+            warmup_sched_cls = Scheduler.get_implementation(
+                LoadPatternType.MAX_THROUGHPUT
+            )
+            warmup_sched = warmup_sched_cls(warmup_rt, SequentialSampleOrder)
+            warmup_generator = load_generator_cls(
+                sample_issuer, warmup_dataset, warmup_sched, *args
+            )  # type: ignore[arg-type]
 
         # Create accuracy test generators
         accuracy_test_generators = None
@@ -328,6 +375,7 @@ class BenchmarkSession:
             target=session._run_test,
             args=(load_generator,),
             kwargs={
+                "warmup_generator": warmup_generator,
                 "accuracy_test_generators": accuracy_test_generators,
                 "max_shutdown_timeout_s": max_shutdown_timeout_s,
                 "report_dir": report_dir,

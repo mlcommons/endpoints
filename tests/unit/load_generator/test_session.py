@@ -157,3 +157,55 @@ def test_session_start(clean_sample_event_hooks):
         assert stats["total_sent"] == 10_000
         assert stats["completed"] == 10_000
         assert stats["in_flight"] == 0
+
+
+@pytest.mark.unit
+def test_warmup_uses_sequential_sample_order():
+    rt_settings = RuntimeSettings(
+        metrics.Throughput(10),
+        [metrics.Throughput(10)],
+        min_duration_ms=1000,
+        max_duration_ms=10_000,
+        n_samples_from_dataset=8,
+        n_samples_to_issue=8,
+        min_sample_count=1,
+        rng_sched=random.Random(1234),
+        rng_sample_index=random.Random(5678),
+        load_pattern=LoadPattern(type=LoadPatternType.MAX_THROUGHPUT),
+    )
+
+    dl = DummyDataLoader(n_samples=8)
+    sample_issuer = PooledSampleIssuer(lambda n: [str(n)])
+    sched = MaxThroughputScheduler(rt_settings, WithoutReplacementSampleOrder)
+    warmup_dataset = DummyDataLoader(n_samples=4)
+
+    created_schedulers = []
+
+    class RecordingLoadGenerator:
+        def __init__(self, sample_issuer, dataloader, scheduler, *args):
+            self.sample_issuer = sample_issuer
+            self.dataloader = dataloader
+            self.scheduler = scheduler
+            self.args = args
+            self.uuid_to_index_map = {}
+            self.name = None
+            created_schedulers.append(scheduler)
+
+    with patch(
+        "inference_endpoint.load_generator.session.Scheduler.get_implementation",
+        return_value=MaxThroughputScheduler,
+    ):
+        with patch.object(BenchmarkSession, "_run_test", return_value=None):
+            BenchmarkSession.start(
+                rt_settings,
+                dl,
+                sample_issuer,
+                sched,
+                warmup_dataset=warmup_dataset,
+                load_generator_cls=RecordingLoadGenerator,
+                max_shutdown_timeout_s=0.01,
+            )
+
+    assert len(created_schedulers) >= 2
+    warmup_scheduler = created_schedulers[1]
+    assert [next(warmup_scheduler.sample_order) for _ in range(4)] == [0, 1, 2, 3]

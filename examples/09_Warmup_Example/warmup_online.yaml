@@ -1,0 +1,63 @@
+# Online (Sustained QPS) Benchmark with Warmup Phase
+#
+# The warmup phase issues randomly generated requests before the timed
+# performance window starts. This primes the endpoint by:
+#   - Establishing and reusing TCP connections
+#   - Filling KV caches to steady-state
+#   - Triggering JIT compilation in the inference runtime
+#
+# Warmup samples are excluded from all reported metrics.
+name: "warmup-online-qwen2.5-0.5b"
+version: "1.0"
+type: "online"
+
+# Warmup configuration: runs before the timed performance test.
+# Uses randomly generated token sequences; no real dataset required.
+warmup:
+  num_samples: 32 # Number of warmup requests to issue
+  input_seq_length: 128 # ISL: target input sequence length in tokens
+  output_seq_length: 32 # OSL: max_new_tokens for warmup requests
+  range_ratio: 0.8 # ISL variance: generates ISL in [128*0.8, 128]
+  random_seed: 42
+
+model_params:
+  name: "Qwen/Qwen2.5-0.5B-Instruct"
+  temperature: 0.0
+  top_p: 1.0
+  max_new_tokens: 128
+  streaming: "on"
+
+datasets:
+  - name: cnn_dailymail::llama3_8b
+    type: "performance"
+    samples: 13368
+    parser:
+      input: prompt
+
+settings:
+  runtime:
+    min_duration_ms: 60000 # 1 minute
+    max_duration_ms: 360000 # 6 minutes
+    scheduler_random_seed: 137
+    dataloader_random_seed: 111
+
+  load_pattern:
+    type: "poisson"
+    target_qps: 10.0
+
+  client:
+    workers: 4
+
+metrics:
+  collect:
+    - "throughput"
+    - "latency"
+    - "ttft"
+    - "tpot"
+
+endpoint_config:
+  endpoints:
+    - "http://localhost:8000"
+  api_key: null
+
+report_dir: logs/warmup_online
