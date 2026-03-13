@@ -63,8 +63,8 @@ class RuntimeSettings:
     min_duration_ms: int
     """Minimum benchmark duration in milliseconds"""
 
-    max_duration_ms: int
-    """Maximum benchmark duration in milliseconds (timeout)"""
+    max_duration_ms: int | None
+    """Maximum benchmark duration in milliseconds (timeout). None means no wall-clock limit."""
 
     n_samples_from_dataset: int
     """Number of samples to load from dataset"""
