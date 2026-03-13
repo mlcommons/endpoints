@@ -168,9 +168,9 @@ class HTTPClientConfig:
             # Auto: use available ephemeral ports
             self.max_connections = available_ports
 
-            # Resolve min_required_connections: -1 means auto (90% of system max)
+            # Resolve min_required_connections: -1 means auto (12.5% of system max)
             if self.min_required_connections == -1:
-                self.min_required_connections = int(system_maximum_ports * 0.90)
+                self.min_required_connections = int(system_maximum_ports * 0.125)
         else:
             # User specified explicit max_connections - validate against port limit
             if self.max_connections > available_ports:
@@ -184,7 +184,7 @@ def _get_auto_num_workers() -> int:
     """
     Compute optimal number of workers based on NUMA topology.
 
-    Defaults to NUMA domain size (min 8, max 24) for optimal memory locality.
+    Defaults to NUMA domain size (min 10, max 24) for optimal memory locality.
     Users can override with explicit num_workers to use more cores (workers
     will be pinned to additional cores outside NUMA domain if needed).
 

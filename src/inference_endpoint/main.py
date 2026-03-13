@@ -23,12 +23,16 @@ or imported as a module.
 
 import asyncio
 import logging
+import os
 import sys
 
-import uvloop
+# Suppress transformers "no framework found" warning (only tokenizers used)
+os.environ["TRANSFORMERS_VERBOSITY"] = "error"
 
-from inference_endpoint.cli import main as cli_main
-from inference_endpoint.utils.logging import setup_logging
+import uvloop  # noqa: E402
+
+from inference_endpoint.cli import main as cli_main  # noqa: E402
+from inference_endpoint.utils.logging import setup_logging  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
