@@ -523,7 +523,7 @@ class VariableResponseServer:
         output_len_mean: Mean output sequence length (chars).
         output_len_spread: Coefficient of variation for output length.
         output_len_min: Minimum output sequence length (chars).
-        output_len_max: Maximum output sequence length (chars). None = 8 * mean.
+        output_len_max: Maximum output sequence length (chars). None = 2 * mean.
         response_rate_mean: Per-request response rate mean (responses/sec). 0 = no rate mode.
         response_rate_spread: CoV for per-request response rate.
         inter_token_latency: Per-token delay (TPOT) mean in milliseconds. 0 = no ICL mode.
