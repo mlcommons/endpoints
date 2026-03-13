@@ -56,7 +56,7 @@ def require_linux(func: Callable) -> Callable:
     return wrapper
 
 
-# NOTE(vir): seeing high jitter when loadgen has <2 Physical CPUs
+# NOTE(vir): seeing high jitter when loadgen has <=2 Physical CPUs
 # Default physical cores for LoadGen (main process):
 #   - Session thread (scheduler, busy-wait timing)
 #   - Event loop thread (uvloop, response handling)
