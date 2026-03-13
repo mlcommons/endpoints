@@ -53,7 +53,7 @@ class _SocketConfig:
     # client kernel sends probe, server's kernel ACKs - no application overhead
     #
     # TODO(vir): verify impact on failure-detection, we want to fail fast
-    # detection time: KEEPIDLE + (KEEPCNT × KEEPINTVL) = 1 + 5×1 = 5s
+    # detection time: KEEPIDLE + (KEEPCNT × KEEPINTVL) = 1 + 5×1 = 6s
     SO_KEEPALIVE: int = 1  # Enable keepalive at socket level
     TCP_KEEPIDLE: int = 1  # Probe after 1s idle
     TCP_KEEPCNT: int = 5  # 5 failed probes = dead

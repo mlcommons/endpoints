@@ -201,8 +201,8 @@ class Worker:
 
             # Create connection pool
             # Naively divide max connections among workers
-            connections_per_worker = (
-                self.http_config.max_connections // self.http_config.num_workers
+            connections_per_worker = max(
+                1, self.http_config.max_connections // self.http_config.num_workers
             )
             self._pool = ConnectionPool(
                 host=self._host,

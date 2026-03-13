@@ -7,16 +7,16 @@ Unlike :class:`MaxThroughputServer` (which returns identical pre-compiled respon
 instantly for roofline testing), this server models realistic LLM inference:
 
 * **Variable output lengths** — lognormal distribution, configurable mean + spread
-* **Per-request response rate** — lognormal distribution (responses/sec per request)
+* **Per-worker response rate** — token bucket rate limiter per worker process
 * **First-chunk latency (TTFT)** — lognormal delay before first data
-* **Per-chunk latency jitter** — lognormal inter-chunk delays in streaming mode
+* **Per-chunk latency jitter** — lognormal inter-token delays in streaming mode
 
 Two mutually exclusive timing modes:
 
 * **Response-rate mode** (``--response-rate-mean``): controls total response time
-  per request.  TPOT is derived from ``(1/rate - TTFT) / num_chunks``.
-* **Inter-chunk mode** (``--inter-chunk-latency``): controls per-chunk delay
-  directly.  Total response time = TTFT + num_chunks × TPOT.
+  per request.  TPOT is derived from ``(1/rate - TTFT) / (num_chunks - 1)``.
+* **Inter-token mode** (``--inter-token-latency``): controls per-token delay
+  (TPOT) directly.  Actual inter-SSE-event delay = TPOT × stream_interval.
 
 Usage::
 
@@ -28,10 +28,10 @@ Usage::
         --output-len-mean 1000 --output-len-spread 0.4 \\
         --response-rate-mean 10000 --response-rate-spread 2.0
 
-    # Streaming with inter-chunk latency (ms) + TTFT (s)
+    # Streaming with inter-token latency (ms) + TTFT (s)
     python -m inference_endpoint.testing.variable_throughput_server --stream --stats \\
         --stream-interval 2 \\
-        --inter-chunk-latency 20 --inter-chunk-spread 0.05 \\
+        --inter-token-latency 20 --inter-token-spread 0.05 \\
         --first-chunk-latency 0.1 --first-chunk-spread 0.02
 
     # Streaming with response-rate + TTFT
@@ -109,12 +109,14 @@ def _lognormal_params(mean: float, cv: float) -> tuple[float, float]:
 
 
 class _TokenBucket:
-    """Global rate limiter: enforces N responses/sec across all concurrent requests."""
+    """Per-worker rate limiter: enforces N responses/sec within a single worker."""
 
     __slots__ = ("_interval", "_available_at")
 
     def __init__(self, rate: float):
-        self._interval = 1.0 / rate if rate > 0 else 0.0
+        if rate <= 0:
+            raise ValueError(f"rate must be > 0, got {rate}")
+        self._interval = 1.0 / rate
         self._available_at = 0.0
 
     async def acquire(self) -> None:
@@ -139,7 +141,7 @@ class VariableResponseProtocol(asyncio.Protocol):
 
     Two timing modes:
     - **rate**: Global token bucket controls overall throughput (responses/sec).
-    - **icl**: Per-request inter-chunk latency, no global rate limit.
+    - **icl**: Per-request inter-token latency, no global rate limit.
 
     Because ``data_received`` is synchronous, async work is dispatched via
     ``loop.create_task``.
@@ -171,7 +173,7 @@ class VariableResponseProtocol(asyncio.Protocol):
         "_rate_mu",
         "_rate_sigma",
         "_rate_mean",
-        # Inter-chunk-latency params (mode="icl")
+        # Inter-token-latency params (mode="icl")
         "_icl_mu",
         "_icl_sigma",
         "_icl_mean",
@@ -277,7 +279,6 @@ class VariableResponseProtocol(asyncio.Protocol):
 
         try:
             rng = self._rng
-            num_chunks = math.ceil(osl / self._stream_interval) if self._stream else 1
 
             # Rate mode: global token bucket controls overall throughput
             if self._mode == "rate":
@@ -292,8 +293,10 @@ class VariableResponseProtocol(asyncio.Protocol):
                     rng, self._rate_mu, self._rate_sigma, self._rate_mean
                 )
                 total_time = 1.0 / rate if rate > 0 else 0.0
-                if self._stream and num_chunks > 1:
-                    tpot = max(0.0, (total_time - ttft) / num_chunks)
+                if self._stream and osl > 1:
+                    # Derive per-token TPOT: remaining time spread across output tokens.
+                    # Streaming loop scales by tokens_per_chunk automatically.
+                    tpot = max(0.0, (total_time - ttft) / (osl - 1))
                 else:
                     # Non-streaming or single chunk: total_time is the full delay
                     ttft = total_time
@@ -332,13 +335,18 @@ class VariableResponseProtocol(asyncio.Protocol):
         _counter_add(_byte_counter, len(response))
 
     async def _handle_streaming(self, transport, osl: int, ttft: float, tpot: float):
-        """Stream chunks with TTFT + per-chunk TPOT delays."""
+        """Stream chunks with TTFT + per-token TPOT delays.
+
+        tpot is the simulated per-token generation time (seconds).
+        stream_interval is chars per SSE event (≈ tokens).
+        Actual inter-event delay = tpot × stream_interval.
+        """
         interval = self._stream_interval
         num_events = math.ceil(osl / interval)
         created = int(time.time())
         model = self._model
 
-        # Pre-compile all chunk bytes upfront to keep the hot loop free of encoding.
+        # Pre-compile all chunk bytes upfront.
         chunks: list[bytes] = []
         chars_left = osl
         for _ in range(num_events):
@@ -377,9 +385,9 @@ class VariableResponseProtocol(asyncio.Protocol):
             if transport.is_closing():
                 return
 
-            # TPOT delay between chunks (skip first — TTFT already applied)
+            # Delay = tpot × chars_per_event (chars ≈ tokens). Skip first — TTFT already applied.
             if i > 0 and tpot > 0:
-                target += tpot
+                target += tpot * interval
                 wait = target - loop.time()
                 if wait > 0:
                     await asyncio.sleep(wait)
@@ -505,7 +513,7 @@ class VariableResponseServer:
     Timing is per-request with two mutually exclusive modes:
 
     * **Response-rate mode**: each request samples its own rate, TPOT is derived.
-    * **Inter-chunk mode**: each request samples its own TPOT directly.
+    * **Inter-token mode**: each request samples its own TPOT directly.
 
     Both modes support first-chunk latency (TTFT) with optional spread.
 
@@ -518,8 +526,8 @@ class VariableResponseServer:
         output_len_max: Maximum output sequence length (chars). None = 8 * mean.
         response_rate_mean: Per-request response rate mean (responses/sec). 0 = no rate mode.
         response_rate_spread: CoV for per-request response rate.
-        inter_chunk_latency: Per-chunk delay mean in milliseconds. 0 = no ICL mode.
-        inter_chunk_spread: CoV for per-chunk delay.
+        inter_token_latency: Per-token delay (TPOT) mean in milliseconds. 0 = no ICL mode.
+        inter_token_spread: CoV for per-chunk delay.
         first_chunk_latency: Mean TTFT in seconds. 0 = no TTFT delay.
         first_chunk_spread: CoV for TTFT.
         stream: SSE streaming mode.
@@ -541,8 +549,8 @@ class VariableResponseServer:
         output_len_max: int | None = None,
         response_rate_mean: float = 0.0,
         response_rate_spread: float = 0.0,
-        inter_chunk_latency: float = 0.0,
-        inter_chunk_spread: float = 0.0,
+        inter_token_latency: float = 0.0,
+        inter_token_spread: float = 0.0,
         first_chunk_latency: float = 0.0,
         first_chunk_spread: float = 0.2,
         stream: bool = False,
@@ -554,10 +562,20 @@ class VariableResponseServer:
         quiet: bool = False,
     ):
         # Validate mutual exclusivity
-        if response_rate_mean > 0 and inter_chunk_latency > 0:
+        if response_rate_mean > 0 and inter_token_latency > 0:
             raise ValueError(
-                "response_rate_mean and inter_chunk_latency are mutually exclusive. "
-                "Use response-rate mode OR inter-chunk-latency mode, not both."
+                "response_rate_mean and inter_token_latency are mutually exclusive. "
+                "Use response-rate mode OR inter-token-latency mode, not both."
+            )
+        if num_workers <= 0:
+            raise ValueError(f"num_workers must be > 0, got {num_workers}")
+        if stream and stream_interval <= 0:
+            raise ValueError(
+                f"stream_interval must be > 0 in streaming mode, got {stream_interval}"
+            )
+        if response_rate_mean < 0:
+            raise ValueError(
+                f"response_rate_mean must be >= 0, got {response_rate_mean}"
             )
 
         self.host, self.port, self.num_workers = host, port, num_workers
@@ -585,7 +603,7 @@ class VariableResponseServer:
         # Determine timing mode
         if response_rate_mean > 0:
             self._mode = "rate"
-        elif inter_chunk_latency > 0:
+        elif inter_token_latency > 0:
             self._mode = "icl"
         else:
             # Neither specified — no delays (instant response)
@@ -611,10 +629,10 @@ class VariableResponseServer:
             self._rate_mu, self._rate_sigma = 0.0, 0.0
         self._rate_mean = response_rate_mean
 
-        # Inter-chunk-latency params (convert ms → seconds for asyncio.sleep)
-        icl_s = inter_chunk_latency / 1000.0
+        # Inter-token-latency params (convert ms → seconds for asyncio.sleep)
+        icl_s = inter_token_latency / 1000.0
         if icl_s > 0:
-            self._icl_mu, self._icl_sigma = _lognormal_params(icl_s, inter_chunk_spread)
+            self._icl_mu, self._icl_sigma = _lognormal_params(icl_s, inter_token_spread)
         else:
             self._icl_mu, self._icl_sigma = 0.0, 0.0
         self._icl_mean = icl_s
@@ -816,7 +834,7 @@ def main():
         "--output-len-max",
         type=int,
         default=None,
-        help="Maximum output sequence length in chars (default: 8 * output-len-mean)",
+        help="Maximum output sequence length in chars (default: 2 * output-len-mean)",
     )
 
     # Timing mode A: response-rate
@@ -825,7 +843,7 @@ def main():
         type=float,
         default=0.0,
         help="Per-request response rate mean in resp/sec (default: 0 = disabled). "
-        "Mutually exclusive with --inter-chunk-latency.",
+        "Mutually exclusive with --inter-token-latency.",
     )
     parser.add_argument(
         "--response-rate-spread",
@@ -834,17 +852,17 @@ def main():
         help="CoV for per-request response rate (default: 0.0 = deterministic)",
     )
 
-    # Timing mode B: inter-chunk-latency
+    # Timing mode B: inter-token-latency
     parser.add_argument(
-        "--inter-chunk-latency",
+        "--inter-token-latency",
         type=float,
         default=0.0,
-        help="Mean per-chunk delay in milliseconds (default: 0 = disabled). "
-        "E.g. 20 = 20ms per chunk ≈ 50 tokens/sec. "
+        help="Per-token generation time (TPOT) in milliseconds (default: 0 = disabled). "
+        "E.g. 20 = 20ms/token. Actual inter-SSE-event delay = TPOT × stream_interval. "
         "Mutually exclusive with --response-rate-mean.",
     )
     parser.add_argument(
-        "--inter-chunk-spread",
+        "--inter-token-spread",
         type=float,
         default=0.0,
         help="CoV for per-chunk delay (default: 0.0 = deterministic)",
@@ -896,8 +914,8 @@ def main():
         output_len_max=args.output_len_max,
         response_rate_mean=args.response_rate_mean,
         response_rate_spread=args.response_rate_spread,
-        inter_chunk_latency=args.inter_chunk_latency,
-        inter_chunk_spread=args.inter_chunk_spread,
+        inter_token_latency=args.inter_token_latency,
+        inter_token_spread=args.inter_token_spread,
         first_chunk_latency=args.first_chunk_latency,
         first_chunk_spread=args.first_chunk_spread,
         stream=args.stream,
