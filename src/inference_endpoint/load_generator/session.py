@@ -261,7 +261,7 @@ class BenchmarkSession:
         accuracy_datasets: list[Dataset] | None = None,
         load_generator_cls: type[LoadGenerator] = SchedulerBasedLoadGenerator,
         name: str | None = None,
-        max_shutdown_timeout_s: float | None = 300.0,
+        max_shutdown_timeout_s: float | None = None,
         report_dir: os.PathLike | None = None,
         tokenizer_override: AutoTokenizer | None = None,
         dump_events_log: bool = False,
