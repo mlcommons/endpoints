@@ -79,7 +79,7 @@ def worker_main(
         http_config: HTTP client configuration.
     """
     # Suppress transformers "no framework found" warning (only tokenizers used)
-    os.environ["TRANSFORMERS_VERBOSITY"] = "error"
+    os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 
     worker_log_format = f"%(asctime)s - %(name)s[W{worker_id}/%(process)d] - %(funcName)s - %(levelname)s - %(message)s"
     setup_logging(level=http_config.log_level, format_string=worker_log_format)
@@ -236,11 +236,17 @@ class Worker:
                 # Warn if warmup fell short of target
                 # min_required_connections=0 disables the check
                 if self.http_config.min_required_connections > 0:
-                    threshold = warmup_count // 10 if warmup_cfg == -1 else warmup_count
+                    min_per_worker = (
+                        self.http_config.min_required_connections
+                        // self.http_config.num_workers
+                    )
+                    threshold = (
+                        max(1, min_per_worker) if warmup_cfg == -1 else warmup_count
+                    )
                     if warmed < threshold:
                         logger.warning(
-                            f"Warmup: only established {warmed}/{warmup_count} connections. "
-                            "Consider closing background TCP connections."
+                            f"Warmup: only established {warmed}/{warmup_count} connections "
+                            f"(need {threshold}). Consider closing background TCP connections."
                         )
 
             # TODO(vir):

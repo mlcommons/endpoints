@@ -105,7 +105,7 @@ class HTTPClientConfig:
     # Values:
     #   - >0 = explicit minimum required connections
     #   - 0 = disable check (no warning if ports unavailable)
-    #   - -1 = auto (defaults to 90% of system ephemeral port range)
+    #   - -1 = auto (defaults to 12.5% of system ephemeral port range)
     min_required_connections: int = -1
 
     # GC strategy for worker processes to reduce latency spikes from collection pauses

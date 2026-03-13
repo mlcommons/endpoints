@@ -27,7 +27,7 @@ import os
 import sys
 
 # Suppress transformers "no framework found" warning (only tokenizers used)
-os.environ["TRANSFORMERS_VERBOSITY"] = "error"
+os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 
 import uvloop  # noqa: E402
 
