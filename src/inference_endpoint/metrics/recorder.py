@@ -372,6 +372,9 @@ class EventRecorder:
             )
 
         # Update inflight sample tracking
+        # NOTE: n_inflight_samples is not thread-safe (+=/-= from multiple threads).
+        # This is a known issue but EventRecorder is being deprecated in favor of
+        # EventLoggerService (pub-sub based). Not worth fixing here.
         if ev_type == SessionEvent.LOADGEN_ISSUE_CALLED:
             rec_inst.n_inflight_samples += 1
         elif ev_type == SampleEvent.COMPLETE:

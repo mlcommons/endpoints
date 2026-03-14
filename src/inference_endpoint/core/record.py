@@ -122,6 +122,7 @@ class SessionEventType(EventType):
     STARTED = "started"
     ENDED = "ended"
     STOP_LOADGEN = "stop_loadgen"
+    START_PERFORMANCE_TRACKING = "start_performance_tracking"
     STOP_PERFORMANCE_TRACKING = "stop_performance_tracking"
 
 
