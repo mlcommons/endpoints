@@ -99,8 +99,31 @@ class TextModelOutput(
         return "".join(parts)
 
 
-# str is supported for backward compatibility but will be deprecated; prefer TextModelOutput.
-OUTPUT_TYPE = str | TextModelOutput
+OUTPUT_TYPE = TextModelOutput
+
+
+class PromptData(
+    msgspec.Struct,
+    tag=True,
+    kw_only=True,
+    frozen=True,
+    omit_defaults=True,
+    array_like=True,
+    gc=False,
+):  # type: ignore[call-arg]
+    """Prompt input data attached to ISSUED events for ISL computation.
+
+    Exactly one of ``text`` or ``token_ids`` should be set:
+    - ``text``: raw prompt string (OpenAI path) — requires tokenization for ISL.
+    - ``token_ids``: pre-tokenized token ID list (SGLang/Harmonize path) — ISL is len().
+
+    Attributes:
+        text: Raw prompt string. Set when the adapter sends text prompts.
+        token_ids: Pre-computed token IDs. Set when the adapter pre-tokenizes (e.g. SGLang).
+    """
+
+    text: str | None = None
+    token_ids: tuple[int, ...] | None = None
 
 
 class ErrorData(

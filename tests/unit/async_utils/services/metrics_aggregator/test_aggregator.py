@@ -35,7 +35,7 @@ from inference_endpoint.core.record import (
     SampleEventType,
     SessionEventType,
 )
-from inference_endpoint.core.types import ErrorData, TextModelOutput
+from inference_endpoint.core.types import ErrorData, PromptData, TextModelOutput
 
 
 class FakeEmitter(MetricEmitter):
@@ -83,6 +83,11 @@ def _session(ev_type, ts=0):
 
 def _sample(ev_type, uuid, ts=0, data=None):
     return EventRecord(event_type=ev_type, timestamp_ns=ts, sample_uuid=uuid, data=data)
+
+
+def _text(s: str) -> TextModelOutput:
+    """Wrap a string in TextModelOutput for use as EventRecord.data."""
+    return TextModelOutput(output=s)
 
 
 # ---------------------------------------------------------------------------
@@ -309,11 +314,35 @@ class TestTextAccumulation:
         await agg.process(
             [
                 _session(SessionEventType.START_PERFORMANCE_TRACKING, ts=0),
-                _sample(SampleEventType.ISSUED, "s1", ts=1000, data="What is AI?"),
+                _sample(
+                    SampleEventType.ISSUED,
+                    "s1",
+                    ts=1000,
+                    data=PromptData(text="What is AI?"),
+                ),
             ]
         )
         row = agg._table.get_row("s1")
         assert row.prompt_text == "What is AI?"
+
+    @pytest.mark.asyncio
+    async def test_issued_with_token_ids_emits_isl_directly(self):
+        """SGLang path: PromptData with token_ids emits ISL = len(token_ids)
+        without tokenization."""
+        emitter = FakeEmitter()
+        agg = StubAggregator(emitter)
+        await agg.process(
+            [
+                _session(SessionEventType.START_PERFORMANCE_TRACKING, ts=0),
+                _sample(
+                    SampleEventType.ISSUED,
+                    "s1",
+                    ts=1000,
+                    data=PromptData(token_ids=(101, 202, 303, 404, 505)),
+                ),
+            ]
+        )
+        assert ("s1", "isl", 5) in emitter.emitted
 
     @pytest.mark.asyncio
     async def test_issued_without_data_leaves_prompt_none(self):
@@ -336,7 +365,7 @@ class TestTextAccumulation:
             [
                 _session(SessionEventType.START_PERFORMANCE_TRACKING, ts=0),
                 _sample(SampleEventType.ISSUED, "s1", ts=1000),
-                _sample(SampleEventType.RECV_FIRST, "s1", ts=2000, data="Hello"),
+                _sample(SampleEventType.RECV_FIRST, "s1", ts=2000, data=_text("Hello")),
             ]
         )
         row = agg._table.get_row("s1")
@@ -351,9 +380,11 @@ class TestTextAccumulation:
             [
                 _session(SessionEventType.START_PERFORMANCE_TRACKING, ts=0),
                 _sample(SampleEventType.ISSUED, "s1", ts=1000),
-                _sample(SampleEventType.RECV_FIRST, "s1", ts=2000, data="Hello"),
-                _sample(SampleEventType.RECV_NON_FIRST, "s1", ts=3000, data=" World"),
-                _sample(SampleEventType.RECV_NON_FIRST, "s1", ts=4000, data="!"),
+                _sample(SampleEventType.RECV_FIRST, "s1", ts=2000, data=_text("Hello")),
+                _sample(
+                    SampleEventType.RECV_NON_FIRST, "s1", ts=3000, data=_text(" World")
+                ),
+                _sample(SampleEventType.RECV_NON_FIRST, "s1", ts=4000, data=_text("!")),
             ]
         )
         row = agg._table.get_row("s1")

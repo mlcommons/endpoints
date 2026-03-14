@@ -21,7 +21,7 @@ import time
 
 import msgspec
 from inference_endpoint.config.schema import ModelParams, StreamingMode
-from inference_endpoint.core.types import Query, QueryResult
+from inference_endpoint.core.types import Query, QueryResult, TextModelOutput
 from inference_endpoint.dataset_manager.transforms import (
     AddStaticColumns,
     ColumnFilter,
@@ -182,7 +182,7 @@ class OpenAIMsgspecAdapter(HttpRequestAdapter):
 
         return QueryResult(
             id=result_id or response.id,
-            response_output=response.choices[0].message.content,
+            response_output=TextModelOutput(output=response.choices[0].message.content),
         )
 
     @classmethod

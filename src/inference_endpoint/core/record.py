@@ -19,7 +19,7 @@ from typing import Any, ClassVar, Final
 
 import msgspec
 
-from .types import OUTPUT_TYPE, ErrorData
+from .types import OUTPUT_TYPE, ErrorData, PromptData
 
 TOPIC_FRAME_SIZE: Final[int] = 40
 """int: Fixed bytesize for the encoded topic string. PUB messages will be prefixed by a
@@ -154,7 +154,7 @@ class EventRecord(msgspec.Struct, kw_only=True, frozen=True, gc=False):  # type:
     event_type: EventType
     timestamp_ns: int = msgspec.field(default_factory=time.monotonic_ns)
     sample_uuid: str = ""
-    data: OUTPUT_TYPE | ErrorData | None = None
+    data: OUTPUT_TYPE | PromptData | ErrorData | None = None
 
 
 _ENCODER = msgspec.msgpack.Encoder(enc_hook=EventType.encode_hook)

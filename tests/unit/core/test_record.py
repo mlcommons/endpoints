@@ -28,7 +28,7 @@ from inference_endpoint.core.record import (
     decode_event_record,
     encode_event_record,
 )
-from inference_endpoint.core.types import ErrorData, TextModelOutput
+from inference_endpoint.core.types import ErrorData, PromptData, TextModelOutput
 
 
 class TestEventType:
@@ -72,10 +72,11 @@ class TestEncodeEventRecord:
         self,
     ):
         """encode_event_record returns (topic_bytes_padded, payload) for single-frame ZMQ."""
+        data = TextModelOutput(output="test-output")
         record = EventRecord(
             event_type=SampleEventType.ISSUED,
             sample_uuid="test-uuid",
-            data="test-output",
+            data=data,
         )
         topic_bytes, payload = encode_event_record(record)
         assert isinstance(topic_bytes, bytes)
@@ -84,7 +85,7 @@ class TestEncodeEventRecord:
         assert isinstance(payload, bytes)
         decoded = decode_event_record(payload)
         assert decoded.sample_uuid == "test-uuid"
-        assert decoded.data == "test-output"
+        assert decoded.data == data
 
     def test_topic_bytes_padded_matches_event_type_for_session_sample_error(self):
         """Topic is null-padded to TOPIC_FRAME_SIZE for single-frame ZMQ sends."""
@@ -114,16 +115,17 @@ class TestEventRecordRoundTrip:
         assert decoded.timestamp_ns == record.timestamp_ns
 
     def test_sample_event_round_trips_with_output(self):
+        data = TextModelOutput(output="output text")
         record = EventRecord(
             event_type=SampleEventType.COMPLETE,
             sample_uuid="sample-42",
-            data="output text",
+            data=data,
         )
         _, payload = encode_event_record(record)
         decoded = decode_event_record(payload)
         assert decoded.event_type.topic == SampleEventType.COMPLETE.topic
         assert decoded.sample_uuid == "sample-42"
-        assert decoded.data == "output text"
+        assert decoded.data == data
 
     def test_sample_event_round_trips_with_text_model_output(self):
         record = EventRecord(
@@ -138,6 +140,33 @@ class TestEventRecordRoundTrip:
         assert isinstance(decoded.data, TextModelOutput)
         assert decoded.data.output == "out"
         assert decoded.data.reasoning == "reason"
+
+    def test_sample_event_round_trips_with_prompt_data_text(self):
+        record = EventRecord(
+            event_type=SampleEventType.ISSUED,
+            sample_uuid="sample-99",
+            data=PromptData(text="What is AI?"),
+        )
+        _, payload = encode_event_record(record)
+        decoded = decode_event_record(payload)
+        assert decoded.event_type.topic == SampleEventType.ISSUED.topic
+        assert decoded.sample_uuid == "sample-99"
+        assert isinstance(decoded.data, PromptData)
+        assert decoded.data.text == "What is AI?"
+        assert decoded.data.token_ids is None
+
+    def test_sample_event_round_trips_with_prompt_data_token_ids(self):
+        record = EventRecord(
+            event_type=SampleEventType.ISSUED,
+            sample_uuid="sample-100",
+            data=PromptData(token_ids=(101, 202, 303)),
+        )
+        _, payload = encode_event_record(record)
+        decoded = decode_event_record(payload)
+        assert decoded.event_type.topic == SampleEventType.ISSUED.topic
+        assert isinstance(decoded.data, PromptData)
+        assert decoded.data.token_ids == (101, 202, 303)
+        assert decoded.data.text is None
 
     def test_error_event_round_trips_with_error_data(self):
         record = EventRecord(

@@ -28,7 +28,7 @@ from inference_endpoint.core.record import (
     SampleEventType,
     SessionEventType,
 )
-from inference_endpoint.core.types import TextModelOutput
+from inference_endpoint.core.types import PromptData, TextModelOutput
 
 from .emitter import MetricEmitter
 from .metrics_table import MetricsTable, SampleRow
@@ -59,7 +59,7 @@ class MetricsAggregatorService(ZmqEventRecordSubscriber):
       - sample_latency_ns:   COMPLETE.timestamp - ISSUED.timestamp
       - request_duration_ns: CLIENT_RESP_DONE.timestamp - CLIENT_SEND.timestamp
       - chunk_delta_ns:      each RECV_NON_FIRST.timestamp - previous recv timestamp
-      - isl:                 token_count(prompt_text) — scheduled on ISSUED
+      - isl:                 len(token_ids) or token_count(prompt_text) — on ISSUED
       - osl:                 token_count(full_output) — computed on COMPLETE
       - tpot_ns:             (COMPLETE.timestamp - RECV_FIRST.timestamp) / (osl - first_chunk_tokens)
                              for streaming responses where osl > first_chunk_tokens
@@ -143,10 +143,15 @@ class MetricsAggregatorService(ZmqEventRecordSubscriber):
         row = self._table.create_row(record.sample_uuid)
         row.issued_ns = record.timestamp_ns
 
-        if record.data is not None and isinstance(record.data, str):
-            row.prompt_text = record.data
-            if self._tokenize_pool is not None:
-                self._schedule_isl(record.sample_uuid, record.data)
+        if isinstance(record.data, PromptData):
+            if record.data.token_ids is not None:
+                # SGLang path: ISL is len(token_ids), no tokenization needed.
+                self._emitter.emit(row.sample_uuid, "isl", len(record.data.token_ids))
+            elif record.data.text is not None:
+                # OpenAI path: tokenize the prompt text to compute ISL.
+                row.prompt_text = record.data.text
+                if self._tokenize_pool is not None:
+                    self._schedule_isl(record.sample_uuid, record.data.text)
 
     def _on_recv_first(self, record: EventRecord) -> None:
         row = self._get_tracked_row(record.sample_uuid)
@@ -160,9 +165,10 @@ class MetricsAggregatorService(ZmqEventRecordSubscriber):
         if ttft is not None:
             self._emitter.emit(row.sample_uuid, "ttft_ns", ttft)
 
-        if record.data is not None and isinstance(record.data, str):
-            row.first_chunk_text = record.data
-            row.output_chunks.append(record.data)
+        if isinstance(record.data, TextModelOutput):
+            text = str(record.data)
+            row.first_chunk_text = text
+            row.output_chunks.append(text)
 
     def _on_recv_non_first(self, record: EventRecord) -> None:
         row = self._get_tracked_row(record.sample_uuid)
@@ -175,8 +181,8 @@ class MetricsAggregatorService(ZmqEventRecordSubscriber):
 
         row.last_recv_ns = record.timestamp_ns
 
-        if record.data is not None and isinstance(record.data, str):
-            row.output_chunks.append(record.data)
+        if isinstance(record.data, TextModelOutput):
+            row.output_chunks.append(str(record.data))
 
     def _on_client_send(self, record: EventRecord) -> None:
         row = self._get_tracked_row(record.sample_uuid)
@@ -266,10 +272,6 @@ class MetricsAggregatorService(ZmqEventRecordSubscriber):
 
     @staticmethod
     def _extract_complete_output(record: EventRecord) -> str:
-        if record.data is None:
-            return ""
-        if isinstance(record.data, str):
-            return record.data
         if isinstance(record.data, TextModelOutput):
             return str(record.data)
         return ""

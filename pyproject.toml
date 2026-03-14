@@ -52,7 +52,7 @@ dependencies = [
     # Fix pytz-2024 import warning
     "pytz==2025.2",
     # SQL event logger (swappable backends, default sqlite)
-    "sqlalchemy>=2.0.0",
+    "sqlalchemy==2.0.48",
 ]
 
 [project.optional-dependencies]

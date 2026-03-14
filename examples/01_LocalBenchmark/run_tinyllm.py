@@ -173,8 +173,9 @@ class SerialSampleIssuer(SampleIssuer):
             )
         else:
             response = self.compute_func(sample.data)
-            # str response_output supported but deprecated; prefer TextModelOutput
-            query_result = QueryResult(id=sample.uuid, response_output=response)
+            query_result = QueryResult(
+                id=sample.uuid, response_output=TextModelOutput(output=response)
+            )
         SampleEventHandler.query_result_complete(query_result)
 
 

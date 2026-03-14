@@ -25,7 +25,7 @@ import pytest
 import pytest_asyncio
 from inference_endpoint.async_utils.transport import ZmqWorkerPoolTransport
 from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
-from inference_endpoint.core.types import Query, QueryResult
+from inference_endpoint.core.types import Query, QueryResult, TextModelOutput
 
 # =============================================================================
 # Fixtures
@@ -105,13 +105,15 @@ class TestZmqCommunication:
             assert received.data["prompt"] == "hello"
 
             # Worker sends response
-            result = QueryResult(id="test-1", response_output="world")
+            result = QueryResult(
+                id="test-1", response_output=TextModelOutput(output="world")
+            )
             worker_send.send(result)
 
             # Main receives via recv()
             response = await zmq_pool.recv()
             assert response.id == "test-1"
-            assert response.response_output == "world"
+            assert response.response_output == TextModelOutput(output="world")
 
     @pytest.mark.asyncio
     async def test_poll_nonblocking(self, zmq_pool):
@@ -124,7 +126,9 @@ class TestZmqCommunication:
             assert zmq_pool.poll() is None
 
             # Worker sends response
-            worker_send.send(QueryResult(id="test", response_output="hi"))
+            worker_send.send(
+                QueryResult(id="test", response_output=TextModelOutput(output="hi"))
+            )
             await asyncio.sleep(0.01)  # Let event loop process
 
             # Available - poll returns item

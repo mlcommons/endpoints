@@ -204,16 +204,20 @@ class TestQueryResultSerialization:
         assert isinstance(decoded.completed_at, int)
 
     def test_query_result_with_string_response(self):
-        """Test QueryResult with string response output (str branch; will be deprecated)."""
+        """Test QueryResult with string response output."""
         result = QueryResult(
             id="query-456",
-            response_output="This is a complete response from the model.",
+            response_output=TextModelOutput(
+                output="This is a complete response from the model."
+            ),
         )
 
         encoded = msgspec.msgpack.encode(result)
         decoded = msgspec.msgpack.decode(encoded, type=QueryResult)
 
-        assert decoded.response_output == "This is a complete response from the model."
+        assert decoded.response_output == TextModelOutput(
+            output="This is a complete response from the model."
+        )
 
     def test_query_result_with_tuple_response(self):
         """Test QueryResult with TextModelOutput (tuple output, streaming chunks)."""
@@ -310,7 +314,7 @@ class TestQueryResultSerialization:
         """Test QueryResult with comprehensive metadata."""
         result = QueryResult(
             id="query-meta",
-            response_output="Response text",
+            response_output=TextModelOutput(output="Response text"),
             metadata={
                 "model": "gpt-4",
                 "tokens_used": 150,
@@ -352,7 +356,7 @@ class TestQueryResultSerialization:
         """Test QueryResult with both error and partial response."""
         result = QueryResult(
             id="query-partial",
-            response_output="Partial response before error",
+            response_output=TextModelOutput(output="Partial response before error"),
             error=ErrorData(
                 error_type="ConnectionError",
                 error_message="Server disconnected during streaming",
@@ -362,7 +366,9 @@ class TestQueryResultSerialization:
         encoded = msgspec.msgpack.encode(result)
         decoded = msgspec.msgpack.decode(encoded, type=QueryResult)
 
-        assert decoded.response_output == "Partial response before error"
+        assert decoded.response_output == TextModelOutput(
+            output="Partial response before error"
+        )
         assert decoded.error is not None
         assert decoded.error.error_message == "Server disconnected during streaming"
 
@@ -394,7 +400,9 @@ class TestQueryResultSerialization:
 
     def test_query_result_immutability(self):
         """Test QueryResult is frozen and cannot be modified."""
-        result = QueryResult(id="query-frozen", response_output="Original text")
+        result = QueryResult(
+            id="query-frozen", response_output=TextModelOutput(output="Original text")
+        )
 
         with pytest.raises(AttributeError):
             result.response_output = "Modified text"
@@ -413,13 +421,15 @@ class TestQueryResultSerialization:
         assert isinstance(result.completed_at, int | float)
 
     def test_query_result_empty_string_response(self):
-        """Test QueryResult with empty string response (str branch; will be deprecated)."""
-        result = QueryResult(id="query-empty", response_output="")
+        """Test QueryResult with empty string response."""
+        result = QueryResult(
+            id="query-empty", response_output=TextModelOutput(output="")
+        )
 
         encoded = msgspec.msgpack.encode(result)
         decoded = msgspec.msgpack.decode(encoded, type=QueryResult)
 
-        assert decoded.response_output == ""
+        assert decoded.response_output == TextModelOutput(output="")
 
     def test_query_result_empty_tuple_response(self):
         """Test QueryResult with TextModelOutput (empty tuple output)."""
@@ -721,8 +731,8 @@ class TestMixedTypeSerialization:
     def test_serialize_list_of_query_results(self):
         """Test serializing a list of QueryResult objects."""
         results = [
-            QueryResult(id="r1", response_output="Response 1"),
-            QueryResult(id="r2", response_output="Response 2"),
+            QueryResult(id="r1", response_output=TextModelOutput(output="Response 1")),
+            QueryResult(id="r2", response_output=TextModelOutput(output="Response 2")),
             QueryResult(
                 id="r3",
                 error=ErrorData(
@@ -735,7 +745,7 @@ class TestMixedTypeSerialization:
         decoded = msgspec.msgpack.decode(encoded, type=list[QueryResult])
 
         assert len(decoded) == 3
-        assert decoded[0].response_output == "Response 1"
+        assert decoded[0].response_output == TextModelOutput(output="Response 1")
         assert decoded[2].error is not None
         assert decoded[2].error.error_type == "RuntimeError"
         assert decoded[2].error.error_message == "Error in query 3"
@@ -818,17 +828,18 @@ class TestMixedTypeSerialization:
         decoded_query = msgspec.msgpack.decode(encoded_query, type=Query)
         assert decoded_query.data["prompt"] == large_text
 
-        # str response_output (will be deprecated)
-        result = QueryResult(id="large", response_output=large_text)
+        result = QueryResult(
+            id="large", response_output=TextModelOutput(output=large_text)
+        )
         encoded_result = msgspec.msgpack.encode(result)
         decoded_result = msgspec.msgpack.decode(encoded_result, type=QueryResult)
-        assert decoded_result.response_output == large_text
+        assert decoded_result.response_output == TextModelOutput(output=large_text)
 
     def test_numeric_types_in_metadata(self):
         """Test various numeric types in metadata."""
         result = QueryResult(
             id="numeric-test",
-            response_output="Text",
+            response_output=TextModelOutput(output="Text"),
             metadata={
                 "int_value": 42,
                 "float_value": 3.14159,

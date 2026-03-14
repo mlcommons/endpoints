@@ -21,7 +21,12 @@ import signal
 import pytest
 from inference_endpoint.async_utils.transport import ZmqWorkerPoolTransport
 from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
-from inference_endpoint.core.types import Query, QueryResult, StreamChunk
+from inference_endpoint.core.types import (
+    Query,
+    QueryResult,
+    StreamChunk,
+    TextModelOutput,
+)
 from inference_endpoint.endpoint_client.config import HTTPClientConfig
 from inference_endpoint.endpoint_client.worker import Worker
 
@@ -153,8 +158,10 @@ class TestWorkerBasicFunctionality:
                             assert first_chunk.metadata.get("first_chunk") is True
                             assert first_chunk.response_chunk == expected_first_chunk
                     else:
-                        # Non-streaming response
-                        assert response.response_output == expected
+                        # Non-streaming response — adapter wraps in TextModelOutput
+                        assert response.response_output == TextModelOutput(
+                            output=expected
+                        )
 
             finally:
                 worker.shutdown()

@@ -22,7 +22,12 @@ import pytest
 import zmq
 import zmq.asyncio
 from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
-from inference_endpoint.core.types import Query, QueryResult, StreamChunk
+from inference_endpoint.core.types import (
+    Query,
+    QueryResult,
+    StreamChunk,
+    TextModelOutput,
+)
 from inference_endpoint.endpoint_client.config import HTTPClientConfig
 from inference_endpoint.endpoint_client.http_client import HTTPEndpointClient
 
@@ -349,8 +354,10 @@ class TestHTTPEndpointClientFunctionality:
             result2 = await asyncio.wrap_future(future2)
 
             # Both should complete successfully
-            assert result1.response_output == "First query"
-            assert result2.response_output == "Second query after error"
+            assert result1.response_output == TextModelOutput(output="First query")
+            assert result2.response_output == TextModelOutput(
+                output="Second query after error"
+            )
 
         finally:
             response_push.close()

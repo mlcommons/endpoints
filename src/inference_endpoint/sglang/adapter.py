@@ -16,7 +16,7 @@
 import msgspec
 
 from ..config.schema import ModelParams, StreamingMode
-from ..core.types import Query, QueryResult
+from ..core.types import Query, QueryResult, TextModelOutput
 from ..dataset_manager.transforms import (
     AddStaticColumns,
     ColumnFilter,
@@ -100,10 +100,9 @@ class SGLangGenerateAdapter(HttpRequestAdapter):
     @classmethod
     def decode_response(cls, response_bytes: bytes, query_id: str) -> QueryResult:
         resp = cls._response_decoder.decode(response_bytes)
-        # str response_output supported but deprecated; prefer TextModelOutput
         return QueryResult(
             id=query_id,
-            response_output=resp.text,
+            response_output=TextModelOutput(output=resp.text),
             metadata={
                 "token_ids": resp.output_ids,
                 "n_tokens": resp.meta_info.completion_tokens,

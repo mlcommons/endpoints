@@ -43,14 +43,14 @@ metrics_aggregator/
 
 ### Sample Events
 
-| Event              | Stored Field                                        | Metric Emitted                        | Formula                                |
-| ------------------ | --------------------------------------------------- | ------------------------------------- | -------------------------------------- |
-| `ISSUED`           | `issued_ns`                                         | `isl` (async)                         | `token_count(prompt_text)`             |
-| `RECV_FIRST`       | `recv_first_ns`, `last_recv_ns`, `first_chunk_text` | `ttft_ns`                             | `recv_first_ns - issued_ns`            |
-| `RECV_NON_FIRST`   | `last_recv_ns` (updated)                            | `chunk_delta_ns`                      | `timestamp - last_recv_ns`             |
-| `CLIENT_SEND`      | `client_send_ns`                                    | —                                     | —                                      |
-| `CLIENT_RESP_DONE` | `client_resp_done_ns`                               | `request_duration_ns`                 | `client_resp_done_ns - client_send_ns` |
-| `COMPLETE`         | `complete_ns`                                       | `sample_latency_ns`, `osl`, `tpot_ns` | see below                              |
+| Event              | Stored Field                                        | Metric Emitted                        | Formula                                                  |
+| ------------------ | --------------------------------------------------- | ------------------------------------- | -------------------------------------------------------- |
+| `ISSUED`           | `issued_ns`                                         | `isl`                                 | `len(token_ids)` or `token_count(text)` via `PromptData` |
+| `RECV_FIRST`       | `recv_first_ns`, `last_recv_ns`, `first_chunk_text` | `ttft_ns`                             | `recv_first_ns - issued_ns`                              |
+| `RECV_NON_FIRST`   | `last_recv_ns` (updated)                            | `chunk_delta_ns`                      | `timestamp - last_recv_ns`                               |
+| `CLIENT_SEND`      | `client_send_ns`                                    | —                                     | —                                                        |
+| `CLIENT_RESP_DONE` | `client_resp_done_ns`                               | `request_duration_ns`                 | `client_resp_done_ns - client_send_ns`                   |
+| `COMPLETE`         | `complete_ns`                                       | `sample_latency_ns`, `osl`, `tpot_ns` | see below                                                |
 
 Ignored sample events: `TRANSPORT_SENT`, `TRANSPORT_RECV` (infrastructure-level, not
 relevant for user-facing metrics).
@@ -138,7 +138,7 @@ is independently testable.
 
 | Metric    | Emitted On           | Formula                                                      | Notes                                                                                                                                                                                                                                   |
 | --------- | -------------------- | ------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `isl`     | ISSUED (async)       | `token_count(prompt_text)`                                   | Input sequence length. Scheduled as async task to not block event processing.                                                                                                                                                           |
+| `isl`     | ISSUED               | `len(token_ids)` or `token_count(text)`                      | Input sequence length. ISSUED event carries `PromptData` with either `token_ids` (SGLang, emitted synchronously) or `text` (OpenAI, tokenized async).                                                                                   |
 | `osl`     | COMPLETE (awaited)   | `token_count(output_text)`                                   | Output sequence length. Output text is from accumulated chunks (streaming) or COMPLETE data (non-streaming).                                                                                                                            |
 | `tpot_ns` | COMPLETE (after OSL) | `(complete_ns - recv_first_ns) / (osl - first_chunk_tokens)` | Time per output token after the first chunk. The first chunk may contain multiple tokens, so `first_chunk_text` is tokenized separately for the denominator. Only emitted for streaming responses where `osl - first_chunk_tokens > 0`. |
 
@@ -269,11 +269,13 @@ the event loop.
 
 ### Current Design
 
-The `ISSUED` event's `data` field carries the prompt text as a `str`. The aggregator
-tokenizes this to compute ISL.
+The `ISSUED` event's `data` field carries a `PromptData` struct with either:
 
-`EventRecord.data` is typed as `OUTPUT_TYPE | ErrorData | None` where
-`OUTPUT_TYPE = str | TextModelOutput`. A raw prompt string fits naturally.
+- `text: str` — raw prompt string (OpenAI path), tokenized async by the aggregator.
+- `token_ids: tuple[int, ...]` — pre-tokenized token IDs (SGLang/Harmonize path),
+  ISL is `len(token_ids)` with no tokenization needed.
+
+`EventRecord.data` is typed as `TextModelOutput | PromptData | ErrorData | None`.
 
 ### Where to Publish
 
@@ -283,37 +285,29 @@ extracts the prompt:
 
 ```python
 # In the load generator, when issuing a sample:
-prompt_text = sample.data.get("prompt", "")
+if "input_tokens" in sample.data:
+    prompt_data = PromptData(token_ids=tuple(sample.data["input_tokens"]))
+elif "prompt" in sample.data:
+    prompt_data = PromptData(text=sample.data["prompt"])
+else:
+    prompt_data = None
+
 publisher.publish(EventRecord(
     event_type=SampleEventType.ISSUED,
     sample_uuid=sample.uuid,
-    data=prompt_text or None,
+    data=prompt_data,
 ))
 ```
 
 ### Adapter Considerations
 
-The prompt text available at ISSUED time is **post-transform** — dataset transforms
+The prompt data available at ISSUED time is **post-transform** — dataset transforms
 have already been applied by this point. This matters because:
 
-| Adapter                 | Transform Pipeline                            | `sample.data` at ISSUED             | ISL Source                              |
-| ----------------------- | --------------------------------------------- | ----------------------------------- | --------------------------------------- |
-| OpenAI / OpenAI-Msgspec | `ColumnFilter → AddStaticColumns`             | `{"prompt": "...", "model": "..."}` | Tokenize `prompt` string                |
-| SGLang                  | `Harmonize → ColumnFilter → AddStaticColumns` | `{"input_tokens": [int, ...]}`      | `len(input_tokens)` — already tokenized |
-
-For SGLang, the `Harmonize` transform pre-tokenizes the prompt into `input_tokens`
-(a list of integer token IDs). The original text is discarded. Options:
-
-1. **Short-term**: If `input_tokens` is present, ISL = `len(input_tokens)`. The
-   publisher can check for this and encode the count as a string in `data`
-   (e.g., the aggregator checks `data.startswith("__ISL:")`) or use a new event type.
-2. **Better**: Preserve the original prompt text in `sample.data["prompt"]` alongside
-   `input_tokens` during the Harmonize transform. The publisher always sends `prompt`.
-3. **Best (future)**: A `DATA_READY` event with richer metadata, or widen
-   `EventRecord.data` to support a metadata dict. Requires core type changes.
-
-Recommendation: option 2 for now — modify `Harmonize` to keep `prompt` in the output
-row alongside `input_tokens`.
+| Adapter                 | Transform Pipeline                            | `sample.data` at ISSUED             | `PromptData`                                |
+| ----------------------- | --------------------------------------------- | ----------------------------------- | ------------------------------------------- |
+| OpenAI / OpenAI-Msgspec | `ColumnFilter → AddStaticColumns`             | `{"prompt": "...", "model": "..."}` | `PromptData(text=prompt)`                   |
+| SGLang                  | `Harmonize → ColumnFilter → AddStaticColumns` | `{"input_tokens": [int, ...]}`      | `PromptData(token_ids=tuple(input_tokens))` |
 
 ## Lifecycle
 
