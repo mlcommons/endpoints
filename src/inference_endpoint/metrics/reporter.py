@@ -354,7 +354,8 @@ class Report:
     test_started_at: int
     n_samples_issued: int
     n_samples_completed: int
-    duration_ns: int
+    n_samples_failed: int
+    duration_ns: int | None
 
     # For the following metrics, the key is a rollup statistic (i.e. mean, median, etc.)
     ttft: dict[str, float]
@@ -495,6 +496,7 @@ class Report:
         )
         fn(f"Total samples issued: {self.n_samples_issued}{newline}")
         fn(f"Total samples completed: {self.n_samples_completed}{newline}")
+        fn(f"Total samples failed: {self.n_samples_failed}{newline}")
         if self.duration_ns is not None:
             fn(f"Duration: {self.duration_ns / 1e9:.2f} seconds{newline}")
         else:
@@ -931,11 +933,35 @@ class MetricsReporter:
         }
 
     def get_error_count(self) -> int:
+        """Returns the number of distinct samples that encountered an error within the performance window.
+
+        A sample with multiple ERROR events is counted only once. Only samples whose
+        LOADGEN_ISSUE_CALLED event occurred before the STOP_PERFORMANCE_TRACKING timestamp
+        are included, keeping this metric consistent with n_samples_issued and n_samples_completed.
+        If no STOP_PERFORMANCE_TRACKING event exists, all errored samples are counted.
+
+        Returns:
+            int: The number of distinct failed sample UUIDs.
+        """
+        stop_ts = self.stop_performance_tracking_timestamp_ns
+
+        where_clause = ""
+        if stop_ts != float("inf"):
+            where_clause = f"""
+            AND sample_uuid IN (
+                SELECT DISTINCT sample_uuid FROM events
+                WHERE event_type = '{SessionEvent.LOADGEN_ISSUE_CALLED.value}'
+                AND timestamp_ns < {stop_ts}
+            )
+            """
+
         return self.cur_.execute(f"""
         SELECT
-            COUNT(*) AS error_count
+            COUNT(DISTINCT sample_uuid) AS error_count
         FROM events
         WHERE event_type = '{SessionEvent.ERROR.value}'
+        AND sample_uuid NOT IN ('', '<NO_SAMPLE_UUID>')
+        {where_clause}
         """).fetchone()[0]
 
     def get_sample_outputs(
@@ -1312,6 +1338,7 @@ class MetricsReporter:
             test_started_at=test_started_at,
             n_samples_issued=sample_statuses["total_sent"],
             n_samples_completed=sample_statuses["completed"],
+            n_samples_failed=self.get_error_count(),
             duration_ns=self.derive_duration(),
             ttft=ttft_summary,
             tpot=tpot_summary,
