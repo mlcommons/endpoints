@@ -16,23 +16,21 @@
 """Unit tests for evaluation scoring module."""
 
 import json
-from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pandas as pd
 import pytest
-from pydantic import ValidationError
-
 from inference_endpoint.evaluation.scoring import (
-    _calculate_hierarchical_f1,
-    _create_pred_pad_category,
-    _get_hierarchical_components,
-    _parse_response_to_category,
     _PRED_CATEGORY_PAD,
     ProductMetadata,
     Scorer,
     ShopifyCategoryF1Scorer,
+    _calculate_hierarchical_f1,
+    _create_pred_pad_category,
+    _get_hierarchical_components,
+    _parse_response_to_category,
 )
+from pydantic import ValidationError
 
 
 class TestGetHierarchicalComponents:
@@ -103,7 +101,10 @@ class TestCreatePredPadCategory:
     def test_matching_depth(self):
         gt = "A > B > C"
         result = _create_pred_pad_category(gt, " > ")
-        assert result == f"{_PRED_CATEGORY_PAD} > {_PRED_CATEGORY_PAD} > {_PRED_CATEGORY_PAD}"
+        assert (
+            result
+            == f"{_PRED_CATEGORY_PAD} > {_PRED_CATEGORY_PAD} > {_PRED_CATEGORY_PAD}"
+        )
 
     def test_single_level(self):
         gt = "Electronics"
@@ -118,7 +119,9 @@ class TestParseResponseToCategory:
         out = json.dumps(
             {"category": "Clothing > Shirts", "brand": "Nike", "is_secondhand": False}
         )
-        assert _parse_response_to_category(out, "Clothing > Shirts") == "Clothing > Shirts"
+        assert (
+            _parse_response_to_category(out, "Clothing > Shirts") == "Clothing > Shirts"
+        )
 
     def test_json_with_extra_whitespace(self):
         out = '  { "category" : " A > B ", "brand": "x", "is_secondhand": false }  '
@@ -148,7 +151,9 @@ class TestParseResponseToCategory:
 
     def test_markdown_wrapped_uses_pred_pad(self):
         """Reference passes raw string; markdown-wrapped JSON fails validation."""
-        out = '```json\n{"category": "X > Y", "brand": "x", "is_secondhand": false}\n```'
+        out = (
+            '```json\n{"category": "X > Y", "brand": "x", "is_secondhand": false}\n```'
+        )
         result = _parse_response_to_category(out, "A > B")
         assert result == f"{_PRED_CATEGORY_PAD} > {_PRED_CATEGORY_PAD}"
 

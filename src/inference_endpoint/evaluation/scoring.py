@@ -731,9 +731,7 @@ def _get_hierarchical_components(
         return 0, len(predicted_categories), len(true_categories)
 
     intersection_count = 0
-    for pred_cat, true_cat in zip(
-        predicted_categories, true_categories, strict=False
-    ):
+    for pred_cat, true_cat in zip(predicted_categories, true_categories, strict=False):
         if pred_cat == true_cat:
             intersection_count += 1
         else:

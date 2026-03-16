@@ -38,10 +38,9 @@ datasets:
     accuracy_config:
       eval_method: "shopify_category_f1"
       ground_truth: "ground_truth_category"
-      extractor: "identity_extractor"  # Required by benchmark; scorer parses JSON internally
+      extractor: "identity_extractor" # Required by benchmark; scorer parses JSON internally
       num_repeats: 1
 ```
-
 
 ## Benchmark Qwen3-VL-235B-A22B using a config file
 

@@ -22,7 +22,6 @@ from unittest.mock import patch
 
 import pandas as pd
 import pytest
-
 from inference_endpoint.dataset_manager.predefined.shopify_product_catalogue import (
     ShopifyProductCatalogue,
 )
@@ -182,9 +181,7 @@ class TestShopifyProductCatalogueGenerate:
         assert call_kwargs["load_options"]["token"] == "hf_xxx"
         assert call_kwargs["load_options"]["revision"] == "v1"
 
-    def test_generate_raises_when_product_image_missing(
-        self, tmp_path: Path
-    ) -> None:
+    def test_generate_raises_when_product_image_missing(self, tmp_path: Path) -> None:
         """Raises ValueError when product_image is missing from a row."""
         bad_data = pd.DataFrame(
             [
@@ -298,11 +295,9 @@ class TestShopifyQ3vlPreset:
         transforms = q3vl()
         assert isinstance(transforms, list)
         assert len(transforms) >= 1
-        assert all(hasattr(t, "__call__") for t in transforms)
+        assert all(callable(t) for t in transforms)
 
-    def test_get_dataloader_with_q3vl_preset(
-        self, tmp_path: Path
-    ) -> None:
+    def test_get_dataloader_with_q3vl_preset(self, tmp_path: Path) -> None:
         """get_dataloader with q3vl preset produces loadable dataset."""
         mock_df = pd.DataFrame(
             [
