@@ -48,6 +48,9 @@ class ShopifyProductCatalogue(
         "product_image_base64",
         "product_image_format",
         "potential_product_categories",
+        "ground_truth_category",
+        "ground_truth_brand",
+        "ground_truth_is_secondhand",
     ]
 
     PRESETS = presets
@@ -136,6 +139,11 @@ class ShopifyProductCatalogue(
                         "product_image_base64": image_base64,
                         "product_image_format": image_format,
                         "potential_product_categories": json.dumps(categories),
+                        "ground_truth_category": row.get("ground_truth_category", ""),
+                        "ground_truth_brand": row.get("ground_truth_brand", ""),
+                        "ground_truth_is_secondhand": json.dumps(
+                            row.get("ground_truth_is_secondhand", False)
+                        ),
                     }
                 )
 
