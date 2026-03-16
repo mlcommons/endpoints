@@ -660,7 +660,6 @@ _CATEGORY_SEPARATOR = " > "
 
 # Pad tokens for unparsable responses (matches MLCommons Q3VL evaluation.py)
 _PRED_CATEGORY_PAD = "<|__PRED_CATEGORY_PAD__|>"
-_PRED_BRAND_PAD = "<|__PRED_BRAND_PAD__|>"
 
 
 class ProductMetadata(BaseModel):
