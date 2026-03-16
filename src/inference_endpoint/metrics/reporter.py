@@ -355,7 +355,7 @@ class Report:
     n_samples_issued: int
     n_samples_completed: int
     n_samples_failed: int
-    duration_ns: int
+    duration_ns: int | None
 
     # For the following metrics, the key is a rollup statistic (i.e. mean, median, etc.)
     ttft: dict[str, float]
@@ -960,6 +960,7 @@ class MetricsReporter:
             COUNT(DISTINCT sample_uuid) AS error_count
         FROM events
         WHERE event_type = '{SessionEvent.ERROR.value}'
+        AND sample_uuid NOT IN ('', '<NO_SAMPLE_UUID>')
         {where_clause}
         """).fetchone()[0]
 
