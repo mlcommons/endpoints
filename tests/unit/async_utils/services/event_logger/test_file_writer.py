@@ -13,14 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for FileWriter and JSONLWriter."""
+"""Tests for JSONLWriter."""
 
 import json
 
 import msgspec
 import pytest
 from inference_endpoint.async_utils.services.event_logger.file_writer import (
-    FileWriter,
     JSONLWriter,
 )
 from inference_endpoint.core.record import (
@@ -36,38 +35,6 @@ def _record(event_type, uuid="", ts=0, data=None):
     return EventRecord(
         event_type=event_type, timestamp_ns=ts, sample_uuid=uuid, data=data
     )
-
-
-# ---------------------------------------------------------------------------
-# FileWriter base
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.unit
-class TestFileWriter:
-    def test_record_to_line_raises_not_implemented(self, tmp_path):
-        writer = FileWriter(tmp_path / "test.txt")
-        try:
-            with pytest.raises(NotImplementedError):
-                writer.record_to_line(_record(SampleEventType.ISSUED))
-        finally:
-            writer.close()
-
-    def test_close_idempotent(self, tmp_path):
-        writer = FileWriter(tmp_path / "test.txt")
-        writer.close()
-        writer.close()  # should not raise
-
-    def test_write_after_close_is_noop(self, tmp_path):
-        writer = FileWriter(tmp_path / "test.txt")
-        writer.close()
-        # _write_record guards on file_obj is not None
-        writer._write_record(_record(SampleEventType.ISSUED))
-
-    def test_flush_after_close_is_noop(self, tmp_path):
-        writer = FileWriter(tmp_path / "test.txt")
-        writer.close()
-        writer.flush()  # should not raise
 
 
 # ---------------------------------------------------------------------------
@@ -176,11 +143,18 @@ class TestJSONLWriter:
         timestamps = [decoder.decode(line.encode()).timestamp_ns for line in lines]
         assert timestamps == list(range(0, 1000, 100))
 
-    def test_record_to_line_returns_valid_json(self, tmp_path):
+    def test_close_idempotent(self, tmp_path):
         writer = JSONLWriter(tmp_path / "events")
-        try:
-            record = _record(SampleEventType.ISSUED, uuid="s1", ts=42)
-            line = writer.record_to_line(record)
-            json.loads(line)  # should not raise
-        finally:
-            writer.close()
+        writer.close()
+        writer.close()  # should not raise
+
+    def test_write_after_close_is_noop(self, tmp_path):
+        writer = JSONLWriter(tmp_path / "events")
+        writer.close()
+        # _write_record guards on file_obj is not None
+        writer._write_record(_record(SampleEventType.ISSUED))
+
+    def test_flush_after_close_is_noop(self, tmp_path):
+        writer = JSONLWriter(tmp_path / "events")
+        writer.close()
+        writer.flush()  # should not raise
