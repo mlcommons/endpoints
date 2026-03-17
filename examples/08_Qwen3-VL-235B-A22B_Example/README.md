@@ -1,6 +1,6 @@
 # Running Endpoints with Qwen3-VL-235B-A22B on Shopify Product Catalogue
 
-This document describes how to perform MLPerf Q3VL benchmarking using the inference endpoints with the Qwen3-VL-235B-A22B model and Shopify Product Catalogue dataset for multimodal product taxonomy classification. The benchmark uses the quantized NVFP4 Qwen3-VL-235B-A22B checkpoint `nvidia/Qwen3-VL-235B-A22B-Instruct-NVFP4-MLPerf-Inference-Closed-V6.0`.
+This document describes how to perform MLPerf Q3VL benchmarking using the inference endpoints with [Qwen3-VL-235B-A22B-instruct](https://huggingface.co/Qwen/Qwen3-VL-235B-A22B-Instruct) model and [Shopify's Product Catalogue dataset](https://huggingface.co/datasets/Shopify/product-catalogue) for multimodal product taxonomy classification. 
 
 ## Get Dataset
 
@@ -16,12 +16,12 @@ The Shopify Product Catalogue dataset is loaded from HuggingFace and will be gen
 Use the public quantized MLPerf checkpoint:
 
 ```
-export MODEL_NAME=nvidia/Qwen3-VL-235B-A22B-Instruct-NVFP4-MLPerf-Inference-Closed-V6.0
+export MODEL_NAME=Qwen/Qwen3-VL-235B-A22B-Instruct
 export HF_TOKEN=<your Hugging Face token>  # Optional for public model; may help with rate limits
 hf download $MODEL_NAME
 ```
 
-The model is available at [nvidia/Qwen3-VL-235B-A22B-Instruct-NVFP4-MLPerf-Inference-Closed-V6.0](https://huggingface.co/nvidia/Qwen3-VL-235B-A22B-Instruct-NVFP4-MLPerf-Inference-Closed-V6.0) — no access request required.
+The model is available at [Qwen3-VL-235B-A22B-instruct](https://huggingface.co/Qwen/Qwen3-VL-235B-A22B-Instruct) — no access request required.
 
 **Note:** The Shopify Product Catalogue includes `ground_truth_category`, `ground_truth_brand`, and `ground_truth_is_secondhand` from the HuggingFace dataset. For accuracy evaluation, use the `shopify_category_f1` scorer which computes hierarchical F1 for category taxonomy (matches [MLCommons Q3VL evaluation](https://github.com/mlcommons/inference/blob/master/multimodal/qwen3-vl/src/mlperf_inf_mm_q3vl/evaluation.py)).
 
@@ -47,7 +47,7 @@ datasets:
 Prepare the environment:
 
 ```
-export MODEL_NAME=nvidia/Qwen3-VL-235B-A22B-Instruct-NVFP4-MLPerf-Inference-Closed-V6.0
+export MODEL_NAME=Qwen/Qwen3-VL-235B-A22B-Instruct
 export HF_TOKEN=<your Hugging Face token>  # Optional for public model
 export HF_HOME=<path to HuggingFace cache, e.g. ~/.cache/huggingface>
 ```
@@ -64,13 +64,11 @@ docker run --runtime nvidia --gpus all \
   -v ${HF_HOME}:/root/.cache/huggingface \
   vllm/vllm-openai:latest \
   --model ${MODEL_NAME} \
-  --gpu_memory_utilization 0.95 \
-  --data-parallel-size 4 \
+  --tensor-parallel-size 4 \
   --max-model-len=32768 \
   --async-scheduling \
-  --enable-expert-parallel \
   --max-num-seqs 1024 \
-  --max-num-batched-tokens 4864
+  --limit-mm-per-prompt.video 0 \ 
 ```
 
 Run the benchmark:
