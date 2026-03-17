@@ -337,8 +337,11 @@ class BenchmarkSession:
             )
             warmup_sched = warmup_sched_cls(warmup_rt, SequentialSampleOrder)
             warmup_generator = load_generator_cls(
-                sample_issuer, warmup_dataset, warmup_sched, *args
-            )  # type: ignore[arg-type]
+                sample_issuer,
+                warmup_dataset,
+                warmup_sched, # type: ignore[arg-type]
+                *args,  
+            )
 
         # Create accuracy test generators
         accuracy_test_generators = None
