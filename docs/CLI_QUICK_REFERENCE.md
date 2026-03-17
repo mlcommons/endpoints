@@ -159,8 +159,7 @@ inference-endpoint benchmark online \
   --target-qps 100 \
   --num-samples 10000 \
   --workers 16 \
-  --output results.json \
-  --report-path production_report \
+  --report-dir production_report \
   -v
 
 # Or with duration (calculates samples from target_qps * duration)
@@ -172,8 +171,7 @@ inference-endpoint benchmark online \
   --target-qps 100 \
   --duration 300 \
   --workers 16 \
-  --output results.json \
-  --report-path production_report \
+  --report-dir production_report \
   -v
 ```
 
@@ -260,8 +258,8 @@ endpoint_config:
 
 - All configuration from YAML file
 - Reproducible, shareable configs
-- No CLI parameter mixing (only --output auxiliary allowed)
-- Example: `benchmark from-config --config file.yaml --output results.json`
+- No CLI parameter mixing (only `--timeout` auxiliary allowed)
+- Example: `benchmark from-config --config file.yaml --timeout 600`
 
 ## Tips
 
@@ -281,6 +279,6 @@ endpoint_config:
 **Best Practices:**
 
 - Share YAML configs for reproducible results across systems
-- Use `--report-path` for detailed metrics with TTFT, TPOT, and token analysis
+- Use `--report-dir` for detailed metrics with TTFT, TPOT, and token analysis
 - Set `HF_TOKEN` environment variable for non-public models
 - Use `--min-output-tokens` and `--max-output-tokens` to control output length

@@ -81,8 +81,7 @@ inference-endpoint -v benchmark offline \
   --dataset tests/datasets/dummy_1k.pkl \
   --num-samples 5000 \
   --workers 4 \
-  --output benchmark_results.json \
-  --report-path benchmark_report
+  --report-dir benchmark_report
 
 # Note: Set HF_TOKEN environment variable if using non-public models
 # export HF_TOKEN=your_huggingface_token
@@ -115,7 +114,7 @@ inference-endpoint -v benchmark online \
   --dataset tests/datasets/dummy_1k.pkl \
   --load-pattern poisson \
   --target-qps 100 \
-  --report-path online_benchmark_report
+  --report-dir online_benchmark_report
 ```
 
 **Expected Output:**
@@ -157,26 +156,7 @@ inference-endpoint benchmark offline \
 
 ### 6. View Results
 
-```bash
-# View benchmark results
-cat benchmark_results.json | jq
-
-# Example output:
-{
-  "config": {
-    "endpoint": "http://localhost:8765",
-    "mode": null,
-    "qps": 10
-  },
-  "results": {
-    "total": 1000,
-    "successful": 1000,
-    "failed": 0,
-    "elapsed_time": 1.8,
-    "qps": 555.6
-  }
-}
-```
+When run with `--report-dir`, a directory is created containing benchmark metrics files (JSON/CSV) with detailed QPS, latency, TTFT, and TPOT data.
 
 ### 7. Stop the Echo Server
 
@@ -262,13 +242,9 @@ inference-endpoint -v benchmark offline \
   --model Qwen/Qwen3-8B \
   --dataset tests/datasets/dummy_1k.pkl \
   --workers 4 \
-  --output benchmark_results.json \
-  --report-path benchmark_report
+  --report-dir benchmark_report
 
-# 6. Check results
-cat benchmark_results.json | jq '.results'
-
-# 7. Stop server
+# 6. Stop server
 pkill -f echo_server
 ```
 
@@ -280,7 +256,7 @@ inference-endpoint benchmark offline \
   --endpoints http://localhost:8765 \
   --model Qwen/Qwen3-8B \
   --dataset tests/datasets/dummy_1k.pkl \
-  --report-path offline_report
+  --report-dir offline_report
 
 # Online (Poisson distribution)
 inference-endpoint benchmark online \
@@ -289,7 +265,7 @@ inference-endpoint benchmark online \
   --dataset tests/datasets/dummy_1k.pkl \
   --load-pattern poisson \
   --target-qps 500 \
-  --report-path online_report
+  --report-dir online_report
 
 # With explicit sample count
 inference-endpoint benchmark offline \
@@ -339,5 +315,5 @@ inference-endpoint benchmark online \
 **Advanced:**
 
 - Streaming: `auto` (default), `on`, or `off` - auto enables for online, disables for offline
-- Use `--report-path` for detailed metrics reports with TTFT, TPOT, and token analysis
+- Use `--report-dir` for detailed metrics reports with TTFT, TPOT, and token analysis
 - Dataset format auto-inferred from file extension
