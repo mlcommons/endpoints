@@ -24,12 +24,14 @@ Make sure we are in the venv environment. If not: `source ./venv/bin/activate`
 ### Step 1: Pre-flight checks
 
 ```bash
+tailscale status | grep mlc2
 which inference-endpoint
 ls tests/datasets/dummy_1k.pkl
 ping -c 1 mlc2
 ```
 
-If any of these fail, report the error and stop.
+- If `tailscale status | grep mlc2` returns nothing or mlc2 shows as offline, stop immediately and report: "Not connected to Tailscale — please run `sudo tailscale up` first."
+- If any other check fails, report the error and stop.
 
 ### Step 2: Start vLLM on mlc2
 
@@ -92,6 +94,7 @@ Report:
 - Server startup: SUCCESS/FAILED + time to ready
 - Benchmark: PASSED/FAILED (exit code)
 - Key metrics from stdout (throughput, latency percentiles, errors)
+- **Postgres table** where results were written: full location in the format `host=ep-withered-grass-akhya6bx.c-3.us-west-2.aws.neon.tech db=neondb table=events_cli_benchmark_<session_id>`
 - Any relevant log output
 
 The whole run (excluding model load time) should complete within 60 seconds once the server is healthy. If not, something is wrong.
