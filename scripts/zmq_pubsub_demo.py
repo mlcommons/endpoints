@@ -12,28 +12,32 @@ Demonstrates the intended control flow:
 - process(records) is async and scheduled via create_task so it does not block the socket.
 - Cleanup: .close() on subscribers when the session has ended.
 
-Same logical behavior as zmq_pubsub_simple_demo.py (console log, file output, duration stats)
-but using the async_utils APIs and no extra queuing layer.
+The demo runs the event_logger with both JSONL and SQL writers, then opens the SQLite
+database and prints its contents to verify SQLWriter worked.
 
 Usage:
-    python scripts/zmq_pubsub_async_utils_demo.py
+    python scripts/zmq_pubsub_demo.py
 """
 
 import asyncio
 import logging
+import sqlite3
+import subprocess
+import sys
 import time
 import uuid
 from pathlib import Path
 
-from inference_endpoint.async_utils.autoinit import LOOP_MANAGER
 from inference_endpoint.async_utils.event_publisher import EventPublisherService
-from inference_endpoint.async_utils.transport.record import (
+from inference_endpoint.async_utils.loop_manager import LoopManager
+from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
+from inference_endpoint.async_utils.transport.zmq.pubsub import ZmqEventRecordSubscriber
+from inference_endpoint.core.record import (
+    ErrorEventType,
     EventRecord,
     SampleEventType,
     SessionEventType,
 )
-from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
-from inference_endpoint.async_utils.transport.zmq.pubsub import ZmqEventRecordSubscriber
 
 logging.basicConfig(
     level=logging.INFO,
@@ -47,17 +51,27 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 
+def _is_error_event(event: EventRecord) -> bool:
+    """True if the event is an error (should not be dropped after ENDED)."""
+    return isinstance(event.event_type, ErrorEventType)
+
+
 class ConsoleSubscriber(ZmqEventRecordSubscriber):
-    """Logs events to console. process() is async and runs when records are received."""
+    """Logs events to console. Stops and cleans up on SessionEventType.ENDED."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.event_count = 0
+        self._shutdown_received = False
 
     async def process(self, records: list[EventRecord]) -> None:
         for event in records:
+            if self._shutdown_received and not _is_error_event(event):
+                continue
             if event.event_type == SessionEventType.ENDED:
-                logger.info("[Console] Received shutdown signal (session.ended)")
+                self._shutdown_received = True
+                logger.info("[Console] Received session ended signal (session.ended)")
+                self.loop.call_soon_threadsafe(self.close)
             self.event_count += 1
             sample_id = event.sample_uuid[:8] if event.sample_uuid else "N/A"
             logger.info(
@@ -66,52 +80,24 @@ class ConsoleSubscriber(ZmqEventRecordSubscriber):
             )
 
 
-class FileSubscriber(ZmqEventRecordSubscriber):
-    """Writes events to a file. process() is async."""
-
-    def __init__(self, output_file: Path, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.output_file = output_file
-        self.event_count = 0
-        self._file = open(output_file, "w")
-        self._file.write("timestamp_ns,topic,event_type,sample_uuid,data\n")
-
-    async def process(self, records: list[EventRecord]) -> None:
-        for event in records:
-            if event.event_type == SessionEventType.ENDED:
-                logger.info("[File] Received shutdown signal (session.ended)")
-            self.event_count += 1
-            data_str = str(event.data) if event.data else ""
-            self._file.write(
-                f"{event.timestamp_ns},{event.event_type.topic},"
-                f"{event.event_type.name},{event.sample_uuid},{data_str}\n"
-            )
-        self._file.flush()
-
-    def close(self) -> None:
-        if not self.is_closed and hasattr(self, "_file") and self._file is not None:
-            try:
-                self._file.close()
-            except OSError:
-                # File may already be closed or I/O error on close (e.g. disk full).
-                pass
-            self._file = None
-        super().close()
-
-
 class DurationSubscriber(ZmqEventRecordSubscriber):
-    """Tracks sample durations from ISSUED to COMPLETE. process() is async."""
+    """Tracks sample durations from ISSUED to COMPLETE. Stops on SessionEventType.ENDED."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.start_times: dict[str, int] = {}
         self.durations: dict[str, int] = {}
         self.event_count = 0
+        self._shutdown_received = False
 
     async def process(self, records: list[EventRecord]) -> None:
         for event in records:
+            if self._shutdown_received and not _is_error_event(event):
+                continue
             if event.event_type == SessionEventType.ENDED:
-                logger.info("[Duration] Received shutdown signal (session.ended)")
+                self._shutdown_received = True
+                logger.info("[Duration] Received session ended signal (session.ended)")
+                self.loop.call_soon_threadsafe(self.close)
             self.event_count += 1
             if event.event_type == SampleEventType.ISSUED:
                 self.start_times[event.sample_uuid] = event.timestamp_ns
@@ -167,13 +153,11 @@ async def publish_test_events(publisher) -> None:
             event_type=SampleEventType.RECV_FIRST,
             timestamp_ns=10010,
             sample_uuid=uuid1,
-            data={"ttft_ms": 10.0},
         ),
         EventRecord(
             event_type=SampleEventType.RECV_FIRST,
             timestamp_ns=10190,
             sample_uuid=uuid2,
-            data={"ttft_ms": 187.0},
         ),
         EventRecord(
             event_type=SampleEventType.RECV_NON_FIRST,
@@ -204,7 +188,7 @@ async def publish_test_events(publisher) -> None:
             event_type=SampleEventType.COMPLETE,
             timestamp_ns=10211,
             sample_uuid=uuid1,
-            data={"tokens": 50},
+            data="Hello world",
         ),
         EventRecord(
             event_type=SampleEventType.RECV_NON_FIRST,
@@ -225,7 +209,7 @@ async def publish_test_events(publisher) -> None:
             event_type=SampleEventType.COMPLETE,
             timestamp_ns=10219,
             sample_uuid=uuid2,
-            data={"tokens": 75},
+            data="Sample output for uuid2",
         ),
     ]
 
@@ -243,7 +227,7 @@ async def publish_test_events(publisher) -> None:
         sample_uuid="",
     )
     publisher.publish(shutdown_event)
-    logger.info("Sending shutdown signal (session.ended)...")
+    logger.info("Sending session ended signal (session.ended)...")
     await asyncio.sleep(0.2)
     logger.info("All events published")
 
@@ -258,28 +242,43 @@ async def main() -> None:
     logger.info("ZMQ Pub-Sub Demo (async_utils)")
     logger.info("=" * 80)
 
-    output_file = Path("/tmp/zmq_events_async_utils_output.csv")
+    event_log_dir = Path("/tmp/zmq_demo_event_logger")
+    event_log_dir.mkdir(parents=True, exist_ok=True)
+
     with ManagedZMQContext.scoped() as zmq_ctx:
         publisher = EventPublisherService(zmq_ctx)
         connect_path = publisher.bind_path
 
-        # Each subscriber has its own event loop (not shared with the publisher).
-        console_loop = LOOP_MANAGER.create_loop("demo_console")
-        file_loop = LOOP_MANAGER.create_loop("demo_file")
-        duration_loop = LOOP_MANAGER.create_loop("demo_duration")
+        # Start event_logger as a subprocess (logs to both JSONL and SQL under event_log_dir).
+        event_logger_cmd = [
+            sys.executable,
+            "-m",
+            "inference_endpoint.async_utils.services.event_logger",
+            "--log-dir",
+            str(event_log_dir),
+            "--socket-address",
+            str(connect_path),
+            "--writers",
+            "jsonl",
+            "sql",
+        ]
+        logger.info("Starting event_logger subprocess: %s", " ".join(event_logger_cmd))
+        event_logger_proc = subprocess.Popen(
+            event_logger_cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+        # Each in-process subscriber has its own event loop (not shared with the publisher).
+        loop_manager = LoopManager()
+        console_loop = loop_manager.create_loop("demo_console")
+        duration_loop = loop_manager.create_loop("demo_duration")
 
         logger.info("Creating subscribers (init does NOT start processing)...")
         console_sub = ConsoleSubscriber(
             path=connect_path,
             zmq_context=zmq_ctx,
             loop=console_loop,
-            topics=None,
-        )
-        file_sub = FileSubscriber(
-            output_file,
-            path=connect_path,
-            zmq_context=zmq_ctx,
-            loop=file_loop,
             topics=None,
         )
         duration_sub = DurationSubscriber(
@@ -297,20 +296,68 @@ async def main() -> None:
         # Start listening (add reader to each loop).
         logger.info("Starting subscribers (.start())...")
         console_loop.call_soon_threadsafe(console_sub.start)
-        file_loop.call_soon_threadsafe(file_sub.start)
         duration_loop.call_soon_threadsafe(duration_sub.start)
 
         try:
             await publish_test_events(publisher)
+            # Give event_logger time to receive ENDED and exit.
+            try:
+                event_logger_proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                logger.warning("event_logger did not exit within 5s, terminating")
+                event_logger_proc.terminate()
+                event_logger_proc.wait(timeout=2)
         except KeyboardInterrupt:
             logger.info("Interrupted by user")
         finally:
             logger.info("Cleaning up (closing subscribers)...")
             console_sub.close()
-            file_sub.close()
             duration_sub.close()
+            if event_logger_proc.poll() is None:
+                event_logger_proc.terminate()
+                event_logger_proc.wait(timeout=2)
+
+            # Verify SQLWriter: open the SQLite DB and show contents.
+            events_db = event_log_dir / "events.db"
+            if events_db.exists():
+                logger.info("=" * 80)
+                logger.info("SQLWriter verification: contents of %s", events_db)
+                logger.info("=" * 80)
+                conn = sqlite3.connect(str(events_db))
+                try:
+                    cur = conn.execute(
+                        "SELECT id, sample_uuid, event_type, timestamp_ns, data FROM events ORDER BY id"
+                    )
+                    rows = cur.fetchall()
+                    for row in rows:
+                        row_id, sample_uuid, event_type, timestamp_ns, data = row
+                        sample_short = (
+                            (sample_uuid[:8] + "..") if sample_uuid else "N/A"
+                        )
+                        data_preview = (
+                            data[:60] + b"..."
+                            if data and len(data) > 60
+                            else data or b""
+                        ) or b""
+                        logger.info(
+                            "  id=%s | event_type=%s | sample=%s | timestamp_ns=%s | data=%s",
+                            row_id,
+                            event_type,
+                            sample_short,
+                            timestamp_ns,
+                            data_preview.decode("utf-8", errors="replace"),
+                        )
+                    logger.info("Total rows: %s", len(rows))
+                finally:
+                    conn.close()
+            else:
+                logger.warning(
+                    "SQL DB not found at %s (SQL writer may not have been used)",
+                    events_db,
+                )
+
             logger.info("=" * 80)
-            logger.info(f"Output file written to: {output_file}")
+            logger.info("Event log directory: %s", event_log_dir)
             logger.info("Demo complete")
             logger.info("=" * 80)
 
