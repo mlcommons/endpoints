@@ -97,4 +97,10 @@ Report:
 - **Postgres table** where results were written: full location in the format `host=ep-withered-grass-akhya6bx.c-3.us-west-2.aws.neon.tech db=neondb table=events_cli_benchmark_<session_id>`
 - Any relevant log output
 
+After reporting, ring the terminal bell:
+
+```bash
+printf '\a'
+```
+
 The whole run (excluding model load time) should complete within 60 seconds once the server is healthy. If not, something is wrong.
