@@ -412,7 +412,7 @@ def _create_client(
         tmp = HTTPClientConfig(endpoint_urls=[endpoint_url], num_workers=effective)
         cpu_affinity_plan = compute_affinity_plan(tmp.num_workers)
         if cpu_affinity_plan.loadgen_cpus:
-            os.sched_setaffinity(os.getpid(), set(cpu_affinity_plan.loadgen_cpus))
+            os.sched_setaffinity(os.getpid(), set(cpu_affinity_plan.loadgen_cpus))  # type: ignore[attr-defined]
         if verbose:
             print(f"CPU Affinity Plan ({tmp.num_workers} workers):")
             for line in cpu_affinity_plan.summary().split("\n"):
@@ -486,7 +486,7 @@ def run_benchmark(
     saved_affinity: set[int] | None = None
     if enable_affinity:
         try:
-            saved_affinity = os.sched_getaffinity(os.getpid())
+            saved_affinity = os.sched_getaffinity(os.getpid())  # type: ignore[attr-defined]
         except OSError:
             pass
 
@@ -624,7 +624,7 @@ def run_benchmark(
     # Restore original affinity so the next sweep iteration sees all CPUs
     if saved_affinity is not None:
         try:
-            os.sched_setaffinity(os.getpid(), saved_affinity)
+            os.sched_setaffinity(os.getpid(), saved_affinity)  # type: ignore[attr-defined]
         except OSError:
             pass
 

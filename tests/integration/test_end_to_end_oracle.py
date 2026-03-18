@@ -56,7 +56,7 @@ async def run_benchmark(server_url, dataloader, tmp_path, rt_settings):
 
     def on_complete_hook(result: QueryResult):
         """Callback to store the responses from the server."""
-        server_responses[result.id] = result.response_output
+        server_responses[result.id] = result.get_response_output_string()
 
     SampleEventHandler.register_hook(SampleEvent.COMPLETE, on_complete_hook)
 

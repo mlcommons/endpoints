@@ -24,7 +24,7 @@ from inference_endpoint.async_utils.transport.protocol import (
     EventRecordPublisher,
     EventRecordSubscriber,
 )
-from inference_endpoint.async_utils.transport.record import TOPIC_FRAME_SIZE
+from inference_endpoint.core.record import TOPIC_FRAME_SIZE
 
 from .context import ManagedZMQContext
 

@@ -22,6 +22,7 @@ This module contains common utilities used throughout the system.
 from __future__ import annotations
 
 import ctypes
+import threading
 import time
 import warnings
 from datetime import datetime
@@ -110,11 +111,14 @@ class SingletonMixin:
     """
 
     _instance: ClassVar[Any] = None
+    _instance_lock: ClassVar[threading.Lock] = threading.Lock()
 
     def __new__(cls, *args: Any, **kwargs: Any) -> Any:
         if cls._instance is None:
-            obj = super().__new__(cls)
-            # Inject _initialized attribute if child class does not define it.
-            obj._initialized = False  # type: ignore[attr-defined]
-            cls._instance = obj
+            with cls._instance_lock:
+                if cls._instance is None:
+                    obj = super().__new__(cls)
+                    # Inject _initialized attribute if child class does not define it.
+                    obj._initialized = False  # type: ignore[attr-defined]
+                    cls._instance = obj
         return cls._instance

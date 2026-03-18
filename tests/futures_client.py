@@ -77,7 +77,7 @@ class FuturesHttpClient(HTTPEndpointClient):
                     case QueryResult(error=err) if err:
                         # Error response - pop and reject future
                         if future := self._pending.pop(response.id, None):
-                            future.set_exception(Exception(err))
+                            future.set_exception(Exception(str(err)))
                         else:
                             logger.debug(f"Error for unknown request ID: {response.id}")
 

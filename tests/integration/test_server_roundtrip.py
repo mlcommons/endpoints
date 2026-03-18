@@ -59,12 +59,10 @@ async def test_ds_chat_completion_data_loader_with_oracle_server(
                 assert response.status == 200
 
                 response_data = await response.json()
-                assert (
-                    OpenAIAdapter.from_endpoint_response(
-                        CreateChatCompletionResponse(**response_data)
-                    ).response_output
-                    == sample["output"]
+                result = OpenAIAdapter.from_endpoint_response(
+                    CreateChatCompletionResponse(**response_data)
                 )
+                assert result.get_response_output_string() == sample["output"]
                 logging.debug(
                     f"Sample {i} passed : in:\n {sample['prompt'][0:30]} out:\n {sample['output'][0:30]}"
                 )

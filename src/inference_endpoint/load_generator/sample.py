@@ -85,6 +85,10 @@ class _SampleEventHandler:
     A valid hook is a callable that takes a single argument, representing the response object (StreamChunk or QueryResult).
 
     A simple example use-case of a hook is to update a progress bar on-completion of a sample.
+
+    NOTE: Hook lists are not thread-safe. Hooks must be registered before the benchmark
+    starts (single-threaded setup phase). This is a known limitation; _SampleEventHandler
+    is being deprecated in favor of the pub-sub EventLoggerService.
     """
 
     __slots__ = ["first_chunk_hooks", "non_first_chunk_hooks", "complete_hooks"]
@@ -180,9 +184,10 @@ class _SampleEventHandler:
 
         # Even if there is an error, we still record the event to count the sample as complete
         if result.error is not None:
-            logger.error(f"Error in request {result.id}: {result.error}")
+            err_str = str(result.error)
+            logger.error(f"Error in request {result.id}: {err_str}")
 
-            record_exception(result.error, result.id)
+            record_exception(err_str, result.id)
 
         EventRecorder.record_event(
             SampleEvent.COMPLETE,

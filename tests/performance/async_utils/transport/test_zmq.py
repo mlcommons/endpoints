@@ -34,7 +34,12 @@ from inference_endpoint.async_utils.transport.zmq.transport import (
     _create_sender,
     _ZMQSocketConfig,
 )
-from inference_endpoint.core.types import Query, QueryResult, StreamChunk
+from inference_endpoint.core.types import (
+    Query,
+    QueryResult,
+    StreamChunk,
+    TextModelOutput,
+)
 
 # =============================================================================
 # Config
@@ -65,7 +70,7 @@ def make_query(payload_chars: int, idx: int) -> Query:
 def make_query_result(payload_chars: int, idx: int) -> QueryResult:
     return QueryResult(
         id=str(idx),
-        response_output="x" * payload_chars,
+        response_output=TextModelOutput(output="x" * payload_chars),
     )
 
 

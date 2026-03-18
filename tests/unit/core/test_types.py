@@ -24,7 +24,27 @@ import time
 
 import msgspec
 import pytest
-from inference_endpoint.core.types import Query, QueryResult, StreamChunk
+from inference_endpoint.core.types import (
+    ErrorData,
+    Query,
+    QueryResult,
+    StreamChunk,
+    TextModelOutput,
+)
+
+
+class TestErrorData:
+    """Test ErrorData string representation."""
+
+    def test_error_data_str_with_message(self):
+        """str(ErrorData) is 'type: message' when error_message is non-empty."""
+        err = ErrorData(error_type="ValueError", error_message="invalid value")
+        assert str(err) == "ValueError: invalid value"
+
+    def test_error_data_str_without_message(self):
+        """str(ErrorData) is error_type only when error_message is empty."""
+        err = ErrorData(error_type="TimeoutError", error_message="")
+        assert str(err) == "TimeoutError"
 
 
 class TestQuerySerialization:
@@ -187,93 +207,114 @@ class TestQueryResultSerialization:
         """Test QueryResult with string response output."""
         result = QueryResult(
             id="query-456",
-            response_output="This is a complete response from the model.",
+            response_output=TextModelOutput(
+                output="This is a complete response from the model."
+            ),
         )
 
         encoded = msgspec.msgpack.encode(result)
         decoded = msgspec.msgpack.decode(encoded, type=QueryResult)
 
-        assert decoded.response_output == "This is a complete response from the model."
+        assert decoded.response_output == TextModelOutput(
+            output="This is a complete response from the model."
+        )
 
     def test_query_result_with_tuple_response(self):
-        """Test QueryResult with tuple response output (streaming chunks)."""
+        """Test QueryResult with TextModelOutput (tuple output, streaming chunks)."""
         result = QueryResult(
             id="query-789",
-            response_output=("First chunk", "Second chunk", "Final chunk"),
+            response_output=TextModelOutput(
+                output=("First chunk", "Second chunk", "Final chunk"),
+                reasoning=None,
+            ),
         )
 
         encoded = msgspec.msgpack.encode(result)
         decoded = msgspec.msgpack.decode(encoded, type=QueryResult)
 
-        assert isinstance(decoded.response_output, tuple)
-        assert decoded.response_output == ("First chunk", "Second chunk", "Final chunk")
+        assert isinstance(decoded.response_output, TextModelOutput)
+        assert decoded.response_output.output == (
+            "First chunk",
+            "Second chunk",
+            "Final chunk",
+        )
+        assert decoded.response_output.reasoning is None
 
     def test_query_result_with_list_response_converts_to_tuple(self):
-        """Test QueryResult converts list response to tuple in __post_init__."""
+        """Test TextModelOutput converts list output to tuple in __post_init__."""
         result = QueryResult(
-            id="query-list", response_output=["Chunk 1", "Chunk 2", "Chunk 3"]
+            id="query-list",
+            response_output=TextModelOutput(
+                output=["Chunk 1", "Chunk 2", "Chunk 3"],
+                reasoning=None,
+            ),
         )
 
-        # Should be converted to tuple in __post_init__
-        assert isinstance(result.response_output, tuple)
-        assert result.response_output == ("Chunk 1", "Chunk 2", "Chunk 3")
+        assert isinstance(result.response_output, TextModelOutput)
+        assert result.response_output.output == ("Chunk 1", "Chunk 2", "Chunk 3")
 
-        # Verify it serializes as tuple
         encoded = msgspec.msgpack.encode(result)
         decoded = msgspec.msgpack.decode(encoded, type=QueryResult)
 
-        assert isinstance(decoded.response_output, tuple)
-        assert decoded.response_output == ("Chunk 1", "Chunk 2", "Chunk 3")
+        assert isinstance(decoded.response_output, TextModelOutput)
+        assert decoded.response_output.output == ("Chunk 1", "Chunk 2", "Chunk 3")
 
     def test_query_result_with_dict_response_output_only(self):
-        """Test QueryResult with dict response output (output only)."""
+        """Test QueryResult with TextModelOutput (output only, list converted to tuple)."""
         result = QueryResult(
             id="query-dict",
-            response_output={"output": ["First chunk", "rest of output"]},
+            response_output=TextModelOutput(
+                output=["First chunk", "rest of output"],
+                reasoning=None,
+            ),
         )
 
         encoded = msgspec.msgpack.encode(result)
         decoded = msgspec.msgpack.decode(encoded, type=QueryResult)
 
-        assert isinstance(decoded.response_output, dict)
-        assert decoded.response_output["output"] == ("First chunk", "rest of output")
-        assert "reasoning" not in decoded.response_output
+        assert isinstance(decoded.response_output, TextModelOutput)
+        assert decoded.response_output.output == ("First chunk", "rest of output")
+        assert decoded.response_output.reasoning is None
 
     def test_query_result_with_dict_response_output_and_reasoning(self):
-        """Test QueryResult with dict response output (output and reasoning)."""
+        """Test QueryResult with TextModelOutput (output and reasoning)."""
         result = QueryResult(
             id="query-dict-reasoning",
-            response_output={
-                "output": "Final output text",
-                "reasoning": ["First reasoning chunk", "rest of reasoning"],
-            },
+            response_output=TextModelOutput(
+                output="Final output text",
+                reasoning=["First reasoning chunk", "rest of reasoning"],
+            ),
         )
 
         encoded = msgspec.msgpack.encode(result)
         decoded = msgspec.msgpack.decode(encoded, type=QueryResult)
 
-        assert isinstance(decoded.response_output, dict)
-        assert decoded.response_output["output"] == "Final output text"
-        assert decoded.response_output["reasoning"] == (
+        assert isinstance(decoded.response_output, TextModelOutput)
+        assert decoded.response_output.output == "Final output text"
+        assert decoded.response_output.reasoning == (
             "First reasoning chunk",
             "rest of reasoning",
         )
 
     def test_query_result_with_dict_response_empty_output(self):
-        """Test QueryResult with dict response output (empty output)."""
-        result = QueryResult(id="query-dict-empty", response_output={"output": []})
+        """Test QueryResult with TextModelOutput (empty output list -> tuple)."""
+        result = QueryResult(
+            id="query-dict-empty",
+            response_output=TextModelOutput(output=[], reasoning=None),
+        )
 
         encoded = msgspec.msgpack.encode(result)
         decoded = msgspec.msgpack.decode(encoded, type=QueryResult)
 
-        assert isinstance(decoded.response_output, dict)
-        assert decoded.response_output["output"] == ()
+        assert isinstance(decoded.response_output, TextModelOutput)
+        assert decoded.response_output.output == ()
+        assert decoded.response_output.reasoning is None
 
     def test_query_result_with_metadata(self):
         """Test QueryResult with comprehensive metadata."""
         result = QueryResult(
             id="query-meta",
-            response_output="Response text",
+            response_output=TextModelOutput(output="Response text"),
             metadata={
                 "model": "gpt-4",
                 "tokens_used": 150,
@@ -294,36 +335,51 @@ class TestQueryResultSerialization:
         assert decoded.metadata["cache_hit"] is False
 
     def test_query_result_with_error(self):
-        """Test QueryResult with error information."""
+        """Test QueryResult with ErrorData."""
         result = QueryResult(
-            id="query-error", error="Connection timeout after 30 seconds"
+            id="query-error",
+            error=ErrorData(
+                error_type="TimeoutError",
+                error_message="Connection timeout after 30 seconds",
+            ),
         )
 
         encoded = msgspec.msgpack.encode(result)
         decoded = msgspec.msgpack.decode(encoded, type=QueryResult)
 
-        assert decoded.error == "Connection timeout after 30 seconds"
+        assert decoded.error is not None
+        assert decoded.error.error_type == "TimeoutError"
+        assert decoded.error.error_message == "Connection timeout after 30 seconds"
         assert decoded.response_output is None
 
     def test_query_result_with_error_and_partial_response(self):
         """Test QueryResult with both error and partial response."""
         result = QueryResult(
             id="query-partial",
-            response_output="Partial response before error",
-            error="Server disconnected during streaming",
+            response_output=TextModelOutput(output="Partial response before error"),
+            error=ErrorData(
+                error_type="ConnectionError",
+                error_message="Server disconnected during streaming",
+            ),
         )
 
         encoded = msgspec.msgpack.encode(result)
         decoded = msgspec.msgpack.decode(encoded, type=QueryResult)
 
-        assert decoded.response_output == "Partial response before error"
-        assert decoded.error == "Server disconnected during streaming"
+        assert decoded.response_output == TextModelOutput(
+            output="Partial response before error"
+        )
+        assert decoded.error is not None
+        assert decoded.error.error_message == "Server disconnected during streaming"
 
     def test_query_result_all_fields_populated(self):
         """Test QueryResult with all fields fully populated."""
         result = QueryResult(
             id="query-full",
-            response_output=("Chunk 1", "Chunk 2"),
+            response_output=TextModelOutput(
+                output=("Chunk 1", "Chunk 2"),
+                reasoning=None,
+            ),
             metadata={
                 "model": "llama-2-70b",
                 "prompt_tokens": 50,
@@ -337,20 +393,22 @@ class TestQueryResultSerialization:
         decoded = msgspec.msgpack.decode(encoded, type=QueryResult)
 
         assert decoded.id == "query-full"
-        assert decoded.response_output == ("Chunk 1", "Chunk 2")
+        assert isinstance(decoded.response_output, TextModelOutput)
+        assert decoded.response_output.output == ("Chunk 1", "Chunk 2")
         assert decoded.metadata["total_tokens"] == 150
         assert decoded.error is None
 
     def test_query_result_immutability(self):
         """Test QueryResult is frozen and cannot be modified."""
-        result = QueryResult(id="query-frozen", response_output="Original text")
+        result = QueryResult(
+            id="query-frozen", response_output=TextModelOutput(output="Original text")
+        )
 
-        # Attempting to modify should raise an error
         with pytest.raises(AttributeError):
             result.response_output = "Modified text"
 
         with pytest.raises(AttributeError):
-            result.error = "New error"
+            result.error = ErrorData(error_type="x", error_message="y")
 
     def test_query_result_completed_at_auto_set(self):
         """Test QueryResult completed_at is automatically set in __post_init__."""
@@ -364,41 +422,48 @@ class TestQueryResultSerialization:
 
     def test_query_result_empty_string_response(self):
         """Test QueryResult with empty string response."""
-        result = QueryResult(id="query-empty", response_output="")
+        result = QueryResult(
+            id="query-empty", response_output=TextModelOutput(output="")
+        )
 
         encoded = msgspec.msgpack.encode(result)
         decoded = msgspec.msgpack.decode(encoded, type=QueryResult)
 
-        assert decoded.response_output == ""
+        assert decoded.response_output == TextModelOutput(output="")
 
     def test_query_result_empty_tuple_response(self):
-        """Test QueryResult with empty tuple response."""
-        result = QueryResult(id="query-empty-tuple", response_output=())
+        """Test QueryResult with TextModelOutput (empty tuple output)."""
+        result = QueryResult(
+            id="query-empty-tuple",
+            response_output=TextModelOutput(output=(), reasoning=None),
+        )
 
         encoded = msgspec.msgpack.encode(result)
         decoded = msgspec.msgpack.decode(encoded, type=QueryResult)
 
-        assert decoded.response_output == ()
+        assert isinstance(decoded.response_output, TextModelOutput)
+        assert decoded.response_output.output == ()
 
     def test_query_result_multiple_roundtrips(self):
         """Test QueryResult survives multiple serialization roundtrips."""
         original = QueryResult(
             id="query-roundtrip",
-            response_output=("Chunk A", "Chunk B"),
+            response_output=TextModelOutput(
+                output=("Chunk A", "Chunk B"),
+                reasoning=None,
+            ),
             metadata={"tokens": 42},
         )
 
-        # First roundtrip
         encoded1 = msgspec.msgpack.encode(original)
         decoded1 = msgspec.msgpack.decode(encoded1, type=QueryResult)
 
-        # Second roundtrip
         encoded2 = msgspec.msgpack.encode(decoded1)
         decoded2 = msgspec.msgpack.decode(encoded2, type=QueryResult)
 
-        # ID and response should remain consistent
         assert decoded2.id == original.id
-        assert decoded2.response_output == original.response_output
+        assert isinstance(decoded2.response_output, TextModelOutput)
+        assert decoded2.response_output.output == original.response_output.output
         assert decoded2.metadata == original.metadata
 
 
@@ -545,125 +610,104 @@ class TestStreamChunkSerialization:
 
 
 class TestQueryResultWorkerPatterns:
-    """Test QueryResult serialization patterns used by worker.py."""
+    """Test QueryResult serialization patterns used by worker.py (TextModelOutput)."""
 
     def test_query_result_reasoning_chunks_pattern(self):
         """Test the exact pattern used when worker has reasoning chunks."""
-        # Simulates worker.py lines 396-406
         reasoning_chunks = ["Let me think...", " step by step", " to solve this"]
         output_chunks = ["The answer", " is", " 42"]
 
-        # First reasoning chunk is kept separate
         resp_reasoning = [reasoning_chunks[0]]
         if len(reasoning_chunks) > 1:
             resp_reasoning.append("".join(reasoning_chunks[1:]))
 
-        response_output = {
-            "output": "".join(output_chunks),
-            "reasoning": resp_reasoning,
-        }
-
         result = QueryResult(
             id="query-reasoning-pattern",
-            response_output=response_output,
+            response_output=TextModelOutput(
+                output="".join(output_chunks),
+                reasoning=resp_reasoning,
+            ),
             metadata={"first_chunk": False, "final_chunk": True},
         )
 
         encoded = msgspec.msgpack.encode(result)
         decoded = msgspec.msgpack.decode(encoded, type=QueryResult)
 
-        assert decoded.response_output["output"] == "The answer is 42"
-        assert decoded.response_output["reasoning"] == (
+        assert isinstance(decoded.response_output, TextModelOutput)
+        assert decoded.response_output.output == "The answer is 42"
+        assert decoded.response_output.reasoning == (
             "Let me think...",
             " step by step to solve this",
         )
-        assert len(decoded.response_output["reasoning"]) == 2
+        assert len(decoded.response_output.reasoning) == 2
 
     def test_query_result_output_only_pattern(self):
         """Test the exact pattern used when worker has only output chunks."""
-        # Simulates worker.py lines 407-415
         output_chunks = ["Hello", " world", "!"]
 
-        # First output chunk is kept separate
         resp_output = [output_chunks[0]]
         if len(output_chunks) > 1:
             resp_output.append("".join(output_chunks[1:]))
 
-        response_output = {
-            "output": resp_output,
-        }
-
         result = QueryResult(
             id="query-output-pattern",
-            response_output=response_output,
+            response_output=TextModelOutput(output=resp_output, reasoning=None),
             metadata={"first_chunk": False, "final_chunk": True},
         )
 
         encoded = msgspec.msgpack.encode(result)
         decoded = msgspec.msgpack.decode(encoded, type=QueryResult)
 
-        assert decoded.response_output["output"] == ("Hello", " world!")
-        assert len(decoded.response_output["output"]) == 2
-        assert "reasoning" not in decoded.response_output
+        assert isinstance(decoded.response_output, TextModelOutput)
+        assert decoded.response_output.output == ("Hello", " world!")
+        assert len(decoded.response_output.output) == 2
+        assert decoded.response_output.reasoning is None
 
     def test_query_result_no_chunks_pattern(self):
         """Test the exact pattern used when worker has no chunks."""
-        # Simulates worker.py lines 416-417
-        response_output = {"output": []}
-
         result = QueryResult(
             id="query-no-chunks",
-            response_output=response_output,
+            response_output=TextModelOutput(output=[], reasoning=None),
             metadata={"first_chunk": True, "final_chunk": True},
         )
 
         encoded = msgspec.msgpack.encode(result)
         decoded = msgspec.msgpack.decode(encoded, type=QueryResult)
 
-        assert decoded.response_output["output"] == ()
-        assert "reasoning" not in decoded.response_output
+        assert isinstance(decoded.response_output, TextModelOutput)
+        assert decoded.response_output.output == ()
+        assert decoded.response_output.reasoning is None
 
     def test_query_result_single_reasoning_chunk(self):
         """Test pattern when there's only one reasoning chunk."""
-        reasoning_chunks = ["Quick thought"]
-        output_chunks = ["Answer"]
-
-        # When len(reasoning_chunks) == 1, only first element is included
-        resp_reasoning = [reasoning_chunks[0]]
-
-        response_output = {
-            "output": "".join(output_chunks),
-            "reasoning": resp_reasoning,
-        }
-
         result = QueryResult(
-            id="query-single-reasoning", response_output=response_output
+            id="query-single-reasoning",
+            response_output=TextModelOutput(
+                output="Answer",
+                reasoning=["Quick thought"],
+            ),
         )
 
         encoded = msgspec.msgpack.encode(result)
         decoded = msgspec.msgpack.decode(encoded, type=QueryResult)
 
-        assert decoded.response_output["reasoning"] == ("Quick thought",)
-        assert len(decoded.response_output["reasoning"]) == 1
+        assert isinstance(decoded.response_output, TextModelOutput)
+        assert decoded.response_output.reasoning == ("Quick thought",)
+        assert len(decoded.response_output.reasoning) == 1
 
     def test_query_result_single_output_chunk(self):
         """Test pattern when there's only one output chunk."""
-        output_chunks = ["SingleResponse"]
-
-        # When len(output_chunks) == 1, only first element is included
-        resp_output = [output_chunks[0]]
-
-        response_output = {
-            "output": resp_output,
-        }
-
-        result = QueryResult(id="query-single-output", response_output=response_output)
+        result = QueryResult(
+            id="query-single-output",
+            response_output=TextModelOutput(output=["SingleResponse"], reasoning=None),
+        )
 
         encoded = msgspec.msgpack.encode(result)
         decoded = msgspec.msgpack.decode(encoded, type=QueryResult)
 
-        assert decoded.response_output["output"] == ("SingleResponse",)
-        assert len(decoded.response_output["output"]) == 1
+        assert isinstance(decoded.response_output, TextModelOutput)
+        assert decoded.response_output.output == ("SingleResponse",)
+        assert len(decoded.response_output.output) == 1
 
 
 class TestMixedTypeSerialization:
@@ -687,17 +731,24 @@ class TestMixedTypeSerialization:
     def test_serialize_list_of_query_results(self):
         """Test serializing a list of QueryResult objects."""
         results = [
-            QueryResult(id="r1", response_output="Response 1"),
-            QueryResult(id="r2", response_output="Response 2"),
-            QueryResult(id="r3", error="Error in query 3"),
+            QueryResult(id="r1", response_output=TextModelOutput(output="Response 1")),
+            QueryResult(id="r2", response_output=TextModelOutput(output="Response 2")),
+            QueryResult(
+                id="r3",
+                error=ErrorData(
+                    error_type="RuntimeError", error_message="Error in query 3"
+                ),
+            ),
         ]
 
         encoded = msgspec.msgpack.encode(results)
         decoded = msgspec.msgpack.decode(encoded, type=list[QueryResult])
 
         assert len(decoded) == 3
-        assert decoded[0].response_output == "Response 1"
-        assert decoded[2].error == "Error in query 3"
+        assert decoded[0].response_output == TextModelOutput(output="Response 1")
+        assert decoded[2].error is not None
+        assert decoded[2].error.error_type == "RuntimeError"
+        assert decoded[2].error.error_message == "Error in query 3"
 
     def test_serialize_list_of_stream_chunks(self):
         """Test serializing a list of StreamChunk objects."""
@@ -717,13 +768,13 @@ class TestMixedTypeSerialization:
         assert decoded[2].is_complete is True
 
     def test_query_result_with_nested_metadata(self):
-        """Test QueryResult with deeply nested metadata structures."""
+        """Test QueryResult with deeply nested metadata and TextModelOutput."""
         result = QueryResult(
             id="query-nested",
-            response_output={
-                "output": ["First chunk", "remaining output"],
-                "reasoning": ["Reasoning process"],
-            },
+            response_output=TextModelOutput(
+                output=["First chunk", "remaining output"],
+                reasoning=["Reasoning process"],
+            ),
             metadata={
                 "model_info": {
                     "name": "gpt-4",
@@ -748,8 +799,9 @@ class TestMixedTypeSerialization:
         assert decoded.metadata["model_info"]["parameters"]["temperature"] == 0.7
         assert decoded.metadata["usage"]["breakdown"] == [5, 5, 10, 10]
         assert "production" in decoded.metadata["tags"]
-        assert decoded.response_output["output"] == ("First chunk", "remaining output")
-        assert decoded.response_output["reasoning"] == ("Reasoning process",)
+        assert isinstance(decoded.response_output, TextModelOutput)
+        assert decoded.response_output.output == ("First chunk", "remaining output")
+        assert decoded.response_output.reasoning == ("Reasoning process",)
 
     def test_query_with_none_values_in_data(self):
         """Test Query with None values in data dict."""
@@ -776,16 +828,18 @@ class TestMixedTypeSerialization:
         decoded_query = msgspec.msgpack.decode(encoded_query, type=Query)
         assert decoded_query.data["prompt"] == large_text
 
-        result = QueryResult(id="large", response_output=large_text)
+        result = QueryResult(
+            id="large", response_output=TextModelOutput(output=large_text)
+        )
         encoded_result = msgspec.msgpack.encode(result)
         decoded_result = msgspec.msgpack.decode(encoded_result, type=QueryResult)
-        assert decoded_result.response_output == large_text
+        assert decoded_result.response_output == TextModelOutput(output=large_text)
 
     def test_numeric_types_in_metadata(self):
         """Test various numeric types in metadata."""
         result = QueryResult(
             id="numeric-test",
-            response_output="Text",
+            response_output=TextModelOutput(output="Text"),
             metadata={
                 "int_value": 42,
                 "float_value": 3.14159,

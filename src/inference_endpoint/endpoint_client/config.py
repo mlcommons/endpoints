@@ -71,7 +71,7 @@ class HTTPClientConfig:
     cpu_affinity: AffinityPlan | None = None
 
     # Worker lifecycle timeouts
-    worker_initialization_timeout: float = 40.0  # init
+    worker_initialization_timeout: float = 60.0  # init
     worker_graceful_shutdown_wait: float = 0.5  # post-run
     worker_force_kill_timeout: float = 0.5  # post-run
 

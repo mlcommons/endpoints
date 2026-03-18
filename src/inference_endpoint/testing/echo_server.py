@@ -26,7 +26,7 @@ from abc import abstractmethod
 
 from aiohttp import web
 
-from inference_endpoint.core.types import QueryResult
+from inference_endpoint.core.types import QueryResult, TextModelOutput
 from inference_endpoint.openai.openai_adapter import OpenAIAdapter
 from inference_endpoint.openai.openai_types_gen import CreateChatCompletionRequest
 
@@ -284,10 +284,10 @@ class EchoServer(HTTPServer):
                     id, request, completion_request, raw_response
                 )
             else:
-                # Non-streaming: return QueryResult as before
+                # Non-streaming: return QueryResult
                 response = QueryResult(
                     id=id,
-                    response_output=raw_response,
+                    response_output=TextModelOutput(output=raw_response),
                 )
                 echo_response = OpenAIAdapter.to_endpoint_response(response).model_dump(
                     mode="json"

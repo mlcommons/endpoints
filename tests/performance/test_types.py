@@ -30,7 +30,12 @@ To compare against saved results:
 
 import msgspec
 import pytest
-from inference_endpoint.core.types import Query, QueryResult, StreamChunk
+from inference_endpoint.core.types import (
+    Query,
+    QueryResult,
+    StreamChunk,
+    TextModelOutput,
+)
 
 TEXT_SIZES = {
     "empty": "",
@@ -57,7 +62,11 @@ def make_instance(type_name: str, text: str):
             headers={"Authorization": "Bearer token"},
         )
     elif type_name == "QueryResult":
-        return QueryResult(id="test-id", response_output=text, metadata={"tokens": 0})
+        return QueryResult(
+            id="test-id",
+            response_output=TextModelOutput(output=text),
+            metadata={"tokens": 0},
+        )
     else:
         return StreamChunk(id="test-id", response_chunk=text, metadata={})
 

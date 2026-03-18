@@ -48,8 +48,110 @@ class QueryStatus(Enum):
     CANCELLED = "cancelled"
 
 
-_OUTPUT_DICT_TYPE = dict[str, str | list[str]]
-_OUTPUT_RESULT_TYPE = str | tuple[str, ...] | _OUTPUT_DICT_TYPE | None
+OUTPUT_ELEM_TYPE = str | tuple[str, ...]
+"""Type for a single output or reasoning value: string (non-streaming) or tuple of strings (streaming)."""
+
+
+class TextModelOutput(
+    msgspec.Struct,
+    tag=True,
+    kw_only=True,
+    frozen=True,
+    omit_defaults=True,
+    array_like=True,
+    gc=False,
+):  # type: ignore[call-arg]
+    """Structured output from a text model.
+
+    Supports main output and optional reasoning (e.g. chain-of-thought).
+    Each field may be a string (non-streaming) or tuple of strings (streaming chunks).
+
+    Attributes:
+        output: Main model output. Defaults to empty string.
+        reasoning: Optional reasoning trace. Defaults to None.
+    """
+
+    output: OUTPUT_ELEM_TYPE = ""
+    reasoning: OUTPUT_ELEM_TYPE | None = None
+
+    def __post_init__(self):
+        """Convert list to tuple for output and reasoning to preserve immutability."""
+        if isinstance(self.output, list):
+            msgspec.structs.force_setattr(self, "output", tuple(self.output))
+        if self.reasoning is not None and isinstance(self.reasoning, list):
+            msgspec.structs.force_setattr(self, "reasoning", tuple(self.reasoning))
+
+    def __str__(self) -> str:
+        """Return the full output as a single string (joins tuple chunks if streaming)."""
+        parts = []
+        if self.reasoning:
+            if isinstance(self.reasoning, str):
+                parts.append(self.reasoning)
+            elif isinstance(self.reasoning, tuple):
+                parts.extend(self.reasoning)
+
+        if self.output:
+            if isinstance(self.output, str):
+                parts.append(self.output)
+            elif isinstance(self.output, tuple):
+                parts.extend(self.output)
+
+        return "".join(parts)
+
+
+OUTPUT_TYPE = TextModelOutput
+
+
+class PromptData(
+    msgspec.Struct,
+    tag=True,
+    kw_only=True,
+    frozen=True,
+    omit_defaults=True,
+    array_like=True,
+    gc=False,
+):  # type: ignore[call-arg]
+    """Prompt input data attached to ISSUED events for ISL computation.
+
+    Exactly one of ``text`` or ``token_ids`` should be set:
+    - ``text``: raw prompt string (OpenAI path) — requires tokenization for ISL.
+    - ``token_ids``: pre-tokenized token ID list (SGLang/Harmonize path) — ISL is len().
+
+    Attributes:
+        text: Raw prompt string. Set when the adapter sends text prompts.
+        token_ids: Pre-computed token IDs. Set when the adapter pre-tokenizes (e.g. SGLang).
+    """
+
+    text: str | None = None
+    token_ids: tuple[int, ...] | None = None
+
+
+class ErrorData(
+    msgspec.Struct,
+    tag=True,
+    kw_only=True,
+    frozen=True,
+    omit_defaults=True,
+    array_like=True,
+    gc=False,
+):  # type: ignore[call-arg]
+    """Structured error information.
+
+    Attributes:
+        error_type: Name of error. If possible, should be a qualified error type (e.g. "msgspec.DecodeError")..
+        error_message: Optional human-readable message. Defaults to empty string.
+    """
+
+    error_type: str
+    error_message: str = ""
+
+    def __str__(self) -> str:
+        """Human-readable string: 'type: message' if message present, else 'type'."""
+        return (
+            f"{self.error_type}: {self.error_message}"
+            if self.error_message
+            else self.error_type
+        )
 
 
 class Query(
@@ -98,6 +200,7 @@ class Query(
     created_at: float = msgspec.field(default_factory=time.time)
 
 
+# gc=False: audit 2026-03: metadata dict is only ever read, never mutated after construction.
 class QueryResult(
     msgspec.Struct,
     tag="query_result",
@@ -109,6 +212,10 @@ class QueryResult(
 ):  # type: ignore[call-arg]
     """Result of a completed inference query.
 
+    AT-RISK (gc=False): Has mutable container field `metadata`. Any change that
+    mutates `metadata` after construction or stores this struct in a container
+    referenced by this struct must be audited; if so, remove gc=False.
+
     Represents the outcome of processing a Query, including the response text,
     metadata, and any error information. The completed_at timestamp is
     automatically set to ensure accurate timing measurements.
@@ -118,14 +225,10 @@ class QueryResult(
 
     Attributes:
         id: Query identifier (matches the originating Query.id).
-        response_output: Generated text response from the endpoint (None if error).
-                         Can be a string, or a tuple of strings. If it is a string,
-                         it is assumed to be a non-streaming response. If it is a
-                         tuple of strings, it is assumed to be a streamed response,
-                         where the first element is the first chunk, which will not
-                         be included in the TPOT measurements.
+        response_output: Generated response from the endpoint (None if error).
+                         Prefer TextModelOutput; str is supported but will be deprecated.
         metadata: Additional response metadata (token counts, model info, etc.).
-        error: Error message if query failed (None if successful).
+        error: Structured error if query failed (None if successful).
         completed_at: High-resolution timestamp (nanoseconds, monotonic clock).
                       Auto-set in __post_init__ to prevent tampering.
 
@@ -144,9 +247,9 @@ class QueryResult(
     """
 
     id: str = ""
-    response_output: _OUTPUT_RESULT_TYPE = None
+    response_output: OUTPUT_TYPE | None = None
     metadata: dict[str, Any] = msgspec.field(default_factory=dict)
-    error: str | None = None
+    error: ErrorData | None = None
     completed_at: int | msgspec.UnsetType = msgspec.UNSET
 
     def __post_init__(self):
@@ -166,22 +269,9 @@ class QueryResult(
         # due to how monotonic_ns works.
         msgspec.structs.force_setattr(self, "completed_at", time.monotonic_ns())
 
-        # A list can be passed on, but we need to convert it to a tuple to maintain immutability,
-        # and for serialization to work properly.
-        if isinstance(self.response_output, list):
-            msgspec.structs.force_setattr(
-                self, "response_output", tuple(self.response_output)
-            )
-        elif isinstance(self.response_output, dict):
-            for k, v in self.response_output.items():
-                if isinstance(v, list):
-                    self.response_output[k] = tuple(v)
-
     def get_response_output_string(self) -> str:
         """Get the response output as a string."""
-        if isinstance(self.response_output, tuple):
-            return "".join(self.response_output)
-        elif isinstance(self.response_output, dict):
+        if isinstance(self.response_output, TextModelOutput):
             return str(self.response_output)
         elif isinstance(self.response_output, str):
             return self.response_output
