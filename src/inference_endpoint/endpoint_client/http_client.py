@@ -115,17 +115,12 @@ class HTTPEndpointClient:
         """
         Issue query to endpoint (round-robin to workers).
         Non-blocking - buffers if socket would block.
-
-        Thread-safe: schedules the send on the event loop thread via
-        call_soon_threadsafe, since the underlying ZMQ sockets and send
-        buffers are not thread-safe and belong to the event loop thread.
         """
         if self._shutdown:
             # NOTE(vir): drop requests during shutdown
             self._dropped_requests += 1
         else:
-            worker_id = next(self._worker_cycle)
-            self.loop.call_soon_threadsafe(self.pool.send, worker_id, query)
+            self.pool.send(next(self._worker_cycle), query)
 
     def poll(self) -> QueryResult | StreamChunk | None:
         """Non-blocking. Returns response if available, None otherwise."""
