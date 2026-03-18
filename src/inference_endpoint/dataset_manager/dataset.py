@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 import numpy as np
 import pandas as pd
-from datasets import load_dataset, load_from_disk
+from datasets import Dataset as HFDataset, concatenate_datasets, load_dataset, load_from_disk
 
 from ..config.schema import APIType, ModelParams
 from .transforms import Transform, apply_transforms, get_transforms_for_api_type
@@ -240,20 +240,20 @@ def load_from_huggingface(
     cache_dir: Path | None = None,
     load_options: dict[str, Any] | None = None,
     cache_options: dict[str, Any] | None = None,
-) -> pd.DataFrame:
+) -> HFDataset:
     """Load a dataset from HuggingFace.
 
     Args:
         dataset_path: The path to the dataset on HuggingFace. See HuggingFace docs for more details.
         dataset_name: The name of the dataset from the path to load. See HuggingFace docs for more details.
-        split: The split of the dataset. Defaults to "train".
+        split: The split(s) of the dataset to load. Defaults to "train".
         cache_dir: Optional explicit cache directory to load dataset from. This is useful if your dataset is
             saved to an external storage location not in your local HuggingFace cache.
         load_options: Optional additional options to pass to the load_dataset function. See HuggingFace docs for more details.
         cache_options: Optional additional options to pass to the save_to_disk function. See HuggingFace docs for more details.
 
     Returns:
-        A pandas dataframe containing the dataset.
+        A HuggingFace dataset object.
     """
     load_options = load_options or {}
     cache_options = cache_options or {}
@@ -261,7 +261,17 @@ def load_from_huggingface(
     if cache_dir is not None and cache_dir.exists():
         try:
             ds = load_from_disk(str(cache_dir), **cache_options)
-            return ds[split].to_pandas()
+            # load_from_disk returns Dataset or DatasetDict (no split kwarg)
+            if hasattr(ds, "keys"):
+                # DatasetDict: extract split(s)
+                if "+" in split:
+                    split_names = [s.strip() for s in split.split("+")]
+                    sub_datasets = [ds[s] for s in split_names]
+                    ds = concatenate_datasets(sub_datasets)
+                else:
+                    ds = ds[split]
+            # else: single Dataset, use as-is
+            return ds
         except Exception as e:
             logger.warning(f"Error loading dataset from cache: {e}")
     ds = load_dataset(dataset_path, dataset_name, **load_options)
@@ -271,7 +281,7 @@ def load_from_huggingface(
             ds.save_to_disk(str(cache_dir), **cache_options)
         except Exception as e:
             logger.warning(f"Error caching dataset: {e}")
-    return ds[split].to_pandas()
+    return ds[split]
 
 
 class Dataset:

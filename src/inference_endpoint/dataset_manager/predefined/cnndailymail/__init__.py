@@ -80,7 +80,7 @@ class CNNDailyMail(
                 dataset_name="3.0.0",
                 split="validation",
                 cache_dir=datasets_dir / "hf_cache" / "cnndailymail",
-            )
+            ).to_pandas()
         except Exception as e:
             logger.error(f"Error loading dataset: {e}")
             logger.error("Note: This dataset may require HuggingFace authentication.")

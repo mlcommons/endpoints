@@ -17,6 +17,7 @@
 
 import base64
 import json
+from io import BytesIO
 from logging import getLogger
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,52 @@ from ...dataset import Dataset, load_from_huggingface
 from . import presets
 
 logger = getLogger(__name__)
+
+EXT_TO_FORMAT = {"": "JPEG", ".jpg": "JPEG", ".jpeg": "JPEG", ".png": "PNG"}
+
+
+def _process_sample_to_row(sample: dict[str, Any]) -> dict[str, Any]:
+    """Convert a single HF dataset sample to a row dict for parquet storage.
+
+    Handles product_image as either PIL Image (MLCommons-style) or dict with
+    bytes/path. Reference: https://github.com/mlcommons/inference/blob/master/
+    multimodal/qwen3-vl/src/mlperf_inf_mm_q3vl/task.py#L577
+    """
+    image = sample.get("product_image")
+    if image is None:
+        raise ValueError("product_image is missing from dataset row")
+
+    if hasattr(image, "save") and hasattr(image, "format"):
+        image_file = BytesIO()
+        image_format = image.format or "JPEG"
+        image.save(image_file, format=image_format)
+        image_bytes = image_file.getvalue()
+    elif isinstance(image, dict) and "bytes" in image:
+        image_bytes = image["bytes"]
+        ext = Path(image.get("path", "")).suffix.lower()
+        image_format = EXT_TO_FORMAT.get(ext, "JPEG")
+    else:
+        raise ValueError(
+            "product_image must be PIL Image or dict with 'bytes' and 'path'"
+        )
+
+    image_base64 = base64.b64encode(image_bytes).decode("utf-8")
+    categories = sample.get("potential_product_categories", [])
+    if hasattr(categories, "tolist"):
+        categories = categories.tolist()
+
+    return {
+        "product_title": sample.get("product_title", ""),
+        "product_description": sample.get("product_description", ""),
+        "product_image_base64": image_base64,
+        "product_image_format": image_format,
+        "potential_product_categories": json.dumps(categories),
+        "ground_truth_category": sample.get("ground_truth_category", ""),
+        "ground_truth_brand": sample.get("ground_truth_brand", ""),
+        "ground_truth_is_secondhand": json.dumps(
+            sample.get("ground_truth_is_secondhand", False)
+        ),
+    }
 
 
 class ProductMetadata(BaseModel):
@@ -122,49 +169,22 @@ class ShopifyProductCatalogue(
 
         all_rows: list[dict[str, Any]] = []
         for s in split:
-            df = load_from_huggingface(
+            ds = load_from_huggingface(
                 dataset_path=cls.REPO_ID,
                 split=s,
                 load_options=load_options,
             )
             logger.info(
-                f"Loaded {len(df)} samples from Shopify product catalogue ({s})"
+                f"Loaded {len(ds)} samples from Shopify product catalogue ({s})"
             )
 
-            # Convert product_image (dict with bytes/path) to base64 for parquet storage.
-
-            ext_to_format = {"": "JPEG", ".jpg": "JPEG", ".jpeg": "JPEG", ".png": "PNG"}
-            for row in tqdm(
-                df.to_dict("records"),
-                total=len(df),
+            for i in tqdm(
+                range(len(ds)),
                 desc=f"Converting images ({s})",
                 unit="rows",
             ):
-                image = row.get("product_image")
-                if image is None:
-                    raise ValueError("product_image is missing from dataset row")
-                image_base64 = base64.b64encode(image["bytes"]).decode("utf-8")
-                ext = Path(image.get("path", "")).suffix.lower()
-                image_format = ext_to_format.get(ext, "JPEG")
-
-                categories = row.get("potential_product_categories", [])
-                if hasattr(categories, "tolist"):
-                    categories = categories.tolist()
-
-                all_rows.append(
-                    {
-                        "product_title": row.get("product_title", ""),
-                        "product_description": row.get("product_description", ""),
-                        "product_image_base64": image_base64,
-                        "product_image_format": image_format,
-                        "potential_product_categories": json.dumps(categories),
-                        "ground_truth_category": row.get("ground_truth_category", ""),
-                        "ground_truth_brand": row.get("ground_truth_brand", ""),
-                        "ground_truth_is_secondhand": json.dumps(
-                            row.get("ground_truth_is_secondhand", False)
-                        ),
-                    }
-                )
+                sample = ds[i]
+                all_rows.append(_process_sample_to_row(sample))
 
         df = pd.DataFrame(all_rows)
 

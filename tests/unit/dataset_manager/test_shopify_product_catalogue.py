@@ -60,9 +60,12 @@ class TestShopifyProductCatalogueGenerate:
     """Tests for ShopifyProductCatalogue.generate()."""
 
     @pytest.fixture
-    def mock_hf_data(self) -> pd.DataFrame:
-        """Synthetic HuggingFace-style data for mocking load_from_huggingface."""
-        rows = [
+    def mock_hf_dataset(self) -> list[dict]:
+        """Synthetic HuggingFace-style dataset for mocking load_from_huggingface.
+
+        Returns a list of sample dicts (indexable like HF Dataset via ds[i]).
+        """
+        return [
             _make_mock_hf_row(
                 product_title="Shirt A",
                 product_description="Blue cotton shirt",
@@ -75,15 +78,14 @@ class TestShopifyProductCatalogueGenerate:
                 ground_truth_category="Clothing > Shirts > Dress",
             ),
         ]
-        return pd.DataFrame(rows)
 
     def test_generate_produces_expected_columns(
-        self, tmp_path: Path, mock_hf_data: pd.DataFrame
+        self, tmp_path: Path, mock_hf_dataset: list[dict]
     ) -> None:
         """Generate produces DataFrame with expected column names."""
         with patch(
             "inference_endpoint.dataset_manager.predefined.shopify_product_catalogue.load_from_huggingface",
-            return_value=mock_hf_data,
+            return_value=mock_hf_dataset,
         ):
             df = ShopifyProductCatalogue.generate(
                 datasets_dir=tmp_path,
@@ -94,12 +96,12 @@ class TestShopifyProductCatalogueGenerate:
         assert len(df) == 2
 
     def test_generate_converts_image_to_base64(
-        self, tmp_path: Path, mock_hf_data: pd.DataFrame
+        self, tmp_path: Path, mock_hf_dataset: list[dict]
     ) -> None:
         """Images are base64-encoded in output."""
         with patch(
             "inference_endpoint.dataset_manager.predefined.shopify_product_catalogue.load_from_huggingface",
-            return_value=mock_hf_data,
+            return_value=mock_hf_dataset,
         ):
             df = ShopifyProductCatalogue.generate(
                 datasets_dir=tmp_path,
@@ -112,12 +114,12 @@ class TestShopifyProductCatalogueGenerate:
         assert df["product_image_format"].iloc[1] == "PNG"
 
     def test_generate_json_serializes_categories_and_secondhand(
-        self, tmp_path: Path, mock_hf_data: pd.DataFrame
+        self, tmp_path: Path, mock_hf_dataset: list[dict]
     ) -> None:
         """potential_product_categories and ground_truth_is_secondhand are JSON strings."""
         with patch(
             "inference_endpoint.dataset_manager.predefined.shopify_product_catalogue.load_from_huggingface",
-            return_value=mock_hf_data,
+            return_value=mock_hf_dataset,
         ):
             df = ShopifyProductCatalogue.generate(
                 datasets_dir=tmp_path,
@@ -130,7 +132,7 @@ class TestShopifyProductCatalogueGenerate:
         assert secondhand is False
 
     def test_generate_uses_cache_when_exists_and_not_force(
-        self, tmp_path: Path, mock_hf_data: pd.DataFrame
+        self, tmp_path: Path, mock_hf_dataset: list[dict]
     ) -> None:
         """When file exists and force=False, loads from cache without calling HF."""
         dst_dir = tmp_path / "shopify_product_catalogue" / "train"
@@ -151,7 +153,7 @@ class TestShopifyProductCatalogueGenerate:
 
         with patch(
             "inference_endpoint.dataset_manager.predefined.shopify_product_catalogue.load_from_huggingface",
-            return_value=mock_hf_data,
+            return_value=mock_hf_dataset,
         ) as mock_load:
             df = ShopifyProductCatalogue.generate(
                 datasets_dir=tmp_path,
@@ -162,12 +164,12 @@ class TestShopifyProductCatalogueGenerate:
         assert df["product_title"].iloc[0] == "Cached"
 
     def test_generate_passes_token_and_revision(
-        self, tmp_path: Path, mock_hf_data: pd.DataFrame
+        self, tmp_path: Path, mock_hf_dataset: list[dict]
     ) -> None:
         """Token and revision are passed to load_from_huggingface."""
         with patch(
             "inference_endpoint.dataset_manager.predefined.shopify_product_catalogue.load_from_huggingface",
-            return_value=mock_hf_data,
+            return_value=mock_hf_dataset,
         ) as mock_load:
             ShopifyProductCatalogue.generate(
                 datasets_dir=tmp_path,
@@ -183,22 +185,20 @@ class TestShopifyProductCatalogueGenerate:
 
     def test_generate_raises_when_product_image_missing(self, tmp_path: Path) -> None:
         """Raises ValueError when product_image is missing from a row."""
-        bad_data = pd.DataFrame(
-            [
-                {
-                    "product_title": "No Image",
-                    "product_description": "",
-                    "product_image": None,
-                    "potential_product_categories": [],
-                    "ground_truth_category": "",
-                    "ground_truth_brand": "",
-                    "ground_truth_is_secondhand": False,
-                }
-            ]
-        )
+        bad_dataset = [
+            {
+                "product_title": "No Image",
+                "product_description": "",
+                "product_image": None,
+                "potential_product_categories": [],
+                "ground_truth_category": "",
+                "ground_truth_brand": "",
+                "ground_truth_is_secondhand": False,
+            }
+        ]
         with patch(
             "inference_endpoint.dataset_manager.predefined.shopify_product_catalogue.load_from_huggingface",
-            return_value=bad_data,
+            return_value=bad_dataset,
         ):
             with pytest.raises(ValueError, match="product_image is missing"):
                 ShopifyProductCatalogue.generate(
