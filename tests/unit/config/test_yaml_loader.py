@@ -23,6 +23,7 @@ from inference_endpoint.config.schema import TestType as BenchmarkTestType
 from inference_endpoint.config.yaml_loader import ConfigError, ConfigLoader
 
 
+@pytest.mark.unit
 class TestConfigLoader:
     """Test configuration loader."""
 
@@ -49,6 +50,9 @@ settings:
     type: "max_throughput"
   client:
     workers: 4
+    worker_initialization_timeout: 120
+    zmq_recv_buffer_bytes: 16777216
+    zmq_send_buffer_bytes: 8388608
 
 metrics:
   collect:
@@ -65,6 +69,9 @@ endpoint_config:
         assert config.name == "test-config"
         assert config.type == BenchmarkTestType.OFFLINE
         assert len(config.datasets) == 1
+        assert config.settings.client.worker_initialization_timeout == 120.0
+        assert config.settings.client.zmq_recv_buffer_bytes == 16777216
+        assert config.settings.client.zmq_send_buffer_bytes == 8388608
 
     def test_load_nonexistent_file(self):
         """Test error when file doesn't exist."""
@@ -113,6 +120,18 @@ endpoint_config:
         assert loaded.type == original.type
         assert loaded.settings.client.workers == original.settings.client.workers
         assert loaded.settings.load_pattern.type == original.settings.load_pattern.type
+        assert (
+            loaded.settings.client.worker_initialization_timeout
+            == original.settings.client.worker_initialization_timeout
+        )
+        assert (
+            loaded.settings.client.zmq_recv_buffer_bytes
+            == original.settings.client.zmq_recv_buffer_bytes
+        )
+        assert (
+            loaded.settings.client.zmq_send_buffer_bytes
+            == original.settings.client.zmq_send_buffer_bytes
+        )
 
     def test_to_yaml_file_creates_directory(self, tmp_path):
         """Test that to_yaml_file creates parent directories."""
