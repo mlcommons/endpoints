@@ -17,7 +17,7 @@ warmup:
   num_samples: 32 # Number of warmup requests to issue
   input_seq_length: 128 # ISL: target input sequence length in tokens
   output_seq_length: 32 # OSL: max_new_tokens for warmup requests
-  range_ratio: 0.8 # ISL variance: generates ISL in [128*0.8, 128]
+  input_range_ratio: 0.8 # ISL variance: generates ISL in [128*0.8, 128]
   random_seed: 42
 
 model_params:

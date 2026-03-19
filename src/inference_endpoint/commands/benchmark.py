@@ -467,7 +467,7 @@ def _run_benchmark(
                 force=False,
                 num_sequences=warmup_cfg.num_samples,
                 input_seq_length=warmup_cfg.input_seq_length,
-                range_ratio=warmup_cfg.range_ratio,
+                input_range_ratio=warmup_cfg.input_range_ratio,
                 random_seed=warmup_cfg.random_seed,
                 tokenizer=tokenizer,
             )

@@ -37,7 +37,7 @@ class RandomDataset(Dataset, dataset_id="random"):
         *,
         num_sequences: int = 1024,
         input_seq_length: int = 1024,
-        range_ratio: float = 1.0,
+        input_range_ratio: float = 1.0,
         random_seed: int = 42,
         save_tokenized_data: bool = False,
         tokenizer: str | PreTrainedTokenizer,
@@ -49,7 +49,7 @@ class RandomDataset(Dataset, dataset_id="random"):
         data = []
         # Generate the input sequence lengths given the range ratio
         input_seq_lengths = rng.integers(
-            int(input_seq_length * range_ratio),
+            int(input_seq_length * input_range_ratio),
             input_seq_length + 1,
             num_sequences,
         )

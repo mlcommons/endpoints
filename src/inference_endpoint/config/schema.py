@@ -245,15 +245,15 @@ class WarmupConfig(BaseModel):
         num_samples: Number of warmup queries to issue.
         input_seq_length: Target input sequence length in tokens (ISL).
         output_seq_length: Max output tokens for warmup requests (OSL).
-        range_ratio: ISL variance factor in [0.0, 1.0]. Generates ISL in
-            the range [input_seq_length * range_ratio, input_seq_length].
+        input_range_ratio: ISL variance factor in [0.0, 1.0]. Generates ISL in
+            the range [input_seq_length * input_range_ratio, input_seq_length].
         random_seed: Seed for reproducible warmup data generation.
     """
 
     num_samples: int = Field(100, gt=0)
     input_seq_length: int = Field(512, gt=0)
     output_seq_length: int = Field(128, gt=0)
-    range_ratio: float = Field(1.0, ge=0.0, le=1.0)
+    input_range_ratio: float = Field(1.0, ge=0.0, le=1.0)
     random_seed: int = 42
 
 

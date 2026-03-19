@@ -47,7 +47,7 @@ async def test_warmup_offline_with_echo_server(
           num_samples: 4
           input_seq_length: 16
           output_seq_length: 8
-          range_ratio: 0.9
+          input_range_ratio: 0.9
           random_seed: 42
 
         model_params:
@@ -103,7 +103,7 @@ async def test_warmup_offline_with_echo_server(
 
     log_text = caplog.text
     assert "Warmup: issuing samples" in log_text, "Warmup did not start"
-    assert "Warmup issue complete" in log_text, "Warmup issue did not complete"
+    assert "Warmup complete" in log_text, "Warmup did not complete"
     assert "Estimated QPS:" in log_text, "Performance test did not run after warmup"
 
 
@@ -122,7 +122,7 @@ async def test_warmup_online_with_echo_server(
           num_samples: 4
           input_seq_length: 16
           output_seq_length: 8
-          range_ratio: 0.8
+          input_range_ratio: 0.8
           random_seed: 42
 
         model_params:
@@ -179,5 +179,5 @@ async def test_warmup_online_with_echo_server(
 
     log_text = caplog.text
     assert "Warmup: issuing samples" in log_text, "Warmup did not start"
-    assert "Warmup issue complete" in log_text, "Warmup issue did not complete"
+    assert "Warmup complete" in log_text, "Warmup did not complete"
     assert "Estimated QPS:" in log_text, "Performance test did not run after warmup"

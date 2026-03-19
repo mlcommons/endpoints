@@ -50,8 +50,8 @@ def test_hf_squad_dataset(hf_squad_dataset):
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("range_ratio", [0.5, 0.8, 1.0])
-def test_random_data_loader(range_ratio):
+@pytest.mark.parametrize("input_range_ratio", [0.5, 0.8, 1.0])
+def test_random_data_loader(input_range_ratio):
     num_sequences = 1024
     input_seq_length = 1024
     random_seed = 42
@@ -60,7 +60,7 @@ def test_random_data_loader(range_ratio):
     random_data_loader = RandomDataset.get_dataloader(
         num_sequences=num_sequences,
         input_seq_length=input_seq_length,
-        range_ratio=range_ratio,
+        input_range_ratio=input_range_ratio,
         random_seed=random_seed,
         tokenizer=tokenizer,
         save_tokenized_data=save_tokenized_data,
@@ -83,11 +83,11 @@ def test_random_data_loader(range_ratio):
         # the decoding-encoding which may coalesce some sequences to newer tokens. We use a 0.8 factor to allow for this.
         # And we allow for a 20% overhead due to the decoding-encoding.
         assert (
-            len(sample["input_tokens"]) > input_seq_length * range_ratio * 0.8
+            len(sample["input_tokens"]) > input_seq_length * input_range_ratio * 0.8
             and len(sample["input_tokens"]) <= input_seq_length * 1.2
-        ), f"Expected {input_seq_length*range_ratio*0.8} to {input_seq_length*0.2} input tokens, got {len(sample["input_tokens"])}"
+        ), f"Expected {input_seq_length*input_range_ratio*0.8} to {input_seq_length*0.2} input tokens, got {len(sample["input_tokens"])}"
 
         assert (
-            len(sample["prompt"]) >= 1024 * range_ratio * 0.5
+            len(sample["prompt"]) >= 1024 * input_range_ratio * 0.5
             and len(sample["prompt"]) <= 7 * 1024
-        ), f"Expected length between 1024*range_ratio*0.5 and 1024, got {len(sample["prompt"])}"
+        ), f"Expected length between 1024*input_range_ratio*0.5 and 1024, got {len(sample["prompt"])}"
