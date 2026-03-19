@@ -64,7 +64,10 @@ from inference_endpoint.core.types import QueryResult
 from inference_endpoint.dataset_manager.dataset import Dataset
 from inference_endpoint.dataset_manager.factory import DataLoaderFactory
 from inference_endpoint.endpoint_client.config import HTTPClientConfig
-from inference_endpoint.endpoint_client.cpu_affinity import pin_loadgen
+from inference_endpoint.endpoint_client.cpu_affinity import (
+    UnsupportedPlatformError,
+    pin_loadgen,
+)
 from inference_endpoint.endpoint_client.http_client import HTTPEndpointClient
 from inference_endpoint.endpoint_client.http_sample_issuer import HttpClientSampleIssuer
 from inference_endpoint.evaluation import Extractor
@@ -580,6 +583,13 @@ def _run_benchmark(
         try:
             api_type: APIType = config.endpoint_config.api_type
             assert api_type is not None
+            warmup = config.settings.client.warmup_connections
+            max_conn = config.settings.client.max_connections
+            init_timeout = config.settings.client.worker_initialization_timeout
+            logger.info(
+                f"HTTP client: workers={num_workers}, warmup_connections={warmup}, "
+                f"max_connections={max_conn}, worker_init_timeout={init_timeout}s"
+            )
             http_config = HTTPClientConfig(
                 endpoint_urls=[urljoin(e, api_type.default_route()) for e in endpoints],
                 api_type=api_type,
@@ -588,8 +598,9 @@ def _run_benchmark(
                 event_logs_dir=report_dir,
                 log_level=config.settings.client.log_level,
                 cpu_affinity=affinity_plan,
-                warmup_connections=config.settings.client.warmup_connections,
-                max_connections=config.settings.client.max_connections,
+                warmup_connections=warmup,
+                max_connections=max_conn,
+                worker_initialization_timeout=init_timeout,
                 api_key=config.endpoint_config.api_key,
             )
             http_client = HTTPEndpointClient(http_config, zmq_context=zmq_ctx)

@@ -67,7 +67,6 @@ docker run --runtime nvidia --gpus all \
   --tensor-parallel-size 4 \
   --max-model-len=32768 \
   --async-scheduling \
-  --max-num-seqs 1024 \
   --limit-mm-per-prompt.video 0
 ```
 

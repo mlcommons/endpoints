@@ -299,6 +299,10 @@ class ClientSettings(BaseModel):
     # -1 = unlimited (bound by system ephemeral port limit)
     max_connections: int = -1
 
+    # Seconds to wait for workers to initialize (spawn, connect, signal ready).
+    # Increase for slow systems or when workers load heavy dependencies.
+    worker_initialization_timeout: float = 40.0
+
 
 class Settings(BaseModel):
     """Test settings (can be overridden by CLI)."""
