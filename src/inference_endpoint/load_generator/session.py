@@ -98,24 +98,31 @@ class BenchmarkSession:
                     self.logger.info(
                         "Warmup samples issued, waiting for responses to drain..."
                     )
+                    # Enable idle signalling so EventRecorder wakes end_event when
+                    # all warmup responses are received, then reset it for the perf test.
+                    self.event_recorder.should_check_idle = True
                     warmup_start = time.monotonic()
                     while self.event_recorder.n_inflight_samples != 0:
                         if (
                             max_shutdown_timeout_s is not None
                             and time.monotonic() - warmup_start > max_shutdown_timeout_s
                         ):
-                            self.logger.warning(
-                                "Warmup drain timeout exceeded, proceeding to performance test"
+                            raise TimeoutError(
+                                f"Warmup drain timeout exceeded: "
+                                f"{self.event_recorder.n_inflight_samples} warmup requests "
+                                f"still in-flight after {max_shutdown_timeout_s}s"
                             )
-                            break
                         if self.stop_requested:
                             self.logger.info(
                                 f"Early stop requested (pending={self.event_recorder.n_inflight_samples}), shutting down test..."
                             )
-                            break
-                        time.sleep(0.1)
+                            return
+                        self.end_event.wait(timeout=SHUTDOWN_POLL_INTERVAL_S)
+                    # Reset so end_event is not pre-fired for the performance drain below.
+                    self.event_recorder.should_check_idle = False
+                    self.end_event.clear()
 
-                    self.logger.info("Warmup issue complete")
+                    self.logger.info("Warmup complete")
 
                 EventRecorder.record_event(
                     SessionEvent.TEST_STARTED,

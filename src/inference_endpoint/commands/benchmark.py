@@ -476,9 +476,9 @@ def _run_benchmark(
                 f"Failed to generate warmup dataset from warmup config: {e}"
             ) from e
         warmup_dataset = RandomDataset(warmup_df)
-        warmup_model_params = ModelParams(
-            name=config.model_params.name,
-            max_new_tokens=warmup_cfg.output_seq_length,
+        # Create a new model params object with the warmup output sequence length
+        warmup_model_params = config.model_params.model_copy(
+            update={"max_new_tokens": warmup_cfg.output_seq_length}
         )
         warmup_dataset.load(
             api_type=config.endpoint_config.api_type,
