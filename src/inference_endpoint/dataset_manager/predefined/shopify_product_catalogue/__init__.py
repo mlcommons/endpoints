@@ -148,8 +148,8 @@ class ShopifyProductCatalogue(
             token: HuggingFace token for gated datasets.
             revision: Dataset revision/branch. Defaults to "main".
             cache_dir: Optional cache directory for HF dataset. When set and the path
-                exists, load_from_huggingface uses load_from_disk instead of downloading.
-                Defaults to datasets_dir / "hf_cache" / DATASET_ID / {split_key}.
+                exists, load_from_huggingface uses load_from_disk from cache_dir instead of default huggingface cache directory.
+                Defaults to None. Pass a path to enable caching.
 
         Returns:
             DataFrame with product_title, product_description, product_image_base64,
@@ -173,9 +173,10 @@ class ShopifyProductCatalogue(
         if revision is not None:
             load_options["revision"] = revision
 
-        hf_cache = cache_dir or (
-            datasets_dir / "hf_cache" / cls.DATASET_ID / split_key
-        )
+        # Disable HF save_to_disk cache by default: it hangs on large image datasets
+        # (48k samples, ~9.5 GB) around shard 16/20. See huggingface/datasets#7290.
+        # Parquet output is the real cache. Pass cache_dir explicitly to enable HF cache.
+        hf_cache = cache_dir
         ds = load_from_huggingface(
             dataset_path=cls.REPO_ID,
             split=split_key,
