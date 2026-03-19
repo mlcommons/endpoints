@@ -92,6 +92,7 @@ class _ZMQSocketConfig:
     high_water_mark: int = 0  # 0 = unlimited
     linger: int = -1  # Block indefinitely on close to send pending messages
     immediate: int = 1  # Only enqueue on ready connections
+    # Default 4MB; increase for multimodal (VL) payloads via HTTPClientConfig / YAML / CLI.
     recv_buffer_size: int = 4 * 1024 * 1024  # 4MB
     send_buffer_size: int = 4 * 1024 * 1024  # 4MB
 
@@ -646,7 +647,7 @@ class ZmqWorkerPoolTransport(WorkerPoolTransport):
             num_workers: Number of workers (required).
             zmq_context: Managed ZMQ context (e.g. from ManagedZMQContext.scoped()).
             *args: Ignored - prevents any errors with extraneous args and adheres with WorkerPoolTransport.create().
-            **kwargs: Optional _ZMQSocketConfig overrides.
+            **kwargs: Optional _ZMQSocketConfig overrides (e.g. ``recv_buffer_size``, ``send_buffer_size``).
 
         Returns:
             Configured ZmqWorkerPoolTransport instance.

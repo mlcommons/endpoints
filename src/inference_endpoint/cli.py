@@ -91,6 +91,7 @@ def create_parser() -> argparse.ArgumentParser:
         "QPS is used to calculate total queries (QPS × duration).",
     )
     _add_shared_benchmark_args(offline_parser)
+    _add_zmq_buffer_args(offline_parser)
     _add_auxiliary_args(offline_parser)
 
     # benchmark online
@@ -101,6 +102,7 @@ def create_parser() -> argparse.ArgumentParser:
     )
     _add_shared_benchmark_args(online_parser)
     _add_online_specific_args(online_parser)
+    _add_zmq_buffer_args(online_parser)
     _add_auxiliary_args(online_parser)
 
     # benchmark from-config (YAML mode)
@@ -280,6 +282,24 @@ def _add_auxiliary_args(parser):
     """
     parser.add_argument(
         "--timeout", type=float, help="Timeout in seconds (default: 300)", default=300
+    )
+
+
+def _add_zmq_buffer_args(parser):
+    """ZMQ IPC buffer sizes for offline/online CLI mode only (not from-config)."""
+    parser.add_argument(
+        "--zmq-recv-buffer-bytes",
+        type=int,
+        default=argparse.SUPPRESS,
+        metavar="N",
+        help="ZMQ receive buffer size in bytes (default: 4MB; offline/online only)",
+    )
+    parser.add_argument(
+        "--zmq-send-buffer-bytes",
+        type=int,
+        default=argparse.SUPPRESS,
+        metavar="N",
+        help="ZMQ send buffer size in bytes (default: 4MB; offline/online only)",
     )
 
 

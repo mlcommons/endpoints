@@ -19,6 +19,7 @@ import asyncio
 import logging
 import uuid
 from itertools import cycle
+from typing import Any
 
 from inference_endpoint.async_utils.loop_manager import LoopManager
 from inference_endpoint.async_utils.transport import ZmqWorkerPoolTransport
@@ -103,11 +104,18 @@ class HTTPEndpointClient:
         self._dropped_requests: int = 0
 
         assert self.loop is not None
-        additional_args = []
+        additional_args: list[Any] = []
+        pool_kwargs: dict[str, int] = {}
         if self.config.worker_pool_transport is ZmqWorkerPoolTransport:
             assert self._zmq_context is not None
             additional_args.append(self._zmq_context)
-        self.worker_manager = WorkerManager(self.config, self.loop, *additional_args)
+            pool_kwargs = {
+                "recv_buffer_size": self.config.zmq_recv_buffer_bytes,
+                "send_buffer_size": self.config.zmq_send_buffer_bytes,
+            }
+        self.worker_manager = WorkerManager(
+            self.config, self.loop, *additional_args, **pool_kwargs
+        )
         await self.worker_manager.initialize()
         self.pool = self.worker_manager.pool_transport
 

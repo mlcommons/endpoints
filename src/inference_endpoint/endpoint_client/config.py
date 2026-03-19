@@ -128,6 +128,10 @@ class HTTPClientConfig:
     # Default in __post_init__ if None
     worker_pool_transport: type[WorkerPoolTransport] = None  # type: ignore[assignment]
 
+    # ZMQ socket buffer sizes (bytes); passed as recv_buffer_size/send_buffer_size kwargs
+    zmq_recv_buffer_bytes: int = 4 * 1024 * 1024
+    zmq_send_buffer_bytes: int = 4 * 1024 * 1024
+
     def __post_init__(self):
         # set default adapter in __post_init__ to avoid circular dependency
         if isinstance(self.api_type, str):

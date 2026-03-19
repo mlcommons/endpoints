@@ -295,6 +295,16 @@ def _build_config_from_cli(
     timeout = getattr(args, "timeout", None)
     verbose_level = getattr(args, "verbose", 0)
     api_type = APIType(getattr(args, "api_type", "openai"))
+    client_kwargs: dict[str, Any] = {
+        "workers": args.workers if args.workers else -1,
+        "log_level": "DEBUG" if verbose_level >= 2 else "INFO",
+        "warmup_connections": getattr(args, "warmup_connections", -1),
+        "max_connections": getattr(args, "max_connections", None) or -1,
+    }
+    if hasattr(args, "zmq_recv_buffer_bytes"):
+        client_kwargs["zmq_recv_buffer_bytes"] = args.zmq_recv_buffer_bytes
+    if hasattr(args, "zmq_send_buffer_bytes"):
+        client_kwargs["zmq_send_buffer_bytes"] = args.zmq_send_buffer_bytes
     # Build BenchmarkConfig from CLI params
     return BenchmarkConfig(
         name=f"cli_{benchmark_mode}",
@@ -325,12 +335,7 @@ def _build_config_from_cli(
                 scheduler_random_seed=42,
                 dataloader_random_seed=42,
             ),
-            client=ClientSettings(
-                workers=args.workers if args.workers else -1,
-                log_level="DEBUG" if verbose_level >= 2 else "INFO",
-                warmup_connections=getattr(args, "warmup_connections", -1),
-                max_connections=getattr(args, "max_connections", None) or -1,
-            ),
+            client=ClientSettings(**client_kwargs),
         ),
         model_params=ModelParams(
             name=args.model,
@@ -602,6 +607,8 @@ def _run_benchmark(
                 max_connections=max_conn,
                 worker_initialization_timeout=init_timeout,
                 api_key=config.endpoint_config.api_key,
+                zmq_recv_buffer_bytes=config.settings.client.zmq_recv_buffer_bytes,
+                zmq_send_buffer_bytes=config.settings.client.zmq_send_buffer_bytes,
             )
             http_client = HTTPEndpointClient(http_config, zmq_context=zmq_ctx)
             sample_issuer = HttpClientSampleIssuer(http_client)
