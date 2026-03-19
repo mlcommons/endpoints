@@ -101,6 +101,4 @@ The following are the possible product categories:
 
 def q3vl() -> list[Transform]:
     """Preset for Qwen3-VL / OpenAI multimodal adapter (vLLM vision, etc.)."""
-    return [
-        ShopifyMultimodalFormatter(),
-    ]
+    return [ShopifyMultimodalFormatter()]

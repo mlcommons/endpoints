@@ -27,11 +27,31 @@ from pydantic import BaseModel, ConfigDict
 from tqdm import tqdm
 
 from ...dataset import Dataset, load_from_huggingface
-from . import presets
 
 logger = getLogger(__name__)
 
 EXT_TO_FORMAT = {"": "JPEG", ".jpg": "JPEG", ".jpeg": "JPEG", ".png": "PNG"}
+
+
+class ProductMetadata(BaseModel):
+    """JSON format for expected VLM responses (matches MLCommons Q3VL schema).
+
+    Reference: https://github.com/mlcommons/inference/blob/master/multimodal/qwen3-vl/src/mlperf_inf_mm_q3vl/schema.py
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    category: str
+    """Complete category path, e.g. 'Clothing & Accessories > Clothing > Shirts > Polo Shirts'."""
+
+    brand: str
+    """Brand of the product, e.g. 'giorgio armani'."""
+
+    is_secondhand: bool
+    """True if second-hand, False otherwise."""
+
+
+from . import presets
 
 
 def _process_sample_to_row(sample: dict[str, Any]) -> dict[str, Any]:
@@ -78,24 +98,6 @@ def _process_sample_to_row(sample: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-class ProductMetadata(BaseModel):
-    """JSON format for expected VLM responses (matches MLCommons Q3VL schema).
-
-    Reference: https://github.com/mlcommons/inference/blob/master/multimodal/qwen3-vl/src/mlperf_inf_mm_q3vl/schema.py
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    category: str
-    """Complete category path, e.g. 'Clothing & Accessories > Clothing > Shirts > Polo Shirts'."""
-
-    brand: str
-    """Brand of the product, e.g. 'giorgio armani'."""
-
-    is_secondhand: bool
-    """True if second-hand, False otherwise."""
-
-
 class ShopifyProductCatalogue(
     Dataset,
     dataset_id="shopify_product_catalogue",
@@ -131,6 +133,7 @@ class ShopifyProductCatalogue(
         force: bool = False,
         token: str | None = None,
         revision: str = "main",
+        cache_dir: Path | None = None,
         **kwargs: Any,
     ) -> pd.DataFrame:
         """Generate the Shopify product catalogue dataset.
@@ -144,6 +147,9 @@ class ShopifyProductCatalogue(
             force: Regenerate even if file exists.
             token: HuggingFace token for gated datasets.
             revision: Dataset revision/branch. Defaults to "main".
+            cache_dir: Optional cache directory for HF dataset. When set and the path
+                exists, load_from_huggingface uses load_from_disk instead of downloading.
+                Defaults to datasets_dir / "hf_cache" / DATASET_ID / {split_key}.
 
         Returns:
             DataFrame with product_title, product_description, product_image_base64,
@@ -167,24 +173,27 @@ class ShopifyProductCatalogue(
         if revision is not None:
             load_options["revision"] = revision
 
-        all_rows: list[dict[str, Any]] = []
-        for s in split:
-            ds = load_from_huggingface(
-                dataset_path=cls.REPO_ID,
-                split=s,
-                load_options=load_options,
-            )
-            logger.info(
-                f"Loaded {len(ds)} samples from Shopify product catalogue ({s})"
-            )
+        hf_cache = cache_dir or (
+            datasets_dir / "hf_cache" / cls.DATASET_ID / split_key
+        )
+        ds = load_from_huggingface(
+            dataset_path=cls.REPO_ID,
+            split=split_key,
+            cache_dir=hf_cache,
+            load_options=load_options,
+        )
+        logger.info(
+            f"Loaded {len(ds)} samples from Shopify product catalogue ({split_key})"
+        )
 
-            for i in tqdm(
-                range(len(ds)),
-                desc=f"Converting images ({s})",
-                unit="rows",
-            ):
-                sample = ds[i]
-                all_rows.append(_process_sample_to_row(sample))
+        all_rows: list[dict[str, Any]] = []
+        for i in tqdm(
+            range(len(ds)),
+            desc=f"Converting images ({split_key})",
+            unit="rows",
+        ):
+            sample = ds[i]
+            all_rows.append(_process_sample_to_row(sample))
 
         df = pd.DataFrame(all_rows)
 

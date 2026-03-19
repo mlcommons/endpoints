@@ -274,14 +274,16 @@ def load_from_huggingface(
             return ds
         except Exception as e:
             logger.warning(f"Error loading dataset from cache: {e}")
-    ds = load_dataset(dataset_path, dataset_name, **load_options)
+    ds = load_dataset(
+        dataset_path, dataset_name, split=split, **load_options
+    )
 
     if cache_dir is not None:
         try:
             ds.save_to_disk(str(cache_dir), **cache_options)
         except Exception as e:
             logger.warning(f"Error caching dataset: {e}")
-    return ds[split]
+    return ds
 
 
 class Dataset:

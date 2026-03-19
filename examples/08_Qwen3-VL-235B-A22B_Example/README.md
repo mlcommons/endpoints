@@ -68,7 +68,7 @@ docker run --runtime nvidia --gpus all \
   --max-model-len=32768 \
   --async-scheduling \
   --max-num-seqs 1024 \
-  --limit-mm-per-prompt.video 0 \ 
+  --limit-mm-per-prompt.video 0
 ```
 
 Run the benchmark:
