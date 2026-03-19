@@ -26,9 +26,8 @@ import pandas as pd
 from tqdm import tqdm
 
 from ...dataset import Dataset, load_from_huggingface
-
-from .metadata import ProductMetadata
 from . import presets
+from .metadata import ProductMetadata
 
 logger = getLogger(__name__)
 

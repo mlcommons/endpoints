@@ -27,7 +27,7 @@ datasets:
 settings:
   runtime:
     min_duration_ms: 600000 # 10 minute
-    n_samples_to_issue: 48289 # Limit queries for testing (remove or increase for full run)
+    n_samples_to_issue: 100 # Limit queries for testing (remove or increase for full run)
     scheduler_random_seed: 42 # For Poisson/distribution sampling
     dataloader_random_seed: 42 # For dataset shuffling
 
