@@ -54,7 +54,7 @@ docker build -t sglang-cpu:latest -f xeon.Dockerfile .
 docker run -it --privileged --ipc=host --network=host -v /dev/shm:/dev/shm -v ~/.cache/huggingface:/root/.cache/huggingface -p 8000:8000 -e "HF_TOKEN=<secret>" --name sglang-cpu-server sglang-cpu:latest /bin/bash
 
 # Start sglang endpoint
-docker exec -u root -w /workspace sglang-cpu-server /bin/bash -lc python3 -m sglang.launch_server \
+docker exec -u root -w /workspace sglang-cpu-server /bin/bash -lc "python3 -m sglang.launch_server \
     --model-path $MODEL_NAME \
     --served-model-name meta-llama/Llama-3.1-8B-Instruct \
     --dtype bfloat16 \
