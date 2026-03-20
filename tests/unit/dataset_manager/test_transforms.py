@@ -15,10 +15,11 @@
 
 """
 Unit tests for the transforms module.
-Tests all transform classes and functions except Harmonize.
+Tests all transform classes and functions.
 """
 
 from typing import Any
+from unittest.mock import patch
 
 import pandas as pd
 import pytest
@@ -27,6 +28,7 @@ from inference_endpoint.dataset_manager.transforms import (
     ColumnFilter,
     ColumnRemap,
     FusedRowProcessor,
+    Harmonize,
     MakeAdapterCompatible,
     RowProcessor,
     Transform,
@@ -820,3 +822,50 @@ class TestMakeAdapterCompatible:
         # Should not raise error or create prompt column
         assert "prompt" not in result.columns
         assert "unrelated" in result.columns
+
+
+class TestHarmonize:
+    """Test Harmonize transform with mocked Harmonizer to avoid tokenizer downloads."""
+
+    @patch("inference_endpoint.dataset_manager.transforms.Harmonizer")
+    def test_harmonize_invalid_mode_raises(self, mock_harmonizer):
+        """Test that invalid mode raises ValueError."""
+        with pytest.raises(ValueError, match="Invalid harmonize mode"):
+            Harmonize(mode="invalid")
+
+    @patch("inference_endpoint.dataset_manager.transforms.Harmonizer")
+    def test_harmonize_row_skip_existing_tokens(self, mock_harmonizer):
+        """Test that pre-existing tokens aren't overwritten (fusion safety)."""
+        # This is critical: when fused, the __call__ check is bypassed
+        # so the row-level check must prevent overwriting preset-added tokens
+        harmonize = Harmonize()
+        row = {
+            "prompt": "test",
+            "input_tokens": [1, 2, 3],  # Already added by preset
+        }
+        result = harmonize.process_row(row)
+        assert result["input_tokens"] == [1, 2, 3]
+        # Harmonizer should NOT be called
+        mock_harmonizer.return_value.assert_not_called()
+
+    @patch("inference_endpoint.dataset_manager.transforms.Harmonizer")
+    def test_harmonize_plain_mode(self, mock_harmonizer):
+        """Test plain mode uses to_tokens() instead of full Harmonizer call."""
+        mock_harmonizer.return_value.to_tokens.return_value = [1, 2, 3]
+        harmonize = Harmonize(mode="plain")
+        row = {"prompt": "test prompt"}
+        result = harmonize.process_row(row)
+
+        assert result["input_tokens"] == [1, 2, 3]
+        mock_harmonizer.return_value.to_tokens.assert_called_once_with("test prompt")
+
+    @patch("inference_endpoint.dataset_manager.transforms.Harmonizer")
+    def test_harmonize_harmony_mode(self, mock_harmonizer):
+        """Test harmony mode calls full Harmonizer."""
+        mock_harmonizer.return_value.return_value = [4, 5, 6]
+        harmonize = Harmonize(mode="harmony")
+        row = {"prompt": "test prompt"}
+        result = harmonize.process_row(row)
+
+        assert result["input_tokens"] == [4, 5, 6]
+        mock_harmonizer.return_value.assert_called_once_with("test prompt")
