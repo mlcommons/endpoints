@@ -13,52 +13,60 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for configuration schema."""
+"""Tests for configuration schema models and validation."""
 
+import pytest
 from inference_endpoint.config.schema import (
+    APIType,
     BenchmarkConfig,
     Dataset,
     DatasetType,
     EvalMethod,
+    Metrics,
     ModelParams,
     OSLDistribution,
     OSLDistributionType,
+    StreamingMode,
     SubmissionReference,
+    TestType,
 )
-from inference_endpoint.config.schema import TestType as BenchmarkTestType
 
 
 class TestOSLDistribution:
-    """Test OSL distribution configuration."""
-
+    @pytest.mark.unit
     def test_fixed_distribution(self):
-        """Test fixed OSL distribution."""
         osl = OSLDistribution(type=OSLDistributionType.FIXED, max=1024)
         assert osl.type == OSLDistributionType.FIXED
         assert osl.max == 1024
 
+    @pytest.mark.unit
     def test_normal_distribution(self):
-        """Test normal OSL distribution with mean and std."""
         osl = OSLDistribution(
             type=OSLDistributionType.NORMAL, mean=1000, std=200, min=512, max=2048
         )
-        assert osl.type == OSLDistributionType.NORMAL
         assert osl.mean == 1000
         assert osl.std == 200
 
+    @pytest.mark.unit
+    def test_partial_construction_preserves_defaults(self):
+        osl = OSLDistribution(min=10)
+        assert osl.min == 10
+        assert osl.type == OSLDistributionType.ORIGINAL
+        assert osl.max == 2048
+        assert ModelParams().osl_distribution is None
+
 
 class TestModelParams:
-    """Test model parameters."""
-
-    def test_default_params(self):
-        """Test default model parameters."""
-        params = ModelParams()
+    @pytest.mark.unit
+    def test_defaults(self):
+        params = ModelParams(name="test")
         assert params.temperature is None
         assert params.max_new_tokens == 1024
 
+    @pytest.mark.unit
     def test_with_osl_distribution(self):
-        """Test model params with OSL distribution."""
         params = ModelParams(
+            name="test",
             temperature=0.5,
             top_k=50,
             top_p=0.9,
@@ -71,99 +79,273 @@ class TestModelParams:
         assert params.osl_distribution.type == OSLDistributionType.NORMAL
 
 
+class TestAPIType:
+    @pytest.mark.unit
+    def test_default_routes(self):
+        assert APIType.OPENAI.default_route() == "/v1/chat/completions"
+        assert APIType.SGLANG.default_route() == "/generate"
+
+
 class TestDataset:
-    """Test dataset configuration."""
-
+    @pytest.mark.unit
     def test_performance_dataset(self):
-        """Test performance dataset config."""
-        dataset = Dataset(
-            name="perf-test",
-            type=DatasetType.PERFORMANCE,
-            path="datasets/openorca.pkl",
-            samples=5000,
-        )
-        assert dataset.type == DatasetType.PERFORMANCE
-        assert dataset.eval_method is None
+        ds = Dataset(name="perf", type=DatasetType.PERFORMANCE, path="data.pkl")
+        assert ds.eval_method is None
 
+    @pytest.mark.unit
     def test_accuracy_dataset(self):
-        """Test accuracy dataset config."""
-        dataset = Dataset(
+        ds = Dataset(
             name="gpqa",
             type=DatasetType.ACCURACY,
-            path="datasets/gpqa.pkl",
-            samples=500,
+            path="gpqa.pkl",
             eval_method=EvalMethod.EXACT_MATCH,
         )
-        assert dataset.type == DatasetType.ACCURACY
-        assert dataset.eval_method == EvalMethod.EXACT_MATCH
+        assert ds.eval_method == EvalMethod.EXACT_MATCH
+
+    @pytest.mark.unit
+    def test_auto_derive_name(self):
+        ds = Dataset(path="datasets/my_data.pkl")
+        assert ds.name == "my_data"
+
+
+class TestMetrics:
+    @pytest.mark.unit
+    def test_get_metric_types(self):
+        m = Metrics(collect=["throughput", "latency", "ttft", "tpot"])
+        types = m.get_metric_types()
+        assert len(types) == 4
+
+    @pytest.mark.unit
+    def test_unknown_metric_raises(self):
+        m = Metrics(collect=["nonexistent"])
+        with pytest.raises(ValueError, match="Unknown metric"):
+            m.get_metric_types()
 
 
 class TestBenchmarkConfig:
-    """Test complete benchmark configuration."""
-
-    def test_minimal_config(self):
-        """Test minimal valid configuration."""
+    @pytest.mark.unit
+    def test_minimal_offline(self):
         config = BenchmarkConfig(
-            name="test",
-            type=BenchmarkTestType.OFFLINE,
-            datasets=[{"name": "test", "type": "performance", "path": "test.pkl"}],
+            type=TestType.OFFLINE,
+            model_params={"name": "test"},
+            endpoint_config={"endpoints": ["http://localhost:8000"]},
+            datasets=[{"path": "test.pkl"}],
         )
-        assert config.name == "test"
-        assert config.type == BenchmarkTestType.OFFLINE
-        assert len(config.datasets) == 1
+        assert config.type == TestType.OFFLINE
 
-    def test_submission_config(self):
-        """Test official submission configuration."""
+    @pytest.mark.unit
+    def test_submission_with_ref(self):
         config = BenchmarkConfig(
-            name="submission",
-            version="1.0",
-            type=BenchmarkTestType.SUBMISSION,
+            type=TestType.SUBMISSION,
+            benchmark_mode=TestType.OFFLINE,
+            endpoint_config={"endpoints": ["http://localhost:8000"]},
             submission_ref=SubmissionReference(
                 model="llama-2-70b", ruleset="mlperf-inference-v6.0"
             ),
-            datasets=[
-                {
-                    "name": "perf",
-                    "type": "performance",
-                    "path": "perf.pkl",
-                    "samples": 5000,
-                },
-                {
-                    "name": "gpqa",
-                    "type": "accuracy",
-                    "path": "gpqa.pkl",
-                    "samples": 500,
-                    "eval_method": "exact_match",
-                },
-            ],
+            datasets=[{"path": "perf.pkl"}],
         )
-        assert config.submission_ref is not None
-        assert config.submission_ref.model == "llama-2-70b"
+        assert config.model_params.name == "llama-2-70b"
         assert config.submission_ref.ruleset == "mlperf-inference-v6.0"
-        assert len(config.datasets) == 2
 
+    @pytest.mark.unit
     def test_multiple_accuracy_datasets(self):
-        """Test config with multiple accuracy datasets."""
         config = BenchmarkConfig(
-            name="multi-acc",
-            type=BenchmarkTestType.SUBMISSION,
+            type=TestType.SUBMISSION,
+            benchmark_mode=TestType.OFFLINE,
+            model_params={"name": "test"},
+            endpoint_config={"endpoints": ["http://localhost:8000"]},
             datasets=[
-                {
-                    "name": "gpqa",
-                    "type": "accuracy",
-                    "path": "gpqa.pkl",
-                    "eval_method": "exact_match",
-                },
-                {
-                    "name": "aime",
-                    "type": "accuracy",
-                    "path": "aime.pkl",
-                    "eval_method": "exact_match",
-                },
+                {"name": "gpqa", "type": "accuracy", "path": "gpqa.pkl"},
+                {"name": "aime", "type": "accuracy", "path": "aime.pkl"},
             ],
         )
-        accuracy_datasets = [
-            d for d in config.datasets if d.type == DatasetType.ACCURACY
-        ]
-        assert len(accuracy_datasets) == 2
-        assert {d.name for d in accuracy_datasets} == {"gpqa", "aime"}
+        acc = [d for d in config.datasets if d.type == DatasetType.ACCURACY]
+        assert len(acc) == 2
+
+    @pytest.mark.unit
+    def test_duplicate_datasets_rejected(self):
+        with pytest.raises(ValueError, match="Duplicate dataset"):
+            BenchmarkConfig(
+                type=TestType.OFFLINE,
+                model_params={"name": "test"},
+                endpoint_config={"endpoints": ["http://localhost:8000"]},
+                datasets=[{"path": "test.pkl"}, {"path": "test.pkl"}],
+            )
+
+    @pytest.mark.unit
+    def test_explicit_streaming_preserved(self):
+        config = BenchmarkConfig(
+            type=TestType.OFFLINE,
+            model_params={"name": "M", "streaming": "on"},
+            endpoint_config={"endpoints": ["http://x"]},
+            datasets=[{"path": "D"}],
+        )
+        assert config.model_params.streaming == StreamingMode.ON
+
+    @pytest.mark.unit
+    def test_offline_rejects_poisson(self):
+        with pytest.raises(ValueError, match="max_throughput"):
+            BenchmarkConfig(
+                type=TestType.OFFLINE,
+                model_params={"name": "M"},
+                endpoint_config={"endpoints": ["http://x"]},
+                datasets=[{"path": "D"}],
+                settings={"load_pattern": {"type": "poisson", "target_qps": 10}},
+            )
+
+    @pytest.mark.unit
+    def test_online_max_throughput_rejected(self):
+        with pytest.raises(ValueError, match="Online mode requires"):
+            BenchmarkConfig(
+                type=TestType.ONLINE,
+                model_params={"name": "M"},
+                endpoint_config={"endpoints": ["http://x"]},
+                datasets=[{"path": "D"}],
+                settings={"load_pattern": {"type": "max_throughput"}},
+            )
+
+    @pytest.mark.unit
+    def test_negative_min_duration_rejected(self):
+        with pytest.raises(ValueError, match="greater than or equal to 0"):
+            BenchmarkConfig(
+                type=TestType.OFFLINE,
+                model_params={"name": "M"},
+                endpoint_config={"endpoints": ["http://x"]},
+                datasets=[{"path": "D"}],
+                settings={"runtime": {"min_duration_ms": -1}},
+            )
+
+    @pytest.mark.unit
+    def test_max_lt_min_duration_rejected(self):
+        with pytest.raises(ValueError, match="max_duration_ms"):
+            BenchmarkConfig(
+                type=TestType.OFFLINE,
+                model_params={"name": "M"},
+                endpoint_config={"endpoints": ["http://x"]},
+                datasets=[{"path": "D"}],
+                settings={
+                    "runtime": {"min_duration_ms": 5000, "max_duration_ms": 1000}
+                },
+            )
+
+    @pytest.mark.unit
+    def test_submission_bad_benchmark_mode(self):
+        with pytest.raises(ValueError, match="benchmark_mode"):
+            BenchmarkConfig(
+                type=TestType.SUBMISSION,
+                benchmark_mode=TestType.EVAL,
+                model_params={"name": "M"},
+                endpoint_config={"endpoints": ["http://x"]},
+                datasets=[{"path": "D"}],
+                submission_ref={"model": "M", "ruleset": "R"},
+            )
+
+
+class TestBenchmarkConfigMethods:
+    @pytest.mark.unit
+    def test_get_benchmark_mode_offline(self):
+        config = BenchmarkConfig(
+            type=TestType.OFFLINE,
+            model_params={"name": "M"},
+            endpoint_config={"endpoints": ["http://x"]},
+            datasets=[{"path": "D"}],
+        )
+        assert config.get_benchmark_mode() == TestType.OFFLINE
+
+    @pytest.mark.unit
+    def test_get_benchmark_mode_submission(self):
+        config = BenchmarkConfig(
+            type=TestType.SUBMISSION,
+            benchmark_mode=TestType.OFFLINE,
+            model_params={"name": "M"},
+            endpoint_config={"endpoints": ["http://x"]},
+            datasets=[{"path": "D"}],
+            submission_ref={"model": "M", "ruleset": "R"},
+        )
+        assert config.get_benchmark_mode() == TestType.OFFLINE
+
+    @pytest.mark.unit
+    def test_get_benchmark_mode_eval_returns_none(self):
+        config = BenchmarkConfig(
+            type=TestType.EVAL,
+            model_params={"name": "M"},
+            endpoint_config={"endpoints": ["http://x"]},
+            datasets=[{"path": "D"}],
+        )
+        assert config.get_benchmark_mode() is None
+
+    @pytest.mark.unit
+    def test_get_single_dataset(self):
+        config = BenchmarkConfig(
+            type=TestType.OFFLINE,
+            model_params={"name": "M"},
+            endpoint_config={"endpoints": ["http://x"]},
+            datasets=[
+                {"name": "acc", "type": "accuracy", "path": "a.pkl"},
+                {"name": "perf", "type": "performance", "path": "p.pkl"},
+            ],
+        )
+        ds = config.get_single_dataset()
+        assert ds.path == "p.pkl"
+
+    @pytest.mark.unit
+    def test_get_single_dataset_empty(self):
+        config = BenchmarkConfig(
+            type=TestType.EVAL,
+            model_params={"name": "M"},
+            endpoint_config={"endpoints": ["http://x"]},
+        )
+        assert config.get_single_dataset() is None
+
+    @pytest.mark.unit
+    def test_get_single_dataset_acc_only(self):
+        config = BenchmarkConfig(
+            type=TestType.EVAL,
+            model_params={"name": "M"},
+            endpoint_config={"endpoints": ["http://x"]},
+            datasets=[{"name": "acc", "type": "accuracy", "path": "a.pkl"}],
+        )
+        assert config.get_single_dataset().path == "a.pkl"
+
+    @pytest.mark.unit
+    def test_create_default_offline(self):
+        config = BenchmarkConfig.create_default_config(TestType.OFFLINE)
+        assert config.type == TestType.OFFLINE
+        assert config.model_params.name == "<MODEL_NAME>"
+
+    @pytest.mark.unit
+    def test_create_default_online(self):
+        config = BenchmarkConfig.create_default_config(TestType.ONLINE)
+        assert config.type == TestType.ONLINE
+        assert config.settings.load_pattern.target_qps == 10.0
+
+    @pytest.mark.unit
+    def test_create_default_eval_not_implemented(self):
+        with pytest.raises(NotImplementedError):
+            BenchmarkConfig.create_default_config(TestType.EVAL)
+
+    @pytest.mark.unit
+    def test_create_default_submission_not_implemented(self):
+        with pytest.raises(NotImplementedError):
+            BenchmarkConfig.create_default_config(TestType.SUBMISSION)
+
+    @pytest.mark.unit
+    def test_to_yaml_file(self, tmp_path):
+        config = BenchmarkConfig(
+            type=TestType.OFFLINE,
+            model_params={"name": "M"},
+            endpoint_config={"endpoints": ["http://x"]},
+            datasets=[{"path": "D"}],
+        )
+        out = tmp_path / "out.yaml"
+        config.to_yaml_file(out)
+        assert out.exists()
+        loaded = BenchmarkConfig.from_yaml_file(out)
+        assert loaded.model_params.name == "M"
+
+    @pytest.mark.unit
+    def test_from_yaml_file_not_found(self):
+        from pathlib import Path
+
+        with pytest.raises(FileNotFoundError):
+            BenchmarkConfig.from_yaml_file(Path("/nonexistent.yaml"))

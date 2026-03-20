@@ -144,7 +144,7 @@ inference-endpoint -v info
 inference-endpoint init --template offline
 
 # Validate config
-inference-endpoint validate --config offline_template.yaml
+inference-endpoint validate-yaml --config offline_template.yaml
 
 # Test with existing dataset
 inference-endpoint benchmark offline \

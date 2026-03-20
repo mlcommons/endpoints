@@ -40,6 +40,9 @@ dependencies = [
     "msgspec==0.20.0",
     "pydantic==2.12.0",
     "pydantic_core==2.41.1",
+    # YAML/CLI from Pydantic Schema
+    "cyclopts==4.10.0",
+    "rich==14.3.3",
     # Needed for tokenization and OSL reporting
     "transformers==4.57.1",
     "numpy==2.3.4",

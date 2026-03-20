@@ -13,258 +13,428 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for benchmark command error handling.
+"""Tests for benchmark CLI models, config building, and command handlers."""
 
-These tests verify that the benchmark command properly validates inputs,
-handles configuration errors, and raises appropriate exceptions instead of
-calling sys.exit(). This allows:
-- Testing error conditions without process termination
-- Programmatic use of benchmark command
-- Consistent error handling via centralized exception catching in main()
-
-Focus areas:
-- Input validation (missing args, invalid patterns)
-- Configuration loading and merging
-- Dataset validation
-- Error propagation with proper exception types
-"""
-
-import argparse
+import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pytest
-from inference_endpoint.commands.benchmark import (
-    _build_config_from_cli,
-    run_benchmark_command,
+from inference_endpoint.commands.benchmark.cli import (
+    from_config,
+    offline,
+    online,
 )
-from inference_endpoint.config.schema import APIType
+from inference_endpoint.commands.benchmark.execute import ResponseCollector
+from inference_endpoint.config.schema import (
+    BenchmarkConfig,
+    DatasetType,
+    LoadPattern,
+    LoadPatternType,
+    OfflineSettings,
+    OnlineSettings,
+    RuntimeConfig,
+    StreamingMode,
+    TestMode,
+    TestType,
+)
+from inference_endpoint.config.schema import (
+    OfflineBenchmarkConfig as OfflineConfig,
+)
+from inference_endpoint.config.schema import (
+    OnlineBenchmarkConfig as OnlineConfig,
+)
+from inference_endpoint.core.types import QueryResult
 from inference_endpoint.exceptions import InputValidationError
+from pydantic import ValidationError
+
+TEMPLATE_DIR = (
+    Path(__file__).resolve().parents[3]
+    / "src"
+    / "inference_endpoint"
+    / "config"
+    / "templates"
+)
+
+# Reusable minimal config kwargs
+_OFFLINE_KWARGS = {
+    "endpoint_config": {"endpoints": ["http://test:8000"]},
+    "model_params": {"name": "test-model"},
+    "datasets": [{"path": "test.pkl"}],
+}
 
 
-def _create_mock_args(**overrides):
-    """Helper to create mock args with default values.
+class TestCLIConfigModels:
+    """Test OfflineBenchmarkConfig/OnlineBenchmarkConfig defaults and validation."""
 
-    Args:
-        **overrides: Any fields to override from defaults
-
-    Returns:
-        MagicMock configured with all required benchmark args
-    """
-    defaults = {
-        "benchmark_mode": "offline",
-        "config": None,
-        "endpoints": "http://test.com",
-        "dataset": Path("test.pkl"),
-        "model": "llama-2-70b",
-        "api_key": None,
-        "api_type": APIType.OPENAI,
-        "load_pattern": None,
-        "target_qps": None,
-        "concurrency": None,
-        "workers": None,
-        "duration": None,
-        "num_samples": None,
-        "streaming": "auto",
-        "min_output_tokens": None,
-        "max_output_tokens": None,
-        "mode": "perf",
-        "report_dir": None,
-        "timeout": None,
-        "output": None,
-        "verbose": 0,
-    }
-    defaults.update(overrides)
-
-    mock = MagicMock()
-    for key, value in defaults.items():
-        setattr(mock, key, value)
-    return mock
-
-
-class TestBuildConfigFromCLI:
-    """Test building BenchmarkConfig from CLI arguments.
-
-    CLI and YAML modes are now mutually exclusive - no merging.
-    This tests the CLI-only config builder.
-    """
-
-    def test_build_config_offline_minimal(self):
-        """Test building config with minimal offline params."""
-        # Note: concurrency is now in shared args (applies to both offline and online)
-        args = argparse.Namespace(
-            endpoints="http://test:8000",
-            dataset=Path("test.pkl"),
-            model="llama-2-70b",  # Required
-            api_key=None,
-            target_qps=None,
-            concurrency=None,  # Now in shared args
-            workers=None,
-            duration=None,
-            min_output_tokens=None,
-            max_output_tokens=None,
-        )
-
-        config = _build_config_from_cli(args, "offline")
-
-        assert config.name == "cli_offline"
-        assert config.endpoint_config.endpoints == ["http://test:8000"]
-        assert config.datasets[0].path == "test.pkl"
-        assert config.settings.load_pattern.type.value == "max_throughput"
-        assert config.settings.load_pattern.target_qps is None
-        assert config.settings.client.workers == -1  # Default (auto)
-        assert (
-            config.settings.runtime.min_duration_ms == 0
-        )  # Default: 0 - use dataset samples
-        assert config.settings.runtime.n_samples_to_issue is None  # Default: None
-
-    def test_build_config_online_with_params(self):
-        """Test building config with custom online params."""
-        # Online mode has concurrency attribute (from _add_online_specific_args)
-        args = argparse.Namespace(
-            endpoints="http://prod:8000",
-            dataset=Path("dataset.pkl"),
-            model="gpt-4",  # Required
-            api_key="key123",
-            target_qps=100.0,
-            workers=8,
-            concurrency=64,  # Online-specific
-            load_pattern="poisson",  # Online-specific
-            duration=600,
-            min_output_tokens=None,
-            max_output_tokens=None,
-        )
-
-        config = _build_config_from_cli(args, "online")
-
-        assert config.name == "cli_online"
-        assert config.settings.load_pattern.type.value == "poisson"
-        assert config.settings.load_pattern.target_qps == 100.0
-        assert config.settings.client.workers == 8
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "cls, extra_kwargs, expected_type, expected_streaming",
+        [
+            (OfflineConfig, {}, TestType.OFFLINE, StreamingMode.OFF),
+            (
+                OnlineConfig,
+                {
+                    "settings": OnlineSettings(
+                        load_pattern=LoadPattern(
+                            type=LoadPatternType.POISSON, target_qps=100
+                        ),
+                    ),
+                },
+                TestType.ONLINE,
+                StreamingMode.ON,
+            ),
+        ],
+    )
+    def test_mode_defaults(self, cls, extra_kwargs, expected_type, expected_streaming):
+        config = cls(**_OFFLINE_KWARGS, **extra_kwargs)
+        assert config.type == expected_type
+        assert config.model_params.streaming == expected_streaming
         assert config.settings.runtime.min_duration_ms == 600000
 
-    # Note: Tests for missing endpoint/dataset/model removed
-    # These are enforced by argparse (required=True), not by _build_config_from_cli
-    # Argparse errors before our code runs, so no need to test here
-
-    def test_build_config_with_num_samples(self):
-        """Test that num_samples parameter is mapped to config."""
-        args = argparse.Namespace(
-            endpoints="http://test:8000",
-            dataset=Path("test.pkl"),
-            model="llama-2-70b",
-            api_key=None,
-            target_qps=None,
-            concurrency=None,
-            workers=None,
-            duration=None,
-            num_samples=100,  # This should be mapped to config
-            min_output_tokens=None,
-            max_output_tokens=None,
+    @pytest.mark.unit
+    def test_num_samples_override(self):
+        config = OfflineConfig(
+            **_OFFLINE_KWARGS,
+            settings=OfflineSettings(
+                runtime=RuntimeConfig(min_duration_ms=0, n_samples_to_issue=100)
+            ),
         )
-
-        config = _build_config_from_cli(args, "offline")
         assert config.settings.runtime.n_samples_to_issue == 100
 
+    @pytest.mark.unit
+    def test_missing_model_name_raises(self):
+        with pytest.raises(ValidationError, match="model"):
+            OfflineConfig(
+                endpoint_config={"endpoints": ["http://x"]},
+                datasets=[{"path": "test.pkl"}],
+            )
 
-class TestRunBenchmarkCommand:
-    """Test benchmark command error handling.
 
-    These tests validate that all user input errors are caught early and
-    raise InputValidationError, allowing main() to handle exits gracefully.
-    Tests cover: missing mode, invalid config, missing endpoint/dataset.
-    """
+class TestDatasetParsing:
+    """Test dataset string coercion through BenchmarkConfig construction."""
 
-    @pytest.mark.asyncio
-    async def test_from_config_mode_requires_config(self):
-        """Test from-config mode requires --config."""
-        # Argparse makes --config required for from-config mode
-        # This tests the code path
-        import tempfile
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "raw, path, dtype, samples, parser, acc_eval_method",
+        [
+            ("test.pkl", "test.pkl", DatasetType.PERFORMANCE, None, None, None),
+            ("perf:a.pkl", "a.pkl", DatasetType.PERFORMANCE, None, None, None),
+            ("acc:gpqa.pkl", "gpqa.pkl", DatasetType.ACCURACY, None, None, None),
+            (
+                "data.csv,samples=500,parser.prompt=article,parser.system=inst",
+                "data.csv",
+                DatasetType.PERFORMANCE,
+                500,
+                {"prompt": "article", "system": "inst"},  # {target: source}
+                None,
+            ),
+            (
+                "perf:d.jsonl,format=jsonl,parser.prompt=text",
+                "d.jsonl",
+                DatasetType.PERFORMANCE,
+                None,
+                {"prompt": "text"},  # {target: source}
+                None,
+            ),
+            (
+                "acc:eval.pkl,accuracy_config.eval_method=pass_at_1,accuracy_config.ground_truth=answer",
+                "eval.pkl",
+                DatasetType.ACCURACY,
+                None,
+                None,
+                "pass_at_1",
+            ),
+        ],
+    )
+    def test_dataset_string_coercion(
+        self, raw, path, dtype, samples, parser, acc_eval_method
+    ):
+        """Strings passed as datasets are parsed by BeforeValidator into Dataset objects."""
+        config = OfflineConfig(**_OFFLINE_KWARGS | {"datasets": [raw]})
+        ds = config.datasets[0]
+        assert ds.path == path
+        assert ds.type == dtype
+        assert ds.samples == samples
+        assert ds.parser == parser
+        if acc_eval_method:
+            assert ds.accuracy_config is not None
+            assert ds.accuracy_config.eval_method == acc_eval_method
 
+
+class TestCommandHandlers:
+    """Test offline/online/from_config handlers (mock run_benchmark)."""
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "handler, config, dataset_arg, mode, expected_path, expected_dtype",
+        [
+            (
+                offline,
+                OfflineConfig(
+                    endpoint_config={"endpoints": ["http://x"]},
+                    model_params={"name": "M"},
+                ),
+                ["data.pkl"],
+                TestMode.PERF,
+                "data.pkl",
+                DatasetType.PERFORMANCE,
+            ),
+            (
+                online,
+                OnlineConfig(
+                    endpoint_config={"endpoints": ["http://x"]},
+                    model_params={"name": "M"},
+                    settings={"load_pattern": {"type": "poisson", "target_qps": 10}},
+                ),
+                ["acc:eval.pkl"],
+                TestMode.ACC,
+                "eval.pkl",
+                DatasetType.ACCURACY,
+            ),
+        ],
+    )
+    @patch("inference_endpoint.commands.benchmark.cli.run_benchmark")
+    def test_command_handler(
+        self,
+        mock_run,
+        handler,
+        config,
+        dataset_arg,
+        mode,
+        expected_path,
+        expected_dtype,
+    ):
+        handler(config=config, dataset=dataset_arg, mode=mode)
+        called_config, called_mode = mock_run.call_args[0]
+        assert called_config.datasets[0].path == expected_path
+        assert called_config.datasets[0].type == expected_dtype
+        assert called_mode == mode
+
+    @pytest.mark.unit
+    @patch("inference_endpoint.commands.benchmark.cli.run_benchmark")
+    def test_from_config_handler(self, mock_run, tmp_path):
+        yaml_content = """
+type: "offline"
+model_params:
+  name: "test-model"
+endpoint_config:
+  endpoints: ["http://test:8000"]
+datasets:
+  - path: "test.pkl"
+"""
+        config_file = tmp_path / "test.yaml"
+        config_file.write_text(yaml_content)
+        from_config(config=config_file, timeout=42.0, mode=TestMode.BOTH)
+        called_config, called_mode = mock_run.call_args[0]
+        assert called_config.timeout == 42.0
+        assert called_mode == TestMode.BOTH
+
+    @pytest.mark.unit
+    def test_from_config_bad_yaml(self, tmp_path):
+        bad_file = tmp_path / "bad.yaml"
+        bad_file.write_text("{{invalid yaml")
+        with pytest.raises(InputValidationError, match="Config error"):
+            from_config(config=bad_file)
+
+    @pytest.mark.unit
+    @patch("inference_endpoint.commands.benchmark.cli.run_benchmark")
+    def test_from_config_submission_defaults_to_both(self, mock_run, tmp_path):
+        yaml_content = """
+type: "submission"
+benchmark_mode: "offline"
+model_params:
+  name: "test-model"
+endpoint_config:
+  endpoints: ["http://test:8000"]
+datasets:
+  - path: "test.pkl"
+submission_ref:
+  model: "test-model"
+  ruleset: "test"
+"""
+        config_file = tmp_path / "sub.yaml"
+        config_file.write_text(yaml_content)
+        from_config(config=config_file)
+        _, called_mode = mock_run.call_args[0]
+        assert called_mode == TestMode.BOTH
+
+
+class TestBenchmarkValidation:
+    """Test BenchmarkConfig validation paths."""
+
+    @pytest.mark.unit
+    def test_from_yaml_file(self):
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
             f.write("""
-name: "test"
 type: "offline"
+model_params:
+  name: "test-model"
 datasets:
-  - name: "test"
-    type: "performance"
-    path: "tests/datasets/dummy_1k.pkl"
+  - path: "tests/datasets/dummy_1k.pkl"
 endpoint_config:
-  endpoints:
-  - "http://test:8000"
+  endpoints: ["http://test:8000"]
 """)
             config_path = Path(f.name)
-
-        args = MagicMock()
-        args.benchmark_mode = "from-config"
-        args.config = config_path
-        args.output = None
-        args.mode = None
-
         try:
-            # Should load from YAML successfully
-            from inference_endpoint.config.yaml_loader import ConfigLoader
-
-            config = ConfigLoader.load_yaml(config_path)
+            config = BenchmarkConfig.from_yaml_file(config_path)
             assert config.endpoint_config.endpoints == ["http://test:8000"]
         finally:
             config_path.unlink()
 
-    @pytest.mark.asyncio
-    async def test_missing_benchmark_mode(self):
-        """Test error when benchmark mode is None (shouldn't happen with argparse)."""
-        # Note: Argparse prevents this scenario, but we test defensive code
-        args = MagicMock()
-        args.benchmark_mode = None  # Not "offline", "online", or "from-config"
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "overrides, match",
+        [
+            (
+                {
+                    "type": TestType.ONLINE,
+                    "settings": {"load_pattern": {"type": "poisson"}},
+                },
+                "requires --target-qps",
+            ),
+            (
+                {
+                    "type": TestType.ONLINE,
+                    "settings": {"load_pattern": {"type": "concurrency"}},
+                },
+                "requires --concurrency",
+            ),
+            (
+                {"type": TestType.OFFLINE, "settings": {"client": {"workers": 0}}},
+                "workers must be",
+            ),
+            (
+                {
+                    "type": TestType.SUBMISSION,
+                    "submission_ref": {"model": "M", "ruleset": "R"},
+                },
+                "benchmark_mode",
+            ),
+        ],
+    )
+    def test_validation_errors(self, overrides, match):
+        with pytest.raises((ValueError, ValidationError), match=match):
+            BenchmarkConfig(
+                endpoint_config={"endpoints": ["http://x"]},
+                model_params={"name": "M"},
+                datasets=[{"path": "test.pkl"}],
+                **overrides,
+            )
 
-        # Should error in the else clause
-        with pytest.raises(InputValidationError, match="Unknown benchmark mode"):
-            await run_benchmark_command(args)
 
-    @pytest.mark.asyncio
-    async def test_invalid_config_file(self):
-        """Test error with invalid config file."""
-        args = MagicMock()
-        args.benchmark_mode = "from-config"
-        args.config = Path("/nonexistent/config.yaml")
-        args.output = None
-        args.mode = None
+class TestYAMLTemplateValidation:
+    """Validate all bundled YAML templates parse correctly."""
 
-        with pytest.raises(InputValidationError, match="Config error"):
-            await run_benchmark_command(args)
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "template",
+        [
+            "concurrency_template.yaml",
+            "eval_template.yaml",
+            "offline_template.yaml",
+            "online_template.yaml",
+            "submission_template.yaml",
+        ],
+    )
+    def test_valid_templates_parse(self, template):
+        config = BenchmarkConfig.from_yaml_file(TEMPLATE_DIR / template)
+        assert config.model_params.name
+        assert config.endpoint_config.endpoints
 
-    @pytest.mark.asyncio
-    async def test_nonexistent_dataset_file(self):
-        """Test error when dataset file doesn't exist."""
-        args = _create_mock_args(dataset=Path("/nonexistent/data.pkl"))
 
-        with pytest.raises(InputValidationError, match="not found"):
-            await run_benchmark_command(args)
+class TestResponseCollector:
+    @pytest.mark.unit
+    def test_success_response(self):
+        collector = ResponseCollector(collect_responses=True)
+        result = QueryResult(id="q1", error=None, response_output="hello")
+        collector.on_complete_hook(result)
+        assert collector.count == 1
+        assert not collector.errors
+        assert "q1" in collector.responses
 
-    @pytest.mark.asyncio
-    async def test_online_mode_requires_qps(self):
-        """Test that online mode with poisson pattern requires --target-qps."""
-        args = _create_mock_args(
-            benchmark_mode="online",
-            # target_qps=None (default) - should raise error from config validation
+    @pytest.mark.unit
+    def test_error_response(self):
+        collector = ResponseCollector()
+        result = QueryResult(id="q1", error="timeout")
+        collector.on_complete_hook(result)
+        assert collector.count == 1
+        assert len(collector.errors) == 1
+        assert "timeout" in collector.errors[0]
+
+    @pytest.mark.unit
+    def test_no_collect_skips_responses(self):
+        collector = ResponseCollector(collect_responses=False)
+        result = QueryResult(id="q1", error=None, response_output="hello")
+        collector.on_complete_hook(result)
+        assert collector.count == 1
+        assert not collector.responses
+
+
+class TestErrorFormatter:
+    """Test _error_formatter in main.py."""
+
+    @pytest.mark.unit
+    def test_cyclopts_arg_with_children(self):
+        from inference_endpoint.config.utils import (
+            cli_error_formatter as _error_formatter,
         )
 
-        with pytest.raises(InputValidationError, match="requires positive target_qps"):
-            await run_benchmark_command(args)
+        child = SimpleNamespace(
+            name="--endpoints", names=("--endpoints",), required=True, has_tokens=False
+        )
+        arg = SimpleNamespace(name="--endpoint-config", children=[child])
+        err = MagicMock(spec=["argument"])
+        err.argument = arg
+        panel = _error_formatter(err)
+        assert "Required: --endpoints" in panel.renderable
 
-    @pytest.mark.asyncio
-    async def test_concurrency_pattern_requires_concurrency(self):
-        """Test that concurrency load pattern requires --concurrency."""
-        args = _create_mock_args(
-            benchmark_mode="online",
-            load_pattern="concurrency",
-            # concurrency=None (default) - should raise error from config validation
+    @pytest.mark.unit
+    def test_cyclopts_leaf_arg(self):
+        from inference_endpoint.config.utils import (
+            cli_error_formatter as _error_formatter,
         )
 
-        with pytest.raises(InputValidationError, match="requires target_concurrency"):
-            await run_benchmark_command(args)
+        arg = SimpleNamespace(
+            name="--model", names=("--model-params.name", "--model"), children=[]
+        )
+        err = MagicMock(spec=["argument"])
+        err.argument = arg
+        panel = _error_formatter(err)
+        assert "Required: --model" in panel.renderable
 
-    # Note: Testing unsupported load patterns requires full integration
-    # as it happens during scheduler creation after dataset loading.
-    # This is covered by yaml_config.py tests and integration tests.
+    @pytest.mark.unit
+    def test_pydantic_validation_error(self):
+        from inference_endpoint.config.utils import (
+            cli_error_formatter as _error_formatter,
+        )
+
+        try:
+            BenchmarkConfig(
+                type=TestType.OFFLINE,
+                endpoint_config={"endpoints": ["http://x"]},
+                datasets=[{"path": "D"}],
+            )
+        except Exception as cause:
+            err = MagicMock(spec=[])
+            err.__cause__ = cause
+            panel = _error_formatter(err)
+            assert "model" in panel.renderable.lower()
+
+    @pytest.mark.unit
+    def test_generic_error_fallback(self):
+        from inference_endpoint.config.utils import (
+            cli_error_formatter as _error_formatter,
+        )
+
+        class FakeError:
+            argument = None
+            __cause__ = None
+            __context__ = None
+
+            def __str__(self):
+                return "something went wrong"
+
+        panel = _error_formatter(FakeError())
+        assert "something went wrong" in panel.renderable

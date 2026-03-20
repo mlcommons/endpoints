@@ -13,22 +13,35 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""
-TODO: PoC only, subject to change!
+"""Configuration schema — single source of truth for YAML and CLI.
 
-Configuration schema definitions for YAML-based benchmark configs."""
+All Pydantic models here define both the YAML config structure and the CLI interface.
+cyclopts auto-generates CLI flags from fields. Use cyclopts.Parameter(alias=...)
+on Annotated fields to declare shorthand aliases alongside dotted paths.
+"""
 
 from __future__ import annotations
 
+from collections import Counter
 from enum import Enum
 from pathlib import Path
-from typing import ClassVar
+from typing import Annotated, Any, ClassVar, Literal, Self, Union
 
+import cyclopts
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import (
+    BaseModel,
+    Discriminator,
+    Field,
+    Tag,
+    TypeAdapter,
+    field_validator,
+    model_validator,
+)
 
 from .. import metrics
 from .ruleset_base import BenchmarkSuiteRuleset
+from .utils import parse_dataset_string, resolve_env_vars
 
 
 class SystemDefaults(BaseModel):
@@ -145,24 +158,39 @@ class OSLDistribution(BaseModel):
     - NORMAL: Normal/Gaussian distribution with mean and std
     """
 
-    type: OSLDistributionType = OSLDistributionType.ORIGINAL
-    mean: int | None = None  # Required for FIXED and NORMAL
-    std: int | None = None  # Required for NORMAL
-    min: int = 1  # Required for UNIFORM, bounds for all types
-    max: int = 2048  # Required for UNIFORM, bounds for all types
+    type: OSLDistributionType = Field(
+        OSLDistributionType.ORIGINAL, description="Distribution type"
+    )
+    mean: int | None = Field(None, description="Mean length (FIXED/NORMAL)")
+    std: int | None = Field(None, description="Std deviation (NORMAL)")
+    min: Annotated[
+        int,
+        cyclopts.Parameter(alias="--min-output-tokens", help="Minimum output length"),
+    ] = 1
+    max: int = Field(2048, description="Maximum output length")
 
 
 class ModelParams(BaseModel):
     """Model generation parameters."""
 
-    name: str | None = None
-    temperature: float | None = None
-    top_k: int | None = None
-    top_p: float | None = None
-    repetition_penalty: float | None = None
-    max_new_tokens: int = 1024
-    osl_distribution: OSLDistribution | None = None
-    streaming: StreamingMode = StreamingMode.AUTO
+    name: Annotated[
+        str,
+        cyclopts.Parameter(alias="--model", help="Model name", required=True),
+    ] = ""
+    temperature: float | None = Field(None, description="Sampling temperature")
+    top_k: int | None = Field(None, description="Top-K sampling")
+    top_p: float | None = Field(None, description="Top-P (nucleus) sampling")
+    repetition_penalty: float | None = Field(None, description="Repetition penalty")
+    max_new_tokens: Annotated[
+        int, cyclopts.Parameter(alias="--max-output-tokens", help="Max output tokens")
+    ] = 1024
+    osl_distribution: OSLDistribution | None = Field(
+        None, description="Output sequence length distribution"
+    )
+    streaming: Annotated[
+        StreamingMode,
+        cyclopts.Parameter(alias="--streaming", help="Streaming mode: auto/on/off"),
+    ] = StreamingMode.AUTO
 
 
 class SubmissionReference(BaseModel):
@@ -196,16 +224,40 @@ class SubmissionReference(BaseModel):
 
 
 class Dataset(BaseModel):
-    """Dataset configuration."""
+    """Dataset configuration.
 
-    name: str
-    type: DatasetType
-    path: str | None = None
-    format: str | None = None
-    samples: int | None = None
-    eval_method: EvalMethod | None = None
-    parser: dict[str, str] | None = None
-    accuracy_config: AccuracyConfig | None = None
+    Name and type have smart defaults: name is auto-derived from path,
+    type defaults to PERFORMANCE.
+
+    Accepts CLI strings via BeforeValidator on BenchmarkConfig.datasets:
+    ``[perf|acc:]<path>[,key=value...]``
+    """
+
+    model_config = {"extra": "forbid"}
+
+    name: str = Field("", description="Dataset name (auto-derived from path if empty)")
+    type: DatasetType = Field(
+        DatasetType.PERFORMANCE, description="Dataset purpose: performance or accuracy"
+    )
+    path: Annotated[
+        str | None, cyclopts.Parameter(alias="--dataset", help="Dataset file path")
+    ] = None
+    format: str | None = Field(None, description="Dataset format (auto-detected)")
+    samples: int | None = Field(None, description="Number of samples to use")
+    eval_method: EvalMethod | None = Field(
+        None, description="Accuracy evaluation method"
+    )
+    parser: dict[str, str] | None = Field(None, description="Column remapping")
+    accuracy_config: AccuracyConfig | None = Field(
+        None, description="Accuracy evaluation settings"
+    )
+
+    @model_validator(mode="after")
+    def _auto_derive_name(self) -> Self:
+        """Derive name from path stem if not explicitly provided."""
+        if not self.name and self.path:
+            object.__setattr__(self, "name", Path(self.path).stem)
+        return self
 
 
 class AccuracyConfig(BaseModel):
@@ -228,6 +280,8 @@ class AccuracyConfig(BaseModel):
           num_repeats: 5
     """
 
+    model_config = {"extra": "forbid"}
+
     eval_method: str | None = None
     ground_truth: str | None = None
     extractor: str | None = None
@@ -235,28 +289,36 @@ class AccuracyConfig(BaseModel):
 
 
 class RuntimeConfig(BaseModel):
-    """Runtime configuration from YAML (user-facing).
-
-    Note: This is the YAML schema for runtime configuration.
-    The actual execution uses config.runtime_settings.RuntimeSettings
-    (a frozen dataclass with more fields derived from this + ruleset).
-
-    This class represents user inputs, while RuntimeSettings represents
-    the fully-resolved execution configuration.
+    """Runtime configuration.
 
     Sample count priority (in RuntimeSettings.total_samples_to_issue()):
-    1. n_samples_to_issue (if specified) - explicit override
-    2. All dataset samples (if min_duration_ms=0) - default CLI behavior
-    3. Calculated from QPS * duration (if min_duration_ms>0) - duration-based
+    1. n_samples_to_issue (if specified) — explicit override
+    2. Calculated from QPS * duration — duration-based (default: 600000ms)
+    3. All dataset samples — fallback when duration is 0
     """
 
-    min_duration_ms: int = 600000  # 10 minutes
-    max_duration_ms: int = 1800000  # 30 minutes
-    n_samples_to_issue: int | None = (
-        None  # Explicit sample count override (None = auto-calculate)
+    min_duration_ms: Annotated[
+        int,
+        cyclopts.Parameter(alias="--duration-ms", help="Min test duration in ms"),
+    ] = Field(600000, ge=0)
+    max_duration_ms: int = Field(
+        1800000, ge=0, description="Maximum test duration in ms"
     )
-    scheduler_random_seed: int = 42  # For Poisson/distribution sampling
-    dataloader_random_seed: int = 42  # For dataset shuffling
+    n_samples_to_issue: Annotated[
+        int | None,
+        cyclopts.Parameter(alias="--num-samples", help="Sample count override"),
+    ] = None
+    scheduler_random_seed: int = Field(42, description="Scheduler RNG seed")
+    dataloader_random_seed: int = Field(42, description="Dataloader RNG seed")
+
+    @model_validator(mode="after")
+    def _validate_durations(self) -> Self:
+        if self.max_duration_ms < self.min_duration_ms:
+            raise ValueError(
+                f"max_duration_ms ({self.max_duration_ms}) must be >= "
+                f"min_duration_ms ({self.min_duration_ms})"
+            )
+        return self
 
 
 class LoadPattern(BaseModel):
@@ -268,36 +330,61 @@ class LoadPattern(BaseModel):
     - concurrency: issue at fixed target_concurrency (online, required - validated)
     """
 
-    type: LoadPatternType = LoadPatternType.MAX_THROUGHPUT
-    target_qps: float | None = (
-        None  # Target QPS - required for poisson pattern, optional otherwise
-    )
-    target_concurrency: int | None = None  # For concurrency mode, ignored otherwise
+    type: Annotated[
+        LoadPatternType,
+        cyclopts.Parameter(alias="--load-pattern", help="Load pattern type"),
+    ] = LoadPatternType.MAX_THROUGHPUT
+    target_qps: Annotated[
+        float | None, cyclopts.Parameter(alias="--target-qps", help="Target QPS")
+    ] = None
+    target_concurrency: Annotated[
+        int | None,
+        cyclopts.Parameter(alias="--concurrency", help="Concurrent requests"),
+    ] = None
+
+    @model_validator(mode="after")
+    def _validate_completeness(self) -> Self:
+        if self.type == LoadPatternType.POISSON and (
+            self.target_qps is None or self.target_qps <= 0
+        ):
+            raise ValueError("Poisson requires --target-qps (e.g., --target-qps 100)")
+        if self.type == LoadPatternType.CONCURRENCY and (
+            not self.target_concurrency or self.target_concurrency <= 0
+        ):
+            raise ValueError(
+                "Concurrency requires --concurrency (e.g., --concurrency 10)"
+            )
+        return self
 
 
 class ClientSettings(BaseModel):
-    """HTTP client configuration.
-
-    Only workers are required to configure the client.
-    Timeout is handled by the HTTP client internally.
-
-    Note: for details see src/endpoint_client/config.py
+    """
+    HTTP client configuration.
+    NOTE: for details see src/inference_endpoint/endpoint_client/config.py
     """
 
-    # Number of worker processes (-1 for automatic detection)
-    #   - -1 uses min(max(8, loadgen_numa_domain_size - 1), 24)
-    workers: int = -1
+    workers: Annotated[
+        int, cyclopts.Parameter(alias="--workers", help="Worker processes (-1=auto)")
+    ] = Field(-1, ge=-1)
+    record_worker_events: bool = Field(False, description="Record per-worker events")
 
-    record_worker_events: bool = False
-    log_level: str = "INFO"
+    @field_validator("workers")
+    @classmethod
+    def _workers_not_zero(cls, v: int) -> int:
+        if v == 0:
+            raise ValueError("workers must be -1 (auto) or >= 1, got 0")
+        return v
 
-    # Pre-establish TCP connections during init for reuse at runtime.
-    # Values: -1 = auto (50% of pool), 0 = disabled, >0 = explicit total count
-    warmup_connections: int = -1
-
-    # Maximum concurrent TCP connections per worker.
-    # -1 = unlimited (bound by system ephemeral port limit)
-    max_connections: int = -1
+    log_level: str = Field("INFO", description="Worker log level")
+    warmup_connections: int = Field(
+        -1, description="Pre-establish TCP connections (-1=auto, 0=disabled)"
+    )
+    max_connections: Annotated[
+        int,
+        cyclopts.Parameter(
+            alias="--max-connections", help="Max TCP connections (-1=unlimited)"
+        ),
+    ] = -1
 
     # Seconds to wait for workers to initialize (spawn, connect, signal ready).
     # Increase for slow systems or when workers load heavy dependencies.
@@ -316,12 +403,27 @@ class ClientSettings(BaseModel):
     )
 
 
+@cyclopts.Parameter(name="*")
 class Settings(BaseModel):
-    """Test settings (can be overridden by CLI)."""
+    """Test settings."""
 
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
     load_pattern: LoadPattern = Field(default_factory=LoadPattern)
     client: ClientSettings = Field(default_factory=ClientSettings)
+
+
+class OfflineSettings(Settings):
+    """Offline mode default settings."""
+
+    load_pattern: Annotated[LoadPattern, cyclopts.Parameter(show=False)] = Field(
+        default_factory=lambda: LoadPattern(type=LoadPatternType.MAX_THROUGHPUT)
+    )
+
+
+class OnlineSettings(Settings):
+    """Online mode default settings."""
+
+    pass
 
 
 def _default_metrics() -> list[str]:
@@ -375,49 +477,170 @@ class EndpointConfig(BaseModel):
     The Default API type is APIType.OPENAI, which refers to the the /v1/chat/completions route.
     """
 
-    endpoints: list[str] | None = None
-    api_key: str | None = None
-    api_type: APIType = APIType.OPENAI
+    endpoints: Annotated[
+        list[str],
+        cyclopts.Parameter(alias="--endpoints", help="Endpoint URL(s)", negative=""),
+    ] = Field(min_length=1)
+    api_key: Annotated[
+        str | None, cyclopts.Parameter(alias="--api-key", help="API key")
+    ] = None
+    api_type: Annotated[
+        APIType,
+        cyclopts.Parameter(alias="--api-type", help="API type: openai or sglang"),
+    ] = APIType.OPENAI
 
 
 class BenchmarkConfig(BaseModel):
-    """Complete benchmark configuration from YAML.
+    """Benchmark configuration — single source of truth for YAML and CLI.
 
-    This is the root configuration model. It's immutable (frozen) to prevent
-    accidental modifications during benchmark execution.
+    Immutable (frozen) to prevent accidental modifications during execution.
+    cyclopts auto-generates CLI flags from fields. Use cyclopts.Parameter(name=...)
+    on Annotated fields to declare flat shorthand aliases.
     """
 
-    model_config = {"frozen": True}  # Pydantic v2 frozen config
+    model_config = {"frozen": True}
 
-    name: str
-    version: str = "1.0"
-    type: TestType
-    submission_ref: SubmissionReference | None = None  # For SUBMISSION type configs
-    # For SUBMISSION: specify offline or online
-    benchmark_mode: TestType | None = None
+    name: Annotated[str, cyclopts.Parameter(show=False)] = Field(
+        "", description="Benchmark name (auto-derived from type if empty)"
+    )
+    version: Annotated[str, cyclopts.Parameter(show=False)] = Field(
+        "1.0", description="Config version"
+    )
+    type: Annotated[TestType, cyclopts.Parameter(show=False)] = Field(
+        description="Test type: offline, online, eval, submission"
+    )
+    submission_ref: Annotated[
+        SubmissionReference | None, cyclopts.Parameter(show=False)
+    ] = None
+    benchmark_mode: Annotated[
+        Literal[TestType.OFFLINE, TestType.ONLINE] | None,
+        cyclopts.Parameter(show=False),
+    ] = None
     model_params: ModelParams = Field(default_factory=ModelParams)
-    datasets: list[Dataset]
+    datasets: Annotated[list[Dataset], cyclopts.Parameter(show=False)] = Field(
+        default_factory=list, description="Dataset configs"
+    )
     settings: Settings = Field(default_factory=Settings)
-    metrics: Metrics = Field(default_factory=Metrics)
-    # workers are assigned endpoints in a round-robin manner
-    endpoint_config: EndpointConfig = Field(default_factory=EndpointConfig)
-    report_dir: Path | None = None
-    timeout: float | None = None
-    verbose: bool = False
-    # CPU affinity for loadgen and worker processes:
-    #   - True = auto (compute optimal NUMA-aware plan)
-    #   - False = disabled (no CPU pinning)
-    enable_cpu_affinity: bool = True
+    metrics: Annotated[Metrics, cyclopts.Parameter(show=False)] = Field(
+        default_factory=Metrics
+    )
+    endpoint_config: EndpointConfig
+    report_dir: Annotated[
+        Path | None,
+        cyclopts.Parameter(alias="--report-dir", help="Report output directory"),
+    ] = None
+    timeout: Annotated[
+        float | None,
+        cyclopts.Parameter(alias="--timeout", help="Global timeout in seconds"),
+    ] = None
+    # verbose is handled by cyclopts meta app (-v flag), not here
+    verbose: Annotated[bool, cyclopts.Parameter(show=False)] = False
+    enable_cpu_affinity: Annotated[
+        bool,
+        cyclopts.Parameter(
+            negative="--no-cpu-affinity",
+            help="NUMA-aware CPU pinning",
+        ),
+    ] = True
+
+    @field_validator("datasets", mode="before")
+    @classmethod
+    def _coerce_dataset_strings(cls, v: object) -> object:
+        """Accept CLI dataset strings alongside Dataset dicts/objects.
+
+        Grammar: ``[perf|acc:]<path>[,key=value...]``
+        """
+        if isinstance(v, list):
+            return [parse_dataset_string(x) if isinstance(x, str) else x for x in v]
+        return v
+
+    @model_validator(mode="after")
+    def _resolve_and_validate(self) -> Self:
+        """Resolve defaults and validate on frozen model after construction.
+
+        Defaults:
+        - Derive name from type if empty
+        - Resolve AUTO streaming (offline=OFF, online=ON)
+        - Resolve model name from submission_ref
+
+        Validation:
+        - Workers must be -1 (auto) or >= 1
+        - max_duration_ms >= min_duration_ms >= 0
+        - No duplicate dataset (name, type) pairs
+        - Load pattern must match test type
+        """
+        # --- Resolve defaults ---
+        mp_updates: dict[str, object] = {}
+
+        if not self.name:
+            object.__setattr__(self, "name", f"{self.type.value}_benchmark")
+
+        effective_mode = (
+            self.benchmark_mode if self.type == TestType.SUBMISSION else self.type
+        )
+
+        if self.model_params.streaming == StreamingMode.AUTO:
+            mp_updates["streaming"] = (
+                StreamingMode.OFF
+                if effective_mode in (TestType.OFFLINE,)
+                else StreamingMode.ON
+            )
+
+        if not self.model_params.name and self.submission_ref:
+            mp_updates["name"] = self.submission_ref.model
+
+        if mp_updates:
+            object.__setattr__(
+                self,
+                "model_params",
+                self.model_params.model_copy(update=mp_updates),
+            )
+
+        if not self.model_params.name:
+            raise ValueError("Required: --model-params.name [--model]")
+
+        # --- Validate (cross-model checks only; sub-models self-validate) ---
+        if self.type == TestType.SUBMISSION and not self.benchmark_mode:
+            raise ValueError(
+                "SUBMISSION configs must specify benchmark_mode (offline or online)"
+            )
+
+        # Duplicate datasets — same (name, type) would collide in results.json
+        if self.datasets:
+            pairs = [(d.name, d.type) for d in self.datasets]
+            dupes = [
+                f"{n} ({t.value})" for (n, t), cnt in Counter(pairs).items() if cnt > 1
+            ]
+            if dupes:
+                raise ValueError(f"Duplicate dataset names: {dupes}")
+
+        # Load pattern type vs test type (sub-model validates completeness)
+        lp = self.settings.load_pattern
+        if effective_mode == TestType.OFFLINE:
+            if lp.type != LoadPatternType.MAX_THROUGHPUT:
+                raise ValueError(
+                    f"Offline benchmarks must use 'max_throughput', got '{lp.type}'"
+                )
+        elif effective_mode == TestType.ONLINE:
+            if lp.type not in (LoadPatternType.POISSON, LoadPatternType.CONCURRENCY):
+                raise ValueError(
+                    "Online mode requires --load-pattern (poisson or concurrency)"
+                )
+
+        return self
 
     @classmethod
     def from_yaml_file(cls, path: Path) -> BenchmarkConfig:
         """Load BenchmarkConfig from YAML file.
 
+        Auto-selects OfflineBenchmarkConfig/OnlineBenchmarkConfig based on
+        the ``type`` field so YAML gets the same defaults as CLI.
+
         Args:
             path: Path to YAML file
 
         Returns:
-            BenchmarkConfig instance
+            BenchmarkConfig (or subclass) instance
 
         Raises:
             FileNotFoundError: If file doesn't exist
@@ -428,10 +651,13 @@ class BenchmarkConfig(BaseModel):
         if not path.exists():
             raise FileNotFoundError(f"Config file not found: {path}")
 
-        with open(path) as f:
-            data = yaml.safe_load(f)
+        raw = path.read_text()
+        data = yaml.safe_load(raw)
+        if not isinstance(data, dict):
+            raise ValueError(f"Expected YAML mapping, got {type(data).__name__}")
+        resolve_env_vars(data)
 
-        return cls(**data)
+        return _config_adapter.validate_python(data)
 
     def to_yaml_file(self, path: Path, exclude_none: bool = True) -> None:
         """Save BenchmarkConfig to YAML file.
@@ -494,198 +720,87 @@ class BenchmarkConfig(BaseModel):
 
         return self.datasets[0]
 
-    def validate_required_fields(self) -> None:
-        """Validate that required fields are populated.
-
-        Raises:
-            ValueError: If required fields are missing
-        """
-        if not self.endpoint_config.endpoints:
-            raise ValueError(
-                "Endpoint required: specify --endpoints URL or set in YAML config"
-            )
-
-        # Model is required for production benchmarks
-        # For submissions, baseline.model is checked
-        # For others, it could be in various places (TODO: unify model handling)
-        # For now, we'll warn but not enforce (gradual migration)
-
-    def validate_load_pattern(self, benchmark_mode: TestType) -> None:
-        """Validate load pattern is appropriate for benchmark mode.
-
-        Args:
-            benchmark_mode: The benchmark execution mode
-
-        Raises:
-            ValueError: If load pattern doesn't match benchmark mode or required parameters are missing
-        """
-        load_pattern_type = self.settings.load_pattern.type
-        target_qps = self.settings.load_pattern.target_qps
-        target_concurrency = self.settings.load_pattern.target_concurrency
-
-        if benchmark_mode == TestType.OFFLINE:
-            if load_pattern_type != LoadPatternType.MAX_THROUGHPUT:
-                raise ValueError(
-                    f"Offline benchmarks must use 'max_throughput' load pattern, got '{load_pattern_type}'"
-                )
-
-        elif benchmark_mode == TestType.ONLINE:
-            # Online mode validation
-            if load_pattern_type == LoadPatternType.POISSON:
-                # Poisson pattern requires target_qps to be specified
-                if target_qps is None or target_qps <= 0:
-                    raise ValueError(
-                        "Online mode with poisson pattern requires positive target_qps. "
-                        "Specify target queries per second (e.g., target_qps: 100 in YAML or --target-qps 100 in CLI)"
-                    )
-            elif load_pattern_type == LoadPatternType.CONCURRENCY:
-                # Concurrency pattern requires target_concurrency > 0
-                if not target_concurrency or target_concurrency <= 0:
-                    raise ValueError(
-                        "Concurrency load pattern requires target_concurrency > 0. "
-                        "Specify number of concurrent requests (e.g., target_concurrency: 10 under load_pattern in YAML or --concurrency 10 in CLI)"
-                    )
-
-    def validate_client_settings(self) -> None:
-        """Validate client settings are reasonable.
-
-        Raises:
-            ValueError: If settings are invalid
-        """
-        workers = self.settings.client.workers
-        # -1 means auto-detect, otherwise must be >= 1
-        if workers < -1 or workers == 0:
-            raise ValueError(f"workers must be -1 (auto) or >= 1, got {workers}")
-
-    def validate_runtime_settings(self) -> None:
-        """Validate runtime settings are reasonable.
-
-        Raises:
-            ValueError: If settings are invalid
-        """
-        if (
-            self.settings.runtime.max_duration_ms
-            < self.settings.runtime.min_duration_ms
-        ):
-            raise ValueError(
-                f"max_duration_ms ({self.settings.runtime.max_duration_ms}) must be >= "
-                f"min_duration_ms ({self.settings.runtime.min_duration_ms})"
-            )
-
-        if self.settings.runtime.min_duration_ms < 0:
-            raise ValueError(
-                f"min_duration_ms must be >= 0, got {self.settings.runtime.min_duration_ms}"
-            )
-
-    def validate_datasets(self) -> None:
-        """Validate dataset configuration.
-
-        Raises:
-            ValueError: If dataset configuration is invalid
-        """
-        if not self.datasets:
-            # Empty datasets is OK for CLI-based benchmarks
-            return
-
-        # Check for duplicate dataset name + type combinations
-        pairs = [(d.name, d.type) for d in self.datasets]
-        duplicates = [
-            f"{name} ({dtype.value})"
-            for name, dtype in set(pairs)
-            if pairs.count((name, dtype)) > 1
-        ]
-        if duplicates:
-            raise ValueError(f"Duplicate dataset names: {duplicates}")
-
-    def validate_all(self, benchmark_mode: TestType | None = None) -> None:
-        """Run all validation checks.
-
-        Args:
-            benchmark_mode: Optional benchmark mode for load pattern validation
-
-        Raises:
-            ValueError: If any validation fails
-        """
-        self.validate_required_fields()
-        self.validate_client_settings()
-        self.validate_runtime_settings()
-        self.validate_datasets()
-
-        if benchmark_mode:
-            self.validate_load_pattern(benchmark_mode)
-
-    @classmethod
-    def create_default_config(cls, test_type: TestType) -> BenchmarkConfig:
+    @staticmethod
+    def create_default_config(test_type: TestType) -> BenchmarkConfig:
         """Create default BenchmarkConfig for a given test type.
 
-        This is the source of truth for default configurations. Used by:
-        - Template generation (init command)
-        - Testing and examples
-        - CLI fallbacks
+        Delegates to the appropriate subclass so field defaults are the
+        single source of truth.  Only placeholder values (endpoints, model
+        name, dataset path) are set explicitly.
 
         Args:
             test_type: TestType enum (OFFLINE, ONLINE, EVAL, or SUBMISSION)
 
         Returns:
-            Default BenchmarkConfig instance
+            BenchmarkConfig (or subclass) instance
 
         Raises:
-            NotImplementedError: If test_type is EVAL or SUBMISSION (not yet implemented)
+            NotImplementedError: If test_type is EVAL or SUBMISSION
             ValueError: If test_type is invalid
         """
+        _common = {
+            "model_params": ModelParams(name="<MODEL_NAME>"),
+            "datasets": [Dataset(path="<DATASET_PATH>")],
+            "endpoint_config": EndpointConfig(endpoints=["<ENDPOINT_URL>"]),
+        }
         if test_type == TestType.OFFLINE:
-            return cls(
-                name="default_offline",
-                version="1.0",
-                type=TestType.OFFLINE,
-                datasets=[],
-                settings=Settings(
-                    load_pattern=LoadPattern(
-                        type=LoadPatternType.MAX_THROUGHPUT, target_qps=None
-                    ),
-                    runtime=RuntimeConfig(
-                        min_duration_ms=600000,
-                        max_duration_ms=1800000,
-                        scheduler_random_seed=42,
-                        dataloader_random_seed=42,
-                    ),
-                    client=ClientSettings(workers=4),
-                ),
-                model_params=ModelParams(temperature=0.7, max_new_tokens=1024),
-                metrics=Metrics(),
-                endpoint_config=EndpointConfig(),
-            )
-        elif test_type == TestType.ONLINE:
-            return cls(
-                name="default_online",
-                version="1.0",
-                type=TestType.ONLINE,
-                datasets=[],
-                settings=Settings(
+            return OfflineBenchmarkConfig(**_common)
+        if test_type == TestType.ONLINE:
+            return OnlineBenchmarkConfig(
+                **_common,
+                settings=OnlineSettings(
                     load_pattern=LoadPattern(
                         type=LoadPatternType.POISSON, target_qps=10.0
                     ),
-                    runtime=RuntimeConfig(
-                        min_duration_ms=600000,
-                        max_duration_ms=1800000,
-                        scheduler_random_seed=42,
-                        dataloader_random_seed=42,
-                    ),
-                    client=ClientSettings(workers=4),
                 ),
-                model_params=ModelParams(temperature=0.7, max_new_tokens=1024),
-                metrics=Metrics(),
-                endpoint_config=EndpointConfig(),
             )
-        elif test_type == TestType.EVAL:
+        if test_type == TestType.EVAL:
             raise NotImplementedError(
                 "Default EVAL config not yet implemented. "
                 "EVAL templates will be added in future release."
             )
-        elif test_type == TestType.SUBMISSION:
+        if test_type == TestType.SUBMISSION:
             raise NotImplementedError(
                 "Default SUBMISSION config not yet implemented. "
                 "SUBMISSION templates will be added in future release."
             )
-        else:
-            raise ValueError(f"Unknown test type: {test_type}")
+        raise ValueError(f"Unknown test type: {test_type}")
+
+    def with_updates(self, **updates: object) -> Self:
+        """Reconstruct with updates, re-running all validators."""
+        return type(self).model_validate(self.model_dump() | updates)
+
+
+@cyclopts.Parameter(name="*")
+class OfflineBenchmarkConfig(BenchmarkConfig):
+    """Offline benchmark config — type locked, load pattern hidden."""
+
+    type: Annotated[Literal[TestType.OFFLINE], cyclopts.Parameter(show=False)] = (
+        TestType.OFFLINE
+    )  # type: ignore[assignment]
+    settings: OfflineSettings = Field(default_factory=OfflineSettings)
+
+
+@cyclopts.Parameter(name="*")
+class OnlineBenchmarkConfig(BenchmarkConfig):
+    """Online benchmark config — type locked."""
+
+    type: Annotated[Literal[TestType.ONLINE], cyclopts.Parameter(show=False)] = (
+        TestType.ONLINE
+    )  # type: ignore[assignment]
+    settings: OnlineSettings = Field(default_factory=OnlineSettings)
+
+
+def _config_discriminator(v: Any) -> str:
+    t = v.get("type", "") if isinstance(v, dict) else str(getattr(v, "type", ""))
+    return str(t) if str(t) in ("offline", "online") else "base"
+
+
+_ConfigUnion = Union[  # noqa: UP007 — runtime Union needed for TypeAdapter + __future__.annotations
+    Annotated[OfflineBenchmarkConfig, Tag("offline")],
+    Annotated[OnlineBenchmarkConfig, Tag("online")],
+    Annotated[BenchmarkConfig, Tag("base")],
+]
+_config_adapter: TypeAdapter[BenchmarkConfig] = TypeAdapter(
+    Annotated[_ConfigUnion, Discriminator(_config_discriminator)]
+)
