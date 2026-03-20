@@ -21,16 +21,6 @@ Each preset gets three types of tests:
 2. **Transform application test** - Verifies transforms apply without errors
 3. **Output validation test** - Verifies transforms produce expected output format
 
-### 2. **Examples Module: `src/inference_endpoint/dataset_manager/examples.py`**
-
-Practical examples showing how to:
-- Load predefined datasets with presets
-- Create custom datasets from Python data structures
-- Apply transforms programmatically
-- Test transforms without YAML configuration
-- Validate all presets in batch
-- Structure benchmarks without YAML
-
 ## Running the Tests
 
 ### Run all preset tests:
@@ -76,14 +66,7 @@ This approach:
 
 ## Programmatic Dataset Usage (No YAML)
 
-The examples module shows how to use datasets without YAML configuration:
-
-### Quick validation of all presets:
-```python
-from inference_endpoint.dataset_manager.examples import example_validate_all_presets
-
-example_validate_all_presets()
-```
+The schema reference documents how to use datasets without YAML configuration. See the `DATASET_SCHEMA_REFERENCE.md` for input/output column specifications.
 
 ### Load a dataset with preset programmatically:
 ```python
@@ -263,11 +246,9 @@ def test_new_preset_transforms_apply(self, sample_data):
 ```
 
 ### Scenario 3: Validate dataset before full benchmark run
-```python
-from inference_endpoint.dataset_manager.examples import example_test_preset_transforms
-
-# Quick validation without running full benchmark
-example_test_preset_transforms()
+```bash
+# Quick validation using pytest
+pytest tests/unit/dataset_manager/test_dataset_presets.py -v
 ```
 
 ## Troubleshooting
@@ -298,14 +279,9 @@ pytest tests/unit/dataset_manager/test_dataset_presets.py::TestClass::test_metho
    pytest tests/unit/dataset_manager/test_dataset_presets.py -v
    ```
 
-2. **Review the examples** to understand programmatic dataset usage:
-   ```bash
-   python -m inference_endpoint.dataset_manager.examples
-   ```
-
-3. **Add to pre-commit** to catch regressions automatically:
+2. **Add to pre-commit** to catch regressions automatically:
    ```bash
    pre-commit run pytest
    ```
 
-4. **Extend tests** when adding new dataset presets or transforms
+3. **Extend tests** when adding new dataset presets or transforms

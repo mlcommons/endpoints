@@ -326,23 +326,13 @@ print("Prompt length:", len(result["prompt"][0]))
 
 ## Quick Validation Script
 
-To validate all presets quickly without downloading datasets:
+To validate all presets quickly without downloading datasets, run the test suite:
 
-```python
-from inference_endpoint.dataset_manager.examples import example_validate_all_presets
-
-example_validate_all_presets()
+```bash
+pytest tests/unit/dataset_manager/test_dataset_presets.py -v
 ```
 
-Output:
-```
-✓ CNNDailyMail::llama3_8b - 2 transforms
-✓ CNNDailyMail::llama3_8b_sglang - 2 transforms
-✓ AIME25::gptoss - 1 transforms
-✓ GPQA::gptoss - 1 transforms
-✓ LiveCodeBench::gptoss - 1 transforms
-✓ OpenOrca::llama2_70b - 1 transforms
-```
+This runs 20 tests across all 6 presets in <5 seconds with no external dependencies.
 
 ---
 

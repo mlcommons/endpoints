@@ -16,12 +16,7 @@ You now have a complete unit testing solution for dataset presets that:
 - **Tests**: 20 test cases covering 5 datasets with 6 presets
 - **Coverage**: Instantiation, application, and format validation for each preset
 
-### 2. **Examples Module** (`src/inference_endpoint/dataset_manager/examples.py`)
-- **Size**: ~280 lines
-- **Purpose**: Shows how to programmatically work with datasets without YAML
-- **8 examples**: From loading datasets to validating presets in batch
-
-### 3. **Documentation**
+### 2. **Documentation**
 - `DATASET_PRESET_TESTING.md` - Complete guide to running and extending tests
 - `DATASET_SCHEMA_REFERENCE.md` - Quick reference for all dataset schemas
 
@@ -246,14 +241,12 @@ Just run the tests - if your change affects output format, tests will fail and t
 2. **Read** the testing guide: `DATASET_PRESET_TESTING.md`
 3. **Check** dataset schemas: `DATASET_SCHEMA_REFERENCE.md`
 4. **Run** the tests: `pytest tests/unit/dataset_manager/test_dataset_presets.py -v`
-5. **Explore** examples: `src/inference_endpoint/dataset_manager/examples.py`
-6. **Extend** with new presets as they're added
+5. **Extend** with new presets as they're added
 
 ## Support
 
 - See `DATASET_PRESET_TESTING.md` for detailed testing guide
 - See `DATASET_SCHEMA_REFERENCE.md` for dataset structures
-- See `examples.py` for usage patterns
 - Check `test_dataset_presets.py` for test patterns to follow
 
 All tests follow AGENTS.md standards:
