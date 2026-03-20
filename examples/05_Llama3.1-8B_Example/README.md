@@ -56,7 +56,7 @@ docker run -it --privileged --ipc=host --network=host -v /dev/shm:/dev/shm -v ~/
 # Start sglang endpoint
 docker exec -u root -w /workspace sglang-cpu-server /bin/bash -lc python3 -m sglang.launch_server \
     --model-path $MODEL_NAME \
-    --served-model-name meta-llama/Llama-3.1-8B-Instruct \ # Needed if `model-path` is here is different from `model` in the client config
+    --served-model-name meta-llama/Llama-3.1-8B-Instruct \
     --dtype bfloat16 \
     --device cpu \
     --max-running-requests 64 \
@@ -67,7 +67,7 @@ docker exec -u root -w /workspace sglang-cpu-server /bin/bash -lc python3 -m sgl
     --disable-piecewise-cuda-graph \
     --disable-radix-cache \
     --host 127.0.0.1 \
-    --port 8080 2>&1 | tee server.log
+    --port 8080 2>&1 | tee server.log"
 ```
 
 ## Start benchmark
