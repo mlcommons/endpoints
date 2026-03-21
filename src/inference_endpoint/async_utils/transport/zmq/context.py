@@ -65,6 +65,12 @@ class ManagedZMQContext(SingletonMixin):
             # However, if mp.start_method is 'fork', we need to check if the PID matches and create
             # a new singleton if we are in a child process.
             if os.getpid() == self.pid:
+                if socket_dir is not None and socket_dir != self.socket_dir:
+                    raise ValueError(
+                        f"ManagedZMQContext singleton already initialized with "
+                        f"socket_dir={self.socket_dir!r}, cannot reinitialize "
+                        f"with socket_dir={socket_dir!r}"
+                    )
                 return
         self.pid: int = os.getpid()
 

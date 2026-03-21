@@ -13,74 +13,437 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Per-sample metrics table for the metrics aggregator service."""
+"""Per-sample metrics table, trigger system, and trigger implementations."""
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 import msgspec
+from inference_endpoint.core.record import SampleEventType, SessionEventType
+
+if TYPE_CHECKING:
+    from inference_endpoint.async_utils.services.metrics_aggregator.emitter import (
+        MetricEmitter,
+    )
+    from inference_endpoint.async_utils.services.metrics_aggregator.token_metrics import (
+        TokenizePool,
+    )
+    from inference_endpoint.core.record import EventRecord
 
 logger = logging.getLogger(__name__)
 
 
-# gc=False: audit 2026-03: output_chunks list is only appended with str values,
-# never with the SampleRow itself or anything referencing it. No cycles possible.
+# ---------------------------------------------------------------------------
+# SampleRow
+# ---------------------------------------------------------------------------
+
+
 class SampleRow(msgspec.Struct, gc=False):  # type: ignore[call-arg]
-    """Per-sample timing and text accumulation for metric computation.
+    """Per-sample state for metric computation.
 
-    Stores raw timestamps (int nanoseconds, or None if not yet received)
-    and accumulated text for tokenization-based metrics.
+    Pure data container — no methods, no trigger awareness.
+    Fields are set by MetricsTable.set_field() which dispatches triggers.
 
-    AT-RISK (gc=False): Has mutable container field `output_chunks`. Any change
-    that stores this struct (or something referencing it) inside `output_chunks`
-    must be audited; if so, remove gc=False.
+    gc=False is safe: no mutable container fields that could form reference cycles.
     """
 
     sample_uuid: str
+    tracked_block_idx: int = -1
     issued_ns: int | None = None
-    complete_ns: int | None = None
     recv_first_ns: int | None = None
     last_recv_ns: int | None = None
     client_send_ns: int | None = None
     client_resp_done_ns: int | None = None
-    prompt_text: str | None = None
-    first_chunk_text: str | None = None
-    output_chunks: list[str] = msgspec.field(default_factory=list)
+    complete_ns: int | None = None
+    # Set async by FirstChunkTokenCountTrigger; read by OslTpotTrigger for TPOT.
+    first_chunk_token_count: int | None = None
 
-    def ttft_ns(self) -> int | None:
-        """Time to first token: recv_first - issued."""
-        if self.recv_first_ns is not None and self.issued_ns is not None:
-            return self.recv_first_ns - self.issued_ns
+
+# ---------------------------------------------------------------------------
+# TrackedBlock
+# ---------------------------------------------------------------------------
+
+
+@dataclass(slots=True)
+class TrackedBlock:
+    """A single START_PERFORMANCE_TRACKING → (last sample completion) window.
+
+    Duration extends to the last tracked sample completion, not to
+    STOP_PERFORMANCE_TRACKING. Empty blocks have duration 0.
+    """
+
+    start_ns: int
+    last_complete_ns: int
+    completed_samples: int = 0
+
+    @property
+    def duration_ns(self) -> int:
+        return self.last_complete_ns - self.start_ns
+
+
+# ---------------------------------------------------------------------------
+# EmitTrigger
+# ---------------------------------------------------------------------------
+
+
+class EmitTrigger(ABC):
+    """A metric computation that fires when a SampleRow field is set.
+
+    Runtime deps (emitter, pool, loop) are bound at construction.
+    ``fire()`` receives only event-specific context.
+    """
+
+    def __init__(self, metric_name: str, requires: tuple[str, ...] = ()):
+        self.metric_name = metric_name
+        self.requires = requires
+
+    @abstractmethod
+    def fire(
+        self,
+        ev_rec: EventRecord,
+        row: SampleRow,
+        pre_change: dict[str, Any],
+    ) -> asyncio.Task | None:
+        """Must be non-blocking. Return a Task if async work was scheduled."""
+        ...
+
+
+# ---------------------------------------------------------------------------
+# Timing triggers (sync)
+# ---------------------------------------------------------------------------
+
+
+class TtftTrigger(EmitTrigger):
+    """TTFT = recv_first_ns (new, from ev_rec) - issued_ns."""
+
+    def __init__(self, emitter: MetricEmitter):
+        super().__init__("ttft_ns", requires=("issued_ns",))
+        self._emitter = emitter
+
+    def fire(self, ev_rec, row, pre_change):
+        issued_ns = pre_change.get("issued_ns")
+        if issued_ns is not None:
+            self._emitter.emit(
+                row.sample_uuid, "ttft_ns", ev_rec.timestamp_ns - issued_ns
+            )
         return None
 
-    def sample_latency_ns(self) -> int | None:
-        """End-to-end latency: complete - issued."""
-        if self.complete_ns is not None and self.issued_ns is not None:
-            return self.complete_ns - self.issued_ns
+
+class ChunkDeltaTrigger(EmitTrigger):
+    """chunk_delta_ns = new timestamp - previous last_recv_ns.
+
+    Skips when pre-change last_recv_ns is None (first recv via RECV_FIRST).
+    """
+
+    def __init__(self, emitter: MetricEmitter):
+        super().__init__("chunk_delta_ns", requires=("last_recv_ns",))
+        self._emitter = emitter
+
+    def fire(self, ev_rec, row, pre_change):
+        prev = pre_change.get("last_recv_ns")
+        if prev is None:
+            return None
+        self._emitter.emit(
+            row.sample_uuid, "chunk_delta_ns", ev_rec.timestamp_ns - prev
+        )
         return None
 
-    def request_duration_ns(self) -> int | None:
-        """HTTP request duration: client_resp_done - client_send."""
-        if self.client_resp_done_ns is not None and self.client_send_ns is not None:
-            return self.client_resp_done_ns - self.client_send_ns
+
+class RequestDurationTrigger(EmitTrigger):
+    """request_duration_ns = client_resp_done_ns (new) - client_send_ns."""
+
+    def __init__(self, emitter: MetricEmitter):
+        super().__init__("request_duration_ns", requires=("client_send_ns",))
+        self._emitter = emitter
+
+    def fire(self, ev_rec, row, pre_change):
+        client_send = pre_change.get("client_send_ns")
+        if client_send is not None:
+            self._emitter.emit(
+                row.sample_uuid,
+                "request_duration_ns",
+                ev_rec.timestamp_ns - client_send,
+            )
         return None
 
-    def output_text(self) -> str:
-        """Full output text from accumulated streaming chunks."""
-        return "".join(self.output_chunks)
+
+class SampleLatencyTrigger(EmitTrigger):
+    """sample_latency_ns = complete_ns (new) - issued_ns."""
+
+    def __init__(self, emitter: MetricEmitter):
+        super().__init__("sample_latency_ns", requires=("issued_ns",))
+        self._emitter = emitter
+
+    def fire(self, ev_rec, row, pre_change):
+        issued_ns = pre_change.get("issued_ns")
+        if issued_ns is not None:
+            self._emitter.emit(
+                row.sample_uuid,
+                "sample_latency_ns",
+                ev_rec.timestamp_ns - issued_ns,
+            )
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Token triggers (async)
+# ---------------------------------------------------------------------------
+
+
+class IslTrigger(EmitTrigger):
+    """ISL from PromptData: len(token_ids) sync, or token_count(text) async."""
+
+    def __init__(
+        self,
+        emitter: MetricEmitter,
+        tokenize_pool: TokenizePool | None,
+        loop: asyncio.AbstractEventLoop | None,
+    ):
+        super().__init__("isl", requires=())
+        self._emitter = emitter
+        self._pool = tokenize_pool
+        self._loop = loop
+
+    def fire(self, ev_rec, row, pre_change):
+        from inference_endpoint.core.types import PromptData
+
+        if not isinstance(ev_rec.data, PromptData):
+            return None
+        if ev_rec.data.token_ids is not None:
+            self._emitter.emit(row.sample_uuid, "isl", len(ev_rec.data.token_ids))
+            return None
+        if (
+            ev_rec.data.text is not None
+            and self._pool is not None
+            and self._loop is not None
+        ):
+            text = ev_rec.data.text
+            uuid = row.sample_uuid
+            pool, loop, emitter = self._pool, self._loop, self._emitter
+
+            async def _compute() -> None:
+                try:
+                    count = await pool.token_count_async(text, loop)
+                    emitter.emit(uuid, "isl", count)
+                except Exception:
+                    logger.exception("ISL tokenization failed for %s", uuid)
+
+            return loop.create_task(_compute())
+        return None
+
+
+class FirstChunkTokenCountTrigger(EmitTrigger):
+    """Tokenize first chunk at RECV_FIRST, store count on row for TPOT."""
+
+    def __init__(
+        self,
+        tokenize_pool: TokenizePool | None,
+        loop: asyncio.AbstractEventLoop | None,
+    ):
+        super().__init__("_first_chunk_token_count", requires=())
+        self._pool = tokenize_pool
+        self._loop = loop
+
+    def fire(self, ev_rec, row, pre_change):
+        from inference_endpoint.core.types import TextModelOutput
+
+        if self._pool is None or self._loop is None:
+            return None
+        if not isinstance(ev_rec.data, TextModelOutput):
+            return None
+        text = str(ev_rec.data)
+        if not text:
+            return None
+
+        target_row = row
+        pool, loop = self._pool, self._loop
+
+        async def _compute() -> None:
+            try:
+                count = await pool.token_count_async(text, loop)
+                msgspec.structs.force_setattr(
+                    target_row, "first_chunk_token_count", count
+                )
+            except Exception:
+                logger.exception(
+                    "First chunk tokenization failed for %s", row.sample_uuid
+                )
+
+        return loop.create_task(_compute())
+
+
+class OslTpotTrigger(EmitTrigger):
+    """OSL and TPOT from COMPLETE event data."""
+
+    def __init__(
+        self,
+        emitter: MetricEmitter,
+        tokenize_pool: TokenizePool | None,
+        loop: asyncio.AbstractEventLoop | None,
+    ):
+        super().__init__("osl", requires=("recv_first_ns",))
+        self._emitter = emitter
+        self._pool = tokenize_pool
+        self._loop = loop
+
+    def fire(self, ev_rec, row, pre_change):
+        from inference_endpoint.core.types import TextModelOutput
+
+        if self._pool is None or self._loop is None:
+            return None
+        if not isinstance(ev_rec.data, TextModelOutput):
+            return None
+        output_text = str(ev_rec.data)
+        if not output_text:
+            return None
+
+        uuid = row.sample_uuid
+        recv_first_ns = pre_change.get("recv_first_ns")
+        first_chunk_tc = row.first_chunk_token_count
+        complete_ns = ev_rec.timestamp_ns
+        pool, loop, emitter = self._pool, self._loop, self._emitter
+
+        async def _compute() -> None:
+            try:
+                osl = await pool.token_count_async(output_text, loop)
+                emitter.emit(uuid, "osl", osl)
+                if recv_first_ns is not None and first_chunk_tc is not None:
+                    tokens_after_first = osl - first_chunk_tc
+                    if tokens_after_first > 0:
+                        tpot = (complete_ns - recv_first_ns) / tokens_after_first
+                        emitter.emit(uuid, "tpot_ns", tpot)
+            except Exception:
+                logger.exception("Output tokenization failed for %s", uuid)
+
+        return loop.create_task(_compute())
+
+
+# ---------------------------------------------------------------------------
+# MetricsTable
+# ---------------------------------------------------------------------------
 
 
 class MetricsTable:
-    """Stores in-flight sample rows.
+    """Stores in-flight sample rows, session state, and dispatches triggers.
 
-    Rows are created on ISSUED and removed on COMPLETE (after metrics are emitted).
+    Row lifecycle is managed internally via ``set_field``:
+    - ISSUED: creates the row if tracking is on, assigns block index.
+    - COMPLETE: fires triggers, sets field, updates tracked block, removes row.
+    - Other events: fires triggers and sets field. No-op if row doesn't exist.
+
+    Session state is updated via ``handle_session_event``.
     """
 
     def __init__(self) -> None:
         self._in_flight: dict[str, SampleRow] = {}
+        self._triggers: dict[str, list[EmitTrigger]] = {}
+        self._in_flight_tasks: set[asyncio.Task] = set()
 
-    def create_row(self, sample_uuid: str) -> SampleRow:
+        # Session-level state
+        self.is_tracking: bool = False
+        self.session_started_ns: int | None = None
+        self.tracked_blocks: list[TrackedBlock] = []
+
+    # --- Trigger registration ---
+
+    def add_trigger(self, field_name: str, trigger: EmitTrigger) -> None:
+        """Register a trigger for a SampleRow field."""
+        self._triggers.setdefault(field_name, []).append(trigger)
+
+    # --- Session event handling ---
+
+    def handle_session_event(self, ev_rec: EventRecord) -> None:
+        """Update session-level state from a session event."""
+        ev = ev_rec.event_type
+        if ev == SessionEventType.STARTED:
+            self.session_started_ns = ev_rec.timestamp_ns
+        elif ev == SessionEventType.START_PERFORMANCE_TRACKING:
+            if not self.is_tracking:
+                self.is_tracking = True
+                self.tracked_blocks.append(
+                    TrackedBlock(
+                        start_ns=ev_rec.timestamp_ns,
+                        last_complete_ns=ev_rec.timestamp_ns,
+                    )
+                )
+        elif ev == SessionEventType.STOP_PERFORMANCE_TRACKING:
+            self.is_tracking = False
+
+    # --- Row access ---
+
+    def get_row(self, sample_uuid: str) -> SampleRow | None:
+        return self._in_flight.get(sample_uuid)
+
+    def __len__(self) -> int:
+        return len(self._in_flight)
+
+    # --- Tracked duration ---
+
+    @property
+    def total_tracked_duration_ns(self) -> int:
+        """Sum of all tracking block durations."""
+        return sum(b.duration_ns for b in self.tracked_blocks)
+
+    @property
+    def total_completed_tracked_samples(self) -> int:
+        """Total samples completed across all tracking blocks."""
+        return sum(b.completed_samples for b in self.tracked_blocks)
+
+    # --- Field updates ---
+
+    def set_field(
+        self,
+        sample_uuid: str,
+        field_name: str,
+        value: Any,
+        ev_rec: EventRecord,
+    ) -> None:
+        """Update a sample field, handling row lifecycle and trigger dispatch.
+
+        - ISSUED: creates the row if tracking is on, assigns current block index.
+          No-op if tracking is off.
+        - COMPLETE: fires triggers, sets field, updates tracked block, removes row.
+        - Other events: fires triggers and sets field.
+          No-op if the row doesn't exist (untracked sample).
+        """
+        row: SampleRow | None
+        ev = ev_rec.event_type
+
+        if ev == SampleEventType.ISSUED:
+            if not self.is_tracking:
+                return
+            row = self._create_row(sample_uuid)
+            msgspec.structs.force_setattr(
+                row, "tracked_block_idx", len(self.tracked_blocks) - 1
+            )
+        else:
+            row = self._in_flight.get(sample_uuid)
+            if row is None:
+                return
+
+        self._fire_triggers(row, field_name, ev_rec)
+        msgspec.structs.force_setattr(row, field_name, value)
+
+        if ev == SampleEventType.COMPLETE:
+            self._update_tracked_block(row, ev_rec.timestamp_ns)
+            self._in_flight.pop(sample_uuid, None)
+
+    # --- Task draining ---
+
+    async def drain_tasks(self) -> None:
+        """Await all in-flight async trigger tasks."""
+        if self._in_flight_tasks:
+            await asyncio.gather(*self._in_flight_tasks, return_exceptions=True)
+            self._in_flight_tasks.clear()
+
+    # --- Internal ---
+
+    def _create_row(self, sample_uuid: str) -> SampleRow:
         if sample_uuid in self._in_flight:
             logger.warning(
                 "Duplicate ISSUED for sample %s, possibly due to retry - skipping",
@@ -91,11 +454,21 @@ class MetricsTable:
         self._in_flight[sample_uuid] = row
         return row
 
-    def get_row(self, sample_uuid: str) -> SampleRow | None:
-        return self._in_flight.get(sample_uuid)
+    def _fire_triggers(
+        self, row: SampleRow, field_name: str, ev_rec: EventRecord
+    ) -> None:
+        for trigger in self._triggers.get(field_name, ()):
+            pre_change = {attr: getattr(row, attr) for attr in trigger.requires}
+            task = trigger.fire(ev_rec, row, pre_change)
+            if task is not None:
+                self._in_flight_tasks.add(task)
+                task.add_done_callback(self._in_flight_tasks.discard)
 
-    def remove_row(self, sample_uuid: str) -> SampleRow | None:
-        return self._in_flight.pop(sample_uuid, None)
-
-    def __len__(self) -> int:
-        return len(self._in_flight)
+    def _update_tracked_block(self, row: SampleRow, complete_ns: int) -> None:
+        """Extend the sample's tracked block duration and increment count."""
+        idx = row.tracked_block_idx
+        if 0 <= idx < len(self.tracked_blocks):
+            block = self.tracked_blocks[idx]
+            if complete_ns > block.last_complete_ns:
+                block.last_complete_ns = complete_ns
+            block.completed_samples += 1

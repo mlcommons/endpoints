@@ -19,6 +19,7 @@ import os
 import tempfile
 import time
 
+import pytest
 import zmq
 from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
 
@@ -180,3 +181,40 @@ class TestManagedZMQContextScoped:
             assert ctx1.ctx is not None
             assert ctx1.socket_dir == dir1
         # After outer exit, cleanup() ran (own=True)
+
+
+# =============================================================================
+# Mismatched socket_dir detection
+# =============================================================================
+
+
+class TestManagedZMQContextMismatchedSocketDir:
+    """Tests for ManagedZMQContext raising on mismatched socket_dir."""
+
+    def test_different_socket_dir_raises(self, tmp_path):
+        """Re-init with a different explicit socket_dir raises ValueError."""
+        dir_a = tmp_path / "dir_a"
+        dir_b = tmp_path / "dir_b"
+        dir_a.mkdir()
+        dir_b.mkdir()
+
+        with ManagedZMQContext.scoped(socket_dir=str(dir_a)) as ctx:
+            assert ctx.socket_dir == dir_a.as_posix()
+            with pytest.raises(ValueError, match="cannot reinitialize"):
+                ManagedZMQContext(socket_dir=str(dir_b))
+
+    def test_none_socket_dir_does_not_raise(self):
+        """Re-init with socket_dir=None does not raise (caller doesn't care)."""
+        with ManagedZMQContext.scoped() as ctx:
+            original_dir = ctx.socket_dir
+            ManagedZMQContext(socket_dir=None)
+            assert ctx.socket_dir == original_dir
+
+    def test_same_socket_dir_does_not_raise(self, tmp_path):
+        """Re-init with the same explicit socket_dir does not raise."""
+        sock_dir = tmp_path / "same_dir"
+        sock_dir.mkdir()
+
+        with ManagedZMQContext.scoped(socket_dir=str(sock_dir)) as ctx:
+            assert ctx.socket_dir == sock_dir.as_posix()
+            ManagedZMQContext(socket_dir=str(sock_dir))

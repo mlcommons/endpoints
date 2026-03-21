@@ -2,20 +2,18 @@
 
 ## Overview
 
-The metrics aggregator is a ZMQ subscriber service that consumes `EventRecord` messages
-from the pub/sub event bus, computes per-sample metrics in real time, and pushes them
-to a `MetricEmitter` backend (currently JSONL; future: Prometheus PushGateway).
+The metrics aggregator receives `EventRecord` messages from a ZMQ SUB socket,
+computes per-sample metrics in real time, and pushes them to a `MetricEmitter`
+backend (currently JSONL; future: Prometheus PushGateway).
 
-It runs as an independent subprocess with its own event loop, connected to the same
-ZMQ PUB socket as the EventLoggerService.
-
-```
-                        ZMQ PUB (ipc://)
-                             │
-              ┌──────────────┼──────────────┐
-              ▼              ▼              ▼
-       EventLogger   MetricsAggregator   (future subscribers)
-       (JSONL/SQL)   (real-time metrics)
+```mermaid
+flowchart LR
+    Socket[ZMQ SUB socket] --> Dispatch[Event dispatch]
+    Dispatch --> Row[Create / update SampleRow]
+    Row --> Check{Triggers\na metric?}
+    Check -->|Yes| Task[Compute metric]
+    Check -->|No| Done[Done]
+    Task --> Emit[MetricEmitter.emit]
 ```
 
 ## Module Layout
@@ -24,167 +22,290 @@ ZMQ PUB socket as the EventLoggerService.
 metrics_aggregator/
 ├── __init__.py
 ├── __main__.py          # CLI entry point
-├── aggregator.py        # MetricsAggregatorService (ZmqEventRecordSubscriber)
+├── aggregator.py        # MetricsAggregatorService (thin event router)
 ├── emitter.py           # MetricEmitter ABC, JsonlMetricEmitter
-├── metrics_table.py     # SampleRow, MetricsTable
+├── metrics_table.py     # SampleRow, TrackedBlock, MetricsTable, EmitTrigger, triggers
 └── token_metrics.py     # TokenizePool (thread-pool tokenizer)
 ```
+
+## Architecture
+
+### Component Roles
+
+| Component                    | Responsibility                                                                                                                                                                                                                                                       |
+| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **MetricsAggregatorService** | Thin event router. Receives EventRecord batches, dispatches session events to `MetricsTable.handle_session_event()` and sample events to `MetricsTable.set_field()`. Owns shutdown logic.                                                                            |
+| **MetricsTable**             | Owns sample rows, session state, trigger registry, tracked blocks, and in-flight task tracking. Handles row lifecycle (create on ISSUED, remove on COMPLETE), trigger dispatch, and tracked duration bookkeeping.                                                    |
+| **SampleRow**                | Pure data container (`dataclass(slots=True)`). Holds per-sample timestamps and a `tracked_block_idx` linking it to its tracking window. No methods, no trigger awareness.                                                                                            |
+| **EmitTrigger**              | ABC for metric computations. Each trigger binds runtime deps (emitter, tokenize_pool, loop) at construction. `fire(ev_rec, row, pre_change)` is called by MetricsTable when a field is set. Must be non-blocking; returns an `asyncio.Task` if async work is needed. |
+| **TrackedBlock**             | Per-tracking-window duration state. Tracks `start_ns`, `last_complete_ns`, and `completed_samples`. Duration extends to the last sample completion, not to STOP_PERFORMANCE_TRACKING.                                                                                |
+
+### Trigger System
+
+Triggers are registered on `MetricsTable` at aggregator construction time:
+
+```python
+table = MetricsTable()
+table.add_trigger("recv_first_ns", TtftTrigger(emitter))
+table.add_trigger("complete_ns", SampleLatencyTrigger(emitter))
+table.add_trigger("complete_ns", OslTpotTrigger(emitter, tokenize_pool, loop))
+```
+
+Each trigger has:
+
+- `metric_name`: identifies the metric being computed.
+- `requires`: tuple of SampleRow field names whose **pre-change** values are
+  snapshotted and passed to `fire()`.
+
+When `MetricsTable.set_field(uuid, field_name, value, ev_rec)` is called:
+
+1. Look up the row (or create it if ISSUED + tracking is on).
+2. For each trigger registered on `field_name`:
+   a. Snapshot `{attr: getattr(row, attr) for attr in trigger.requires}`.
+   b. Call `trigger.fire(ev_rec, row, pre_change)`.
+   c. If a Task is returned, add it to `_in_flight_tasks`.
+3. Set `row.field_name = value`.
+4. If COMPLETE, update the tracked block and remove the row.
+
+This means triggers see the row state **before** the update. This is critical for
+`chunk_delta_ns`, which needs the previous `last_recv_ns` value.
 
 ## Subscribed Events
 
 ### Session Events
 
-| Event                                         | Effect                                               |
-| --------------------------------------------- | ---------------------------------------------------- |
-| `SessionEventType.STARTED`                    | Records session start timestamp                      |
-| `SessionEventType.START_PERFORMANCE_TRACKING` | Sets `is_tracking = True`                            |
-| `SessionEventType.STOP_PERFORMANCE_TRACKING`  | Sets `is_tracking = False`                           |
-| `SessionEventType.ENDED`                      | Flushes emitter, closes subscriber, signals shutdown |
+| Event                                         | Effect                                                                     |
+| --------------------------------------------- | -------------------------------------------------------------------------- |
+| `SessionEventType.STARTED`                    | Records `session_started_ns` on MetricsTable                               |
+| `SessionEventType.START_PERFORMANCE_TRACKING` | Sets `is_tracking = True`, opens a new `TrackedBlock`                      |
+| `SessionEventType.STOP_PERFORMANCE_TRACKING`  | Sets `is_tracking = False` (tracked blocks keep extending via completions) |
+| `SessionEventType.ENDED`                      | Triggers shutdown: drain in-flight tasks, then finalize                    |
 
 ### Sample Events
 
-| Event              | Stored Field                                        | Metric Emitted                        | Formula                                                  |
-| ------------------ | --------------------------------------------------- | ------------------------------------- | -------------------------------------------------------- |
-| `ISSUED`           | `issued_ns`                                         | `isl`                                 | `len(token_ids)` or `token_count(text)` via `PromptData` |
-| `RECV_FIRST`       | `recv_first_ns`, `last_recv_ns`, `first_chunk_text` | `ttft_ns`                             | `recv_first_ns - issued_ns`                              |
-| `RECV_NON_FIRST`   | `last_recv_ns` (updated)                            | `chunk_delta_ns`                      | `timestamp - last_recv_ns`                               |
-| `CLIENT_SEND`      | `client_send_ns`                                    | —                                     | —                                                        |
-| `CLIENT_RESP_DONE` | `client_resp_done_ns`                               | `request_duration_ns`                 | `client_resp_done_ns - client_send_ns`                   |
-| `COMPLETE`         | `complete_ns`                                       | `sample_latency_ns`, `osl`, `tpot_ns` | see below                                                |
+| Event              | Field Set                       | Trigger(s) Fired                                                                              |
+| ------------------ | ------------------------------- | --------------------------------------------------------------------------------------------- |
+| `ISSUED`           | `issued_ns`                     | `IslTrigger`                                                                                  |
+| `RECV_FIRST`       | `recv_first_ns`, `last_recv_ns` | `TtftTrigger`, `FirstChunkTokenCountTrigger`, `ChunkDeltaTrigger` (skips: pre-change is None) |
+| `RECV_NON_FIRST`   | `last_recv_ns`                  | `ChunkDeltaTrigger`                                                                           |
+| `CLIENT_SEND`      | `client_send_ns`                | (none)                                                                                        |
+| `CLIENT_RESP_DONE` | `client_resp_done_ns`           | `RequestDurationTrigger`                                                                      |
+| `COMPLETE`         | `complete_ns`                   | `SampleLatencyTrigger`, `OslTpotTrigger`                                                      |
 
-Ignored sample events: `TRANSPORT_SENT`, `TRANSPORT_RECV` (infrastructure-level, not
-relevant for user-facing metrics).
+Ignored: `TRANSPORT_SENT`, `TRANSPORT_RECV` (infrastructure-level).
 
-## Performance Tracking Window
+## Performance Tracking and Tracked Duration
 
-The `is_tracking` flag gates which samples are tracked:
+### Tracking Windows
+
+`is_tracking` defaults to `False`. No samples are tracked until
+`START_PERFORMANCE_TRACKING` is received. This allows warmup queries to be excluded.
 
 ```
-  STARTED                                                    ENDED
-    │                                                          │
-    ▼                                                          ▼
-────┬─────────┬─────────────────────────────┬──────────────────┬──
-    │         │  ◄── samples issued here    │                  │
-    │   START_PERF_TRACKING          STOP_PERF_TRACKING        │
-    │         │      are tracked            │                  │
-    │         │                             │                  │
+  STARTED                                                      ENDED
+    │                                                            │
+    ▼                                                            ▼
+────┬─────────┬───────────────────────────────┬──────────────────┬──
+    │  warmup │  ◄── samples issued here      │  cooldown        │
+    │         │      are tracked              │                  │
+    │   START_PERF_TRACKING            STOP_PERF_TRACKING        │
+    │         │                               │                  │
+    │         │◄── block 0 ──────────────────►│                  │
+    │         │   (extends to last completion) │                  │
 ```
 
-- A sample is tracked **if and only if** its `ISSUED` event arrives while `is_tracking` is `True`.
-- Once tracked, a sample continues to receive events and emit metrics regardless of
-  later `STOP_PERFORMANCE_TRACKING` events. Only new ISSUEs are blocked.
-- This allows warmup queries (before START) and cooldown queries (after STOP) to be
-  excluded from reported metrics while still draining in-flight samples cleanly.
+- A sample is tracked **if and only if** its ISSUED event arrives while
+  `is_tracking == True`.
+- Once tracked, the sample continues to receive events and emit metrics
+  regardless of later STOP events.
+- Duplicate START events (while already tracking) are no-ops.
+
+### TrackedBlock
+
+Each `START_PERFORMANCE_TRACKING` (when not already tracking) opens a new
+`TrackedBlock`:
+
+```python
+@dataclass(slots=True)
+class TrackedBlock:
+    start_ns: int               # timestamp of START_PERFORMANCE_TRACKING
+    last_complete_ns: int       # max completion timestamp (init = start_ns)
+    completed_samples: int = 0  # count of completions in this block
+```
+
+When a tracked sample completes:
+
+- `block.last_complete_ns = max(block.last_complete_ns, complete_ns)`
+- `block.completed_samples += 1`
+
+`block.duration_ns = last_complete_ns - start_ns`
+
+This means block duration extends to the **last tracked completion**, not to
+STOP_PERFORMANCE_TRACKING. Samples issued during tracking but completing after
+STOP still contribute to their block's duration.
+
+### Aggregate Metrics
+
+```
+total_tracked_duration_ns = sum(block.duration_ns for block in tracked_blocks)
+total_completed_tracked_samples = sum(block.completed_samples for block in tracked_blocks)
+QPS = total_completed_tracked_samples / total_tracked_duration_ns
+```
+
+An empty block (START → STOP with no samples) has `duration_ns = 0` and
+`completed_samples = 0`, contributing nothing to either sum.
+
+### Multiple Tracking Windows Example
+
+```
+t=0:    START → block 0 (start=0)
+t=100:  ISSUED s1 (block_idx=0)
+t=200:  ISSUED s2 (block_idx=0)
+t=300:  STOP → is_tracking=False
+t=400:  ISSUED s3 (untracked, is_tracking=False)
+t=600:  COMPLETE s1 → block 0: last_complete=600, completed=1
+t=700:  COMPLETE s2 → block 0: last_complete=700, completed=2
+t=800:  START → block 1 (start=800)
+t=900:  ISSUED s4 (block_idx=1)
+t=1000: COMPLETE s4 → block 1: last_complete=1000, completed=1
+
+block 0: duration = 700 - 0 = 700, samples = 2
+block 1: duration = 1000 - 800 = 200, samples = 1
+total_tracked_duration = 900
+QPS = 3 / 900
+```
 
 ## Data Model: SampleRow
 
-Each tracked sample gets a `SampleRow` — a `msgspec.Struct` with `gc=False` that
-stores raw `int | None` nanosecond timestamps and accumulated text:
-
-```
-SampleRow
-├── sample_uuid: str
-├── issued_ns: int | None           ← set on ISSUED
-├── complete_ns: int | None          ← set on COMPLETE
-├── recv_first_ns: int | None        ← set on RECV_FIRST
-├── last_recv_ns: int | None         ← set on RECV_FIRST, updated on each RECV_NON_FIRST
-├── client_send_ns: int | None       ← set on CLIENT_SEND
-├── client_resp_done_ns: int | None  ← set on CLIENT_RESP_DONE
-├── prompt_text: str | None          ← from ISSUED event data (for ISL tokenization)
-├── first_chunk_text: str | None     ← from RECV_FIRST event data (for TPOT denominator)
-└── output_chunks: list[str]         ← accumulated from RECV_FIRST/RECV_NON_FIRST data
-```
-
-Metric formulas are simple methods on the row:
+A pure `dataclass(slots=True)` — no methods, no trigger awareness:
 
 ```python
-def ttft_ns(self) -> int | None:           # recv_first_ns - issued_ns
-def sample_latency_ns(self) -> int | None: # complete_ns - issued_ns
-def request_duration_ns(self) -> int | None: # client_resp_done_ns - client_send_ns
-def output_text(self) -> str:              # "".join(output_chunks)
+@dataclass(slots=True)
+class SampleRow:
+    sample_uuid: str
+    tracked_block_idx: int = -1       # -1 = untracked (should never happen with current gate)
+    issued_ns: int | None = None
+    recv_first_ns: int | None = None
+    last_recv_ns: int | None = None
+    client_send_ns: int | None = None
+    client_resp_done_ns: int | None = None
+    complete_ns: int | None = None
+    first_chunk_token_count: int | None = None  # set async by FirstChunkTokenCountTrigger
 ```
 
-Rows are created on ISSUED and removed on COMPLETE.
+Compared to the previous design:
 
-### Design Rationale: Why Not a Declarative Field System
-
-An earlier iteration used `_MetricField` structs with `delta_start_field_prio` lists
-to declaratively describe which field pairs produce which metrics. This was abandoned
-because:
-
-1. The formulas are few and fixed — a declarative DSL adds indirection without flexibility.
-2. String-based field lookups at runtime obscure the actual data flow.
-3. The metric emission logic was coupled into the data storage layer (`set_field` both
-   stored a timestamp and emitted a metric), making it hard to test or reason about.
-4. Special cases (`mutable` flag for `recv_non_first`, `msgspec.UNSET` sentinels)
-   added complexity for what is fundamentally `int | None`.
-
-The current design keeps data storage (SampleRow) separate from metric emission
-(aggregator event handlers). Each handler is 5-15 lines, reads top-to-bottom, and
-is independently testable.
+- **Dropped**: `prompt_text` (ISL trigger reads from `ev_rec.data` directly),
+  `first_chunk_text` (replaced by `first_chunk_token_count`, computed eagerly at
+  RECV_FIRST), `output_chunks` (COMPLETE carries full output via TextModelOutput).
+- **Added**: `tracked_block_idx` (links sample to its tracking window),
+  `first_chunk_token_count` (pre-computed token count for TPOT denominator).
+- **Changed from msgspec.Struct to dataclass**: SampleRow is never serialized, only
+  used as a temporary in-memory container. `dataclass(slots=True)` provides similar
+  performance without msgspec constraints.
 
 ## Metrics Computed
 
-### Timing Metrics (emitted immediately on triggering event)
+### Timing Metrics (sync triggers, emitted immediately)
 
-| Metric                | Emitted On       | Formula                                | Notes                                                                                                      |
-| --------------------- | ---------------- | -------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| `ttft_ns`             | RECV_FIRST       | `recv_first_ns - issued_ns`            | Time to first token. Streaming only.                                                                       |
-| `sample_latency_ns`   | COMPLETE         | `complete_ns - issued_ns`              | End-to-end latency from issue to completion.                                                               |
-| `request_duration_ns` | CLIENT_RESP_DONE | `client_resp_done_ns - client_send_ns` | HTTP-level request time (inside worker process).                                                           |
-| `chunk_delta_ns`      | RECV_NON_FIRST   | `timestamp - last_recv_ns`             | Inter-token arrival time. `last_recv_ns` starts at `recv_first_ns` and advances with each non-first chunk. |
+| Metric                | Trigger                  | Field                 | Formula                                                                          |
+| --------------------- | ------------------------ | --------------------- | -------------------------------------------------------------------------------- |
+| `ttft_ns`             | `TtftTrigger`            | `recv_first_ns`       | `ev_rec.timestamp_ns - pre_change["issued_ns"]`                                  |
+| `chunk_delta_ns`      | `ChunkDeltaTrigger`      | `last_recv_ns`        | `ev_rec.timestamp_ns - pre_change["last_recv_ns"]` (skips if pre-change is None) |
+| `request_duration_ns` | `RequestDurationTrigger` | `client_resp_done_ns` | `ev_rec.timestamp_ns - pre_change["client_send_ns"]`                             |
+| `sample_latency_ns`   | `SampleLatencyTrigger`   | `complete_ns`         | `ev_rec.timestamp_ns - pre_change["issued_ns"]`                                  |
 
-### Token Metrics (require tokenization, may be async)
+### Token Metrics (async triggers, fire tasks)
 
-| Metric    | Emitted On           | Formula                                                      | Notes                                                                                                                                                                                                                                   |
-| --------- | -------------------- | ------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `isl`     | ISSUED               | `len(token_ids)` or `token_count(text)`                      | Input sequence length. ISSUED event carries `PromptData` with either `token_ids` (SGLang, emitted synchronously) or `text` (OpenAI, tokenized async).                                                                                   |
-| `osl`     | COMPLETE (awaited)   | `token_count(output_text)`                                   | Output sequence length. Output text is from accumulated chunks (streaming) or COMPLETE data (non-streaming).                                                                                                                            |
-| `tpot_ns` | COMPLETE (after OSL) | `(complete_ns - recv_first_ns) / (osl - first_chunk_tokens)` | Time per output token after the first chunk. The first chunk may contain multiple tokens, so `first_chunk_text` is tokenized separately for the denominator. Only emitted for streaming responses where `osl - first_chunk_tokens > 0`. |
+| Metric                     | Trigger                       | Field           | Source                                                                           |
+| -------------------------- | ----------------------------- | --------------- | -------------------------------------------------------------------------------- |
+| `isl`                      | `IslTrigger`                  | `issued_ns`     | `len(ev_rec.data.token_ids)` (sync) or `token_count(ev_rec.data.text)` (async)   |
+| `_first_chunk_token_count` | `FirstChunkTokenCountTrigger` | `recv_first_ns` | `token_count(str(ev_rec.data))` → stored on `row.first_chunk_token_count`        |
+| `osl`, `tpot_ns`           | `OslTpotTrigger`              | `complete_ns`   | `token_count(str(ev_rec.data))` for OSL; TPOT uses `row.first_chunk_token_count` |
 
-## Event Dispatch Flow
+## Data Flow
 
+```mermaid
+flowchart TB
+    E[EventRecord from socket] --> D{Event type?}
+
+    D -->|Session event| S["table.handle_session_event(ev_rec)"]
+    S --> S1[Update is_tracking / session_started_ns]
+    S --> S2[Open TrackedBlock on START]
+
+    D -->|ENDED| SD[Set shutdown flag]
+
+    D -->|Sample event| SF["table.set_field(uuid, field, value, ev_rec)"]
+    SF --> LC{ISSUED?}
+    LC -->|Yes + tracking on| CR[Create row, assign block_idx]
+    LC -->|Yes + tracking off| Skip[No-op]
+    LC -->|No| LU[Look up existing row]
+    LU --> LU2{Row exists?}
+    LU2 -->|No| Skip
+    LU2 -->|Yes| FT[Fire triggers]
+    CR --> FT
+
+    FT --> Set[Set field on row]
+    Set --> CC{COMPLETE?}
+    CC -->|Yes| UB[Update tracked block]
+    UB --> RM[Remove row]
+    CC -->|No| Done[Done]
+
+    SD --> Drain[Await in-flight tasks]
+    Drain --> Fin[Flush + close emitter]
 ```
-process(records: list[EventRecord])
-│
-├── for each record:
-│   ├── Session events → update is_tracking / session state
-│   │
-│   └── Sample events (if sample_uuid non-empty):
-│       ├── ISSUED
-│       │   ├── if not is_tracking: skip
-│       │   ├── create SampleRow in MetricsTable
-│       │   ├── store issued_ns
-│       │   ├── store prompt_text from record.data (if str)
-│       │   └── schedule ISL tokenization (async, fire-and-forget)
-│       │
-│       ├── RECV_FIRST
-│       │   ├── lookup row (skip if not tracked)
-│       │   ├── store recv_first_ns, last_recv_ns
-│       │   ├── emit ttft_ns
-│       │   └── append record.data to output_chunks
-│       │
-│       ├── RECV_NON_FIRST
-│       │   ├── lookup row (skip if not tracked)
-│       │   ├── emit chunk_delta_ns (from last_recv_ns)
-│       │   ├── update last_recv_ns
-│       │   └── append record.data to output_chunks
-│       │
-│       ├── CLIENT_SEND
-│       │   └── store client_send_ns
-│       │
-│       ├── CLIENT_RESP_DONE
-│       │   ├── store client_resp_done_ns
-│       │   └── emit request_duration_ns
-│       │
-│       └── COMPLETE
-│           ├── store complete_ns
-│           ├── emit sample_latency_ns
-│           ├── await OSL tokenization → emit osl
-│           ├── if streaming and osl > first_chunk_tokens → emit tpot_ns
-│           └── remove row from MetricsTable
-│
-└── if ENDED seen: flush emitter, close subscriber, signal shutdown
+
+### Execution Sequence
+
+```mermaid
+sequenceDiagram
+    participant Socket as ZMQ SUB
+    participant Agg as Aggregator
+    participant Table as MetricsTable
+    participant Trigger as EmitTrigger
+    participant Pool as TokenizePool
+    participant Em as Emitter
+
+    Socket->>Agg: batch of EventRecords
+
+    Note over Agg: Session events
+    Agg->>Table: handle_session_event(ev_rec)
+
+    Note over Agg: Sample events
+    Agg->>Table: set_field(uuid, field, value, ev_rec)
+    Table->>Table: lookup / create row
+    Table->>Trigger: fire(ev_rec, row, pre_change)
+
+    alt Sync trigger
+        Trigger->>Em: emit(metric_name, value)
+    else Async trigger
+        Trigger->>Pool: token_count_async (creates Task)
+        Pool-->>Em: emit(metric_name, value)
+        Note over Table: Task tracked in _in_flight_tasks
+    end
+
+    Table->>Table: setattr(row, field, value)
+
+    Note over Agg: On ENDED
+    Agg->>Table: drain_tasks()
+    Table->>Table: await gather(*_in_flight_tasks)
+    Agg->>Em: flush() + close()
+```
+
+### Shutdown Sequence
+
+```mermaid
+stateDiagram-v2
+    [*] --> Listening: start()
+    Listening --> Processing: events arrive
+    Processing --> Listening: batch done
+
+    Processing --> ShuttingDown: ENDED in batch
+    note right of ShuttingDown: shutdown flag set,<br/>no new tasks fired
+
+    ShuttingDown --> Draining: await table.drain_tasks()
+    Draining --> Finalized: all tasks complete
+    Finalized --> [*]: emitter flushed/closed,<br/>shutdown_event set
 ```
 
 ## MetricEmitter
@@ -197,6 +318,9 @@ class MetricEmitter(ABC):
     def flush(self) -> None: ...
     def close(self) -> None: ...
 ```
+
+`emit()` has a None guard: if the emitter is closed, the call is a silent no-op.
+This protects against late-arriving async tasks that complete after shutdown.
 
 ### JsonlMetricEmitter (current implementation)
 
@@ -222,8 +346,6 @@ values per metric name.
 
 Thread-pool wrapper around HuggingFace `AutoTokenizer` for ISL/OSL/TPOT computation.
 
-### Architecture
-
 ```
                           TokenizePool
                          ┌─────────────┐
@@ -237,83 +359,36 @@ Thread-pool wrapper around HuggingFace `AutoTokenizer` for ISL/OSL/TPOT computat
                          └─────────────┘
 ```
 
-### Thread-Safety Analysis
-
-- **`ThreadPoolExecutor.submit()`** is internally synchronized — safe to call from
-  any thread.
-- **Thread-local tokenizer instances** (`threading.local()`) mean zero shared mutable
-  state during tokenization. Each worker thread lazily loads its own
-  `AutoTokenizer.from_pretrained()` on first use.
-- **HuggingFace tokenizers** (Rust backend via `tokenizers` crate) release the GIL
-  during the core tokenization work, so multiple threads actually run in parallel.
-- **Blocking vs async**: `tokenize()` and `token_count()` block the calling thread
-  on `future.result()`. In async context, use `token_count_async()` which wraps the
-  call in `loop.run_in_executor(None, ...)` to avoid blocking the event loop.
-
-### Why `run_in_executor` for async?
-
-The `token_count_async` method uses a double-hop: `event loop executor → TokenizePool executor`.
-This seems redundant but is necessary because:
-
-1. The aggregator's `process()` runs as an async task on the event loop.
-2. Calling `pool.token_count()` directly would block the loop (the `future.result()`
-   inside `token_count()` is a synchronous wait).
-3. `run_in_executor` offloads the blocking call to a thread, freeing the loop to
-   continue processing events.
-
-The inner `ThreadPoolExecutor` in `TokenizePool` still provides the thread-local
-tokenizer isolation. The outer executor just prevents the blocking wait from starving
-the event loop.
+- Each worker thread has its own `AutoTokenizer` via `threading.local()`, bound
+  to the pool instance. All threads are pre-warmed during `__init__`.
+- HuggingFace tokenizers (Rust backend) release the GIL during tokenization,
+  so threads run in true parallel.
+- `token_count_async()` wraps the blocking call in `loop.run_in_executor()` to
+  avoid blocking the event loop.
+- Only `token_count()` / `token_count_async()` are exposed. The `tokenize()`
+  method (returning token strings) was removed — all metrics only need counts.
 
 ## ISL Tracking: How the Prompt Gets to the Aggregator
 
-### Current Design
-
 The `ISSUED` event's `data` field carries a `PromptData` struct with either:
 
-- `text: str` — raw prompt string (OpenAI path), tokenized async by the aggregator.
-- `token_ids: tuple[int, ...]` — pre-tokenized token IDs (SGLang/Harmonize path),
+- `text: str` — raw prompt string (OpenAI path), tokenized async by `IslTrigger`.
+- `token_ids: tuple[int, ...]` — pre-tokenized IDs (SGLang path),
   ISL is `len(token_ids)` with no tokenization needed.
 
-`EventRecord.data` is typed as `TextModelOutput | PromptData | ErrorData | None`.
+The trigger reads directly from `ev_rec.data` — no prompt text is stored on
+`SampleRow`.
 
-### Where to Publish
-
-The ISSUED event is published in the load generator when `issue_sample()` is called.
-At that point, `sample.data` contains the post-transform dataset row. The publisher
-extracts the prompt:
-
-```python
-# In the load generator, when issuing a sample:
-if "input_tokens" in sample.data:
-    prompt_data = PromptData(token_ids=tuple(sample.data["input_tokens"]))
-elif "prompt" in sample.data:
-    prompt_data = PromptData(text=sample.data["prompt"])
-else:
-    prompt_data = None
-
-publisher.publish(EventRecord(
-    event_type=SampleEventType.ISSUED,
-    sample_uuid=sample.uuid,
-    data=prompt_data,
-))
-```
-
-### Adapter Considerations
-
-The prompt data available at ISSUED time is **post-transform** — dataset transforms
-have already been applied by this point. This matters because:
-
-| Adapter                 | Transform Pipeline                            | `sample.data` at ISSUED             | `PromptData`                                |
-| ----------------------- | --------------------------------------------- | ----------------------------------- | ------------------------------------------- |
-| OpenAI / OpenAI-Msgspec | `ColumnFilter → AddStaticColumns`             | `{"prompt": "...", "model": "..."}` | `PromptData(text=prompt)`                   |
-| SGLang                  | `Harmonize → ColumnFilter → AddStaticColumns` | `{"input_tokens": [int, ...]}`      | `PromptData(token_ids=tuple(input_tokens))` |
+| Adapter                 | `sample.data` at ISSUED             | `PromptData`                                |
+| ----------------------- | ----------------------------------- | ------------------------------------------- |
+| OpenAI / OpenAI-Msgspec | `{"prompt": "...", "model": "..."}` | `PromptData(text=prompt)`                   |
+| SGLang                  | `{"input_tokens": [int, ...]}`      | `PromptData(token_ids=tuple(input_tokens))` |
 
 ## Lifecycle
 
 ### Startup
 
-```python
+```
 python -m inference_endpoint.async_utils.services.metrics_aggregator \
     --metrics-dir /tmp/metrics \
     --socket-address ipc:///tmp/events.sock \
@@ -321,30 +396,31 @@ python -m inference_endpoint.async_utils.services.metrics_aggregator \
     --tokenizer-workers 2
 ```
 
-1. Create `TokenizePool` (if `--tokenizer` provided)
-2. Create `JsonlMetricEmitter` writing to `<metrics-dir>/metrics.jsonl`
-3. Create `MetricsAggregatorService` connected to the ZMQ PUB socket
-4. `aggregator.start()` adds the ZMQ socket reader to the event loop
-5. `await shutdown_event.wait()` blocks until ENDED is received
+1. Create `TokenizePool` (if `--tokenizer` provided).
+2. Create `JsonlMetricEmitter` writing to `<metrics-dir>/metrics.jsonl`.
+3. Create `MetricsAggregatorService` — constructs `MetricsTable` and registers
+   all triggers with bound runtime deps.
+4. `aggregator.start()` adds the ZMQ socket reader to the event loop.
+5. `await shutdown_event.wait()` blocks until ENDED is received.
 
 ### Shutdown
 
 On `SessionEventType.ENDED`:
 
-1. `_finalize()` flushes the emitter
-2. `close()` closes the emitter file and removes the ZMQ socket reader
-3. `shutdown_event.set()` unblocks the main coroutine
-4. `TokenizePool.close()` shuts down worker threads (in `finally` block)
+1. Set `_shutdown_received` flag — no new events are processed.
+2. `await table.drain_tasks()` — wait for all in-flight async trigger tasks.
+3. `_finalize()` — flush and close the emitter.
+4. `shutdown_event.set()` — unblock the main coroutine.
+5. `TokenizePool.close()` — shut down worker threads (in `finally` block).
 
 ### Graceful Drain
 
-Events received in the same batch as ENDED are processed (the `_shutdown_received`
-flag is checked at the top of the loop, so events before ENDED in the batch still
-get handled). Events in subsequent batches are dropped.
+Events before ENDED in the same batch are processed; events after are dropped.
+In-flight async tasks (ISL tokenization, OSL/TPOT computation) are awaited
+before the emitter is closed, ensuring no metrics are lost.
 
-In-flight samples that never receive COMPLETE will be abandoned (their rows stay in
-the table but are never emitted). This is expected — if the session ends, those
-samples didn't complete.
+In-flight samples that never receive COMPLETE are abandoned — their rows remain
+but no metrics are emitted. This is expected when the session ends.
 
 ## Output Format
 

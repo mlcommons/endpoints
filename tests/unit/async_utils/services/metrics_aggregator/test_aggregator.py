@@ -65,16 +65,14 @@ class StubAggregator(MetricsAggregatorService):
 
     def __init__(self, emitter: MetricEmitter, tokenize_pool=None):
         # Intentionally skip super().__init__() to avoid ZMQ socket creation.
-        # All required attributes are set manually below.
         self._emitter = emitter
-        self._tokenize_pool = tokenize_pool
-        self._table = MetricsTable()
-        self._is_tracking = False
-        self._session_started_ns = None
         self._shutdown_received = False
         self._shutdown_event = None
         self.loop = None  # type: ignore[assignment]
         self.is_closed = False
+
+        self._table = MetricsTable()
+        self._register_triggers(self._table, emitter, tokenize_pool, None)
 
 
 def _session(ev_type, ts=0):
@@ -173,6 +171,27 @@ class TestTrackingWindow:
         assert agg._table.get_row("s2") is None  # never tracked
         assert "sample_latency_ns" in emitter.get_metrics("s1")
         assert "sample_latency_ns" in emitter.get_metrics("s3")
+
+    @pytest.mark.asyncio
+    async def test_tracked_block_durations(self):
+        """Tracked blocks extend to last sample completion."""
+        emitter = FakeEmitter()
+        agg = StubAggregator(emitter)
+        await agg.process(
+            [
+                _session(SessionEventType.START_PERFORMANCE_TRACKING, ts=0),
+                _sample(SampleEventType.ISSUED, "s1", ts=100),
+                _session(SessionEventType.STOP_PERFORMANCE_TRACKING, ts=200),
+                _sample(SampleEventType.COMPLETE, "s1", ts=700),
+                _session(SessionEventType.START_PERFORMANCE_TRACKING, ts=800),
+                _sample(SampleEventType.ISSUED, "s2", ts=900),
+                _sample(SampleEventType.COMPLETE, "s2", ts=1000),
+            ]
+        )
+        assert agg._table.tracked_blocks[0].duration_ns == 700  # 700 - 0
+        assert agg._table.tracked_blocks[1].duration_ns == 200  # 1000 - 800
+        assert agg._table.total_tracked_duration_ns == 900
+        assert agg._table.total_completed_tracked_samples == 2
 
 
 # ---------------------------------------------------------------------------
@@ -301,34 +320,15 @@ class TestTimingMetrics:
 
 
 # ---------------------------------------------------------------------------
-# Text accumulation and first_chunk_text
+# ISL (token_ids path — sync, no tokenize_pool needed)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
-class TestTextAccumulation:
-    @pytest.mark.asyncio
-    async def test_issued_stores_prompt_text(self):
-        emitter = FakeEmitter()
-        agg = StubAggregator(emitter)
-        await agg.process(
-            [
-                _session(SessionEventType.START_PERFORMANCE_TRACKING, ts=0),
-                _sample(
-                    SampleEventType.ISSUED,
-                    "s1",
-                    ts=1000,
-                    data=PromptData(text="What is AI?"),
-                ),
-            ]
-        )
-        row = agg._table.get_row("s1")
-        assert row.prompt_text == "What is AI?"
-
+class TestIsl:
     @pytest.mark.asyncio
     async def test_issued_with_token_ids_emits_isl_directly(self):
-        """SGLang path: PromptData with token_ids emits ISL = len(token_ids)
-        without tokenization."""
+        """SGLang path: PromptData with token_ids emits ISL = len(token_ids)."""
         emitter = FakeEmitter()
         agg = StubAggregator(emitter)
         await agg.process(
@@ -345,7 +345,7 @@ class TestTextAccumulation:
         assert ("s1", "isl", 5) in emitter.emitted
 
     @pytest.mark.asyncio
-    async def test_issued_without_data_leaves_prompt_none(self):
+    async def test_issued_without_data_no_isl(self):
         emitter = FakeEmitter()
         agg = StubAggregator(emitter)
         await agg.process(
@@ -354,71 +354,7 @@ class TestTextAccumulation:
                 _sample(SampleEventType.ISSUED, "s1", ts=1000),
             ]
         )
-        row = agg._table.get_row("s1")
-        assert row.prompt_text is None
-
-    @pytest.mark.asyncio
-    async def test_recv_first_stores_first_chunk_text(self):
-        emitter = FakeEmitter()
-        agg = StubAggregator(emitter)
-        await agg.process(
-            [
-                _session(SessionEventType.START_PERFORMANCE_TRACKING, ts=0),
-                _sample(SampleEventType.ISSUED, "s1", ts=1000),
-                _sample(SampleEventType.RECV_FIRST, "s1", ts=2000, data=_text("Hello")),
-            ]
-        )
-        row = agg._table.get_row("s1")
-        assert row.first_chunk_text == "Hello"
-        assert row.output_chunks == ["Hello"]
-
-    @pytest.mark.asyncio
-    async def test_output_chunks_accumulated(self):
-        emitter = FakeEmitter()
-        agg = StubAggregator(emitter)
-        await agg.process(
-            [
-                _session(SessionEventType.START_PERFORMANCE_TRACKING, ts=0),
-                _sample(SampleEventType.ISSUED, "s1", ts=1000),
-                _sample(SampleEventType.RECV_FIRST, "s1", ts=2000, data=_text("Hello")),
-                _sample(
-                    SampleEventType.RECV_NON_FIRST, "s1", ts=3000, data=_text(" World")
-                ),
-                _sample(SampleEventType.RECV_NON_FIRST, "s1", ts=4000, data=_text("!")),
-            ]
-        )
-        row = agg._table.get_row("s1")
-        assert row.output_text() == "Hello World!"
-
-    @pytest.mark.asyncio
-    async def test_recv_without_data_does_not_append(self):
-        emitter = FakeEmitter()
-        agg = StubAggregator(emitter)
-        await agg.process(
-            [
-                _session(SessionEventType.START_PERFORMANCE_TRACKING, ts=0),
-                _sample(SampleEventType.ISSUED, "s1", ts=1000),
-                _sample(SampleEventType.RECV_FIRST, "s1", ts=2000),
-                _sample(SampleEventType.RECV_NON_FIRST, "s1", ts=3000),
-            ]
-        )
-        row = agg._table.get_row("s1")
-        assert row.output_chunks == []
-        assert row.first_chunk_text is None
-
-    @pytest.mark.asyncio
-    async def test_complete_with_text_model_output(self):
-        emitter = FakeEmitter()
-        agg = StubAggregator(emitter)
-        output = TextModelOutput(output="Complete response")
-        await agg.process(
-            [
-                _session(SessionEventType.START_PERFORMANCE_TRACKING, ts=0),
-                _sample(SampleEventType.ISSUED, "s1", ts=1000),
-                _sample(SampleEventType.COMPLETE, "s1", ts=5000, data=output),
-            ]
-        )
-        assert emitter.get_metrics("s1")["sample_latency_ns"] == 4000
+        assert all(name != "isl" for _, name, _ in emitter.emitted)
 
 
 # ---------------------------------------------------------------------------
@@ -557,7 +493,7 @@ class TestEdgeCases:
         emitter = FakeEmitter()
         agg = StubAggregator(emitter)
         await agg.process([_session(SessionEventType.STARTED, ts=42)])
-        assert agg._session_started_ns == 42
+        assert agg._table.session_started_ns == 42
 
     @pytest.mark.asyncio
     async def test_process_multiple_batches(self):

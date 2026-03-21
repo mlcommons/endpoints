@@ -18,6 +18,12 @@ import pytest
 from inference_endpoint.async_utils.services.metrics_aggregator.metrics_table import (
     MetricsTable,
     SampleRow,
+    TrackedBlock,
+)
+from inference_endpoint.core.record import (
+    EventRecord,
+    SampleEventType,
+    SessionEventType,
 )
 
 
@@ -31,129 +37,229 @@ class TestSampleRow:
         assert row.last_recv_ns is None
         assert row.client_send_ns is None
         assert row.client_resp_done_ns is None
-        assert row.prompt_text is None
-        assert row.first_chunk_text is None
-        assert row.output_chunks == []
+        assert row.first_chunk_token_count is None
+        assert row.tracked_block_idx == -1
 
     def test_is_msgspec_struct(self):
         row = SampleRow("s1")
         assert isinstance(row, msgspec.Struct)
 
-    def test_ttft(self):
-        row = SampleRow("s1")
-        row.issued_ns = 1000
-        row.recv_first_ns = 2500
-        assert row.ttft_ns() == 1500
 
-    def test_ttft_returns_none_without_issued(self):
-        row = SampleRow("s1")
-        row.recv_first_ns = 2500
-        assert row.ttft_ns() is None
+@pytest.mark.unit
+class TestTrackedBlock:
+    def test_duration_ns(self):
+        block = TrackedBlock(start_ns=100, last_complete_ns=500)
+        assert block.duration_ns == 400
 
-    def test_ttft_returns_none_without_recv_first(self):
-        row = SampleRow("s1")
-        row.issued_ns = 1000
-        assert row.ttft_ns() is None
+    def test_empty_block_duration_zero(self):
+        block = TrackedBlock(start_ns=100, last_complete_ns=100)
+        assert block.duration_ns == 0
+        assert block.completed_samples == 0
 
-    def test_sample_latency(self):
-        row = SampleRow("s1")
-        row.issued_ns = 1000
-        row.complete_ns = 5000
-        assert row.sample_latency_ns() == 4000
-
-    def test_sample_latency_returns_none_without_issued(self):
-        row = SampleRow("s1")
-        row.complete_ns = 5000
-        assert row.sample_latency_ns() is None
-
-    def test_sample_latency_returns_none_without_complete(self):
-        row = SampleRow("s1")
-        row.issued_ns = 1000
-        assert row.sample_latency_ns() is None
-
-    def test_request_duration(self):
-        row = SampleRow("s1")
-        row.client_send_ns = 100
-        row.client_resp_done_ns = 600
-        assert row.request_duration_ns() == 500
-
-    def test_request_duration_returns_none_without_send(self):
-        row = SampleRow("s1")
-        row.client_resp_done_ns = 600
-        assert row.request_duration_ns() is None
-
-    def test_request_duration_returns_none_without_resp_done(self):
-        row = SampleRow("s1")
-        row.client_send_ns = 100
-        assert row.request_duration_ns() is None
-
-    def test_output_text_empty(self):
-        row = SampleRow("s1")
-        assert row.output_text() == ""
-
-    def test_output_text_from_chunks(self):
-        row = SampleRow("s1")
-        row.output_chunks.append("Hello")
-        row.output_chunks.append(" World")
-        assert row.output_text() == "Hello World"
-
-    def test_first_chunk_text_stored(self):
-        row = SampleRow("s1")
-        row.first_chunk_text = "First chunk"
-        assert row.first_chunk_text == "First chunk"
-
-    def test_fields_are_mutable(self):
-        row = SampleRow("s1")
-        row.issued_ns = 100
-        row.issued_ns = 200
-        assert row.issued_ns == 200
-
-    def test_last_recv_ns_tracks_latest(self):
-        row = SampleRow("s1")
-        row.last_recv_ns = 1000
-        row.last_recv_ns = 2000
-        row.last_recv_ns = 3000
-        assert row.last_recv_ns == 3000
+    def test_completed_samples_increment(self):
+        block = TrackedBlock(start_ns=0, last_complete_ns=0)
+        block.completed_samples += 1
+        block.last_complete_ns = 500
+        assert block.duration_ns == 500
+        assert block.completed_samples == 1
 
 
 @pytest.mark.unit
 class TestMetricsTable:
     def test_create_and_get_row(self):
         table = MetricsTable()
-        row = table.create_row("s1")
-        assert table.get_row("s1") is row
+        table.is_tracking = True
+        table.tracked_blocks.append(TrackedBlock(start_ns=0, last_complete_ns=0))
+        ev = EventRecord(
+            event_type=SampleEventType.ISSUED, timestamp_ns=100, sample_uuid="s1"
+        )
+        table.set_field("s1", "issued_ns", 100, ev)
+        assert table.get_row("s1") is not None
         assert len(table) == 1
 
-    def test_remove_row(self):
+    def test_complete_removes_row(self):
         table = MetricsTable()
-        table.create_row("s1")
-        removed = table.remove_row("s1")
-        assert removed is not None
+        table.is_tracking = True
+        table.tracked_blocks.append(TrackedBlock(start_ns=0, last_complete_ns=0))
+        issued = EventRecord(
+            event_type=SampleEventType.ISSUED, timestamp_ns=100, sample_uuid="s1"
+        )
+        table.set_field("s1", "issued_ns", 100, issued)
+        complete = EventRecord(
+            event_type=SampleEventType.COMPLETE, timestamp_ns=500, sample_uuid="s1"
+        )
+        table.set_field("s1", "complete_ns", 500, complete)
         assert table.get_row("s1") is None
         assert len(table) == 0
 
-    def test_remove_nonexistent_returns_none(self):
+    def test_set_field_noop_for_untracked(self):
         table = MetricsTable()
-        assert table.remove_row("nope") is None
+        ev = EventRecord(
+            event_type=SampleEventType.RECV_FIRST,
+            timestamp_ns=200,
+            sample_uuid="unknown",
+        )
+        table.set_field("unknown", "recv_first_ns", 200, ev)
+        assert table.get_row("unknown") is None
 
-    def test_duplicate_create_returns_existing(self):
+    def test_issued_noop_when_not_tracking(self):
         table = MetricsTable()
-        row1 = table.create_row("s1")
-        row1.issued_ns = 12345
-        row2 = table.create_row("s1")
-        # Should return same row (retry semantics)
-        assert row1 is row2
-        assert row2.issued_ns == 12345
+        ev = EventRecord(
+            event_type=SampleEventType.ISSUED, timestamp_ns=100, sample_uuid="s1"
+        )
+        table.set_field("s1", "issued_ns", 100, ev)
+        assert table.get_row("s1") is None
+
+    def test_duplicate_issued_returns_existing(self):
+        table = MetricsTable()
+        table.is_tracking = True
+        table.tracked_blocks.append(TrackedBlock(start_ns=0, last_complete_ns=0))
+        ev1 = EventRecord(
+            event_type=SampleEventType.ISSUED, timestamp_ns=100, sample_uuid="s1"
+        )
+        table.set_field("s1", "issued_ns", 100, ev1)
+        row1 = table.get_row("s1")
+        ev2 = EventRecord(
+            event_type=SampleEventType.ISSUED, timestamp_ns=200, sample_uuid="s1"
+        )
+        table.set_field("s1", "issued_ns", 200, ev2)
+        assert table.get_row("s1") is row1
         assert len(table) == 1
 
     def test_multiple_rows(self):
         table = MetricsTable()
-        table.create_row("s1")
-        table.create_row("s2")
-        table.create_row("s3")
+        table.is_tracking = True
+        table.tracked_blocks.append(TrackedBlock(start_ns=0, last_complete_ns=0))
+        for uuid in ("s1", "s2", "s3"):
+            ev = EventRecord(
+                event_type=SampleEventType.ISSUED,
+                timestamp_ns=100,
+                sample_uuid=uuid,
+            )
+            table.set_field(uuid, "issued_ns", 100, ev)
         assert len(table) == 3
-        table.remove_row("s2")
-        assert len(table) == 2
-        assert table.get_row("s2") is None
-        assert table.get_row("s1") is not None
-        assert table.get_row("s3") is not None
+
+    def test_handle_session_started(self):
+        table = MetricsTable()
+        ev = EventRecord(event_type=SessionEventType.STARTED, timestamp_ns=42)
+        table.handle_session_event(ev)
+        assert table.session_started_ns == 42
+
+    def test_handle_start_stop_tracking(self):
+        table = MetricsTable()
+        assert not table.is_tracking
+
+        start = EventRecord(
+            event_type=SessionEventType.START_PERFORMANCE_TRACKING, timestamp_ns=100
+        )
+        table.handle_session_event(start)
+        assert table.is_tracking
+        assert len(table.tracked_blocks) == 1
+        assert table.tracked_blocks[0].start_ns == 100
+
+        stop = EventRecord(
+            event_type=SessionEventType.STOP_PERFORMANCE_TRACKING, timestamp_ns=200
+        )
+        table.handle_session_event(stop)
+        assert not table.is_tracking
+
+    def test_duplicate_start_is_noop(self):
+        table = MetricsTable()
+        start1 = EventRecord(
+            event_type=SessionEventType.START_PERFORMANCE_TRACKING, timestamp_ns=100
+        )
+        start2 = EventRecord(
+            event_type=SessionEventType.START_PERFORMANCE_TRACKING, timestamp_ns=200
+        )
+        table.handle_session_event(start1)
+        table.handle_session_event(start2)
+        assert len(table.tracked_blocks) == 1
+
+    def test_tracked_block_updated_on_complete(self):
+        table = MetricsTable()
+        start = EventRecord(
+            event_type=SessionEventType.START_PERFORMANCE_TRACKING, timestamp_ns=0
+        )
+        table.handle_session_event(start)
+        issued = EventRecord(
+            event_type=SampleEventType.ISSUED, timestamp_ns=100, sample_uuid="s1"
+        )
+        table.set_field("s1", "issued_ns", 100, issued)
+        complete = EventRecord(
+            event_type=SampleEventType.COMPLETE, timestamp_ns=500, sample_uuid="s1"
+        )
+        table.set_field("s1", "complete_ns", 500, complete)
+
+        assert table.tracked_blocks[0].last_complete_ns == 500
+        assert table.tracked_blocks[0].completed_samples == 1
+        assert table.total_tracked_duration_ns == 500
+        assert table.total_completed_tracked_samples == 1
+
+    def test_multiple_tracking_windows(self):
+        table = MetricsTable()
+
+        # Block 0
+        table.handle_session_event(
+            EventRecord(
+                event_type=SessionEventType.START_PERFORMANCE_TRACKING, timestamp_ns=0
+            )
+        )
+        table.set_field(
+            "s1",
+            "issued_ns",
+            100,
+            EventRecord(
+                event_type=SampleEventType.ISSUED,
+                timestamp_ns=100,
+                sample_uuid="s1",
+            ),
+        )
+        table.handle_session_event(
+            EventRecord(
+                event_type=SessionEventType.STOP_PERFORMANCE_TRACKING, timestamp_ns=200
+            )
+        )
+        # s1 completes after STOP — still extends block 0
+        table.set_field(
+            "s1",
+            "complete_ns",
+            600,
+            EventRecord(
+                event_type=SampleEventType.COMPLETE,
+                timestamp_ns=600,
+                sample_uuid="s1",
+            ),
+        )
+
+        # Block 1
+        table.handle_session_event(
+            EventRecord(
+                event_type=SessionEventType.START_PERFORMANCE_TRACKING,
+                timestamp_ns=800,
+            )
+        )
+        table.set_field(
+            "s2",
+            "issued_ns",
+            900,
+            EventRecord(
+                event_type=SampleEventType.ISSUED,
+                timestamp_ns=900,
+                sample_uuid="s2",
+            ),
+        )
+        table.set_field(
+            "s2",
+            "complete_ns",
+            1000,
+            EventRecord(
+                event_type=SampleEventType.COMPLETE,
+                timestamp_ns=1000,
+                sample_uuid="s2",
+            ),
+        )
+
+        assert table.tracked_blocks[0].duration_ns == 600  # 600 - 0
+        assert table.tracked_blocks[1].duration_ns == 200  # 1000 - 800
+        assert table.total_tracked_duration_ns == 800
+        assert table.total_completed_tracked_samples == 2
