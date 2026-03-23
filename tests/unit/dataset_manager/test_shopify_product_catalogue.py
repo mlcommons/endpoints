@@ -99,7 +99,7 @@ class TestShopifyProductCatalogueGenerate:
     ) -> None:
         """Generate produces DataFrame with expected column names."""
         with patch(
-            "inference_endpoint.dataset_manager.predefined.shopify_product_catalogue.load_from_huggingface",
+            "inference_endpoint.dataset_manager.predefined.shopify_product_catalogue.load_dataset",
             return_value=mock_hf_dataset,
         ):
             df = ShopifyProductCatalogue.generate(
@@ -115,7 +115,7 @@ class TestShopifyProductCatalogueGenerate:
     ) -> None:
         """Images are base64-encoded in output with correct format detection."""
         with patch(
-            "inference_endpoint.dataset_manager.predefined.shopify_product_catalogue.load_from_huggingface",
+            "inference_endpoint.dataset_manager.predefined.shopify_product_catalogue.load_dataset",
             return_value=mock_hf_dataset,
         ):
             df = ShopifyProductCatalogue.generate(
@@ -142,7 +142,7 @@ class TestShopifyProductCatalogueGenerate:
     ) -> None:
         """potential_product_categories and ground_truth_is_secondhand are JSON strings."""
         with patch(
-            "inference_endpoint.dataset_manager.predefined.shopify_product_catalogue.load_from_huggingface",
+            "inference_endpoint.dataset_manager.predefined.shopify_product_catalogue.load_dataset",
             return_value=mock_hf_dataset,
         ):
             df = ShopifyProductCatalogue.generate(
@@ -176,7 +176,7 @@ class TestShopifyProductCatalogueGenerate:
         cached_df.to_parquet(dst_dir / "shopify_product_catalogue_train.parquet")
 
         with patch(
-            "inference_endpoint.dataset_manager.predefined.shopify_product_catalogue.load_from_huggingface",
+            "inference_endpoint.dataset_manager.predefined.shopify_product_catalogue.load_dataset",
             return_value=mock_hf_dataset,
         ) as mock_load:
             df = ShopifyProductCatalogue.generate(
@@ -190,9 +190,9 @@ class TestShopifyProductCatalogueGenerate:
     def test_generate_passes_token_and_revision(
         self, tmp_path: Path, mock_hf_dataset: list[dict]
     ) -> None:
-        """Token and revision are passed to load_from_huggingface."""
+        """Token and revision are forwarded as kwargs to load_dataset."""
         with patch(
-            "inference_endpoint.dataset_manager.predefined.shopify_product_catalogue.load_from_huggingface",
+            "inference_endpoint.dataset_manager.predefined.shopify_product_catalogue.load_dataset",
             return_value=mock_hf_dataset,
         ) as mock_load:
             ShopifyProductCatalogue.generate(
@@ -203,9 +203,9 @@ class TestShopifyProductCatalogueGenerate:
                 revision="v1",
             )
         mock_load.assert_called_once()
-        call_kwargs = mock_load.call_args[1]
-        assert call_kwargs["load_options"]["token"] == "hf_xxx"
-        assert call_kwargs["load_options"]["revision"] == "v1"
+        call_kwargs = mock_load.call_args.kwargs
+        assert call_kwargs["token"] == "hf_xxx"
+        assert call_kwargs["revision"] == "v1"
 
     def test_generate_raises_when_product_image_missing(self, tmp_path: Path) -> None:
         """Raises ValueError when product_image is missing from a row."""
@@ -221,7 +221,7 @@ class TestShopifyProductCatalogueGenerate:
             }
         ]
         with patch(
-            "inference_endpoint.dataset_manager.predefined.shopify_product_catalogue.load_from_huggingface",
+            "inference_endpoint.dataset_manager.predefined.shopify_product_catalogue.load_dataset",
             return_value=bad_dataset,
         ):
             with pytest.raises(ValueError, match="product_image is missing"):
@@ -230,35 +230,6 @@ class TestShopifyProductCatalogueGenerate:
                     split=["train"],
                     force=True,
                 )
-
-    def test_generate_uses_load_from_disk_when_cache_dir_exists(
-        self, tmp_path: Path, mock_hf_dataset: list[dict]
-    ) -> None:
-        """When cache_dir exists, load_from_huggingface uses load_from_disk, not load_dataset."""
-        cache_dir = tmp_path / "hf_cache" / "shopify_product_catalogue" / "train"
-        cache_dir.mkdir(parents=True)
-
-        with (
-            patch(
-                "inference_endpoint.dataset_manager.dataset.load_from_disk",
-                return_value=mock_hf_dataset,
-            ) as mock_load_from_disk,
-            patch(
-                "inference_endpoint.dataset_manager.dataset.load_dataset",
-            ) as mock_load_dataset,
-        ):
-            df = ShopifyProductCatalogue.generate(
-                datasets_dir=tmp_path,
-                split=["train+test"],
-                force=True,
-                cache_dir=cache_dir,
-            )
-
-        mock_load_from_disk.assert_called_once()
-        assert mock_load_from_disk.call_args[0][0] == str(cache_dir)
-        mock_load_dataset.assert_not_called()
-        assert list(df.columns) == ShopifyProductCatalogue.COLUMN_NAMES
-        assert len(df) == 2
 
 
 class TestShopifyMultimodalFormatter:

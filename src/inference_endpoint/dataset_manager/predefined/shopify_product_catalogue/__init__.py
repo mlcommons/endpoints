@@ -23,9 +23,10 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+from datasets import load_dataset
 from tqdm import tqdm
 
-from ...dataset import Dataset, load_from_huggingface
+from ...dataset import Dataset
 from . import presets
 from .metadata import ProductMetadata
 
@@ -100,7 +101,6 @@ class ShopifyProductCatalogue(
         force: bool = False,
         token: str | None = None,
         revision: str = "main",
-        cache_dir: Path | None = None,
         **kwargs: Any,
     ) -> pd.DataFrame:
         """Generate the Shopify product catalogue dataset.
@@ -114,9 +114,6 @@ class ShopifyProductCatalogue(
             force: Regenerate even if file exists.
             token: HuggingFace token for gated datasets.
             revision: Dataset revision/branch. Defaults to "main".
-            cache_dir: Optional cache directory for HF dataset. When set and the path
-                exists, load_from_huggingface uses load_from_disk from cache_dir instead of default huggingface cache directory.
-                Defaults to None. Pass a path to enable caching.
 
         Returns:
             DataFrame with product_title, product_description, product_image_base64,
@@ -140,16 +137,7 @@ class ShopifyProductCatalogue(
         if revision is not None:
             load_options["revision"] = revision
 
-        # Disable HF save_to_disk cache by default: it hangs on large image datasets
-        # (48k samples, ~9.5 GB) around shard 16/20. See huggingface/datasets#7290.
-        # Parquet output is the real cache. Pass cache_dir explicitly to enable HF cache.
-        hf_cache = cache_dir
-        ds = load_from_huggingface(
-            dataset_path=cls.REPO_ID,
-            split=split_key,
-            cache_dir=hf_cache,
-            load_options=load_options,
-        )
+        ds = load_dataset(cls.REPO_ID, split=split_key, **load_options)
         logger.info(
             f"Loaded {len(ds)} samples from Shopify product catalogue ({split_key})"
         )
