@@ -37,12 +37,21 @@ import threading
 import time
 from dataclasses import dataclass
 
-from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
-from inference_endpoint.core.types import Query, QueryResult
-from inference_endpoint.endpoint_client.config import HTTPClientConfig
-from inference_endpoint.endpoint_client.cpu_affinity import compute_affinity_plan
-from inference_endpoint.endpoint_client.http_client import HTTPEndpointClient
-from inference_endpoint.testing.max_throughput_server import (
+# Suppress transformers "no framework found" warning (only tokenizers used)
+os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+
+from inference_endpoint.async_utils.transport.zmq.context import (
+    ManagedZMQContext,  # noqa: E402
+)
+from inference_endpoint.core.types import Query, QueryResult  # noqa: E402
+from inference_endpoint.endpoint_client.config import HTTPClientConfig  # noqa: E402
+from inference_endpoint.endpoint_client.cpu_affinity import (
+    compute_affinity_plan,  # noqa: E402
+)
+from inference_endpoint.endpoint_client.http_client import (
+    HTTPEndpointClient,  # noqa: E402
+)
+from inference_endpoint.testing.max_throughput_server import (  # noqa: E402
     MaxThroughputServer,
     build_response,
 )
@@ -522,6 +531,7 @@ def run_benchmark(
         nonlocal stats
 
         send_done = False
+        receiver_done = asyncio.Event()
         start_ns = time.monotonic_ns()
         send_deadline = time.monotonic() + duration
         overall_deadline = time.monotonic() + max_total_time
@@ -530,9 +540,18 @@ def run_benchmark(
 
         qid = 0
 
+        def _process_result(result):
+            nonlocal last_recv_time
+            last_recv_time = time.monotonic()
+            if isinstance(result, QueryResult):
+                if result.error:
+                    stats.errors += 1
+                else:
+                    stats.received += 1
+
         async def sender():
             nonlocal qid, send_done
-            while time.monotonic() < send_deadline:
+            while time.monotonic() < send_deadline and not receiver_done.is_set():
                 # Back-pressure: wait if too many in-flight
                 in_flight = stats.sent - stats.received - stats.errors
                 if in_flight > stats.peak_inflight:
@@ -558,52 +577,48 @@ def run_benchmark(
 
         async def receiver():
             nonlocal last_recv_time
-            while True:
-                # Fast drain: poll all available results synchronously
-                result = client.poll()
-                if result is not None:
-                    while result is not None:
-                        last_recv_time = time.monotonic()
-                        if isinstance(result, QueryResult):
-                            if result.error:
-                                stats.errors += 1
-                            else:
-                                stats.received += 1
-                        result = client.poll()
-                    # Deadline check once per drain batch
-                    if last_recv_time > overall_deadline:
+            try:
+                while True:
+                    # Fast drain: poll all available results synchronously
+                    result = client.poll()
+                    if result is not None:
+                        while result is not None:
+                            _process_result(result)
+                            result = client.poll()
+                        # Deadline check once per drain batch
+                        if last_recv_time > overall_deadline:
+                            outstanding = stats.sent - stats.received - stats.errors
+                            print(
+                                f"\nTime limit ({max_total_time:.0f}s) reached, "
+                                f"stopping ({outstanding:,} in-flight)"
+                            )
+                            return
+                        continue
+
+                    # Nothing queued — check termination before blocking
+                    if send_done and (stats.received + stats.errors) >= stats.sent:
+                        break
+                    if (
+                        send_done
+                        and (time.monotonic() - last_recv_time) > stall_timeout
+                    ):
+                        print(f"\nStalled for {stall_timeout}s, stopping")
+                        break
+                    if time.monotonic() > overall_deadline:
                         outstanding = stats.sent - stats.received - stats.errors
                         print(
                             f"\nTime limit ({max_total_time:.0f}s) reached, "
                             f"stopping ({outstanding:,} in-flight)"
                         )
-                        return
-                    continue
+                        break
 
-                # Nothing queued — check termination before blocking
-                if send_done and (stats.received + stats.errors) >= stats.sent:
-                    break
-                if send_done and (time.monotonic() - last_recv_time) > stall_timeout:
-                    print(f"\nStalled for {stall_timeout}s, stopping")
-                    break
-                if time.monotonic() > overall_deadline:
-                    outstanding = stats.sent - stats.received - stats.errors
-                    print(
-                        f"\nTime limit ({max_total_time:.0f}s) reached, "
-                        f"stopping ({outstanding:,} in-flight)"
-                    )
-                    break
-
-                # Block until next response (event-driven, no CPU spin)
-                result = await client.recv()
-                if result is None:
-                    break
-                last_recv_time = time.monotonic()
-                if isinstance(result, QueryResult):
-                    if result.error:
-                        stats.errors += 1
-                    else:
-                        stats.received += 1
+                    # Block until next response (event-driven, no CPU spin)
+                    result = await client.recv()
+                    if result is None:
+                        break
+                    _process_result(result)
+            finally:
+                receiver_done.set()
 
         # Run sender and receiver concurrently
         await asyncio.gather(sender(), receiver())

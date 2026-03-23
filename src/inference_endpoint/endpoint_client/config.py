@@ -167,10 +167,6 @@ class HTTPClientConfig:
         if self.max_connections == -1:
             # Auto: use available ephemeral ports
             self.max_connections = available_ports
-
-            # Resolve min_required_connections: -1 means auto (12.5% of system max)
-            if self.min_required_connections == -1:
-                self.min_required_connections = int(system_maximum_ports * 0.125)
         else:
             # User specified explicit max_connections - validate against port limit
             if self.max_connections > available_ports:
@@ -178,6 +174,10 @@ class HTTPClientConfig:
                     f"--max-connections ({self.max_connections}) exceeds ephemeral port limit ({available_ports}). "
                     f"Either reduce --max-connections or increase system port limit."
                 )
+
+        # Resolve min_required_connections: -1 means auto (12.5% of system max)
+        if self.min_required_connections == -1:
+            self.min_required_connections = int(system_maximum_ports * 0.125)
 
 
 def _get_auto_num_workers() -> int:

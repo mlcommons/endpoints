@@ -203,10 +203,16 @@ class Worker:
             )
 
             # Create connection pool
-            # Naively divide max connections among workers
+            # Divide max connections among workers
             connections_per_worker = max(
                 1, self.http_config.max_connections // self.http_config.num_workers
             )
+            if self.http_config.max_connections < self.http_config.num_workers:
+                logger.warning(
+                    f"max_connections ({self.http_config.max_connections}) < "
+                    f"num_workers ({self.http_config.num_workers}): each worker gets 1 "
+                    f"connection, total={self.http_config.num_workers} exceeds the cap."
+                )
             self._pool = ConnectionPool(
                 host=self._host,
                 port=self._port,
@@ -232,6 +238,14 @@ class Worker:
                 warmup_count = max(1, warmup_count)
                 warmed = await self._pool.warmup(count=warmup_count)
                 logger.debug(f"Warmed up {warmed}/{warmup_count} connections")
+
+                # Fatal: zero connections means endpoint is unreachable
+                if warmed == 0:
+                    logger.error(
+                        f"Warmup failed: 0/{warmup_count} connections established. "
+                        f"Endpoint {self._host}:{self._port} is unreachable."
+                    )
+                    sys.exit(1)
 
                 # Warn if warmup fell short of target
                 # min_required_connections=0 disables the check

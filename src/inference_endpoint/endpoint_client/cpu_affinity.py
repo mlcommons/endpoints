@@ -60,6 +60,7 @@ def require_linux(func: Callable) -> Callable:
 # Default physical cores for LoadGen (main process):
 #   - Session thread (scheduler, busy-wait timing)
 #   - Event loop thread (uvloop, response handling)
+#   - ZMQ I/O threads (up to 4)
 DEFAULT_LOADGEN_CORES = 5
 
 

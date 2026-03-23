@@ -177,6 +177,8 @@ class VariableResponseProtocol(asyncio.Protocol):
         "_icl_mu",
         "_icl_sigma",
         "_icl_mean",
+        # Track pending tasks to prevent GC before completion
+        "_tasks",
     )
 
     def __init__(
@@ -232,6 +234,7 @@ class VariableResponseProtocol(asyncio.Protocol):
 
     def connection_made(self, transport):
         self.transport = transport
+        self._tasks: set[asyncio.Task] = set()
         sock = transport.get_extra_info("socket")
         if sock:
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -259,8 +262,10 @@ class VariableResponseProtocol(asyncio.Protocol):
             osl = int(rng.lognormvariate(self._osl_mu, self._osl_sigma))
             osl = max(self._osl_min, min(osl, self._osl_max))
 
-            # Dispatch async handler
-            self._loop.create_task(self._handle_request(osl))
+            # Dispatch async handler (prevent GC before completion)
+            task = self._loop.create_task(self._handle_request(osl))
+            self._tasks.add(task)
+            task.add_done_callback(self._tasks.discard)
 
             # Reset for next request (HTTP/1.1 keep-alive)
             self._request = RequestParser()
@@ -577,6 +582,8 @@ class VariableResponseServer:
             raise ValueError(
                 f"response_rate_mean must be >= 0, got {response_rate_mean}"
             )
+        if output_len_mean <= 0:
+            raise ValueError(f"output_len_mean must be > 0, got {output_len_mean}")
 
         self.host, self.port, self.num_workers = host, port, num_workers
         self.stream = stream
@@ -640,6 +647,14 @@ class VariableResponseServer:
         # Max concurrency per worker (0 = unlimited)
         if max_concurrency > 0:
             self._max_concurrency_per_worker = max(1, max_concurrency // num_workers)
+            if max_concurrency < num_workers:
+                import warnings
+
+                warnings.warn(
+                    f"max_concurrency ({max_concurrency}) < num_workers ({num_workers}): "
+                    f"each worker gets 1 slot, effective total={num_workers} exceeds cap.",
+                    stacklevel=2,
+                )
         else:
             self._max_concurrency_per_worker = 0
 
