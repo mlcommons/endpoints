@@ -29,19 +29,19 @@ from inference_endpoint.evaluation.scoring import (
     ShopifyCategoryF1Scorer,
     _calculate_hierarchical_f1,
     _create_pred_pad_category,
-    _get_hierarchical_components,
+    _match_hierarchical_paths,
     _parse_response_to_category,
 )
 from pydantic import ValidationError
 
 
-class TestGetHierarchicalComponents:
-    """Tests for _get_hierarchical_components."""
+class TestMatchHierarchicalPaths:
+    """Tests for _match_hierarchical_paths."""
 
     def test_exact_match(self):
         pred = "Clothing > Shirts > Polo"
         true = "Clothing > Shirts > Polo"
-        inter, p_len, t_len = _get_hierarchical_components(pred, true)
+        inter, p_len, t_len = _match_hierarchical_paths(pred, true)
         assert inter == 3
         assert p_len == 3
         assert t_len == 3
@@ -49,7 +49,7 @@ class TestGetHierarchicalComponents:
     def test_partial_match_prefix(self):
         pred = "Clothing > Shirts"
         true = "Clothing > Shirts > Polo"
-        inter, p_len, t_len = _get_hierarchical_components(pred, true)
+        inter, p_len, t_len = _match_hierarchical_paths(pred, true)
         assert inter == 2
         assert p_len == 2
         assert t_len == 3
@@ -57,7 +57,7 @@ class TestGetHierarchicalComponents:
     def test_mismatch_at_first_level(self):
         pred = "Electronics > Phones"
         true = "Clothing > Shirts > Polo"
-        inter, p_len, t_len = _get_hierarchical_components(pred, true)
+        inter, p_len, t_len = _match_hierarchical_paths(pred, true)
         assert inter == 0
         assert p_len == 2
         assert t_len == 3

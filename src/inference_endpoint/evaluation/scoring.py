@@ -691,14 +691,29 @@ def _parse_response_to_category(
         return _create_pred_pad_category(ground_truth, separator)
 
 
-def _get_hierarchical_components(
+def _match_hierarchical_paths(
     predicted_path: str,
     true_path: str,
     separator: str = _CATEGORY_SEPARATOR,
 ) -> tuple[int, int, int]:
-    """Calculate components for Hierarchical Precision/Recall.
+    """Match two hierarchical category paths and return precision/recall components.
+
+    Splits both paths on ``separator``, then counts consecutive matching levels
+    from the root, stopping at the first mismatch. Returns the intersection
+    count and the length of each path for use in hierarchical P/R calculation.
 
     Reference: https://github.com/mlcommons/inference/blob/master/multimodal/qwen3-vl/src/mlperf_inf_mm_q3vl/evaluation.py
+
+    Example::
+
+        data = [
+            ("Clothing > Shirts > Polo",  "Clothing > Shirts > Polo"),   # exact match
+            ("Clothing > Shirts > Dress", "Clothing > Shirts > Polo"),   # wrong leaf
+        ]
+        # Pair 1: intersection=3, pred_len=3, true_len=3
+        # Pair 2: intersection=2 (stops at "Dress" != "Polo"), pred_len=3, true_len=3
+        # HP = (3+2)/(3+3) = 5/6,  HR = (3+2)/(3+3) = 5/6
+        # F1 = 2*(5/6)*(5/6) / (5/6+5/6) = 5/6 ≈ 0.833
 
     Args:
         predicted_path: Categories predicted by the VLM.
@@ -744,7 +759,7 @@ def _calculate_hierarchical_f1(
     total_true_length = 0
 
     for pred_path, true_path in data:
-        intersection, pred_len, true_len = _get_hierarchical_components(
+        intersection, pred_len, true_len = _match_hierarchical_paths(
             predicted_path=pred_path,
             true_path=true_path,
             separator=separator,
