@@ -37,24 +37,24 @@ import threading
 import time
 from dataclasses import dataclass
 
-# Suppress transformers "no framework found" warning (only tokenizers used)
-os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
-
 from inference_endpoint.async_utils.transport.zmq.context import (
-    ManagedZMQContext,  # noqa: E402
+    ManagedZMQContext,
 )
-from inference_endpoint.core.types import Query, QueryResult  # noqa: E402
-from inference_endpoint.endpoint_client.config import HTTPClientConfig  # noqa: E402
+from inference_endpoint.core.types import Query, QueryResult
+from inference_endpoint.endpoint_client.config import HTTPClientConfig
 from inference_endpoint.endpoint_client.cpu_affinity import (
-    compute_affinity_plan,  # noqa: E402
+    compute_affinity_plan,
 )
 from inference_endpoint.endpoint_client.http_client import (
-    HTTPEndpointClient,  # noqa: E402
+    HTTPEndpointClient,
 )
-from inference_endpoint.testing.max_throughput_server import (  # noqa: E402
+from inference_endpoint.testing.max_throughput_server import (
     MaxThroughputServer,
     build_response,
 )
+
+# Suppress transformers "no framework found" warning (only tokenizers used)
+os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 
 
 @dataclass(slots=True)
