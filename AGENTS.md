@@ -70,7 +70,8 @@ Multi-process, event-loop design optimized for throughput:
 ### CLI Modes
 
 - **CLI mode** (`offline`/`online`): Parameters from command-line arguments
-- **YAML mode** (`from-config`): All config from file, no CLI overrides except `--output`
+- **YAML mode** (`from-config`): All config from file, no CLI overrides except `--timeout`
+- **eval**: Accuracy evaluation — subcommand exists but is not yet implemented (raises `NotImplementedError`)
 
 ### Load Patterns
 
@@ -87,7 +88,9 @@ src/inference_endpoint/
 ├── exceptions.py              # CLIError, ExecutionError, InputValidationError, SetupError
 ├── commands/                  # benchmark, eval, probe, info, validate, init
 │   ├── benchmark.py           # Core benchmark command implementation
-│   └── probe.py               # Endpoint health checking
+│   ├── eval.py                # Accuracy evaluation command (not yet implemented)
+│   ├── probe.py               # Endpoint health checking
+│   └── utils.py               # info, validate, init command implementations
 ├── core/types.py              # Query, QueryResult, StreamChunk, QueryStatus (msgspec Structs)
 ├── load_generator/
 │   ├── session.py             # BenchmarkSession - top-level orchestrator
@@ -104,7 +107,8 @@ src/inference_endpoint/
 │   ├── config.py              # HTTPClientConfig
 │   ├── adapter_protocol.py    # HttpRequestAdapter protocol
 │   ├── accumulator_protocol.py # Response accumulation protocol
-│   └── cpu_affinity.py        # CPU pinning
+│   ├── cpu_affinity.py        # CPU pinning
+│   └── utils.py               # Port range helpers
 ├── async_utils/
 │   ├── loop_manager.py        # LoopManager (uvloop + eager_task_factory)
 │   ├── event_publisher.py     # Async event pub/sub
@@ -127,6 +131,7 @@ src/inference_endpoint/
 │   ├── runtime_settings.py    # RuntimeSettings dataclass
 │   ├── ruleset_base.py        # BenchmarkSuiteRuleset base
 │   ├── ruleset_registry.py    # Ruleset registry
+│   ├── user_config.py         # UserConfig dataclass for ruleset user overrides
 │   ├── rulesets/mlcommons/    # MLCommons-specific rules, datasets, models
 │   └── templates/             # YAML config templates (offline, online, eval, etc.)
 ├── openai/                    # OpenAI-compatible API types and adapters
@@ -146,7 +151,8 @@ src/inference_endpoint/
 └── utils/
     ├── logging.py             # Logging setup
     ├── version.py             # Version info
-    └── dataset_utils.py       # Dataset utilities
+    ├── dataset_utils.py       # Dataset utilities
+    └── benchmark_httpclient.py # HTTP client throughput benchmarking utility
 
 tests/
 ├── conftest.py                # Shared fixtures (echo/oracle servers, datasets, settings)

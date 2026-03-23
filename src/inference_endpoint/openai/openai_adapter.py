@@ -16,7 +16,7 @@
 import time
 
 import msgspec
-from inference_endpoint.core.types import Query, QueryResult
+from inference_endpoint.core.types import Query, QueryResult, TextModelOutput
 from inference_endpoint.endpoint_client.adapter_protocol import HttpRequestAdapter
 
 from ..config.schema import ModelParams, StreamingMode
@@ -121,7 +121,7 @@ class OpenAIAdapter(HttpRequestAdapter):
 
         return QueryResult(
             id=result_id,
-            response_output=response.choices[0].message.content,
+            response_output=TextModelOutput(output=response.choices[0].message.content),
         )
 
     @classmethod
@@ -134,7 +134,9 @@ class OpenAIAdapter(HttpRequestAdapter):
                     finish_reason=FinishReason.stop,
                     index=0,
                     message=ChatCompletionResponseMessage(
-                        content=result.response_output, role=Role6.assistant, refusal=""
+                        content=result.get_response_output_string(),
+                        role=Role6.assistant,
+                        refusal="",
                     ),
                     logprobs=Logprobs(content=[], refusal=[]),
                 )

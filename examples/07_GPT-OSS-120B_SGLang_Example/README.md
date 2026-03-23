@@ -67,7 +67,7 @@ If you already have the model weights or prefer a direct approach, follow the [i
 LiveCodeBench has a few security concerns and dependency conflicts, so it is recommended to run LiveCodeBench via the
 containerized workflow.
 
-Follow the instructions in the [LiveCodeBench README](../../src/inference_endpoint/dataset_manager/predefined/livecodebench/README.md#running-the-container)
+Follow the instructions in the [LiveCodeBench README](../../src/inference_endpoint/evaluation/livecodebench/README.md#running-the-container)
 
 #### Non-containerized run (NOT RECOMMENDED)
 

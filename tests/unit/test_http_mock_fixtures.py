@@ -24,7 +24,7 @@ import logging
 
 import aiohttp
 import pytest
-from inference_endpoint.core.types import Query
+from inference_endpoint.core.types import Query, TextModelOutput
 from inference_endpoint.openai.openai_adapter import OpenAIAdapter
 from inference_endpoint.openai.openai_types_gen import CreateChatCompletionResponse
 
@@ -80,7 +80,9 @@ class TestHttpEchoMockFixtures:
                     CreateChatCompletionResponse(**json_payload)
                 )
 
-                assert query_result.response_output == prompt_text
+                assert query_result.response_output == TextModelOutput(
+                    output=prompt_text
+                )
 
     @pytest.mark.asyncio
     async def test_real_http_server_post_request_with_max_osl(
@@ -108,7 +110,7 @@ class TestHttpEchoMockFixtures:
                     CreateChatCompletionResponse.model_validate(response_data)
                 )
 
-                assert len(response.response_output) == 100
+                assert len(str(response.response_output)) == 100
 
         mock_http_echo_server.set_max_osl(5)
         async with aiohttp.ClientSession() as session:
@@ -130,6 +132,6 @@ class TestHttpEchoMockFixtures:
                     CreateChatCompletionResponse.model_validate(response_data)
                 )
 
-                assert len(response.response_output) == 5
+                assert len(str(response.response_output)) == 5
 
         mock_http_echo_server.set_max_osl(old_max_osl)

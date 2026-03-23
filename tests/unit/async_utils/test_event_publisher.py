@@ -32,15 +32,16 @@ import pytest
 import zmq
 from inference_endpoint.async_utils.event_publisher import EventPublisherService
 from inference_endpoint.async_utils.loop_manager import LoopManager
-from inference_endpoint.async_utils.transport.record import (
+from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
+from inference_endpoint.async_utils.transport.zmq.pubsub import ZmqEventRecordSubscriber
+from inference_endpoint.core.record import (
     TOPIC_FRAME_SIZE,
     EventRecord,
     SampleEventType,
     SessionEventType,
     decode_event_record,
 )
-from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
-from inference_endpoint.async_utils.transport.zmq.pubsub import ZmqEventRecordSubscriber
+from inference_endpoint.core.types import TextModelOutput
 
 # Default timeout when waiting for records in tests.
 _WAIT_RECORDS_TIMEOUT = 1
@@ -151,7 +152,6 @@ class TestEventPublisherService:
         record = EventRecord(
             event_type=SessionEventType.STARTED,
             sample_uuid="",
-            data={"manual_socket": True},
         )
         event_publisher_service.publish(record)
         # Yield so the publisher's event loop can drain the send buffer
@@ -168,7 +168,7 @@ class TestEventPublisherService:
         assert topic_bytes == b"session.started"
         rec = decode_event_record(bytes(payload))
         assert rec.event_type.value == SessionEventType.STARTED.value
-        assert rec.data == {"manual_socket": True}
+        assert rec.data is None
         # Socket is closed by ManagedZMQContext.cleanup() in ev_pub_zmq_context fixture teardown.
 
     def test_singleton_returns_same_instance(
@@ -190,7 +190,6 @@ class TestEventPublisherService:
         record = EventRecord(
             event_type=SessionEventType.STARTED,
             sample_uuid="",
-            data={"key": "value"},
         )
         event_publisher_service.publish(record)
         await asyncio.sleep(0.05)  # Let publisher drain send buffer
@@ -198,7 +197,7 @@ class TestEventPublisherService:
         assert len(collecting_subscriber.received) == 1
         rec = collecting_subscriber.received[0]
         assert rec.event_type.value == SessionEventType.STARTED.value
-        assert rec.data == {"key": "value"}
+        assert rec.data is None
 
     @pytest.mark.asyncio
     async def test_publish_sample_event_received_by_subscriber(
@@ -207,10 +206,11 @@ class TestEventPublisherService:
         """Publishing a sample event is received by the collecting subscriber."""
         received_event = asyncio.Event()
         collecting_subscriber.set_wait_target(received_event, 1)
+        data = TextModelOutput(output="sample output")
         record = EventRecord(
             event_type=SampleEventType.COMPLETE,
             sample_uuid="sample-1",
-            data={"latency_ns": 42},
+            data=data,
         )
         event_publisher_service.publish(record)
         await asyncio.sleep(0.05)  # Let publisher drain send buffer
@@ -219,7 +219,7 @@ class TestEventPublisherService:
         rec = collecting_subscriber.received[0]
         assert rec.event_type.value == SampleEventType.COMPLETE.value
         assert rec.sample_uuid == "sample-1"
-        assert rec.data == {"latency_ns": 42}
+        assert rec.data == data
 
     @pytest.mark.asyncio
     async def test_multiple_events_received_in_order(
@@ -232,7 +232,6 @@ class TestEventPublisherService:
             record = EventRecord(
                 event_type=SampleEventType.ISSUED,
                 sample_uuid=f"sample-{i}",
-                data={"seq": i},
             )
             event_publisher_service.publish(record)
             await asyncio.sleep(0.05)  # Small delay between events (demo-style)
@@ -240,4 +239,4 @@ class TestEventPublisherService:
         assert len(collecting_subscriber.received) == 3
         for i in range(3):
             assert collecting_subscriber.received[i].sample_uuid == f"sample-{i}"
-            assert collecting_subscriber.received[i].data.get("seq") == i
+            assert collecting_subscriber.received[i].data is None

@@ -665,9 +665,11 @@ def _run_benchmark(
                     "Session report missing — cannot produce benchmark results"
                 )
 
-            elapsed_time = report.duration_ns / 1e9
+            elapsed_time = (
+                report.duration_ns / 1e9 if report.duration_ns is not None else 0.0
+            )
             total = report.n_samples_issued
-            success_count = report.n_samples_completed
+            success_count = total - report.n_samples_failed
 
             # qps will be None if duration was 0, so fall back to 0.0
             estimated_qps = report.qps or 0.0
@@ -697,7 +699,7 @@ def _run_benchmark(
                     "results": {
                         "total": total,
                         "successful": success_count,
-                        "failed": total - success_count,
+                        "failed": report.n_samples_failed,
                         "elapsed_time": elapsed_time,
                         "qps": estimated_qps,
                     },

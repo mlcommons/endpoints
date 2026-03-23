@@ -19,6 +19,8 @@ from typing import Any, ClassVar, Final
 
 import msgspec
 
+from .types import OUTPUT_TYPE, ErrorData, PromptData
+
 TOPIC_FRAME_SIZE: Final[int] = 40
 """int: Fixed bytesize for the encoded topic string. PUB messages will be prefixed by a
 topic string corresponding to the EventType. This topic will be null-padded to this fixed
@@ -120,6 +122,7 @@ class SessionEventType(EventType):
     STARTED = "started"
     ENDED = "ended"
     STOP_LOADGEN = "stop_loadgen"
+    START_PERFORMANCE_TRACKING = "start_performance_tracking"
     STOP_PERFORMANCE_TRACKING = "stop_performance_tracking"
 
 
@@ -145,13 +148,13 @@ class SampleEventType(EventType):
     TRANSPORT_RECV = "transport_recv"
 
 
-class EventRecord(msgspec.Struct, kw_only=True):  # type: ignore[call-arg]
+class EventRecord(msgspec.Struct, kw_only=True, frozen=True, gc=False):  # type: ignore[call-arg]
     """A record of an event that occurs throughout the inference process."""
 
     event_type: EventType
     timestamp_ns: int = msgspec.field(default_factory=time.monotonic_ns)
     sample_uuid: str = ""
-    data: dict[str, Any] = msgspec.field(default_factory=dict)
+    data: OUTPUT_TYPE | PromptData | ErrorData | None = None
 
 
 _ENCODER = msgspec.msgpack.Encoder(enc_hook=EventType.encode_hook)

@@ -17,9 +17,8 @@
 
 import time
 
-import msgspec
 import pytest
-from inference_endpoint.async_utils.transport.record import (
+from inference_endpoint.core.record import (
     TOPIC_FRAME_SIZE,
     ErrorEventType,
     EventRecord,
@@ -29,6 +28,7 @@ from inference_endpoint.async_utils.transport.record import (
     decode_event_record,
     encode_event_record,
 )
+from inference_endpoint.core.types import ErrorData, PromptData, TextModelOutput
 
 
 class TestEventType:
@@ -64,8 +64,7 @@ class TestEventRecordConstruction:
         after = time.monotonic_ns()
         assert before <= record.timestamp_ns <= after
         assert record.sample_uuid == ""
-        assert record.data == {}
-        assert isinstance(record.data, dict)
+        assert record.data is None
 
 
 class TestEncodeEventRecord:
@@ -73,20 +72,20 @@ class TestEncodeEventRecord:
         self,
     ):
         """encode_event_record returns (topic_bytes_padded, payload) for single-frame ZMQ."""
+        data = TextModelOutput(output="test-output")
         record = EventRecord(
             event_type=SampleEventType.ISSUED,
             sample_uuid="test-uuid",
-            data={"key": "value"},
+            data=data,
         )
         topic_bytes, payload = encode_event_record(record)
         assert isinstance(topic_bytes, bytes)
         assert len(topic_bytes) == TOPIC_FRAME_SIZE
         assert topic_bytes.rstrip(b"\x00") == b"sample.issued"
         assert isinstance(payload, bytes)
-        decoded = msgspec.msgpack.decode(payload)
-        assert isinstance(decoded, dict)
-        assert decoded.get("sample_uuid") == "test-uuid"
-        assert decoded.get("data") == {"key": "value"}
+        decoded = decode_event_record(payload)
+        assert decoded.sample_uuid == "test-uuid"
+        assert decoded.data == data
 
     def test_topic_bytes_padded_matches_event_type_for_session_sample_error(self):
         """Topic is null-padded to TOPIC_FRAME_SIZE for single-frame ZMQ sends."""
@@ -106,37 +105,83 @@ class TestEventRecordRoundTrip:
         record = EventRecord(
             event_type=SessionEventType.STARTED,
             sample_uuid="sess-1",
-            data={"session_id": "abc"},
         )
         _, payload = encode_event_record(record)
         decoded = decode_event_record(payload)
         assert decoded.event_type.topic == SessionEventType.STARTED.topic
         assert decoded.sample_uuid == "sess-1"
-        assert decoded.data == {"session_id": "abc"}
+        assert decoded.data is None
         assert isinstance(decoded.timestamp_ns, int)
         assert decoded.timestamp_ns == record.timestamp_ns
 
-    def test_sample_event_round_trips(self):
+    def test_sample_event_round_trips_with_output(self):
+        data = TextModelOutput(output="output text")
         record = EventRecord(
             event_type=SampleEventType.COMPLETE,
             sample_uuid="sample-42",
-            data={"latency_ns": 1000},
+            data=data,
         )
         _, payload = encode_event_record(record)
         decoded = decode_event_record(payload)
         assert decoded.event_type.topic == SampleEventType.COMPLETE.topic
         assert decoded.sample_uuid == "sample-42"
-        assert decoded.data == {"latency_ns": 1000}
+        assert decoded.data == data
 
-    def test_error_event_round_trips_with_defaults(self):
+    def test_sample_event_round_trips_with_text_model_output(self):
+        record = EventRecord(
+            event_type=SampleEventType.COMPLETE,
+            sample_uuid="sample-42",
+            data=TextModelOutput(output="out", reasoning="reason"),
+        )
+        _, payload = encode_event_record(record)
+        decoded = decode_event_record(payload)
+        assert decoded.event_type.topic == SampleEventType.COMPLETE.topic
+        assert decoded.sample_uuid == "sample-42"
+        assert isinstance(decoded.data, TextModelOutput)
+        assert decoded.data.output == "out"
+        assert decoded.data.reasoning == "reason"
+
+    def test_sample_event_round_trips_with_prompt_data_text(self):
+        record = EventRecord(
+            event_type=SampleEventType.ISSUED,
+            sample_uuid="sample-99",
+            data=PromptData(text="What is AI?"),
+        )
+        _, payload = encode_event_record(record)
+        decoded = decode_event_record(payload)
+        assert decoded.event_type.topic == SampleEventType.ISSUED.topic
+        assert decoded.sample_uuid == "sample-99"
+        assert isinstance(decoded.data, PromptData)
+        assert decoded.data.text == "What is AI?"
+        assert decoded.data.token_ids is None
+
+    def test_sample_event_round_trips_with_prompt_data_token_ids(self):
+        record = EventRecord(
+            event_type=SampleEventType.ISSUED,
+            sample_uuid="sample-100",
+            data=PromptData(token_ids=(101, 202, 303)),
+        )
+        _, payload = encode_event_record(record)
+        decoded = decode_event_record(payload)
+        assert decoded.event_type.topic == SampleEventType.ISSUED.topic
+        assert isinstance(decoded.data, PromptData)
+        assert decoded.data.token_ids == (101, 202, 303)
+        assert decoded.data.text is None
+
+    def test_error_event_round_trips_with_error_data(self):
         record = EventRecord(
             event_type=ErrorEventType.LOADGEN,
-            data={"message": "error details"},
+            data=ErrorData(
+                error_type="LoadgenError",
+                error_message="error details",
+            ),
         )
         _, payload = encode_event_record(record)
         decoded = decode_event_record(payload)
         assert decoded.event_type.topic == ErrorEventType.LOADGEN.topic
-        assert decoded.data == {"message": "error details"}
+        assert isinstance(decoded.data, ErrorData)
+        assert decoded.data.error_type == "LoadgenError"
+        assert decoded.data.error_message == "error details"
         assert decoded.sample_uuid == ""
 
     def test_record_with_only_event_type_round_trips_with_defaults(self):
@@ -145,7 +190,7 @@ class TestEventRecordRoundTrip:
         decoded = decode_event_record(payload)
         assert decoded.event_type.topic == SessionEventType.ENDED.topic
         assert decoded.sample_uuid == ""
-        assert decoded.data == {}
+        assert decoded.data is None
         assert decoded.timestamp_ns > 0
 
     def test_explicit_timestamp_ns_preserved_round_trip(self):
@@ -157,12 +202,3 @@ class TestEventRecordRoundTrip:
         _, payload = encode_event_record(record)
         decoded = decode_event_record(payload)
         assert decoded.timestamp_ns == ts
-
-    def test_nested_and_list_data_round_trips(self):
-        record = EventRecord(
-            event_type=SampleEventType.TRANSPORT_RECV,
-            data={"nested": {"a": 1}, "list": [1, 2, 3]},
-        )
-        _, payload = encode_event_record(record)
-        decoded = decode_event_record(payload)
-        assert decoded.data == {"nested": {"a": 1}, "list": [1, 2, 3]}

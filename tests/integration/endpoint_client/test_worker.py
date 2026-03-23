@@ -21,7 +21,12 @@ import signal
 import pytest
 from inference_endpoint.async_utils.transport import ZmqWorkerPoolTransport
 from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
-from inference_endpoint.core.types import Query, QueryResult, StreamChunk
+from inference_endpoint.core.types import (
+    Query,
+    QueryResult,
+    StreamChunk,
+    TextModelOutput,
+)
 from inference_endpoint.endpoint_client.config import HTTPClientConfig
 from inference_endpoint.endpoint_client.worker import Worker
 
@@ -46,22 +51,22 @@ class TestWorkerBasicFunctionality:
         [
             # Mixed streaming and non-streaming requests
             # Format: (prompt, stream, expected_output)
-            # For streaming: expected_output is tuple (first_chunk, full_output_dict)
-            #   where full_output_dict = {"output": (first_chunk, joined_rest)}
+            # For streaming: expected is (first_chunk_content, output_tuple) where
+            #   output_tuple is TextModelOutput.output: (first_chunk, joined_rest) or ()
             # For non-streaming: expected_output is just the string
             [
                 ("Non-streaming first", False, "Non-streaming first"),
                 (
                     "Streaming second",
                     True,
-                    ("Streaming", {"output": ("Streaming", " second")}),
+                    ("Streaming", ("Streaming", " second")),
                 ),
                 ("Non-streaming third", False, "Non-streaming third"),
             ],
             # Empty prompts for both streaming and non-streaming
             [
                 ("", False, ""),
-                ("", True, ("", {"output": ()})),
+                ("", True, ("", ())),
             ],
         ],
         ids=[
@@ -144,7 +149,8 @@ class TestWorkerBasicFunctionality:
                         # Streaming response - expected is (first_chunk_content, full_output_tuple)
                         expected_first_chunk, expected_output = expected
                         assert response.metadata.get("final_chunk") is True
-                        assert response.response_output == expected_output
+                        # response_output is TextModelOutput from OpenAI accumulator
+                        assert response.response_output.output == expected_output
 
                         # Verify first chunk metadata and content
                         if query_id in streaming_chunks and streaming_chunks[query_id]:
@@ -152,8 +158,10 @@ class TestWorkerBasicFunctionality:
                             assert first_chunk.metadata.get("first_chunk") is True
                             assert first_chunk.response_chunk == expected_first_chunk
                     else:
-                        # Non-streaming response
-                        assert response.response_output == expected
+                        # Non-streaming response — adapter wraps in TextModelOutput
+                        assert response.response_output == TextModelOutput(
+                            output=expected
+                        )
 
             finally:
                 worker.shutdown()
@@ -289,13 +297,13 @@ class TestWorkerErrorHandling:
                 assert isinstance(response, QueryResult)
                 assert response.id == query_id
                 assert response.error is not None
-                # Check for connection error indicators
-                error_lower = response.error.lower()
+                error_str = str(response.error)
+                error_lower = error_str.lower()
                 assert (
                     ("connect" in error_lower and "failed" in error_lower)
                     or ("connection" in error_lower and "refused" in error_lower)
                     or ("cannot connect" in error_lower)
-                ), f"Unexpected error message: {response.error}"
+                ), f"Unexpected error message: {error_str}"
 
             finally:
                 worker.shutdown()
@@ -360,7 +368,8 @@ class TestWorkerErrorHandling:
                 assert isinstance(response, QueryResult)
                 assert response.id == query_id
                 assert response.error is not None
-                assert error_msg in response.error
+                err_str = str(response.error)
+                assert error_msg in err_str
                 assert response.response_output is None
 
             finally:
@@ -455,16 +464,13 @@ class TestWorkerErrorHandling:
 
                 if stream:
                     # Streaming: malformed JSON is skipped, so we get an empty response
-                    # (see _parse_sse_chunk which catches exceptions for non-content SSE messages)
                     assert response.error is None
-                    assert response.response_output == {"output": ()}
+                    assert response.response_output.output == ()
                 else:
                     # Non-streaming: malformed JSON causes a decode error
                     assert response.error is not None
-                    assert (
-                        "decode" in response.error.lower()
-                        or "json" in response.error.lower()
-                    )
+                    err_lower = str(response.error).lower()
+                    assert "decode" in err_lower or "json" in err_lower
 
             finally:
                 worker.shutdown()

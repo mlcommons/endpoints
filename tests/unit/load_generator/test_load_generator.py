@@ -137,7 +137,7 @@ def test_full_run(record_event_mock):
     results = {}
 
     def save_query_result(result: QueryResult):
-        results[result.id] = result.response_output
+        results[result.id] = result.get_response_output_string()
 
     SampleEventHandler.register_hook(SampleEvent.COMPLETE, save_query_result)
 

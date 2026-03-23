@@ -23,8 +23,7 @@ python3.12 -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 
 # 3. Install development dependencies
-pip install -e .
-pip install -r requirements/base.txt
+pip install -e ".[dev,test]"
 
 # 4. Install pre-commit hooks
 pre-commit install
@@ -49,7 +48,6 @@ inference-endpoint/
 │   ├── metrics/                # Performance measurement and reporting
 │   ├── openai/                 # OpenAI API compatibility
 │   ├── profiling/              # Performance profiling tools
-│   ├── runtime/                # Runtime configuration
 │   ├── testing/                # Test utilities (echo server, etc.)
 │   └── utils/                  # Common utilities
 ├── tests/                      # Test suite
@@ -59,7 +57,6 @@ inference-endpoint/
 │   └── datasets/               # Test datasets
 ├── docs/                       # Documentation
 ├── examples/                   # Usage examples
-├── requirements/               # Dependency management
 └── scripts/                    # Utility scripts
 ```
 
@@ -112,7 +109,7 @@ class TestQuery:
         assert query.prompt == "Test"
         assert query.model == "test-model"
 
-    @pytest.mark.asyncio
+    @pytest.mark.asyncio(mode="strict")
     async def test_async_operation(self):
         """Test async operations."""
         # Your async test here
@@ -142,22 +139,18 @@ git commit --no-verify
 ### Code Formatting
 
 ```bash
-# Format code with Black
-black src/ tests/
-
-# Sort imports with isort
-isort src/ tests/
+# Format code with ruff
+ruff format src/ tests/
 
 # Check formatting without changing files
-black --check src/ tests/
-isort --check-only src/ tests/
+ruff format --check src/ tests/
 ```
 
 ### Linting
 
 ```bash
-# Run flake8
-flake8 src/ tests/
+# Run ruff linter
+ruff check src/ tests/
 
 # Run mypy for type checking
 mypy src/
@@ -195,7 +188,7 @@ When developing a new component:
 3. **Implement the component** following the established patterns
 4. **Add tests** in the corresponding `tests/unit/` directory
 5. **Update main package** `__init__.py` if needed
-6. **Add dependencies** to appropriate `requirements/` files
+6. **Add dependencies** to `pyproject.toml` under `[project.dependencies]` or `[project.optional-dependencies]`
 
 ### 3. Testing Strategy
 
@@ -287,20 +280,18 @@ python -m pdb -m pytest test_file.py
 
 ### Adding Dependencies
 
-1. **Base Dependencies** (`requirements/base.txt`): Required for package to function, development tools, linters, and pre-commit hooks
-2. **Test Dependencies** (`requirements/test.txt`): Testing framework and utilities (pytest, pytest-asyncio, etc.)
+Add dependencies to `pyproject.toml`:
 
-### Updating Dependencies
+- **Runtime dependencies**: `[project.dependencies]`
+- **Optional groups** (dev, test, etc.): `[project.optional-dependencies]`
+
+Install after updating:
 
 ```bash
-# Update all dependencies
-pip install --upgrade -r requirements/base.txt
+pip install -e ".[dev,test]"
 
 # Check for outdated packages
 pip list --outdated
-
-# Update specific package
-pip install --upgrade package-name
 ```
 
 ## 🚨 Troubleshooting
