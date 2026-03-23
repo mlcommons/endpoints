@@ -31,8 +31,6 @@ from .metadata import ProductMetadata
 
 logger = getLogger(__name__)
 
-EXT_TO_FORMAT = {"": "JPEG", ".jpg": "JPEG", ".jpeg": "JPEG", ".png": "PNG"}
-
 
 def _process_sample_to_row(sample: dict[str, Any]) -> dict[str, Any]:
     """Convert a single HF dataset sample to a row dict for parquet storage.
