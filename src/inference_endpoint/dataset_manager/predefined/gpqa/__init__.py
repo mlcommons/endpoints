@@ -90,7 +90,7 @@ class GPQA(
                 dataset_name=f"gpqa_{variant}",
                 split="train",
                 cache_dir=datasets_dir / "hf_cache" / f"gpqa_{variant}",
-            ).to_pandas()
+            )
         except Exception as e:
             logger.error(f"Error loading dataset: {e}")
             logger.error("Note: This dataset may require HuggingFace authentication.")

@@ -91,13 +91,13 @@ class AIME25(
                 dataset_name="AIME2025-I",
                 split="test",
                 cache_dir=datasets_dir / "hf_cache" / "aime25",
-            ).to_pandas()
+            )
             df_ii = load_from_huggingface(
                 "opencompass/AIME2025",
                 dataset_name="AIME2025-II",
                 split="test",
                 cache_dir=datasets_dir / "hf_cache" / "aime25",
-            ).to_pandas()
+            )
             df = pd.concat([df_i, df_ii])
             logger.info(f"Loaded {len(df)} samples from AIME25-I and AIME25-II")
         except Exception as e:
