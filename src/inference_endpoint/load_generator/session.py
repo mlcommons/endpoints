@@ -340,7 +340,7 @@ class BenchmarkSession:
             load_generator_cls: The load generator class to use for the session.
             name: The name of the session.
             max_shutdown_timeout_s: The maximum timeout to wait for the test to complete after all samples have been issued.
-                                    If None, wait indefinitely. (Default: 300.0 seconds)
+                                    If None, wait indefinitely. Warmup drain defaults to 300.0 seconds if not specified.
             report_dir: The path to save the report to. If None, no report will be saved.
             tokenizer_override: The tokenizer to use for the session. If None, a tokenizer will be automatically selected
                                 based on the model name in the runtime settings.
