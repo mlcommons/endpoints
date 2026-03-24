@@ -90,23 +90,38 @@ They provide:
 | **Streaming default** | AUTO → OFF        | AUTO → ON        |
 | **Settings class**    | `OfflineSettings` | `OnlineSettings` |
 
-## Dataset Injection
+## Dataset Specification
 
-CLI `--dataset` strings use TOML-style dotted paths (`key=value`, `parser.prompt=article`, `accuracy_config.eval_method=pass_at_1`). Pydantic validates all fields — `extra="forbid"` on Dataset/AccuracyConfig catches typos, and parser remap targets are validated against `MakeAdapterCompatible`.
+`--dataset` is repeatable and accepts a string with TOML-style dotted paths:
 
-Full CLI/YAML parity for dataset specification:
+```
+--dataset [perf|acc:]<path>[,key=value...]
+```
 
-| Field               | CLI                                     | YAML |
-| ------------------- | --------------------------------------- | ---- |
-| `path`              | Yes                                     | Yes  |
-| `type`              | `perf:`/`acc:` prefix                   | Yes  |
-| `samples`           | `samples=N`                             | Yes  |
-| `format`            | `format=fmt`                            | Yes  |
-| `parser` (remap)    | `parser.prompt=article`                 | Yes  |
-| `accuracy_config.*` | `accuracy_config.eval_method=pass_at_1` | Yes  |
-| `name`              | No (auto-derived from path)             | Yes  |
+The first segment is the file path, optionally prefixed with `perf:` or `acc:` to set the dataset type (defaults to performance). Additional comma-separated `key=value` pairs set Dataset fields using dotted paths for nesting.
 
-The only YAML-only features are `submission_ref` and `benchmark_mode` (for official submissions — ruleset enforcement not yet implemented).
+```bash
+# Simple
+--dataset data.pkl
+
+# Accuracy dataset
+--dataset acc:eval.jsonl
+
+# With samples limit and column remap
+--dataset data.csv,samples=500,parser.prompt=article
+
+# With accuracy config
+--dataset acc:eval.pkl,accuracy_config.eval_method=pass_at_1,accuracy_config.ground_truth=answer
+
+# Multiple datasets
+--dataset perf:train.pkl --dataset acc:eval.pkl,accuracy_config.eval_method=pass_at_1 --mode both
+```
+
+Parser remaps use `parser.TARGET=SOURCE` — "rename my dataset's SOURCE column to TARGET". Valid targets are derived from `MakeAdapterCompatible` (`prompt`, `system`). Invalid targets are rejected at parse time. Invalid source columns are rejected at dataset load time.
+
+Pydantic validates all fields: `extra="forbid"` on `Dataset` and `AccuracyConfig` catches typos like `--dataset data.pkl,samles=500`. Format is auto-detected from file extension.
+
+The only YAML-only features are `submission_ref` and `benchmark_mode` (for official submissions).
 
 ## Validation
 
