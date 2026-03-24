@@ -158,6 +158,8 @@ class OSLDistribution(BaseModel):
     - NORMAL: Normal/Gaussian distribution with mean and std
     """
 
+    model_config = {"extra": "forbid"}
+
     type: OSLDistributionType = Field(
         OSLDistributionType.ORIGINAL, description="Distribution type"
     )
@@ -172,6 +174,8 @@ class OSLDistribution(BaseModel):
 
 class ModelParams(BaseModel):
     """Model generation parameters."""
+
+    model_config = {"extra": "forbid"}
 
     name: Annotated[
         str,
@@ -205,6 +209,8 @@ class SubmissionReference(BaseModel):
           model: "llama-2-70b"
           ruleset: "mlperf-inference-v5.1"
     """
+
+    model_config = {"extra": "forbid"}
 
     model: str  # Model identifier (e.g., "llama-2-70b")
     ruleset: str  # Ruleset name/version (e.g., "mlperf-inference-v5.1")
@@ -297,6 +303,8 @@ class RuntimeConfig(BaseModel):
     3. All dataset samples — fallback when duration is 0
     """
 
+    model_config = {"extra": "forbid"}
+
     min_duration_ms: Annotated[
         int,
         cyclopts.Parameter(
@@ -346,6 +354,8 @@ class LoadPattern(BaseModel):
     - poisson: target_qps sets scheduler rate (online, required - validated)
     - concurrency: issue at fixed target_concurrency (online, required - validated)
     """
+
+    model_config = {"extra": "forbid"}
 
     type: Annotated[
         LoadPatternType,
@@ -458,6 +468,8 @@ class Metrics(BaseModel):
     Use get_metric_types() to convert to actual Metric type classes.
     """
 
+    model_config = {"extra": "forbid"}
+
     collect: list[str] = Field(default_factory=_default_metrics)
 
     def get_metric_types(self) -> list[type[metrics.Metric]]:
@@ -495,6 +507,8 @@ class EndpointConfig(BaseModel):
     The Default API type is APIType.OPENAI, which refers to the the /v1/chat/completions route.
     """
 
+    model_config = {"extra": "forbid"}
+
     endpoints: Annotated[
         list[str],
         cyclopts.Parameter(alias="--endpoints", help="Endpoint URL(s)", negative=""),
@@ -516,7 +530,7 @@ class BenchmarkConfig(BaseModel):
     on Annotated fields to declare flat shorthand aliases.
     """
 
-    model_config = {"frozen": True}
+    model_config = {"frozen": True, "extra": "forbid"}
 
     name: Annotated[str, cyclopts.Parameter(show=False)] = Field(
         "", description="Benchmark name (auto-derived from type if empty)"
