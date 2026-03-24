@@ -556,6 +556,8 @@ def output_sequence_from_data(
 
     The data column is expected to be a JSON-encoded byte string. The decoded value can be:
     - A string: treated as the output sequence directly
+    - A list: tagged msgspec array from TextModelOutput (array_like=True, tag=True),
+      formatted as ["TextModelOutput", output, reasoning]
     - A dictionary with 'output' key (required) and optionally 'reasoning' key
       - Both 'output' and 'reasoning' can be either strings or lists of strings
       - If a list of strings, they will be joined together
@@ -582,6 +584,22 @@ def output_sequence_from_data(
     if isinstance(decoded_data, str):
         # If decoded value is a string, it's the output sequence
         output = decoded_data
+    elif isinstance(decoded_data, list):
+        # Tagged msgspec array_like Struct: ["TextModelOutput", output, reasoning]
+        # The tag is at index 0, output at index 1, reasoning at index 2
+        if len(decoded_data) < 2:
+            logging.warning(f"Array data too short: {len(decoded_data)} elements")
+            return None, None
+        raw_output = decoded_data[1]
+        raw_reasoning = decoded_data[2] if len(decoded_data) > 2 else None
+        output = _output_sequence_to_str(raw_output) if join_chunks else raw_output
+        if output is None and raw_output is not None:
+            logging.warning(f"Output field has unexpected type: {type(raw_output)}")
+            return None, None
+        if raw_reasoning is not None:
+            reasoning = (
+                _output_sequence_to_str(raw_reasoning) if join_chunks else raw_reasoning
+            )
     elif isinstance(decoded_data, dict):
         # If decoded value is a dict, extract 'output' and optionally 'reasoning'
         if "output" not in decoded_data:
