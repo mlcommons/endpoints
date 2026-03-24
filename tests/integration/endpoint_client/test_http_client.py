@@ -21,7 +21,6 @@ import time
 import pytest
 import zmq
 import zmq.asyncio
-from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
 from inference_endpoint.core.types import (
     Query,
     QueryResult,
@@ -34,9 +33,7 @@ from inference_endpoint.endpoint_client.http_client import HTTPEndpointClient
 from .conftest import create_futures_client
 
 
-def _create_client(
-    url: str, zmq_context: ManagedZMQContext | None = None, **kwargs
-) -> HTTPEndpointClient:
+def _create_client(url: str, **kwargs) -> HTTPEndpointClient:
     config = HTTPClientConfig(
         endpoint_urls=[url],
         num_workers=kwargs.pop("num_workers", 1),
@@ -44,7 +41,7 @@ def _create_client(
         warmup_connections=kwargs.pop("warmup_connections", 0),
         **kwargs,
     )
-    return HTTPEndpointClient(config, zmq_context=zmq_context)
+    return HTTPEndpointClient(config)
 
 
 def _make_query(id: str, prompt: str = "hello", stream: bool = False) -> Query:
@@ -56,13 +53,11 @@ def _make_query(id: str, prompt: str = "hello", stream: bool = False) -> Query:
 
 @pytest.fixture
 def http_client(mock_http_echo_server):
-    with ManagedZMQContext.scoped() as zmq_ctx:
-        client = _create_client(
-            f"{mock_http_echo_server.url}/v1/chat/completions",
-            zmq_context=zmq_ctx,
-        )
-        yield client
-        client.shutdown()
+    client = _create_client(
+        f"{mock_http_echo_server.url}/v1/chat/completions",
+    )
+    yield client
+    client.shutdown()
 
 
 class TestHttpEndpointClientScaleOut:
@@ -188,47 +183,44 @@ class TestHttpEndpointClientScaleOut:
         for num_workers in worker_counts:
             print(f"\nTesting with {num_workers} workers...")
 
-            with ManagedZMQContext.scoped() as zmq_ctx:
-                client = create_futures_client(
-                    f"{mock_http_echo_server.url}/v1/chat/completions",
-                    num_workers=num_workers,
-                    max_connections=num_workers
-                    * 10,  # ensure each worker has connections
-                    warmup_connections=0,
-                    zmq_context=zmq_ctx,
+            client = create_futures_client(
+                f"{mock_http_echo_server.url}/v1/chat/completions",
+                num_workers=num_workers,
+                max_connections=num_workers * 10,  # ensure each worker has connections
+                warmup_connections=0,
+            )
+
+            try:
+                num_requests = actual_max_concurrency
+                futures = []
+
+                start_time = time.time()
+                for i in range(num_requests):
+                    query = Query(
+                        id=f"worker-test-{i}",
+                        data={
+                            "prompt": f"Testing {num_workers} workers - request {i}",
+                            "model": "gpt-3.5-turbo",
+                        },
+                    )
+                    future = client.issue(query)
+                    futures.append(future)
+
+                # Wait for all
+                results = await asyncio.gather(
+                    *[asyncio.wrap_future(f) for f in futures]
+                )
+                duration = time.time() - start_time
+
+                # Verify
+                assert len(results) == num_requests
+                print(
+                    f"  Completed {num_requests} requests in {duration:.2f}s "
+                    f"({num_requests / duration:.0f} req/s)"
                 )
 
-                try:
-                    num_requests = actual_max_concurrency
-                    futures = []
-
-                    start_time = time.time()
-                    for i in range(num_requests):
-                        query = Query(
-                            id=f"worker-test-{i}",
-                            data={
-                                "prompt": f"Testing {num_workers} workers - request {i}",
-                                "model": "gpt-3.5-turbo",
-                            },
-                        )
-                        future = client.issue(query)
-                        futures.append(future)
-
-                    # Wait for all
-                    results = await asyncio.gather(
-                        *[asyncio.wrap_future(f) for f in futures]
-                    )
-                    duration = time.time() - start_time
-
-                    # Verify
-                    assert len(results) == num_requests
-                    print(
-                        f"  Completed {num_requests} requests in {duration:.2f}s "
-                        f"({num_requests / duration:.0f} req/s)"
-                    )
-
-                finally:
-                    client.shutdown()
+            finally:
+                client.shutdown()
 
 
 class TestHTTPEndpointClientFunctionality:
@@ -254,32 +246,30 @@ class TestHTTPEndpointClientFunctionality:
         await server.start_server()
 
         try:
-            with ManagedZMQContext.scoped() as zmq_ctx:
-                client = create_futures_client(
-                    f"http://localhost:{server.port}/v1/chat/completions",
-                    num_workers=1,
-                    zmq_context=zmq_ctx,
+            client = create_futures_client(
+                f"http://localhost:{server.port}/v1/chat/completions",
+                num_workers=1,
+            )
+
+            # Issue requests that will hang
+            num_requests = 5
+            futures = [
+                client.issue(
+                    Query(id=f"test-{i}", data={"prompt": "x", "model": "test"})
                 )
+                for i in range(num_requests)
+            ]
 
-                # Issue requests that will hang
-                num_requests = 5
-                futures = [
-                    client.issue(
-                        Query(id=f"test-{i}", data={"prompt": "x", "model": "test"})
-                    )
-                    for i in range(num_requests)
-                ]
+            # Wait for at least one request to reach server
+            await request_received.wait()
 
-                # Wait for at least one request to reach server
-                await request_received.wait()
+            # Shutdown should cancel all futures
+            client.shutdown()
 
-                # Shutdown should cancel all futures
-                client.shutdown()
-
-                cancelled = sum(1 for f in futures if f.cancelled())
-                assert (
-                    cancelled == num_requests
-                ), f"Expected {num_requests} cancelled, got {cancelled}"
+            cancelled = sum(1 for f in futures if f.cancelled())
+            assert (
+                cancelled == num_requests
+            ), f"Expected {num_requests} cancelled, got {cancelled}"
 
         finally:
             await server.close()
@@ -287,33 +277,31 @@ class TestHTTPEndpointClientFunctionality:
     @pytest.mark.asyncio
     async def test_error_response_propagation(self):
         """Test that error responses are propagated as exceptions in futures."""
-        with ManagedZMQContext.scoped() as zmq_ctx:
-            client = create_futures_client(
-                "http://invalid-host-does-not-exist:9999/v1/chat/completions",
-                zmq_context=zmq_ctx,
+        client = create_futures_client(
+            "http://invalid-host-does-not-exist:9999/v1/chat/completions",
+        )
+
+        try:
+            # Send request to invalid endpoint
+            query = Query(
+                id="2001",
+                data={
+                    "prompt": "Test error",
+                    "model": "gpt-3.5-turbo",
+                },
             )
 
-            try:
-                # Send request to invalid endpoint
-                query = Query(
-                    id="2001",
-                    data={
-                        "prompt": "Test error",
-                        "model": "gpt-3.5-turbo",
-                    },
-                )
+            future = client.issue(query)
 
-                future = client.issue(query)
+            # Should get error
+            with pytest.raises(Exception) as exc_info:
+                await asyncio.wrap_future(future)
 
-                # Should get error
-                with pytest.raises(Exception) as exc_info:
-                    await asyncio.wrap_future(future)
+            # Error message might be empty string, just verify exception was raised
+            assert exc_info.value is not None  # Exception was raised
 
-                # Error message might be empty string, just verify exception was raised
-                assert exc_info.value is not None  # Exception was raised
-
-            finally:
-                client.shutdown()
+        finally:
+            client.shutdown()
 
     @pytest.mark.asyncio
     async def test_response_handler_error_recovery(self, futures_http_client):
@@ -366,32 +354,30 @@ class TestHTTPEndpointClientFunctionality:
     @pytest.mark.asyncio
     async def test_streaming_error_propagation(self):
         """Test error propagation in streaming responses."""
-        with ManagedZMQContext.scoped() as zmq_ctx:
-            # Use invalid endpoint to trigger errors
-            client = create_futures_client(
-                "http://invalid-endpoint-12345:9999/v1/chat/completions",
-                warmup_connections=0,
-                zmq_context=zmq_ctx,
+        # Use invalid endpoint to trigger errors
+        client = create_futures_client(
+            "http://invalid-endpoint-12345:9999/v1/chat/completions",
+            warmup_connections=0,
+        )
+
+        try:
+            query = Query(
+                id="test-error",
+                data={
+                    "prompt": "This will fail",
+                    "model": "gpt-3.5-turbo",
+                    "stream": True,
+                },
             )
 
-            try:
-                query = Query(
-                    id="test-error",
-                    data={
-                        "prompt": "This will fail",
-                        "model": "gpt-3.5-turbo",
-                        "stream": True,
-                    },
-                )
+            future = client.issue(query)
 
-                future = client.issue(query)
+            # Complete response should fail
+            with pytest.raises(Exception):  # noqa: B017 Worker wraps errors in generic Exception
+                await asyncio.wrap_future(future)
 
-                # Complete response should fail
-                with pytest.raises(Exception):  # noqa: B017 Worker wraps errors in generic Exception
-                    await asyncio.wrap_future(future)
-
-            finally:
-                client.shutdown()
+        finally:
+            client.shutdown()
 
     @pytest.mark.asyncio
     async def test_concurrent_streaming_requests(self, futures_http_client):
@@ -573,20 +559,16 @@ class TestShutdown:
 
     def test_shutdown_is_idempotent(self, mock_http_echo_server):
         """Calling shutdown() multiple times does not raise."""
-        with ManagedZMQContext.scoped() as zmq_ctx:
-            client = _create_client(
-                f"{mock_http_echo_server.url}/v1/chat/completions",
-                zmq_context=zmq_ctx,
-            )
-            client.shutdown()
-            client.shutdown()
+        client = _create_client(
+            f"{mock_http_echo_server.url}/v1/chat/completions",
+        )
+        client.shutdown()
+        client.shutdown()
 
     def test_issue_after_shutdown_drops(self, mock_http_echo_server):
         """Requests issued after shutdown are silently dropped."""
-        with ManagedZMQContext.scoped() as zmq_ctx:
-            client = _create_client(
-                f"{mock_http_echo_server.url}/v1/chat/completions",
-                zmq_context=zmq_ctx,
-            )
-            client.shutdown()
-            client.issue(_make_query("post-shutdown"))
+        client = _create_client(
+            f"{mock_http_echo_server.url}/v1/chat/completions",
+        )
+        client.shutdown()
+        client.issue(_make_query("post-shutdown"))

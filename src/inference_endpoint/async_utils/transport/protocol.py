@@ -15,19 +15,26 @@
 
 """Transport protocol definitions for worker IPC.
 
-Defines the protocols for transport abstraction, allowing the Worker to be
-completely agnostic of the transport backend (ZMQ, shared memory, etc.).
+Defines the protocols and base types for transport abstraction, allowing the
+Worker to be completely agnostic of the transport backend (ZMQ, shared memory, etc.).
+
+Key types:
+    TransportConfig   — base Pydantic model for transport settings
+    WorkerPoolTransport — protocol for main-process pool communication
+    WorkerConnector   — protocol for worker-side transport setup
 """
 
 from __future__ import annotations
 
 import asyncio
+import builtins
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 import msgspec
+from pydantic import BaseModel, Field
 
 from inference_endpoint.core.record import (
     ErrorEventType,
@@ -37,8 +44,35 @@ from inference_endpoint.core.record import (
 )
 from inference_endpoint.core.types import ErrorData, Query, QueryResult, StreamChunk
 
-if TYPE_CHECKING:
-    from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
+
+class TransportConfig(BaseModel):
+    """Base transport configuration. Subclassed per transport backend.
+
+    Each subclass must:
+    - Set ``type`` to a unique Literal string for discriminated union dispatch
+    - Override ``create_context()`` to produce the transport's runtime context
+    - Override ``get_transport_class()`` to return the WorkerPoolTransport implementation
+    """
+
+    type: str = Field(description="Transport backend (currently: zmq)")  # noqa: A003
+    recv_buffer_size: int = Field(
+        default=4 * 1024 * 1024,
+        ge=1,
+        description="IPC receive buffer size in bytes (default 4MB). Increase for multimodal payloads.",
+    )
+    send_buffer_size: int = Field(
+        default=4 * 1024 * 1024,
+        ge=1,
+        description="IPC send buffer size in bytes (default 4MB). Increase for multimodal payloads.",
+    )
+    model_config = {"extra": "forbid"}
+
+    @property
+    def transport_class(self) -> builtins.type[WorkerPoolTransport]:
+        """The WorkerPoolTransport implementation for this backend. Override per subclass."""
+        raise NotImplementedError(
+            f"Transport {self.type!r} must implement transport_class"
+        )
 
 
 @runtime_checkable
@@ -94,16 +128,17 @@ class WorkerConnector(Protocol):
 
     @asynccontextmanager
     async def connect(
-        self, worker_id: int, zmq_context: ManagedZMQContext
+        self, worker_id: int
     ) -> AsyncIterator[tuple[ReceiverTransport, SenderTransport]]:
         """Connect worker transports and signal readiness.
 
         Creates request receiver and response sender, signals readiness
         to main process, then yields transports. Cleans up on exit.
+        Transport-specific context (e.g. ZMQ) is managed internally by
+        the connector implementation.
 
         Args:
             worker_id: Unique identifier for this worker.
-            zmq_context: Managed ZMQ context (e.g. from ManagedZMQContext.scoped() in this process).
 
         Yields:
             Tuple of (request_receiver, response_sender) transports.
@@ -119,23 +154,12 @@ class WorkerPoolTransport(Protocol):
     Transport for endpoint-child child-process (workers) pool communication.
     Provides fan-out (send to workers) and fan-in (receive from workers).
 
+    Context and pool creation are managed by WorkerManager from TransportConfig.
+
     Usage:
-        with ManagedZMQContext.scoped() as zmq_ctx:
-            pool = ZmqWorkerPoolTransport.create(loop, 4, zmq_ctx)
-
-        # Spawn workers with connector
-        for i in range(4):
-            spawn_worker(i, pool.worker_connector, ...)
-
-        # Wait for workers
-        await pool.wait_for_workers_ready(timeout=30)
-
-        # Use
         pool.send(worker_id, query)
         result = pool.poll()        # Non-blocking
         result = await pool.recv()  # Blocking
-
-        # Cleanup
         pool.cleanup()
     """
 
@@ -144,16 +168,16 @@ class WorkerPoolTransport(Protocol):
         cls,
         loop: asyncio.AbstractEventLoop,
         num_workers: int,
-        *args: Any,
-        **kwargs: Any,
+        config: TransportConfig | None = None,
     ) -> WorkerPoolTransport:
         """Factory to create a worker pool transport.
+
+        Transport implementations manage their own context internally.
 
         Args:
             loop: Event loop for transport registration.
             num_workers: Number of workers (required).
-            *args: Transport-specific positional arguments (e.g. ManagedZMQContext for ZMQ).
-            **kwargs: Transport-specific config overrides.
+            config: Transport configuration. Defaults per implementation.
 
         Returns:
             Configured WorkerPoolTransport instance.

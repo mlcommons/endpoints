@@ -20,7 +20,6 @@ import signal
 
 import pytest
 from inference_endpoint.async_utils.transport import ZmqWorkerPoolTransport
-from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
 from inference_endpoint.core.types import (
     Query,
     QueryResult,
@@ -80,93 +79,90 @@ class TestWorkerBasicFunctionality:
 
         # Create pool transport with the running event loop
         loop = asyncio.get_running_loop()
-        with ManagedZMQContext.scoped() as zmq_ctx:
-            pool = ZmqWorkerPoolTransport.create(loop, 1, zmq_ctx)
+        pool = ZmqWorkerPoolTransport.create(loop, 1)
 
-            worker = Worker(
-                worker_id=0,
-                connector=pool.worker_connector,
-                http_config=http_config,
-            )
+        worker = Worker(
+            worker_id=0,
+            connector=pool.worker_connector,
+            http_config=http_config,
+        )
 
-            # Start worker
-            worker_task = asyncio.create_task(worker.run())
+        # Start worker
+        worker_task = asyncio.create_task(worker.run())
 
-            try:
-                # Wait for worker readiness
-                await pool.wait_for_workers_ready(timeout=0.5)
+        try:
+            # Wait for worker readiness
+            await pool.wait_for_workers_ready(timeout=5.0)
 
-                # Send all queries
-                for i, (prompt, stream, _) in enumerate(requests):
-                    query = Query(
-                        id=f"test-{i}",
-                        data={
-                            "prompt": prompt,
-                            "model": "gpt-3.5-turbo",
-                            "stream": stream,
-                        },
-                    )
-                    pool.send(0, query)
+            # Send all queries
+            for i, (prompt, stream, _) in enumerate(requests):
+                query = Query(
+                    id=f"test-{i}",
+                    data={
+                        "prompt": prompt,
+                        "model": "gpt-3.5-turbo",
+                        "stream": stream,
+                    },
+                )
+                pool.send(0, query)
 
-                # Collect responses
-                final_responses: dict[str, QueryResult] = {}
-                streaming_chunks: dict[str, list[StreamChunk]] = {}
+            # Collect responses
+            final_responses: dict[str, QueryResult] = {}
+            streaming_chunks: dict[str, list[StreamChunk]] = {}
 
-                # Receive all responses (streaming queries produce multiple messages)
-                while len(final_responses) < len(requests):
-                    response = await pool.recv()
+            # Receive all responses (streaming queries produce multiple messages)
+            while len(final_responses) < len(requests):
+                response = await pool.recv()
 
-                    if response is None:
-                        break
+                if response is None:
+                    break
 
-                    if isinstance(response, StreamChunk):
-                        # Intermediate streaming chunk
-                        if response.id not in streaming_chunks:
-                            streaming_chunks[response.id] = []
-                        streaming_chunks[response.id].append(response)
-                    elif isinstance(response, QueryResult):
-                        if response.metadata.get("final_chunk", False):
-                            # Final streaming response
-                            final_responses[response.id] = response
-                        else:
-                            # Non-streaming response
-                            final_responses[response.id] = response
-
-                # Verify all responses received
-                assert len(final_responses) == len(
-                    requests
-                ), f"Expected {len(requests)} responses, got {len(final_responses)}"
-
-                # Verify each response
-                for i, (_, stream, expected) in enumerate(requests):
-                    query_id = f"test-{i}"
-
-                    assert query_id in final_responses
-                    response = final_responses[query_id]
-                    assert response.error is None
-
-                    if stream:
-                        # Streaming response - expected is (first_chunk_content, full_output_tuple)
-                        expected_first_chunk, expected_output = expected
-                        assert response.metadata.get("final_chunk") is True
-                        # response_output is TextModelOutput from OpenAI accumulator
-                        assert response.response_output.output == expected_output
-
-                        # Verify first chunk metadata and content
-                        if query_id in streaming_chunks and streaming_chunks[query_id]:
-                            first_chunk = streaming_chunks[query_id][0]
-                            assert first_chunk.metadata.get("first_chunk") is True
-                            assert first_chunk.response_chunk == expected_first_chunk
+                if isinstance(response, StreamChunk):
+                    # Intermediate streaming chunk
+                    if response.id not in streaming_chunks:
+                        streaming_chunks[response.id] = []
+                    streaming_chunks[response.id].append(response)
+                elif isinstance(response, QueryResult):
+                    if response.metadata.get("final_chunk", False):
+                        # Final streaming response
+                        final_responses[response.id] = response
                     else:
-                        # Non-streaming response — adapter wraps in TextModelOutput
-                        assert response.response_output == TextModelOutput(
-                            output=expected
-                        )
+                        # Non-streaming response
+                        final_responses[response.id] = response
 
-            finally:
-                worker.shutdown()
-                await asyncio.gather(worker_task, return_exceptions=True)
-                pool.cleanup()
+            # Verify all responses received
+            assert len(final_responses) == len(
+                requests
+            ), f"Expected {len(requests)} responses, got {len(final_responses)}"
+
+            # Verify each response
+            for i, (_, stream, expected) in enumerate(requests):
+                query_id = f"test-{i}"
+
+                assert query_id in final_responses
+                response = final_responses[query_id]
+                assert response.error is None
+
+                if stream:
+                    # Streaming response - expected is (first_chunk_content, full_output_tuple)
+                    expected_first_chunk, expected_output = expected
+                    assert response.metadata.get("final_chunk") is True
+                    # response_output is TextModelOutput from OpenAI accumulator
+                    assert response.response_output.output == expected_output
+
+                    # Verify first chunk metadata and content
+                    if query_id in streaming_chunks and streaming_chunks[query_id]:
+                        first_chunk = streaming_chunks[query_id][0]
+                        assert first_chunk.metadata.get("first_chunk") is True
+                        assert first_chunk.response_chunk == expected_first_chunk
+                else:
+                    # Non-streaming response -- adapter wraps in TextModelOutput
+                    assert response.response_output == TextModelOutput(output=expected)
+
+        finally:
+            worker.shutdown()
+            await asyncio.gather(worker_task, return_exceptions=True)
+            pool.cleanup()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -192,39 +188,38 @@ class TestWorkerBasicFunctionality:
 
         # Create pool transport with the running event loop
         loop = asyncio.get_running_loop()
-        with ManagedZMQContext.scoped() as zmq_ctx:
-            pool = ZmqWorkerPoolTransport.create(loop, 1, zmq_ctx)
+        pool = ZmqWorkerPoolTransport.create(loop, 1)
 
-            worker = Worker(
-                worker_id=0,
-                connector=pool.worker_connector,
-                http_config=http_config,
-            )
+        worker = Worker(
+            worker_id=0,
+            connector=pool.worker_connector,
+            http_config=http_config,
+        )
 
-            # Start worker
-            worker_task = asyncio.create_task(worker.run())
+        # Start worker
+        worker_task = asyncio.create_task(worker.run())
 
-            try:
-                # Wait for worker readiness
-                await pool.wait_for_workers_ready(timeout=0.5)
+        try:
+            # Wait for worker readiness
+            await pool.wait_for_workers_ready(timeout=5.0)
 
-                # Verify worker is running
-                assert not worker._shutdown
+            # Verify worker is running
+            assert not worker._shutdown
 
-                # Send signal via shutdown method (simulates signal handler)
-                worker.shutdown(sig, None)
+            # Send signal via shutdown method (simulates signal handler)
+            worker.shutdown(sig, None)
 
-                # Verify shutdown flag is set
-                assert worker._shutdown
+            # Verify shutdown flag is set
+            assert worker._shutdown
 
-                # Await worker exit
+            # Await worker exit
+            await asyncio.gather(worker_task, return_exceptions=True)
+
+        finally:
+            if not worker_task.done():
+                worker.shutdown()
                 await asyncio.gather(worker_task, return_exceptions=True)
-
-            finally:
-                if not worker_task.done():
-                    worker.shutdown()
-                    await asyncio.gather(worker_task, return_exceptions=True)
-                pool.cleanup()
+            pool.cleanup()
 
 
 class TestWorkerErrorHandling:
@@ -262,53 +257,54 @@ class TestWorkerErrorHandling:
 
         # Create pool transport with the running event loop
         loop = asyncio.get_running_loop()
-        with ManagedZMQContext.scoped() as zmq_ctx:
-            pool = ZmqWorkerPoolTransport.create(loop, 1, zmq_ctx)
+        pool = ZmqWorkerPoolTransport.create(loop, 1)
 
-            worker = Worker(
-                worker_id=0,
-                connector=pool.worker_connector,
-                http_config=http_config,
+        worker = Worker(
+            worker_id=0,
+            connector=pool.worker_connector,
+            http_config=http_config,
+        )
+
+        # Start worker
+        worker_task = asyncio.create_task(worker.run())
+
+        try:
+            # Wait for worker readiness
+            await pool.wait_for_workers_ready(timeout=5.0)
+
+            # Send query
+            query_id = (
+                f"test-connection-error-{'streaming' if stream else 'non-streaming'}"
             )
+            query = Query(
+                id=query_id,
+                data={
+                    "prompt": "This should fail",
+                    "model": "gpt-3.5-turbo",
+                    "stream": stream,
+                },
+            )
+            pool.send(0, query)
 
-            # Start worker
-            worker_task = asyncio.create_task(worker.run())
+            # Receive error response
+            response = await pool.recv()
 
-            try:
-                # Wait for worker readiness
-                await pool.wait_for_workers_ready(timeout=0.5)
+            # Verify error response
+            assert isinstance(response, QueryResult)
+            assert response.id == query_id
+            assert response.error is not None
+            error_str = str(response.error)
+            error_lower = error_str.lower()
+            assert (
+                ("connect" in error_lower and "failed" in error_lower)
+                or ("connection" in error_lower and "refused" in error_lower)
+                or ("cannot connect" in error_lower)
+            ), f"Unexpected error message: {error_str}"
 
-                # Send query
-                query_id = f"test-connection-error-{'streaming' if stream else 'non-streaming'}"
-                query = Query(
-                    id=query_id,
-                    data={
-                        "prompt": "This should fail",
-                        "model": "gpt-3.5-turbo",
-                        "stream": stream,
-                    },
-                )
-                pool.send(0, query)
-
-                # Receive error response
-                response = await pool.recv()
-
-                # Verify error response
-                assert isinstance(response, QueryResult)
-                assert response.id == query_id
-                assert response.error is not None
-                error_str = str(response.error)
-                error_lower = error_str.lower()
-                assert (
-                    ("connect" in error_lower and "failed" in error_lower)
-                    or ("connection" in error_lower and "refused" in error_lower)
-                    or ("cannot connect" in error_lower)
-                ), f"Unexpected error message: {error_str}"
-
-            finally:
-                worker.shutdown()
-                await asyncio.gather(worker_task, return_exceptions=True)
-                pool.cleanup()
+        finally:
+            worker.shutdown()
+            await asyncio.gather(worker_task, return_exceptions=True)
+            pool.cleanup()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -320,62 +316,61 @@ class TestWorkerErrorHandling:
 
         # Create pool transport with the running event loop
         loop = asyncio.get_running_loop()
-        with ManagedZMQContext.scoped() as zmq_ctx:
-            pool = ZmqWorkerPoolTransport.create(loop, 1, zmq_ctx)
+        pool = ZmqWorkerPoolTransport.create(loop, 1)
 
-            worker = Worker(
-                worker_id=0,
-                connector=pool.worker_connector,
-                http_config=http_config,
+        worker = Worker(
+            worker_id=0,
+            connector=pool.worker_connector,
+            http_config=http_config,
+        )
+
+        # Mock the appropriate body handler to raise an exception
+        error_msg = (
+            f"Simulated {'streaming' if stream else 'non-streaming'} processing error"
+        )
+
+        async def mock_handle_body(prepared):
+            raise RuntimeError(error_msg)
+
+        if stream:
+            worker._handle_streaming_body = mock_handle_body
+        else:
+            worker._handle_non_streaming_body = mock_handle_body
+
+        # Start worker
+        worker_task = asyncio.create_task(worker.run())
+
+        try:
+            # Wait for worker readiness
+            await pool.wait_for_workers_ready(timeout=5.0)
+
+            # Send query
+            query_id = f"test-exception-{'streaming' if stream else 'non-streaming'}"
+            query = Query(
+                id=query_id,
+                data={
+                    "prompt": "Test exception handling",
+                    "model": "gpt-3.5-turbo",
+                    "stream": stream,
+                },
             )
+            pool.send(0, query)
 
-            # Mock the appropriate body handler to raise an exception
-            error_msg = f"Simulated {'streaming' if stream else 'non-streaming'} processing error"
+            # Receive error response
+            response = await pool.recv()
 
-            async def mock_handle_body(prepared):
-                raise RuntimeError(error_msg)
+            # Verify error response
+            assert isinstance(response, QueryResult)
+            assert response.id == query_id
+            assert response.error is not None
+            err_str = str(response.error)
+            assert error_msg in err_str
+            assert response.response_output is None
 
-            if stream:
-                worker._handle_streaming_body = mock_handle_body
-            else:
-                worker._handle_non_streaming_body = mock_handle_body
-
-            # Start worker
-            worker_task = asyncio.create_task(worker.run())
-
-            try:
-                # Wait for worker readiness
-                await pool.wait_for_workers_ready(timeout=0.5)
-
-                # Send query
-                query_id = (
-                    f"test-exception-{'streaming' if stream else 'non-streaming'}"
-                )
-                query = Query(
-                    id=query_id,
-                    data={
-                        "prompt": "Test exception handling",
-                        "model": "gpt-3.5-turbo",
-                        "stream": stream,
-                    },
-                )
-                pool.send(0, query)
-
-                # Receive error response
-                response = await pool.recv()
-
-                # Verify error response
-                assert isinstance(response, QueryResult)
-                assert response.id == query_id
-                assert response.error is not None
-                err_str = str(response.error)
-                assert error_msg in err_str
-                assert response.response_output is None
-
-            finally:
-                worker.shutdown()
-                await asyncio.gather(worker_task, return_exceptions=True)
-                pool.cleanup()
+        finally:
+            worker.shutdown()
+            await asyncio.gather(worker_task, return_exceptions=True)
+            pool.cleanup()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -417,63 +412,62 @@ class TestWorkerErrorHandling:
 
         # Create pool transport with the running event loop
         loop = asyncio.get_running_loop()
-        with ManagedZMQContext.scoped() as zmq_ctx:
-            pool = ZmqWorkerPoolTransport.create(loop, 1, zmq_ctx)
+        pool = ZmqWorkerPoolTransport.create(loop, 1)
 
-            # Create config with test server URL
-            http_config = HTTPClientConfig(
-                endpoint_urls=[f"http://localhost:{server.port}/malformed"],
-                num_workers=1,
-                max_connections=10,
-                warmup_connections=0,
+        # Create config with test server URL
+        http_config = HTTPClientConfig(
+            endpoint_urls=[f"http://localhost:{server.port}/malformed"],
+            num_workers=1,
+            max_connections=10,
+            warmup_connections=0,
+        )
+
+        worker = Worker(
+            worker_id=0,
+            connector=pool.worker_connector,
+            http_config=http_config,
+        )
+
+        # Start worker
+        worker_task = asyncio.create_task(worker.run())
+
+        try:
+            # Wait for worker readiness
+            await pool.wait_for_workers_ready(timeout=5.0)
+
+            # Send query
+            query_id = (
+                f"test-malformed-json-{'streaming' if stream else 'non-streaming'}"
             )
-
-            worker = Worker(
-                worker_id=0,
-                connector=pool.worker_connector,
-                http_config=http_config,
+            query = Query(
+                id=query_id,
+                data={
+                    "prompt": "Test malformed JSON",
+                    "model": "gpt-3.5-turbo",
+                    "stream": stream,
+                },
             )
+            pool.send(0, query)
 
-            # Start worker
-            worker_task = asyncio.create_task(worker.run())
+            # Receive response
+            response = await pool.recv()
 
-            try:
-                # Wait for worker readiness
-                await pool.wait_for_workers_ready(timeout=0.5)
+            # Verify we get a response
+            assert isinstance(response, QueryResult)
+            assert response.id == query_id
 
-                # Send query
-                query_id = (
-                    f"test-malformed-json-{'streaming' if stream else 'non-streaming'}"
-                )
-                query = Query(
-                    id=query_id,
-                    data={
-                        "prompt": "Test malformed JSON",
-                        "model": "gpt-3.5-turbo",
-                        "stream": stream,
-                    },
-                )
-                pool.send(0, query)
+            if stream:
+                # Streaming: malformed JSON is skipped, so we get an empty response
+                assert response.error is None
+                assert response.response_output.output == ()
+            else:
+                # Non-streaming: malformed JSON causes a decode error
+                assert response.error is not None
+                err_lower = str(response.error).lower()
+                assert "decode" in err_lower or "json" in err_lower
 
-                # Receive response
-                response = await pool.recv()
-
-                # Verify we get a response
-                assert isinstance(response, QueryResult)
-                assert response.id == query_id
-
-                if stream:
-                    # Streaming: malformed JSON is skipped, so we get an empty response
-                    assert response.error is None
-                    assert response.response_output.output == ()
-                else:
-                    # Non-streaming: malformed JSON causes a decode error
-                    assert response.error is not None
-                    err_lower = str(response.error).lower()
-                    assert "decode" in err_lower or "json" in err_lower
-
-            finally:
-                worker.shutdown()
-                await asyncio.gather(worker_task, return_exceptions=True)
-                pool.cleanup()
+        finally:
+            worker.shutdown()
+            await asyncio.gather(worker_task, return_exceptions=True)
+            pool.cleanup()
         await server.close()

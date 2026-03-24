@@ -13,18 +13,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Configuration classes for HTTP endpoint client."""
+"""HTTP endpoint client configuration.
 
-from dataclasses import dataclass
+Single Pydantic model for both CLI/YAML (via cyclopts) and runtime.
+Internal fields use ``cyclopts.Parameter(parse=False)`` so they are
+invisible to the parser but can be set programmatically.
+"""
+
+from __future__ import annotations
+
 from importlib import import_module
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Any, Literal
 
-from inference_endpoint.async_utils.transport.protocol import WorkerPoolTransport
-from inference_endpoint.config.schema import APIType
+import cyclopts
+from pydantic import BaseModel, Field, field_validator, model_validator
 
-from .accumulator_protocol import SSEAccumulatorProtocol
-from .adapter_protocol import HttpRequestAdapter
+from inference_endpoint.async_utils.transport.zmq import ZMQTransportConfig
+from inference_endpoint.core.types import APIType
+
+# Lazy-imported at runtime to break circular import:
+# Type annotations work as strings via ``from __future__ import annotations``.
 from .cpu_affinity import AffinityPlan, get_cpus_in_numa_node, get_current_numa_node
 from .utils import get_ephemeral_port_limit, get_ephemeral_port_range
 
@@ -39,21 +48,75 @@ ACCUMULATOR_MAP = {
 }
 
 
-@dataclass
-class HTTPClientConfig:
-    """Configuration for the HTTP endpoint client."""
+class HTTPClientConfig(BaseModel):
+    """HTTP endpoint client configuration.
 
-    endpoint_urls: list[str]
-    api_type: APIType = APIType.OPENAI
-    api_key: str | None = None
+    User-facing fields are exposed to CLI/YAML via cyclopts.
+    Internal fields use ``parse=False`` — set programmatically only.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    # =========================================================================
+    # User-facing fields (exposed to CLI/YAML)
+    # =========================================================================
+
+    workers: Annotated[
+        int, cyclopts.Parameter(alias="--workers", help="Worker processes (-1=auto)")
+    ] = Field(-1, ge=-1)
+
+    record_worker_events: bool = Field(False, description="Record per-worker events")
+    log_level: str = Field("INFO", description="Worker log level")
+
+    # Pre-establish TCP connections during init for reuse at runtime.
+    # Reduces p99/max latency from cold-start connections.
+    #
+    # Values:
+    #   -1 = auto (50% of pool, safe default - 100% can overwhelm some servers)
+    #    0 = disabled
+    #   >0 = explicit total connection count to warmup (split across workers)
+    warmup_connections: int = Field(
+        -1, description="Pre-establish TCP connections (-1=auto, 0=disabled)"
+    )
+
+    # Maximum concurrent TCP connections.
+    # Performance sweetspot is often a low number compared to port limit ~1024.
+    #
+    # Values:
+    #   - >0 = explicit max size of TCP connection pool
+    #   - -1: unlimited (bound by system ephemeral_port_limit)
+    max_connections: Annotated[
+        int,
+        cyclopts.Parameter(
+            alias="--max-connections", help="Max TCP connections (-1=unlimited)"
+        ),
+    ] = -1
+
+    # Seconds to wait for workers to initialize (spawn, connect, signal ready).
+    # Increase for slow systems or when workers load heavy dependencies.
+    worker_initialization_timeout: float = 60.0
+
+    # Transport-specific configuration.
+    # When adding new transports, convert to discriminated union on ``type``.
+    transport: ZMQTransportConfig | None = None
+
+    # =========================================================================
+    # Internal fields (parse=False — not exposed to CLI/YAML)
+    # =========================================================================
+
+    endpoint_urls: Annotated[list[str], cyclopts.Parameter(parse=False)] = Field(
+        default_factory=list
+    )
+
+    api_type: Annotated[APIType, cyclopts.Parameter(parse=False)] = APIType.OPENAI
+
+    api_key: Annotated[str | None, cyclopts.Parameter(parse=False)] = None
 
     # Number of worker processes (-1 for automatic detection)
     #   - -1 for "auto": min(max(8, loadgen_numa_domain_size - 1), 24)
-    num_workers: int = -1
+    num_workers: Annotated[int, cyclopts.Parameter(parse=False)] = -1
 
-    record_worker_events: bool = False
-    event_logs_dir: Path | None = None
-    log_level: str = "INFO"
+    event_logs_dir: Annotated[Path | None, cyclopts.Parameter(parse=False)] = None
 
     # WARNING: Use with caution
     # Can cause large performance overhead on main-thread (user / Loadgen)
@@ -64,40 +127,26 @@ class HTTPClientConfig:
     # NOTE:
     #   - StreamChunk.metadata['first_chunk'] is set for first chunk of every response
     #   - At end of stream, QueryResult is returned with the entire response content
-    stream_all_chunks: bool = False
+    stream_all_chunks: Annotated[bool, cyclopts.Parameter(parse=False)] = False
 
     # CPU affinity plan for worker processes (computed by caller, e.g. benchmark command).
     # None = disabled (no worker pinning)
-    cpu_affinity: AffinityPlan | None = None
+    cpu_affinity: Annotated[AffinityPlan | None, cyclopts.Parameter(parse=False)] = (
+        Field(default=None, exclude=True)
+    )
 
     # Worker lifecycle timeouts
-    worker_initialization_timeout: float = 60.0  # init
-    worker_graceful_shutdown_wait: float = 0.5  # post-run
-    worker_force_kill_timeout: float = 0.5  # post-run
+    worker_graceful_shutdown_wait: Annotated[float, cyclopts.Parameter(parse=False)] = (
+        0.5
+    )
+    worker_force_kill_timeout: Annotated[float, cyclopts.Parameter(parse=False)] = 0.5
 
     # Connection idle timeout - discard connections idle longer than this.
     # Two fold benefits:
     # 1. Prevents keep-alive race condition where server closes idle connection
     #    at the exact moment client sends a new request (half-closed TCP).
     # 2. Early discard connections which are likely disconnected by the server already
-    max_idle_time: float = 4.0  # seconds
-
-    # Pre-establish TCP connections during init for reuse at runtime.
-    # Reduces p99/max latency from cold-start connections.
-    #
-    # Values:
-    #   -1 = auto (50% of pool, safe default - 100% can overwhelm some servers)
-    #    0 = disabled
-    #   >0 = explicit total connection count to warmup (split across workers)
-    warmup_connections: int = -1
-
-    # Maximum concurrent TCP connections.
-    # Performance sweetspot is often a low number compared to port limit ~1024.
-    #
-    # Values:
-    #   - >0 = explicit max size of TCP connection pool
-    #   - -1: unlimited (bound by system ephemeral_port_limit)
-    max_connections: int = -1
+    max_idle_time: Annotated[float, cyclopts.Parameter(parse=False)] = 4.0
 
     # Minimum required connections for http-client to initialize.
     # Will log warning if not enough ephemeral ports are available during warmup.
@@ -106,7 +155,7 @@ class HTTPClientConfig:
     #   - >0 = explicit minimum required connections
     #   - 0 = disable check (no warning if ports unavailable)
     #   - -1 = auto (defaults to 12.5% of system ephemeral port range)
-    min_required_connections: int = -1
+    min_required_connections: Annotated[int, cyclopts.Parameter(parse=False)] = -1
 
     # GC strategy for worker processes to reduce latency spikes from collection pauses
     #
@@ -114,26 +163,37 @@ class HTTPClientConfig:
     #   - "disabled": GC completely disabled (risky for long-running benchmarks)
     #   - "relaxed": GC enabled with 50x higher threshold (less aggressive)
     #   - "system": Standard Python GC with default thresholds
-    worker_gc_mode: Literal["disabled", "relaxed", "system"] = "relaxed"
+    worker_gc_mode: Annotated[
+        Literal["disabled", "relaxed", "system"],
+        cyclopts.Parameter(parse=False),
+    ] = "relaxed"
 
     # Request adapter for Query/Response <-> Payload/Response bytes
-    # Default in __post_init__ if None
-    adapter: type[HttpRequestAdapter] = None  # type: ignore[assignment]
+    # Resolved from api_type in _resolve_defaults validator
+    adapter: Annotated[Any, cyclopts.Parameter(parse=False)] = Field(
+        default=None, exclude=True
+    )
 
     # SSE accumulator for streaming responses
-    # Default in __post_init__ if None
-    accumulator: type[SSEAccumulatorProtocol] = None  # type: ignore[assignment]
+    # Resolved from api_type in _resolve_defaults validator
+    accumulator: Annotated[Any, cyclopts.Parameter(parse=False)] = Field(
+        default=None, exclude=True
+    )
 
-    # Worker pool transport class for worker IPC
-    # Default in __post_init__ if None
-    worker_pool_transport: type[WorkerPoolTransport] = None  # type: ignore[assignment]
+    # =========================================================================
+    # Validators
+    # =========================================================================
 
-    # ZMQ socket buffer sizes (bytes); passed as recv_buffer_size/send_buffer_size kwargs
-    zmq_recv_buffer_bytes: int = 4 * 1024 * 1024
-    zmq_send_buffer_bytes: int = 4 * 1024 * 1024
+    @field_validator("workers")
+    @classmethod
+    def _workers_not_zero(cls, v: int) -> int:
+        if v == 0:
+            raise ValueError("workers must be -1 (auto) or >= 1, got 0")
+        return v
 
-    def __post_init__(self):
-        # set default adapter in __post_init__ to avoid circular dependency
+    @model_validator(mode="after")
+    def _resolve_defaults(self) -> HTTPClientConfig:
+        """Resolve auto-detect values and lazy defaults."""
         if isinstance(self.api_type, str):
             self.api_type = APIType(self.api_type)
 
@@ -144,13 +204,11 @@ class HTTPClientConfig:
             adapter_path = ADAPTER_MAP.get(self.api_type)
             if not adapter_path:
                 raise ValueError(f"Invalid or unsupported API type: {self.api_type}")
-
             module_path, class_name = adapter_path.rsplit(".", 1)
             module = import_module(module_path)
             self.adapter = getattr(module, class_name)
 
         if self.accumulator is None:
-            # Default to OpenAI accumulator for unrecognized API types
             accumulator_path = ACCUMULATOR_MAP.get(
                 self.api_type, ACCUMULATOR_MAP[APIType.OPENAI]
             )
@@ -158,30 +216,32 @@ class HTTPClientConfig:
             module = import_module(module_path)
             self.accumulator = getattr(module, class_name)
 
-        if self.worker_pool_transport is None:
-            # Default to ZMQ worker pool transport
-            from inference_endpoint.async_utils.transport import ZmqWorkerPoolTransport
+        if self.transport is None:
+            from inference_endpoint.async_utils.transport.zmq import (
+                ZMQTransportConfig,
+            )
 
-            self.worker_pool_transport = ZmqWorkerPoolTransport
+            self.transport = ZMQTransportConfig()
 
-        low, high = get_ephemeral_port_range()
-        system_maximum_ports = high - low + 1
-        available_ports = get_ephemeral_port_limit()
+        # Only resolve ports when endpoint_urls are set (runtime config, not settings default)
+        if self.endpoint_urls:
+            low, high = get_ephemeral_port_range()
+            system_maximum_ports = high - low + 1
+            available_ports = get_ephemeral_port_limit()
 
-        if self.max_connections == -1:
-            # Auto: use available ephemeral ports
-            self.max_connections = available_ports
-        else:
-            # User specified explicit max_connections - validate against port limit
-            if self.max_connections > available_ports:
-                raise RuntimeError(
-                    f"--max-connections ({self.max_connections}) exceeds ephemeral port limit ({available_ports}). "
-                    f"Either reduce --max-connections or increase system port limit."
-                )
+            if self.max_connections == -1:
+                self.max_connections = available_ports
+            elif self.max_connections > 0:
+                if self.max_connections > available_ports:
+                    raise RuntimeError(
+                        f"--max-connections ({self.max_connections}) exceeds ephemeral port limit ({available_ports}). "
+                        f"Either reduce --max-connections or increase system port limit."
+                    )
 
-        # Resolve min_required_connections: -1 means auto (12.5% of system max)
-        if self.min_required_connections == -1:
-            self.min_required_connections = int(system_maximum_ports * 0.125)
+            if self.min_required_connections == -1:
+                self.min_required_connections = int(system_maximum_ports * 0.125)
+
+        return self
 
 
 def _get_auto_num_workers() -> int:
@@ -209,4 +269,4 @@ def _get_auto_num_workers() -> int:
     return min(max(min_workers, len(numa_cpus)), max_workers)
 
 
-__all__ = ["HTTPClientConfig"]
+__all__ = ["APIType", "HTTPClientConfig"]

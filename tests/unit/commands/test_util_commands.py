@@ -184,12 +184,7 @@ class TestProbeExecution:
 
     @pytest.mark.unit
     @patch("inference_endpoint.commands.probe.HTTPEndpointClient")
-    @patch("inference_endpoint.commands.probe.ManagedZMQContext")
-    def test_setup_failure_raises(self, mock_zmq_cls, mock_client_cls):
-        mock_zmq = MagicMock()
-        mock_zmq.__enter__ = MagicMock(return_value=MagicMock())
-        mock_zmq.__exit__ = MagicMock(return_value=False)
-        mock_zmq_cls.scoped.return_value = mock_zmq
+    def test_setup_failure_raises(self, mock_client_cls):
         mock_client_cls.side_effect = ConnectionError("refused")
 
         config = ProbeConfig(endpoints="http://localhost:8000", model="test")
@@ -202,13 +197,7 @@ class TestProbeExecution:
 
     @pytest.mark.unit
     @patch("inference_endpoint.commands.probe.HTTPEndpointClient")
-    @patch("inference_endpoint.commands.probe.ManagedZMQContext")
-    def test_all_issues_fail_raises(self, mock_zmq_cls, mock_client_cls):
-        mock_zmq = MagicMock()
-        mock_zmq.__enter__ = MagicMock(return_value=MagicMock())
-        mock_zmq.__exit__ = MagicMock(return_value=False)
-        mock_zmq_cls.scoped.return_value = mock_zmq
-
+    def test_all_issues_fail_raises(self, mock_client_cls):
         mock_client = MagicMock()
         mock_client.issue.side_effect = RuntimeError("send failed")
         mock_client_cls.return_value = mock_client

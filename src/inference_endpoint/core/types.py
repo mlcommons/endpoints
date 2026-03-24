@@ -27,6 +27,20 @@ from typing import Any
 import msgspec
 
 
+class APIType(str, Enum):
+    OPENAI = "openai"
+    SGLANG = "sglang"
+
+    def default_route(self) -> str:
+        match self:
+            case APIType.OPENAI:
+                return "/v1/chat/completions"
+            case APIType.SGLANG:
+                return "/generate"
+            case _:
+                raise ValueError(f"Invalid API type: {self}")
+
+
 class QueryStatus(Enum):
     """Status of a query in its lifecycle.
 

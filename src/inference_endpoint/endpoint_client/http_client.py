@@ -19,11 +19,8 @@ import asyncio
 import logging
 import uuid
 from itertools import cycle
-from typing import Any
 
 from inference_endpoint.async_utils.loop_manager import LoopManager
-from inference_endpoint.async_utils.transport import ZmqWorkerPoolTransport
-from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
 from inference_endpoint.core.types import Query, QueryResult, StreamChunk
 from inference_endpoint.endpoint_client.config import HTTPClientConfig
 from inference_endpoint.endpoint_client.worker_manager import WorkerManager
@@ -40,38 +37,22 @@ class HTTPEndpointClient:
     - Worker processes: Make actual HTTP requests to the endpoint
     - Requests are distributed to workers round-robin
 
-    When config uses ZmqWorkerPoolTransport, the caller must scope the client
-    lifetime within ManagedZMQContext.scoped() and pass the context in.
-    The client does not create or own the ZMQ context.
-
     Usage:
-        with ManagedZMQContext.scoped() as zmq_ctx:
-            client = HTTPEndpointClient(config, zmq_context=zmq_ctx)
-            client.issue(query)
-            response = client.poll()        # Non-blocking, returns None if nothing ready
-            responses = client.drain()      # Drain all available responses
-            # response = await client.recv()  # Blocking; only if caller provides its own loop
-            client.shutdown()               # Blocks until workers stop
+        client = HTTPEndpointClient(config)
+        client.issue(query)
+        response = client.poll()        # Non-blocking, returns None if nothing ready
+        responses = client.drain()      # Drain all available responses
+        client.shutdown()               # Blocks until workers stop
     """
 
     def __init__(
         self,
         config: HTTPClientConfig,
         loop: asyncio.AbstractEventLoop | None = None,
-        zmq_context: ManagedZMQContext | None = None,
     ):
         self.client_id = uuid.uuid4().hex[:8]
         self.config = config
         self._worker_cycle = cycle(range(self.config.num_workers))
-
-        # TODO(vir): make context setup/teardown part of transport protocol
-        if config.worker_pool_transport is ZmqWorkerPoolTransport:
-            if zmq_context is None:
-                raise ValueError(
-                    "zmq_context is required when using ZmqWorkerPoolTransport; "
-                    "use ManagedZMQContext.scoped() and pass the context in."
-                )
-        self._zmq_context = zmq_context
 
         # Use provided loop or create one via LoopManager (uvloop + eager task factory)
         self._owns_loop = loop is None
@@ -95,7 +76,7 @@ class HTTPEndpointClient:
             f"endpoints={self.config.endpoint_urls}, "
             f"adapter={self.config.adapter.__name__}, "
             f"accumulator={self.config.accumulator.__name__}, "
-            f"pool_transport={self.config.worker_pool_transport.__name__}"
+            f"transport={self.config.transport.type if self.config.transport else 'none'}"
         )
 
     async def _initialize(self) -> None:
@@ -104,18 +85,7 @@ class HTTPEndpointClient:
         self._dropped_requests: int = 0
 
         assert self.loop is not None
-        additional_args: list[Any] = []
-        pool_kwargs: dict[str, int] = {}
-        if self.config.worker_pool_transport is ZmqWorkerPoolTransport:
-            assert self._zmq_context is not None
-            additional_args.append(self._zmq_context)
-            pool_kwargs = {
-                "recv_buffer_size": self.config.zmq_recv_buffer_bytes,
-                "send_buffer_size": self.config.zmq_send_buffer_bytes,
-            }
-        self.worker_manager = WorkerManager(
-            self.config, self.loop, *additional_args, **pool_kwargs
-        )
+        self.worker_manager = WorkerManager(self.config, self.loop)
         await self.worker_manager.initialize()
         self.pool = self.worker_manager.pool_transport
 

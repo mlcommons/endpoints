@@ -61,7 +61,7 @@ def offline(
     dataset: Annotated[
         list[str],
         cyclopts.Parameter(
-            help="Dataset(s) as [perf|acc:]<path>[,key=val...]", negative=""
+            help=r"Dataset(s) as \[perf|acc:]PATH\[,key=val...]", negative=""
         ),
     ],
     mode: Annotated[
@@ -80,7 +80,7 @@ def online(
     dataset: Annotated[
         list[str],
         cyclopts.Parameter(
-            help="Dataset(s) as [perf|acc:]<path>[,key=val...]", negative=""
+            help=r"Dataset(s) as \[perf|acc:]PATH\[,key=val...]", negative=""
         ),
     ],
     mode: Annotated[

@@ -40,6 +40,8 @@ from pydantic import (
 )
 
 from .. import metrics
+from ..core.types import APIType
+from ..endpoint_client.config import HTTPClientConfig
 from .ruleset_base import BenchmarkSuiteRuleset
 from .utils import parse_dataset_string, resolve_env_vars
 
@@ -47,20 +49,6 @@ from .utils import parse_dataset_string, resolve_env_vars
 class SystemDefaults(BaseModel):
     DEFAULT_TIMEOUT: ClassVar[float] = 300.0
     DEFAULT_METRIC: ClassVar[metrics.Metric] = metrics.Throughput(0.0)
-
-
-class APIType(str, Enum):
-    OPENAI = "openai"
-    SGLANG = "sglang"
-
-    def default_route(self) -> str:
-        match self:
-            case APIType.OPENAI:
-                return "/v1/chat/completions"
-            case APIType.SGLANG:
-                return "/generate"
-            case _:
-                raise ValueError(f"Invalid API type: {self}")
 
 
 class LoadPatternType(str, Enum):
@@ -384,51 +372,6 @@ class LoadPattern(BaseModel):
         return self
 
 
-class ClientSettings(BaseModel):
-    """HTTP client configuration — user-facing subset of HTTPClientConfig."""
-
-    model_config = {"extra": "forbid"}
-
-    workers: Annotated[
-        int, cyclopts.Parameter(alias="--workers", help="Worker processes (-1=auto)")
-    ] = Field(-1, ge=-1)
-    record_worker_events: bool = Field(False, description="Record per-worker events")
-
-    @field_validator("workers")
-    @classmethod
-    def _workers_not_zero(cls, v: int) -> int:
-        if v == 0:
-            raise ValueError("workers must be -1 (auto) or >= 1, got 0")
-        return v
-
-    log_level: str = Field("INFO", description="Worker log level")
-    warmup_connections: int = Field(
-        -1, description="Pre-establish TCP connections (-1=auto, 0=disabled)"
-    )
-    max_connections: Annotated[
-        int,
-        cyclopts.Parameter(
-            alias="--max-connections", help="Max TCP connections (-1=unlimited)"
-        ),
-    ] = -1
-
-    # Seconds to wait for workers to initialize (spawn, connect, signal ready).
-    # Increase for slow systems or when workers load heavy dependencies.
-    worker_initialization_timeout: float = 40.0
-
-    # ZMQ IPC socket buffer sizes (bytes). Increase for large multimodal requests.
-    zmq_recv_buffer_bytes: int = Field(
-        default=4 * 1024 * 1024,
-        ge=1,
-        description="ZMQ receive buffer size in bytes (default 4MB).",
-    )
-    zmq_send_buffer_bytes: int = Field(
-        default=4 * 1024 * 1024,
-        ge=1,
-        description="ZMQ send buffer size in bytes (default 4MB).",
-    )
-
-
 @cyclopts.Parameter(name="*")
 class Settings(BaseModel):
     """Test settings."""
@@ -437,7 +380,7 @@ class Settings(BaseModel):
 
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
     load_pattern: LoadPattern = Field(default_factory=LoadPattern)
-    client: ClientSettings = Field(default_factory=ClientSettings)
+    client: HTTPClientConfig = Field(default_factory=HTTPClientConfig)
 
 
 class OfflineSettings(Settings):

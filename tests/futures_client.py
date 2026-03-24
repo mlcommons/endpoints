@@ -35,10 +35,9 @@ class FuturesHttpClient(HTTPEndpointClient):
     def __init__(
         self,
         config: HTTPClientConfig,
-        zmq_context=None,
     ):
         # Auto-starts with own event loop thread (loop=None)
-        super().__init__(config, zmq_context=zmq_context)
+        super().__init__(config)
 
         # Start response handler on client's loop
         self._pending: dict[str | int, concurrent.futures.Future] = {}

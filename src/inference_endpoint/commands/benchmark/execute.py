@@ -38,7 +38,6 @@ from tqdm import tqdm
 from transformers import AutoTokenizer
 from transformers.utils import logging as transformers_logging
 
-from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import (
     APIType,
@@ -324,26 +323,24 @@ def run_benchmark_threaded(ctx: BenchmarkContext) -> tuple[Any, ResponseCollecto
     # Create endpoint client
     endpoints = config.endpoint_config.endpoints
     logger.info(f"Connecting: {endpoints}")
-    # Scope ZMQ context so transport and sockets are cleaned up when the block exits.
-    with (
-        ManagedZMQContext.scoped() as zmq_ctx,
-        tempfile.TemporaryDirectory(prefix="inference_endpoint_") as _tmp_dir,
-    ):
+    # Transport context is managed by WorkerManager (created from transport config).
+    with tempfile.TemporaryDirectory(prefix="inference_endpoint_") as _tmp_dir:
         try:
             api_type: APIType = config.endpoint_config.api_type
-            http_config = HTTPClientConfig(
-                endpoint_urls=[urljoin(e, api_type.default_route()) for e in endpoints],
-                api_type=api_type,
-                num_workers=config.settings.client.workers,
-                record_worker_events=config.settings.client.record_worker_events,
-                event_logs_dir=ctx.report_dir,
-                log_level=config.settings.client.log_level,
-                cpu_affinity=ctx.affinity_plan,
-                warmup_connections=config.settings.client.warmup_connections,
-                max_connections=config.settings.client.max_connections,
-                api_key=config.endpoint_config.api_key,
+            base = config.settings.client.model_dump()
+            base.update(
+                {
+                    "endpoint_urls": [
+                        urljoin(e, api_type.default_route()) for e in endpoints
+                    ],
+                    "api_type": api_type,
+                    "api_key": config.endpoint_config.api_key,
+                    "event_logs_dir": ctx.report_dir,
+                    "cpu_affinity": ctx.affinity_plan,
+                }
             )
-            http_client = HTTPEndpointClient(http_config, zmq_context=zmq_ctx)
+            http_config = HTTPClientConfig.model_validate(base)
+            http_client = HTTPEndpointClient(http_config)
             sample_issuer = HttpClientSampleIssuer(http_client)
         except Exception as e:
             raise SetupError(f"Failed to connect to endpoint: {e}") from e

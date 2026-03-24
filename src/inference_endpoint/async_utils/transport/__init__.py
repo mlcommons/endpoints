@@ -18,6 +18,7 @@
 from .protocol import (
     ReceiverTransport,
     SenderTransport,
+    TransportConfig,
     WorkerConnector,
     WorkerPoolTransport,
 )
@@ -26,6 +27,8 @@ from .protocol import (
 from .zmq import ZmqWorkerPoolTransport
 
 __all__ = [
+    # Config
+    "TransportConfig",
     # Protocols
     "ReceiverTransport",
     "SenderTransport",

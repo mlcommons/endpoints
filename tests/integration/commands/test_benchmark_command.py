@@ -21,7 +21,6 @@ import pytest
 from inference_endpoint.commands.benchmark.execute import run_benchmark
 from inference_endpoint.config.schema import (
     BenchmarkConfig,
-    ClientSettings,
     Dataset,
     DatasetType,
     EndpointConfig,
@@ -34,11 +33,12 @@ from inference_endpoint.config.schema import (
     TestMode,
     TestType,
 )
+from inference_endpoint.endpoint_client.config import HTTPClientConfig
 
 _TEST_SETTINGS = Settings(
     runtime=RuntimeConfig(min_duration_ms=0),
     load_pattern=LoadPattern(type=LoadPatternType.MAX_THROUGHPUT),
-    client=ClientSettings(workers=1, warmup_connections=0),
+    client=HTTPClientConfig(workers=1, warmup_connections=0, max_connections=10),
 )
 
 
@@ -58,7 +58,7 @@ def _poisson_settings(target_qps: float, duration_s: int = 2) -> Settings:
     return Settings(
         runtime=RuntimeConfig(min_duration_ms=duration_s * 1000),
         load_pattern=LoadPattern(type=LoadPatternType.POISSON, target_qps=target_qps),
-        client=ClientSettings(workers=1, warmup_connections=0),
+        client=HTTPClientConfig(workers=1, warmup_connections=0, max_connections=10),
     )
 
 

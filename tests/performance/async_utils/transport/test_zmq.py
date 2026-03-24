@@ -30,9 +30,9 @@ import pytest
 import uvloop
 from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
 from inference_endpoint.async_utils.transport.zmq.transport import (
+    ZMQTransportConfig,
     _create_receiver,
     _create_sender,
-    _ZMQSocketConfig,
 )
 from inference_endpoint.core.types import (
     Query,
@@ -144,7 +144,7 @@ async def benchmark(
 
     loop = asyncio.get_running_loop()
 
-    config = _ZMQSocketConfig()
+    config = ZMQTransportConfig()
 
     with ManagedZMQContext.scoped(io_threads=config.io_threads) as zmq_ctx:
         with tempfile.TemporaryDirectory(prefix="zmq_") as tmp:

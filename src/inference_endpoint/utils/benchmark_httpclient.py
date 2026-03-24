@@ -445,7 +445,7 @@ def _create_client(
             f"max_connections={config.max_connections}, stream={streaming}"
         )
 
-    client = HTTPEndpointClient(config, zmq_context=zmq_context)
+    client = HTTPEndpointClient(config)
     query_data = {
         "prompt": prompt,
         "model": "benchmark-model",
