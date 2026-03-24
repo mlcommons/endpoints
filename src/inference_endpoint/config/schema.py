@@ -375,10 +375,9 @@ class LoadPattern(BaseModel):
 
 
 class ClientSettings(BaseModel):
-    """
-    HTTP client configuration.
-    NOTE: for details see src/inference_endpoint/endpoint_client/config.py
-    """
+    """HTTP client configuration — user-facing subset of HTTPClientConfig."""
+
+    model_config = {"extra": "forbid"}
 
     workers: Annotated[
         int, cyclopts.Parameter(alias="--workers", help="Worker processes (-1=auto)")
@@ -423,6 +422,8 @@ class ClientSettings(BaseModel):
 @cyclopts.Parameter(name="*")
 class Settings(BaseModel):
     """Test settings."""
+
+    model_config = {"extra": "forbid"}
 
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
     load_pattern: LoadPattern = Field(default_factory=LoadPattern)
