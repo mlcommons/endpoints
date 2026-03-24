@@ -95,7 +95,10 @@ class DataLoaderFactory:
 
         transforms: list[Transform] = []
         if remap is not None:
-            transforms.append(ColumnRemap(remap))  # type: ignore[arg-type]
+            # Parser convention is {target: source} (e.g. {prompt: article}).
+            # ColumnRemap expects {source: target} — flip it.
+            flipped = {src: dst for dst, src in remap.items()}
+            transforms.append(ColumnRemap(flipped))  # type: ignore[arg-type]
         transforms.append(MakeAdapterCompatible())
 
         assert dataset_path is not None

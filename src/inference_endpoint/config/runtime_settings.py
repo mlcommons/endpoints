@@ -98,7 +98,7 @@ class RuntimeSettings:
         a validated BenchmarkConfig (Pydantic model).
 
         Args:
-            config: Validated BenchmarkConfig from yaml_loader
+            config: Validated BenchmarkConfig
             dataloader_num_samples: Number of samples loaded from dataset
             ruleset: Optional ruleset to apply constraints (delegates to ruleset's apply_user_config)
             **overrides: Additional fields to override (e.g., for testing)

@@ -1,23 +1,40 @@
 # CLI Quick Reference
 
+## Architecture
+
+The CLI is auto-generated from Pydantic models in `config/schema.py` using
+cyclopts. schema.py is the single source of truth for both YAML configs and CLI flags.
+
+- **All schema fields** available as CLI flags on each subcommand (dotted kebab-case)
+- **Shorthand aliases** declared via `cyclopts.Parameter(alias="--flag")` on schema fields
+- **`${VAR}` interpolation** in YAML files (with `${VAR:-default}` fallback)
+
 ## Commands
 
 ### Performance Benchmarking
 
 ```bash
-# Offline (max throughput - CLI mode)
+# Offline (max throughput)
 inference-endpoint benchmark offline \
   --endpoints URL \
   --model Qwen/Qwen3-8B \
   --dataset tests/datasets/dummy_1k.pkl
 
-# Online (sustained QPS - CLI mode - requires --target-qps, --load-pattern)
+# Online (sustained QPS - requires --load-pattern, --target-qps)
 inference-endpoint benchmark online \
   --endpoints URL \
   --model Qwen/Qwen3-8B \
   --dataset tests/datasets/dummy_1k.pkl \
   --load-pattern poisson \
   --target-qps 100
+
+# Multiple datasets (--dataset is repeatable, prefix with perf: or acc:)
+inference-endpoint benchmark offline \
+  --endpoints URL \
+  --model Qwen/Qwen3-8B \
+  --dataset perf:performance.pkl \
+  --dataset acc:accuracy.pkl \
+  --mode both
 
 # With detailed report generation
 inference-endpoint benchmark offline \
@@ -26,12 +43,20 @@ inference-endpoint benchmark offline \
   --dataset tests/datasets/dummy_1k.pkl \
   --report-dir my_benchmark_report
 
-# YAML-based (YAML mode - no CLI overrides)
-inference-endpoint benchmark from-config \
-  --config test.yaml
+# YAML-based
+inference-endpoint benchmark from-config --config test.yaml
 ```
 
 **Default Test Dataset:** Use `tests/datasets/dummy_1k.pkl` (1000 samples, ~133 KB) for local testing.
+
+**Dataset format:** `--dataset [perf|acc:]<path>[,key=value...]` — TOML-style dotted paths. Type prefix is optional (defaults to `perf`):
+
+```bash
+--dataset data.pkl                                           # simple path
+--dataset acc:eval.jsonl                                     # accuracy dataset
+--dataset data.csv,samples=500,parser.prompt=article         # with options
+--dataset perf:data.jsonl,format=jsonl,parser.prompt=text    # explicit format + remap
+```
 
 ### Accuracy Evaluation (stub - future implementation)
 
@@ -45,56 +70,74 @@ inference-endpoint eval --dataset gpqa,aime --endpoints URL
 # Test endpoint connectivity
 inference-endpoint probe \
   --endpoints URL \
-  --model gpt-3.5-turbo \
-  --api-key KEY
+  --model gpt-3.5-turbo
 
 # Validate YAML config
-inference-endpoint validate --config test.yaml
+inference-endpoint validate-yaml -c test.yaml
 ```
 
 ### Utilities
 
 ```bash
 # Generate config templates
-inference-endpoint init --template offline        # or: online, eval, submission
+inference-endpoint init offline        # or: online, eval, submission
+inference-endpoint init submission
 
 # Show system info
 inference-endpoint info
 ```
 
-## Common Options
+## Common Options (Benchmark Subcommands)
 
-- `--endpoints, -e URL` - Endpoint URL (required for CLI mode)
-- `--model NAME` - Model name (required for CLI mode, e.g., Qwen/Qwen3-8B)
-- `--dataset, -d PATH` - Dataset file (required for CLI mode)
-- `--config, -c PATH` - YAML config file (required for from-config mode)
-- `--report-dir PATH` - Save detailed benchmark report with metrics
-- `--verbose, -v` - Increase verbosity (-vv for debug)
+Flag names shown as `--full.dotted.path --alias`. Both forms work.
 
-## Benchmark Options (CLI Mode Only)
+**Required:**
 
-- `--api-key KEY` - API authentication
-- `--target-qps N` - Target queries per second (required when --load-pattern=poisson)
-- `--duration SEC` - Test duration in seconds (default: 0 - run until dataset exhausted)
-- `--num-samples N` - Number of samples to issue (overrides dataset size and duration calculation)
-- `--streaming MODE` - Streaming control: `auto` (default), `on`, or `off`. Streaming will enable token streaming in response.
-- `--workers N` - HTTP workers (default: 4)
-- `--mode MODE` - Test mode: `perf` (default), `acc`, or `both`
-- `--min-output-tokens N` - Min output tokens
-- `--max-output-tokens N` - Max output tokens
+- `--endpoint-config.endpoints --endpoints` - Endpoint URL(s)
+- `--model-params.name --model` - Model name (e.g., Qwen/Qwen3-8B)
+- `--dataset` - Dataset file path
 
-## Online-Specific Options
+**Optional (with aliases):**
 
-- `--load-pattern TYPE` - Load pattern (required): `poisson`, `concurrency`
-- `--concurrency N` - Max concurrent requests (required when --load-pattern=concurrency)
+- `--model-params.max-new-tokens --max-output-tokens` - Max output tokens (default: 1024)
+- `--model-params.osl-distribution.min --min-output-tokens` - Min output tokens (default: 1)
+- `--model-params.streaming --streaming` - Streaming mode: auto/on/off (default: auto)
+- `--runtime.min-duration-ms --duration` - Min duration: ms default, or with suffix (600s, 10m) (default: 600000)
+- `--runtime.n-samples-to-issue --num-samples` - Explicit sample count override
+- `--client.workers --workers` - HTTP workers (-1=auto, default: -1)
+- `--client.max-connections --max-connections` - Max TCP connections (-1=unlimited)
+- `--endpoint-config.api-key --api-key` - API authentication
+- `--endpoint-config.api-type --api-type` - API type: openai/sglang (default: openai)
+- `--report-dir` - Report output directory
+- `--timeout` - Global timeout in seconds
+- `--enable-cpu-affinity / --no-cpu-affinity` - NUMA-aware CPU pinning (default: true)
+
+**Online-specific:**
+
+- `--load-pattern.type --load-pattern` - Load pattern: poisson or concurrency (required for online)
+- `--load-pattern.target-qps --target-qps` - Target QPS (required for poisson)
+- `--load-pattern.target-concurrency --concurrency` - Concurrent requests (required for concurrency)
+
+**All other schema fields** are accessible via dotted paths (e.g., `--model-params.temperature`, `--model-params.top-k`, `--runtime.scheduler-random-seed`). Run `--help` to see the full list.
+
+## Environment Variables
+
+**In YAML files** — use `${VAR}` or `${VAR:-default}` syntax:
+
+```yaml
+endpoint_config:
+  endpoints:
+    - "${ENDPOINT_URL}"
+  api_key: "${API_KEY:-sk-test}"
+model_params:
+  name: "${MODEL_NAME:-Qwen/Qwen3-8B}"
+```
 
 ## Dataset Formats
 
-**Supported:**
+Format is auto-detected from file extension. Override with `format:` in the dataset string.
 
-- `pkl` - Pickle format (default)
-- `hf` - HuggingFace datasets
-- `jsonl` - JSON Lines format
+**Supported:** `pkl`, `csv`, `json`, `jsonl`, `parquet`, `npy`, `pandas_pkl`, `huggingface`
 
 ## Test Modes
 
@@ -108,13 +151,29 @@ inference-endpoint info
 
 - Response collection and evaluation
 - Metrics: Accuracy %
-- Use for evaluation runs
+- Requires `accuracy_config` on datasets (eval_method, extractor)
 
 **both** - Combined (for official submissions)
 
 - Performance datasets: metrics only
 - Accuracy datasets: collect + evaluate
 - Selective collection based on dataset type
+
+Accuracy config is supported in both CLI and YAML:
+
+```bash
+# CLI — accuracy config via dotted paths
+--dataset acc:eval.pkl,accuracy_config.eval_method=pass_at_1,accuracy_config.ground_truth=answer,accuracy_config.extractor=boxed_math_extractor
+
+# Combined perf + accuracy
+inference-endpoint benchmark offline \
+  --endpoints URL --model M \
+  --dataset perf:perf.pkl \
+  --dataset acc:eval.pkl,accuracy_config.eval_method=pass_at_1,accuracy_config.ground_truth=answer \
+  --mode both
+```
+
+> **Note:** Submission runs (`type: submission`) are YAML-only — they require `submission_ref` and `benchmark_mode` fields not exposed in CLI.
 
 ## Load Patterns
 
@@ -169,7 +228,7 @@ inference-endpoint benchmark online \
   --dataset prod_queries.pkl \
   --load-pattern poisson \
   --target-qps 100 \
-  --duration 300 \
+  --duration 5m \
   --workers 16 \
   --report-dir production_report \
   -v
@@ -179,11 +238,11 @@ inference-endpoint benchmark online \
 
 ```bash
 # 1. Generate template
-inference-endpoint init --template submission
+inference-endpoint init submission
 
 # 2. Edit submission_template.yaml (set model, datasets, ruleset, endpoint)
 
-# 3. Run (YAML mode - no CLI overrides)
+# 3. Run (YAML mode)
 inference-endpoint benchmark from-config \
   --config submission_template.yaml \
   --report-dir official_results
@@ -198,7 +257,7 @@ inference-endpoint probe \
   --model Qwen/Qwen3-8B
 
 # Validate YAML config
-inference-endpoint validate --config submission.yaml
+inference-endpoint validate-yaml --config submission.yaml
 ```
 
 ## YAML Config Structure
@@ -235,7 +294,7 @@ settings:
     type: "max_throughput"
     target_qps: 10.0
   client:
-    workers: 4
+    workers: -1 # auto
 
 metrics:
   collect: ["throughput", "latency", "ttft", "tpot"]
@@ -246,35 +305,38 @@ endpoint_config:
   api_key: null
 ```
 
+Note: For submission configs, `model_params.name` is optional when `submission_ref.model` is provided — the model name is resolved automatically.
+
 ## CLI vs YAML Modes
 
 **CLI Mode** (`benchmark offline/online`):
 
 - All parameters from command line
 - Quick testing and iteration
-- Examples: `benchmark offline --endpoints URL --model NAME --dataset FILE`
+- Example: `benchmark offline --endpoints URL --model NAME --dataset FILE`
 
 **YAML Mode** (`benchmark from-config`):
 
 - All configuration from YAML file
 - Reproducible, shareable configs
-- No CLI parameter mixing (only `--timeout` auxiliary allowed)
-- Example: `benchmark from-config --config file.yaml --timeout 600`
+- Supports `${VAR}` env var interpolation
+- Optional `--timeout` and `--mode` overrides
+- Example: `benchmark from-config -c file.yaml --timeout 600`
 
 ## Tips
 
 **Sample Count Control:**
 
-- Sample priority: `--num-samples` > dataset size (duration=0) > calculated (target_qps × duration)
-- Default duration: 0 (runs until dataset exhausted or max_duration reached)
+- Priority: `--num-samples` > calculated (target_qps × duration) > dataset size
+- Default duration: 600000ms (10 minutes)
 
 **Mode Requirements:**
 
 - Online mode requires `--load-pattern` (poisson or concurrency)
-  - `--load-pattern poisson` requires `--target-qps`
-  - `--load-pattern concurrency` requires `--concurrency`
+  - `poisson` requires `--target-qps`
+  - `concurrency` requires `--concurrency`
 - Use `--mode both` for combined perf + accuracy runs
-- Streaming: auto (default) enables streaming responses for online, disables for offline
+- Streaming: auto (default) resolves to off for offline, on for online
 
 **Best Practices:**
 
@@ -282,3 +344,4 @@ endpoint_config:
 - Use `--report-dir` for detailed metrics with TTFT, TPOT, and token analysis
 - Set `HF_TOKEN` environment variable for non-public models
 - Use `--min-output-tokens` and `--max-output-tokens` to control output length
+- Use `${VAR:-default}` in YAML for environment-specific configs
