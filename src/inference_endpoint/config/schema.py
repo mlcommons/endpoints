@@ -299,11 +299,28 @@ class RuntimeConfig(BaseModel):
 
     min_duration_ms: Annotated[
         int,
-        cyclopts.Parameter(alias="--duration-ms", help="Min test duration in ms"),
+        cyclopts.Parameter(
+            alias="--duration", help="Min duration (ms, or with suffix: 600s, 10m)"
+        ),
     ] = Field(600000, ge=0)
     max_duration_ms: int = Field(
         1800000, ge=0, description="Maximum test duration in ms"
     )
+
+    @field_validator("min_duration_ms", "max_duration_ms", mode="before")
+    @classmethod
+    def _parse_duration_suffix(cls, v: object) -> object:
+        """Accept duration with unit suffix: 600s, 10m, 600000ms, or plain int (ms)."""
+        if isinstance(v, str):
+            v = v.strip()
+            if v.endswith("ms"):
+                return int(v[:-2])
+            if v.endswith("m"):
+                return int(float(v[:-1]) * 60_000)
+            if v.endswith("s"):
+                return int(float(v[:-1]) * 1000)
+        return v
+
     n_samples_to_issue: Annotated[
         int | None,
         cyclopts.Parameter(alias="--num-samples", help="Sample count override"),

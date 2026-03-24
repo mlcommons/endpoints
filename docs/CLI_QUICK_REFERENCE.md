@@ -102,7 +102,7 @@ Flag names shown as `--full.dotted.path --alias`. Both forms work.
 - `--model-params.max-new-tokens --max-output-tokens` - Max output tokens (default: 1024)
 - `--model-params.osl-distribution.min --min-output-tokens` - Min output tokens (default: 1)
 - `--model-params.streaming --streaming` - Streaming mode: auto/on/off (default: auto)
-- `--runtime.min-duration-ms --duration-ms` - Min test duration in ms (default: 600000)
+- `--runtime.min-duration-ms --duration` - Min duration: ms default, or with suffix (600s, 10m) (default: 600000)
 - `--runtime.n-samples-to-issue --num-samples` - Explicit sample count override
 - `--client.workers --workers` - HTTP workers (-1=auto, default: -1)
 - `--client.max-connections --max-connections` - Max TCP connections (-1=unlimited)
@@ -228,7 +228,7 @@ inference-endpoint benchmark online \
   --dataset prod_queries.pkl \
   --load-pattern poisson \
   --target-qps 100 \
-  --duration-ms 300000 \
+  --duration 5m \
   --workers 16 \
   --report-dir production_report \
   -v

@@ -112,6 +112,30 @@ class TestCLIConfigModels:
             )
 
 
+class TestDurationSuffix:
+    """Test duration suffix parsing (600s, 10m, 600000ms, plain int)."""
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "value, expected_ms",
+        [
+            ("600s", 600000),
+            ("10m", 600000),
+            ("600000ms", 600000),
+            ("600000", 600000),
+            (600000, 600000),
+            ("0.5m", 30000),
+            ("1.5s", 1500),
+        ],
+    )
+    def test_duration_suffix(self, value, expected_ms):
+        config = OfflineConfig(
+            **_OFFLINE_KWARGS,
+            settings=OfflineSettings(runtime=RuntimeConfig(min_duration_ms=value)),
+        )
+        assert config.settings.runtime.min_duration_ms == expected_ms
+
+
 class TestDatasetParsing:
     """Test dataset string coercion through BenchmarkConfig construction."""
 
