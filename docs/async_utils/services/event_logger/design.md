@@ -110,15 +110,16 @@ CLI currently only supports the default sqlite path.
 ```
 python -m inference_endpoint.async_utils.services.event_logger \
     --log-dir /path/to/logs \
-    --socket-address ipc:///path/to/socket_dir/ev_pub_abc123 \
+    --socket-dir /path/to/socket_dir \
+    --socket-name ev_pub_abc123 \
     --writers jsonl sql
 ```
 
 1. Parse CLI arguments.
 2. Create writer instances (one per `--writers` entry), writing to `{log_dir}/events.*`.
-3. Create `ManagedZMQContext.scoped(socket_dir=log_dir.parent)` so the IPC path is valid.
-4. Create `EventLoggerService` (extends `ZmqEventRecordSubscriber`), connecting to
-   the publisher's address.
+3. Create `ManagedZMQContext.scoped(socket_dir=args.socket_dir)` with the publisher's socket directory.
+4. Create `EventLoggerService` (extends `ZmqEventRecordSubscriber`), which connects
+   to the publisher via `ctx.connect(socket, socket_name)`.
 5. Call `logger.start()` which registers `add_reader` on the subscriber's event loop.
 6. `await shutdown_event.wait()` blocks until shutdown is signalled.
 
@@ -197,15 +198,17 @@ flowchart TB
 ```
 usage: python -m inference_endpoint.async_utils.services.event_logger
     --log-dir LOG_DIR
-    --socket-address SOCKET_ADDRESS
+    --socket-dir SOCKET_DIR
+    --socket-name SOCKET_NAME
     [--writers WRITER [WRITER ...]]
 ```
 
-| Argument           | Required | Default | Description                              |
-| ------------------ | -------- | ------- | ---------------------------------------- |
-| `--log-dir`        | Yes      | —       | Directory for log output files           |
-| `--socket-address` | Yes      | —       | ZMQ PUB socket address to connect to     |
-| `--writers`        | No       | `jsonl` | Writer backends: `jsonl`, `sql`, or both |
+| Argument        | Required | Default | Description                                               |
+| --------------- | -------- | ------- | --------------------------------------------------------- |
+| `--log-dir`     | Yes      | —       | Directory for log output files                            |
+| `--socket-dir`  | Yes      | —       | Directory containing ZMQ IPC sockets (must already exist) |
+| `--socket-name` | Yes      | —       | Socket name within socket-dir                             |
+| `--writers`     | No       | `jsonl` | Writer backends: `jsonl`, `sql`, or both                  |
 
 ## Not Yet Wired
 

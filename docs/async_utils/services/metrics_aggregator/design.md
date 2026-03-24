@@ -388,7 +388,8 @@ The trigger reads directly from `ev_rec.data` — no prompt text is stored on
 ```
 python -m inference_endpoint.async_utils.services.metrics_aggregator \
     --metrics-dir /tmp/metrics \
-    --socket-address ipc:///tmp/events.sock \
+    --socket-dir /tmp/socket_dir \
+    --socket-name ev_pub_abc123 \
     --tokenizer gpt2 \
     --tokenizer-workers 2
 ```
