@@ -23,6 +23,7 @@ Currently supported:
 
 import argparse
 import asyncio
+import importlib.util
 import os
 from pathlib import Path
 
@@ -35,14 +36,18 @@ from inference_endpoint.core.record import (
 )
 
 from .file_writer import JSONLWriter
-from .sql_writer import SQLWriter
 from .writer import RecordWriter
+
+_HAS_SQLALCHEMY = importlib.util.find_spec("sqlalchemy") is not None
 
 # CLI writer names to writer classes (for --writers flag)
 _WRITER_REGISTRY: dict[str, type[RecordWriter]] = {
     "jsonl": JSONLWriter,
-    "sql": SQLWriter,
 }
+if _HAS_SQLALCHEMY:
+    from .sql_writer import SQLWriter
+
+    _WRITER_REGISTRY["sql"] = SQLWriter
 
 
 class EventLoggerService(ZmqEventRecordSubscriber):
@@ -127,10 +132,16 @@ async def main() -> None:
     parser = argparse.ArgumentParser(description="Event logger service")
     parser.add_argument("--log-dir", type=Path, required=True, help="Log directory")
     parser.add_argument(
-        "--socket-address",
+        "--socket-dir",
         type=str,
         required=True,
-        help="ZMQ socket address to connect to",
+        help="Directory containing ZMQ IPC sockets (must already exist)",
+    )
+    parser.add_argument(
+        "--socket-name",
+        type=str,
+        required=True,
+        help="Socket name within socket-dir",
     )
     parser.add_argument(
         "--writers",
@@ -138,17 +149,22 @@ async def main() -> None:
         choices=list(_WRITER_REGISTRY),
         default=["jsonl"],
         metavar="WRITER",
-        help="Writers to use: jsonl, sql (default: jsonl). Can specify multiple, e.g. --writers jsonl sql",
+        help=f"Writers to use (default: jsonl). Available: {', '.join(_WRITER_REGISTRY)}."
+        + (
+            ""
+            if _HAS_SQLALCHEMY
+            else " Install sqlalchemy for SQL support: pip install inference-endpoint[sql]"
+        ),
     )
     args = parser.parse_args()
 
     writer_classes = tuple(_WRITER_REGISTRY[name] for name in args.writers)
     shutdown_event = asyncio.Event()
     loop = LoopManager().default_loop
-    with ManagedZMQContext.scoped(socket_dir=args.log_dir.parent) as zmq_ctx:
+    with ManagedZMQContext.scoped(socket_dir=args.socket_dir) as zmq_ctx:
         logger = EventLoggerService(
             args.log_dir,
-            args.socket_address,
+            args.socket_name,
             zmq_ctx,
             loop,
             topics=None,  # Subscribe to all topics for logging

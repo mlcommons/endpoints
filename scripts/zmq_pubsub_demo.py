@@ -261,7 +261,7 @@ async def main() -> None:
     output_file = Path("/tmp/zmq_events_async_utils_output.csv")
     with ManagedZMQContext.scoped() as zmq_ctx:
         publisher = EventPublisherService(zmq_ctx)
-        connect_address = publisher.bind_address
+        connect_path = publisher.bind_path
 
         # Each subscriber has its own event loop (not shared with the publisher).
         console_loop = LOOP_MANAGER.create_loop("demo_console")
@@ -270,20 +270,20 @@ async def main() -> None:
 
         logger.info("Creating subscribers (init does NOT start processing)...")
         console_sub = ConsoleSubscriber(
-            connect_address=connect_address,
+            path=connect_path,
             zmq_context=zmq_ctx,
             loop=console_loop,
             topics=None,
         )
         file_sub = FileSubscriber(
             output_file,
-            connect_address=connect_address,
+            path=connect_path,
             zmq_context=zmq_ctx,
             loop=file_loop,
             topics=None,
         )
         duration_sub = DurationSubscriber(
-            connect_address=connect_address,
+            path=connect_path,
             zmq_context=zmq_ctx,
             loop=duration_loop,
             topics=[

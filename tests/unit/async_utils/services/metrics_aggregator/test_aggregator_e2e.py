@@ -127,7 +127,7 @@ def aggregator(
 ):
     """MetricsAggregatorService connected to the publisher via ZMQ."""
     agg = MetricsAggregatorService(
-        publisher.bind_address,
+        publisher.bind_path,
         zmq_context,
         aggregator_loop,
         topics=None,
@@ -345,7 +345,7 @@ class TestAggregatorE2E:
         """Full pipeline with JsonlMetricEmitter writing to disk."""
         emitter = JsonlMetricEmitter(tmp_path / "metrics", flush_interval=1)
         agg = MetricsAggregatorService(
-            publisher.bind_address,
+            publisher.bind_path,
             zmq_context,
             aggregator_loop,
             topics=None,

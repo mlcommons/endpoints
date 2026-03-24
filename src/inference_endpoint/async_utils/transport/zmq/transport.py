@@ -53,7 +53,6 @@ from typing import Any
 
 import msgspec
 import zmq
-import zmq.asyncio
 
 from inference_endpoint.core.types import Query, QueryResult, StreamChunk
 
@@ -412,7 +411,7 @@ class _ZmqSenderTransport(SenderTransport):
 
 def _create_receiver(
     loop: asyncio.AbstractEventLoop,
-    address: str,
+    path: str,
     zmq_context: ManagedZMQContext,
     config: _ZMQSocketConfig,
     message_type: type | None = None,
@@ -422,7 +421,7 @@ def _create_receiver(
 
     Args:
         loop: Event loop for transport registration.
-        address: ZMQ address (e.g., "ipc:///tmp/socket").
+        path: Socket path for IPC address construction (via zmq_context).
         zmq_context: Managed ZMQ context (use .socket() for tracked cleanup).
         config: Socket configuration.
         message_type: Type hint for msgspec decoder. Can be a single type, Union type, or None.
@@ -435,9 +434,9 @@ def _create_receiver(
     config.apply_recv(sock)
 
     if bind:
-        sock.bind(address)
+        zmq_context.bind(sock, path)
     else:
-        sock.connect(address)
+        zmq_context.connect(sock, path)
 
     decoder = (
         msgspec.msgpack.Decoder(type=message_type)  # type: ignore[arg-type]
@@ -450,7 +449,7 @@ def _create_receiver(
 
 def _create_sender(
     loop: asyncio.AbstractEventLoop,
-    address: str,
+    path: str,
     zmq_context: ManagedZMQContext,
     config: _ZMQSocketConfig,
     bind: bool = False,
@@ -460,9 +459,9 @@ def _create_sender(
     config.apply_send(sock)
 
     if bind:
-        sock.bind(address)
+        zmq_context.bind(sock, path)
     else:
-        sock.connect(address)
+        zmq_context.connect(sock, path)
 
     encoder = msgspec.msgpack.Encoder()
     return _ZmqSenderTransport(loop, sock, encoder)
@@ -477,13 +476,15 @@ def _create_sender(
 class _ZmqWorkerConnector(WorkerConnector):
     """Internal: Picklable connector for worker processes.
 
-    Contains pre-allocated addresses. Passed to workers via multiprocessing.
+    Contains socket_dir and path components for IPC address construction.
+    Passed to workers via multiprocessing.
     """
 
     config: _ZMQSocketConfig
-    request_addrs: list[str]
-    response_addr: str
-    readiness_addr: str
+    socket_dir: str
+    request_paths: list[str]
+    response_path: str
+    readiness_path: str
 
     @asynccontextmanager
     async def connect(
@@ -510,35 +511,34 @@ class _ZmqWorkerConnector(WorkerConnector):
         Args:
             worker_id: Unique identifier for this worker.
             zmq_context: Managed ZMQ context (e.g. from ManagedZMQContext.scoped() in this process).
+                Must have socket_dir set to the same directory as the main process.
 
         Yields:
             Tuple of (request_receiver, response_sender) transports.
         """
         loop = asyncio.get_running_loop()
-        request_addr = self.request_addrs[worker_id]
+        request_path = self.request_paths[worker_id]
 
-        logger.debug("Worker %d request addr: %s", worker_id, request_addr)
-        logger.debug("Worker %d response addr: %s", worker_id, self.response_addr)
+        logger.debug("Worker %d request path: %s", worker_id, request_path)
+        logger.debug("Worker %d response path: %s", worker_id, self.response_path)
 
         # Worker CONNECTS (main process BINDS)
         requests = _create_receiver(
-            loop, request_addr, zmq_context, self.config, Query, bind=False
+            loop, request_path, zmq_context, self.config, Query, bind=False
         )
         responses = _create_sender(
-            loop, self.response_addr, zmq_context, self.config, bind=False
+            loop, self.response_path, zmq_context, self.config, bind=False
         )
 
-        # Signal readiness using zmq.asyncio for proper async send
-        async_ctx = zmq.asyncio.Context()
-        readiness_sock = async_ctx.socket(zmq.PUSH)
+        # Signal readiness using an async socket for proper async send.
+        readiness_sock = zmq_context.async_socket(zmq.PUSH)
         readiness_sock.setsockopt(zmq.LINGER, -1)  # Wait indefinitely for delivery
-        readiness_sock.connect(self.readiness_addr)
+        zmq_context.connect(readiness_sock, self.readiness_path)
 
         try:
             encoder = msgspec.msgpack.Encoder()
             await readiness_sock.send(encoder.encode(worker_id))  # Async send
             readiness_sock.close()  # LINGER ensures message is sent
-            async_ctx.term()
             logger.debug("Worker %d signaled readiness", worker_id)
 
             yield requests, responses
@@ -586,45 +586,37 @@ class ZmqWorkerPoolTransport(WorkerPoolTransport):
         self._num_workers = num_workers
         self._closed = False
         suffix = uuid.uuid4().hex[:8]
-        socket_dir = zmq_context.socket_dir
 
-        # Generate addresses
-        self._request_addrs = [
-            f"ipc://{socket_dir}/req_{suffix}_{i}" for i in range(num_workers)
-        ]
-        self._response_addr = f"ipc://{socket_dir}/resp_{suffix}"
-        self._readiness_addr = f"ipc://{socket_dir}/ready_{suffix}"
+        # Generate path components (address construction is handled by zmq_context)
+        request_paths = [f"req_{suffix}_{i}" for i in range(num_workers)]
+        response_path = f"resp_{suffix}"
+        readiness_path = f"ready_{suffix}"
 
-        # Validate path lengths
-        for addr in self._request_addrs + [self._response_addr, self._readiness_addr]:
-            if len(addr) > zmq.IPC_PATH_MAX_LEN:
-                raise ValueError(
-                    f"IPC path too long ({len(addr)} > {zmq.IPC_PATH_MAX_LEN}): {addr}"
-                )
-
-        # Create connector for workers
-        self._worker_connector = _ZmqWorkerConnector(
-            config=config,
-            request_addrs=self._request_addrs,
-            response_addr=self._response_addr,
-            readiness_addr=self._readiness_addr,
-        )
-
-        # Create transports (main process BINDS)
+        # Create transports (main process BINDS — this sets socket_dir if needed)
         self._request_senders = [
-            _create_sender(loop, addr, zmq_context, config, bind=True)
-            for addr in self._request_addrs
+            _create_sender(loop, path, zmq_context, config, bind=True)
+            for path in request_paths
         ]
         self._response_receiver = _create_receiver(
             loop,
-            self._response_addr,
+            response_path,
             zmq_context,
             config,
             QueryResult | StreamChunk,  # type: ignore[arg-type]
             bind=True,
         )
         self._readiness_receiver = _create_receiver(
-            loop, self._readiness_addr, zmq_context, config, bind=True
+            loop, readiness_path, zmq_context, config, bind=True
+        )
+
+        # socket_dir is now guaranteed set (bind() created it if needed)
+        assert zmq_context.socket_dir is not None
+        self._worker_connector = _ZmqWorkerConnector(
+            config=config,
+            socket_dir=zmq_context.socket_dir,
+            request_paths=request_paths,
+            response_path=response_path,
+            readiness_path=readiness_path,
         )
 
     @classmethod

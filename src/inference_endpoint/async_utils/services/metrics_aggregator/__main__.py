@@ -39,10 +39,16 @@ async def main() -> None:
         help="Directory for metrics output (JSONL file)",
     )
     parser.add_argument(
-        "--socket-address",
+        "--socket-dir",
         type=str,
         required=True,
-        help="ZMQ socket address to connect to",
+        help="Directory containing ZMQ IPC sockets (must already exist)",
+    )
+    parser.add_argument(
+        "--socket-name",
+        type=str,
+        required=True,
+        help="Socket name within socket-dir",
     )
     parser.add_argument(
         "--tokenizer",
@@ -81,11 +87,11 @@ async def main() -> None:
 
     with (
         pool_cm as pool,
-        ManagedZMQContext.scoped(socket_dir=args.metrics_dir.parent) as zmq_ctx,
+        ManagedZMQContext.scoped(socket_dir=args.socket_dir) as zmq_ctx,
     ):
         emitter = JsonlMetricEmitter(metrics_file, flush_interval=100)
         aggregator = MetricsAggregatorService(
-            args.socket_address,
+            args.socket_name,
             zmq_ctx,
             loop,
             topics=None,

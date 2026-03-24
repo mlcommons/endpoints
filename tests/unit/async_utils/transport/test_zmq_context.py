@@ -31,10 +31,17 @@ from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQConte
 class TestManagedZMQContextCreation:
     """Tests for ManagedZMQContext creation and attributes."""
 
-    def test_scoped_yields_context_with_ctx_and_socket_dir(self):
-        """scoped() yields a context with valid .ctx and .socket_dir."""
+    def test_scoped_yields_context_with_ctx(self):
+        """scoped() yields a context with valid .ctx. socket_dir is None until bind()."""
         with ManagedZMQContext.scoped() as ctx:
             assert ctx.ctx is not None
+            assert ctx.socket_dir is None  # not set until bind()
+
+    def test_bind_creates_temp_socket_dir(self):
+        """bind() creates a temp socket_dir when socket_dir is None."""
+        with ManagedZMQContext.scoped() as ctx:
+            sock = ctx.socket(zmq.PUB)
+            ctx.bind(sock, "test_socket")
             assert ctx.socket_dir is not None
             assert isinstance(ctx.socket_dir, str)
             assert os.path.isdir(ctx.socket_dir)
@@ -46,12 +53,15 @@ class TestManagedZMQContextCreation:
         with ManagedZMQContext.scoped(io_threads=2) as ctx:
             assert ctx.ctx is not None
             sock = ctx.socket(zmq.PUB)
-            sock.bind(f"ipc://{ctx.socket_dir}/test")
+            ctx.bind(sock, "test")
             # Socket closed by context cleanup on scope exit
 
     def test_socket_dir_is_writable(self):
         """socket_dir is a writable directory (for IPC sockets)."""
         with ManagedZMQContext.scoped() as ctx:
+            # Trigger socket_dir creation via bind
+            sock = ctx.socket(zmq.PUB)
+            ctx.bind(sock, "test_writable")
             path = os.path.join(ctx.socket_dir, "test_socket")
             with open(path, "w") as f:
                 f.write("test")
@@ -87,14 +97,13 @@ class TestManagedZMQContextSocket:
             assert len(ctx._sockets) == 2
 
     def test_socket_can_bind_and_connect(self):
-        """Socket from .socket() can bind/connect for IPC."""
+        """Socket from .socket() can bind/connect via ctx.bind()/ctx.connect()."""
         with ManagedZMQContext.scoped() as ctx:
             pub = ctx.socket(zmq.PUB)
             sub = ctx.socket(zmq.SUB)
             sub.setsockopt(zmq.RCVTIMEO, 1000)
-            addr = f"ipc://{ctx.socket_dir}/test_bind_connect"
-            pub.bind(addr)
-            sub.connect(addr)
+            ctx.bind(pub, "test_bind_connect")
+            ctx.connect(sub, "test_bind_connect")
             sub.setsockopt(zmq.SUBSCRIBE, b"")
             time.sleep(0.05)  # Allow slow-joiner to establish
             pub.send_string("hello")
@@ -141,9 +150,8 @@ class TestManagedZMQContextCleanup:
         with ManagedZMQContext.scoped() as ctx:
             pub = ctx.socket(zmq.PUB)
             sub = ctx.socket(zmq.SUB)
-            addr = f"ipc://{ctx.socket_dir}/hang_test"
-            pub.bind(addr)
-            sub.connect(addr)
+            ctx.bind(pub, "hang_test")
+            ctx.connect(sub, "hang_test")
             # Do not close sockets manually; context cleanup should close them
         # If we get here without hanging, the test passed
 
@@ -164,15 +172,16 @@ class TestManagedZMQContextScoped:
         # After exit, next scoped() creates a fresh context (previous was cleaned)
         with ManagedZMQContext.scoped() as ctx2:
             assert ctx2.ctx is not None
-            assert ctx2.socket_dir is not None
             ctx2.socket(zmq.PULL)
 
     def test_two_scoped_share_singleton_second_does_not_cleanup(self):
         """Nested or sequential scoped() with existing singleton: second does not cleanup."""
         # First scoped creates and owns
         with ManagedZMQContext.scoped() as ctx1:
+            # Trigger socket_dir creation
+            sock = ctx1.socket(zmq.PUB)
+            ctx1.bind(sock, "test_nested")
             dir1 = ctx1.socket_dir
-            ctx1.socket(zmq.PUB)
             # Second scoped: singleton already exists and initialized, so own=False
             with ManagedZMQContext.scoped() as ctx2:
                 assert ctx1 is ctx2
@@ -199,13 +208,16 @@ class TestManagedZMQContextMismatchedSocketDir:
         dir_b.mkdir()
 
         with ManagedZMQContext.scoped(socket_dir=str(dir_a)) as ctx:
-            assert ctx.socket_dir == dir_a.as_posix()
+            assert ctx.socket_dir == str(dir_a)
             with pytest.raises(ValueError, match="cannot reinitialize"):
                 ManagedZMQContext(socket_dir=str(dir_b))
 
     def test_none_socket_dir_does_not_raise(self):
         """Re-init with socket_dir=None does not raise (caller doesn't care)."""
         with ManagedZMQContext.scoped() as ctx:
+            # Trigger socket_dir creation
+            sock = ctx.socket(zmq.PUB)
+            ctx.bind(sock, "test_none")
             original_dir = ctx.socket_dir
             ManagedZMQContext(socket_dir=None)
             assert ctx.socket_dir == original_dir
@@ -216,5 +228,5 @@ class TestManagedZMQContextMismatchedSocketDir:
         sock_dir.mkdir()
 
         with ManagedZMQContext.scoped(socket_dir=str(sock_dir)) as ctx:
-            assert ctx.socket_dir == sock_dir.as_posix()
+            assert ctx.socket_dir == str(sock_dir)
             ManagedZMQContext(socket_dir=str(sock_dir))

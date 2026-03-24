@@ -51,11 +51,13 @@ dependencies = [
     "colorama==0.4.6",
     # Fix pytz-2024 import warning
     "pytz==2025.2",
-    # SQL event logger (swappable backends, default sqlite)
-    "sqlalchemy==2.0.48",
 ]
 
 [project.optional-dependencies]
+sql = [
+    # SQL event logger (swappable backends, default sqlite)
+    "sqlalchemy==2.0.48",
+]
 dev = [
     # Code quality
     "ruff>=0.3.0",
@@ -71,6 +73,8 @@ dev = [
     "myst-parser>=2.0.0",
 ]
 test = [
+    # Includes optional dependencies for full test coverage
+    "inference-endpoint[sql]",
     # Testing framework
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",

@@ -296,7 +296,16 @@ class Worker:
 
         # Connect and signal readiness as we enter recv() loop. Scope ZMQ context
         # for this process so transports are cleaned up when the block exits.
-        with ManagedZMQContext.scoped() as zmq_ctx:
+        # ZMQ connectors provide socket_dir so the worker can construct IPC
+        # addresses via ctx.connect(). Non-ZMQ transports may not have it.
+        socket_dir: str | None = getattr(self._connector, "socket_dir", None)
+        if socket_dir is None:
+            logger.warning(
+                "Connector %s does not provide socket_dir; "
+                "IPC connect() calls will fail.",
+                type(self._connector).__name__,
+            )
+        with ManagedZMQContext.scoped(socket_dir=socket_dir) as zmq_ctx:
             async with self._connector.connect(self.worker_id, zmq_ctx) as (
                 requests,
                 responses,

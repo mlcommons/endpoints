@@ -117,7 +117,7 @@ def subscriber_loop():
 def collecting_subscriber(event_publisher_service, subscriber_loop, ev_pub_zmq_context):
     """Create a subscriber with its own loop; schedule .start() on that loop."""
     subscriber = CollectingEventSubscriber(
-        connect_address=event_publisher_service.bind_address,
+        path=event_publisher_service.bind_path,
         zmq_context=ev_pub_zmq_context,
         loop=subscriber_loop,
         topics=None,
@@ -146,7 +146,7 @@ class TestEventPublisherService:
         sub = ev_pub_zmq_context.socket(zmq.SUB)
         sub.setsockopt(zmq.RCVTIMEO, int(_WAIT_RECORDS_TIMEOUT * 1000))
         sub.setsockopt(zmq.SUBSCRIBE, b"")
-        sub.connect(event_publisher_service.bind_address)
+        ev_pub_zmq_context.connect(sub, event_publisher_service.bind_path)
         # Allow ZMQ slow-joiner to establish connection
         await asyncio.sleep(0.05)
         record = EventRecord(
