@@ -31,6 +31,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from inference_endpoint.async_utils.transport.zmq import ZMQTransportConfig
 from inference_endpoint.core.types import APIType
+from inference_endpoint.utils import WithUpdatesMixin
 
 from .cpu_affinity import AffinityPlan, get_cpus_in_numa_node, get_current_numa_node
 from .utils import get_ephemeral_port_limit, get_ephemeral_port_range
@@ -46,7 +47,7 @@ ACCUMULATOR_MAP = {
 }
 
 
-class HTTPClientConfig(BaseModel):
+class HTTPClientConfig(WithUpdatesMixin, BaseModel):
     """HTTP endpoint client configuration.
 
     User-facing fields are exposed to CLI/YAML via cyclopts.

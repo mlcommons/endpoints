@@ -42,6 +42,7 @@ from pydantic import (
 from .. import metrics
 from ..core.types import APIType
 from ..endpoint_client.config import HTTPClientConfig
+from ..utils import WithUpdatesMixin
 from .ruleset_base import BenchmarkSuiteRuleset
 from .utils import parse_dataset_string, resolve_env_vars
 
@@ -465,7 +466,7 @@ class EndpointConfig(BaseModel):
     ] = APIType.OPENAI
 
 
-class BenchmarkConfig(BaseModel):
+class BenchmarkConfig(WithUpdatesMixin, BaseModel):
     """Benchmark configuration — single source of truth for YAML and CLI.
 
     Immutable (frozen) to prevent accidental modifications during execution.
@@ -740,10 +741,6 @@ class BenchmarkConfig(BaseModel):
                 "SUBMISSION templates will be added in future release."
             )
         raise ValueError(f"Unknown test type: {test_type}")
-
-    def with_updates(self, **updates: object) -> Self:
-        """Reconstruct with updates, re-running all validators."""
-        return type(self).model_validate(self.model_dump() | updates)
 
 
 @cyclopts.Parameter(name="*")

@@ -51,7 +51,6 @@ from inference_endpoint.config.schema import (
 from inference_endpoint.core.types import QueryResult
 from inference_endpoint.dataset_manager.dataset import Dataset
 from inference_endpoint.dataset_manager.factory import DataLoaderFactory
-from inference_endpoint.endpoint_client.config import HTTPClientConfig
 from inference_endpoint.endpoint_client.cpu_affinity import AffinityPlan, pin_loadgen
 from inference_endpoint.endpoint_client.http_client import HTTPEndpointClient
 from inference_endpoint.endpoint_client.http_sample_issuer import HttpClientSampleIssuer
@@ -327,18 +326,10 @@ def run_benchmark_threaded(ctx: BenchmarkContext) -> tuple[Any, ResponseCollecto
     with tempfile.TemporaryDirectory(prefix="inference_endpoint_") as _tmp_dir:
         try:
             api_type: APIType = config.endpoint_config.api_type
-            client = config.settings.client
-            http_config = HTTPClientConfig(
+            http_config = config.settings.client.with_updates(
                 endpoint_urls=[urljoin(e, api_type.default_route()) for e in endpoints],
                 api_type=api_type,
                 api_key=config.endpoint_config.api_key,
-                workers=client.workers,
-                record_worker_events=client.record_worker_events,
-                log_level=client.log_level,
-                warmup_connections=client.warmup_connections,
-                max_connections=client.max_connections,
-                worker_initialization_timeout=client.worker_initialization_timeout,
-                transport=client.transport,
                 event_logs_dir=ctx.report_dir,
                 cpu_affinity=ctx.affinity_plan,
             )

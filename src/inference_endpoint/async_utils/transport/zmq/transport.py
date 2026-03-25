@@ -599,6 +599,7 @@ class ZmqWorkerPoolTransport(WorkerPoolTransport):
     ) -> None:
         self._loop = loop
         self._zmq_context = zmq_context
+        self._owns_context = False  # set True by create() when it creates the context
         self._config = config
         self._num_workers = num_workers
         self._closed = False
@@ -666,7 +667,9 @@ class ZmqWorkerPoolTransport(WorkerPoolTransport):
 
         # Create ZMQ context — owned by this transport, cleaned up in cleanup()
         context = ManagedZMQContext(io_threads=config.io_threads)
-        return cls(loop, context, config, num_workers)
+        transport = cls(loop, context, config, num_workers)
+        transport._owns_context = True
+        return transport
 
     @property
     def worker_connector(self) -> WorkerConnector:
@@ -731,8 +734,9 @@ class ZmqWorkerPoolTransport(WorkerPoolTransport):
         self._response_receiver.close()
         self._readiness_receiver.close()
 
-        # Clean up the ZMQ context we own
-        self._zmq_context.cleanup()
+        # Only clean up the ZMQ context if we created it (singleton may be shared)
+        if self._owns_context:
+            self._zmq_context.cleanup()
 
     def __del__(self) -> None:
         """Best-effort cleanup on garbage collection."""

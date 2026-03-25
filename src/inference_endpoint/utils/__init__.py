@@ -98,6 +98,17 @@ def monotime_to_datetime(monotime_ns: int) -> datetime:
     return datetime.fromtimestamp(wall_time)
 
 
+class WithUpdatesMixin:
+    """Mixin for Pydantic models that need ``with_updates(**overrides)``.
+
+    Reconstructs with overrides, re-running all validators.
+    """
+
+    def with_updates(self, **updates: object) -> Any:
+        """Reconstruct with updates, re-running all validators."""
+        return type(self).model_validate(self.model_dump() | updates)  # type: ignore[attr-defined]
+
+
 class SingletonMixin:
     """Mixin that makes a class a singleton.
 
