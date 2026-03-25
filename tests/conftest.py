@@ -308,6 +308,11 @@ class CharacterTokenizer:
     def tokenize(self, text: str) -> list[str]:
         return list(text)
 
+    def __call__(
+        self, texts: list[str], **kwargs: object
+    ) -> dict[str, list[list[int]]]:
+        return {"input_ids": [list(range(len(t))) for t in texts]}
+
 
 @pytest.fixture
 def tokenizer():

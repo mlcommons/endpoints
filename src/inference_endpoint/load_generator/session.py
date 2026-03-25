@@ -93,19 +93,22 @@ class BenchmarkSession:
                 )
 
                 for _ in perf_test_generator:
-                    # Actual issue is done during next(generator). Nothing else to do here, just pass.
-                    pass
+                    if self.stop_requested:
+                        self.logger.info(
+                            "Early stop requested, aborting sample issuance"
+                        )
+                        break
 
                 EventRecorder.record_event(
                     SessionEvent.STOP_PERFORMANCE_TRACKING, time.monotonic_ns()
                 )
                 self.logger.info("All performance samples issued")
 
-                if accuracy_test_generators:
+                if accuracy_test_generators and not self.stop_requested:
                     for _, generator in accuracy_test_generators.items():
                         for _ in generator:
-                            # Actual issue is done during next(generator). Nothing else to do here, just pass.
-                            pass
+                            if self.stop_requested:
+                                break
 
                 self.logger.info("All accuracy samples issued")
 

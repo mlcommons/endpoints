@@ -39,6 +39,40 @@ from ..utils import monotime_to_datetime
 if TYPE_CHECKING:
     from transformers import Tokenizer
 
+logger = logging.getLogger(__name__)
+
+
+def _parallel_batch_tokenize(tokenizer: Tokenizer, texts: list[str]) -> list[int]:
+    """Batch-tokenize texts using all available cores and return token counts.
+
+    Uses a ThreadPoolExecutor to parallelize across ~95% of CPU cores.
+    HuggingFace tokenizers use a Rust backend that releases the GIL,
+    so threads achieve real parallelism without GIL contention.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    n_cores = os.cpu_count() or 1
+    n_workers = max(1, int(n_cores * 0.95))
+
+    if len(texts) <= n_workers:
+        # Few texts — just tokenize directly, no threading overhead
+        encoded = tokenizer(texts, add_special_tokens=False)
+        return [len(ids) for ids in encoded["input_ids"]]
+
+    # Split texts into chunks, one per worker
+    chunk_size = (len(texts) + n_workers - 1) // n_workers
+    chunks = [texts[i : i + chunk_size] for i in range(0, len(texts), chunk_size)]
+
+    def _tokenize_chunk(chunk: list[str]) -> list[int]:
+        encoded = tokenizer(chunk, add_special_tokens=False)
+        return [len(ids) for ids in encoded["input_ids"]]
+
+    results: list[int] = []
+    with ThreadPoolExecutor(max_workers=n_workers) as pool:
+        for chunk_lengths in pool.map(_tokenize_chunk, chunks):
+            results.extend(chunk_lengths)
+    return results
+
 
 class TPOTReportingMode(str, Enum):
     """TPOT (Time Per Output Token) reporting mode.
@@ -1036,7 +1070,9 @@ class MetricsReporter:
         """
         query_result = self.get_sample_outputs()
 
-        rows = []
+        # Collect all texts for batch tokenization
+        uuids: list[str] = []
+        texts: list[str] = []
         for sample_uuid, data_bytes in query_result:
             output_sequence, reasoning_sequence = output_sequence_from_data(data_bytes)
 
@@ -1049,12 +1085,15 @@ class MetricsReporter:
             else:
                 full_sequence = output_sequence
 
-            # Tokenize and calculate length
-            output_tokens = tokenizer.tokenize(full_sequence)
-            rows.append((sample_uuid, len(output_tokens)))
+            uuids.append(sample_uuid)
+            texts.append(full_sequence)
 
-        if not rows:
+        if not texts:
             return None
+
+        # Parallel batch tokenize across ~95% of cores
+        token_counts = _parallel_batch_tokenize(tokenizer, texts)
+        rows = list(zip(uuids, token_counts, strict=False))
 
         return RollupQueryTable("output_sequence_length", None, rows)
 
@@ -1105,11 +1144,9 @@ class MetricsReporter:
         if not query_result:
             return None
 
-        rows = []
-        if condense_table and reporting_mode == TPOTReportingMode.TOKEN_WEIGHTED:
-            repeats = []
-        else:
-            repeats = None
+        # Pass 1: Collect all non-first-chunk texts for batch tokenization
+        batch_uuids: list[str] = []
+        batch_texts: list[str] = []
 
         for sample_uuid, data_bytes in query_result:
             if data_bytes is None or len(data_bytes) == 0:
@@ -1157,9 +1194,25 @@ class MetricsReporter:
                 # Possible malformed output data where empty string is included as a non-first chunk
                 continue
 
-            non_first_tokens = tokenizer.tokenize(non_first_chunk)
-            n_non_first_tokens = len(non_first_tokens)
+            batch_uuids.append(sample_uuid)
+            batch_texts.append(non_first_chunk)
 
+        if not batch_texts:
+            return None
+
+        # Parallel batch tokenize across ~95% of cores
+        token_counts = _parallel_batch_tokenize(tokenizer, batch_texts)
+
+        # Pass 2: Compute TPOT using batch-tokenized results
+        rows = []
+        if condense_table and reporting_mode == TPOTReportingMode.TOKEN_WEIGHTED:
+            repeats = []
+        else:
+            repeats = None
+
+        for sample_uuid, n_non_first_tokens in zip(
+            batch_uuids, token_counts, strict=False
+        ):
             latency = sample_latency_rollup.filter_uuid(sample_uuid, only_first=True)
             if latency is None:
                 raise SampleUUIDNotFoundError(sample_uuid, "events record")
