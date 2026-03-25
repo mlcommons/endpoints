@@ -17,11 +17,6 @@
 
 Defines the protocols and base types for transport abstraction, allowing the
 Worker to be completely agnostic of the transport backend (ZMQ, shared memory, etc.).
-
-Key types:
-    TransportConfig   — base Pydantic model for transport settings
-    WorkerPoolTransport — protocol for main-process pool communication
-    WorkerConnector   — protocol for worker-side transport setup
 """
 
 from __future__ import annotations
