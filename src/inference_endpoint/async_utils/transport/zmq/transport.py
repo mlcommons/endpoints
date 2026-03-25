@@ -575,16 +575,15 @@ class ZmqWorkerPoolTransport(WorkerPoolTransport):
     Main process transport for worker pool communication.
     Provides fan-out (send to workers) and fan-in (receive from workers).
 
-    The caller must pass a ManagedZMQContext (e.g. from ManagedZMQContext.scoped())
-    and scope the transport lifetime within that context for proper cleanup.
+    Context is managed internally — ``create()`` creates its own
+    ``ManagedZMQContext`` and ``cleanup()`` destroys it.
 
     Usage:
-        with ManagedZMQContext.scoped(io_threads=4) as zmq_ctx:
-            pool = ZmqWorkerPoolTransport.create(loop, 4, zmq_ctx)
-            for i in range(4):
-                spawn_worker(i, pool.worker_connector, ...)
-            await pool.wait_for_workers_ready(timeout=30)
-            pool.send(worker_id, query)
+        pool = ZmqWorkerPoolTransport.create(loop, 4, config=zmq_config)
+        for i in range(4):
+            spawn_worker(i, pool.worker_connector, ...)
+        await pool.wait_for_workers_ready(timeout=30)
+        pool.send(worker_id, query)
             result = pool.poll()        # Non-blocking
             result = await pool.recv()  # Blocking
             pool.cleanup()
