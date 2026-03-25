@@ -27,7 +27,8 @@ HTTP client for LLM inference with multiprocessing workers and ZMQ communication
 ## Usage
 
 ```python
-from inference_endpoint.endpoint_client import HTTPEndpointClient, HTTPClientConfig
+from inference_endpoint.endpoint_client.config import HTTPClientConfig
+from inference_endpoint.endpoint_client.http_client import HTTPEndpointClient
 from inference_endpoint.core.types import Query
 
 client = HTTPEndpointClient(
@@ -61,7 +62,8 @@ The plan partitions physical cores between the main process (LoadGen) and worker
 assigning all hyperthreads of each core together.
 
 ```python
-from inference_endpoint.endpoint_client import HTTPEndpointClient, HTTPClientConfig
+from inference_endpoint.endpoint_client.config import HTTPClientConfig
+from inference_endpoint.endpoint_client.http_client import HTTPEndpointClient
 from inference_endpoint.endpoint_client.cpu_affinity import pin_loadgen
 
 # 1. Compute plan and pin LoadGen (main process)
@@ -71,7 +73,7 @@ plan = pin_loadgen(num_workers=8)
 client = HTTPEndpointClient(
     HTTPClientConfig(
         endpoint_urls=["http://localhost:8000/v1/completions"],
-        num_workers=8,
+        workers=8,
         cpu_affinity=plan,
     )
 )

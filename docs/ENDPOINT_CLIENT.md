@@ -175,7 +175,8 @@ client.shutdown()
 In benchmarking mode, the `HttpClientSampleIssuer` bridges the LoadGen thread and the async client. `HttpClientSampleIssuer` implements the `SampleIssuer` interface from the `inference-endpoints` LoadGen framework, converting `Sample` objects to `Query` and routing responses back to `SampleEventHandler` callbacks.
 
 ```python
-from inference_endpoint.endpoint_client import HTTPEndpointClient, HttpClientSampleIssuer
+from inference_endpoint.endpoint_client.http_client import HTTPEndpointClient
+from inference_endpoint.endpoint_client.http_sample_issuer import HttpClientSampleIssuer
 
 client = HTTPEndpointClient(config)
 issuer = HttpClientSampleIssuer(client)
@@ -226,7 +227,7 @@ class QueryStatus(Enum):
 
 ## 4. HTTPClientConfig
 
-`HTTPClientConfig` (`config.py`) is a `@dataclass` that configures the client, worker pool, and connection management. Several fields support auto-detection via sentinel defaults (`-1`), resolved in `__post_init__`.
+`HTTPClientConfig` (`config.py`) is a Pydantic `BaseModel` that configures the client, worker pool, and connection management. Several fields support auto-detection via sentinel defaults (`-1`), resolved in the `_resolve_defaults` model validator.
 
 **Classes:**
 
@@ -239,8 +240,7 @@ class APIType(str, Enum):
     OPENAI = "openai"
     SGLANG = "sglang"
 
-@dataclass
-class HTTPClientConfig:
+class HTTPClientConfig(BaseModel):
     # Target endpoint URLs; workers assigned round-robin at spawn time
     endpoint_urls: list[str]
     # Selects adapter + accumulator pair (see §9)
@@ -250,7 +250,7 @@ class HTTPClientConfig:
 
     # Worker process count
     # -1 = auto: min(max(8, numa_domain_size), 24)
-    num_workers: int = -1
+    workers: int = -1
 
     record_worker_events: bool = False
     event_logs_dir: Path | None = None
@@ -264,7 +264,7 @@ class HTTPClientConfig:
     cpu_affinity: AffinityPlan | None = None
 
     # Worker lifecycle timeouts (seconds)
-    worker_initialization_timeout: float = 40.0
+    worker_initialization_timeout: float = 60.0
     worker_graceful_shutdown_wait: float = 0.5
     worker_force_kill_timeout: float = 0.5
 
@@ -297,11 +297,11 @@ class HTTPClientConfig:
     accumulator: Annotated[Any, cyclopts.Parameter(parse=False)] = None
 ```
 
-#### Auto-configuration (`__post_init__`)
+#### Auto-configuration (`_resolve_defaults` model validator)
 
 Three fields resolve `-1` sentinels by probing the host at construction time:
 
-**`num_workers=-1`:** Detects the NUMA node of the current process, counts physical CPUs in that NUMA domain, and clamps to `min(max(8, numa_cpu_count), 24)`. Falls back to 8 if NUMA info is unavailable. The intent is to keep all workers local to the same NUMA node for memory locality; users can override to use more cores (workers will be pinned to additional cores outside the NUMA domain if an `AffinityPlan` is provided).
+**`workers=-1`:** Detects the NUMA node of the current process, counts physical CPUs in that NUMA domain, and clamps to `min(max(8, numa_cpu_count), 24)`. Falls back to 8 if NUMA info is unavailable. The intent is to keep all workers local to the same NUMA node for memory locality; users can override to use more cores (workers will be pinned to additional cores outside the NUMA domain if an `AffinityPlan` is provided).
 
 **`max_connections=-1`:** Reads the system ephemeral port range from `/proc/sys/net/ipv4/ip_local_port_range`, counts currently used TCP sockets in that range from `/proc/net/tcp` and `/proc/net/tcp6`, and sets `max_connections` to the remaining available ports. Also sets `min_required_connections` to 90% of the total system port range (used to warn during warmup if too few ports are available). If an explicit `max_connections` value exceeds available ports, raises `RuntimeError`.
 
@@ -491,15 +491,15 @@ The transport layer handles all IPC between the main process and worker processe
 
 **Public API — `WorkerConnector`:**
 
-| Method                            | Async   | Description                                                                                                                   |
-| --------------------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| `connect(worker_id, zmq_context)` | **Yes** | Async context manager yielding `(ReceiverTransport, SenderTransport)` pair for a worker; signals readiness, cleans up on exit |
+| Method               | Async   | Description                                                                                                                   |
+| -------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `connect(worker_id)` | **Yes** | Async context manager yielding `(ReceiverTransport, SenderTransport)` pair for a worker; signals readiness, cleans up on exit |
 
 **Public API — `WorkerPoolTransport`:**
 
 | Method / Property                        | Async   | Description                                                                             |
 | ---------------------------------------- | ------- | --------------------------------------------------------------------------------------- |
-| `create(loop, num_workers, **overrides)` | No      | Factory classmethod — creates configured pool transport bound to the given event loop   |
+| `create(loop, num_workers, config=None)` | No      | Factory classmethod — creates configured pool transport bound to the given event loop   |
 | `worker_connector`                       | No      | Property returning the picklable `WorkerConnector` to pass to spawned worker processes  |
 | `send(worker_id, query)`                 | No      | Fan-out: dispatch a `Query` to a specific worker by ID                                  |
 | `poll()`                                 | No      | Fan-in: non-blocking poll for a `QueryResult` or `StreamChunk` from any worker          |
@@ -511,7 +511,7 @@ The transport layer handles all IPC between the main process and worker processe
 
 ```python
 # Create pool transport bound to the event loop
-pool = WorkerPoolTransport.create(loop, num_workers=4)
+pool = ZmqWorkerPoolTransport.create(loop, num_workers=4)
 # Spawn worker processes, passing the picklable connector
 for i in range(4):
     Process(target=worker_main, args=(i, pool.worker_connector, config)).start()

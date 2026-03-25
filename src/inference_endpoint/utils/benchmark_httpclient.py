@@ -1371,6 +1371,7 @@ def main() -> None:
         "--num-workers",
         type=int_or_range,
         default=[-1],
+        dest="workers",
         help="Number of worker processes, or range (e.g. 4:12). -1 for auto. Default: -1",
     )
     parser.add_argument(
