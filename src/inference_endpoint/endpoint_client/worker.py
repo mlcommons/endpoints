@@ -209,7 +209,7 @@ class Worker:
             if self.http_config.max_connections < self.http_config.workers:
                 logger.warning(
                     f"max_connections ({self.http_config.max_connections}) < "
-                    f"num_workers ({self.http_config.workers}): each worker gets 1 "
+                    f"workers ({self.http_config.workers}): each worker gets 1 "
                     f"connection, total={self.http_config.workers} exceeds the cap."
                 )
             self._pool = ConnectionPool(

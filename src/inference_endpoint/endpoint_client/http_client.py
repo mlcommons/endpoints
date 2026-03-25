@@ -72,7 +72,7 @@ class HTTPEndpointClient:
         asyncio.run_coroutine_threadsafe(self._initialize(), self.loop).result()
 
         logger.info(
-            f"EndpointClient initialized with num_workers={self.config.workers}, "
+            f"EndpointClient initialized with workers={self.config.workers}, "
             f"endpoints={self.config.endpoint_urls}, "
             f"adapter={self.config.adapter.__name__}, "
             f"accumulator={self.config.accumulator.__name__}, "
