@@ -342,6 +342,8 @@ def run_benchmark_threaded(ctx: BenchmarkContext) -> tuple[Any, ResponseCollecto
                 warmup_connections=config.settings.client.warmup_connections,
                 max_connections=config.settings.client.max_connections,
                 api_key=config.endpoint_config.api_key,
+                zmq_recv_buffer_bytes=config.settings.client.zmq_recv_buffer_bytes,
+                zmq_send_buffer_bytes=config.settings.client.zmq_send_buffer_bytes,
             )
             http_client = HTTPEndpointClient(http_config, zmq_context=zmq_ctx)
             sample_issuer = HttpClientSampleIssuer(http_client)
