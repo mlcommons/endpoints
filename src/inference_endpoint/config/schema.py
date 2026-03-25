@@ -188,6 +188,10 @@ class ModelParams(BaseModel):
     max_new_tokens: Annotated[
         int, cyclopts.Parameter(alias="--max-output-tokens", help="Max output tokens")
     ] = 1024
+    tokenizer_path: str | None = Field(
+        None,
+        description="Local path to tokenizer. If set, used instead of 'name' for tokenizer loading.",
+    )
     osl_distribution: OSLDistribution | None = Field(
         None, description="Output sequence length distribution"
     )

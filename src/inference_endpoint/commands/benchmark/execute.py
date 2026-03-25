@@ -263,8 +263,8 @@ def setup_benchmark(config: BenchmarkConfig, test_mode: TestMode) -> BenchmarkCo
     report_dir.mkdir(parents=True, exist_ok=True)
     config.to_yaml_file(report_dir / "config.yaml")
 
-    # Tokenizer (model name validated by BenchmarkConfig._resolve_and_validate)
-    tokenizer = _load_tokenizer(config.model_params.name)
+    # Tokenizer: use tokenizer_path if set (container-internal paths won't exist on host)
+    tokenizer = _load_tokenizer(config.model_params.tokenizer_path or config.model_params.name)
 
     # Streaming
     logger.info(
