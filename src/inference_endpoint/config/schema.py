@@ -161,6 +161,10 @@ class ModelParams(BaseModel):
     top_p: float | None = None
     repetition_penalty: float | None = None
     max_new_tokens: int = 1024
+    tokenizer_path: str | None = Field(
+        None,
+        description="Local path to tokenizer. If set, used instead of 'name' for tokenizer loading.",
+    )
     osl_distribution: OSLDistribution | None = None
     streaming: StreamingMode = StreamingMode.AUTO
 

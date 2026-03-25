@@ -419,10 +419,11 @@ def _run_benchmark(
     report_dir.mkdir(parents=True, exist_ok=True)
     config.to_yaml_file(report_dir / "config.yaml")
 
-    if model_name:
+    tokenizer_source = config.model_params.tokenizer_path or model_name
+    if tokenizer_source:
         try:
-            logger.info(f"Loading tokenizer for model: {model_name}")
-            tokenizer = AutoTokenizer.from_pretrained(model_name)
+            logger.info(f"Loading tokenizer for model: {tokenizer_source}")
+            tokenizer = AutoTokenizer.from_pretrained(tokenizer_source)
             logger.info("Tokenizer loaded successfully")
         except Exception as e:
             logger.warning(f"Failed to load tokenizer for {model_name}: {e}")
