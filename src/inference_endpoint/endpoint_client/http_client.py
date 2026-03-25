@@ -74,8 +74,8 @@ class HTTPEndpointClient:
         logger.info(
             f"EndpointClient initialized with workers={self.config.workers}, "
             f"endpoints={self.config.endpoint_urls}, "
-            f"adapter={self.config.adapter.__name__}, "
-            f"accumulator={self.config.accumulator.__name__}, "
+            f"adapter={self.config.adapter.__name__ if self.config.adapter else 'none'}, "
+            f"accumulator={self.config.accumulator.__name__ if self.config.accumulator else 'none'}, "
             f"transport={self.config.transport.type if self.config.transport else 'none'}"
         )
 

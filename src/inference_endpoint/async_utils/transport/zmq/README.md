@@ -78,7 +78,7 @@ transport/
 └── zmq/                  # ZMQ Implementation
     ├── __init__.py       # Exports ZmqWorkerPoolTransport
     └── transport.py      # Main implementation
-        ├── _ZMQSocketConfig
+        ├── ZMQTransportConfig
         ├── _ZmqReceiverTransport
         ├── _ZmqSenderTransport
         ├── _ZmqWorkerConnector

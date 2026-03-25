@@ -35,6 +35,9 @@ from inference_endpoint.async_utils.transport import (
     WorkerConnector,
 )
 from inference_endpoint.core.types import ErrorData, Query, QueryResult
+from inference_endpoint.endpoint_client.accumulator_protocol import (
+    SSEAccumulatorProtocol,
+)
 from inference_endpoint.endpoint_client.adapter_protocol import HttpRequestAdapter
 from inference_endpoint.endpoint_client.config import HTTPClientConfig
 from inference_endpoint.endpoint_client.http import (
@@ -173,8 +176,10 @@ class Worker:
         # Track active request tasks
         self._active_tasks: set[asyncio.Task] = set()
 
-        # Use adapter type from config
+        assert self.http_config.adapter is not None
+        assert self.http_config.accumulator is not None
         self._adapter: type[HttpRequestAdapter] = self.http_config.adapter
+        self._accumulator: type[SSEAccumulatorProtocol] = self.http_config.accumulator
 
     async def run(self) -> None:
         """Main worker loop - pull requests, execute, push responses."""
@@ -454,10 +459,7 @@ class Worker:
         query_id = req.query_id
         conn = req.connection
 
-        # Create accumulator for streaming response
-        accumulator = self.http_config.accumulator(
-            query_id, self.http_config.stream_all_chunks
-        )
+        accumulator = self._accumulator(query_id, self.http_config.stream_all_chunks)
 
         # Process SSE stream - yields batches of chunks
         async for chunk_batch in self._iter_sse_lines(conn):

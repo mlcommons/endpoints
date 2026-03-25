@@ -322,75 +322,73 @@ def run_benchmark_threaded(ctx: BenchmarkContext) -> tuple[Any, ResponseCollecto
     # Create endpoint client
     endpoints = config.endpoint_config.endpoints
     logger.info(f"Connecting: {endpoints}")
-    # Transport context is managed by WorkerManager (created from transport config).
-    with tempfile.TemporaryDirectory(prefix="inference_endpoint_") as _tmp_dir:
+    try:
+        api_type: APIType = config.endpoint_config.api_type
+        http_config = config.settings.client.with_updates(
+            endpoint_urls=[urljoin(e, api_type.default_route()) for e in endpoints],
+            api_type=api_type,
+            api_key=config.endpoint_config.api_key,
+            event_logs_dir=ctx.report_dir,
+            cpu_affinity=ctx.affinity_plan,
+        )
+        http_client = HTTPEndpointClient(http_config)
+        sample_issuer = HttpClientSampleIssuer(http_client)
+    except Exception as e:
+        raise SetupError(f"Failed to connect to endpoint: {e}") from e
+
+    # Run benchmark
+    logger.info("Running...")
+    sess = None
+    try:
+        sess = BenchmarkSession.start(
+            ctx.rt_settings,
+            ctx.dataloader,
+            sample_issuer,
+            ctx.scheduler,
+            name=f"cli_benchmark_{uuid.uuid4().hex[0:8]}",
+            report_dir=ctx.report_dir,
+            tokenizer_override=ctx.tokenizer,
+            accuracy_datasets=ctx.accuracy_datasets,
+            max_shutdown_timeout_s=config.timeout or SystemDefaults.DEFAULT_TIMEOUT,
+            dump_events_log=True,
+        )
+
+        # Wait for test end with ability to interrupt
+        def _raise_keyboard_interrupt(*_: object) -> None:
+            raise KeyboardInterrupt
+
+        old_handler = signal.signal(signal.SIGINT, _raise_keyboard_interrupt)
         try:
-            api_type: APIType = config.endpoint_config.api_type
-            http_config = config.settings.client.with_updates(
-                endpoint_urls=[urljoin(e, api_type.default_route()) for e in endpoints],
-                api_type=api_type,
-                api_key=config.endpoint_config.api_key,
-                event_logs_dir=ctx.report_dir,
-                cpu_affinity=ctx.affinity_plan,
-            )
-            http_client = HTTPEndpointClient(http_config)
-            sample_issuer = HttpClientSampleIssuer(http_client)
-        except Exception as e:
-            raise SetupError(f"Failed to connect to endpoint: {e}") from e
-
-        # Run benchmark
-        logger.info("Running...")
-        sess = None
-        try:
-            sess = BenchmarkSession.start(
-                ctx.rt_settings,
-                ctx.dataloader,
-                sample_issuer,
-                ctx.scheduler,
-                name=f"cli_benchmark_{uuid.uuid4().hex[0:8]}",
-                report_dir=ctx.report_dir,
-                tokenizer_override=ctx.tokenizer,
-                accuracy_datasets=ctx.accuracy_datasets,
-                max_shutdown_timeout_s=config.timeout or SystemDefaults.DEFAULT_TIMEOUT,
-                dump_events_log=True,
-            )
-
-            # Wait for test end with ability to interrupt
-            def _raise_keyboard_interrupt(*_: object) -> None:
-                raise KeyboardInterrupt
-
-            old_handler = signal.signal(signal.SIGINT, _raise_keyboard_interrupt)
-            try:
-                sess.wait_for_test_end()
-            finally:
-                # Always restore original handler
-                signal.signal(signal.SIGINT, old_handler)
-
-            # Prefer authoritative metrics from the session report
-            report = getattr(sess, "report", None)
-            if report is None:
-                raise ExecutionError("Session report missing — cannot produce results")
-            return report, collector
-
-        except KeyboardInterrupt:
-            logger.warning("Benchmark interrupted by user")
-            raise
-        except ExecutionError:
-            # Re-raise our own exceptions
-            raise
-        except Exception as e:
-            raise ExecutionError(f"Benchmark execution failed: {e}") from e
+            sess.wait_for_test_end()
         finally:
-            # Cleanup - always execute
-            logger.info("Cleaning up...")
-            try:
-                if sess is not None:
-                    sess.stop()
-                pbar.close()
-                sample_issuer.shutdown()
-                http_client.shutdown()
-            except Exception as e:
-                logger.debug(f"Cleanup error: {e}")
+            # Always restore original handler
+            signal.signal(signal.SIGINT, old_handler)
+
+        # Prefer authoritative metrics from the session report
+        report = getattr(sess, "report", None)
+        if report is None:
+            raise ExecutionError("Session report missing — cannot produce results")
+        return report, collector
+
+    except KeyboardInterrupt:
+        logger.warning("Benchmark interrupted by user")
+        raise
+    except ExecutionError:
+        # Re-raise our own exceptions
+        raise
+    except Exception as e:
+        raise ExecutionError(f"Benchmark execution failed: {e}") from e
+    finally:
+        # Cleanup - always execute
+        logger.info("Cleaning up...")
+        try:
+            if sess is not None:
+                sess.stop()
+            pbar.close()
+            sample_issuer.shutdown()
+            http_client.shutdown()
+        except Exception as e:
+            logger.debug(f"Cleanup error: {e}")
 
 
 def finalize_benchmark(

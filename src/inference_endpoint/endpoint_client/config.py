@@ -24,15 +24,17 @@ from __future__ import annotations
 
 from importlib import import_module
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Literal
 
 import cyclopts
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from inference_endpoint.async_utils.transport.zmq import ZMQTransportConfig
+from inference_endpoint.async_utils.transport.protocol import TransportConfig
 from inference_endpoint.core.types import APIType
 from inference_endpoint.utils import WithUpdatesMixin
 
+from .accumulator_protocol import SSEAccumulatorProtocol
+from .adapter_protocol import HttpRequestAdapter
 from .cpu_affinity import AffinityPlan, get_cpus_in_numa_node, get_current_numa_node
 from .utils import get_ephemeral_port_limit, get_ephemeral_port_range
 
@@ -93,7 +95,7 @@ class HTTPClientConfig(WithUpdatesMixin, BaseModel):
 
     # Transport-specific configuration.
     # When adding new transports, convert to discriminated union on ``type``.
-    transport: ZMQTransportConfig | None = None
+    transport: TransportConfig | None = None
 
     # WARNING: Use with caution
     # Can cause large performance overhead on main-thread (user / Loadgen)
@@ -155,15 +157,15 @@ class HTTPClientConfig(WithUpdatesMixin, BaseModel):
 
     # Request adapter for Query/Response <-> Payload/Response bytes
     # Resolved from api_type in _resolve_defaults validator
-    adapter: Annotated[Any, cyclopts.Parameter(parse=False)] = Field(
-        default=None, exclude=True
-    )
+    adapter: Annotated[
+        type[HttpRequestAdapter] | None, cyclopts.Parameter(parse=False)
+    ] = Field(default=None, exclude=True)
 
     # SSE accumulator for streaming responses
     # Resolved from api_type in _resolve_defaults validator
-    accumulator: Annotated[Any, cyclopts.Parameter(parse=False)] = Field(
-        default=None, exclude=True
-    )
+    accumulator: Annotated[
+        type[SSEAccumulatorProtocol] | None, cyclopts.Parameter(parse=False)
+    ] = Field(default=None, exclude=True)
 
     # =========================================================================
     # Validators

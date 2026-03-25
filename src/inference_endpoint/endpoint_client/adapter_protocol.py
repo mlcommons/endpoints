@@ -15,12 +15,17 @@
 
 """Base class for HTTP request adapters."""
 
+from __future__ import annotations
+
 import re
 from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING
 
-from inference_endpoint.config.schema import ModelParams
 from inference_endpoint.core.types import Query, QueryResult
-from inference_endpoint.dataset_manager.transforms import Transform
+
+if TYPE_CHECKING:
+    from inference_endpoint.config.schema import ModelParams
+    from inference_endpoint.dataset_manager.transforms import Transform
 
 
 class HttpRequestAdapter(ABC):

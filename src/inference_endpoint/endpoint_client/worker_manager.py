@@ -53,10 +53,9 @@ class WorkerManager:
 
         # Transport creates its own context internally
         assert http_config.transport is not None
-        tc = http_config.transport
-        transport_cls = tc.transport_class  # type: ignore[attr-defined]
+        transport_cls = http_config.transport.transport_class
         self.pool_transport: WorkerPoolTransport = transport_cls.create(
-            loop, http_config.workers, config=tc
+            loop, http_config.workers, config=http_config.transport
         )
 
         # Worker processes
