@@ -204,13 +204,13 @@ class Worker:
             # Create connection pool
             # Divide max connections among workers
             connections_per_worker = max(
-                1, self.http_config.max_connections // self.http_config.num_workers
+                1, self.http_config.max_connections // self.http_config.workers
             )
-            if self.http_config.max_connections < self.http_config.num_workers:
+            if self.http_config.max_connections < self.http_config.workers:
                 logger.warning(
                     f"max_connections ({self.http_config.max_connections}) < "
-                    f"num_workers ({self.http_config.num_workers}): each worker gets 1 "
-                    f"connection, total={self.http_config.num_workers} exceeds the cap."
+                    f"num_workers ({self.http_config.workers}): each worker gets 1 "
+                    f"connection, total={self.http_config.workers} exceeds the cap."
                 )
             self._pool = ConnectionPool(
                 host=self._host,
@@ -233,7 +233,7 @@ class Worker:
                     warmup_count = connections_per_worker // 2
                 else:
                     # Explicit total count split across workers
-                    warmup_count = warmup_cfg // self.http_config.num_workers
+                    warmup_count = warmup_cfg // self.http_config.workers
                 warmup_count = max(1, warmup_count)
                 warmed = await self._pool.warmup(count=warmup_count)
                 logger.debug(f"Warmed up {warmed}/{warmup_count} connections")
@@ -251,7 +251,7 @@ class Worker:
                 if self.http_config.min_required_connections > 0:
                     min_per_worker = (
                         self.http_config.min_required_connections
-                        // self.http_config.num_workers
+                        // self.http_config.workers
                     )
                     threshold = (
                         max(1, min_per_worker) if warmup_cfg == -1 else warmup_count

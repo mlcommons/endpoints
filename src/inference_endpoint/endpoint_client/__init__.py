@@ -18,6 +18,6 @@ Endpoint Client for the MLPerf Inference Endpoint Benchmarking System.
 This module provides HTTP client implementation.
 
 Import directly from submodules:
-    from inference_endpoint.endpoint_client.config import APIType, HTTPClientConfig, HTTPClientSettings
+    from inference_endpoint.endpoint_client.config import HTTPClientConfig
     from inference_endpoint.endpoint_client.http_client import HTTPEndpointClient
 """

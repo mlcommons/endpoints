@@ -34,12 +34,12 @@ async def test_external_serving(vllm_docker_server, streaming, num_requests):
 
     def _create_custom_client(
         vllm_docker_server,
-        num_workers=1,
+        workers=1,
     ):
         """Helper method to create a client with custom configuration."""
         http_config = HTTPClientConfig(
             endpoint_urls=[f"{vllm_docker_server['url']}/v1/chat/completions"],
-            num_workers=num_workers,
+            workers=workers,
             max_connections=50,
             warmup_connections=0,
         )
@@ -51,7 +51,7 @@ async def test_external_serving(vllm_docker_server, streaming, num_requests):
     # create client
     client = _create_custom_client(
         vllm_docker_server,
-        num_workers=1,
+        workers=1,
     )
 
     try:

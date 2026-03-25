@@ -28,10 +28,17 @@ import msgspec
 
 
 class APIType(str, Enum):
+    """Supported inference API protocols.
+
+    Each variant maps to a request adapter, SSE accumulator, and default route.
+    Used by HTTPClientConfig to select the correct HTTP request/response handling.
+    """
+
     OPENAI = "openai"
     SGLANG = "sglang"
 
     def default_route(self) -> str:
+        """Return the default HTTP path for this API type."""
         match self:
             case APIType.OPENAI:
                 return "/v1/chat/completions"

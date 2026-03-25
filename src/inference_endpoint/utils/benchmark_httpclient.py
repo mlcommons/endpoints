@@ -418,12 +418,12 @@ def _create_client(
     cpu_affinity_plan = None
     if enable_affinity:
         effective = num_workers if num_workers > 0 else -1
-        tmp = HTTPClientConfig(endpoint_urls=[endpoint_url], num_workers=effective)
-        cpu_affinity_plan = compute_affinity_plan(tmp.num_workers)
+        tmp = HTTPClientConfig(endpoint_urls=[endpoint_url], workers=effective)
+        cpu_affinity_plan = compute_affinity_plan(tmp.workers)
         if cpu_affinity_plan.loadgen_cpus:
             os.sched_setaffinity(os.getpid(), set(cpu_affinity_plan.loadgen_cpus))  # type: ignore[attr-defined]
         if verbose:
-            print(f"CPU Affinity Plan ({tmp.num_workers} workers):")
+            print(f"CPU Affinity Plan ({tmp.workers} workers):")
             for line in cpu_affinity_plan.summary().split("\n"):
                 print(f"  {line}")
     elif verbose:
@@ -431,7 +431,7 @@ def _create_client(
 
     config = HTTPClientConfig(
         endpoint_urls=[endpoint_url],
-        num_workers=num_workers if num_workers > 0 else -1,
+        workers=num_workers if num_workers > 0 else -1,
         max_connections=max_connections if max_connections > 0 else -1,
         warmup_connections=0,
         worker_gc_mode="relaxed",
@@ -441,7 +441,7 @@ def _create_client(
 
     if verbose:
         print(
-            f"Config: workers={config.num_workers}, "
+            f"Config: workers={config.workers}, "
             f"max_connections={config.max_connections}, stream={streaming}"
         )
 
@@ -769,7 +769,7 @@ def run_single(
     stats = run_benchmark(
         endpoint_url=endpoint_url,
         duration=args.duration,
-        num_workers=args.num_workers[0],
+        num_workers=args.workers[0],
         max_connections=args.max_connections[0],
         prompt=prompt,
         track_memory=args.track_memory,
@@ -850,7 +850,7 @@ def run_sweep(
     sweep_values = [s[1] for s in sweeps]
     combinations = list(itertools.product(*sweep_values))
 
-    default_workers = args.num_workers[0]
+    default_workers = args.workers[0]
     default_connections = args.max_connections[0]
     default_prompt_length = args.prompt_length[0]
     default_stream_interval = args.stream_interval[0]
@@ -1432,8 +1432,8 @@ def main() -> None:
     args._stream_interval_pcts = None
 
     if args.full:
-        if args.num_workers == [-1]:
-            args.num_workers = _FULL_WORKERS
+        if args.workers == [-1]:
+            args.workers = _FULL_WORKERS
         if args.prompt_length == [-1]:
             args.prompt_length = _FULL_PROMPT_LENGTHS
         if args.streaming and args.stream_interval == [1]:
@@ -1443,7 +1443,7 @@ def main() -> None:
         args.prompt_length = [1000]
 
     sweeps = collect_sweep_params(
-        args.num_workers,
+        args.workers,
         args.max_connections,
         args.prompt_length,
         stream_intervals=(

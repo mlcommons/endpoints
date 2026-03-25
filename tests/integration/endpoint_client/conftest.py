@@ -23,14 +23,14 @@ from tests.futures_client import FuturesHttpClient
 
 def create_futures_client(
     url: str,
-    num_workers: int = 1,
+    workers: int = 1,
     max_connections: int = 10,
     warmup_connections: int = 0,
 ) -> FuturesHttpClient:
     """Helper to create a FuturesHttpClient with specific config."""
     http_config = HTTPClientConfig(
         endpoint_urls=[url],
-        num_workers=num_workers,
+        workers=workers,
         max_connections=max_connections,
         warmup_connections=warmup_connections,
     )

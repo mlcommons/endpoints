@@ -327,19 +327,21 @@ def run_benchmark_threaded(ctx: BenchmarkContext) -> tuple[Any, ResponseCollecto
     with tempfile.TemporaryDirectory(prefix="inference_endpoint_") as _tmp_dir:
         try:
             api_type: APIType = config.endpoint_config.api_type
-            base = config.settings.client.model_dump()
-            base.update(
-                {
-                    "endpoint_urls": [
-                        urljoin(e, api_type.default_route()) for e in endpoints
-                    ],
-                    "api_type": api_type,
-                    "api_key": config.endpoint_config.api_key,
-                    "event_logs_dir": ctx.report_dir,
-                    "cpu_affinity": ctx.affinity_plan,
-                }
+            client = config.settings.client
+            http_config = HTTPClientConfig(
+                endpoint_urls=[urljoin(e, api_type.default_route()) for e in endpoints],
+                api_type=api_type,
+                api_key=config.endpoint_config.api_key,
+                workers=client.workers,
+                record_worker_events=client.record_worker_events,
+                log_level=client.log_level,
+                warmup_connections=client.warmup_connections,
+                max_connections=client.max_connections,
+                worker_initialization_timeout=client.worker_initialization_timeout,
+                transport=client.transport,
+                event_logs_dir=ctx.report_dir,
+                cpu_affinity=ctx.affinity_plan,
             )
-            http_config = HTTPClientConfig.model_validate(base)
             http_client = HTTPEndpointClient(http_config)
             sample_issuer = HttpClientSampleIssuer(http_client)
         except Exception as e:

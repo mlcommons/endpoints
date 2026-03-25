@@ -36,7 +36,7 @@ from .conftest import create_futures_client
 def _create_client(url: str, **kwargs) -> HTTPEndpointClient:
     config = HTTPClientConfig(
         endpoint_urls=[url],
-        num_workers=kwargs.pop("num_workers", 1),
+        workers=kwargs.pop("workers", 1),
         max_connections=kwargs.pop("max_connections", 10),
         warmup_connections=kwargs.pop("warmup_connections", 0),
         **kwargs,
@@ -185,7 +185,7 @@ class TestHttpEndpointClientScaleOut:
 
             client = create_futures_client(
                 f"{mock_http_echo_server.url}/v1/chat/completions",
-                num_workers=num_workers,
+                workers=num_workers,
                 max_connections=num_workers * 10,  # ensure each worker has connections
                 warmup_connections=0,
             )
@@ -248,7 +248,7 @@ class TestHTTPEndpointClientFunctionality:
         try:
             client = create_futures_client(
                 f"http://localhost:{server.port}/v1/chat/completions",
-                num_workers=1,
+                workers=1,
             )
 
             # Issue requests that will hang
