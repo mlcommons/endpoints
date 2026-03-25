@@ -394,6 +394,7 @@ class EventRecordSubscriber(ABC):
 
 
 __all__ = [
+    "TransportConfig",
     "ReceiverTransport",
     "SenderTransport",
     "WorkerConnector",

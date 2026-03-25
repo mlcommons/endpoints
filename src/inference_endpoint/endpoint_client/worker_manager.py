@@ -32,12 +32,10 @@ class WorkerManager:
     """Manages worker processes and IPC transports.
 
     Creates and owns:
-    - WorkerPoolTransport for IPC
+    - WorkerPoolTransport for IPC (created via transport_config.transport_class)
     - Worker processes
 
-    Transport-specific arguments (e.g. ManagedZMQContext for ZMQ) are forwarded
-    via *args and **kwargs to transport_cls.create(). The caller is responsible
-    for scoping the lifetime of any context (e.g. ManagedZMQContext.scoped()).
+    Transport context is managed internally by the transport implementation.
     """
 
     def __init__(
