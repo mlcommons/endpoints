@@ -37,9 +37,6 @@ import threading
 import time
 from dataclasses import dataclass
 
-from inference_endpoint.async_utils.transport.zmq.context import (
-    ManagedZMQContext,
-)
 from inference_endpoint.core.types import Query, QueryResult
 from inference_endpoint.endpoint_client.config import HTTPClientConfig
 from inference_endpoint.endpoint_client.cpu_affinity import (
@@ -409,7 +406,6 @@ def _create_client(
     prompt: str,
     enable_affinity: bool,
     verbose: bool = True,
-    zmq_context: ManagedZMQContext | None = None,
 ) -> tuple:
     """Create an endpoint client and query data dict.
 
@@ -499,9 +495,6 @@ def run_benchmark(
         except OSError:
             pass
 
-    zmq_ctx_manager = ManagedZMQContext.scoped()
-    zmq_ctx = zmq_ctx_manager.__enter__()
-
     client, query_data = _create_client(
         endpoint_url,
         num_workers,
@@ -509,7 +502,6 @@ def run_benchmark(
         streaming,
         prompt,
         enable_affinity,
-        zmq_context=zmq_ctx,
     )
     loop = client.loop
     stats = BenchmarkStats(sse_events_per_response=sse_events_per_response)
@@ -639,7 +631,6 @@ def run_benchmark(
     gc.collect()
 
     client.shutdown()
-    zmq_ctx_manager.__exit__(None, None, None)
 
     # Restore original affinity so the next sweep iteration sees all CPUs
     if saved_affinity is not None:

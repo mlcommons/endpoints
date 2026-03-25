@@ -179,7 +179,7 @@ class TestDefaultConfigs:
         assert isinstance(config, BenchmarkConfig)
         assert config.settings.load_pattern.type == LoadPatternType.MAX_THROUGHPUT
         assert config.settings.runtime.min_duration_ms == 600000
-        assert config.settings.client.workers == -1
+        assert config.settings.client.workers >= 1  # auto-resolved from -1
 
     def test_create_default_online_config(self):
         config = BenchmarkConfig.create_default_config(BenchmarkTestType.ONLINE)

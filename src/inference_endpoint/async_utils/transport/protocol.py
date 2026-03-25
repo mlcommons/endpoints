@@ -50,8 +50,8 @@ class TransportConfig(BaseModel):
 
     Each subclass must:
     - Set ``type`` to a unique Literal string for discriminated union dispatch
-    - Override ``create_context()`` to produce the transport's runtime context
-    - Override ``get_transport_class()`` to return the WorkerPoolTransport implementation
+    - Implement the ``transport_class`` property to return the transport's
+      ``WorkerPoolTransport`` implementation class
     """
 
     type: str = Field(description="Transport backend (currently: zmq)")  # noqa: A003

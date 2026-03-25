@@ -529,7 +529,10 @@ class _ZmqWorkerConnector(WorkerConnector):
         Yields:
             Tuple of (request_receiver, response_sender) transports.
         """
-        with ManagedZMQContext.scoped(socket_dir=self.socket_dir) as zmq_context:
+        with ManagedZMQContext.scoped(
+            socket_dir=self.socket_dir,
+            io_threads=self.config.io_threads,
+        ) as zmq_context:
             loop = asyncio.get_running_loop()
             request_path = self.request_paths[worker_id]
 
@@ -662,7 +665,7 @@ class ZmqWorkerPoolTransport(WorkerPoolTransport):
             config = ZMQTransportConfig()
 
         # Create ZMQ context — owned by this transport, cleaned up in cleanup()
-        context = ManagedZMQContext()
+        context = ManagedZMQContext(io_threads=config.io_threads)
         return cls(loop, context, config, num_workers)
 
     @property
