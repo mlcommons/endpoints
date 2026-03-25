@@ -257,16 +257,19 @@ class TestZmqRobustness:
         """cleanup() and close() are idempotent."""
         loop = asyncio.get_running_loop()
         zmq_pool = ZmqWorkerPoolTransport.create(loop, 1)
+        connector = zmq_pool.worker_connector
 
-        async with zmq_pool.worker_connector.connect(0) as (
-            recv,
-            send,
-        ):
-            # Transport close is idempotent
-            recv.close()
-            recv.close()
-            send.close()
-            send.close()
+        async def simulate_worker():
+            async with connector.connect(0) as (recv, send):
+                # Transport close is idempotent
+                recv.close()
+                recv.close()
+                send.close()
+                send.close()
+
+        worker_task = asyncio.create_task(simulate_worker())
+        await zmq_pool.wait_for_workers_ready(timeout=5.0)
+        await worker_task
 
         # Pool cleanup is idempotent
         zmq_pool.cleanup()
