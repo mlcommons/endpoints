@@ -1153,6 +1153,20 @@ class TestOutputSequenceFromData:
         assert output == "c1c2"
         assert reasoning is None
 
+    def test_list_without_tag_returns_none(self):
+        """A list without 'TextModelOutput' tag returns (None, None)."""
+        data = msgspec.json.encode(["not-a-tag", "some", "data"])
+        output, reasoning = output_sequence_from_data(data)
+        assert output is None
+        assert reasoning is None
+
+    def test_short_list_returns_none(self):
+        """A single-element list returns (None, None)."""
+        data = msgspec.json.encode(["only-one"])
+        output, reasoning = output_sequence_from_data(data)
+        assert output is None
+        assert reasoning is None
+
     def test_none_data(self):
         """None data returns (None, None)."""
         output, reasoning = output_sequence_from_data(None)

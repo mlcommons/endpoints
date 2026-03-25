@@ -549,7 +549,7 @@ def _output_sequence_to_str(output_sequence: str | list[str]) -> str | None:
 
 
 def output_sequence_from_data(
-    data_bytes: bytes,
+    data_bytes: bytes | None,
     join_chunks: bool = True,
 ) -> tuple[str | list[str] | None, str | list[str] | None]:
     """Parse the data column from a COMPLETE event and extract output and reasoning sequences.
@@ -587,8 +587,10 @@ def output_sequence_from_data(
     elif isinstance(decoded_data, list):
         # Tagged msgspec array_like Struct: ["TextModelOutput", output, reasoning]
         # The tag is at index 0, output at index 1, reasoning at index 2
-        if len(decoded_data) < 2:
-            logging.warning(f"Array data too short: {len(decoded_data)} elements")
+        if len(decoded_data) < 2 or decoded_data[0] != "TextModelOutput":
+            logging.warning(
+                f"Invalid TextModelOutput tagged array data: {decoded_data}"
+            )
             return None, None
         raw_output = decoded_data[1]
         raw_reasoning = decoded_data[2] if len(decoded_data) > 2 else None
