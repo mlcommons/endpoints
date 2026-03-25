@@ -33,6 +33,7 @@ import pytest
 from inference_endpoint import metrics
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import LoadPattern, LoadPatternType
+from inference_endpoint.core.types import TextModelOutput
 from inference_endpoint.dataset_manager.dataset import Dataset, DatasetFormat
 from inference_endpoint.dataset_manager.transforms import ColumnRemap
 from inference_endpoint.load_generator.events import SampleEvent, SessionEvent
@@ -275,7 +276,7 @@ def events_db(tmp_path, sample_uuids, fake_outputs):
             uuid1,
             SampleEvent.COMPLETE.value,
             10211,
-            msgspec.json.encode({"output": fake_outputs[uuid1]}),
+            msgspec.json.encode(TextModelOutput(output=tuple(fake_outputs[uuid1]))),
         ),
         (uuid2, SampleEvent.NON_FIRST_CHUNK.value, 10214, b""),
         (uuid3, SessionEvent.ERROR.value, 10216, b""),
@@ -285,7 +286,7 @@ def events_db(tmp_path, sample_uuids, fake_outputs):
             uuid2,
             SampleEvent.COMPLETE.value,
             10219,
-            msgspec.json.encode({"output": fake_outputs[uuid2]}),
+            msgspec.json.encode(TextModelOutput(output=tuple(fake_outputs[uuid2]))),
         ),
         (uuid3, SessionEvent.ERROR.value, 10225, b""),
         ("", SessionEvent.TEST_ENDED.value, 10300, b""),
