@@ -65,8 +65,17 @@ class ConversationState:
         self.message_history.append({"role": "assistant", "content": content})
         # After assistant responds to turn N, conversation is at turn N+1
         # (e.g., after user turn 1 + assistant turn 2, we're ready for turn 3)
-        self.current_turn = self.pending_user_turn + 1
-        self.pending_user_turn = None
+        if self.pending_user_turn is not None:
+            self.current_turn = self.pending_user_turn + 1
+            self.pending_user_turn = None
+        else:
+            # Handle duplicate/orphaned response (response without pending user turn)
+            logger.warning(
+                f"Received assistant response for {self.conversation_id} "
+                f"with no pending user turn (duplicate or out-of-order response)"
+            )
+            # Increment from current position or start at 1 if no turns yet
+            self.current_turn = self.current_turn + 1 if self.current_turn > 0 else 1
         self.turn_complete_event.set()
 
     def is_ready_for_turn(self, turn: int) -> bool:
@@ -159,14 +168,18 @@ class ConversationManager:
             if timeout is not None:
                 elapsed = time.time() - start_time
                 if elapsed >= timeout:
+                    # Final check before timing out
+                    with self._lock:
+                        if state.is_ready_for_turn(turn):
+                            return True
                     return False
                 remaining_timeout = max(MIN_TIMEOUT_SECONDS, timeout - elapsed)
             else:
                 remaining_timeout = None
 
             state.turn_complete_event.clear()
-            if not state.turn_complete_event.wait(timeout=remaining_timeout):
-                return False
+            state.turn_complete_event.wait(timeout=remaining_timeout)
+            # Loop back to check if ready (don't return False immediately)
 
     def mark_turn_issued(self, conversation_id: str, turn: int, content: str):
         """Mark that user turn has been issued.
