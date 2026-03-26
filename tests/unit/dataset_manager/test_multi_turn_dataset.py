@@ -23,7 +23,7 @@ from inference_endpoint.dataset_manager.multi_turn_dataset import MultiTurnDatas
 
 
 @pytest.fixture
-def valid_multi_turn_jsonl():
+def valid_multi_turn_jsonl() -> str:
     """Create valid multi-turn conversation JSONL data."""
     data = [
         {
@@ -71,7 +71,7 @@ def valid_multi_turn_jsonl():
 
 
 @pytest.fixture
-def invalid_role_sequence_jsonl():
+def invalid_role_sequence_jsonl() -> str:
     """Create JSONL with invalid role sequence (not alternating)."""
     data = [
         {"conversation_id": "conv_001", "turn": 1, "role": "user", "content": "Hello"},
@@ -101,7 +101,7 @@ def invalid_role_sequence_jsonl():
 
 
 @pytest.fixture
-def missing_fields_jsonl():
+def missing_fields_jsonl() -> str:
     """Create JSONL with missing required fields."""
     data = [
         {"conversation_id": "conv_001", "turn": 1, "role": "user"},  # Missing content

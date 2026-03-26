@@ -16,6 +16,7 @@
 import random
 import threading
 import time
+from typing import Any
 
 import pytest
 from inference_endpoint import metrics
@@ -37,7 +38,7 @@ from inference_endpoint.load_generator.scheduler import (
 
 
 @pytest.fixture
-def multi_turn_dataset_metadata():
+def multi_turn_dataset_metadata() -> dict[str, Any]:
     """Sample multi-turn dataset metadata for 3 conversations with 3 user turns each.
 
     Uses absolute turn numbering (matching actual dataset format):
@@ -65,7 +66,7 @@ def multi_turn_dataset_metadata():
 
 
 @pytest.fixture
-def multi_turn_runtime_settings(random_seed):
+def multi_turn_runtime_settings(random_seed) -> RuntimeSettings:
     """Runtime settings for multi-turn scheduler tests."""
     return RuntimeSettings(
         metric_target=metrics.Throughput(100),
@@ -85,7 +86,7 @@ def multi_turn_runtime_settings(random_seed):
 
 
 @pytest.fixture
-def multi_turn_runtime_settings_sequential(random_seed):
+def multi_turn_runtime_settings_sequential(random_seed) -> RuntimeSettings:
     """Runtime settings for sequential multi-turn tests."""
     return RuntimeSettings(
         metric_target=metrics.Throughput(100),

@@ -47,7 +47,7 @@ from inference_endpoint.load_generator.scheduler import MultiTurnScheduler
 
 
 @pytest.fixture
-def multi_turn_test_dataset():
+def multi_turn_test_dataset() -> str:
     """Create multi-turn conversation dataset for testing."""
     conversations = [
         # Conversation 1: 3 user turns
@@ -103,7 +103,7 @@ def multi_turn_test_dataset():
 
 
 @pytest.fixture(params=["http://localhost:8868"])
-def endpoint_url(request):
+def endpoint_url(request) -> str:
     """Parameterized endpoint URL fixture."""
     return request.param
 

@@ -22,6 +22,9 @@ from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
 
+# Minimum timeout to prevent busy-waiting
+MIN_TIMEOUT_SECONDS = 0.001
+
 
 @dataclass
 class ConversationState:
@@ -136,23 +139,34 @@ class ConversationManager:
 
         Returns:
             True if ready, False if timeout.
+
+        Raises:
+            KeyError: If conversation_id not found in manager.
         """
-        state = self._conversations[conversation_id]
+        with self._lock:
+            state = self._conversations.get(conversation_id)
+            if state is None:
+                logger.error(f"Conversation {conversation_id} not found in manager")
+                raise KeyError(f"Conversation {conversation_id} not initialized")
+
         start_time = time.time()
 
-        while not state.is_ready_for_turn(turn):
-            remaining_timeout = None
+        while True:
+            with self._lock:
+                if state.is_ready_for_turn(turn):
+                    return True
+
             if timeout is not None:
                 elapsed = time.time() - start_time
-                remaining_timeout = max(0.001, timeout - elapsed)
                 if elapsed >= timeout:
                     return False
+                remaining_timeout = max(MIN_TIMEOUT_SECONDS, timeout - elapsed)
+            else:
+                remaining_timeout = None
 
+            state.turn_complete_event.clear()
             if not state.turn_complete_event.wait(timeout=remaining_timeout):
                 return False
-            state.turn_complete_event.clear()
-
-        return True
 
     def mark_turn_issued(self, conversation_id: str, turn: int, content: str):
         """Mark that user turn has been issued.
@@ -161,8 +175,15 @@ class ConversationManager:
             conversation_id: Conversation ID.
             turn: Turn number being issued.
             content: User message content.
+
+        Raises:
+            KeyError: If conversation_id not found in manager.
         """
-        state = self._conversations[conversation_id]
+        with self._lock:
+            state = self._conversations.get(conversation_id)
+            if state is None:
+                raise KeyError(f"Conversation {conversation_id} not initialized")
+
         state.add_user_turn(turn, content)
 
     def mark_turn_complete(self, conversation_id: str, response: str):
@@ -171,6 +192,13 @@ class ConversationManager:
         Args:
             conversation_id: Conversation ID.
             response: Assistant response content.
+
+        Raises:
+            KeyError: If conversation_id not found in manager.
         """
-        state = self._conversations[conversation_id]
+        with self._lock:
+            state = self._conversations.get(conversation_id)
+            if state is None:
+                raise KeyError(f"Conversation {conversation_id} not initialized")
+
         state.add_assistant_turn(response)

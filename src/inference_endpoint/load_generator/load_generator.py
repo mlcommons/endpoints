@@ -318,25 +318,21 @@ class SchedulerBasedLoadGenerator(LoadGenerator):
         # request beforehand.
         sample_data_raw = self.load_sample_data(s_idx, sample_uuid="placeholder")
 
-        # Check if multi-turn sample
         if (
             "conversation_id" in sample_data_raw
             and self.conversation_manager is not None
         ):
-            # Multi-turn path: build full messages array with history
+            # Multi-turn: include conversation history in request
             conv_id = sample_data_raw["conversation_id"]
             turn = sample_data_raw["turn"]
 
-            # Get conversation state (includes message history)
             conv_state = self.conversation_manager.get_or_create(
                 conv_id, sample_data_raw.get("system")
             )
 
-            # Build full messages array
             messages = conv_state.message_history.copy()
             messages.append({"role": "user", "content": sample_data_raw["content"]})
 
-            # Create ConversationSample
             sample = ConversationSample(
                 data={
                     "messages": messages,
@@ -348,12 +344,10 @@ class SchedulerBasedLoadGenerator(LoadGenerator):
                 turn_number=turn,
             )
 
-            # Mark turn as issued (in-flight)
             self.conversation_manager.mark_turn_issued(
                 conv_id, turn, sample_data_raw["content"]
             )
         else:
-            # Single-turn path (existing logic)
             sample = Sample(sample_data_raw)
 
         self.uuid_to_index_map[sample.uuid] = s_idx

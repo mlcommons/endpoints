@@ -516,8 +516,6 @@ class MultiTurnScheduler(Scheduler, load_pattern=LoadPatternType.MULTI_TURN):
         - BLOCK_ON_PREVIOUS_TURN: Block until previous turn completes
         - 0: Issue immediately
         """
-        # Get multi_turn_config from runtime_settings
-        # For now, use PARALLEL mode as default
         mode = ConversationMode.PARALLEL
         if self.runtime_settings.multi_turn_config is not None:
             mode = self.runtime_settings.multi_turn_config.mode
@@ -536,9 +534,9 @@ class MultiTurnScheduler(Scheduler, load_pattern=LoadPatternType.MULTI_TURN):
             conv_id = sample_meta["conversation_id"]
             turn = sample_meta["turn"]
 
-            # Step 1: Block on previous turn if needed (turn sequencing)
+            # Step 1: Block on previous turn if needed
             if delay_or_sentinel == BLOCK_ON_PREVIOUS_TURN:
-                timeout = 300.0  # Default timeout
+                timeout = 300.0
                 if self.runtime_settings.multi_turn_config is not None:
                     timeout = self.runtime_settings.multi_turn_config.turn_timeout_s
 
@@ -548,12 +546,12 @@ class MultiTurnScheduler(Scheduler, load_pattern=LoadPatternType.MULTI_TURN):
                     logger.warning(
                         f"Turn {turn} of {conv_id} timed out waiting for prev turn"
                     )
-                    continue  # Skip this turn
+                    continue
                 delay_ns = 0
             else:
                 delay_ns = delay_or_sentinel
 
-            # Step 2: Block on concurrency limit if enabled (concurrency control)
+            # Step 2: Block on concurrency limit if enabled
             if self._condition is not None:
                 with self._condition:
                     while self._inflight >= self._target_concurrency:

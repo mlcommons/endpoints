@@ -235,21 +235,15 @@ class _SampleEventHandler:
 
         assert isinstance(result, QueryResult), f"Invalid result type: {type(result)}"
 
-        # Update conversation state if multi-turn
         conv_id, turn_num = _get_conversation_metadata(result)
         if self.conversation_manager and conv_id is not None:
             response_text = result.get_response_output_string()
             self.conversation_manager.mark_turn_complete(conv_id, response_text)
 
-        # Even if there is an error, we still record the event to count the sample as complete
         if result.error is not None:
             err_str = str(result.error)
             logger.error(f"Error in request {result.id}: {err_str}")
-
             record_exception(err_str, result.id)
-
-        # Extract conversation metadata for event recording
-        conv_id, turn_num = _get_conversation_metadata(result)
 
         EventRecorder.record_event(
             SampleEvent.COMPLETE,
