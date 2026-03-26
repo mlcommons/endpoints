@@ -28,8 +28,8 @@ from inference_endpoint.core.record import SampleEventType, SessionEventType
 from inference_endpoint.core.types import PromptData, TextModelOutput
 
 if TYPE_CHECKING:
-    from inference_endpoint.async_utils.services.metrics_aggregator.emitter import (
-        MetricEmitter,
+    from inference_endpoint.async_utils.services.metrics_aggregator.kv_store import (
+        KVStore,
     )
     from inference_endpoint.async_utils.services.metrics_aggregator.token_metrics import (
         TokenizePool,
@@ -84,20 +84,22 @@ class TrackedBlock:
 
 
 # ---------------------------------------------------------------------------
-# EmitTrigger
+# EmitTrigger base classes
 # ---------------------------------------------------------------------------
 
 
 class EmitTrigger(ABC):
     """A metric computation that fires when a SampleRow field is set.
 
-    Runtime deps (emitter, pool, loop) are bound at construction.
-    ``fire()`` receives only event-specific context.
+    Each trigger has a ``metric_name`` and a ``kv_store`` reference, both
+    set by ``MetricsTable.add_trigger``. When ``fire()`` computes a value,
+    it writes directly to ``self.kv_store.update(self.metric_name, value)``.
     """
 
     def __init__(self, metric_name: str, requires: tuple[str, ...] = ()):
         self.metric_name = metric_name
         self.requires = requires
+        self.kv_store: KVStore = None  # type: ignore[assignment]  # Set by MetricsTable.add_trigger
 
     @abstractmethod
     def fire(
@@ -110,63 +112,107 @@ class EmitTrigger(ABC):
         raise NotImplementedError()
 
 
+class TimeDeltaTrigger(EmitTrigger):
+    """Sync trigger: emits ev_rec.timestamp_ns - pre_change[required_field].
+
+    Subclass only needs to set metric_name and the required field name.
+    Skips silently if the required field is None (event hasn't occurred yet).
+    """
+
+    def __init__(self, metric_name: str, subtract_field: str):
+        super().__init__(metric_name, requires=(subtract_field,))
+        self._subtract_field = subtract_field
+
+    def fire(self, ev_rec, row, pre_change):
+        baseline = pre_change.get(self._subtract_field)
+        if baseline is not None:
+            self.kv_store.update(self.metric_name, ev_rec.timestamp_ns - baseline)
+        return None
+
+
+class AsyncTokenTrigger(EmitTrigger):
+    """Base for triggers that need async tokenization.
+
+    Subclasses implement ``_extract_text()`` to pull the text to tokenize
+    from the event record. If text is returned, an async task is created
+    to tokenize and emit. Subclasses can override ``_compute_value()`` to
+    transform the token count before storing.
+    """
+
+    def __init__(
+        self,
+        metric_name: str,
+        tokenize_pool: TokenizePool | None,
+        loop: asyncio.AbstractEventLoop | None,
+        requires: tuple[str, ...] = (),
+    ):
+        super().__init__(metric_name, requires=requires)
+        self._pool = tokenize_pool
+        self._loop = loop
+
+    @abstractmethod
+    def _extract_text(
+        self, ev_rec: EventRecord, row: SampleRow, pre_change: dict[str, Any]
+    ) -> str | None:
+        """Return the text to tokenize, or None to skip."""
+        raise NotImplementedError()
+
+    def _compute_value(
+        self, token_count: int, ev_rec: EventRecord, pre_change: dict[str, Any]
+    ) -> float | None:
+        """Transform token count into the metric value. Default: count as-is."""
+        return float(token_count)
+
+    def fire(self, ev_rec, row, pre_change):
+        if self._pool is None or self._loop is None:
+            return None
+        text = self._extract_text(ev_rec, row, pre_change)
+        if not text:
+            return None
+
+        pool, loop = self._pool, self._loop
+        store, name = self.kv_store, self.metric_name
+        uuid = row.sample_uuid
+
+        async def _tokenize_and_emit() -> None:
+            try:
+                count = await pool.token_count_async(text, loop)
+                value = self._compute_value(count, ev_rec, pre_change)
+                if value is not None:
+                    store.update(name, value)
+            except Exception:
+                logger.exception("%s tokenization failed for %s", name, uuid)
+
+        return loop.create_task(_tokenize_and_emit())
+
+
 # ---------------------------------------------------------------------------
 # Timing triggers (sync)
 # ---------------------------------------------------------------------------
 
 
-class TtftTrigger(EmitTrigger):
-    """TTFT = recv_first_ns (new, from ev_rec) - issued_ns."""
+class TtftTrigger(TimeDeltaTrigger):
+    """TTFT = recv_first_ns (new) - issued_ns."""
 
-    def __init__(self, emitter: MetricEmitter):
-        super().__init__("ttft_ns", requires=("issued_ns",))
-        self._emitter = emitter
-
-    def fire(self, ev_rec, row, pre_change):
-        issued_ns = pre_change.get("issued_ns")
-        if issued_ns is not None:
-            self._emitter.emit(
-                row.sample_uuid, "ttft_ns", ev_rec.timestamp_ns - issued_ns
-            )
-        return None
+    def __init__(self):
+        super().__init__("ttft_ns", subtract_field="issued_ns")
 
 
-class ChunkDeltaTrigger(EmitTrigger):
+class ChunkDeltaTrigger(TimeDeltaTrigger):
     """chunk_delta_ns = new timestamp - previous last_recv_ns.
 
     Skips when pre-change last_recv_ns is None (first recv via RECV_FIRST).
     """
 
-    def __init__(self, emitter: MetricEmitter):
-        super().__init__("chunk_delta_ns", requires=("last_recv_ns",))
-        self._emitter = emitter
-
-    def fire(self, ev_rec, row, pre_change):
-        prev = pre_change.get("last_recv_ns")
-        if prev is None:
-            return None
-        self._emitter.emit(
-            row.sample_uuid, "chunk_delta_ns", ev_rec.timestamp_ns - prev
-        )
-        return None
+    def __init__(self):
+        super().__init__("chunk_delta_ns", subtract_field="last_recv_ns")
 
 
-class SampleLatencyTrigger(EmitTrigger):
+class SampleLatencyTrigger(TimeDeltaTrigger):
     """sample_latency_ns = complete_ns (new) - issued_ns."""
 
-    def __init__(self, emitter: MetricEmitter):
-        super().__init__("sample_latency_ns", requires=("issued_ns",))
-        self._emitter = emitter
-
-    def fire(self, ev_rec, row, pre_change):
-        issued_ns = pre_change.get("issued_ns")
-        if issued_ns is not None:
-            self._emitter.emit(
-                row.sample_uuid,
-                "sample_latency_ns",
-                ev_rec.timestamp_ns - issued_ns,
-            )
-        return None
+    def __init__(self):
+        super().__init__("sample_latency_ns", subtract_field="issued_ns")
 
 
 # ---------------------------------------------------------------------------
@@ -174,88 +220,47 @@ class SampleLatencyTrigger(EmitTrigger):
 # ---------------------------------------------------------------------------
 
 
-class IslTrigger(EmitTrigger):
+class IslTrigger(AsyncTokenTrigger):
     """ISL from PromptData: len(token_ids) sync, or token_count(text) async."""
 
     def __init__(
-        self,
-        emitter: MetricEmitter,
-        tokenize_pool: TokenizePool | None,
-        loop: asyncio.AbstractEventLoop | None,
+        self, tokenize_pool: TokenizePool | None, loop: asyncio.AbstractEventLoop | None
     ):
-        super().__init__("isl", requires=())
-        self._emitter = emitter
-        self._pool = tokenize_pool
-        self._loop = loop
+        super().__init__("isl", tokenize_pool, loop)
 
     def fire(self, ev_rec, row, pre_change):
-        if not isinstance(ev_rec.data, PromptData):
+        # Sync fast path: pre-tokenized IDs (SGLang)
+        if isinstance(ev_rec.data, PromptData) and ev_rec.data.token_ids is not None:
+            self.kv_store.update(self.metric_name, len(ev_rec.data.token_ids))
             return None
-        if ev_rec.data.token_ids is not None:
-            self._emitter.emit(row.sample_uuid, "isl", len(ev_rec.data.token_ids))
-            return None
-        if (
-            ev_rec.data.text is not None
-            and self._pool is not None
-            and self._loop is not None
-        ):
-            text = ev_rec.data.text
-            uuid = row.sample_uuid
-            pool, loop, emitter = self._pool, self._loop, self._emitter
+        # Async path: tokenize raw text (OpenAI) — handled by base class
+        return super().fire(ev_rec, row, pre_change)
 
-            async def _compute() -> None:
-                try:
-                    count = await pool.token_count_async(text, loop)
-                    emitter.emit(uuid, "isl", count)
-                except Exception:
-                    logger.exception("ISL tokenization failed for %s", uuid)
-
-            return loop.create_task(_compute())
+    def _extract_text(self, ev_rec, row, pre_change):
+        if isinstance(ev_rec.data, PromptData) and ev_rec.data.text is not None:
+            return ev_rec.data.text
         return None
 
 
-class OslTrigger(EmitTrigger):
+class OslTrigger(AsyncTokenTrigger):
     """OSL = token_count(full output text) from COMPLETE event data."""
 
     def __init__(
-        self,
-        emitter: MetricEmitter,
-        tokenize_pool: TokenizePool | None,
-        loop: asyncio.AbstractEventLoop | None,
+        self, tokenize_pool: TokenizePool | None, loop: asyncio.AbstractEventLoop | None
     ):
-        super().__init__("osl", requires=())
-        self._emitter = emitter
-        self._pool = tokenize_pool
-        self._loop = loop
+        super().__init__("osl", tokenize_pool, loop)
 
-    def fire(self, ev_rec, row, pre_change):
-        if self._pool is None or self._loop is None:
-            return None
-        if not isinstance(ev_rec.data, TextModelOutput):
-            return None
-        output_text = str(ev_rec.data)
-        if not output_text:
-            return None
-
-        uuid = row.sample_uuid
-        pool, loop, emitter = self._pool, self._loop, self._emitter
-
-        async def _compute() -> None:
-            try:
-                osl = await pool.token_count_async(output_text, loop)
-                emitter.emit(uuid, "osl", osl)
-            except Exception:
-                logger.exception("OSL tokenization failed for %s", uuid)
-
-        return loop.create_task(_compute())
+    def _extract_text(self, ev_rec, row, pre_change):
+        if isinstance(ev_rec.data, TextModelOutput):
+            text = str(ev_rec.data)
+            return text if text else None
+        return None
 
 
-class TpotTrigger(EmitTrigger):
+class TpotTrigger(AsyncTokenTrigger):
     """TPOT = (complete_ns - recv_first_ns) / token_count(text_after_first_chunk).
 
-    Only registered when streaming mode is enabled. Computes the TPOT denominator
-    directly from TextModelOutput.text_after_first_chunk() at COMPLETE time,
-    avoiding any dependency on RECV_FIRST tokenization state.
+    Only registered when streaming mode is enabled.
 
     # NOTE(agents): This trigger tokenizes text_after_first_chunk independently
     # from OslTrigger, which tokenizes the full output. This means the output is
@@ -268,42 +273,22 @@ class TpotTrigger(EmitTrigger):
     """
 
     def __init__(
-        self,
-        emitter: MetricEmitter,
-        tokenize_pool: TokenizePool | None,
-        loop: asyncio.AbstractEventLoop | None,
+        self, tokenize_pool: TokenizePool | None, loop: asyncio.AbstractEventLoop | None
     ):
-        super().__init__("tpot_ns", requires=("recv_first_ns",))
-        self._emitter = emitter
-        self._pool = tokenize_pool
-        self._loop = loop
+        super().__init__("tpot_ns", tokenize_pool, loop, requires=("recv_first_ns",))
 
-    def fire(self, ev_rec, row, pre_change):
-        if self._pool is None or self._loop is None:
+    def _extract_text(self, ev_rec, row, pre_change):
+        if pre_change.get("recv_first_ns") is None:
             return None
-        recv_first_ns = pre_change.get("recv_first_ns")
-        if recv_first_ns is None:
-            return None
-        if not isinstance(ev_rec.data, TextModelOutput):
-            return None
-        after_first = ev_rec.data.text_after_first_chunk()
-        if not after_first:
-            return None
+        if isinstance(ev_rec.data, TextModelOutput):
+            return ev_rec.data.text_after_first_chunk() or None
+        return None
 
-        uuid = row.sample_uuid
-        complete_ns = ev_rec.timestamp_ns
-        pool, loop, emitter = self._pool, self._loop, self._emitter
-
-        async def _compute() -> None:
-            try:
-                tokens_after_first = await pool.token_count_async(after_first, loop)
-                if tokens_after_first > 0:
-                    tpot = (complete_ns - recv_first_ns) / tokens_after_first
-                    emitter.emit(uuid, "tpot_ns", tpot)
-            except Exception:
-                logger.exception("TPOT tokenization failed for %s", uuid)
-
-        return loop.create_task(_compute())
+    def _compute_value(self, token_count, ev_rec, pre_change):
+        if token_count <= 0:
+            return None
+        recv_first_ns = pre_change["recv_first_ns"]
+        return (ev_rec.timestamp_ns - recv_first_ns) / token_count
 
 
 # ---------------------------------------------------------------------------
@@ -314,6 +299,10 @@ class TpotTrigger(EmitTrigger):
 class MetricsTable:
     """Stores in-flight sample rows, session state, and dispatches triggers.
 
+    Takes a KVStore for metric storage. When triggers are registered via
+    add_trigger(), the table creates the key in the store and wires the
+    store onto the trigger.
+
     Row lifecycle is managed internally via ``set_field``:
     - ISSUED: creates the row if tracking is on, assigns block index.
     - COMPLETE: fires triggers, sets field, updates tracked block, removes row.
@@ -322,7 +311,8 @@ class MetricsTable:
     Session state is updated via ``handle_session_event``.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, kv_store: KVStore) -> None:
+        self._kv_store = kv_store
         self._in_flight: dict[str, SampleRow] = {}
         self._triggers: dict[str, list[EmitTrigger]] = {}
         self._in_flight_tasks: set[asyncio.Task] = set()
@@ -335,7 +325,13 @@ class MetricsTable:
     # --- Trigger registration ---
 
     def add_trigger(self, field_name: str, trigger: EmitTrigger) -> None:
-        """Register a trigger for a SampleRow field."""
+        """Register a trigger for a SampleRow field.
+
+        Creates the trigger's metric key in the KV store (as a series)
+        and sets the trigger's kv_store reference.
+        """
+        self._kv_store.create_key(trigger.metric_name, "series")
+        trigger.kv_store = self._kv_store
         self._triggers.setdefault(field_name, []).append(trigger)
 
     # --- Session event handling ---

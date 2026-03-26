@@ -23,12 +23,13 @@ from inference_endpoint.async_utils.transport.zmq.pubsub import (
     ZmqEventRecordSubscriber,
 )
 from inference_endpoint.core.record import (
+    ErrorEventType,
     EventRecord,
     SampleEventType,
     SessionEventType,
 )
 
-from .emitter import MetricEmitter
+from .kv_store import KVStore
 from .metrics_table import (
     ChunkDeltaTrigger,
     IslTrigger,
@@ -54,32 +55,41 @@ class MetricsAggregatorService(ZmqEventRecordSubscriber):
     """Subscribes to EventRecords and computes per-sample metrics in real time.
 
     The aggregator is a thin event router. All state management, trigger
-    dispatch, and row lifecycle are handled by MetricsTable.
+    dispatch, and row lifecycle are handled by MetricsTable. The KVStore
+    is shared between the table (for series metrics via triggers) and the
+    aggregator (for counter metrics like n_issued, n_completed, etc.).
     """
 
     def __init__(
         self,
         *args,
-        emitter: MetricEmitter,
+        kv_store: KVStore,
         tokenize_pool: TokenizePool | None = None,
         streaming: bool = False,
         shutdown_event: asyncio.Event | None = None,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
-        self._emitter = emitter
+        self._kv_store = kv_store
         self._shutdown_event = shutdown_event
         self._shutdown_received = False
 
-        self._table = MetricsTable()
-        self._register_triggers(
-            self._table, emitter, tokenize_pool, self.loop, streaming
-        )
+        # Counter keys
+        kv_store.create_key("n_samples_issued", "counter")
+        kv_store.create_key("n_samples_completed", "counter")
+        kv_store.create_key("n_samples_failed", "counter")
+        kv_store.create_key("duration_ns", "counter")
+
+        self._n_issued = 0
+        self._n_completed = 0
+        self._n_failed = 0
+
+        self._table = MetricsTable(kv_store)
+        self._register_triggers(self._table, tokenize_pool, self.loop, streaming)
 
     @staticmethod
     def _register_triggers(
         table: MetricsTable,
-        emitter: MetricEmitter,
         tokenize_pool: TokenizePool | None,
         loop: asyncio.AbstractEventLoop | None,
         streaming: bool,
@@ -90,19 +100,20 @@ class MetricsAggregatorService(ZmqEventRecordSubscriber):
         when ``streaming=True``.
         """
         # Always registered
-        table.add_trigger("issued_ns", IslTrigger(emitter, tokenize_pool, loop))
-        table.add_trigger("complete_ns", SampleLatencyTrigger(emitter))
-        table.add_trigger("complete_ns", OslTrigger(emitter, tokenize_pool, loop))
+        table.add_trigger("issued_ns", IslTrigger(tokenize_pool, loop))
+        table.add_trigger("complete_ns", SampleLatencyTrigger())
+        table.add_trigger("complete_ns", OslTrigger(tokenize_pool, loop))
 
         # Streaming-only
         if streaming:
-            table.add_trigger("recv_first_ns", TtftTrigger(emitter))
-            table.add_trigger("last_recv_ns", ChunkDeltaTrigger(emitter))
-            table.add_trigger("complete_ns", TpotTrigger(emitter, tokenize_pool, loop))
+            table.add_trigger("recv_first_ns", TtftTrigger())
+            table.add_trigger("last_recv_ns", ChunkDeltaTrigger())
+            table.add_trigger("complete_ns", TpotTrigger(tokenize_pool, loop))
 
     async def process(self, records: list[EventRecord]) -> None:
         saw_shutdown = False
         table = self._table
+        store = self._kv_store
 
         for record in records:
             if self._shutdown_received:
@@ -117,6 +128,14 @@ class MetricsAggregatorService(ZmqEventRecordSubscriber):
                     saw_shutdown = True
                 else:
                     table.handle_session_event(record)
+                    if ev == SessionEventType.STOP_PERFORMANCE_TRACKING:
+                        store.update("duration_ns", table.total_tracked_duration_ns)
+                continue
+
+            # --- Error events ---
+            if isinstance(ev, ErrorEventType):
+                self._n_failed += 1
+                store.update("n_samples_failed", self._n_failed)
                 continue
 
             # --- Sample events ---
@@ -132,6 +151,8 @@ class MetricsAggregatorService(ZmqEventRecordSubscriber):
 
             if ev == SampleEventType.ISSUED:
                 table.set_field(uuid, "issued_ns", ts, record)
+                self._n_issued += 1
+                store.update("n_samples_issued", self._n_issued)
             elif ev == SampleEventType.RECV_FIRST:
                 table.set_field(uuid, "recv_first_ns", ts, record)
                 table.set_field(uuid, "last_recv_ns", ts, record)
@@ -139,9 +160,12 @@ class MetricsAggregatorService(ZmqEventRecordSubscriber):
                 table.set_field(uuid, "last_recv_ns", ts, record)
             elif ev == SampleEventType.COMPLETE:
                 table.set_field(uuid, "complete_ns", ts, record)
+                self._n_completed += 1
+                store.update("n_samples_completed", self._n_completed)
 
         if saw_shutdown:
             await table.drain_tasks()
+            store.update("duration_ns", table.total_tracked_duration_ns)
             self._finalize()
 
     def _finalize(self) -> None:
@@ -152,5 +176,5 @@ class MetricsAggregatorService(ZmqEventRecordSubscriber):
             self.loop.stop()
 
     def close(self) -> None:
-        self._emitter.close()
+        self._kv_store.close()
         super().close()

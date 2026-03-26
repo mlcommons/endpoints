@@ -26,6 +26,8 @@ from inference_endpoint.core.record import (
     SessionEventType,
 )
 
+from .conftest import InMemoryKVStore
+
 
 @pytest.mark.unit
 class TestSampleRow:
@@ -64,7 +66,7 @@ class TestTrackedBlock:
 @pytest.mark.unit
 class TestMetricsTable:
     def test_create_and_get_row(self):
-        table = MetricsTable()
+        table = MetricsTable(InMemoryKVStore())
         table.is_tracking = True
         table.tracked_blocks.append(TrackedBlock(start_ns=0, last_complete_ns=0))
         ev = EventRecord(
@@ -75,7 +77,7 @@ class TestMetricsTable:
         assert len(table) == 1
 
     def test_complete_removes_row(self):
-        table = MetricsTable()
+        table = MetricsTable(InMemoryKVStore())
         table.is_tracking = True
         table.tracked_blocks.append(TrackedBlock(start_ns=0, last_complete_ns=0))
         issued = EventRecord(
@@ -90,7 +92,7 @@ class TestMetricsTable:
         assert len(table) == 0
 
     def test_set_field_noop_for_untracked(self):
-        table = MetricsTable()
+        table = MetricsTable(InMemoryKVStore())
         ev = EventRecord(
             event_type=SampleEventType.RECV_FIRST,
             timestamp_ns=200,
@@ -100,7 +102,7 @@ class TestMetricsTable:
         assert table.get_row("unknown") is None
 
     def test_issued_noop_when_not_tracking(self):
-        table = MetricsTable()
+        table = MetricsTable(InMemoryKVStore())
         ev = EventRecord(
             event_type=SampleEventType.ISSUED, timestamp_ns=100, sample_uuid="s1"
         )
@@ -108,7 +110,7 @@ class TestMetricsTable:
         assert table.get_row("s1") is None
 
     def test_duplicate_issued_returns_existing(self):
-        table = MetricsTable()
+        table = MetricsTable(InMemoryKVStore())
         table.is_tracking = True
         table.tracked_blocks.append(TrackedBlock(start_ns=0, last_complete_ns=0))
         ev1 = EventRecord(
@@ -124,7 +126,7 @@ class TestMetricsTable:
         assert len(table) == 1
 
     def test_multiple_rows(self):
-        table = MetricsTable()
+        table = MetricsTable(InMemoryKVStore())
         table.is_tracking = True
         table.tracked_blocks.append(TrackedBlock(start_ns=0, last_complete_ns=0))
         for uuid in ("s1", "s2", "s3"):
@@ -137,13 +139,13 @@ class TestMetricsTable:
         assert len(table) == 3
 
     def test_handle_session_started(self):
-        table = MetricsTable()
+        table = MetricsTable(InMemoryKVStore())
         ev = EventRecord(event_type=SessionEventType.STARTED, timestamp_ns=42)
         table.handle_session_event(ev)
         assert table.session_started_ns == 42
 
     def test_handle_start_stop_tracking(self):
-        table = MetricsTable()
+        table = MetricsTable(InMemoryKVStore())
         assert not table.is_tracking
 
         start = EventRecord(
@@ -161,7 +163,7 @@ class TestMetricsTable:
         assert not table.is_tracking
 
     def test_duplicate_start_is_noop(self):
-        table = MetricsTable()
+        table = MetricsTable(InMemoryKVStore())
         start1 = EventRecord(
             event_type=SessionEventType.START_PERFORMANCE_TRACKING, timestamp_ns=100
         )
@@ -173,7 +175,7 @@ class TestMetricsTable:
         assert len(table.tracked_blocks) == 1
 
     def test_tracked_block_updated_on_complete(self):
-        table = MetricsTable()
+        table = MetricsTable(InMemoryKVStore())
         start = EventRecord(
             event_type=SessionEventType.START_PERFORMANCE_TRACKING, timestamp_ns=0
         )
@@ -193,7 +195,7 @@ class TestMetricsTable:
         assert table.total_completed_tracked_samples == 1
 
     def test_multiple_tracking_windows(self):
-        table = MetricsTable()
+        table = MetricsTable(InMemoryKVStore())
 
         # Block 0
         table.handle_session_event(
