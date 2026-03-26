@@ -62,6 +62,13 @@ class TransportConfig(BaseModel):
     )
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    @classmethod
+    def create_default(cls) -> TransportConfig:
+        """Create the default transport config."""
+        from .zmq import ZMQTransportConfig
+
+        return ZMQTransportConfig()  # type: ignore[return-value]
+
     @property
     def transport_class(self) -> builtins.type[WorkerPoolTransport]:
         """The WorkerPoolTransport implementation for this backend. Override per subclass."""

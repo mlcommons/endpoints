@@ -154,8 +154,7 @@ class TestWorkerLifecycle:
         self, manager_config, signal_type, signal_method
     ):
         """Test workers handle signals correctly and are reaped without leaving zombies."""
-        http_config = manager_config
-        http_config.workers = 1
+        http_config = manager_config.with_updates(workers=1)
         loop = asyncio.get_running_loop()
 
         manager = WorkerManager(http_config, loop)
@@ -201,8 +200,7 @@ class TestWorkerLifecycle:
     @pytest.mark.asyncio
     async def test_multiple_workers_with_mixed_signals(self, manager_config):
         """Test shutdown handles multiple workers killed with different signals simultaneously."""
-        http_config = manager_config
-        http_config.workers = 3
+        http_config = manager_config.with_updates(workers=3)
         loop = asyncio.get_running_loop()
 
         manager = WorkerManager(http_config, loop)

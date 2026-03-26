@@ -29,6 +29,7 @@ from typing import Annotated, Literal
 import cyclopts
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from inference_endpoint.async_utils.transport import AnyTransportConfig
 from inference_endpoint.async_utils.transport.protocol import TransportConfig
 from inference_endpoint.core.types import APIType
 from inference_endpoint.utils import WithUpdatesMixin
@@ -93,9 +94,10 @@ class HTTPClientConfig(WithUpdatesMixin, BaseModel):
         ),
     ] = -1
 
-    # Transport-specific configuration.
-    # When adding new transports, convert to discriminated union on ``type``.
-    transport: TransportConfig | None = None
+    # Transport configuration
+    transport: AnyTransportConfig = Field(
+        default_factory=TransportConfig.create_default
+    )
 
     # WARNING: Use with caution
     # Can cause large performance overhead on main-thread (user / Loadgen)
@@ -202,13 +204,6 @@ class HTTPClientConfig(WithUpdatesMixin, BaseModel):
             module_path, class_name = accumulator_path.rsplit(".", 1)
             module = import_module(module_path)
             object.__setattr__(self, "accumulator", getattr(module, class_name))
-
-        if self.transport is None:
-            from inference_endpoint.async_utils.transport.zmq import (
-                ZMQTransportConfig,
-            )
-
-            object.__setattr__(self, "transport", ZMQTransportConfig())
 
         # Only resolve ports when endpoint_urls are set (runtime config, not settings default)
         if self.endpoint_urls:
