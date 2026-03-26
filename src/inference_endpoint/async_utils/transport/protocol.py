@@ -29,7 +29,7 @@ from contextlib import asynccontextmanager
 from typing import Any, Protocol, runtime_checkable
 
 import msgspec
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from inference_endpoint.core.record import (
     ErrorEventType,
@@ -60,7 +60,7 @@ class TransportConfig(BaseModel):
         ge=1,
         description="IPC send buffer size in bytes (default 4MB). Increase for multimodal payloads.",
     )
-    model_config = {"extra": "forbid"}
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     @property
     def transport_class(self) -> builtins.type[WorkerPoolTransport]:

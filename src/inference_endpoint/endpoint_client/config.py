@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Annotated, Literal
 
 import cyclopts
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from inference_endpoint.async_utils.transport.protocol import TransportConfig
 from inference_endpoint.core.types import APIType
@@ -56,7 +56,7 @@ class HTTPClientConfig(WithUpdatesMixin, BaseModel):
     Internal fields use ``parse=False`` — set programmatically only.
     """
 
-    model_config = {"extra": "forbid"}
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     # =========================================================================
     # User-facing fields (exposed to CLI/YAML)
@@ -182,10 +182,10 @@ class HTTPClientConfig(WithUpdatesMixin, BaseModel):
     def _resolve_defaults(self) -> HTTPClientConfig:
         """Resolve auto-detect values and lazy defaults."""
         if isinstance(self.api_type, str):
-            self.api_type = APIType(self.api_type)
+            object.__setattr__(self, "api_type", APIType(self.api_type))
 
         if self.workers == -1:
-            self.workers = _get_auto_num_workers()
+            object.__setattr__(self, "workers", _get_auto_num_workers())
 
         if self.adapter is None:
             adapter_path = ADAPTER_MAP.get(self.api_type)
@@ -193,7 +193,7 @@ class HTTPClientConfig(WithUpdatesMixin, BaseModel):
                 raise ValueError(f"Invalid or unsupported API type: {self.api_type}")
             module_path, class_name = adapter_path.rsplit(".", 1)
             module = import_module(module_path)
-            self.adapter = getattr(module, class_name)
+            object.__setattr__(self, "adapter", getattr(module, class_name))
 
         if self.accumulator is None:
             accumulator_path = ACCUMULATOR_MAP.get(
@@ -201,14 +201,14 @@ class HTTPClientConfig(WithUpdatesMixin, BaseModel):
             )
             module_path, class_name = accumulator_path.rsplit(".", 1)
             module = import_module(module_path)
-            self.accumulator = getattr(module, class_name)
+            object.__setattr__(self, "accumulator", getattr(module, class_name))
 
         if self.transport is None:
             from inference_endpoint.async_utils.transport.zmq import (
                 ZMQTransportConfig,
             )
 
-            self.transport = ZMQTransportConfig()
+            object.__setattr__(self, "transport", ZMQTransportConfig())
 
         # Only resolve ports when endpoint_urls are set (runtime config, not settings default)
         if self.endpoint_urls:
@@ -217,7 +217,7 @@ class HTTPClientConfig(WithUpdatesMixin, BaseModel):
             available_ports = get_ephemeral_port_limit()
 
             if self.max_connections == -1:
-                self.max_connections = available_ports
+                object.__setattr__(self, "max_connections", available_ports)
             elif self.max_connections > 0:
                 if self.max_connections > available_ports:
                     raise RuntimeError(
@@ -226,7 +226,9 @@ class HTTPClientConfig(WithUpdatesMixin, BaseModel):
                     )
 
             if self.min_required_connections == -1:
-                self.min_required_connections = int(system_maximum_ports * 0.125)
+                object.__setattr__(
+                    self, "min_required_connections", int(system_maximum_ports * 0.125)
+                )
 
         return self
 

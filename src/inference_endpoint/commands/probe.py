@@ -24,7 +24,7 @@ from typing import Annotated
 from urllib.parse import urljoin
 
 import cyclopts
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from inference_endpoint.async_utils.runner import run_async
 from inference_endpoint.config.schema import APIType
@@ -44,13 +44,15 @@ logger = logging.getLogger(__name__)
 class ProbeConfig(BaseModel):
     """Probe command config."""
 
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+
     endpoints: str
     model: str
     api_type: Annotated[
         APIType,
         cyclopts.Parameter(alias="--api-type", help="API type: openai or sglang"),
     ] = APIType.OPENAI
-    requests: int = 10
+    requests: int = Field(10, ge=1)
     prompt: str = Field(
         "Please write me a joke in 30 words.", description="Test prompt"
     )
