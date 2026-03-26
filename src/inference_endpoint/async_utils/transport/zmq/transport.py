@@ -93,7 +93,12 @@ class ZMQTransportConfig(TransportConfig):
     # ZMQ background I/O thread pool size (C++ threads).
     # Each requires a separate physical core for peak performance.
     # Tested io_threads=4 for up to 100 workers on 224-core x86.
-    io_threads: int = Field(default=4, ge=1, description="ZMQ I/O thread pool size")
+    io_threads: int = Field(
+        default=4, ge=1, description="ZMQ I/O thread pool size (main process)"
+    )
+    worker_io_threads: int = Field(
+        default=1, ge=1, description="ZMQ I/O thread pool size (worker processes)"
+    )
     high_water_mark: int = Field(default=0, ge=0, description="ZMQ HWM (0=unlimited)")
     linger: int = Field(
         default=-1, description="ZMQ linger on close (-1=block until sent)"
@@ -531,7 +536,7 @@ class _ZmqWorkerConnector(WorkerConnector):
         """
         with ManagedZMQContext.scoped(
             socket_dir=self.socket_dir,
-            io_threads=self.config.io_threads,
+            io_threads=self.config.worker_io_threads,
         ) as zmq_context:
             loop = asyncio.get_running_loop()
             request_path = self.request_paths[worker_id]
