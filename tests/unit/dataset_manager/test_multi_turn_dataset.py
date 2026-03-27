@@ -515,7 +515,111 @@ def test_multi_turn_dataset_additional_fields():
         if "max_new_tokens" in sample:
             assert sample["max_new_tokens"] == 256
         if "temperature" in sample:
-            assert sample["temperature"] == 0.7
+            assert sample["temperature"] == pytest.approx(0.7)
 
+    finally:
+        Path(temp_path).unlink()
+
+
+@pytest.mark.unit
+def test_multi_turn_dataset_openai_field_forwarding():
+    """Test that OpenAI-specific fields are preserved and forwarded."""
+    data = [
+        {
+            "conversation_id": "c1",
+            "turn": 1,
+            "role": "user",
+            "content": "Hello",
+            # OpenAI fields that should be forwarded
+            "n": 3,
+            "name": "Alice",
+            "user": "user_12345",
+            "logit_bias": {"50256": -100},
+            "chat_template": "custom_template",
+        },
+        {"conversation_id": "c1", "turn": 2, "role": "assistant", "content": "Hi"},
+    ]
+
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".jsonl", delete=False
+    ) as f:
+        for item in data:
+            f.write(json.dumps(item) + "\n")
+        temp_path = f.name
+
+    try:
+        dataset = MultiTurnDataset.load_from_file(
+            temp_path, format=DatasetFormat.JSONL
+        )
+        dataset.load()
+
+        sample = dataset.load_sample(0)
+
+        # Verify OpenAI fields are present
+        assert sample.get("n") == 3
+        assert sample.get("name") == "Alice"
+        assert sample.get("user") == "user_12345"
+        assert sample.get("logit_bias") == {"50256": -100}
+        assert sample.get("chat_template") == "custom_template"
+    finally:
+        Path(temp_path).unlink()
+
+
+@pytest.mark.unit
+def test_multi_turn_dataset_all_generation_params():
+    """Test that all generation parameters in GENERATION_PARAMS are forwarded."""
+    from inference_endpoint.dataset_manager.multi_turn_dataset import GENERATION_PARAMS
+
+    # Create dataset with all possible generation params
+    data = [
+        {
+            "conversation_id": "c1",
+            "turn": 1,
+            "role": "user",
+            "content": "Test",
+            # Include all params from GENERATION_PARAMS
+            "model": "test-model",
+            "max_new_tokens": 100,
+            "max_completion_tokens": 100,
+            "stream": True,
+            "temperature": 0.8,
+            "top_p": 0.95,
+            "top_k": 50,
+            "seed": 42,
+            "repetition_penalty": 1.1,
+            "frequency_penalty": 0.5,
+            "presence_penalty": 0.3,
+            "stop": ["END"],
+            "n": 2,
+            "logit_bias": {"100": 10},
+            "name": "TestEntity",
+            "user": "test_user_001",
+            "chat_template": "test_template",
+        },
+        {"conversation_id": "c1", "turn": 2, "role": "assistant", "content": "Response"},
+    ]
+
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".jsonl", delete=False
+    ) as f:
+        for item in data:
+            f.write(json.dumps(item) + "\n")
+        temp_path = f.name
+
+    try:
+        dataset = MultiTurnDataset.load_from_file(
+            temp_path, format=DatasetFormat.JSONL
+        )
+        dataset.load()
+
+        sample = dataset.load_sample(0)
+
+        # Verify all GENERATION_PARAMS fields are forwarded
+        # (excluding conversational fields like conversation_id, turn, role, content, system)
+        for param in GENERATION_PARAMS:
+            if param in data[0]:
+                assert (
+                    param in sample
+                ), f"Generation parameter '{param}' not forwarded to sample"
     finally:
         Path(temp_path).unlink()

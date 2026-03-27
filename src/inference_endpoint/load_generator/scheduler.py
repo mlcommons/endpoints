@@ -632,8 +632,19 @@ class MultiTurnScheduler(Scheduler, load_pattern=LoadPatternType.MULTI_TURN):
             conv_id = sample_meta["conversation_id"]
             conv_samples[conv_id].append((sample_index, sample_meta["turn"]))
 
+        # Preserve dataset conversation order (not lexicographic sort)
+        # Extract conversation order from metadata which maintains insertion order
+        from collections import OrderedDict
+
+        conv_order = list(
+            OrderedDict.fromkeys(
+                sample_meta["conversation_id"]
+                for sample_meta in self.dataset_metadata["samples"]
+            )
+        )
+
         previous_conv_id = None
-        for conv_id in sorted(conv_samples.keys()):
+        for conv_id in conv_order:
             turns = sorted(conv_samples[conv_id], key=lambda x: x[1])
             for i, (idx, _turn) in enumerate(turns):
                 if i == 0:

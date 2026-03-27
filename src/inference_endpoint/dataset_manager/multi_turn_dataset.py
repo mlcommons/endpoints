@@ -23,19 +23,34 @@ from ..config.schema import APIType, ModelParams
 from .dataset import Dataset
 
 # Known generation parameter fields to forward from dataset to API requests
+# Known generation parameter fields to forward from dataset to API requests.
+# Aligned with OpenAI API specification and openai_msgspec_adapter.py implementation.
+# These parameters work in both single-turn and multi-turn modes.
 GENERATION_PARAMS = {
+    # Model selection
     "model",
-    "max_new_tokens",
-    "max_completion_tokens",
+    # Token/length limits
+    "max_new_tokens",  # Internal parameter
+    "max_completion_tokens",  # OpenAI standard
+    # Streaming configuration
     "stream",
+    # Sampling parameters
     "temperature",
     "top_p",
     "top_k",
-    "repetition_penalty",
-    "frequency_penalty",
-    "presence_penalty",
-    "stop",
     "seed",
+    # Repetition/diversity control
+    "repetition_penalty",  # Internal parameter
+    "frequency_penalty",  # OpenAI standard
+    "presence_penalty",  # OpenAI standard
+    # Output control
+    "stop",  # Stop sequences
+    "n",  # Number of completions to generate
+    # Advanced OpenAI features
+    "logit_bias",  # Token probability adjustments
+    "name",  # Entity name for role (NOT model name, e.g., 'Bob' for tracking)
+    "user",  # End-user identifier for monitoring/abuse detection
+    "chat_template",  # Custom chat formatting template
 }
 
 
@@ -83,6 +98,7 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
         """
         super().__init__(dataframe, **kwargs)
         self._validate_conversation_structure()
+        self._validate_turn_numbering()
         self.conversation_metadata = self._build_metadata()
         self._user_turn_indices: list[int] | None = None
 
@@ -103,6 +119,44 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
                     raise ValueError(
                         f"Conversation {conv_id} has invalid role sequence at position {i}: "
                         f"expected {expected_role}, got {roles[i]}"
+                    )
+
+    def _validate_turn_numbering(self):
+        """Validate turn numbers are contiguous starting from 1.
+
+        Ensures that:
+        - User turns start at turn 1
+        - Turn numbers are sequential with no gaps (1, 2, 3, ...)
+        - Runtime assumptions about turn sequencing are met
+
+        Raises:
+            ValueError: If turn numbering is non-contiguous or doesn't start at 1.
+        """
+        assert self.dataframe is not None, "Dataframe must be initialized"
+
+        for conv_id, group in self.dataframe.groupby("conversation_id"):
+            sorted_group = group.sort_values("turn")
+            turns = sorted_group["turn"].tolist()
+            roles = sorted_group["role"].tolist()
+
+            # Extract user turns for start validation
+            user_turns = [turn for turn, role in zip(turns, roles) if role == "user"]
+            if user_turns and user_turns[0] != 1:
+                raise ValueError(
+                    f"Conversation {conv_id}: First user turn must be turn 1, got {user_turns[0]}. "
+                    f"Multi-turn conversations must start with user turn 1."
+                )
+
+            # Validate contiguous numbering across all turns
+            for i, (expected_turn, actual_turn) in enumerate(
+                zip(range(1, len(turns) + 1), turns), start=1
+            ):
+                if actual_turn != expected_turn:
+                    raise ValueError(
+                        f"Conversation {conv_id}: Non-contiguous turn numbering detected. "
+                        f"Expected turn {expected_turn} at position {i}, found turn {actual_turn}. "
+                        f"Turn sequence: {turns}. "
+                        f"Turns must be sequential with no gaps (1, 2, 3, 4, ...)."
                     )
 
     def _build_metadata(self) -> dict[str, Any]:

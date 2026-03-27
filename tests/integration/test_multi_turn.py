@@ -32,8 +32,8 @@ import time
 from collections import defaultdict
 from collections.abc import Generator
 from pathlib import Path
-from urllib.request import urlopen
 from urllib.error import URLError
+from urllib.request import urlopen
 
 import pytest
 from inference_endpoint import metrics
@@ -48,6 +48,7 @@ from inference_endpoint.config.schema import (
 from inference_endpoint.core.types import QueryResult
 from inference_endpoint.dataset_manager.dataset import DatasetFormat
 from inference_endpoint.dataset_manager.multi_turn_dataset import MultiTurnDataset
+from inference_endpoint.dataset_manager.transforms import AddStaticColumns
 from inference_endpoint.endpoint_client.config import HTTPClientConfig
 from inference_endpoint.endpoint_client.http_client import HTTPEndpointClient
 from inference_endpoint.endpoint_client.http_sample_issuer import HttpClientSampleIssuer
@@ -57,7 +58,6 @@ from inference_endpoint.load_generator import (
     SampleEventHandler,
     WithoutReplacementSampleOrder,
 )
-from inference_endpoint.dataset_manager.transforms import AddStaticColumns
 from inference_endpoint.load_generator.conversation_manager import ConversationManager
 from inference_endpoint.load_generator.scheduler import MultiTurnScheduler
 
@@ -73,7 +73,7 @@ def endpoint_url() -> str:
 
 
 @pytest.fixture
-def multi_turn_model_name(endpoint_url) -> str:
+def multi_turn_model_name(endpoint_url: str) -> str:
     """Query model name from the endpoint instead of hardcoding."""
     try:
         with urlopen(f"{endpoint_url}/v1/models", timeout=5.0) as response:
@@ -87,6 +87,7 @@ def multi_turn_model_name(endpoint_url) -> str:
         raise ValueError(f"Unexpected /v1/models response format: {models_data}")
     except (URLError, ValueError, KeyError) as e:
         pytest.skip(f"Could not query model name from endpoint {endpoint_url}: {e}")
+        return ""  # Unreachable but satisfies mypy
 
 
 @pytest.fixture
@@ -169,7 +170,9 @@ class MultiTurnSampleIssuer(HttpClientSampleIssuer):
         ),  # Complete conv1 then conv2
     ],
 )
-def test_basic_end_to_end(small_dataset, endpoint_url, mode, expected_completions, multi_turn_model_name):
+def test_basic_end_to_end(
+    small_dataset, endpoint_url, mode, expected_completions, multi_turn_model_name
+):
     """Test basic end-to-end multi-turn benchmarking with different modes."""
     dataset = MultiTurnDataset.load_from_file(
         small_dataset,
@@ -261,7 +264,9 @@ def test_basic_end_to_end(small_dataset, endpoint_url, mode, expected_completion
 
 
 @pytest.mark.integration
-def test_message_history_accumulation(small_dataset, endpoint_url, multi_turn_model_name):
+def test_message_history_accumulation(
+    small_dataset, endpoint_url, multi_turn_model_name
+):
     """Test that message history accumulates correctly across turns."""
     dataset = MultiTurnDataset.load_from_file(
         small_dataset,
@@ -349,7 +354,9 @@ def test_message_history_accumulation(small_dataset, endpoint_url, multi_turn_mo
         pytest.param(128, id="concurrency_128_high"),
     ],
 )
-def test_concurrency_control(small_dataset, endpoint_url, target_concurrency, multi_turn_model_name):
+def test_concurrency_control(
+    small_dataset, endpoint_url, target_concurrency, multi_turn_model_name
+):
     """Test multi-turn benchmarking with varying concurrency levels."""
     dataset = MultiTurnDataset.load_from_file(
         small_dataset,
@@ -480,7 +487,7 @@ def test_large_scale(
                     if turn_idx == 0
                     else None,
                     "max_new_tokens": 16 if num_conversations > 100 else 32,
-                        }
+                }
             )
 
             # Assistant placeholder
