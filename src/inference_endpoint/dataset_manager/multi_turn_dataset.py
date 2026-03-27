@@ -76,6 +76,7 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
         Raises:
             ValueError: If any conversation has invalid role sequence.
         """
+        assert self.dataframe is not None, "Dataframe must be initialized"
         for conv_id, group in self.dataframe.groupby("conversation_id"):
             roles = group.sort_values("turn")["role"].tolist()
 
@@ -94,6 +95,7 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
         Returns:
             Metadata dict with samples list, num_conversations, and max_turns_per_conv.
         """
+        assert self.dataframe is not None, "Dataframe must be initialized"
         samples = []
         user_turns = self.dataframe[self.dataframe["role"] == "user"]
 

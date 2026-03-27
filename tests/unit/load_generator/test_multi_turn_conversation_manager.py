@@ -241,7 +241,7 @@ def test_conversation_manager_wait_for_turn_ready_blocking():
     - Turn 3: next user turn (ready after turn 2)
     """
     manager = ConversationManager()
-    state = manager.get_or_create("conv_001", None)
+    _state = manager.get_or_create("conv_001", None)
 
     # Issue turn 1 (makes it pending, blocks turn 3)
     manager.mark_turn_issued("conv_001", 1, "User message")
@@ -412,8 +412,8 @@ def test_conversation_manager_wait_for_turn_ready_reliably_wakes_on_completion()
         start = time.time()
         ready = []
 
-        def waiter():
-            ready.append(manager.wait_for_turn_ready("conv_001", 3, timeout=0.5))
+        def waiter(ready_list=ready, mgr=manager):
+            ready_list.append(mgr.wait_for_turn_ready("conv_001", 3, timeout=0.5))
 
         wait_thread = threading.Thread(target=waiter, daemon=True)
         wait_thread.start()

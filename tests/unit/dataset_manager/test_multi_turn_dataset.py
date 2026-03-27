@@ -15,6 +15,7 @@
 
 import json
 import tempfile
+from collections.abc import Generator
 from pathlib import Path
 
 import pytest
@@ -23,7 +24,7 @@ from inference_endpoint.dataset_manager.multi_turn_dataset import MultiTurnDatas
 
 
 @pytest.fixture
-def valid_multi_turn_jsonl() -> str:
+def valid_multi_turn_jsonl() -> Generator[str, None, None]:
     """Create valid multi-turn conversation JSONL data."""
     data = [
         {
@@ -69,7 +70,7 @@ def valid_multi_turn_jsonl() -> str:
 
 
 @pytest.fixture
-def invalid_role_sequence_jsonl() -> str:
+def invalid_role_sequence_jsonl() -> Generator[str, None, None]:
     """Create JSONL with invalid role sequence (not alternating)."""
     data = [
         {"conversation_id": "conv_001", "turn": 1, "role": "user", "content": "Hello"},
@@ -97,7 +98,7 @@ def invalid_role_sequence_jsonl() -> str:
 
 
 @pytest.fixture
-def missing_fields_jsonl() -> str:
+def missing_fields_jsonl() -> Generator[str, None, None]:
     """Create JSONL with missing required fields."""
     data = [
         {"conversation_id": "conv_001", "turn": 1, "role": "user"},  # Missing content
@@ -219,7 +220,7 @@ def test_multi_turn_dataset_validation_invalid_role_sequence(
     """Test validation rejects invalid role sequences."""
     # Validation happens during load_from_file (in __init__), not during load()
     with pytest.raises(ValueError, match="invalid role sequence"):
-        dataset = MultiTurnDataset.load_from_file(
+        _dataset = MultiTurnDataset.load_from_file(
             invalid_role_sequence_jsonl, format=DatasetFormat.JSONL
         )
 
@@ -236,7 +237,7 @@ def test_multi_turn_dataset_validation_missing_fields(missing_fields_jsonl):
     # Load may succeed but sample loading should fail
     dataset.load()
     # Check that content is None or raises error
-    sample = dataset.load_sample(0)
+    _sample = dataset.load_sample(0)
     # Implementation may vary - just ensure it doesn't crash
 
 
@@ -443,7 +444,7 @@ def test_multi_turn_dataset_validation_assistant_first():
     try:
         # Validation happens during load_from_file (in __init__)
         with pytest.raises(ValueError, match="invalid role sequence"):
-            dataset = MultiTurnDataset.load_from_file(
+            _dataset = MultiTurnDataset.load_from_file(
                 temp_path, format=DatasetFormat.JSONL
             )
 
@@ -473,7 +474,7 @@ def test_multi_turn_dataset_validation_consecutive_assistants():
     try:
         # Validation happens during load_from_file (in __init__)
         with pytest.raises(ValueError, match="invalid role sequence"):
-            dataset = MultiTurnDataset.load_from_file(
+            _dataset = MultiTurnDataset.load_from_file(
                 temp_path, format=DatasetFormat.JSONL
             )
 

@@ -18,6 +18,7 @@
 import json
 import random
 import tempfile
+from collections.abc import Generator
 from pathlib import Path
 
 import pytest
@@ -47,7 +48,7 @@ from inference_endpoint.load_generator.scheduler import MultiTurnScheduler
 
 
 @pytest.fixture
-def multi_turn_test_dataset() -> str:
+def multi_turn_test_dataset() -> Generator[str, None, None]:
     """Create multi-turn conversation dataset for testing."""
     conversations = [
         # Conversation 1: 3 user turns

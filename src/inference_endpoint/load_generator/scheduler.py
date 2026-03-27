@@ -576,12 +576,12 @@ class MultiTurnScheduler(Scheduler, load_pattern=LoadPatternType.MULTI_TURN):
             conv_samples[conv_id].append((sample_index, sample_meta["turn"]))
 
         # Emit all turn-1 samples immediately
-        for conv_id, turns in conv_samples.items():
+        for turns in conv_samples.values():
             first_turn_idx = next(idx for idx, turn in turns if turn == 1)
             yield first_turn_idx, 0
 
         # Subsequent turns: yield with blocking sentinel
-        for conv_id, turns in conv_samples.items():
+        for turns in conv_samples.values():
             for idx, turn in sorted(turns, key=lambda x: x[1]):
                 if turn > 1:
                     yield idx, BLOCK_ON_PREVIOUS_TURN
@@ -599,7 +599,7 @@ class MultiTurnScheduler(Scheduler, load_pattern=LoadPatternType.MULTI_TURN):
 
         for conv_id in sorted(conv_samples.keys()):
             turns = sorted(conv_samples[conv_id], key=lambda x: x[1])
-            for i, (idx, turn) in enumerate(turns):
+            for i, (idx, _turn) in enumerate(turns):
                 if i == 0:
                     yield idx, 0  # First turn of conversation
                 else:

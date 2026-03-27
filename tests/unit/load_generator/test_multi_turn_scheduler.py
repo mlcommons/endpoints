@@ -346,7 +346,7 @@ def test_multi_turn_scheduler_with_concurrency_control(
         """Issues samples through scheduler."""
         nonlocal issued_count, max_inflight
         position = 0
-        for s_idx, delay in scheduler:
+        for _s_idx, _delay in scheduler:
             with issued_lock:
                 issued_count += 1
                 current_inflight = scheduler._inflight
@@ -406,7 +406,7 @@ def test_multi_turn_scheduler_hook_based_release(
     assert SampleEventHandler.complete_hooks[0] == scheduler._release_slot
 
     # Manually invoke hook
-    initial_inflight = 0
+    _initial_inflight = 0
     scheduler._inflight = 1
     scheduler._release_slot()
 

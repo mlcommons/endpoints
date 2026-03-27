@@ -321,6 +321,7 @@ class SchedulerBasedLoadGenerator(LoadGenerator):
         sample_data_raw = self.load_sample_data(s_idx, sample_uuid="placeholder")
 
         # Check if multi-turn (requires dict-like data with conversation_id)
+        sample: Sample
         if (
             isinstance(sample_data_raw, dict)
             and "conversation_id" in sample_data_raw
