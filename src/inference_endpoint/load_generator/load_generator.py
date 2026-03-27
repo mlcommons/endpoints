@@ -165,7 +165,9 @@ class LoadGenerator(ABC):
         self.uuid_to_index_map = {}
         return self
 
-    def load_sample_data(self, sample_index: int, sample_uuid: str = "placeholder") -> Any:
+    def load_sample_data(
+        self, sample_index: int, sample_uuid: str = "placeholder"
+    ) -> Any:
         """Load sample data from dataloader and record event.
 
         Helper method that loads sample data and records the data load event

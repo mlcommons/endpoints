@@ -46,7 +46,10 @@ def test_conversation_state_add_user_turn():
 
     assert state.pending_user_turn == 1
     assert len(state.message_history) == 1
-    assert state.message_history[0] == {"role": "user", "content": "Hello, how are you?"}
+    assert state.message_history[0] == {
+        "role": "user",
+        "content": "Hello, how are you?",
+    }
     assert state.current_turn == 0  # Not incremented until assistant response
 
 

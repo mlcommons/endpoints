@@ -15,7 +15,7 @@ datasets:
     samples: 10
     multi_turn:
       enabled: true
-      mode: parallel        # All conv turn-1 start together
+      mode: parallel # All conv turn-1 start together
       turn_timeout_s: 300.0
 
 settings:
@@ -25,10 +25,10 @@ settings:
 
   load_pattern:
     type: multi_turn
-    target_concurrency: 32  # ← NEW: Limit to 32 concurrent requests
+    target_concurrency: 32 # ← NEW: Limit to 32 concurrent requests
 
   client:
-    workers: 8  # Workers handle requests, concurrency limit controls in-flight
+    workers: 8 # Workers handle requests, concurrency limit controls in-flight
 
 metrics:
   collect:

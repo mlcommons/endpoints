@@ -64,20 +64,23 @@ The multi-turn scheduler supports **optional concurrency limiting** to control t
 settings:
   load_pattern:
     type: multi_turn
-    target_concurrency: 32  # ← Limit to 32 concurrent requests
+    target_concurrency: 32 # ← Limit to 32 concurrent requests
 ```
 
 **Behavior**:
+
 - Without `target_concurrency`: Unlimited concurrency (all turn-1s issue at t=0 in PARALLEL mode)
 - With `target_concurrency`: Limits total in-flight requests across all conversations
 - Combines with turn sequencing: Turn N+1 still waits for turn N, AND waits for available slot
 
 **Use cases**:
+
 - 🎯 **Prevent endpoint overload**: Control request rate to busy endpoints
 - 🎯 **Large-scale testing**: Benchmark 1000+ conversations without overwhelming system
 - 🎯 **Resource management**: Stay within port limits, memory constraints
 
 **Example**: 100 conversations with `target_concurrency: 32`
+
 ```
 t=0:   Issue first 32 turn-1s (concurrency limit reached)
 t=0.5: Turn-1 completes → issue next turn-1 (slot filled)
@@ -88,6 +91,7 @@ t=1.0: Turn-1 completes → issue turn-2 of completed conv (slot filled)
 ### Conversation Modes
 
 #### Parallel Mode (Default)
+
 Issues turn-1 of all conversations simultaneously (or up to concurrency limit), then sequences turns within each conversation.
 
 ```yaml
@@ -105,6 +109,7 @@ settings:
 **Use case**: Maximum throughput testing with multiple concurrent conversations
 
 #### Sequential Mode
+
 Completes conversation 1, then conversation 2, etc.
 
 ```yaml
@@ -116,6 +121,7 @@ multi_turn:
 **Use case**: Controlled testing with one conversation at a time
 
 #### Poisson Mode
+
 Starts conversations with Poisson arrival, sequences turns within each conversation.
 
 ```yaml
@@ -134,7 +140,7 @@ Configure maximum wait time for previous turn completion:
 ```yaml
 multi_turn:
   enabled: true
-  turn_timeout_s: 300.0  # 5 minutes
+  turn_timeout_s: 300.0 # 5 minutes
 ```
 
 If a turn times out waiting for the previous turn, it will be skipped and logged as a warning.
@@ -162,6 +168,7 @@ Results are stored in the configured `report_dir` with conversation metadata inc
 ### customer_support_conversations.jsonl
 
 Simple customer support conversations demonstrating basic multi-turn interactions:
+
 - 3 conversations
 - 2-4 turns per conversation
 - Customer support agent system prompt
@@ -178,6 +185,7 @@ Simple customer support conversations demonstrating basic multi-turn interaction
 ### Turn Sequencing
 
 The system ensures that:
+
 1. Turn N+1 cannot be issued until turn N completes
 2. Message history is included in subsequent requests
 3. Concurrent conversations are supported (in parallel mode)
@@ -185,6 +193,7 @@ The system ensures that:
 ### Memory Considerations
 
 Each conversation maintains message history in memory. For large-scale benchmarks with long conversations:
+
 - Memory usage: ~1KB per turn (approximate)
 - 1000 conversations × 10 turns = ~10MB
 
@@ -195,6 +204,7 @@ Each conversation maintains message history in memory. For large-scale benchmark
 **Cause**: Conversation doesn't alternate between user and assistant roles.
 
 **Fix**: Ensure dataset follows the alternating pattern:
+
 ```
 user -> assistant -> user -> assistant -> ...
 ```
@@ -204,6 +214,7 @@ user -> assistant -> user -> assistant -> ...
 **Cause**: Previous turn took longer than `turn_timeout_s` to complete.
 
 **Fixes**:
+
 - Increase `turn_timeout_s` in configuration
 - Check endpoint performance
 - Verify endpoint is responding
@@ -215,6 +226,7 @@ Multi-turn logic is only activated when `multi_turn.enabled: true` in the datase
 ## Future Enhancements
 
 Planned features:
+
 - [ ] Poisson conversation arrival mode implementation
 - [ ] Per-conversation metrics in reporting
 - [ ] Conversation-level latency percentiles

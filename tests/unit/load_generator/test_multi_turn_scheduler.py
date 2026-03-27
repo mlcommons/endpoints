@@ -256,7 +256,10 @@ def test_multi_turn_scheduler_poisson_mode_fallback(
 
 @pytest.mark.unit
 def test_multi_turn_scheduler_turn_blocking(
-    multi_turn_runtime_settings, multi_turn_dataset_metadata, clean_sample_event_hooks
+    multi_turn_runtime_settings,
+    multi_turn_dataset_metadata,
+    multi_turn_config_parallel,
+    clean_sample_event_hooks,
 ):
     """Test turn blocking mechanism with actual conversation manager."""
     conversation_manager = ConversationManager()
@@ -314,6 +317,7 @@ def test_multi_turn_scheduler_turn_blocking(
 def test_multi_turn_scheduler_with_concurrency_control(
     multi_turn_runtime_settings_with_concurrency,
     multi_turn_dataset_metadata,
+    multi_turn_config_parallel,
     clean_sample_event_hooks,
 ):
     """Test hybrid scheduler: turn blocking + concurrency control."""
@@ -384,6 +388,7 @@ def test_multi_turn_scheduler_with_concurrency_control(
 def test_multi_turn_scheduler_hook_based_release(
     multi_turn_runtime_settings_with_concurrency,
     multi_turn_dataset_metadata,
+    multi_turn_config_parallel,
     clean_sample_event_hooks,
 ):
     """Test that completion hook releases concurrency slots."""
@@ -410,7 +415,10 @@ def test_multi_turn_scheduler_hook_based_release(
 
 @pytest.mark.unit
 def test_multi_turn_scheduler_timeout_handling(
-    random_seed, multi_turn_dataset_metadata, clean_sample_event_hooks
+    random_seed,
+    multi_turn_dataset_metadata,
+    multi_turn_config_parallel,
+    clean_sample_event_hooks,
 ):
     """Test turn timeout handling when previous turn never completes."""
     runtime_settings = RuntimeSettings(
@@ -484,7 +492,10 @@ def test_multi_turn_scheduler_timeout_handling(
 
 @pytest.mark.unit
 def test_multi_turn_scheduler_no_concurrency_control(
-    multi_turn_runtime_settings, multi_turn_dataset_metadata, clean_sample_event_hooks
+    multi_turn_runtime_settings,
+    multi_turn_dataset_metadata,
+    multi_turn_config_parallel,
+    clean_sample_event_hooks,
 ):
     """Test scheduler without concurrency control (unlimited)."""
     conversation_manager = ConversationManager()
@@ -507,7 +518,10 @@ def test_multi_turn_scheduler_no_concurrency_control(
 
 @pytest.mark.unit
 def test_multi_turn_scheduler_complete_conversation_flow(
-    multi_turn_runtime_settings, multi_turn_dataset_metadata, clean_sample_event_hooks
+    multi_turn_runtime_settings,
+    multi_turn_dataset_metadata,
+    multi_turn_config_parallel,
+    clean_sample_event_hooks,
 ):
     """Test complete flow of one conversation from turn-1 to turn-3."""
     conversation_manager = ConversationManager()

@@ -59,9 +59,7 @@ def valid_multi_turn_jsonl() -> str:
         },
     ]
 
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".jsonl", delete=False
-    ) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
         for item in data:
             f.write(json.dumps(item) + "\n")
         temp_path = f.name
@@ -89,9 +87,7 @@ def invalid_role_sequence_jsonl() -> str:
         },
     ]
 
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".jsonl", delete=False
-    ) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
         for item in data:
             f.write(json.dumps(item) + "\n")
         temp_path = f.name
@@ -113,9 +109,7 @@ def missing_fields_jsonl() -> str:
         },
     ]
 
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".jsonl", delete=False
-    ) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
         for item in data:
             f.write(json.dumps(item) + "\n")
         temp_path = f.name
@@ -264,9 +258,7 @@ def test_multi_turn_dataset_multiple_conversations():
         {"conversation_id": "c3", "turn": 2, "role": "assistant", "content": "resp4"},
     ]
 
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".jsonl", delete=False
-    ) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
         for item in data:
             f.write(json.dumps(item) + "\n")
         temp_path = f.name
@@ -331,12 +323,15 @@ def test_multi_turn_dataset_single_turn_conversations():
     data = [
         {"conversation_id": "c1", "turn": 1, "role": "user", "content": "Single turn"},
         # No assistant response
-        {"conversation_id": "c2", "turn": 1, "role": "user", "content": "Another single"},
+        {
+            "conversation_id": "c2",
+            "turn": 1,
+            "role": "user",
+            "content": "Another single",
+        },
     ]
 
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".jsonl", delete=False
-    ) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
         for item in data:
             f.write(json.dumps(item) + "\n")
         temp_path = f.name
@@ -361,16 +356,16 @@ def test_multi_turn_dataset_single_turn_conversations():
 def test_multi_turn_dataset_empty_conversation():
     """Test empty dataset."""
     # Create an empty JSONL file
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".jsonl", delete=False
-    ) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
         # Write nothing (empty file)
         temp_path = f.name
 
     try:
         # Empty file may cause issues during load_from_file - handle gracefully
         try:
-            dataset = MultiTurnDataset.load_from_file(temp_path, format=DatasetFormat.JSONL)
+            dataset = MultiTurnDataset.load_from_file(
+                temp_path, format=DatasetFormat.JSONL
+            )
             dataset.load()
 
             assert len(dataset.data) == 0
@@ -398,9 +393,7 @@ def test_multi_turn_dataset_conversation_grouping():
         {"conversation_id": "c1", "turn": 3, "role": "user", "content": "c1t3"},
     ]
 
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".jsonl", delete=False
-    ) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
         for item in data:
             f.write(json.dumps(item) + "\n")
         temp_path = f.name
@@ -434,12 +427,15 @@ def test_multi_turn_dataset_validation_assistant_first():
             "role": "assistant",
             "content": "I start!",
         },  # Invalid
-        {"conversation_id": "c1", "turn": 2, "role": "user", "content": "User responds"},
+        {
+            "conversation_id": "c1",
+            "turn": 2,
+            "role": "user",
+            "content": "User responds",
+        },
     ]
 
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".jsonl", delete=False
-    ) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
         for item in data:
             f.write(json.dumps(item) + "\n")
         temp_path = f.name
@@ -469,9 +465,7 @@ def test_multi_turn_dataset_validation_consecutive_assistants():
         },  # Invalid
     ]
 
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".jsonl", delete=False
-    ) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
         for item in data:
             f.write(json.dumps(item) + "\n")
         temp_path = f.name
@@ -503,9 +497,7 @@ def test_multi_turn_dataset_additional_fields():
         {"conversation_id": "c1", "turn": 2, "role": "assistant", "content": "Hi"},
     ]
 
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".jsonl", delete=False
-    ) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
         for item in data:
             f.write(json.dumps(item) + "\n")
         temp_path = f.name

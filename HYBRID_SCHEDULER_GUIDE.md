@@ -3,6 +3,7 @@
 ## Overview
 
 The **Hybrid Multi-Turn Scheduler** combines two powerful features:
+
 1. **Turn Sequencing**: Turn N+1 cannot issue until turn N completes (conversation ordering)
 2. **Concurrency Control**: Limit total in-flight requests across all conversations (resource management)
 
@@ -21,6 +22,7 @@ t=0: Issue ALL 1000 turn-1 queries at once
 ```
 
 **Issues**:
+
 - 🔥 Endpoint receives 1000 simultaneous requests
 - 🔥 Port exhaustion (ephemeral port limit ~65K)
 - 🔥 Memory pressure from 1000 in-flight requests
@@ -32,10 +34,11 @@ t=0: Issue ALL 1000 turn-1 queries at once
 settings:
   load_pattern:
     type: multi_turn
-    target_concurrency: 32  # ← Only 32 requests in-flight at once
+    target_concurrency: 32 # ← Only 32 requests in-flight at once
 ```
 
 **Result**:
+
 ```python
 t=0.0:  Issue first 32 turn-1s (limit reached)
 t=0.5:  Turn-1 completes → issue next turn-1 (slot freed)
@@ -44,6 +47,7 @@ t=1.0:  Turn-1 completes → issue turn-2 of completed conv
 ```
 
 **Benefits**:
+
 - ✅ Controlled ramp-up (no endpoint overload)
 - ✅ Predictable resource usage
 - ✅ Still maintains turn sequencing
@@ -155,7 +159,7 @@ datasets:
 settings:
   load_pattern:
     type: multi_turn
-    target_concurrency: 32  # ← Add this for concurrency control
+    target_concurrency: 32 # ← Add this for concurrency control
 ```
 
 **Behavior**: Maximum 32 requests in-flight at any time
@@ -164,12 +168,12 @@ settings:
 
 ### Configuration Parameters
 
-| Parameter | Location | Default | Description |
-|-----------|----------|---------|-------------|
-| `multi_turn.enabled` | Dataset | `false` | Enable multi-turn mode |
-| `multi_turn.mode` | Dataset | `parallel` | Conversation scheduling mode |
-| `multi_turn.turn_timeout_s` | Dataset | `300.0` | Max wait for previous turn (seconds) |
-| `target_concurrency` | Load Pattern | `None` | Max concurrent requests (None = unlimited) |
+| Parameter                   | Location     | Default    | Description                                |
+| --------------------------- | ------------ | ---------- | ------------------------------------------ |
+| `multi_turn.enabled`        | Dataset      | `false`    | Enable multi-turn mode                     |
+| `multi_turn.mode`           | Dataset      | `parallel` | Conversation scheduling mode               |
+| `multi_turn.turn_timeout_s` | Dataset      | `300.0`    | Max wait for previous turn (seconds)       |
+| `target_concurrency`        | Load Pattern | `None`     | Max concurrent requests (None = unlimited) |
 
 ---
 
@@ -201,7 +205,7 @@ datasets:
 settings:
   load_pattern:
     type: multi_turn
-    target_concurrency: 32  # ← Control concurrency
+    target_concurrency: 32 # ← Control concurrency
 
   client:
     workers: 8
@@ -224,17 +228,17 @@ datasets:
 settings:
   load_pattern:
     type: multi_turn
-    target_concurrency: 64  # ← Higher limit for throughput
+    target_concurrency: 64 # ← Higher limit for throughput
 
   client:
-    workers: 16  # More workers for higher throughput
+    workers: 16 # More workers for higher throughput
 
 datasets:
   - samples: 1000
     multi_turn:
       enabled: true
       mode: parallel
-      turn_timeout_s: 600  # Higher timeout for congested system
+      turn_timeout_s: 600 # Higher timeout for congested system
 ```
 
 **Why**: 1000 conversations would create 1000 simultaneous requests. With `target_concurrency: 64`, controlled ramp-up prevents overload.
@@ -256,7 +260,7 @@ datasets:
   - samples: 100
     multi_turn:
       enabled: true
-      mode: sequential  # ← One conversation at a time
+      mode: sequential # ← One conversation at a time
 ```
 
 **Why**: Sequential mode already limits concurrency to 1 conversation at a time. Adding `target_concurrency` would be redundant.
@@ -278,11 +282,11 @@ target_concurrency = min(
 ### Examples
 
 | Endpoint Capacity | Workers | Recommended target_concurrency |
-|-------------------|---------|-------------------------------|
-| 100 QPS           | 4       | 16-32                         |
-| 500 QPS           | 8       | 32-64                         |
-| 1000 QPS          | 16      | 64-128                        |
-| 5000+ QPS         | 32      | 128-256                       |
+| ----------------- | ------- | ------------------------------ |
+| 100 QPS           | 4       | 16-32                          |
+| 500 QPS           | 8       | 32-64                          |
+| 1000 QPS          | 16      | 64-128                         |
+| 5000+ QPS         | 32      | 128-256                        |
 
 ### Tuning Guide
 
@@ -297,12 +301,14 @@ target_concurrency = min(
 4. Repeat until you find the sweet spot
 
 **Symptoms of too-high concurrency**:
+
 - ⚠️ High p99 latencies (queuing delays)
 - ⚠️ Endpoint CPU/memory saturation
 - ⚠️ Increased error rates
 - ⚠️ Port exhaustion warnings
 
 **Symptoms of too-low concurrency**:
+
 - ⚠️ Low endpoint utilization (<50%)
 - ⚠️ Low throughput (QPS below capacity)
 - ⚠️ Workers often idle
@@ -313,11 +319,11 @@ target_concurrency = min(
 
 ### Overhead
 
-| Component | Overhead | Notes |
-|-----------|----------|-------|
-| Turn sequencing | ~10-50μs | Threading.Event wait/notify |
-| Concurrency control | ~10-50μs | Threading.Condition wait/notify |
-| **Total** | **~20-100μs** | Negligible compared to network RTT (1-100ms) |
+| Component           | Overhead      | Notes                                        |
+| ------------------- | ------------- | -------------------------------------------- |
+| Turn sequencing     | ~10-50μs      | Threading.Event wait/notify                  |
+| Concurrency control | ~10-50μs      | Threading.Condition wait/notify              |
+| **Total**           | **~20-100μs** | Negligible compared to network RTT (1-100ms) |
 
 ### Memory Usage
 
@@ -338,11 +344,11 @@ Example:
 
 **Benchmark results** (1000 conversations, 3 turns each):
 
-| Configuration | Time to Complete | Endpoint Peak CPU | Error Rate |
-|---------------|------------------|-------------------|------------|
-| No limit | 120s | 100% (saturation) | 5% timeouts |
-| target_concurrency: 32 | 145s | 75% (stable) | 0% |
-| target_concurrency: 64 | 130s | 85% (stable) | 0% |
+| Configuration          | Time to Complete | Endpoint Peak CPU | Error Rate  |
+| ---------------------- | ---------------- | ----------------- | ----------- |
+| No limit               | 120s             | 100% (saturation) | 5% timeouts |
+| target_concurrency: 32 | 145s             | 75% (stable)      | 0%          |
+| target_concurrency: 64 | 130s             | 85% (stable)      | 0%          |
 
 **Conclusion**: Concurrency control adds ~10-20% to benchmark duration but **eliminates errors** and **prevents endpoint overload**.
 
@@ -350,15 +356,16 @@ Example:
 
 ## Comparison with ConcurrencyScheduler
 
-| Feature | ConcurrencyScheduler | MultiTurnScheduler (Hybrid) |
-|---------|---------------------|----------------------------|
-| **Multi-turn support** | ❌ No | ✅ Yes |
-| **Concurrency control** | ✅ Yes | ✅ Yes (optional) |
-| **Turn sequencing** | ❌ No | ✅ Yes |
-| **Conversation modes** | N/A | ✅ PARALLEL/SEQUENTIAL/POISSON |
-| **Use case** | Single-turn with concurrency | Multi-turn with optional concurrency |
+| Feature                 | ConcurrencyScheduler         | MultiTurnScheduler (Hybrid)          |
+| ----------------------- | ---------------------------- | ------------------------------------ |
+| **Multi-turn support**  | ❌ No                        | ✅ Yes                               |
+| **Concurrency control** | ✅ Yes                       | ✅ Yes (optional)                    |
+| **Turn sequencing**     | ❌ No                        | ✅ Yes                               |
+| **Conversation modes**  | N/A                          | ✅ PARALLEL/SEQUENTIAL/POISSON       |
+| **Use case**            | Single-turn with concurrency | Multi-turn with optional concurrency |
 
 **Migration**:
+
 - Using `ConcurrencyScheduler` for single-turn? → No change needed
 - Want multi-turn + concurrency? → Use `MultiTurnScheduler` with `target_concurrency`
 
@@ -371,6 +378,7 @@ Example:
 **Symptom**: Even with `target_concurrency: 32`, seeing 100+ concurrent requests
 
 **Diagnosis**:
+
 ```bash
 # Check load pattern type in config
 grep "type:" config.yaml
@@ -388,16 +396,18 @@ grep "type:" config.yaml
 **Symptom**: With `target_concurrency: 64`, only seeing ~20 QPS
 
 **Diagnosis**:
+
 ```bash
 # Check worker count
 grep "workers:" config.yaml
 ```
 
 **Fix**: Increase worker count to match concurrency:
+
 ```yaml
 settings:
   client:
-    workers: 16  # Should be ~1/4 to 1/2 of target_concurrency
+    workers: 16 # Should be ~1/4 to 1/2 of target_concurrency
 ```
 
 ---
@@ -409,9 +419,10 @@ settings:
 **Diagnosis**: Previous turn taking longer than `turn_timeout_s`
 
 **Fix**: Increase timeout or investigate slow endpoint:
+
 ```yaml
 multi_turn:
-  turn_timeout_s: 600  # Increase from 300 to 600 seconds
+  turn_timeout_s: 600 # Increase from 300 to 600 seconds
 ```
 
 ---
@@ -423,10 +434,11 @@ multi_turn:
 **Diagnosis**: Too many concurrent connections (hitting 65K port limit)
 
 **Fix**: Reduce `target_concurrency`:
+
 ```yaml
 settings:
   load_pattern:
-    target_concurrency: 32  # Reduce from 128 to 32
+    target_concurrency: 32 # Reduce from 128 to 32
 ```
 
 ---

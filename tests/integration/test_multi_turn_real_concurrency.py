@@ -47,7 +47,9 @@ from inference_endpoint.load_generator.scheduler import MultiTurnScheduler
 class MultiTurnSampleIssuer(HttpClientSampleIssuer):
     """Sample issuer for multi-turn testing."""
 
-    def __init__(self, endpoint_url: str, zmq_context: ManagedZMQContext, num_workers: int = 8):
+    def __init__(
+        self, endpoint_url: str, zmq_context: ManagedZMQContext, num_workers: int = 8
+    ):
         self.http_config = HTTPClientConfig(
             endpoint_urls=[endpoint_url],
             num_workers=num_workers,
@@ -62,9 +64,9 @@ class MultiTurnSampleIssuer(HttpClientSampleIssuer):
 @pytest.mark.parametrize(
     "num_conversations,num_workers,completion_threshold",
     [
-        (50, 8, 0.95),      # Small scale: 150 requests, 8 workers, 95% threshold
-        (100, 16, 0.95),    # Medium scale: 300 requests, 16 workers, 95% threshold
-        (4096, 64, 0.90),   # Extreme scale: 12,288 requests, 64 workers, 90% threshold
+        (50, 8, 0.95),  # Small scale: 150 requests, 8 workers, 95% threshold
+        (100, 16, 0.95),  # Medium scale: 300 requests, 16 workers, 95% threshold
+        (4096, 64, 0.90),  # Extreme scale: 12,288 requests, 64 workers, 90% threshold
     ],
     ids=["50_conversations", "100_conversations", "4096_conversations"],
 )
@@ -97,7 +99,9 @@ def test_concurrent_conversations_real_endpoint(
     conversations = []
 
     total_requests = num_conversations * turns_per_conversation
-    print(f"\nCreating dataset: {num_conversations} conversations × {turns_per_conversation} turns")
+    print(
+        f"\nCreating dataset: {num_conversations} conversations × {turns_per_conversation} turns"
+    )
     print(f"This will result in {total_requests} HTTP requests to the model endpoint")
 
     for conv_idx in range(num_conversations):
@@ -107,22 +111,28 @@ def test_concurrent_conversations_real_endpoint(
             turn = turn_idx * 2 + 1  # User turns: 1, 3, 5
 
             # User message
-            conversations.append({
-                "conversation_id": conv_id,
-                "turn": turn,
-                "role": "user",
-                "content": f"What is {turn_idx + 1} + {turn_idx + 2}?",
-                "system": "You are a helpful math assistant" if turn_idx == 0 else None,
-                "max_new_tokens": 16 if num_conversations > 100 else 32,
-            })
+            conversations.append(
+                {
+                    "conversation_id": conv_id,
+                    "turn": turn,
+                    "role": "user",
+                    "content": f"What is {turn_idx + 1} + {turn_idx + 2}?",
+                    "system": "You are a helpful math assistant"
+                    if turn_idx == 0
+                    else None,
+                    "max_new_tokens": 16 if num_conversations > 100 else 32,
+                }
+            )
 
             # Assistant placeholder (dataset format requirement)
-            conversations.append({
-                "conversation_id": conv_id,
-                "turn": turn + 1,
-                "role": "assistant",
-                "content": f"The answer is {(turn_idx + 1) + (turn_idx + 2)}.",
-            })
+            conversations.append(
+                {
+                    "conversation_id": conv_id,
+                    "turn": turn + 1,
+                    "role": "assistant",
+                    "content": f"The answer is {(turn_idx + 1) + (turn_idx + 2)}.",
+                }
+            )
 
     with open(dataset_path, "w") as f:
         for item in conversations:
@@ -132,10 +142,12 @@ def test_concurrent_conversations_real_endpoint(
     print(f"User messages (HTTP requests): {total_requests}")
 
     # Load dataset
-    dataset = MultiTurnDataset.load_from_file(str(dataset_path), format=DatasetFormat.JSONL)
+    dataset = MultiTurnDataset.load_from_file(
+        str(dataset_path), format=DatasetFormat.JSONL
+    )
     dataset.load()
 
-    print(f"\nDataset loaded:")
+    print("\nDataset loaded:")
     print(f"  Total samples: {dataset.num_samples()}")
     print(f"  Conversations: {dataset.conversation_metadata['num_conversations']}")
     print(f"  Max turns: {dataset.conversation_metadata['max_turns_per_conv']}")
@@ -143,6 +155,12 @@ def test_concurrent_conversations_real_endpoint(
     # Setup runtime settings
     max_duration_ms = 300000 if num_conversations <= 100 else 1800000
     turn_timeout_s = 60.0 if num_conversations <= 100 else 300.0
+
+    multi_turn_config = MultiTurnConfig(
+        enabled=True,
+        mode=ConversationMode.PARALLEL,
+        turn_timeout_s=turn_timeout_s,
+    )
 
     runtime_settings = RuntimeSettings(
         metric_target=metrics.Throughput(100),
@@ -155,16 +173,11 @@ def test_concurrent_conversations_real_endpoint(
         rng_sched=random.Random(42),
         rng_sample_index=random.Random(42),
         load_pattern=LoadPattern(type=LoadPatternType.MULTI_TURN),
-        multi_turn_config=MultiTurnConfig(
-            enabled=True,
-            mode=ConversationMode.PARALLEL,
-            turn_timeout_s=turn_timeout_s,
-        ),
     )
 
-    print(f"\nBenchmark configuration:")
+    print("\nBenchmark configuration:")
     print(f"  Workers: {num_workers}")
-    print(f"  Mode: {runtime_settings.multi_turn_config.mode}")
+    print(f"  Mode: {multi_turn_config.mode}")
     print(f"  Samples to issue: {runtime_settings.n_samples_to_issue}")
     print(f"  Turn timeout: {turn_timeout_s}s")
     print(f"  Max duration: {max_duration_ms / 1000}s")
@@ -176,6 +189,7 @@ def test_concurrent_conversations_real_endpoint(
         sample_order_cls=WithoutReplacementSampleOrder,
         conversation_manager=conversation_manager,
         dataset_metadata=dataset.conversation_metadata,
+        multi_turn_config=multi_turn_config,
     )
 
     print("\n" + "=" * 70)
@@ -188,7 +202,9 @@ def test_concurrent_conversations_real_endpoint(
 
     with ManagedZMQContext.scoped() as zmq_ctx:
         # Create sample issuer
-        sample_issuer = MultiTurnSampleIssuer(endpoint_url, zmq_ctx, num_workers=num_workers)
+        sample_issuer = MultiTurnSampleIssuer(
+            endpoint_url, zmq_ctx, num_workers=num_workers
+        )
 
         try:
             # Inject conversation manager into event handler
@@ -213,9 +229,16 @@ def test_concurrent_conversations_real_endpoint(
                         time.sleep(10)
                         if not stop_monitor.is_set():
                             elapsed = time.time() - start_time
-                            completed = len([s for s in conversation_manager._conversations.values()
-                                           if s.current_turn >= 2])
-                            print(f"  [{elapsed:.0f}s] Conversations with ≥1 turn complete: {completed}/{num_conversations}")
+                            completed = len(
+                                [
+                                    s
+                                    for s in conversation_manager._conversations.values()
+                                    if s.current_turn >= 2
+                                ]
+                            )
+                            print(
+                                f"  [{elapsed:.0f}s] Conversations with ≥1 turn complete: {completed}/{num_conversations}"
+                            )
 
                 monitor_thread = threading.Thread(target=progress_monitor, daemon=True)
                 monitor_thread.start()
@@ -238,7 +261,7 @@ def test_concurrent_conversations_real_endpoint(
             # Get statistics from conversation manager
             total_conversations = len(conversation_manager._conversations)
 
-            print(f"\nConversation Manager Statistics:")
+            print("\nConversation Manager Statistics:")
             print(f"  Total conversations tracked: {total_conversations}")
 
             # Verify all conversations completed
@@ -256,7 +279,9 @@ def test_concurrent_conversations_real_endpoint(
                         f"{conv_id}: turn {state.current_turn} (expected {expected_turn})"
                     )
 
-            print(f"  Completed conversations: {completed_conversations}/{total_conversations}")
+            print(
+                f"  Completed conversations: {completed_conversations}/{total_conversations}"
+            )
 
             if incomplete_conversations and len(incomplete_conversations) <= 10:
                 print(f"\nIncomplete conversations: {len(incomplete_conversations)}")
@@ -264,36 +289,50 @@ def test_concurrent_conversations_real_endpoint(
                     print(f"    - {incomplete}")
 
             # Performance metrics
-            print(f"\nPerformance Metrics:")
-            print(f"  Total time: {elapsed_time:.2f}s ({elapsed_time / 60:.1f} minutes)")
+            print("\nPerformance Metrics:")
+            print(
+                f"  Total time: {elapsed_time:.2f}s ({elapsed_time / 60:.1f} minutes)"
+            )
             print(f"  HTTP requests made: {total_requests}")
             print(f"  Throughput: {total_requests / elapsed_time:.2f} requests/sec")
-            print(f"  Average latency: {elapsed_time / total_requests * 1000:.2f}ms per request")
+            print(
+                f"  Average latency: {elapsed_time / total_requests * 1000:.2f}ms per request"
+            )
 
             # Turn distribution (for large tests)
             if num_conversations > 100:
                 turn_distribution = {}
                 for state in conversation_manager._conversations.values():
-                    turn_distribution[state.current_turn] = turn_distribution.get(state.current_turn, 0) + 1
+                    turn_distribution[state.current_turn] = (
+                        turn_distribution.get(state.current_turn, 0) + 1
+                    )
 
-                print(f"\nTurn distribution:")
+                print("\nTurn distribution:")
                 for turn in sorted(turn_distribution.keys()):
                     count = turn_distribution[turn]
-                    print(f"    Turn {turn}: {count} conversations ({100 * count / total_conversations:.1f}%)")
+                    print(
+                        f"    Turn {turn}: {count} conversations ({100 * count / total_conversations:.1f}%)"
+                    )
 
             # Verify correctness
-            print(f"\nVerification:")
+            print("\nVerification:")
             print(f"  ✓ Expected conversations: {num_conversations}")
             print(f"  ✓ Actual conversations: {total_conversations}")
-            print(f"  ✓ Completed: {completed_conversations} ({100 * completed_conversations / num_conversations:.1f}%)")
+            print(
+                f"  ✓ Completed: {completed_conversations} ({100 * completed_conversations / num_conversations:.1f}%)"
+            )
 
-            assert total_conversations == num_conversations, \
-                f"Expected {num_conversations} conversations, got {total_conversations}"
+            assert (
+                total_conversations == num_conversations
+            ), f"Expected {num_conversations} conversations, got {total_conversations}"
 
-            assert completed_conversations >= num_conversations * completion_threshold, \
-                f"Less than {completion_threshold * 100}% conversations completed: {completed_conversations}/{num_conversations}"
+            assert (
+                completed_conversations >= num_conversations * completion_threshold
+            ), f"Less than {completion_threshold * 100}% conversations completed: {completed_conversations}/{num_conversations}"
 
-            print(f"\n✅ TEST PASSED ({completion_threshold * 100}% completion threshold)")
+            print(
+                f"\n✅ TEST PASSED ({completion_threshold * 100}% completion threshold)"
+            )
             print("=" * 70)
 
         finally:

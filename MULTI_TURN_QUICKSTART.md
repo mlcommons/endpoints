@@ -14,6 +14,7 @@ Create a JSONL file with your conversations:
 ```
 
 **Rules**:
+
 - Alternate between "user" and "assistant" roles
 - Start with "user" role
 - Sequential turn numbers (1, 2, 3, ...)
@@ -39,13 +40,13 @@ datasets:
     path: path/to/your/conversations.jsonl
     format: jsonl
     multi_turn:
-      enabled: true        # ← Enable multi-turn mode
-      mode: parallel       # ← All conv turn-1 at once
-      turn_timeout_s: 300  # ← Max wait for prev turn
+      enabled: true # ← Enable multi-turn mode
+      mode: parallel # ← All conv turn-1 at once
+      turn_timeout_s: 300 # ← Max wait for prev turn
 
 settings:
   load_pattern:
-    type: multi_turn       # ← Use multi-turn scheduler
+    type: multi_turn # ← Use multi-turn scheduler
     target_concurrency: 32 # ← OPTIONAL: limit concurrent requests
 
   client:
@@ -66,6 +67,7 @@ inference-endpoint benchmark from-config --config multi_turn_config.yaml
 ```
 
 That's it! Your benchmark will now:
+
 - ✅ Enforce turn ordering (turn N+1 waits for turn N)
 - ✅ Include conversation history in each request
 - ✅ Track per-turn and per-conversation metrics
@@ -78,11 +80,14 @@ That's it! Your benchmark will now:
 After the benchmark completes, check `logs/my_multi_turn_benchmark/`:
 
 ### Events Database
+
 The `events.db` SQLite database includes:
+
 - Standard fields: sample_uuid, event_type, timestamp_ns
 - **New fields**: conversation_id, turn_number
 
 Query example:
+
 ```sql
 SELECT conversation_id, turn_number, event_type, timestamp_ns
 FROM events
@@ -91,22 +96,26 @@ ORDER BY turn_number;
 ```
 
 ### Metrics
+
 Currently available:
+
 - **Per-turn metrics**: Latency, TTFT, TPOT for each turn
 - **Conversation tracking**: All events tagged with conversation_id
 
-*Note: Per-conversation aggregation (e.g., "conversations/sec") is coming in a future update.*
+_Note: Per-conversation aggregation (e.g., "conversations/sec") is coming in a future update._
 
 ---
 
 ## 🎯 Conversation Modes Explained
 
 ### Parallel Mode (Default)
+
 ```yaml
 mode: parallel
 ```
 
 **Behavior**:
+
 - Issues turn-1 of ALL conversations at t=0
 - Then sequences turns within each conversation
 - Maximum parallelism and throughput
@@ -114,6 +123,7 @@ mode: parallel
 **Use for**: Stress testing with many concurrent conversations
 
 **Example timeline**:
+
 ```
 t=0:    conv1-turn1, conv2-turn1, conv3-turn1 (all at once)
 t=0.5:  conv1-turn2 (after conv1-turn1 completes)
@@ -123,11 +133,13 @@ t=0.8:  conv1-turn3 (after conv1-turn2 completes)
 ```
 
 ### Sequential Mode
+
 ```yaml
 mode: sequential
 ```
 
 **Behavior**:
+
 - Complete conversation 1 entirely
 - Then start conversation 2
 - One conversation at a time
@@ -135,6 +147,7 @@ mode: sequential
 **Use for**: Controlled testing, debugging, single-user simulation
 
 **Example timeline**:
+
 ```
 t=0:   conv1-turn1
 t=0.5: conv1-turn2
@@ -145,12 +158,14 @@ t=2.0: conv2-turn2
 ```
 
 ### Poisson Mode (Planned)
+
 ```yaml
 mode: poisson
 conversations_per_second: 10.0
 ```
 
 **Behavior**:
+
 - Start conversations with Poisson arrival
 - Sequence turns within each
 - Realistic user arrival patterns
@@ -167,12 +182,13 @@ For benchmarks with **> 50 conversations**, use `target_concurrency` to prevent 
 settings:
   load_pattern:
     type: multi_turn
-    target_concurrency: 32  # ← Limit to 32 concurrent requests
+    target_concurrency: 32 # ← Limit to 32 concurrent requests
 ```
 
 **Why?** Without this, PARALLEL mode issues ALL turn-1s at once (could be 100+), overwhelming your endpoint.
 
 **Rule of thumb**:
+
 - Small (< 50 convs): No limit needed
 - Medium (50-500 convs): `target_concurrency: 32`
 - Large (500+ convs): `target_concurrency: 64`
@@ -184,6 +200,7 @@ settings:
 ## 🔧 Common Configurations
 
 ### Recommended: With Concurrency Control
+
 ```yaml
 multi_turn:
   enabled: true
@@ -192,7 +209,7 @@ multi_turn:
 settings:
   load_pattern:
     type: multi_turn
-    target_concurrency: 32  # ← Prevents overload
+    target_concurrency: 32 # ← Prevents overload
   client:
     workers: 8
 
@@ -201,6 +218,7 @@ datasets:
 ```
 
 ### High Throughput Testing
+
 ```yaml
 multi_turn:
   enabled: true
@@ -209,10 +227,11 @@ multi_turn:
 
 settings:
   client:
-    workers: 16  # More workers for parallel conversations
+    workers: 16 # More workers for parallel conversations
 ```
 
 ### Controlled Testing
+
 ```yaml
 multi_turn:
   enabled: true
@@ -221,15 +240,16 @@ multi_turn:
 
 settings:
   client:
-    workers: 1  # Single worker for sequential testing
+    workers: 1 # Single worker for sequential testing
 ```
 
 ### Long Conversations
+
 ```yaml
 multi_turn:
   enabled: true
   mode: parallel
-  turn_timeout_s: 1800  # 30 minutes for slow responses
+  turn_timeout_s: 1800 # 30 minutes for slow responses
 ```
 
 ---
@@ -247,6 +267,7 @@ multi_turn:
 **Problem**: Previous turn took longer than `turn_timeout_s`.
 
 **Fixes**:
+
 1. Increase `turn_timeout_s` in config
 2. Check if your endpoint is slow or unresponsive
 3. Look for errors in the endpoint logs
@@ -256,10 +277,11 @@ multi_turn:
 **Problem**: MultiTurnDataset not recognized.
 
 **Fix**: Ensure `format: jsonl` is specified in config:
+
 ```yaml
 datasets:
   - path: your_file.jsonl
-    format: jsonl  # ← Required for JSONL
+    format: jsonl # ← Required for JSONL
 ```
 
 ---
@@ -267,18 +289,21 @@ datasets:
 ## 📝 Example Datasets
 
 ### Simple 2-Turn Conversation
+
 ```jsonl
 {"conversation_id": "c1", "turn": 1, "role": "user", "content": "Hi"}
 {"conversation_id": "c1", "turn": 2, "role": "assistant", "content": "Hello!"}
 ```
 
 ### With System Prompt
+
 ```jsonl
 {"conversation_id": "c1", "turn": 1, "role": "user", "content": "Who won?", "system": "You are a sports expert"}
 {"conversation_id": "c1", "turn": 2, "role": "assistant", "content": "The Lakers won."}
 ```
 
 ### Multiple Conversations
+
 ```jsonl
 {"conversation_id": "c1", "turn": 1, "role": "user", "content": "Hi"}
 {"conversation_id": "c1", "turn": 2, "role": "assistant", "content": "Hello!"}
@@ -287,6 +312,7 @@ datasets:
 ```
 
 ### With Model Override
+
 ```jsonl
 {"conversation_id": "c1", "turn": 1, "role": "user", "content": "Summarize this", "model": "gpt-4"}
 {"conversation_id": "c1", "turn": 2, "role": "assistant", "content": "Here's the summary..."}
@@ -297,18 +323,21 @@ datasets:
 ## 🧪 Testing Your Setup
 
 ### 1. Use the Example Dataset
+
 ```bash
 cd examples/multi_turn
 inference-endpoint benchmark from-config --config multi_turn_benchmark.yaml
 ```
 
 ### 2. Check the Logs
+
 ```bash
 cat logs/multi_turn_test/benchmark.log
 # Look for: "Turn X of conversation_id issued"
 ```
 
 ### 3. Verify Event Recording
+
 ```bash
 sqlite3 logs/multi_turn_test/events.db
 sqlite> SELECT DISTINCT conversation_id FROM events;
@@ -320,16 +349,19 @@ sqlite> SELECT DISTINCT conversation_id FROM events;
 ## 💡 Tips & Best Practices
 
 ### Dataset Design
+
 - **Keep conversations realistic**: 2-10 turns typical
 - **Test edge cases**: 1-turn conversations, very long conversations
 - **Include system prompts**: Helps model understand context
 
 ### Performance
+
 - **Workers**: Set `workers` = number of concurrent conversations
 - **Timeout**: Set `turn_timeout_s` = 2x your longest expected turn latency
 - **Memory**: ~1KB per turn, plan accordingly for large datasets
 
 ### Debugging
+
 - **Start small**: Test with 1-2 conversations first
 - **Use sequential mode**: Easier to debug than parallel
 - **Check events.db**: Verify turn ordering in database

@@ -91,9 +91,7 @@ def multi_turn_test_dataset() -> str:
         },
     ]
 
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".jsonl", delete=False
-    ) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
         for item in conversations:
             f.write(json.dumps(item) + "\n")
         temp_path = f.name
@@ -139,6 +137,13 @@ def test_multi_turn_end_to_end(
 
     assert dataset.num_samples() == 4  # 4 user turns total
 
+    # Create multi-turn config
+    multi_turn_config = MultiTurnConfig(
+        enabled=True,
+        mode=mode,
+        turn_timeout_s=60.0,
+    )
+
     # Create runtime settings
     rt_settings = RuntimeSettings(
         metric_target=metrics.Throughput(10),
@@ -151,11 +156,6 @@ def test_multi_turn_end_to_end(
         rng_sched=random.Random(42),
         rng_sample_index=random.Random(42),
         load_pattern=LoadPattern(type=LoadPatternType.MULTI_TURN),
-        multi_turn_config=MultiTurnConfig(
-            enabled=True,
-            mode=mode,
-            turn_timeout_s=60.0,
-        ),
     )
 
     # Track results
@@ -191,6 +191,7 @@ def test_multi_turn_end_to_end(
             WithoutReplacementSampleOrder,
             conversation_manager,
             dataset.conversation_metadata,
+            multi_turn_config,
         )
         SampleEventHandler.set_conversation_manager(conversation_manager)
 
@@ -217,20 +218,20 @@ def test_multi_turn_end_to_end(
                     sample_issuer.http_client.shutdown()
 
         # Assertions
-        assert len(completed_queries) == expected_completions, (
-            f"Expected {expected_completions} completions, got {len(completed_queries)}"
-        )
+        assert (
+            len(completed_queries) == expected_completions
+        ), f"Expected {expected_completions} completions, got {len(completed_queries)}"
 
-        assert len(conversations_tracked) == 2, (
-            f"Expected 2 conversations, tracked {len(conversations_tracked)}"
-        )
+        assert (
+            len(conversations_tracked) == 2
+        ), f"Expected 2 conversations, tracked {len(conversations_tracked)}"
 
         # Verify all responses have content
         for conv_id, turns in conversations_tracked.items():
             for turn_info in turns:
-                assert turn_info["response_length"] > 0, (
-                    f"{conv_id} turn {turn_info['turn']} has empty response"
-                )
+                assert (
+                    turn_info["response_length"] > 0
+                ), f"{conv_id} turn {turn_info['turn']} has empty response"
 
     finally:
         SampleEventHandler.clear_hooks()
@@ -244,6 +245,12 @@ def test_multi_turn_message_history_accumulation(multi_turn_test_dataset, endpoi
     )
     dataset.load()
 
+    multi_turn_config = MultiTurnConfig(
+        enabled=True,
+        mode=ConversationMode.PARALLEL,
+        turn_timeout_s=60.0,
+    )
+
     rt_settings = RuntimeSettings(
         metric_target=metrics.Throughput(10),
         reported_metrics=[],
@@ -255,11 +262,6 @@ def test_multi_turn_message_history_accumulation(multi_turn_test_dataset, endpoi
         rng_sched=random.Random(42),
         rng_sample_index=random.Random(42),
         load_pattern=LoadPattern(type=LoadPatternType.MULTI_TURN),
-        multi_turn_config=MultiTurnConfig(
-            enabled=True,
-            mode=ConversationMode.PARALLEL,
-            turn_timeout_s=60.0,
-        ),
     )
 
     conversation_manager = ConversationManager()
@@ -268,6 +270,7 @@ def test_multi_turn_message_history_accumulation(multi_turn_test_dataset, endpoi
         WithoutReplacementSampleOrder,
         conversation_manager,
         dataset.conversation_metadata,
+        multi_turn_config,
     )
     SampleEventHandler.set_conversation_manager(conversation_manager)
 
@@ -302,9 +305,9 @@ def test_multi_turn_message_history_accumulation(multi_turn_test_dataset, endpoi
 
         # Conversation 001 should have: system + user + assistant (turn 1 complete)
         # If turn 3 also completed: + user + assistant
-        assert len(conv_001_state.message_history) >= 3, (
-            f"Expected at least 3 messages in conv_001, got {len(conv_001_state.message_history)}"
-        )
+        assert (
+            len(conv_001_state.message_history) >= 3
+        ), f"Expected at least 3 messages in conv_001, got {len(conv_001_state.message_history)}"
 
         # Verify system message is first
         assert conv_001_state.message_history[0]["role"] == "system"
@@ -335,6 +338,12 @@ def test_multi_turn_with_concurrency_control(
     )
     dataset.load()
 
+    multi_turn_config = MultiTurnConfig(
+        enabled=True,
+        mode=ConversationMode.PARALLEL,
+        turn_timeout_s=60.0,
+    )
+
     rt_settings = RuntimeSettings(
         metric_target=metrics.Throughput(10),
         reported_metrics=[],
@@ -348,11 +357,6 @@ def test_multi_turn_with_concurrency_control(
         load_pattern=LoadPattern(
             type=LoadPatternType.MULTI_TURN,
             target_concurrency=target_concurrency,
-        ),
-        multi_turn_config=MultiTurnConfig(
-            enabled=True,
-            mode=ConversationMode.PARALLEL,
-            turn_timeout_s=60.0,
         ),
     )
 
@@ -371,6 +375,7 @@ def test_multi_turn_with_concurrency_control(
             WithoutReplacementSampleOrder,
             conversation_manager,
             dataset.conversation_metadata,
+            multi_turn_config,
         )
         SampleEventHandler.set_conversation_manager(conversation_manager)
 
@@ -396,9 +401,9 @@ def test_multi_turn_with_concurrency_control(
                     sample_issuer.http_client.shutdown()
 
         # Should complete all samples regardless of concurrency
-        assert completed_count == 4, (
-            f"Expected 4 completions with concurrency={target_concurrency}, got {completed_count}"
-        )
+        assert (
+            completed_count == 4
+        ), f"Expected 4 completions with concurrency={target_concurrency}, got {completed_count}"
 
     finally:
         SampleEventHandler.clear_hooks()
@@ -416,41 +421,51 @@ def test_multi_turn_high_concurrency_large_dataset(endpoint_url):
     for conv_idx in range(20):
         conv_id = f"test_conv_{conv_idx:03d}"
         # Turn 1: user
-        conversations.append({
-            "conversation_id": conv_id,
-            "turn": 1,
-            "role": "user",
-            "content": f"Question {conv_idx}-1",
-            "system": "You are a helpful assistant" if conv_idx == 0 else None,
-        })
+        conversations.append(
+            {
+                "conversation_id": conv_id,
+                "turn": 1,
+                "role": "user",
+                "content": f"Question {conv_idx}-1",
+                "system": "You are a helpful assistant" if conv_idx == 0 else None,
+            }
+        )
         # Turn 2: assistant
-        conversations.append({
-            "conversation_id": conv_id,
-            "turn": 2,
-            "role": "assistant",
-            "content": f"Response {conv_idx}-1",
-        })
+        conversations.append(
+            {
+                "conversation_id": conv_id,
+                "turn": 2,
+                "role": "assistant",
+                "content": f"Response {conv_idx}-1",
+            }
+        )
         # Turn 3: user
-        conversations.append({
-            "conversation_id": conv_id,
-            "turn": 3,
-            "role": "user",
-            "content": f"Question {conv_idx}-2",
-        })
+        conversations.append(
+            {
+                "conversation_id": conv_id,
+                "turn": 3,
+                "role": "user",
+                "content": f"Question {conv_idx}-2",
+            }
+        )
         # Turn 4: assistant
-        conversations.append({
-            "conversation_id": conv_id,
-            "turn": 4,
-            "role": "assistant",
-            "content": f"Response {conv_idx}-2",
-        })
+        conversations.append(
+            {
+                "conversation_id": conv_id,
+                "turn": 4,
+                "role": "assistant",
+                "content": f"Response {conv_idx}-2",
+            }
+        )
         # Turn 5: user
-        conversations.append({
-            "conversation_id": conv_id,
-            "turn": 5,
-            "role": "user",
-            "content": f"Question {conv_idx}-3",
-        })
+        conversations.append(
+            {
+                "conversation_id": conv_id,
+                "turn": 5,
+                "role": "user",
+                "content": f"Question {conv_idx}-3",
+            }
+        )
 
     with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
         for item in conversations:
@@ -463,6 +478,13 @@ def test_multi_turn_high_concurrency_large_dataset(endpoint_url):
         dataset.load()
 
         assert dataset.num_samples() == 60  # 20 conversations × 3 user turns
+
+        # Create multi-turn config
+        multi_turn_config = MultiTurnConfig(
+            enabled=True,
+            mode=ConversationMode.PARALLEL,
+            turn_timeout_s=60.0,
+        )
 
         # Create runtime settings with high concurrency
         rt_settings = RuntimeSettings(
@@ -478,11 +500,6 @@ def test_multi_turn_high_concurrency_large_dataset(endpoint_url):
             load_pattern=LoadPattern(
                 type=LoadPatternType.MULTI_TURN,
                 target_concurrency=128,  # High concurrency
-            ),
-            multi_turn_config=MultiTurnConfig(
-                enabled=True,
-                mode=ConversationMode.PARALLEL,
-                turn_timeout_s=60.0,
             ),
         )
 
@@ -507,6 +524,7 @@ def test_multi_turn_high_concurrency_large_dataset(endpoint_url):
                 WithoutReplacementSampleOrder,
                 conversation_manager,
                 dataset.conversation_metadata,
+                multi_turn_config,
             )
             SampleEventHandler.set_conversation_manager(conversation_manager)
 
@@ -532,12 +550,12 @@ def test_multi_turn_high_concurrency_large_dataset(endpoint_url):
                         sample_issuer.http_client.shutdown()
 
             # Assertions
-            assert completed_count == 60, (
-                f"Expected 60 completions with high concurrency, got {completed_count}"
-            )
-            assert len(conversations_completed) == 20, (
-                f"Expected 20 conversations, got {len(conversations_completed)}"
-            )
+            assert (
+                completed_count == 60
+            ), f"Expected 60 completions with high concurrency, got {completed_count}"
+            assert (
+                len(conversations_completed) == 20
+            ), f"Expected 20 conversations, got {len(conversations_completed)}"
 
         finally:
             SampleEventHandler.clear_hooks()

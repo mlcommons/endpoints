@@ -21,7 +21,6 @@ from collections import defaultdict
 
 import pytest
 
-
 # NOTE: Full integration test disabled - requires benchmark infrastructure
 # Keeping unit tests below for ConversationManager stress testing
 
@@ -117,7 +116,7 @@ def test_conversation_manager_extreme_concurrency_unit():
     print(f"Errors: {len(errors)}")
 
     if turn_times:
-        print(f"\nTurn latency statistics:")
+        print("\nTurn latency statistics:")
         print(f"  Min: {min(turn_times) * 1000:.2f}ms")
         print(f"  Max: {max(turn_times) * 1000:.2f}ms")
         print(f"  Mean: {sum(turn_times) / len(turn_times) * 1000:.2f}ms")
@@ -141,7 +140,9 @@ def test_conversation_manager_extreme_concurrency_unit():
         if state.current_turn != expected_turn:
             return f"{conv_id}: Expected turn {expected_turn}, got {state.current_turn}"
 
-        expected_messages = turns_per_conversation * 2 + 1  # system + (user + assistant) * N
+        expected_messages = (
+            turns_per_conversation * 2 + 1
+        )  # system + (user + assistant) * N
         if len(state.message_history) != expected_messages:
             return (
                 f"{conv_id}: Expected {expected_messages} messages, "
@@ -183,7 +184,7 @@ def test_conversation_manager_extreme_concurrency_unit():
 
     # Memory usage
     total_conversations = len(manager._conversations)
-    print(f"\nMemory stats:")
+    print("\nMemory stats:")
     print(f"  Total conversations in manager: {total_conversations}")
 
     # Sample conversation state size
@@ -193,7 +194,9 @@ def test_conversation_manager_extreme_concurrency_unit():
 
     # Assert success
     assert len(errors) == 0, f"Had {len(errors)} execution errors"
-    assert len(verification_errors) == 0, f"Had {len(verification_errors)} verification errors"
+    assert (
+        len(verification_errors) == 0
+    ), f"Had {len(verification_errors)} verification errors"
 
     print("\n✅ Extreme concurrency unit test PASSED")
 
@@ -207,10 +210,11 @@ def test_conversation_manager_race_conditions_stress():
     Tests race conditions when multiple threads operate on the same
     conversation simultaneously (issue, complete, wait).
     """
+    import threading
+
     from inference_endpoint.load_generator.conversation_manager import (
         ConversationManager,
     )
-    import threading
 
     print("\n=== Testing race conditions with 1024 conversations, high contention ===")
 
@@ -287,11 +291,11 @@ def test_conversation_manager_race_conditions_stress():
     print(f"Time: {elapsed:.2f}s")
     print(f"Rate: {total_ops / elapsed:.0f} ops/sec")
 
-    print(f"\nOperations by type:")
+    print("\nOperations by type:")
     for op_type, count in sorted(operations_completed.items()):
         print(f"  {op_type}: {count}")
 
-    print(f"\nErrors by type:")
+    print("\nErrors by type:")
     for err_type, err_msgs in sorted(errors.items()):
         print(f"  {err_type}: {len(err_msgs)} occurrences")
         if err_msgs[:3]:

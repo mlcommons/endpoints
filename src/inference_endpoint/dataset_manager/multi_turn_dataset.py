@@ -144,7 +144,9 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
     def load_sample(self, index: int) -> dict[str, Any]:
         """Load the Nth user turn as a benchmark sample."""
         assert self.data is not None, "Dataset not loaded. Call load() first."
-        assert self._user_turn_indices is not None, "Dataset not loaded. Call load() first."
+        assert (
+            self._user_turn_indices is not None
+        ), "Dataset not loaded. Call load() first."
         row = self.data[self._user_turn_indices[index]]
 
         # Build sample dict with required fields
@@ -166,5 +168,7 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
         return sample
 
     def num_samples(self) -> int:
-        assert self._user_turn_indices is not None, "Dataset not loaded. Call load() first."
+        assert (
+            self._user_turn_indices is not None
+        ), "Dataset not loaded. Call load() first."
         return len(self._user_turn_indices)
