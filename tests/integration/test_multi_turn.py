@@ -611,7 +611,9 @@ def test_conversation_manager_stress(num_conversations, turns_per_conversation):
     def verify_conversation(conv_idx):
         conv_id = f"conv_{conv_idx:04d}"
         state = manager._conversations[conv_id]
-        expected_turn = turns_per_conversation
+        # current_turn represents the next turn to be processed, not the last completed
+        # After completing turn N, current_turn = N + 1
+        expected_turn = turns_per_conversation + 1
 
         if state.current_turn != expected_turn:
             return f"{conv_id}: Expected turn {expected_turn}, got {state.current_turn}"
