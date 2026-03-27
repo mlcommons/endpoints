@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from .ruleset_base import BenchmarkSuiteRuleset
-    from .schema import BenchmarkConfig, LoadPattern, MultiTurnConfig
+    from .schema import BenchmarkConfig, LoadPattern
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,9 +83,6 @@ class RuntimeSettings:
 
     load_pattern: LoadPattern | None
     """Load pattern configuration"""
-
-    multi_turn_config: MultiTurnConfig | None = None
-    """Multi-turn dataset configuration for conversation-aware schedulers."""
 
     @classmethod
     def from_config(
@@ -141,8 +138,6 @@ class RuntimeSettings:
         # Extract settings from immutable Pydantic models
         runtime_cfg = config.settings.runtime
         load_pattern_cfg = config.settings.load_pattern
-        perf_dataset_cfg = config.get_single_dataset()
-        multi_turn_cfg = perf_dataset_cfg.multi_turn if perf_dataset_cfg else None
 
         # TODO: The default target_qps should be None in Offline mode, but we use 10.0 for now.
         # This is a temporary solution to avoid breaking changes.
@@ -164,7 +159,6 @@ class RuntimeSettings:
             "rng_sched": random.Random(runtime_cfg.scheduler_random_seed),
             "rng_sample_index": random.Random(runtime_cfg.dataloader_random_seed),
             "load_pattern": load_pattern_cfg,
-            "multi_turn_config": multi_turn_cfg,
         }
 
         # Apply overrides

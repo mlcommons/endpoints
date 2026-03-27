@@ -22,7 +22,7 @@ from collections.abc import Callable, Iterator
 from typing import Any
 
 from ..config.runtime_settings import RuntimeSettings
-from ..config.schema import ConversationMode, LoadPatternType
+from ..config.schema import ConversationMode, LoadPatternType, MultiTurnConfig
 from .conversation_manager import ConversationManager
 from .sample import SampleEvent, SampleEventHandler
 
@@ -458,6 +458,7 @@ class MultiTurnScheduler(Scheduler, load_pattern=LoadPatternType.MULTI_TURN):
         sample_order_cls: type[SampleOrder],
         conversation_manager: ConversationManager,
         dataset_metadata: dict[str, Any],
+        multi_turn_config: MultiTurnConfig | None = None,
     ):
         """Initialize multi-turn scheduler.
 
@@ -466,10 +467,12 @@ class MultiTurnScheduler(Scheduler, load_pattern=LoadPatternType.MULTI_TURN):
             sample_order_cls: Sample ordering strategy (unused for multi-turn).
             conversation_manager: Conversation state manager.
             dataset_metadata: Metadata from MultiTurnDataset.
+            multi_turn_config: Multi-turn conversation configuration.
         """
         super().__init__(runtime_settings, sample_order_cls)
         self.conversation_manager = conversation_manager
         self.dataset_metadata = dataset_metadata
+        self.multi_turn_config = multi_turn_config
         self.delay_fn = lambda: 0  # Unused (delays handled by blocking)
 
         # Add concurrency control if target_concurrency is specified
@@ -517,8 +520,8 @@ class MultiTurnScheduler(Scheduler, load_pattern=LoadPatternType.MULTI_TURN):
         - 0: Issue immediately
         """
         mode = ConversationMode.PARALLEL
-        if self.runtime_settings.multi_turn_config is not None:
-            mode = self.runtime_settings.multi_turn_config.mode
+        if self.multi_turn_config is not None:
+            mode = self.multi_turn_config.mode
 
         if mode == ConversationMode.PARALLEL:
             schedule = self._parallel_schedule()
@@ -537,8 +540,8 @@ class MultiTurnScheduler(Scheduler, load_pattern=LoadPatternType.MULTI_TURN):
             # Step 1: Block on previous turn if needed
             if delay_or_sentinel == BLOCK_ON_PREVIOUS_TURN:
                 timeout = 300.0
-                if self.runtime_settings.multi_turn_config is not None:
-                    timeout = self.runtime_settings.multi_turn_config.turn_timeout_s
+                if self.multi_turn_config is not None:
+                    timeout = self.multi_turn_config.turn_timeout_s
 
                 if not self.conversation_manager.wait_for_turn_ready(
                     conv_id, turn, timeout

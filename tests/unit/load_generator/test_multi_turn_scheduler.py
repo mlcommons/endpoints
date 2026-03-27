@@ -27,7 +27,6 @@ from inference_endpoint.config.schema import (
     LoadPatternType,
     MultiTurnConfig,
 )
-from inference_endpoint.core.types import QueryResult
 from inference_endpoint.load_generator.conversation_manager import ConversationManager
 from inference_endpoint.load_generator.sample import SampleEventHandler
 from inference_endpoint.load_generator.scheduler import (
@@ -66,6 +65,22 @@ def multi_turn_dataset_metadata() -> dict[str, Any]:
 
 
 @pytest.fixture
+def multi_turn_config_parallel() -> MultiTurnConfig:
+    """Multi-turn config for parallel mode."""
+    return MultiTurnConfig(
+        enabled=True, mode=ConversationMode.PARALLEL, turn_timeout_s=5.0
+    )
+
+
+@pytest.fixture
+def multi_turn_config_sequential() -> MultiTurnConfig:
+    """Multi-turn config for sequential mode."""
+    return MultiTurnConfig(
+        enabled=True, mode=ConversationMode.SEQUENTIAL, turn_timeout_s=5.0
+    )
+
+
+@pytest.fixture
 def multi_turn_runtime_settings(random_seed) -> RuntimeSettings:
     """Runtime settings for multi-turn scheduler tests."""
     return RuntimeSettings(
@@ -79,9 +94,6 @@ def multi_turn_runtime_settings(random_seed) -> RuntimeSettings:
         rng_sched=random.Random(random_seed),
         rng_sample_index=random.Random(random_seed),
         load_pattern=LoadPattern(type=LoadPatternType.MULTI_TURN),
-        multi_turn_config=MultiTurnConfig(
-            enabled=True, mode=ConversationMode.PARALLEL, turn_timeout_s=5.0
-        ),
     )
 
 
@@ -99,9 +111,6 @@ def multi_turn_runtime_settings_sequential(random_seed) -> RuntimeSettings:
         rng_sched=random.Random(random_seed),
         rng_sample_index=random.Random(random_seed),
         load_pattern=LoadPattern(type=LoadPatternType.MULTI_TURN),
-        multi_turn_config=MultiTurnConfig(
-            enabled=True, mode=ConversationMode.SEQUENTIAL, turn_timeout_s=5.0
-        ),
     )
 
 
@@ -118,12 +127,7 @@ def multi_turn_runtime_settings_with_concurrency(random_seed):
         min_sample_count=9,
         rng_sched=random.Random(random_seed),
         rng_sample_index=random.Random(random_seed),
-        load_pattern=LoadPattern(
-            type=LoadPatternType.MULTI_TURN, target_concurrency=2
-        ),
-        multi_turn_config=MultiTurnConfig(
-            enabled=True, mode=ConversationMode.PARALLEL, turn_timeout_s=5.0
-        ),
+        load_pattern=LoadPattern(type=LoadPatternType.MULTI_TURN, target_concurrency=2),
     )
 
 
@@ -138,6 +142,7 @@ def test_multi_turn_scheduler_parallel_mode(
         WithoutReplacementSampleOrder,
         conversation_manager,
         multi_turn_dataset_metadata,
+        multi_turn_config_parallel,
     )
 
     # Test the schedule generation directly (without blocking)
@@ -171,6 +176,7 @@ def test_multi_turn_scheduler_sequential_mode(
         WithoutReplacementSampleOrder,
         conversation_manager,
         multi_turn_dataset_metadata,
+        multi_turn_config_sequential,
     )
 
     # Test the schedule generation directly (without blocking)
@@ -178,19 +184,25 @@ def test_multi_turn_scheduler_sequential_mode(
 
     # First sample should be conv_001 turn-1 (first user turn) with delay=0
     s_idx, delay = schedule[0]
-    assert multi_turn_dataset_metadata["samples"][s_idx]["conversation_id"] == "conv_001"
+    assert (
+        multi_turn_dataset_metadata["samples"][s_idx]["conversation_id"] == "conv_001"
+    )
     assert multi_turn_dataset_metadata["samples"][s_idx]["turn"] == 1
     assert delay == 0
 
     # Second sample should be conv_001 turn-3 (second user turn) with BLOCK_ON_PREVIOUS_TURN
     s_idx, delay = schedule[1]
-    assert multi_turn_dataset_metadata["samples"][s_idx]["conversation_id"] == "conv_001"
+    assert (
+        multi_turn_dataset_metadata["samples"][s_idx]["conversation_id"] == "conv_001"
+    )
     assert multi_turn_dataset_metadata["samples"][s_idx]["turn"] == 3
     assert delay == BLOCK_ON_PREVIOUS_TURN
 
     # Third sample should be conv_001 turn-5 (third user turn) with BLOCK_ON_PREVIOUS_TURN
     s_idx, delay = schedule[2]
-    assert multi_turn_dataset_metadata["samples"][s_idx]["conversation_id"] == "conv_001"
+    assert (
+        multi_turn_dataset_metadata["samples"][s_idx]["conversation_id"] == "conv_001"
+    )
     assert multi_turn_dataset_metadata["samples"][s_idx]["turn"] == 5
     assert delay == BLOCK_ON_PREVIOUS_TURN
 
@@ -220,9 +232,6 @@ def test_multi_turn_scheduler_poisson_mode_fallback(
         rng_sched=random.Random(random_seed),
         rng_sample_index=random.Random(random_seed),
         load_pattern=LoadPattern(type=LoadPatternType.MULTI_TURN),
-        multi_turn_config=MultiTurnConfig(
-            enabled=True, mode=ConversationMode.POISSON, turn_timeout_s=5.0
-        ),
     )
 
     conversation_manager = ConversationManager()
@@ -231,6 +240,7 @@ def test_multi_turn_scheduler_poisson_mode_fallback(
         WithoutReplacementSampleOrder,
         conversation_manager,
         multi_turn_dataset_metadata,
+        multi_turn_config_parallel,
     )
 
     # Test the schedule generation directly (should fall back to parallel)
@@ -255,6 +265,7 @@ def test_multi_turn_scheduler_turn_blocking(
         WithoutReplacementSampleOrder,
         conversation_manager,
         multi_turn_dataset_metadata,
+        multi_turn_config_parallel,
     )
 
     # Get iterator
@@ -312,6 +323,7 @@ def test_multi_turn_scheduler_with_concurrency_control(
         WithoutReplacementSampleOrder,
         conversation_manager,
         multi_turn_dataset_metadata,
+        multi_turn_config_parallel,
     )
 
     # Verify concurrency control is enabled
@@ -381,6 +393,7 @@ def test_multi_turn_scheduler_hook_based_release(
         WithoutReplacementSampleOrder,
         conversation_manager,
         multi_turn_dataset_metadata,
+        multi_turn_config_parallel,
     )
 
     # Verify hook is registered
@@ -411,9 +424,6 @@ def test_multi_turn_scheduler_timeout_handling(
         rng_sched=random.Random(random_seed),
         rng_sample_index=random.Random(random_seed),
         load_pattern=LoadPattern(type=LoadPatternType.MULTI_TURN),
-        multi_turn_config=MultiTurnConfig(
-            enabled=True, mode=ConversationMode.PARALLEL, turn_timeout_s=0.3
-        ),
     )
 
     conversation_manager = ConversationManager()
@@ -422,6 +432,7 @@ def test_multi_turn_scheduler_timeout_handling(
         WithoutReplacementSampleOrder,
         conversation_manager,
         multi_turn_dataset_metadata,
+        multi_turn_config_parallel,
     )
 
     schedule_iter = iter(scheduler)
@@ -436,7 +447,9 @@ def test_multi_turn_scheduler_timeout_handling(
 
         # Create conversation state and mark turn as issued
         conversation_manager.get_or_create(conv_id, None)
-        conversation_manager.mark_turn_issued(conv_id, sample_meta["turn"], "User message")
+        conversation_manager.mark_turn_issued(
+            conv_id, sample_meta["turn"], "User message"
+        )
 
         # Complete all except the first conversation
         if conv_id != all_conv_ids[0]:
@@ -480,6 +493,7 @@ def test_multi_turn_scheduler_no_concurrency_control(
         WithoutReplacementSampleOrder,
         conversation_manager,
         multi_turn_dataset_metadata,
+        multi_turn_config_parallel,
     )
 
     # Verify concurrency control is disabled
@@ -502,6 +516,7 @@ def test_multi_turn_scheduler_complete_conversation_flow(
         WithoutReplacementSampleOrder,
         conversation_manager,
         multi_turn_dataset_metadata,
+        multi_turn_config_parallel,
     )
 
     schedule_iter = iter(scheduler)
@@ -626,14 +641,18 @@ def test_multi_turn_scheduler_multiple_waiters_same_turn(
         with ready_lock:
             ready_count += 1
 
-    thread1 = threading.Thread(target=wait_for_turn_2, args=(schedule_iter1,), daemon=True)
+    thread1 = threading.Thread(
+        target=wait_for_turn_2, args=(schedule_iter1,), daemon=True
+    )
 
     # Second scheduler iterator
     schedule_iter2 = iter(scheduler2)
     for _ in range(3):  # Skip all turn-1
         s_idx, delay = next(schedule_iter2)
 
-    thread2 = threading.Thread(target=wait_for_turn_2, args=(schedule_iter2,), daemon=True)
+    thread2 = threading.Thread(
+        target=wait_for_turn_2, args=(schedule_iter2,), daemon=True
+    )
 
     thread1.start()
     thread2.start()
