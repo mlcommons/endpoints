@@ -119,6 +119,10 @@ class OpenAIMsgspecAdapter(HttpRequestAdapter):
         """
         Convert a Query to an OpenAI request struct.
 
+        Builds [system, user] from prompt and system. Both accept text (str) or
+        multimodal content (list of content parts, e.g. [{"type": "text", "text": "..."},
+        {"type": "image_url", "image_url": {"url": "data:image/...;base64,..."}}]).
+
         Args:
             query: Input query with prompt and parameters
 

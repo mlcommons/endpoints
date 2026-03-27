@@ -28,6 +28,7 @@ from typing import ClassVar
 import msgspec.json
 import numpy as np
 import pandas as pd
+from pydantic import ValidationError
 from tqdm import tqdm
 
 try:
@@ -36,6 +37,7 @@ except ImportError:
     websocket = None
 
 from ..dataset_manager.dataset import Dataset
+from ..dataset_manager.predefined.shopify_product_catalogue import ProductMetadata
 from ..load_generator.events import SampleEvent
 from .extractor import Extractor, PythonCodeExtractor
 
@@ -653,3 +655,193 @@ class LiveCodeBenchScorer(Scorer, scorer_id="code_bench_scorer"):
 
         pass_at_1 = self._evaluate_via_subprocess(df)
         return pass_at_1, n_repeats
+
+
+_CATEGORY_SEPARATOR = " > "
+
+# Pad tokens for unparsable responses (matches MLCommons Q3VL evaluation.py)
+_PRED_CATEGORY_PAD = "<|__PRED_CATEGORY_PAD__|>"
+
+
+def _create_pred_pad_category(ground_truth: str, separator: str) -> str:
+    """Create dummy category with same depth as ground truth for unparsable responses.
+
+    Matches MLCommons reference: unparsable responses get pred pad with matching depth
+    so hierarchical F1 yields 0 intersection.
+    """
+    n_levels = len(ground_truth.split(separator))
+    return separator.join([_PRED_CATEGORY_PAD] * n_levels) if n_levels > 0 else ""
+
+
+def _parse_response_to_category(
+    response: str,
+    ground_truth: str,
+    separator: str = _CATEGORY_SEPARATOR,
+) -> str:
+    """Parse model output to category, or use pred pad fallback for unparsable responses.
+
+    Aligns with MLCommons Q3VL evaluation.py: validates with ProductMetadata directly,
+    on ValidationError uses pred pad category with same depth as ground truth.
+    No markdown/code-block stripping - reference passes raw string to model_validate_json.
+    """
+    try:
+        parsed = ProductMetadata.model_validate_json(response)
+        return parsed.category.strip()
+    except ValidationError:
+        return _create_pred_pad_category(ground_truth, separator)
+
+
+def _match_hierarchical_paths(
+    predicted_path: str,
+    true_path: str,
+    separator: str = _CATEGORY_SEPARATOR,
+) -> tuple[int, int, int]:
+    """Match two hierarchical category paths and return precision/recall components.
+
+    Splits both paths on ``separator``, then counts consecutive matching levels
+    from the root, stopping at the first mismatch. Returns the intersection
+    count and the length of each path for use in hierarchical P/R calculation.
+
+    Reference: https://github.com/mlcommons/inference/blob/master/multimodal/qwen3-vl/src/mlperf_inf_mm_q3vl/evaluation.py
+
+    Example::
+
+        data = [
+            ("Clothing > Shirts > Polo",  "Clothing > Shirts > Polo"),   # exact match
+            ("Clothing > Shirts > Dress", "Clothing > Shirts > Polo"),   # wrong leaf
+        ]
+        # Pair 1: intersection=3, pred_len=3, true_len=3
+        # Pair 2: intersection=2 (stops at "Dress" != "Polo"), pred_len=3, true_len=3
+        # HP = (3+2)/(3+3) = 5/6,  HR = (3+2)/(3+3) = 5/6
+        # F1 = 2*(5/6)*(5/6) / (5/6+5/6) = 5/6 ≈ 0.833
+
+    Args:
+        predicted_path: Categories predicted by the VLM.
+        true_path: Ground truth categories.
+        separator: Separator for each level of the category (default " > ").
+
+    Returns:
+        Tuple of (intersection_count, predicted_length, true_length).
+    """
+    predicted_categories = [c.strip() for c in predicted_path.split(separator)]
+    true_categories = [c.strip() for c in true_path.split(separator)]
+
+    if not predicted_categories or not true_categories:
+        return 0, len(predicted_categories), len(true_categories)
+
+    intersection_count = 0
+    for pred_cat, true_cat in zip(predicted_categories, true_categories, strict=False):
+        if pred_cat == true_cat:
+            intersection_count += 1
+        else:
+            break
+
+    return intersection_count, len(predicted_categories), len(true_categories)
+
+
+def _calculate_hierarchical_f1(
+    data: list[tuple[str, str]],
+    separator: str = _CATEGORY_SEPARATOR,
+) -> float:
+    """Calculate aggregate hierarchical F1 for a list of (predicted, true) pairs.
+
+    Reference: https://github.com/mlcommons/inference/blob/master/multimodal/qwen3-vl/src/mlperf_inf_mm_q3vl/evaluation.py
+
+    Args:
+        data: List of (predicted_path_str, true_path_str) tuples.
+        separator: Separator used to split paths into category levels.
+
+    Returns:
+        Hierarchical F1 score (0.0 to 1.0).
+    """
+    total_intersection = 0
+    total_predicted_length = 0
+    total_true_length = 0
+
+    for pred_path, true_path in data:
+        intersection, pred_len, true_len = _match_hierarchical_paths(
+            predicted_path=pred_path,
+            true_path=true_path,
+            separator=separator,
+        )
+        total_intersection += intersection
+        total_predicted_length += pred_len
+        total_true_length += true_len
+
+    hp = (
+        total_intersection / total_predicted_length
+        if total_predicted_length > 0
+        else 0.0
+    )
+    hr = total_intersection / total_true_length if total_true_length > 0 else 0.0
+
+    return 0.0 if hp + hr == 0 else 2 * (hp * hr) / (hp + hr)
+
+
+class ShopifyCategoryF1Scorer(Scorer, scorer_id="shopify_category_f1"):
+    """Hierarchical F1 scorer for Shopify product catalogue category classification.
+
+    Implements the MLCommons Q3VL evaluation logic for category taxonomy.
+    Model output must be JSON with category field (ProductMetadata format).
+    Each category level is separated by " > " (e.g. "Clothing > Shirts > Polo").
+
+    Reference: https://github.com/mlcommons/inference/blob/master/multimodal/qwen3-vl/src/mlperf_inf_mm_q3vl/evaluation.py
+    """
+
+    def __init__(
+        self,
+        dataset_name: str,
+        dataset: Dataset,
+        report_dir: os.PathLike,
+        extractor: type[Extractor] | None = None,
+        ground_truth_column: str | None = "ground_truth_category",
+        category_separator: str = _CATEGORY_SEPARATOR,
+    ):
+        super().__init__(
+            dataset_name=dataset_name,
+            dataset=dataset,
+            report_dir=report_dir,
+            extractor=extractor,
+            ground_truth_column=ground_truth_column,
+        )
+        self.category_separator = category_separator
+
+    def score_single_sample(self, value: str, ground_truth: str) -> float:
+        raise RuntimeError(
+            "ShopifyCategoryF1Scorer uses aggregate scoring. "
+            "Call score() instead of score_single_sample."
+        )
+
+    def score(self) -> tuple[float, int]:
+        df = self.get_outputs()
+
+        valid_uuids = self.sample_index_map.keys()
+        df = df[df["sample_uuid"].isin(valid_uuids)]
+        df = df.apply(self.match_sample_index, axis=1)
+
+        empirical = df["output"].tolist()
+
+        order = df["sample_index"].to_numpy().astype(int)
+        assert (
+            self.dataset.dataframe is not None
+        ), f"Dataset {self.dataset} has no dataframe loaded"
+        assert (
+            self.ground_truth_column in self.dataset.dataframe.columns
+        ), f"Ground truth column {self.ground_truth_column} not found in dataset"
+
+        ground_truths = list(
+            self.dataset.dataframe[self.ground_truth_column].to_numpy()[order]
+        )
+
+        ground_truths = [str(g).strip() if g is not None else "" for g in ground_truths]
+
+        predicted_categories = [
+            _parse_response_to_category(out, gt, self.category_separator)
+            for out, gt in zip(empirical, ground_truths, strict=False)
+        ]
+
+        data = list(zip(predicted_categories, ground_truths, strict=False))
+        hf1 = _calculate_hierarchical_f1(data, separator=self.category_separator)
+
+        n_repeats = len(data) // self.dataset.num_samples()
+        return hf1, n_repeats

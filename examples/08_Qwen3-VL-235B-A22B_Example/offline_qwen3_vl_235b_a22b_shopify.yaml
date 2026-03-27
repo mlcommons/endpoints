@@ -1,0 +1,58 @@
+# Offline Benchmark - Qwen3-VL-235B-A22B on Shopify Product Catalogue
+# MLPerf Inference Q3VL benchmark: multimodal product taxonomy classification
+name: "offline-qwen3-vl-235b-a22b-shopify-benchmark"
+version: "1.0"
+type: "offline"
+timeout: 14400 # Perf + acc run takes over 3 hours, consider limit n_samples_to_issue for perf run or remove accuracy dataset to skip accuracy run
+
+model_params:
+  name: "Qwen/Qwen3-VL-235B-A22B-Instruct"
+  temperature: 0
+  top_p: 1
+  max_new_tokens: 150
+
+datasets:
+  - name: shopify_product_catalogue::q3vl
+    type: "performance"
+    force: true
+  - name: shopify_product_catalogue::q3vl
+    type: "accuracy"
+    force: true
+    accuracy_config:
+      eval_method: "shopify_category_f1"
+      ground_truth: "ground_truth_category"
+      extractor: "identity_extractor"
+      num_repeats: 1
+
+settings:
+  runtime:
+    min_duration_ms: 600000 # 10 minute
+    n_samples_to_issue: 100 # Limit queries for testing (remove or increase for full run)
+    scheduler_random_seed: 42 # For Poisson/distribution sampling
+    dataloader_random_seed: 42 # For dataset shuffling
+
+  load_pattern:
+    type: "max_throughput"
+
+  client:
+    workers: 2
+    # ZMQ IPC buffers (bytes). Default 4MB; increase for large multimodal payloads (e.g. 16777216 = 16MB).
+    zmq_recv_buffer_bytes: 16777216
+    zmq_send_buffer_bytes: 16777216
+    # Cap connections to avoid overwhelming server. Default -1 uses ~25k (ephemeral ports),
+    # causing warmup failures and connection timeouts. 256-512 is typical for vLLM.
+    max_connections: 512
+    # Increase timeout for slow worker startup (spawn, imports). Default 40s may be too short.
+    worker_initialization_timeout: 120
+
+metrics:
+  collect:
+    - "throughput"
+    - "latency"
+
+endpoint_config:
+  endpoints:
+    - "http://localhost:8000"
+  api_key: null
+
+report_dir: results/qwen3_vl_235b_a22b_shopify_benchmark_mlperf/

@@ -17,6 +17,7 @@ import asyncio
 import logging
 import os
 from collections import deque
+from urllib.parse import urlparse
 
 import zmq
 
@@ -34,19 +35,11 @@ logger = logging.getLogger(__name__)
 class ZmqEventRecordPublisher(EventRecordPublisher):
     def __init__(
         self,
-        bind_address: str,
+        path: str,
         zmq_context: ManagedZMQContext,
         loop: asyncio.AbstractEventLoop | None = None,
+        scheme: str = "ipc",
     ):
-        super().__init__(bind_address, loop)
-
-        # Validate IPC path length
-        if bind_address.startswith("ipc://"):
-            if len(bind_address) > zmq.IPC_PATH_MAX_LEN:
-                raise ValueError(
-                    f"IPC path too long ({len(bind_address)} > {zmq.IPC_PATH_MAX_LEN})"
-                )
-
         self._socket = zmq_context.socket(zmq.PUB)
 
         # One of the guarantees of event records is that if it is published,
@@ -57,7 +50,9 @@ class ZmqEventRecordPublisher(EventRecordPublisher):
         )  # Wait indefinitely on close() to send pending messages
         self._socket.setsockopt(zmq.IMMEDIATE, 1)
 
-        self._socket.bind(self.bind_address)
+        bind_address = zmq_context.bind(self._socket, path, scheme)
+        super().__init__(bind_address, loop)
+        self.bind_path = path
         logger.info(f"Publisher bound to {self.bind_address}")
 
         self._fd = self._socket.getsockopt(zmq.FD)
@@ -167,12 +162,14 @@ class ZmqEventRecordPublisher(EventRecordPublisher):
 
         # Socket is closed by ManagedZMQContext.cleanup() when the context scope exits.
 
-        # Cleanup IPC socket file
-        if self.bind_address.startswith("ipc://"):
-            socket_path = self.bind_address[len("ipc://") :]
+        # Cleanup IPC socket file.
+        # urlparse("ipc:///a/b/c") puts the full path in parsed.path (netloc is
+        # empty for non-registered URI schemes like "ipc").
+        parsed = urlparse(self.bind_address)
+        if parsed.scheme == "ipc" and parsed.path:
             try:
-                if os.path.exists(socket_path):
-                    os.unlink(socket_path)
+                if os.path.exists(parsed.path):
+                    os.unlink(parsed.path)
             except OSError:
                 # IPC path already removed or unlink failed (e.g. permissions).
                 pass
@@ -181,25 +178,26 @@ class ZmqEventRecordPublisher(EventRecordPublisher):
 class ZmqEventRecordSubscriber(EventRecordSubscriber):
     def __init__(
         self,
-        connect_address: str,
+        path: str,
         zmq_context: ManagedZMQContext,
         loop: asyncio.AbstractEventLoop,
         topics: list[str] | None = None,
+        scheme: str = "ipc",
     ):
-        super().__init__(connect_address, loop, topics)
-
         self._socket = zmq_context.socket(zmq.SUB)
 
         self._socket.setsockopt(zmq.RCVHWM, 0)
 
         # Subscribe to topics
-        if not self.topics:
+        if not topics:
             self._socket.setsockopt(zmq.SUBSCRIBE, b"")
         else:
-            for topic in self.topics:
+            for topic in topics:
                 self._socket.setsockopt(zmq.SUBSCRIBE, topic.encode("utf-8"))
 
-        self._socket.connect(self.connect_address)
+        connect_address = zmq_context.connect(self._socket, path, scheme)
+        super().__init__(connect_address, loop, topics)
+        self.connect_path = path
         logger.info(f"Subscriber connected to {self.connect_address}")
 
         self._fd = self._socket.getsockopt(zmq.FD)

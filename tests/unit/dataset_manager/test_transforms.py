@@ -70,13 +70,18 @@ class TestColumnRemap:
         assert list(result.columns) == list(df.columns)
         pd.testing.assert_frame_equal(result, df)
 
-    def test_rename_nonexistent_column(self):
-        """Test renaming a column that doesn't exist (should be silently ignored)."""
+    def test_rename_nonexistent_column_raises(self):
+        """Test renaming a column that doesn't exist raises KeyError (strict=True default)."""
         df = pd.DataFrame({"col1": [1, 2], "col2": [3, 4]})
         transform = ColumnRemap({"nonexistent": "new_name"})
-        result = transform(df)
+        with pytest.raises(KeyError, match="nonexistent"):
+            transform(df)
 
-        # Should silently ignore non-existent column mappings
+    def test_rename_nonexistent_column_non_strict(self):
+        """Test renaming a column that doesn't exist is ignored when strict=False."""
+        df = pd.DataFrame({"col1": [1, 2], "col2": [3, 4]})
+        transform = ColumnRemap({"nonexistent": "new_name"}, strict=False)
+        result = transform(df)
         assert list(result.columns) == ["col1", "col2"]
         pd.testing.assert_frame_equal(result, df)
 

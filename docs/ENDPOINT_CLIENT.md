@@ -1,31 +1,4 @@
-<!--
-DOCUMENT GUIDELINES:
-- No performance claims without experiment data (no "2x faster", "50k+ QPS" etc.)
-- Design choices presented as tables with rationale, not "Why X?" prose
-- Keep explanations factual and descriptive, no marketing language
-- DONT use Problem: Solution: pattern, or the Why XYZ patten, or purpose: pattern when writing sections
-- Write the design doc for principle-engineer level readers, experts in python
--->
-
 # MLPerf Inference Endpoints: HttpClient Design Document
-
-| Item                      | Details                                                      |
-| ------------------------- | ------------------------------------------------------------ |
-| **Version**               | 0.1                                                          |
-| **Author(s)**             | Viraat Chandra US                                            |
-| **Status**                | Draft Completed                                              |
-| **Last Updated**          | 17/02/2026                                                   |
-| **Related Documentation** | [NV Internal] MLPerf Inference Endpoint Technical Design Doc |
-
-### Review
-
-| Name   | Association | Date | Status      | Notes |
-| ------ | ----------- | ---- | ----------- | ----- |
-| Alice  |             |      | Not Started |       |
-| Rashid |             |      | Not Started |       |
-| Zhihan |             |      | Not Started |       |
-
----
 
 ## Table of Contents
 

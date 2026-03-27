@@ -4,6 +4,7 @@ version: "1.0"
 type: "eval"
 
 model_params:
+  name: "meta-llama/Llama-3.1-8B-Instruct"
   temperature: 0.0
   max_new_tokens: 2048
 

@@ -23,6 +23,7 @@ Currently supported:
 
 import argparse
 import asyncio
+import importlib.util
 import os
 from pathlib import Path
 
@@ -30,34 +31,31 @@ from inference_endpoint.async_utils.loop_manager import LoopManager
 from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
 from inference_endpoint.async_utils.transport.zmq.pubsub import ZmqEventRecordSubscriber
 from inference_endpoint.core.record import (
-    ErrorEventType,
     EventRecord,
     SessionEventType,
 )
 
 from .file_writer import JSONLWriter
-from .sql_writer import SQLWriter
 from .writer import RecordWriter
+
+_HAS_SQLALCHEMY = importlib.util.find_spec("sqlalchemy") is not None
 
 # CLI writer names to writer classes (for --writers flag)
 _WRITER_REGISTRY: dict[str, type[RecordWriter]] = {
     "jsonl": JSONLWriter,
-    "sql": SQLWriter,
 }
+if _HAS_SQLALCHEMY:
+    from .sql_writer import SQLWriter
 
-
-def _is_error_event(record: EventRecord) -> bool:
-    """True if the record is an error event (should not be dropped after ENDED)."""
-    return isinstance(record.event_type, ErrorEventType)
+    _WRITER_REGISTRY["sql"] = SQLWriter
 
 
 class EventLoggerService(ZmqEventRecordSubscriber):
     """Event logger service for logging event records.
 
-    When SessionEventType.ENDED is received (topic 'session.ended'), the service stops
-    accepting further events (except Error events), closes writers, and stops the event loop.
-    Writers are only closed after the current batch is fully processed, so error
-    events that appear in the same batch after ENDED are still written.
+    When SessionEventType.ENDED is received (topic 'session.ended'), the service writes
+    the ENDED record, drops all subsequent events in the batch, then flushes and closes
+    writers and stops the event loop.
     """
 
     def __init__(
@@ -100,12 +98,12 @@ class EventLoggerService(ZmqEventRecordSubscriber):
             writer.close()
         self.writers.clear()
         if self.loop is not None:
-            self.loop.call_soon_threadsafe(self._request_stop)
+            self.loop.call_soon(self._request_stop)
 
     async def process(self, records: list[EventRecord]) -> None:
         saw_shutdown = False
         for record in records:
-            if self._shutdown_received and not _is_error_event(record):
+            if self._shutdown_received:
                 continue
             if record.event_type == SessionEventType.ENDED:
                 self._shutdown_received = True
@@ -134,10 +132,16 @@ async def main() -> None:
     parser = argparse.ArgumentParser(description="Event logger service")
     parser.add_argument("--log-dir", type=Path, required=True, help="Log directory")
     parser.add_argument(
-        "--socket-address",
+        "--socket-dir",
         type=str,
         required=True,
-        help="ZMQ socket address to connect to",
+        help="Directory containing ZMQ IPC sockets (must already exist)",
+    )
+    parser.add_argument(
+        "--socket-name",
+        type=str,
+        required=True,
+        help="Socket name within socket-dir",
     )
     parser.add_argument(
         "--writers",
@@ -145,17 +149,22 @@ async def main() -> None:
         choices=list(_WRITER_REGISTRY),
         default=["jsonl"],
         metavar="WRITER",
-        help="Writers to use: jsonl, sql (default: jsonl). Can specify multiple, e.g. --writers jsonl sql",
+        help=f"Writers to use (default: jsonl). Available: {', '.join(_WRITER_REGISTRY)}."
+        + (
+            ""
+            if _HAS_SQLALCHEMY
+            else " Install sqlalchemy for SQL support: pip install inference-endpoint[sql]"
+        ),
     )
     args = parser.parse_args()
 
     writer_classes = tuple(_WRITER_REGISTRY[name] for name in args.writers)
     shutdown_event = asyncio.Event()
     loop = LoopManager().default_loop
-    with ManagedZMQContext.scoped(socket_dir=args.log_dir.parent) as zmq_ctx:
+    with ManagedZMQContext.scoped(socket_dir=args.socket_dir) as zmq_ctx:
         logger = EventLoggerService(
             args.log_dir,
-            args.socket_address,
+            args.socket_name,
             zmq_ctx,
             loop,
             topics=None,  # Subscribe to all topics for logging
@@ -163,7 +172,7 @@ async def main() -> None:
             shutdown_event=shutdown_event,
         )
 
-        loop.call_soon_threadsafe(logger.start)
+        loop.call_soon(logger.start)
         await shutdown_event.wait()
 
 

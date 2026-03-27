@@ -14,12 +14,16 @@
 # limitations under the License.
 
 
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from ..config.schema import APIType, ModelParams
 
 import pandas as pd
 
-from ..config.schema import APIType, ModelParams
 from ..openai.harmony import Harmonizer
 
 
@@ -261,11 +265,19 @@ class ColumnRemap(Transform):
             df: Input DataFrame
         """
         new_cols = {}
+        old_cols = set(df.columns)
         for src, dst in self.remap.items():
             if isinstance(src, str):
-                new_cols[src] = dst
+                # String keys are explicit — must exist in the DataFrame
+                if src in old_cols:
+                    new_cols[src] = dst
+                elif self.strict:
+                    raise KeyError(
+                        f"Column '{src}' not found in dataset. "
+                        f"Available: {sorted(old_cols)}"
+                    )
             elif isinstance(src, tuple):
-                old_cols = set(df.columns)
+                # Tuple keys are fuzzy — use first candidate found
                 found = None
                 for candidate in src:
                     if candidate in old_cols:
@@ -276,7 +288,9 @@ class ColumnRemap(Transform):
                             raise ValueError(
                                 f"Multiple columns found for fuzzy remap: {found} and {candidate}"
                             )
-        df = df.rename(columns=new_cols, errors="ignore")
+        # Cannot use errors="ignore" — it silently skips missing columns,
+        # hiding typos in user-provided parser remaps.
+        df = df.rename(columns=new_cols)
         return df
 
 
@@ -304,7 +318,7 @@ class MakeAdapterCompatible(ColumnRemap):
                     "problem",
                     "query",
                 ): "prompt",
-                "system_prompt": "system",
+                ("system_prompt",): "system",  # tuple = optional (skip if absent)
             },
             strict=True,
         )

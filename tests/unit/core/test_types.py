@@ -710,6 +710,60 @@ class TestQueryResultWorkerPatterns:
         assert len(decoded.response_output.output) == 1
 
 
+class TestTextAfterFirstChunk:
+    """Test TextModelOutput.text_after_first_chunk() for all reasoning/output combos."""
+
+    @pytest.mark.parametrize(
+        "reasoning, output, expected",
+        [
+            # No reasoning, str output (non-streaming)
+            (None, "abc", ""),
+            # No reasoning, tuple output (streaming)
+            (None, ("a", "b", "c"), "bc"),
+            # No reasoning, single-chunk tuple
+            (None, ("a",), ""),
+            # No reasoning, empty tuple
+            (None, (), ""),
+            # Str reasoning (is the first chunk), str output (non-streaming)
+            ("think", "abc", ""),
+            # Str reasoning (is the first chunk), tuple output
+            ("think", ("a", "b"), "ab"),
+            # Tuple reasoning (multi), str output
+            (("t1", "t2"), "abc", "t2abc"),
+            # Tuple reasoning (multi), tuple output
+            (("t1", "t2"), ("a", "b"), "t2ab"),
+            # Single-element tuple reasoning (is the first chunk), str output
+            (("t1",), "abc", "abc"),
+            # Single-element tuple reasoning (is the first chunk), tuple output
+            (("t1",), ("a", "b"), "ab"),
+            # Falsy str reasoning (empty string), tuple output — treated as no reasoning
+            ("", ("a", "b"), "b"),
+            # Empty tuple reasoning, tuple output — treated as no reasoning
+            ((), ("a", "b"), "b"),
+            # No reasoning, empty str output
+            (None, "", ""),
+        ],
+        ids=[
+            "no_reasoning-str_output",
+            "no_reasoning-tuple_output",
+            "no_reasoning-single_chunk",
+            "no_reasoning-empty_tuple",
+            "str_reasoning-str_output",
+            "str_reasoning-tuple_output",
+            "multi_reasoning-str_output",
+            "multi_reasoning-tuple_output",
+            "single_reasoning-str_output",
+            "single_reasoning-tuple_output",
+            "empty_str_reasoning-tuple_output",
+            "empty_tuple_reasoning-tuple_output",
+            "no_reasoning-empty_str_output",
+        ],
+    )
+    def test_text_after_first_chunk(self, reasoning, output, expected):
+        tmo = TextModelOutput(output=output, reasoning=reasoning)
+        assert tmo.text_after_first_chunk() == expected
+
+
 class TestMixedTypeSerialization:
     """Test serialization of mixed type combinations and edge cases."""
 

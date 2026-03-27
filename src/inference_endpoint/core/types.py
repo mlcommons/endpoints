@@ -96,6 +96,38 @@ class TextModelOutput(
             elif isinstance(self.output, tuple):
                 parts.extend(self.output)
 
+        # NOTE: Not sure how output is formatted - there *might* need to be a space or separator between
+        # reasoning and output depending on the accumulator / API.
+        return "".join(parts)
+
+    def text_after_first_chunk(self) -> str:
+        """Return the full output text excluding the first chunk.
+
+        For TPOT calculation: token_count(text_after_first_chunk) gives the
+        number of tokens generated after the first chunk, which is the TPOT
+        denominator.
+
+        For non-streaming (str fields), there is no "first chunk" concept so
+        this returns an empty string.
+        """
+        parts: list[str] = []
+        if self.reasoning:
+            if isinstance(self.reasoning, tuple) and len(self.reasoning) > 1:
+                parts.extend(self.reasoning[1:])
+            # str reasoning: single chunk, skip entirely (it IS the first chunk)
+        if self.output:
+            if isinstance(self.output, str):
+                # Non-streaming: if reasoning was present and was the first chunk,
+                # include the full output. Otherwise no first chunk to skip.
+                if parts or (self.reasoning and isinstance(self.reasoning, tuple)):
+                    parts.append(self.output)
+            elif isinstance(self.output, tuple):
+                if parts or self.reasoning:
+                    # First chunk was in reasoning; include all output chunks.
+                    parts.extend(self.output)
+                elif len(self.output) > 1:
+                    # No reasoning; first chunk is output[0], skip it.
+                    parts.extend(self.output[1:])
         return "".join(parts)
 
 

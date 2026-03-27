@@ -51,18 +51,22 @@ class _SocketConfig:
 
     # Connection keepalive-probe settings for long-lived connections
     # client kernel sends probe, server's kernel ACKs - no application overhead
+    #
+    # TODO(vir): verify impact on failure-detection, we want to fail fast
+    # detection time: KEEPIDLE + (KEEPCNT × KEEPINTVL) = 1 + 5×1 = 6s
     SO_KEEPALIVE: int = 1  # Enable keepalive at socket level
     TCP_KEEPIDLE: int = 1  # Probe after 1s idle
-    TCP_KEEPCNT: int = 1  # 1 failed probe = dead
+    TCP_KEEPCNT: int = 5  # 5 failed probes = dead
     TCP_KEEPINTVL: int = 1  # 1s between probes
 
-    # Make sure socket buffers are never the bottle neck
-    # With HTTP/1.1, a TCP socket will only be used for a single request
-    # Largest message size would be server response in Offline Mode
-    # 4MB /4 bytes per token = 1M tokens in any given packet
-    # TODO(vir): analyze workloads to better tune buffer sizes
-    SO_RCVBUF: int = 1024 * 1024 * 4  # 4MB receive buffer
-    SO_SNDBUF: int = 1024 * 1024 * 4  # 4MB send buffer
+    # Socket buffer sizing: sliding windows, not full-message buffers.
+    # The event loop reads eagerly so the buffer only holds data between
+    # kernel delivery and application read — typically one RTT worth.
+    #
+    # 128KB ≈ 128K chars buffered in-flight at any instant.
+    # Responses larger than the buffer stream through fine (TCP sliding window).
+    SO_RCVBUF: int = 1024 * 128  # 128KB receive buffer
+    SO_SNDBUF: int = 1024 * 128  # 128KB send buffer
 
     # Linux-specific:
     # kernel closes socket if sent data not ACKed within timeout

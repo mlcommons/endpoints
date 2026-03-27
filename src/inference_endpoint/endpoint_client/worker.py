@@ -78,6 +78,9 @@ def worker_main(
         connector: Transport connector for IPC (ZMQ, shared memory, etc.).
         http_config: HTTP client configuration.
     """
+    # Suppress transformers "no framework found" warning (only tokenizers used)
+    os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+
     worker_log_format = f"%(asctime)s - %(name)s[W{worker_id}/%(process)d] - %(funcName)s - %(levelname)s - %(message)s"
     setup_logging(level=http_config.log_level, format_string=worker_log_format)
 
@@ -200,10 +203,16 @@ class Worker:
             )
 
             # Create connection pool
-            # Naively divide max connections among workers
-            connections_per_worker = (
-                self.http_config.max_connections // self.http_config.num_workers
+            # Divide max connections among workers
+            connections_per_worker = max(
+                1, self.http_config.max_connections // self.http_config.num_workers
             )
+            if self.http_config.max_connections < self.http_config.num_workers:
+                logger.warning(
+                    f"max_connections ({self.http_config.max_connections}) < "
+                    f"num_workers ({self.http_config.num_workers}): each worker gets 1 "
+                    f"connection, total={self.http_config.num_workers} exceeds the cap."
+                )
             self._pool = ConnectionPool(
                 host=self._host,
                 port=self._port,
@@ -228,33 +237,30 @@ class Worker:
                     warmup_count = warmup_cfg // self.http_config.num_workers
                 warmup_count = max(1, warmup_count)
                 warmed = await self._pool.warmup(count=warmup_count)
-                logger.debug(f"Warmed up {warmed} connections")
+                logger.debug(f"Warmed up {warmed}/{warmup_count} connections")
 
-                # Error if 0 connections warmed up
+                # Fatal: zero connections means endpoint is unreachable
                 if warmed == 0:
-                    msg = "Warmup: failed to establish connection to endpoint. Consider closing background TCP connections."
-                    if self.http_config.min_required_connections == 0:
-                        # log error but continue if disabled check
-                        logger.error(msg)
-                    else:
-                        # NOTE(vir):
-                        # 0 warmup connections is always fatal in practice,
-                        # user needs to explicitly disable check to proceed
-                        logger.error(
-                            f"{msg} [ skip-check with --min_required_connections=0 ]"
-                        )
-                        sys.exit(1)
+                    logger.error(
+                        f"Warmup failed: 0/{warmup_count} connections established. "
+                        f"Endpoint {self._host}:{self._port} is unreachable."
+                    )
+                    sys.exit(1)
 
-                # Warn if below min_required_connections threshold (skip if 0 = disabled)
-                elif self.http_config.min_required_connections > 0:
-                    min_required_per_worker = (
+                # Warn if warmup fell short of target
+                # min_required_connections=0 disables the check
+                if self.http_config.min_required_connections > 0:
+                    min_per_worker = (
                         self.http_config.min_required_connections
                         // self.http_config.num_workers
                     )
-                    if warmed < min_required_per_worker:
+                    threshold = (
+                        max(1, min_per_worker) if warmup_cfg == -1 else warmup_count
+                    )
+                    if warmed < threshold:
                         logger.warning(
-                            f"Warmup: this worker has {warmed} connections, need {min_required_per_worker}. "
-                            "Consider closing background TCP connections or adjusting --min_required_connections."
+                            f"Warmup: only established {warmed}/{warmup_count} connections "
+                            f"(need {threshold}). Consider closing background TCP connections."
                         )
 
             # TODO(vir):
@@ -296,7 +302,16 @@ class Worker:
 
         # Connect and signal readiness as we enter recv() loop. Scope ZMQ context
         # for this process so transports are cleaned up when the block exits.
-        with ManagedZMQContext.scoped() as zmq_ctx:
+        # ZMQ connectors provide socket_dir so the worker can construct IPC
+        # addresses via ctx.connect(). Non-ZMQ transports may not have it.
+        socket_dir: str | None = getattr(self._connector, "socket_dir", None)
+        if socket_dir is None:
+            logger.warning(
+                "Connector %s does not provide socket_dir; "
+                "IPC connect() calls will fail.",
+                type(self._connector).__name__,
+            )
+        with ManagedZMQContext.scoped(socket_dir=socket_dir) as zmq_ctx:
             async with self._connector.connect(self.worker_id, zmq_ctx) as (
                 requests,
                 responses,

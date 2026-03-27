@@ -46,16 +46,16 @@ Dataset Manager --> Load Generator --> Endpoint Client --> External Endpoint
 
 ### Key Components
 
-| Component           | Location                                    | Purpose                                                                                                                  |
-| ------------------- | ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| **Load Generator**  | `src/inference_endpoint/load_generator/`    | Central orchestrator: `BenchmarkSession` owns the lifecycle, `Scheduler` controls timing, `LoadGenerator` issues queries |
-| **Endpoint Client** | `src/inference_endpoint/endpoint_client/`   | Multi-process HTTP workers communicating via ZMQ IPC. `HTTPEndpointClient` is the main entry point                       |
-| **Dataset Manager** | `src/inference_endpoint/dataset_manager/`   | Loads pickle, HuggingFace, JSONL datasets. `Dataset` base class with `load_sample()`/`num_samples()` interface           |
-| **Metrics**         | `src/inference_endpoint/metrics/`           | `EventRecorder` writes to SQLite, `MetricsReporter` reads and aggregates (QPS, latency, TTFT, TPOT)                      |
-| **Config**          | `src/inference_endpoint/config/`            | Pydantic-based YAML schema (`schema.py`), ruleset registry for MLCommons compliance, `RuntimeSettings` for runtime state |
-| **CLI**             | `src/inference_endpoint/cli.py`             | argparse-based with subcommands dispatched from `commands/`                                                              |
-| **Async Utils**     | `src/inference_endpoint/async_utils/`       | `LoopManager` (uvloop + eager_task_factory), ZMQ transport layer, event publisher                                        |
-| **OpenAI/SGLang**   | `src/inference_endpoint/openai/`, `sglang/` | Protocol adapters and response accumulators for different API formats                                                    |
+| Component           | Location                                                      | Purpose                                                                                                                  |
+| ------------------- | ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| **Load Generator**  | `src/inference_endpoint/load_generator/`                      | Central orchestrator: `BenchmarkSession` owns the lifecycle, `Scheduler` controls timing, `LoadGenerator` issues queries |
+| **Endpoint Client** | `src/inference_endpoint/endpoint_client/`                     | Multi-process HTTP workers communicating via ZMQ IPC. `HTTPEndpointClient` is the main entry point                       |
+| **Dataset Manager** | `src/inference_endpoint/dataset_manager/`                     | Loads pickle, HuggingFace, JSONL datasets. `Dataset` base class with `load_sample()`/`num_samples()` interface           |
+| **Metrics**         | `src/inference_endpoint/metrics/`                             | `EventRecorder` writes to SQLite, `MetricsReporter` reads and aggregates (QPS, latency, TTFT, TPOT)                      |
+| **Config**          | `src/inference_endpoint/config/`                              | Pydantic-based YAML schema (`schema.py`), ruleset registry for MLCommons compliance, `RuntimeSettings` for runtime state |
+| **CLI**             | `src/inference_endpoint/main.py`, `commands/benchmark/cli.py` | cyclopts-based, auto-generated from `schema.py` Pydantic models. Flat shorthands via `cyclopts.Parameter(alias=...)`     |
+| **Async Utils**     | `src/inference_endpoint/async_utils/`                         | `LoopManager` (uvloop + eager_task_factory), ZMQ transport layer, event publisher                                        |
+| **OpenAI/SGLang**   | `src/inference_endpoint/openai/`, `sglang/`                   | Protocol adapters and response accumulators for different API formats                                                    |
 
 ### Hot-Path Architecture
 
@@ -69,9 +69,32 @@ Multi-process, event-loop design optimized for throughput:
 
 ### CLI Modes
 
-- **CLI mode** (`offline`/`online`): Parameters from command-line arguments
-- **YAML mode** (`from-config`): All config from file, no CLI overrides except `--timeout`
-- **eval**: Accuracy evaluation — subcommand exists but is not yet implemented (raises `NotImplementedError`)
+CLI is auto-generated from `config/schema.py` Pydantic models via cyclopts. Fields annotated with `cyclopts.Parameter(alias="--flag")` get flat shorthands; all other fields get auto-generated dotted flags (kebab-case).
+
+- **CLI mode** (`offline`/`online`): cyclopts constructs `OfflineBenchmarkConfig`/`OnlineBenchmarkConfig` (subclasses in `config/schema.py`) directly from CLI args. Type locked via `Literal`. `--dataset` is repeatable with TOML-style format `[perf|acc:]<path>[,key=value...]` (e.g. `--dataset data.csv,samples=500,parser.prompt=article`). Full accuracy support via `accuracy_config.eval_method=pass_at_1` etc.
+- **YAML mode** (`from-config`): `BenchmarkConfig.from_yaml_file()` loads YAML, resolves env vars, and auto-selects the right subclass via Pydantic discriminated union. Optional `--timeout`/`--mode` overrides via `config.with_updates()`.
+- **eval**: Not yet implemented (raises `NotImplementedError`)
+
+### Config Construction & Validation
+
+Both CLI and YAML produce the same subclass via Pydantic discriminated union on `type`:
+
+```
+CLI offline/online:  cyclopts → OfflineBenchmarkConfig/OnlineBenchmarkConfig → with_updates(datasets) → run_benchmark
+YAML from-config:    from_yaml_file(path) → discriminated union → same subclass → run_benchmark
+```
+
+`OfflineBenchmarkConfig` and `OnlineBenchmarkConfig` (in `config/schema.py`) inherit `BenchmarkConfig`:
+
+- `type`: locked via `Literal[TestType.OFFLINE]` / `Literal[TestType.ONLINE]`
+- `settings`: `OfflineSettings` (hides load pattern) / `OnlineSettings`
+- `submission_ref`, `benchmark_mode`: `show=False` on base class
+
+Validation is layered:
+
+1. **Field-level** (Pydantic): `Field(ge=0)` on durations, `Field(ge=-1)` on workers, `Literal` on `benchmark_mode`
+2. **Field validators**: `workers != 0` check
+3. **Model validator** (`_resolve_and_validate`): streaming AUTO resolution, model name from `submission_ref`, load pattern vs test type, cross-field duration check, duplicate datasets
 
 ### Load Patterns
 
@@ -83,14 +106,17 @@ Multi-process, event-loop design optimized for throughput:
 
 ```
 src/inference_endpoint/
-├── main.py                    # Entry point (run())
-├── cli.py                     # CLI parser & dispatcher
+├── main.py                    # Entry point + CLI app: cyclopts app, commands, error formatter, run()
 ├── exceptions.py              # CLIError, ExecutionError, InputValidationError, SetupError
-├── commands/                  # benchmark, eval, probe, info, validate, init
-│   ├── benchmark.py           # Core benchmark command implementation
-│   ├── eval.py                # Accuracy evaluation command (not yet implemented)
-│   ├── probe.py               # Endpoint health checking
-│   └── utils.py               # info, validate, init command implementations
+├── commands/                  # Command execution logic
+│   ├── benchmark/
+│   │   ├── __init__.py
+│   │   ├── cli.py             # benchmark_app: offline, online, from-config subcommands
+│   │   └── execute.py         # Phased execution: setup/run_threaded/finalize + BenchmarkContext
+│   ├── probe.py               # ProbeConfig + execute_probe()
+│   ├── info.py                # execute_info()
+│   ├── validate.py            # execute_validate()
+│   └── init.py                # execute_init()
 ├── core/types.py              # Query, QueryResult, StreamChunk, QueryStatus (msgspec Structs)
 ├── load_generator/
 │   ├── session.py             # BenchmarkSession - top-level orchestrator
@@ -126,8 +152,7 @@ src/inference_endpoint/
 │   ├── reporter.py            # MetricsReporter (aggregation)
 │   └── metric.py              # Metric types (Throughput, etc.)
 ├── config/
-│   ├── schema.py              # Pydantic models: LoadPattern, APIType, DatasetType, etc.
-│   ├── yaml_loader.py         # YAML config loading
+│   ├── schema.py              # Single source of truth: Pydantic models + cyclopts annotations
 │   ├── runtime_settings.py    # RuntimeSettings dataclass
 │   ├── ruleset_base.py        # BenchmarkSuiteRuleset base
 │   ├── ruleset_registry.py    # Ruleset registry
@@ -244,6 +269,7 @@ These apply especially to code in the hot path (load generator, endpoint client,
 | `msgspec`      | Fast serialization for core types and ZMQ transport |
 | `pyzmq`        | ZMQ IPC between main process and workers            |
 | `pydantic`     | Configuration validation                            |
+| `cyclopts`     | CLI framework — auto-generates flags from Pydantic  |
 | `duckdb`       | Data aggregation                                    |
 | `transformers` | Tokenization for OSL reporting                      |
 

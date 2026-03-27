@@ -92,3 +92,61 @@ python -m inference_endpoint.utils.benchmark_httpclient -w 8 --stream --stream-i
 Pick the worker count where recv rate peaks and stall% is low.
 
 For streaming workloads, also watch **SSE-pkts/s** — a small stream interval (fine-grained events) dramatically increases packet rate and may require more workers to keep up. If SSE-pkts/s plateaus while recv rate drops, the client is bottlenecked on SSE parsing overhead.
+
+---
+
+## Test Servers
+
+Two built-in servers for benchmarking without a real GPU endpoint.
+
+### MaxThroughputServer
+
+Returns identical pre-compiled responses instantly — zero compute, pure client roofline.
+
+```bash
+python -m inference_endpoint.testing.max_throughput_server --port 12345 --stats
+python -m inference_endpoint.testing.max_throughput_server --stream --stream-interval 50 --stats
+```
+
+| Flag                | Default | Description              |
+| ------------------- | ------- | ------------------------ |
+| `--output-length`   | 4000    | Characters in response   |
+| `--stream`          | off     | SSE streaming mode       |
+| `--stream-interval` | 1       | Characters per SSE event |
+| `--num-workers`     | 4       | Server worker processes  |
+
+### VariableResponseServer
+
+Realistic LLM simulation with per-request variable output lengths, TTFT, and TPOT.
+
+Two mutually exclusive timing modes:
+
+- **Response-rate mode** (`--response-rate-mean`): per-worker token bucket controls global throughput
+- **Inter-token mode** (`--inter-token-latency`): per-token generation time (TPOT) in ms. Inter-SSE-event delay = TPOT × stream_interval
+
+```bash
+# Non-streaming with response-rate control
+python -m inference_endpoint.testing.variable_throughput_server --stats \
+    --response-rate-mean 1000
+
+# Streaming with TPOT + TTFT
+python -m inference_endpoint.testing.variable_throughput_server --stream --stats \
+    --inter-token-latency 15 --first-chunk-latency 1.5 --stream-interval 10
+
+# With jitter
+python -m inference_endpoint.testing.variable_throughput_server --stream --stats \
+    --response-rate-mean 50 --response-rate-spread 0.2 \
+    --first-chunk-latency 0.5 --first-chunk-spread 0.2
+```
+
+| Flag                    | Default | Description                                                                   |
+| ----------------------- | ------- | ----------------------------------------------------------------------------- |
+| `--output-len-mean`     | 1000    | Mean output length (chars)                                                    |
+| `--output-len-spread`   | 0.3     | CoV for output length (lognormal)                                             |
+| `--response-rate-mean`  | 0       | Global throughput (resp/sec). Mutually exclusive with `--inter-token-latency` |
+| `--inter-token-latency` | 0       | Per-token delay in ms (TPOT). Mutually exclusive with `--response-rate-mean`  |
+| `--first-chunk-latency` | 0       | Mean TTFT in seconds                                                          |
+| `--first-chunk-spread`  | 0.2     | CoV for TTFT                                                                  |
+| `--stream-interval`     | 1       | Chars per SSE event                                                           |
+| `--max-concurrency`     | 0       | Max concurrent requests (0 = unlimited)                                       |
+| `--num-workers`         | 10      | Server worker processes                                                       |

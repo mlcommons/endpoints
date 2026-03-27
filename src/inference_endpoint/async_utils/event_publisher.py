@@ -48,11 +48,6 @@ class EventPublisherService(SingletonMixin, ZmqEventRecordPublisher):
             return
         self._initialized = True
 
-        # Set up sockets: use ManagedZMQContext for context and socket directory
-        bind_addr = (
-            f"ipc://{managed_zmq_context.socket_dir}/ev_pub_{uuid.uuid4().hex[:8]}"
-        )
-
         # Set up event loop settings
         if extra_eager:
             loop = None
@@ -60,4 +55,6 @@ class EventPublisherService(SingletonMixin, ZmqEventRecordPublisher):
             loop = LoopManager().create_loop("ev_pub")
         else:
             loop = LoopManager().default_loop
-        super().__init__(bind_addr, managed_zmq_context, loop=loop)
+        super().__init__(
+            f"ev_pub_{uuid.uuid4().hex[:8]}", managed_zmq_context, loop=loop
+        )
