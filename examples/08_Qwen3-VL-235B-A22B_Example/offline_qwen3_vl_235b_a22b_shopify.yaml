@@ -14,10 +14,8 @@ model_params:
 datasets:
   - name: shopify_product_catalogue::q3vl
     type: "performance"
-    force: true
   - name: shopify_product_catalogue::q3vl
     type: "accuracy"
-    force: true
     accuracy_config:
       eval_method: "shopify_category_f1"
       ground_truth: "ground_truth_category"

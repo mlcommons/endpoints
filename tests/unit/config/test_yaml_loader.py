@@ -51,8 +51,6 @@ settings:
   client:
     workers: 4
     worker_initialization_timeout: 120
-    zmq_recv_buffer_bytes: 16777216
-    zmq_send_buffer_bytes: 8388608
 
 metrics:
   collect:
@@ -79,8 +77,13 @@ endpoint_config:
 name: "zmq-buf-test"
 type: "offline"
 
+model_params:
+  name: "test-model"
+
 datasets:
-  - path: "tests/datasets/dummy_1k.pkl"
+  - name: "test"
+    type: "performance"
+    path: "test.pkl"
 
 settings:
   client:
