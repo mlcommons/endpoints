@@ -92,11 +92,11 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
     Required columns:
         - conversation_id: Unique identifier for each conversation
         - turn: Turn number within conversation (1-indexed)
-        - role: Speaker role ("user", "assistant", or "system")
+        - role: Speaker role ("user" or "assistant")
         - content: Message content
 
     Optional columns:
-        - system: System prompt (only for first user turn)
+        - system: System prompt associated with the conversation (typically set on the first user turn)
         - model: Model name override
         - max_new_tokens: Max tokens for this turn
 

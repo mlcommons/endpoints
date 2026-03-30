@@ -294,7 +294,7 @@ def test_multi_turn_scheduler_turn_blocking(
 
     def consume_next_sample():
         """Thread that will block trying to get turn-2."""
-        s_idx, delay = next(schedule_iter)
+        next(schedule_iter)
         blocking_event.set()
 
     consumer_thread = threading.Thread(target=consume_next_sample, daemon=True)
@@ -415,7 +415,6 @@ def test_multi_turn_scheduler_hook_based_release(
     assert SampleEventHandler.complete_hooks[0] == scheduler._release_slot
 
     # Manually invoke hook
-    _initial_inflight = 0
     scheduler._inflight = 1
     scheduler._release_slot()
 
@@ -472,11 +471,11 @@ def test_multi_turn_scheduler_timeout_handling(
         if conv_id != all_conv_ids[0]:
             conversation_manager.mark_turn_complete(conv_id, "Assistant response")
 
-    # Try to get turn-2 for first conversation (should timeout and skip)
-    # The scheduler will try turn-2 of first conv, timeout, then continue to other conversations
+    # Try to get turn-3 for first conversation (should timeout and skip)
+    # The scheduler will try turn-3 of first conv (next user turn), timeout, then continue to other conversations
     start = time.time()
 
-    # Collect remaining samples (should skip first conv turn-2 after timeout)
+    # Collect remaining samples (should skip first conv turn-3 after timeout)
     remaining_samples = []
     try:
         for _ in range(10):  # Try to get more samples (some may be skipped)
@@ -491,12 +490,12 @@ def test_multi_turn_scheduler_timeout_handling(
     # Should have timed out at least once
     assert elapsed >= 0.25  # At least one timeout occurred
 
-    # First conv turn-2 should have been skipped (not in remaining samples)
-    first_conv_turn2_found = any(
-        s["conversation_id"] == all_conv_ids[0] and s["turn"] == 2
+    # First conv turn-3 (next user turn) should have been skipped (not in remaining samples)
+    first_conv_turn3_found = any(
+        s["conversation_id"] == all_conv_ids[0] and s["turn"] == 3
         for s in remaining_samples
     )
-    assert not first_conv_turn2_found  # Should have been skipped due to timeout
+    assert not first_conv_turn3_found  # Should have been skipped due to timeout
 
 
 @pytest.mark.unit
@@ -671,7 +670,7 @@ def test_multi_turn_scheduler_multiple_waiters_same_turn(
     # Second scheduler iterator
     schedule_iter2 = iter(scheduler2)
     for _ in range(3):  # Skip all turn-1
-        s_idx, delay = next(schedule_iter2)
+        next(schedule_iter2)
 
     thread2 = threading.Thread(
         target=wait_for_turn_2, args=(schedule_iter2,), daemon=True

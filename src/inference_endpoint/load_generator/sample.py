@@ -66,15 +66,17 @@ class Sample:
 
     __slots__ = ["uuid", "data"]
 
-    def __init__(self, data: Any):
+    def __init__(self, data: Any, sample_uuid: str | None = None):
         """Initialize sample with data and generate unique ID.
 
         Args:
             data: Request data to send to endpoint. Can be None if data
                  will be loaded later, but can only be set once.
+            sample_uuid: Optional UUID to use instead of generating a new one.
+                        Useful for correlating events across sample lifecycle.
         """
         # 128-bit UUID might be a little overkill for our use case, we can investigate slimming down memory usage
-        self.uuid = uuid.uuid4().hex
+        self.uuid = sample_uuid if sample_uuid is not None else uuid.uuid4().hex
         self.data = data
 
     def __setattr__(self, name: str, value: Any):
@@ -99,15 +101,22 @@ class ConversationSample(Sample):
 
     __slots__ = ["uuid", "data", "conversation_id", "turn_number", "conversation_state"]
 
-    def __init__(self, data: Any, conversation_id: str, turn_number: int):
+    def __init__(
+        self,
+        data: Any,
+        conversation_id: str,
+        turn_number: int,
+        sample_uuid: str | None = None,
+    ):
         """Initialize conversation sample with metadata.
 
         Args:
             data: Request data to send to endpoint.
             conversation_id: Unique identifier for the conversation.
             turn_number: Turn number within the conversation (1-indexed).
+            sample_uuid: Optional UUID to use instead of generating a new one.
         """
-        super().__init__(data)
+        super().__init__(data, sample_uuid=sample_uuid)
         self.conversation_id = conversation_id
         self.turn_number = turn_number
         self.conversation_state = None  # Set by LoadGenerator
@@ -162,6 +171,14 @@ class _SampleEventHandler:
             manager: ConversationManager instance for tracking conversation state.
         """
         self.conversation_manager = manager
+
+    def clear_conversation_manager(self) -> None:
+        """Disable multi-turn mode by clearing the conversation manager.
+
+        This should be called during session teardown to avoid leaking
+        conversation state between benchmark runs.
+        """
+        self.conversation_manager = None
 
     def register_hook(
         self,

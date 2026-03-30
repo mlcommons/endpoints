@@ -159,7 +159,11 @@ def test_query_result_complete_does_not_advance_conversation_on_error(
 
     SampleEventHandler.query_result_complete(result)
 
-    assert state.current_turn == 0
-    assert state.pending_user_turn == 1
-    assert state.message_history == [{"role": "user", "content": "Hello"}]
+    # mark_turn_failed advances the conversation and adds error placeholder
+    assert state.current_turn == 2  # pending_user_turn (1) + 1
+    assert state.pending_user_turn is None  # Cleared after failure
+    assert state.message_history == [
+        {"role": "user", "content": "Hello"},
+        {"role": "assistant", "content": "[ERROR: Turn failed or timed out]"},
+    ]
     record_exception_mock.assert_called_once()

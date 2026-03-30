@@ -315,10 +315,15 @@ class SchedulerBasedLoadGenerator(LoadGenerator):
         # Ignore mypy error complaining that self._iterator maybe None
         s_idx, delay_ns = next(self._iterator)  # type: ignore[call-overload]
 
+        # Generate UUID first for event correlation across sample lifecycle
+        import uuid
+
+        sample_uuid = uuid.uuid4().hex
+
         # Data loading is not timed for Time-to-Token metrics. It is assumed that the
         # hypothetical user would have put the data into memory available for a network
         # request beforehand.
-        sample_data_raw = self.load_sample_data(s_idx, sample_uuid="placeholder")
+        sample_data_raw = self.load_sample_data(s_idx, sample_uuid=sample_uuid)
 
         # Check if multi-turn (requires dict-like data with conversation_id)
         sample: Sample
@@ -372,13 +377,14 @@ class SchedulerBasedLoadGenerator(LoadGenerator):
                 data=request_data,
                 conversation_id=conv_id,
                 turn_number=turn,
+                sample_uuid=sample_uuid,
             )
 
             self.conversation_manager.mark_turn_issued(
                 conv_id, turn, sample_data_raw["content"]
             )
         else:
-            sample = Sample(sample_data_raw)
+            sample = Sample(sample_data_raw, sample_uuid=sample_uuid)
 
         self.uuid_to_index_map[sample.uuid] = s_idx
 

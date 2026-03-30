@@ -244,7 +244,7 @@ def test_conversation_manager_wait_for_turn_ready_blocking():
     - Turn 3: next user turn (ready after turn 2)
     """
     manager = ConversationManager()
-    _state = manager.get_or_create("conv_001", None)
+    manager.get_or_create("conv_001", None)
 
     # Issue turn 1 (makes it pending, blocks turn 3)
     manager.mark_turn_issued("conv_001", 1, "User message")
