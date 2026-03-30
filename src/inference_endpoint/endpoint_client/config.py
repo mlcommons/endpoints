@@ -25,7 +25,7 @@ from __future__ import annotations
 import functools
 from importlib import import_module
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 import cyclopts
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -83,7 +83,7 @@ class HTTPClientConfig(WithUpdatesMixin, BaseModel):
     #    0 = disabled
     #   >0 = explicit total connection count to warmup (split across workers)
     warmup_connections: int = Field(
-        -1, description="Pre-establish TCP connections (-1=auto, 0=disabled)"
+        -1, ge=-1, description="Pre-establish TCP connections (-1=auto, 0=disabled)"
     )
 
     # Maximum concurrent TCP connections.
@@ -97,7 +97,7 @@ class HTTPClientConfig(WithUpdatesMixin, BaseModel):
         cyclopts.Parameter(
             alias="--max-connections", help="Max TCP connections (-1=unlimited)"
         ),
-    ] = -1
+    ] = Field(-1, ge=-1)
 
     # Transport configuration
     transport: AnyTransportConfig = Field(
@@ -184,11 +184,11 @@ class HTTPClientConfig(WithUpdatesMixin, BaseModel):
     # Validators
     # =========================================================================
 
-    @field_validator("num_workers")
+    @field_validator("num_workers", "max_connections")
     @classmethod
-    def _workers_not_zero(cls, v: int) -> int:
+    def _resolve_zeros(cls, v: int, info: Any) -> int:
         if v == 0:
-            raise ValueError("num_workers must be -1 (auto) or >= 1, got 0")
+            raise ValueError(f"{info.field_name} must be -1 (auto) or >= 1, got 0")
         return v
 
     @model_validator(mode="after")
