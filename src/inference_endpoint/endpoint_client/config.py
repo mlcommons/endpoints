@@ -58,7 +58,7 @@ class HTTPClientConfig(WithUpdatesMixin, BaseModel):
     Internal fields use ``parse=False`` — set programmatically only.
     """
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
 
     # =========================================================================
     # User-facing fields (exposed to CLI/YAML)
