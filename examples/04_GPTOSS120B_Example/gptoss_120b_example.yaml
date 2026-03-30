@@ -28,7 +28,6 @@ settings:
 
   client:
     workers: 4
-    record_worker_events: false
 
 metrics:
   collect:

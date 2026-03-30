@@ -45,7 +45,6 @@ from inference_endpoint.config.schema import (
     BenchmarkConfig,
     DatasetType,
     StreamingMode,
-    SystemDefaults,
     TestMode,
     TestType,
 )
@@ -335,8 +334,6 @@ def run_benchmark_threaded(ctx: BenchmarkContext) -> tuple[Any, ResponseCollecto
                 endpoint_urls=[urljoin(e, api_type.default_route()) for e in endpoints],
                 api_type=api_type,
                 num_workers=config.settings.client.workers,
-                record_worker_events=config.settings.client.record_worker_events,
-                event_logs_dir=ctx.report_dir,
                 log_level=config.settings.client.log_level,
                 cpu_affinity=ctx.affinity_plan,
                 warmup_connections=config.settings.client.warmup_connections,
@@ -359,10 +356,7 @@ def run_benchmark_threaded(ctx: BenchmarkContext) -> tuple[Any, ResponseCollecto
                 ctx.scheduler,
                 name=f"cli_benchmark_{uuid.uuid4().hex[0:8]}",
                 report_dir=ctx.report_dir,
-                tokenizer_override=ctx.tokenizer,
                 accuracy_datasets=ctx.accuracy_datasets,
-                max_shutdown_timeout_s=config.timeout or SystemDefaults.DEFAULT_TIMEOUT,
-                dump_events_log=True,
             )
 
             # Wait for test end with ability to interrupt

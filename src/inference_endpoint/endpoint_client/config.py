@@ -17,7 +17,6 @@
 
 from dataclasses import dataclass
 from importlib import import_module
-from pathlib import Path
 from typing import Literal
 
 from inference_endpoint.async_utils.transport.protocol import WorkerPoolTransport
@@ -51,8 +50,6 @@ class HTTPClientConfig:
     #   - -1 for "auto": min(max(8, loadgen_numa_domain_size - 1), 24)
     num_workers: int = -1
 
-    record_worker_events: bool = False
-    event_logs_dir: Path | None = None
     log_level: str = "INFO"
 
     # WARNING: Use with caution

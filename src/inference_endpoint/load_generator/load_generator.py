@@ -19,9 +19,7 @@ from abc import ABC, abstractmethod
 from typing import Any
 
 from ..dataset_manager.dataset import Dataset
-from ..metrics.recorder import EventRecorder
 from ..utils import sleep_ns
-from .events import SessionEvent
 from .sample import IssuedSample, Sample
 from .scheduler import Scheduler
 
@@ -104,13 +102,11 @@ class LoadGenerator(ABC):
     - Sample selection from the dataset (via DataLoader)
     - Timing and scheduling (via Scheduler)
     - Actual sample issuance (via SampleIssuer)
-    - Event recording for metrics
 
     Key responsibilities:
     - Load sample data from dataset at the right time
     - Apply scheduling/timing delays
     - Issue samples via the SampleIssuer
-    - Record timing events for metrics
 
     LoadGenerators are iterators - each iteration issues one sample and
     returns information about what was issued.
@@ -165,10 +161,7 @@ class LoadGenerator(ABC):
         return self
 
     def load_sample_data(self, sample_index: int, sample_uuid: str) -> Any:
-        """Load sample data from dataloader and record event.
-
-        Helper method that loads sample data and records the data load event
-        for accurate timing measurements.
+        """Load sample data from dataloader.
 
         Args:
             sample_index: Index of sample in dataset.
@@ -177,25 +170,12 @@ class LoadGenerator(ABC):
         Returns:
             Sample data loaded from dataloader (format depends on dataset).
         """
-        sample_data = self.dataloader.load_sample(sample_index)
-        EventRecorder.record_event(
-            SessionEvent.LOADGEN_DATA_LOAD,
-            time.monotonic_ns(),
-            sample_uuid=sample_uuid,
-        )
-        return sample_data
+        return self.dataloader.load_sample(sample_index)
 
     def issue_sample(self, sample: Sample) -> int:
-        """Issue a sample via the SampleIssuer and record timing event.
+        """Issue a sample via the SampleIssuer.
 
-        Helper method that:
-        1. Records the current timestamp
-        2. Records LOADGEN_ISSUE_CALLED event for metrics
-        3. Invokes sample_issuer.issue(sample)
-        4. Returns the timestamp
-
-        The timestamp is recorded BEFORE issuing to ensure accurate timing
-        even if the issue() call is slow or triggers immediate callbacks.
+        Records the current timestamp, issues the sample, and returns the timestamp.
 
         Args:
             sample: Sample to issue to the endpoint.
@@ -204,20 +184,6 @@ class LoadGenerator(ABC):
             Monotonic nanosecond timestamp when issue was called.
         """
         timestamp_ns = time.monotonic_ns()
-
-        # Currently, EventRecorder will raise an Exception if the in-flight sample
-        # counter is negative. This happens if the SampleIssuer somehow invokes a
-        # SampleEvent.COMPLETE event before the record_event call for LOADGEN_ISSUE_CALLED
-        # goes off.
-        # This can be solved by just recording the issue() call right before actually
-        # invoking it. If this timing mechanism is a problem, we can remove the
-        # negative check in EventRecorder, since the order of insertions doesn't matter
-        # as much if the timestamps are correct.
-        EventRecorder.record_event(
-            SessionEvent.LOADGEN_ISSUE_CALLED,
-            timestamp_ns,
-            sample_uuid=sample.uuid,
-        )
         logging.debug(f"Issuing sample {sample.uuid} at {timestamp_ns}")
         self.sample_issuer.issue(sample)
         return timestamp_ns

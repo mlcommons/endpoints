@@ -81,7 +81,6 @@ async def run_benchmark(server_url, dataloader, tmp_path, rt_settings):
                 sample_issuer,
                 scheduler,
                 name="pytest_run_benchmark",
-                max_shutdown_timeout_s=3 * 60,
             )
 
             # Step 5. Wait for the test to end.

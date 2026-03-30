@@ -22,12 +22,11 @@ import inference_endpoint.metrics as metrics
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import LoadPattern, LoadPatternType
 from inference_endpoint.core.types import QueryResult, StreamChunk
-from inference_endpoint.load_generator.events import SampleEvent
 from inference_endpoint.load_generator.load_generator import (
     SampleIssuer,
     SchedulerBasedLoadGenerator,
 )
-from inference_endpoint.load_generator.sample import SampleEventHandler
+from inference_endpoint.load_generator.sample import SampleEvent, SampleEventHandler
 from inference_endpoint.load_generator.scheduler import (
     MaxThroughputScheduler,
     PoissonDistributionScheduler,
@@ -56,15 +55,11 @@ class FibonacciSampleOrder(SampleOrder):
         return retval
 
 
-@patch("inference_endpoint.load_generator.load_generator.EventRecorder.record_event")
 @patch(
     "inference_endpoint.load_generator.load_generator.LoadGenerator.load_sample_data"
 )
-def test_load_generator(
-    load_sample_data_mock, event_recorder_mock, max_throughput_runtime_settings
-):
+def test_load_generator(load_sample_data_mock, max_throughput_runtime_settings):
     load_sample_data_mock.side_effect = lambda index, _uuid: index**2
-    event_recorder_mock.return_value = True
 
     class ListAppendIssuer(SampleIssuer):
         def __init__(self):
@@ -77,7 +72,7 @@ def test_load_generator(
 
     load_generator = SchedulerBasedLoadGenerator(
         fake_sample_issuer,
-        None,  # No Dataloader to set, we're using Mock to prevent accessing the EventRecorder and DataLoader
+        None,  # No Dataloader needed — load_sample_data is mocked
         scheduler=MaxThroughputScheduler(
             max_throughput_runtime_settings,
             FibonacciSampleOrder,
@@ -95,10 +90,7 @@ def test_load_generator(
         b = c
 
 
-@patch("inference_endpoint.metrics.recorder.EventRecorder.record_event")
-def test_full_run(record_event_mock):
-    record_event_mock.return_value = None
-
+def test_full_run():
     rt_settings = RuntimeSettings(
         metrics.Throughput(5000),
         [metrics.Throughput(5000)],
@@ -177,14 +169,12 @@ def test_full_run(record_event_mock):
     ), f"Should have seen {rt_settings.n_samples_to_issue} unique uuids, but saw {len(seen_uuids)}"
 
 
-@patch("inference_endpoint.load_generator.load_generator.EventRecorder.record_event")
 @patch(
     "inference_endpoint.load_generator.load_generator.LoadGenerator.load_sample_data"
 )
-def test_max_duration_ms_stops_issuance(load_sample_data_mock, event_recorder_mock):
+def test_max_duration_ms_stops_issuance(load_sample_data_mock):
     """max_duration_ms should stop iteration before n_samples_to_issue is exhausted."""
     load_sample_data_mock.side_effect = lambda index, _uuid: index
-    event_recorder_mock.return_value = True
 
     max_duration_ms = 50
     rt_settings = RuntimeSettings(
@@ -233,20 +223,16 @@ def test_max_duration_ms_stops_issuance(load_sample_data_mock, event_recorder_mo
     ), f"Elapsed time {elapsed_s:.3f}s far exceeds max_duration_ms={max_duration_ms}ms"
 
 
-@patch("inference_endpoint.load_generator.load_generator.EventRecorder.record_event")
 @patch(
     "inference_endpoint.load_generator.load_generator.LoadGenerator.load_sample_data"
 )
-def test_max_duration_ms_stops_issuance_with_poisson_scheduler(
-    load_sample_data_mock, event_recorder_mock
-):
+def test_max_duration_ms_stops_issuance_with_poisson_scheduler(load_sample_data_mock):
     """max_duration_ms should stop iteration even when the scheduler has inter-sample delays.
 
     Uses PoissonDistributionScheduler at low QPS so each inter-sample wait is measurable.
     No sample should be issued after the wall-clock deadline has elapsed.
     """
     load_sample_data_mock.side_effect = lambda index, _uuid: index
-    event_recorder_mock.return_value = True
 
     max_duration_ms = 200
     target_qps = 50  # ~20ms average inter-sample delay

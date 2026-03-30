@@ -392,7 +392,6 @@ class ClientSettings(BaseModel):
     workers: Annotated[
         int, cyclopts.Parameter(alias="--workers", help="Worker processes (-1=auto)")
     ] = Field(-1, ge=-1)
-    record_worker_events: bool = Field(False, description="Record per-worker events")
 
     @field_validator("workers")
     @classmethod
