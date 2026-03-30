@@ -104,7 +104,7 @@ Flag names shown as `--full.dotted.path --alias`. Both forms work.
 - `--model-params.streaming --streaming` - Streaming mode: auto/on/off (default: auto)
 - `--runtime.min-duration-ms --duration` - Min duration: ms default, or with suffix (600s, 10m) (default: 600000)
 - `--runtime.n-samples-to-issue --num-samples` - Explicit sample count override
-- `--client.workers --workers` - HTTP workers (-1=auto, default: -1)
+- `--client.num-workers --workers` - HTTP workers (-1=auto, default: -1)
 - `--client.max-connections --max-connections` - Max TCP connections (-1=unlimited)
 - `--endpoint-config.api-key --api-key` - API authentication
 - `--endpoint-config.api-type --api-type` - API type: openai/sglang (default: openai)
@@ -294,7 +294,7 @@ settings:
     type: "max_throughput"
     target_qps: 10.0
   client:
-    workers: -1 # auto
+    num_workers: -1 # auto
 
 metrics:
   collect: ["throughput", "latency", "ttft", "tpot"]

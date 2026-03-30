@@ -414,12 +414,12 @@ def _create_client(
     cpu_affinity_plan = None
     if enable_affinity:
         effective = num_workers if num_workers > 0 else -1
-        tmp = HTTPClientConfig(endpoint_urls=[endpoint_url], workers=effective)
-        cpu_affinity_plan = compute_affinity_plan(tmp.workers)
+        tmp = HTTPClientConfig(endpoint_urls=[endpoint_url], num_workers=effective)
+        cpu_affinity_plan = compute_affinity_plan(tmp.num_workers)
         if cpu_affinity_plan.loadgen_cpus:
             os.sched_setaffinity(os.getpid(), set(cpu_affinity_plan.loadgen_cpus))  # type: ignore[attr-defined]
         if verbose:
-            print(f"CPU Affinity Plan ({tmp.workers} workers):")
+            print(f"CPU Affinity Plan ({tmp.num_workers} workers):")
             for line in cpu_affinity_plan.summary().split("\n"):
                 print(f"  {line}")
     elif verbose:
@@ -427,7 +427,7 @@ def _create_client(
 
     config = HTTPClientConfig(
         endpoint_urls=[endpoint_url],
-        workers=num_workers if num_workers > 0 else -1,
+        num_workers=num_workers if num_workers > 0 else -1,
         max_connections=max_connections if max_connections > 0 else -1,
         warmup_connections=0,
         worker_gc_mode="relaxed",
@@ -437,7 +437,7 @@ def _create_client(
 
     if verbose:
         print(
-            f"Config: workers={config.workers}, "
+            f"Config: num_workers={config.num_workers}, "
             f"max_connections={config.max_connections}, stream={streaming}"
         )
 

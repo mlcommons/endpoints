@@ -27,7 +27,7 @@ settings:
     target_concurrency: 512
 
   client:
-    workers: 4
+    num_workers: 4
     record_worker_events: false
 
 metrics:

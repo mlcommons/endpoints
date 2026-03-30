@@ -217,7 +217,7 @@ class _ZmqReceiverTransport(ReceiverTransport):
                 if nbytes > buf_len:
                     raise RuntimeError(
                         f"ZMQ message truncated ({nbytes} > {buf_len} bytes). "
-                        f"Increase recv_buffer_size in ZMQTransportConfig."
+                        f"Increase client.transport.recv_buffer_size in config."
                     )
                 self._deque.append(self._decoder.decode(recv_view[:nbytes]))
                 count += 1

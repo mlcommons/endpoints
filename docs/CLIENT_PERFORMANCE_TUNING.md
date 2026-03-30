@@ -95,6 +95,36 @@ For streaming workloads, also watch **SSE-pkts/s** — a small stream interval (
 
 ---
 
+## IPC Transport Buffer Sizes
+
+The ZMQ transport uses a pre-allocated receive buffer (`bytearray`) for zero-copy message deserialization. If a serialized message exceeds this buffer, the worker crashes with:
+
+```
+RuntimeError: ZMQ message truncated (18874368 > 16777216 bytes). Increase client.transport.recv_buffer_size in config.
+```
+
+| Setting            | Default | Description                               |
+| ------------------ | ------- | ----------------------------------------- |
+| `recv_buffer_size` | 16 MB   | Application receive buffer per socket     |
+| `send_buffer_size` | 16 MB   | Kernel send buffer hint (advisory on IPC) |
+
+**When to increase:** Multimodal workloads with large base64-encoded images in the request payload. A single VLM request with a high-resolution image can easily exceed 16 MB after msgspec serialization.
+
+**When the default is fine:** Text-only workloads. A 32K-token prompt serializes to ~150 KB — well within the 16 MB buffer.
+
+```yaml
+settings:
+  client:
+    transport:
+      type: zmq
+      recv_buffer_size: 67108864 # 64 MB for large multimodal payloads
+      send_buffer_size: 67108864
+```
+
+**Note:** `recv_buffer_size` sets the application-level `recv_into` buffer, not a kernel limit. IPC (Unix domain) sockets ignore `SO_RCVBUF`/`SO_SNDBUF` — the OS handles arbitrarily large messages regardless. The `send_buffer_size` is passed to `zmq.SNDBUF` as a kernel hint but has no effect on IPC transport.
+
+---
+
 ## Test Servers
 
 Two built-in servers for benchmarking without a real GPU endpoint.

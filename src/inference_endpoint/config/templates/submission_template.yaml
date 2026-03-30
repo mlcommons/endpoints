@@ -56,7 +56,7 @@ settings:
     target_qps: 100
 
   client:
-    workers: 4
+    num_workers: 4
 
 metrics:
   collect:

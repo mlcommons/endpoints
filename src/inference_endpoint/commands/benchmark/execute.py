@@ -249,7 +249,7 @@ def setup_benchmark(config: BenchmarkConfig, test_mode: TestMode) -> BenchmarkCo
     """Load tokenizer, dataset, create scheduler, setup report dir."""
     # CPU affinity
     affinity_plan = (
-        pin_loadgen(config.settings.client.workers)
+        pin_loadgen(config.settings.client.num_workers)
         if config.enable_cpu_affinity
         else None
     )

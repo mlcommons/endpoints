@@ -38,7 +38,7 @@ class TestWorkerBasicFunctionality:
         """Create worker configuration with echo server URL."""
         http_config = HTTPClientConfig(
             endpoint_urls=[f"{mock_http_echo_server.url}/v1/chat/completions"],
-            workers=1,
+            num_workers=1,
             max_connections=10,
             warmup_connections=0,
         )
@@ -230,7 +230,7 @@ class TestWorkerErrorHandling:
         """Create worker configuration with echo server URL."""
         http_config = HTTPClientConfig(
             endpoint_urls=[f"{mock_http_echo_server.url}/v1/chat/completions"],
-            workers=1,
+            num_workers=1,
             max_connections=10,
             warmup_connections=0,
         )
@@ -241,7 +241,7 @@ class TestWorkerErrorHandling:
         """Create configuration with invalid endpoint for error tests."""
         http_config = HTTPClientConfig(
             endpoint_urls=["http://localhost:59999/v1/chat/completions"],
-            workers=1,
+            num_workers=1,
             max_connections=10,
             warmup_connections=0,
         )
@@ -417,7 +417,7 @@ class TestWorkerErrorHandling:
         # Create config with test server URL
         http_config = HTTPClientConfig(
             endpoint_urls=[f"http://localhost:{server.port}/malformed"],
-            workers=1,
+            num_workers=1,
             max_connections=10,
             warmup_connections=0,
         )

@@ -202,7 +202,7 @@ class TestCommandHandlers:
                     model_params={"name": "M"},
                     settings=OfflineSettings(
                         client=HTTPClientConfig(
-                            workers=1, warmup_connections=0, max_connections=10
+                            num_workers=1, warmup_connections=0, max_connections=10
                         ),
                     ),
                 ),
@@ -221,7 +221,7 @@ class TestCommandHandlers:
                             type=LoadPatternType.POISSON, target_qps=10
                         ),
                         client=HTTPClientConfig(
-                            workers=1, warmup_connections=0, max_connections=10
+                            num_workers=1, warmup_connections=0, max_connections=10
                         ),
                     ),
                 ),
@@ -339,8 +339,8 @@ endpoint_config:
                 "requires --concurrency",
             ),
             (
-                {"type": TestType.OFFLINE, "settings": {"client": {"workers": 0}}},
-                "workers must be",
+                {"type": TestType.OFFLINE, "settings": {"client": {"num_workers": 0}}},
+                "num_workers must be",
             ),
             (
                 {

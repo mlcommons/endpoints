@@ -40,7 +40,7 @@ from inference_endpoint.core.record import (
 from inference_endpoint.core.types import ErrorData, Query, QueryResult, StreamChunk
 
 
-class TransportConfig(BaseModel):
+class TransportConfig(BaseModel, ABC):
     """Base transport configuration. Subclassed per transport backend.
 
     Each subclass must:
@@ -51,14 +51,14 @@ class TransportConfig(BaseModel):
 
     type: str = Field(description="Transport backend (currently: zmq)")  # noqa: A003
     recv_buffer_size: int = Field(
-        default=4 * 1024 * 1024,
+        default=4 * 4 * 1024 * 1024,
         ge=1,
-        description="IPC receive buffer size in bytes (default 4MB). Increase for multimodal payloads.",
+        description="IPC receive buffer size in bytes (default 16MB). Increase for multimodal payloads.",
     )
     send_buffer_size: int = Field(
-        default=4 * 1024 * 1024,
+        default=4 * 4 * 1024 * 1024,
         ge=1,
-        description="IPC send buffer size in bytes (default 4MB). Increase for multimodal payloads.",
+        description="IPC send buffer size in bytes (default 16MB). Increase for multimodal payloads.",
     )
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -70,11 +70,10 @@ class TransportConfig(BaseModel):
         return ZMQTransportConfig()  # type: ignore[return-value]
 
     @property
+    @abstractmethod
     def transport_class(self) -> builtins.type[WorkerPoolTransport]:
-        """The WorkerPoolTransport implementation for this backend. Override per subclass."""
-        raise NotImplementedError(
-            f"Transport {self.type!r} must implement transport_class"
-        )
+        """The WorkerPoolTransport implementation for this backend."""
+        ...
 
 
 @runtime_checkable

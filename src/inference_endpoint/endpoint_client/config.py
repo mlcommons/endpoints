@@ -22,6 +22,7 @@ invisible to the parser but can be set programmatically.
 
 from __future__ import annotations
 
+import functools
 from importlib import import_module
 from pathlib import Path
 from typing import Annotated, Literal
@@ -63,8 +64,12 @@ class HTTPClientConfig(WithUpdatesMixin, BaseModel):
     # User-facing fields (exposed to CLI/YAML)
     # =========================================================================
 
-    workers: Annotated[
-        int, cyclopts.Parameter(alias="--workers", help="Worker processes (-1=auto)")
+    num_workers: Annotated[
+        int,
+        cyclopts.Parameter(
+            alias=["--workers", "--num-workers"],
+            help="Worker processes (-1=auto)",
+        ),
     ] = Field(-1, ge=-1)
 
     record_worker_events: bool = Field(False, description="Record per-worker events")
@@ -144,12 +149,18 @@ class HTTPClientConfig(WithUpdatesMixin, BaseModel):
     # =========================================================================
 
     endpoint_urls: Annotated[list[str], cyclopts.Parameter(parse=False)] = Field(
-        default_factory=list
+        default_factory=list, exclude=True
     )
-    api_type: Annotated[APIType, cyclopts.Parameter(parse=False)] = APIType.OPENAI
-    api_key: Annotated[str | None, cyclopts.Parameter(parse=False)] = None
+    api_type: Annotated[APIType, cyclopts.Parameter(parse=False)] = Field(
+        default=APIType.OPENAI, exclude=True
+    )
+    api_key: Annotated[str | None, cyclopts.Parameter(parse=False)] = Field(
+        default=None, exclude=True
+    )
 
-    event_logs_dir: Annotated[Path | None, cyclopts.Parameter(parse=False)] = None
+    event_logs_dir: Annotated[Path | None, cyclopts.Parameter(parse=False)] = Field(
+        default=None, exclude=True
+    )
 
     # CPU affinity plan for worker processes (computed by caller, e.g. benchmark command).
     # None = disabled (no worker pinning)
@@ -173,11 +184,11 @@ class HTTPClientConfig(WithUpdatesMixin, BaseModel):
     # Validators
     # =========================================================================
 
-    @field_validator("workers")
+    @field_validator("num_workers")
     @classmethod
     def _workers_not_zero(cls, v: int) -> int:
         if v == 0:
-            raise ValueError("workers must be -1 (auto) or >= 1, got 0")
+            raise ValueError("num_workers must be -1 (auto) or >= 1, got 0")
         return v
 
     @model_validator(mode="after")
@@ -186,8 +197,8 @@ class HTTPClientConfig(WithUpdatesMixin, BaseModel):
         if isinstance(self.api_type, str):
             object.__setattr__(self, "api_type", APIType(self.api_type))
 
-        if self.workers == -1:
-            object.__setattr__(self, "workers", _get_auto_num_workers())
+        if self.num_workers == -1:
+            object.__setattr__(self, "num_workers", _get_auto_num_workers())
 
         if self.adapter is None:
             adapter_path = ADAPTER_MAP.get(self.api_type)
@@ -228,6 +239,7 @@ class HTTPClientConfig(WithUpdatesMixin, BaseModel):
         return self
 
 
+@functools.lru_cache(maxsize=1)
 def _get_auto_num_workers() -> int:
     """
     Compute optimal number of workers based on NUMA topology.

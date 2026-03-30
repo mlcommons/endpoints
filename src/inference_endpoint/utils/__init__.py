@@ -105,8 +105,14 @@ class WithUpdatesMixin:
     """
 
     def with_updates(self, **updates: object) -> Any:
-        """Reconstruct with updates, re-running all validators."""
-        return type(self).model_validate(self.model_dump() | updates)  # type: ignore[attr-defined]
+        """Reconstruct with updates, re-running all validators.
+
+        Reads all field values directly (including exclude=True fields
+        that model_dump() would drop), merges updates, and re-validates.
+        """
+        cls = type(self)
+        data = {name: getattr(self, name) for name in cls.model_fields}  # type: ignore[attr-defined]
+        return cls.model_validate(data | updates)  # type: ignore[attr-defined]
 
 
 class SingletonMixin:

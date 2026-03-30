@@ -107,7 +107,7 @@ class TestWorkerLifecycle:
         """Create manager configuration."""
         http_config = HTTPClientConfig(
             endpoint_urls=[f"{mock_http_echo_server.url}/v1/chat/completions"],
-            workers=2,
+            num_workers=2,
             max_connections=10,
             warmup_connections=0,
         )
@@ -125,8 +125,8 @@ class TestWorkerLifecycle:
         await manager.initialize()
 
         # Verify workers were spawned
-        assert len(manager.workers) == http_config.workers
-        assert len(manager.worker_pids) == http_config.workers
+        assert len(manager.workers) == http_config.num_workers
+        assert len(manager.worker_pids) == http_config.num_workers
 
         # Verify all workers are alive
         for worker in manager.workers:
@@ -154,7 +154,7 @@ class TestWorkerLifecycle:
         self, manager_config, signal_type, signal_method
     ):
         """Test workers handle signals correctly and are reaped without leaving zombies."""
-        http_config = manager_config.with_updates(workers=1)
+        http_config = manager_config.with_updates(num_workers=1)
         loop = asyncio.get_running_loop()
 
         manager = WorkerManager(http_config, loop)
@@ -200,7 +200,7 @@ class TestWorkerLifecycle:
     @pytest.mark.asyncio
     async def test_multiple_workers_with_mixed_signals(self, manager_config):
         """Test shutdown handles multiple workers killed with different signals simultaneously."""
-        http_config = manager_config.with_updates(workers=3)
+        http_config = manager_config.with_updates(num_workers=3)
         loop = asyncio.get_running_loop()
 
         manager = WorkerManager(http_config, loop)
@@ -246,7 +246,7 @@ class TestWorkerDeathScenarios:
         """Create configuration for worker death scenario tests."""
         http_config = HTTPClientConfig(
             endpoint_urls=["http://localhost:59999/advanced"],
-            workers=2,
+            num_workers=2,
             max_connections=10,
             warmup_connections=0,
         )

@@ -250,7 +250,7 @@ class HTTPClientConfig(BaseModel):
 
     # Worker process count
     # -1 = auto: min(max(8, numa_domain_size), 24)
-    workers: int = -1
+    num_workers: int = -1
 
     record_worker_events: bool = False
     event_logs_dir: Path | None = None
@@ -301,7 +301,7 @@ class HTTPClientConfig(BaseModel):
 
 Three fields resolve `-1` sentinels by probing the host at construction time:
 
-**`workers=-1`:** Detects the NUMA node of the current process, counts physical CPUs in that NUMA domain, and clamps to `min(max(8, numa_cpu_count), 24)`. Falls back to 8 if NUMA info is unavailable. The intent is to keep all workers local to the same NUMA node for memory locality; users can override to use more cores (workers will be pinned to additional cores outside the NUMA domain if an `AffinityPlan` is provided).
+**`num_workers=-1`:** Detects the NUMA node of the current process, counts physical CPUs in that NUMA domain, and clamps to `min(max(8, numa_cpu_count), 24)`. Falls back to 8 if NUMA info is unavailable. The intent is to keep all workers local to the same NUMA node for memory locality; users can override to use more cores (workers will be pinned to additional cores outside the NUMA domain if an `AffinityPlan` is provided).
 
 **`max_connections=-1`:** Reads the system ephemeral port range from `/proc/sys/net/ipv4/ip_local_port_range`, counts currently used TCP sockets in that range from `/proc/net/tcp` and `/proc/net/tcp6`, and sets `max_connections` to the remaining available ports. Also sets `min_required_connections` to 90% of the total system port range (used to warn during warmup if too few ports are available). If an explicit `max_connections` value exceeds available ports, raises `RuntimeError`.
 

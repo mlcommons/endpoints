@@ -15,11 +15,12 @@
 
 """Protocol definition for SSE stream accumulators."""
 
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 from inference_endpoint.core.types import QueryResult, StreamChunk
 
 
+@runtime_checkable
 class SSEAccumulatorProtocol(Protocol):
     """
     Protocol for Server-Sent Events (SSE) stream accumulators.

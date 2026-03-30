@@ -97,7 +97,7 @@ async def _probe_async(config: ProbeConfig) -> None:
                 urljoin(e, api_type.default_route()) for e in endpoints.split(",")
             ],
             api_type=api_type,
-            workers=1,
+            num_workers=1,
             warmup_connections=0,
         )
         # Client creates its own event loop in a separate thread

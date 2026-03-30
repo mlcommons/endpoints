@@ -39,7 +39,7 @@ settings:
     target_concurrency: 128
 
   client:
-    workers: 4 # Number of client workers
+    num_workers: 4 # Number of client workers
 
 metrics:
   collect:

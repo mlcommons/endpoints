@@ -35,7 +35,7 @@ settings:
     type: "max_throughput"
 
   client:
-    workers: 2
+    num_workers: 2
     # Transport buffer sizes. Default 4MB; increase for large multimodal payloads (e.g. 16MB).
     transport:
       type: zmq

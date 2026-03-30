@@ -133,7 +133,7 @@ Validation is layered, executing in order:
  3. Sub-model validators:
     ├── RuntimeConfig._validate_durations    → max >= min duration
     ├── LoadPattern._validate_completeness   → poisson needs qps, concurrency needs target
-    └── HTTPClientConfig._workers_not_zero   → workers != 0
+    └── HTTPClientConfig._workers_not_zero   → num_workers != 0
  4. BenchmarkConfig._resolve_and_validate:
     ├── resolve defaults (name, streaming, model name from submission_ref)
     ├── load pattern type vs test type (offline→max_throughput, online→poisson/concurrency)
@@ -156,7 +156,7 @@ $ inference-endpoint benchmark offline
 
 $ inference-endpoint benchmark offline --endpoints x --model M --dataset D --workers abc
 ╭── Error ─────────────────────────────────────────────────────────────────────╮
-│   settings.client.workers: Input should be a valid integer, unable to parse  │
+│   settings.client.num_workers: Input should be a valid integer, unable to    │
 │ string as an integer                                                         │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ```

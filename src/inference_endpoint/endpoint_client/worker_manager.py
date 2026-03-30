@@ -55,7 +55,7 @@ class WorkerManager:
         assert http_config.transport is not None
         transport_cls = http_config.transport.transport_class
         self.pool_transport: WorkerPoolTransport = transport_cls.create(
-            loop, http_config.workers, config=http_config.transport
+            loop, http_config.num_workers, config=http_config.transport
         )
 
         # Worker processes
@@ -66,11 +66,11 @@ class WorkerManager:
         """Initialize transports and spawn workers."""
         initialization_succeeded = False
         try:
-            logger.debug(f"Starting {self.http_config.workers} worker processes")
+            logger.debug(f"Starting {self.http_config.num_workers} worker processes")
 
             # Spawn workers with connector
             connector = self.pool_transport.worker_connector
-            for i in range(self.http_config.workers):
+            for i in range(self.http_config.num_workers):
                 process = self._spawn_worker(i, connector)
                 self.workers.append(process)
                 assert (
@@ -84,7 +84,7 @@ class WorkerManager:
             # Wait for workers with periodic liveness checks
             await self._wait_for_workers_with_liveness_check()
 
-            logger.debug(f"All {self.http_config.workers} workers ready")
+            logger.debug(f"All {self.http_config.num_workers} workers ready")
             initialization_succeeded = True
 
         except TimeoutError as e:

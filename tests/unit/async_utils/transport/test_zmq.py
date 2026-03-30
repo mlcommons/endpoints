@@ -21,10 +21,16 @@ without requiring external HTTP servers or real child processes.
 
 import asyncio
 
+import msgspec
 import pytest
 import pytest_asyncio
 from inference_endpoint.async_utils.transport import ZmqWorkerPoolTransport
-from inference_endpoint.async_utils.transport.zmq.transport import ZMQTransportConfig
+from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
+from inference_endpoint.async_utils.transport.zmq.transport import (
+    ZMQTransportConfig,
+    _create_receiver,
+    _create_sender,
+)
 from inference_endpoint.core.types import Query, QueryResult, TextModelOutput
 
 # =============================================================================
@@ -292,3 +298,63 @@ class TestZmqRobustness:
 
         # poll returns None
         assert zmq_pool.poll() is None
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_oversized_message_raises_runtime_error(self):
+        """Sending a message larger than recv_buffer_size raises RuntimeError in callback."""
+        loop = asyncio.get_running_loop()
+
+        # Use a tiny buffer so we can trigger truncation with a small payload
+        small_buf = 1024  # 1 KB
+        config = ZMQTransportConfig(
+            recv_buffer_size=small_buf,
+            send_buffer_size=16 * 1024 * 1024,  # sender needs large buf to send
+        )
+
+        with ManagedZMQContext.scoped(io_threads=config.io_threads) as zmq_ctx:
+            addr = "overflow_test"
+
+            sender = _create_sender(loop, addr, zmq_ctx, config, bind=True)
+            receiver = _create_receiver(loop, addr, zmq_ctx, config, Query, bind=False)
+
+            await asyncio.sleep(0.01)
+
+            # Create a query with payload larger than recv buffer
+            big_payload = "x" * (small_buf * 4)
+            query = Query(id="big", data={"prompt": big_payload})
+
+            # Verify the serialized message is actually larger than the buffer
+            encoder = msgspec.msgpack.Encoder()
+            encoded = encoder.encode(query)
+            assert (
+                len(encoded) > small_buf
+            ), f"Encoded message ({len(encoded)}B) must exceed buffer ({small_buf}B)"
+
+            # Capture the RuntimeError from the event loop callback
+            captured_exceptions = []
+            original_handler = loop.get_exception_handler()
+
+            def capture_handler(loop, context):
+                if "exception" in context:
+                    captured_exceptions.append(context["exception"])
+
+            loop.set_exception_handler(capture_handler)
+
+            try:
+                sender.send(query)
+
+                # recv() will time out — the RuntimeError kills _on_readable,
+                # so the message never reaches the deque
+                with pytest.raises(TimeoutError):
+                    await asyncio.wait_for(receiver.recv(), timeout=0.5)
+
+                # Verify the RuntimeError was raised in the callback
+                assert any(
+                    isinstance(e, RuntimeError) and "ZMQ message truncated" in str(e)
+                    for e in captured_exceptions
+                ), f"Expected RuntimeError with 'ZMQ message truncated', got: {captured_exceptions}"
+            finally:
+                loop.set_exception_handler(original_handler)
+                sender.close()
+                receiver.close()

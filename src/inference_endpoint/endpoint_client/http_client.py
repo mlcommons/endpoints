@@ -52,7 +52,7 @@ class HTTPEndpointClient:
     ):
         self.client_id = uuid.uuid4().hex[:8]
         self.config = config
-        self._worker_cycle = cycle(range(self.config.workers))
+        self._worker_cycle = cycle(range(self.config.num_workers))
 
         # Use provided loop or create one via LoopManager (uvloop + eager task factory)
         self._owns_loop = loop is None
@@ -72,7 +72,7 @@ class HTTPEndpointClient:
         asyncio.run_coroutine_threadsafe(self._initialize(), self.loop).result()
 
         logger.info(
-            f"EndpointClient initialized with workers={self.config.workers}, "
+            f"EndpointClient initialized with num_workers={self.config.num_workers}, "
             f"endpoints={self.config.endpoint_urls}, "
             f"adapter={self.config.adapter.__name__ if self.config.adapter else 'none'}, "
             f"accumulator={self.config.accumulator.__name__ if self.config.accumulator else 'none'}, "
