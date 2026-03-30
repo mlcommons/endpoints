@@ -1,36 +1,33 @@
-# Offline Benchmark - Qwen3-VL-235B-A22B on Shopify Product Catalogue
-# MLPerf Inference Q3VL benchmark: multimodal product taxonomy classification
-name: "offline-qwen3-vl-235b-a22b-shopify-benchmark"
+# Online (Server) Benchmark - Qwen3-VL-235B-A22B on Shopify Product Catalogue
+# MLPerf Inference Q3VL server scenario: measures latency under sustained QPS load
+# GB300-NVL4 target: 41.5 QPS
+name: "online-qwen3-vl-235b-a22b-shopify-benchmark"
 version: "1.0"
-type: "offline"
-timeout: 14400 # Perf + acc run takes over 3 hours, consider limit n_samples_to_issue for perf run or remove accuracy dataset to skip accuracy run
+type: "online"
+timeout: 14400
 
 model_params:
   name: "Qwen/Qwen3-VL-235B-A22B-Instruct"
   temperature: 0
   top_p: 1
   max_new_tokens: 150
+  streaming: "on" # Required for TTFT/TPOT measurement
 
 datasets:
   - name: shopify_product_catalogue::q3vl
     type: "performance"
-  - name: shopify_product_catalogue::q3vl
-    type: "accuracy"
-    accuracy_config:
-      eval_method: "shopify_category_f1"
-      ground_truth: "ground_truth_category"
-      extractor: "identity_extractor"
-      num_repeats: 1
+
 
 settings:
   runtime:
-    min_duration_ms: 600000 # 10 minute
+    min_duration_ms: 600000 # 10 minutes
     n_samples_to_issue: 48289 # Limit queries for testing (remove or increase for full run)
-    scheduler_random_seed: 42 # For Poisson/distribution sampling
-    dataloader_random_seed: 42 # For dataset shuffling
+    scheduler_random_seed: 42
+    dataloader_random_seed: 42
 
   load_pattern:
-    type: "max_throughput"
+    type: "poisson"
+    target_qps: 41.5 # GB300-NVL4 server scenario target QPS
 
   client:
     workers: 2
@@ -45,7 +42,6 @@ settings:
 
 metrics:
   collect:
-    - "throughput"
     - "latency"
 
 endpoint_config:
