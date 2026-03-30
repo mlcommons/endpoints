@@ -34,7 +34,6 @@ from .metrics_table import (
     IslTrigger,
     MetricsTable,
     OslTrigger,
-    RequestDurationTrigger,
     SampleLatencyTrigger,
     TpotTrigger,
     TtftTrigger,
@@ -47,8 +46,6 @@ _TRACKED_SAMPLE_EVENTS = frozenset(
         SampleEventType.COMPLETE,
         SampleEventType.RECV_FIRST,
         SampleEventType.RECV_NON_FIRST,
-        SampleEventType.CLIENT_SEND,
-        SampleEventType.CLIENT_RESP_DONE,
     }
 )
 
@@ -94,7 +91,6 @@ class MetricsAggregatorService(ZmqEventRecordSubscriber):
         """
         # Always registered
         table.add_trigger("issued_ns", IslTrigger(emitter, tokenize_pool, loop))
-        table.add_trigger("client_resp_done_ns", RequestDurationTrigger(emitter))
         table.add_trigger("complete_ns", SampleLatencyTrigger(emitter))
         table.add_trigger("complete_ns", OslTrigger(emitter, tokenize_pool, loop))
 
@@ -141,10 +137,6 @@ class MetricsAggregatorService(ZmqEventRecordSubscriber):
                 table.set_field(uuid, "last_recv_ns", ts, record)
             elif ev == SampleEventType.RECV_NON_FIRST:
                 table.set_field(uuid, "last_recv_ns", ts, record)
-            elif ev == SampleEventType.CLIENT_SEND:
-                table.set_field(uuid, "client_send_ns", ts, record)
-            elif ev == SampleEventType.CLIENT_RESP_DONE:
-                table.set_field(uuid, "client_resp_done_ns", ts, record)
             elif ev == SampleEventType.COMPLETE:
                 table.set_field(uuid, "complete_ns", ts, record)
 

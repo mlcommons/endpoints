@@ -35,8 +35,6 @@ class TestSampleRow:
         assert row.complete_ns is None
         assert row.recv_first_ns is None
         assert row.last_recv_ns is None
-        assert row.client_send_ns is None
-        assert row.client_resp_done_ns is None
         assert row.tracked_block_idx == -1
 
     def test_is_msgspec_struct(self):

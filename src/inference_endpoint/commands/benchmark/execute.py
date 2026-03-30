@@ -44,7 +44,6 @@ from inference_endpoint.config.schema import (
     BenchmarkConfig,
     DatasetType,
     StreamingMode,
-    SystemDefaults,
     TestMode,
     TestType,
 )

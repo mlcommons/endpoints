@@ -23,7 +23,6 @@ import os
 import signal
 import ssl
 import sys
-import time
 import traceback
 from collections.abc import AsyncGenerator
 from typing import Any
@@ -46,9 +45,6 @@ from inference_endpoint.endpoint_client.http import (
     InFlightRequest,
     PooledConnection,
 )
-from inference_endpoint.load_generator.events import SampleEvent
-from inference_endpoint.metrics.recorder import EventRecorder
-from inference_endpoint.metrics.reporter import MetricsReporter
 from inference_endpoint.profiling import profile
 from inference_endpoint.utils.logging import setup_logging
 
@@ -267,29 +263,8 @@ class Worker:
                             f"(need {threshold}). Consider closing background TCP connections."
                         )
 
-            # TODO(vir):
-            # record_worker_events has high overhead - slows down the worker 100x
-            # replace with fine-grained metrics, always captured/dumped per worker
-
             # Run main processing loop
-            if self.http_config.record_worker_events:
-                pid = os.getpid()
-                worker_db_name = f"worker_report_{self.worker_id}_{pid}"
-                assert (
-                    self.http_config.event_logs_dir is not None
-                ), "event_logs_dir must be set if record_worker_events is enabled"
-                report_path = self.http_config.event_logs_dir / f"{worker_db_name}.csv"
-
-                with EventRecorder(session_id=worker_db_name) as event_recorder:
-                    await self._run_main_loop()
-                    event_recorder.wait_for_writes(force_commit=True)
-
-                    with MetricsReporter(event_recorder.connection_name) as reporter:
-                        logger.debug(f"About to dump report to {report_path}")
-                        reporter.dump_all_to_csv(report_path)
-                        logger.debug(f"Report dumped to {report_path}")
-            else:
-                await self._run_main_loop()
+            await self._run_main_loop()
 
         except Exception as e:
             logger.error(f"Error: {type(e).__name__}: {str(e)}")
@@ -327,14 +302,6 @@ class Worker:
                     # Transport closed (shutdown called)
                     if query is None:
                         break
-
-                    if self.http_config.record_worker_events:
-                        EventRecorder.record_event(
-                            SampleEvent.ZMQ_REQUEST_RECEIVED,
-                            time.monotonic_ns(),
-                            sample_uuid=query.id,
-                            assert_active=True,
-                        )
 
                     # Prepare and fire request
                     req = self._prepare_request(query)
@@ -439,15 +406,6 @@ class Worker:
             # Release connection back to pool if not already
             self._pool.release(conn)
 
-            # Record completion event
-            if self.http_config.record_worker_events:
-                EventRecorder.record_event(
-                    SampleEvent.HTTP_RESPONSE_COMPLETED,
-                    time.monotonic_ns(),
-                    sample_uuid=req.query_id,
-                    assert_active=True,
-                )
-
             # Clean up task reference
             current_task = asyncio.current_task()
             if current_task is not None:
@@ -467,26 +425,11 @@ class Worker:
                 if stream_chunk := accumulator.add_chunk(delta):
                     self._responses.send(stream_chunk)
 
-                    if self.http_config.record_worker_events:
-                        EventRecorder.record_event(
-                            SampleEvent.ZMQ_RESPONSE_SENT,
-                            time.monotonic_ns(),
-                            sample_uuid=query_id,
-                            assert_active=True,
-                        )
-
         # Release connection early - done with socket I/O (idempotent)
         self._pool.release(conn)
 
         # Send final complete back to main rank
         self._responses.send(accumulator.get_final_output())
-        if self.http_config.record_worker_events:
-            EventRecorder.record_event(
-                SampleEvent.ZMQ_RESPONSE_SENT,
-                time.monotonic_ns(),
-                sample_uuid=query_id,
-                assert_active=True,
-            )
 
     @profile
     async def _handle_non_streaming_body(self, req: InFlightRequest) -> None:
@@ -505,13 +448,6 @@ class Worker:
 
         # Send result back to main rank
         self._responses.send(result)
-        if self.http_config.record_worker_events:
-            EventRecorder.record_event(
-                SampleEvent.ZMQ_RESPONSE_SENT,
-                time.monotonic_ns(),
-                sample_uuid=query_id,
-                assert_active=True,
-            )
 
     async def _handle_error(self, query_id: str, error: Exception | str) -> None:
         """Send error response for a query."""
@@ -532,13 +468,6 @@ class Worker:
             error=error_data,
         )
         self._responses.send(error_response)
-        if self.http_config.record_worker_events:
-            EventRecorder.record_event(
-                SampleEvent.ZMQ_RESPONSE_SENT,
-                time.monotonic_ns(),
-                sample_uuid=query_id,
-                assert_active=True,
-            )
 
     @profile
     async def _iter_sse_lines(

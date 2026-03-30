@@ -38,7 +38,7 @@ except ImportError:
 
 from ..dataset_manager.dataset import Dataset
 from ..dataset_manager.predefined.shopify_product_catalogue import ProductMetadata
-from ..load_generator.events import SampleEvent
+from ..load_generator.sample import SampleEvent
 from .extractor import Extractor, PythonCodeExtractor
 
 

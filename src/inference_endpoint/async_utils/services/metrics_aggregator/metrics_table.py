@@ -58,8 +58,6 @@ class SampleRow(msgspec.Struct, gc=False):  # type: ignore[call-arg]
     issued_ns: int | None = None
     recv_first_ns: int | None = None
     last_recv_ns: int | None = None
-    client_send_ns: int | None = None
-    client_resp_done_ns: int | None = None
     complete_ns: int | None = None
 
 
@@ -150,24 +148,6 @@ class ChunkDeltaTrigger(EmitTrigger):
         self._emitter.emit(
             row.sample_uuid, "chunk_delta_ns", ev_rec.timestamp_ns - prev
         )
-        return None
-
-
-class RequestDurationTrigger(EmitTrigger):
-    """request_duration_ns = client_resp_done_ns (new) - client_send_ns."""
-
-    def __init__(self, emitter: MetricEmitter):
-        super().__init__("request_duration_ns", requires=("client_send_ns",))
-        self._emitter = emitter
-
-    def fire(self, ev_rec, row, pre_change):
-        client_send = pre_change.get("client_send_ns")
-        if client_send is not None:
-            self._emitter.emit(
-                row.sample_uuid,
-                "request_duration_ns",
-                ev_rec.timestamp_ns - client_send,
-            )
         return None
 
 
