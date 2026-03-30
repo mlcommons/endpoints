@@ -261,8 +261,6 @@ class HTTPClientConfig(BaseModel):
     # -1 = auto: min(max(8, numa_domain_size), 24)
     num_workers: int = -1
 
-    record_worker_events: bool = False
-    event_logs_dir: Path | None = None
     log_level: str = "INFO"
 
     # When True, all SSE chunks emitted via IPC (high main-thread overhead).

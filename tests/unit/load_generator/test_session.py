@@ -14,21 +14,21 @@
 # limitations under the License.
 
 import random
-from pathlib import Path
-from unittest.mock import patch
 
 import inference_endpoint.metrics as metrics
 import pytest
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import LoadPattern, LoadPatternType
-from inference_endpoint.load_generator.events import SampleEvent
-from inference_endpoint.load_generator.sample import Sample, SampleEventHandler
+from inference_endpoint.load_generator.sample import (
+    Sample,
+    SampleEvent,
+    SampleEventHandler,
+)
 from inference_endpoint.load_generator.scheduler import (
     MaxThroughputScheduler,
     WithoutReplacementSampleOrder,
 )
 from inference_endpoint.load_generator.session import BenchmarkSession
-from inference_endpoint.metrics.reporter import MetricsReporter
 from tqdm import tqdm
 
 from tests.test_helpers import (
@@ -40,10 +40,7 @@ from tests.test_helpers import (
 # but session.py tests fail, it's probably not the PooledSampleIssuer's fault.
 
 
-@patch("inference_endpoint.load_generator.sample.EventRecorder.record_event")
-def test_pooled_issuer_exception_propagation(record_event_mock):
-    record_event_mock.return_value = None
-
+def test_pooled_issuer_exception_propagation():
     """Test that exceptions in worker threads are properly propagated to the main thread."""
 
     def failing_compute(sample):
@@ -63,10 +60,7 @@ def test_pooled_issuer_exception_propagation(record_event_mock):
         issuer.shutdown()
 
 
-@patch("inference_endpoint.load_generator.sample.EventRecorder.record_event")
-def test_pooled_issuer_futures_cleanup(record_event_mock):
-    record_event_mock.return_value = None
-
+def test_pooled_issuer_futures_cleanup():
     """Test that completed futures are cleaned up to prevent memory leaks."""
     import time
 
@@ -141,19 +135,10 @@ def test_session_start(clean_sample_event_hooks):
             sample_issuer,
             sched,
             name="pytest_test_session_start",
-            max_shutdown_timeout_s=300,
         )
-        events_db_path = sess.event_recorder.connection_name
         assert sess.wait_for_test_end(
             timeout=120.0
         ), "Session did not complete within timeout"
 
         # Shutdown the sample issuer to ensure proper cleanup and error propagation
         sample_issuer.shutdown()
-
-    assert Path(events_db_path).exists()
-    with MetricsReporter(events_db_path) as reporter:
-        stats = reporter.get_sample_statuses()
-        assert stats["total_sent"] == 10_000
-        assert stats["completed"] == 10_000
-        assert stats["in_flight"] == 0

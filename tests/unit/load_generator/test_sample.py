@@ -14,12 +14,14 @@
 # limitations under the License.
 
 import time
-from unittest.mock import patch
 
 import pytest
 from inference_endpoint.core.types import QueryResult, StreamChunk
-from inference_endpoint.load_generator.events import SampleEvent
-from inference_endpoint.load_generator.sample import Sample, SampleEventHandler
+from inference_endpoint.load_generator.sample import (
+    Sample,
+    SampleEvent,
+    SampleEventHandler,
+)
 
 
 def test_sample_uniqueness():
@@ -45,8 +47,8 @@ def test_sample_eager_data_loading():
     assert sample.data == "my data"
 
 
-@patch("inference_endpoint.load_generator.sample.EventRecorder.record_event")
-def test_sample_callback_times(record_event_mock):
+def test_sample_callback_times():
+    """Test that hooks are invoked in the correct order for stream chunks and completion."""
     events = []
 
     sample = Sample(None)
@@ -54,13 +56,20 @@ def test_sample_callback_times(record_event_mock):
     non_first_chunk = StreamChunk(id=sample.uuid, metadata={"first_chunk": False})
     complete_result = QueryResult(id=sample.uuid)
 
-    def fake_record_event(
-        ev_type: SampleEvent, timestamp_ns: int, sample_uuid: str, **kwargs
-    ):
-        assert sample_uuid == sample.uuid
-        events.append((ev_type, timestamp_ns))
+    def record_first_chunk(chunk):
+        events.append((SampleEvent.FIRST_CHUNK, time.monotonic_ns()))
 
-    record_event_mock.side_effect = fake_record_event
+    def record_non_first_chunk(chunk):
+        events.append((SampleEvent.NON_FIRST_CHUNK, time.monotonic_ns()))
+
+    def record_complete(result):
+        events.append((SampleEvent.COMPLETE, time.monotonic_ns()))
+
+    SampleEventHandler.register_hook(SampleEvent.FIRST_CHUNK, record_first_chunk)
+    SampleEventHandler.register_hook(
+        SampleEvent.NON_FIRST_CHUNK, record_non_first_chunk
+    )
+    SampleEventHandler.register_hook(SampleEvent.COMPLETE, record_complete)
 
     sleep_time_sec = 0.01
 
@@ -71,7 +80,6 @@ def test_sample_callback_times(record_event_mock):
     SampleEventHandler.query_result_complete(complete_result)
 
     assert len(events) == 3
-    assert record_event_mock.call_count == 3
 
     assert events[0][0] == SampleEvent.FIRST_CHUNK
     assert events[1][0] == SampleEvent.NON_FIRST_CHUNK
@@ -88,11 +96,10 @@ def test_sample_callback_times(record_event_mock):
     assert tpot_1_sec > sleep_time_sec
     assert tpot_2_sec > sleep_time_sec
 
+    SampleEventHandler.clear_hooks()
 
-@patch("inference_endpoint.load_generator.sample.EventRecorder.record_event")
-def test_sample_invalid_type_errors(record_event_mock):
-    record_event_mock.return_value = None
 
+def test_sample_invalid_type_errors():
     chunk = StreamChunk(id="123", metadata={"first_chunk": True})
     result = QueryResult(id="123")
 
@@ -103,10 +110,7 @@ def test_sample_invalid_type_errors(record_event_mock):
         SampleEventHandler.query_result_complete(chunk)
 
 
-@patch("inference_endpoint.load_generator.sample.EventRecorder.record_event")
-def test_sample_event_handler_register_hook(record_event_mock):
-    record_event_mock.return_value = None
-
+def test_sample_event_handler_register_hook():
     progress_counter = [0, 0]
 
     def progress_hook(_):

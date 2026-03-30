@@ -142,10 +142,6 @@ class SampleEventType(EventType):
     COMPLETE = "complete"
     RECV_FIRST = "recv_first"
     RECV_NON_FIRST = "recv_non_first"
-    CLIENT_SEND = "client_send"
-    CLIENT_RESP_DONE = "client_resp_done"
-    TRANSPORT_SENT = "transport_sent"
-    TRANSPORT_RECV = "transport_recv"
 
 
 class EventRecord(msgspec.Struct, kw_only=True, frozen=True, gc=False):  # type: ignore[call-arg]

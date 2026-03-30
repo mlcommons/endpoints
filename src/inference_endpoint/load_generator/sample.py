@@ -14,17 +14,28 @@
 # limitations under the License.
 
 import logging
-import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any
 
 from ..core.types import QueryResult, StreamChunk
-from ..metrics.recorder import EventRecorder, record_exception
-from .events import SampleEvent
 
 logger = logging.getLogger(__name__)
+
+
+class SampleEvent(str, Enum):
+    """Event types for sample lifecycle hooks.
+
+    Used by _SampleEventHandler for hook registration. These are local to the
+    hook system and separate from core.record.SampleEventType which is used
+    for the event publishing pipeline.
+    """
+
+    COMPLETE = "complete"
+    FIRST_CHUNK = "first_chunk_received"
+    NON_FIRST_CHUNK = "non_first_chunk_received"
 
 
 class Sample:
@@ -139,31 +150,17 @@ class _SampleEventHandler:
     def stream_chunk_complete(self, chunk: StreamChunk) -> None:
         """Handle completion of a streaming chunk.
 
-        Called when a chunk arrives from a streaming response. Records timing
-        event and invokes registered hooks for first/non-first chunks.
+        Called when a chunk arrives from a streaming response. Invokes
+        registered hooks for first/non-first chunks.
 
         Args:
             chunk: StreamChunk containing response data and metadata.
         """
-        timestamp_ns = time.monotonic_ns()
-
         assert isinstance(chunk, StreamChunk), f"Invalid chunk type: {type(chunk)}"
 
-        hooks = []
         if chunk.metadata.get("first_chunk", False):
-            EventRecorder.record_event(
-                SampleEvent.FIRST_CHUNK,
-                timestamp_ns,
-                sample_uuid=chunk.id,
-                data=chunk.response_chunk,
-            )
             hooks = self.first_chunk_hooks
         else:
-            EventRecorder.record_event(
-                SampleEvent.NON_FIRST_CHUNK,
-                timestamp_ns,
-                sample_uuid=chunk.id,
-            )
             hooks = self.non_first_chunk_hooks
 
         for hook in hooks:
@@ -172,29 +169,16 @@ class _SampleEventHandler:
     def query_result_complete(self, result: QueryResult) -> None:
         """Handle completion of a query (success or failure).
 
-        Called when a query finishes (with response or error). Records timing
-        event and invokes registered completion hooks.
+        Called when a query finishes (with response or error). Invokes
+        registered completion hooks.
 
         Args:
             result: QueryResult containing response data or error information.
         """
-        timestamp_ns = time.monotonic_ns()
-
         assert isinstance(result, QueryResult), f"Invalid result type: {type(result)}"
 
-        # Even if there is an error, we still record the event to count the sample as complete
         if result.error is not None:
-            err_str = str(result.error)
-            logger.error(f"Error in request {result.id}: {err_str}")
-
-            record_exception(err_str, result.id)
-
-        EventRecorder.record_event(
-            SampleEvent.COMPLETE,
-            timestamp_ns,
-            sample_uuid=result.id,
-            data=result.response_output,
-        )
+            logger.error(f"Error in request {result.id}: {result.error}")
 
         for hook in self.complete_hooks:
             hook(result)

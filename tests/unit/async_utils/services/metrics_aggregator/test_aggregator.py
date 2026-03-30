@@ -235,21 +235,6 @@ class TestTimingMetrics:
         assert m["sample_latency_ns"] == 4000
 
     @pytest.mark.asyncio
-    async def test_request_duration(self):
-        emitter = FakeEmitter()
-        agg = make_stub_aggregator(emitter)
-        await agg.process(
-            [
-                _session(SessionEventType.START_PERFORMANCE_TRACKING, ts=0),
-                _sample(SampleEventType.ISSUED, "s1", ts=1000),
-                _sample(SampleEventType.CLIENT_SEND, "s1", ts=1100),
-                _sample(SampleEventType.CLIENT_RESP_DONE, "s1", ts=4100),
-                _sample(SampleEventType.COMPLETE, "s1", ts=5000),
-            ]
-        )
-        assert emitter.get_metrics("s1")["request_duration_ns"] == 3000
-
-    @pytest.mark.asyncio
     async def test_chunk_deltas(self):
         emitter = FakeEmitter()
         agg = make_stub_aggregator(emitter)
@@ -301,28 +286,6 @@ class TestTimingMetrics:
         assert "tpot_ns" not in m
 
     @pytest.mark.asyncio
-    async def test_all_timing_metrics_full_lifecycle(self):
-        """Full streaming sample lifecycle emits all expected timing metrics."""
-        emitter = FakeEmitter()
-        agg = make_stub_aggregator(emitter)
-        await agg.process(
-            [
-                _session(SessionEventType.START_PERFORMANCE_TRACKING, ts=0),
-                _sample(SampleEventType.ISSUED, "s1", ts=1000),
-                _sample(SampleEventType.CLIENT_SEND, "s1", ts=1050),
-                _sample(SampleEventType.RECV_FIRST, "s1", ts=2000),
-                _sample(SampleEventType.RECV_NON_FIRST, "s1", ts=3000),
-                _sample(SampleEventType.CLIENT_RESP_DONE, "s1", ts=4000),
-                _sample(SampleEventType.COMPLETE, "s1", ts=4500),
-            ]
-        )
-        m = emitter.get_metrics("s1")
-        assert m["ttft_ns"] == 1000
-        assert m["sample_latency_ns"] == 3500
-        assert m["request_duration_ns"] == 2950
-        assert m["chunk_delta_ns"] == 1000
-
-    @pytest.mark.asyncio
     async def test_chunk_delta_not_emitted_without_last_recv(self):
         """RECV_NON_FIRST without prior RECV_FIRST: no chunk_delta emitted."""
         emitter = FakeEmitter()
@@ -336,21 +299,6 @@ class TestTimingMetrics:
         row = agg._table.get_row("s1")
         assert row is not None
         assert row.last_recv_ns is None  # No recv events yet
-
-    @pytest.mark.asyncio
-    async def test_request_duration_not_emitted_without_client_send(self):
-        """CLIENT_RESP_DONE without CLIENT_SEND: no request_duration."""
-        emitter = FakeEmitter()
-        agg = make_stub_aggregator(emitter)
-        await agg.process(
-            [
-                _session(SessionEventType.START_PERFORMANCE_TRACKING, ts=0),
-                _sample(SampleEventType.ISSUED, "s1", ts=1000),
-                _sample(SampleEventType.CLIENT_RESP_DONE, "s1", ts=4000),
-                _sample(SampleEventType.COMPLETE, "s1", ts=5000),
-            ]
-        )
-        assert "request_duration_ns" not in emitter.get_metrics("s1")
 
 
 # ---------------------------------------------------------------------------
@@ -485,23 +433,6 @@ class TestEdgeCases:
         assert s2["ttft_ns"] == 1500
         assert s1["sample_latency_ns"] == 3000
         assert s2["sample_latency_ns"] == 3500
-
-    @pytest.mark.asyncio
-    async def test_transport_events_ignored(self):
-        """TRANSPORT_SENT / TRANSPORT_RECV should not affect metrics."""
-        emitter = FakeEmitter()
-        agg = make_stub_aggregator(emitter)
-        await agg.process(
-            [
-                _session(SessionEventType.START_PERFORMANCE_TRACKING, ts=0),
-                _sample(SampleEventType.ISSUED, "s1", ts=1000),
-                _sample(SampleEventType.TRANSPORT_SENT, "s1", ts=1001),
-                _sample(SampleEventType.TRANSPORT_RECV, "s1", ts=1002),
-                _sample(SampleEventType.COMPLETE, "s1", ts=5000),
-            ]
-        )
-        m = emitter.get_metrics("s1")
-        assert m == {"sample_latency_ns": 4000}
 
     @pytest.mark.asyncio
     async def test_error_events_ignored(self):

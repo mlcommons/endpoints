@@ -20,9 +20,8 @@ This module handles load pattern generation and query lifecycle management.
 Status: To be implemented by the development team.
 """
 
-from .events import Event, SampleEvent, SessionEvent
 from .load_generator import LoadGenerator, SampleIssuer, SchedulerBasedLoadGenerator
-from .sample import IssuedSample, Sample, SampleEventHandler
+from .sample import IssuedSample, Sample, SampleEvent, SampleEventHandler
 from .scheduler import (
     ConcurrencyScheduler,
     MaxThroughputScheduler,
@@ -35,8 +34,6 @@ from .scheduler import (
 from .session import BenchmarkSession
 
 __all__ = [
-    "Event",
-    "SessionEvent",
     "SampleEvent",
     "Sample",
     "SampleEventHandler",
