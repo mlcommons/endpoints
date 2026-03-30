@@ -18,6 +18,8 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+from enum import Enum
 
 from inference_endpoint.async_utils.transport.zmq.pubsub import (
     ZmqEventRecordSubscriber,
@@ -40,6 +42,18 @@ from .metrics_table import (
     TtftTrigger,
 )
 from .token_metrics import TokenizePool
+
+logger = logging.getLogger(__name__)
+
+
+class MetricCounterKey(str, Enum):
+    """Counter metric keys tracked by the aggregator."""
+
+    N_SAMPLES_ISSUED = "n_samples_issued"
+    N_SAMPLES_COMPLETED = "n_samples_completed"
+    N_SAMPLES_FAILED = "n_samples_failed"
+    DURATION_NS = "duration_ns"
+
 
 _TRACKED_SAMPLE_EVENTS = frozenset(
     {
@@ -74,11 +88,8 @@ class MetricsAggregatorService(ZmqEventRecordSubscriber):
         self._shutdown_event = shutdown_event
         self._shutdown_received = False
 
-        # Counter keys
-        kv_store.create_key("n_samples_issued", "counter")
-        kv_store.create_key("n_samples_completed", "counter")
-        kv_store.create_key("n_samples_failed", "counter")
-        kv_store.create_key("duration_ns", "counter")
+        for key in MetricCounterKey:
+            kv_store.create_key(key.value, "counter")
 
         self._n_issued = 0
         self._n_completed = 0
@@ -129,13 +140,17 @@ class MetricsAggregatorService(ZmqEventRecordSubscriber):
                 else:
                     table.handle_session_event(record)
                     if ev == SessionEventType.STOP_PERFORMANCE_TRACKING:
-                        store.update("duration_ns", table.total_tracked_duration_ns)
+                        store.update(
+                            MetricCounterKey.DURATION_NS.value,
+                            table.total_tracked_duration_ns,
+                        )
                 continue
 
             # --- Error events ---
             if isinstance(ev, ErrorEventType):
                 self._n_failed += 1
-                store.update("n_samples_failed", self._n_failed)
+                store.update(MetricCounterKey.N_SAMPLES_FAILED.value, self._n_failed)
+                logger.debug("Error event: %s", record)
                 continue
 
             # --- Sample events ---
@@ -152,7 +167,7 @@ class MetricsAggregatorService(ZmqEventRecordSubscriber):
             if ev == SampleEventType.ISSUED:
                 table.set_field(uuid, "issued_ns", ts, record)
                 self._n_issued += 1
-                store.update("n_samples_issued", self._n_issued)
+                store.update(MetricCounterKey.N_SAMPLES_ISSUED.value, self._n_issued)
             elif ev == SampleEventType.RECV_FIRST:
                 table.set_field(uuid, "recv_first_ns", ts, record)
                 table.set_field(uuid, "last_recv_ns", ts, record)
@@ -161,11 +176,16 @@ class MetricsAggregatorService(ZmqEventRecordSubscriber):
             elif ev == SampleEventType.COMPLETE:
                 table.set_field(uuid, "complete_ns", ts, record)
                 self._n_completed += 1
-                store.update("n_samples_completed", self._n_completed)
+                store.update(
+                    MetricCounterKey.N_SAMPLES_COMPLETED.value, self._n_completed
+                )
 
         if saw_shutdown:
             await table.drain_tasks()
-            store.update("duration_ns", table.total_tracked_duration_ns)
+            store.update(
+                MetricCounterKey.DURATION_NS.value,
+                table.total_tracked_duration_ns,
+            )
             self._finalize()
 
     def _finalize(self) -> None:

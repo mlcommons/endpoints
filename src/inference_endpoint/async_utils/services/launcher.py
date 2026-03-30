@@ -52,7 +52,7 @@ class ServiceLauncher:
     Usage::
 
         launcher = ServiceLauncher(zmq_context)
-        procs = await launcher.launch([
+        await launcher.launch([
             ServiceConfig(
                 module="inference_endpoint.async_utils.services.event_logger",
                 args=["--log-dir", "/tmp/logs", "--socket-dir", socket_dir,
@@ -62,42 +62,46 @@ class ServiceLauncher:
 
         # ... run benchmark ...
 
-        ServiceLauncher.wait_for_exit(procs, timeout=60.0)
+        launcher.wait_for_exit(timeout=60.0)
     """
 
     def __init__(self, zmq_context: ManagedZMQContext) -> None:
         self._zmq_ctx = zmq_context
+        self._procs: list[subprocess.Popen] = []
+
+    @property
+    def procs(self) -> list[subprocess.Popen]:
+        return self._procs
 
     async def launch(
         self,
         services: list[ServiceConfig],
         timeout: float | None = 30.0,
-    ) -> list[subprocess.Popen]:
+    ) -> None:
         """Spawn service subprocesses and wait for all to signal readiness.
 
         Each service receives ``--readiness-path`` and ``--readiness-id`` CLI
         arguments. After initialization, the service sends a ready signal via
         ``send_ready_signal()`` using the same socket_dir as the launcher.
 
+        Launched processes are stored in ``self.procs`` for later use by
+        ``wait_for_exit()`` and ``kill_all()``.
+
         Args:
             services: List of ServiceConfig describing each service to launch.
             timeout: Maximum total seconds to wait for all services to become ready.
-
-        Returns:
-            List of Popen handles (one per service).
 
         Raises:
             TimeoutError: If services don't signal readiness within timeout.
         """
         if not services:
-            return []
+            return
 
         readiness_path = f"svc_ready_{uuid.uuid4().hex[:8]}"
         receiver = ReadyCheckReceiver(
             readiness_path, self._zmq_ctx, count=len(services)
         )
 
-        procs: list[subprocess.Popen] = []
         try:
             for i, svc in enumerate(services):
                 cmd = [
@@ -112,42 +116,47 @@ class ServiceLauncher:
                 ]
                 logger.info("Launching service: %s (id=%d)", svc.module, i)
                 proc = subprocess.Popen(cmd)
-                procs.append(proc)
+                self._procs.append(proc)
 
             await receiver.wait(timeout=timeout)
             logger.info("All %d services ready", len(services))
 
-        except (TimeoutError, Exception) as e:
-            # Check if any subprocess crashed (provides a better error message)
-            for proc in procs:
-                rc = proc.poll()
-                if rc is not None and rc != 0:
-                    raise RuntimeError(
-                        f"Service pid={proc.pid} exited with code {rc} "
-                        f"during startup"
-                    ) from e
-            for proc in procs:
-                proc.kill()
+        except Exception as e:
+            # Collect all crashed subprocesses for a complete error message
+            crashed = [
+                (proc.pid, exit_code)
+                for proc in self._procs
+                if (exit_code := proc.poll()) is not None and exit_code != 0
+            ]
+
+            self.kill_all()
             receiver.close()
+
+            if crashed:
+                details = ", ".join(
+                    f"pid={pid} exit={exit_code}" for pid, exit_code in crashed
+                )
+                raise RuntimeError(
+                    f"{len(crashed)} service(s) crashed during startup: {details}"
+                ) from e
             raise
 
-        return procs
+    def kill_all(self) -> None:
+        """Kill all managed subprocesses."""
+        for proc in self._procs:
+            if proc.poll() is None:
+                proc.kill()
 
-    @staticmethod
-    def wait_for_exit(
-        procs: list[subprocess.Popen],
-        timeout: float | None = 60.0,
-    ) -> None:
+    def wait_for_exit(self, timeout: float | None = 60.0) -> None:
         """Wait for all service subprocesses to exit.
 
         Services self-terminate on SessionEventType.ENDED. This method
         blocks until all have exited or timeout is reached.
 
         Args:
-            procs: List of subprocess handles from launch().
             timeout: Maximum seconds to wait per process.
         """
-        for proc in procs:
+        for proc in self._procs:
             try:
                 proc.wait(timeout=timeout)
             except subprocess.TimeoutExpired:

@@ -39,6 +39,7 @@ Read protocol (any process):
 
 from __future__ import annotations
 
+import logging
 import math
 import mmap
 import os
@@ -51,6 +52,8 @@ from typing import Literal
 # ---------------------------------------------------------------------------
 # Series rollup stats (computed on read)
 # ---------------------------------------------------------------------------
+
+logger = logging.getLogger(__name__)
 
 _HEADER_BYTES = 8  # uint64 count for series
 _VALUE_BYTES = 8  # float64 per value
@@ -231,11 +234,16 @@ class _SeriesItem:
 
     def append(self, value: float) -> None:
         if self._closed:
+            logger.warning("append() called on closed series: %s", self._path)
             return
         if self._count >= self._capacity:
             self._grow()
         offset = _HEADER_BYTES + self._count * _VALUE_BYTES
         struct.pack_into("<d", self._mm, offset, value)
+        # Flush to ensure the value is visible before updating the count header.
+        # Without this, ARM (weak memory model) readers could see the new count
+        # but read stale/uninitialized data at the corresponding offset.
+        self._mm.flush()
         self._count += 1
         struct.pack_into("<Q", self._mm, 0, self._count)
 
@@ -254,12 +262,13 @@ class _SeriesItem:
 
     def _grow(self) -> None:
         old_mm = self._mm
-        self._capacity *= 2
-        total = _HEADER_BYTES + self._capacity * _VALUE_BYTES
+        new_capacity = self._capacity * 2
+        total = _HEADER_BYTES + new_capacity * _VALUE_BYTES
         fd = os.open(str(self._path), os.O_RDWR)
         try:
             os.ftruncate(fd, total)
             self._mm = mmap.mmap(fd, total)
+            self._capacity = new_capacity
         except Exception:
             self._mm = old_mm
             raise

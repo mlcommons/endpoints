@@ -17,7 +17,9 @@
 
 import argparse
 import asyncio
-import uuid
+import platform
+import shutil
+import tempfile
 from contextlib import AbstractContextManager, nullcontext
 from pathlib import Path
 
@@ -28,6 +30,20 @@ from inference_endpoint.async_utils.transport.zmq.ready_check import send_ready_
 from .aggregator import MetricsAggregatorService
 from .kv_store import BasicKVStore
 from .token_metrics import TokenizePool
+
+
+def _default_shm_dir() -> Path:
+    """Return the platform shared-memory directory.
+
+    Only Linux provides /dev/shm. Other platforms are not supported for
+    mmap-backed metrics.
+    """
+    if platform.system() != "Linux":
+        raise RuntimeError(
+            "mmap-backed metrics require /dev/shm (Linux only); "
+            f"current platform: {platform.system()}"
+        )
+    return Path("/dev/shm")
 
 
 async def main() -> None:
@@ -78,45 +94,48 @@ async def main() -> None:
     )
     args = parser.parse_args()
 
-    metrics_dir = Path(f"/dev/shm/metrics_{uuid.uuid4().hex[:8]}")
-    metrics_dir.mkdir(parents=True, exist_ok=True)
+    metrics_dir = Path(tempfile.mkdtemp(prefix="metrics_", dir=_default_shm_dir()))
+    try:
+        shutdown_event = asyncio.Event()
+        loop = LoopManager().default_loop
 
-    shutdown_event = asyncio.Event()
-    loop = LoopManager().default_loop
-
-    # Using ternary operator causes errors in MyPy object type coalescing
-    # (coalesces to 'object' not 'AbstractContextManager[TokenizePool | None]')
-    if args.tokenizer:
-        pool_cm: AbstractContextManager[TokenizePool | None] = TokenizePool(
-            args.tokenizer, n_workers=args.tokenizer_workers
-        )
-    else:
-        pool_cm = nullcontext()
-
-    with (
-        pool_cm as pool,
-        ManagedZMQContext.scoped(socket_dir=args.socket_dir) as zmq_ctx,
-    ):
-        kv_store = BasicKVStore(metrics_dir)
-        try:
-            aggregator = MetricsAggregatorService(
-                args.socket_name,
-                zmq_ctx,
-                loop,
-                topics=None,
-                kv_store=kv_store,
-                tokenize_pool=pool,
-                streaming=args.streaming,
-                shutdown_event=shutdown_event,
+        # Using ternary operator causes errors in MyPy object type coalescing
+        # (coalesces to 'object' not 'AbstractContextManager[TokenizePool | None]')
+        if args.tokenizer:
+            pool_cm: AbstractContextManager[TokenizePool | None] = TokenizePool(
+                args.tokenizer, n_workers=args.tokenizer_workers
             )
-            aggregator.start()
+        else:
+            pool_cm = nullcontext()
 
-            if args.readiness_path:
-                await send_ready_signal(zmq_ctx, args.readiness_path, args.readiness_id)
+        with (
+            pool_cm as pool,
+            ManagedZMQContext.scoped(socket_dir=args.socket_dir) as zmq_ctx,
+        ):
+            kv_store = BasicKVStore(metrics_dir)
+            try:
+                aggregator = MetricsAggregatorService(
+                    args.socket_name,
+                    zmq_ctx,
+                    loop,
+                    topics=None,
+                    kv_store=kv_store,
+                    tokenize_pool=pool,
+                    streaming=args.streaming,
+                    shutdown_event=shutdown_event,
+                )
+                aggregator.start()
 
-            await shutdown_event.wait()
-        finally:
-            kv_store.unlink()
+                if args.readiness_path:
+                    await send_ready_signal(
+                        zmq_ctx, args.readiness_path, args.readiness_id
+                    )
+
+                await shutdown_event.wait()
+            finally:
+                kv_store.unlink()
+    finally:
+        shutil.rmtree(metrics_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":
