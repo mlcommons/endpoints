@@ -128,7 +128,7 @@ class HTTPClientConfig:
     # Default in __post_init__ if None
     worker_pool_transport: type[WorkerPoolTransport] = None  # type: ignore[assignment]
 
-    # ZMQ socket buffer sizes (bytes); passed as recv_buffer_size/send_buffer_size kwargs
+    # ZMQ socket buffer sizes (bytes). Increase for large multimodal payloads.
     zmq_recv_buffer_bytes: int = 4 * 1024 * 1024
     zmq_send_buffer_bytes: int = 4 * 1024 * 1024
 

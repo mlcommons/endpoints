@@ -420,7 +420,7 @@ class ClientSettings(BaseModel):
     # Increase for slow systems or when workers load heavy dependencies.
     worker_initialization_timeout: float = 40.0
 
-    # ZMQ IPC socket buffer sizes (bytes). Increase for large multimodal requests.
+    # ZMQ IPC socket buffer sizes (bytes). Increase for large multimodal payloads (e.g. 16777216 = 16MB).
     zmq_recv_buffer_bytes: int = Field(
         default=4 * 1024 * 1024,
         ge=1,

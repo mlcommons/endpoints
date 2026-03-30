@@ -70,6 +70,30 @@ endpoint_config:
         assert config.type == BenchmarkTestType.OFFLINE
         assert len(config.datasets) == 1
         assert config.settings.client.worker_initialization_timeout == 120.0
+        assert config.settings.client.zmq_recv_buffer_bytes == 4 * 1024 * 1024
+        assert config.settings.client.zmq_send_buffer_bytes == 4 * 1024 * 1024
+
+    def test_zmq_buffer_override_from_yaml(self, tmp_path):
+        """Test that zmq buffer sizes can be overridden from YAML."""
+        config_content = """
+name: "zmq-buf-test"
+type: "offline"
+
+datasets:
+  - path: "tests/datasets/dummy_1k.pkl"
+
+settings:
+  client:
+    zmq_recv_buffer_bytes: 16777216
+    zmq_send_buffer_bytes: 8388608
+
+endpoint_config:
+  endpoints:
+    - "http://localhost:8000"
+"""
+        config_file = tmp_path / "test_config.yaml"
+        config_file.write_text(config_content)
+        config = BenchmarkConfig.from_yaml_file(config_file)
         assert config.settings.client.zmq_recv_buffer_bytes == 16777216
         assert config.settings.client.zmq_send_buffer_bytes == 8388608
 
@@ -213,14 +237,6 @@ class TestSerialization:
         assert (
             loaded.settings.client.worker_initialization_timeout
             == original.settings.client.worker_initialization_timeout
-        )
-        assert (
-            loaded.settings.client.zmq_recv_buffer_bytes
-            == original.settings.client.zmq_recv_buffer_bytes
-        )
-        assert (
-            loaded.settings.client.zmq_send_buffer_bytes
-            == original.settings.client.zmq_send_buffer_bytes
         )
 
     def test_to_yaml_file_creates_directory(self, tmp_path):

@@ -144,7 +144,6 @@ class _ZmqReceiverTransport(ReceiverTransport):
         loop: asyncio.AbstractEventLoop,
         sock: zmq.Socket,
         decoder: msgspec.msgpack.Decoder,
-        recv_buf_size: int,
     ):
         self._loop = loop
         self._sock = sock
@@ -158,10 +157,7 @@ class _ZmqReceiverTransport(ReceiverTransport):
 
         # NOTE(vir):
         # zmq recv_into with Pre-allocated buffer.
-        # msgspec can decode in-place, avoiding per-message bytes allocation.
-        # NOTE: getsockopt(zmq.RCVBUF) does not reliably reflect what was set
-        # via setsockopt on Linux (the kernel adjusts the value), so we use the
-        # config value directly instead of reading it back from the socket.
+        recv_buf_size = sock.getsockopt(zmq.RCVBUF)
         self._recv_buf = bytearray(recv_buf_size)
         self._recv_view = memoryview(self._recv_buf)
 
@@ -448,7 +444,7 @@ def _create_receiver(
         else msgspec.msgpack.Decoder()
     )
 
-    return _ZmqReceiverTransport(loop, sock, decoder, config.recv_buffer_size)
+    return _ZmqReceiverTransport(loop, sock, decoder)
 
 
 def _create_sender(
