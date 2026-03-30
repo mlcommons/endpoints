@@ -19,8 +19,9 @@ from typing import Any
 
 import pandas as pd
 
-from ..config.schema import APIType, ModelParams
+from ..config.schema import APIType, ModelParams, StreamingMode
 from .dataset import Dataset
+from .transforms import apply_transforms
 
 # Known generation parameter fields to forward from dataset to API requests
 # Known generation parameter fields to forward from dataset to API requests.
@@ -52,6 +53,28 @@ GENERATION_PARAMS = {
     "user",  # End-user identifier for monitoring/abuse detection
     "chat_template",  # Custom chat formatting template
 }
+
+
+def _model_param_defaults(model_params: ModelParams | None) -> dict[str, Any]:
+    """Build per-request defaults for multi-turn rows from model params.
+
+    Multi-turn datasets use `content` and conversation metadata rather than the
+    single-turn `prompt` field expected by adapter dataset transforms. Applying
+    those transforms would drop the conversation schema before load_sample() can
+    construct the messages array. Instead, we inject the request defaults here.
+    """
+    if model_params is None:
+        return {}
+
+    return {
+        "model": model_params.name,
+        "stream": model_params.streaming == StreamingMode.ON,
+        "max_completion_tokens": model_params.max_new_tokens,
+        "temperature": model_params.temperature,
+        "top_p": model_params.top_p,
+        "top_k": model_params.top_k,
+        "repetition_penalty": model_params.repetition_penalty,
+    }
 
 
 class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
@@ -140,7 +163,9 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
             roles = sorted_group["role"].tolist()
 
             # Extract user turns for start validation
-            user_turns = [turn for turn, role in zip(turns, roles) if role == "user"]
+            user_turns = [
+                turn for turn, role in zip(turns, roles, strict=False) if role == "user"
+            ]
             if user_turns and user_turns[0] != 1:
                 raise ValueError(
                     f"Conversation {conv_id}: First user turn must be turn 1, got {user_turns[0]}. "
@@ -149,7 +174,7 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
 
             # Validate contiguous numbering across all turns
             for i, (expected_turn, actual_turn) in enumerate(
-                zip(range(1, len(turns) + 1), turns), start=1
+                zip(range(1, len(turns) + 1), turns, strict=False), start=1
             ):
                 if actual_turn != expected_turn:
                     raise ValueError(
@@ -205,15 +230,44 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
 
         Multi-turn benchmarks only issue user turns. Assistant turns remain in the
         backing data so the conversation structure can still be validated.
-        """
-        super().load(
-            adapter=adapter,
-            api_type=api_type,
-            model_params=model_params,
-            force=force,
-        )
 
-        assert self.data is not None
+        Unlike single-turn datasets, multi-turn rows do not have a `prompt`
+        column, so adapter dataset transforms are intentionally skipped here.
+        They would apply a single-turn ColumnFilter and strip the conversation
+        fields required by load_sample(). Request defaults from model_params are
+        merged directly into the conversation rows instead.
+        """
+        if not force and self.data is not None:
+            self._user_turn_indices = [
+                index for index, row in enumerate(self.data) if row["role"] == "user"
+            ]
+            return
+
+        df = self.dataframe
+        if df is None:
+            raise ValueError(
+                f"Cannot load dataset {self.__class__.__name__}: dataframe is None"
+            )
+
+        transforms = []
+        if self.transforms is not None:
+            transforms.extend(self.transforms)
+
+        if transforms:
+            df = apply_transforms(df, transforms)
+
+        defaults = _model_param_defaults(model_params)
+        for key, value in defaults.items():
+            if value is None:
+                continue
+            if key in df.columns:
+                df[key] = df[key].where(pd.notna(df[key]), value)
+            else:
+                df[key] = value
+
+        self.data = df.to_dict(orient="records")
+        assert self.data is not None, "Failed to convert DataFrame to records"
+
         self._user_turn_indices = [
             index for index, row in enumerate(self.data) if row["role"] == "user"
         ]

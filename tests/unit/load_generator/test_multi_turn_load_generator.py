@@ -17,6 +17,7 @@
 
 import pandas as pd
 import pytest
+from inference_endpoint.config.schema import APIType, ModelParams, StreamingMode
 from inference_endpoint.dataset_manager.multi_turn_dataset import MultiTurnDataset
 
 
@@ -123,3 +124,48 @@ def test_multi_turn_skips_nan_values():
     assert "temperature" not in sample
     # Non-NaN top_p should be present
     assert sample["top_p"] == 0.9
+
+
+@pytest.mark.unit
+def test_multi_turn_load_applies_model_params_without_prompt_column():
+    """Benchmark loading should not require single-turn prompt columns."""
+    df = pd.DataFrame(
+        [
+            {
+                "conversation_id": "c1",
+                "turn": 1,
+                "role": "user",
+                "content": "Hi",
+            },
+            {
+                "conversation_id": "c1",
+                "turn": 2,
+                "role": "assistant",
+                "content": "Hello",
+            },
+        ]
+    )
+
+    dataset = MultiTurnDataset(df)
+    dataset.load(
+        api_type=APIType.OPENAI,
+        model_params=ModelParams(
+            name="test-model",
+            streaming=StreamingMode.ON,
+            max_new_tokens=512,
+            temperature=0.3,
+            top_p=0.8,
+            top_k=42,
+            repetition_penalty=1.05,
+        ),
+    )
+
+    sample = dataset.load_sample(0)
+
+    assert sample["model"] == "test-model"
+    assert sample["stream"] is True
+    assert sample["max_completion_tokens"] == 512
+    assert sample["temperature"] == 0.3
+    assert sample["top_p"] == 0.8
+    assert sample["top_k"] == 42
+    assert sample["repetition_penalty"] == 1.05
