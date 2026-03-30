@@ -312,7 +312,9 @@ class RuntimeConfig(BaseModel):
         ),
     ] = Field(600000, ge=0)
     max_duration_ms: int = Field(
-        -1, ge=-1, description="Maximum test duration in ms (-1 for no limit)"
+        0,
+        ge=0,
+        description="Maximum test duration in ms (0 for no limit)",
     )
 
     @field_validator("min_duration_ms", "max_duration_ms", mode="before")
@@ -338,7 +340,7 @@ class RuntimeConfig(BaseModel):
 
     @model_validator(mode="after")
     def _validate_durations(self) -> Self:
-        if self.max_duration_ms != -1 and self.max_duration_ms < self.min_duration_ms:
+        if self.max_duration_ms != 0 and self.max_duration_ms < self.min_duration_ms:
             raise ValueError(
                 f"max_duration_ms ({self.max_duration_ms}) must be >= "
                 f"min_duration_ms ({self.min_duration_ms})"
