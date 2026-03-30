@@ -36,7 +36,7 @@ settings:
 
   client:
     num_workers: 2
-    # Transport buffer sizes. Default 4MB; increase for large multimodal payloads (e.g. 16MB).
+    # Transport buffer sizes. Default 16MB; increase for large multimodal payloads.
     transport:
       type: zmq
       recv_buffer_size: 16777216

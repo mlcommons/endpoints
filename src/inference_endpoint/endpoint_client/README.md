@@ -73,7 +73,7 @@ plan = pin_loadgen(num_workers=8)
 client = HTTPEndpointClient(
     HTTPClientConfig(
         endpoint_urls=["http://localhost:8000/v1/completions"],
-        workers=8,
+        num_workers=8,
         cpu_affinity=plan,
     )
 )
