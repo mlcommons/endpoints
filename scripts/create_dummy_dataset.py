@@ -22,14 +22,12 @@ local testing without requiring large production datasets.
 Usage:
     python scripts/create_dummy_dataset.py  # Creates 1000 samples
     python scripts/create_dummy_dataset.py --samples 500  # Creates 500 samples
-    python scripts/create_dummy_dataset.py --samples 5000 --output custom.pkl
+    python scripts/create_dummy_dataset.py --samples 5000 --output custom.jsonl
 """
 
 import argparse
-import pickle
+import json
 from pathlib import Path
-
-import pandas as pd
 
 
 def create_dummy_dataset(num_samples: int = 1000, output_path: str = None):
@@ -37,7 +35,7 @@ def create_dummy_dataset(num_samples: int = 1000, output_path: str = None):
 
     Args:
         num_samples: Number of samples to generate
-        output_path: Output file path (default: tests/datasets/dummy_1k.pkl)
+        output_path: Output file path (default: tests/datasets/dummy_1k.jsonl)
     """
     # Create varied prompts
     prompt_templates = [
@@ -82,25 +80,22 @@ def create_dummy_dataset(num_samples: int = 1000, output_path: str = None):
         )
         outputs.append(output)
 
-    # Create DataFrame matching the expected format
-    data = {"text_input": prompts, "ref_output": outputs}
-    df = pd.DataFrame(data)
-
     # Determine output path
     if output_path is None:
         repo_root = Path(__file__).parent.parent
-        output_path = repo_root / "tests" / "datasets" / "dummy_1k.pkl"
+        output_path = repo_root / "tests" / "datasets" / "dummy_1k.jsonl"
 
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Save as pickle
-    with open(output_path, "wb") as f:
-        pickle.dump(df, f)
+    # Save as JSONL
+    with open(output_path, "w") as f:
+        for prompt, ref in zip(prompts, outputs, strict=False):
+            f.write(json.dumps({"text_input": prompt, "ref_output": ref}) + "\n")
 
-    print(f"✓ Created {output_path} with {len(df)} samples")
-    print(f"✓ Sample prompt: {df['text_input'][0]}")
-    print(f"✓ Sample output: {df['ref_output'][0]}")
+    print(f"✓ Created {output_path} with {num_samples} samples")
+    print(f"✓ Sample prompt: {prompts[0]}")
+    print(f"✓ Sample output: {outputs[0]}")
     print(f"✓ File size: {output_path.stat().st_size / 1024:.1f} KB")
 
     return output_path
@@ -120,7 +115,7 @@ def main():
         "--output",
         "-o",
         type=str,
-        help="Output file path (default: tests/datasets/dummy_1k.pkl)",
+        help="Output file path (default: tests/datasets/dummy_1k.jsonl)",
     )
 
     args = parser.parse_args()

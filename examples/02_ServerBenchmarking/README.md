@@ -49,7 +49,7 @@ enroot start -e HF_TOKEN=$HF_TOKEN -m $HF_HOME:/root/.cache/huggingface vllm+vll
 Once the server is up and running, we can send requests to the endpoint by passing in the endpoint address via `-e` as well as the model name
 
 ```
-inference-endpoint benchmark offline -e http://localhost:8000 -d tests/datasets/dummy_1k.pkl  --model ${MODEL_NAME}
+inference-endpoint benchmark offline -e http://localhost:8000 -d tests/datasets/dummy_1k.jsonl  --model ${MODEL_NAME}
 ```
 
 # Using a config file

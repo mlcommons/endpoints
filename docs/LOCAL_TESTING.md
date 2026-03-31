@@ -4,8 +4,8 @@
 
 ### 1. Prepare Test Environment
 
-**Dataset:** The repo includes `tests/datasets/dummy_1k.pkl` (1000 samples, ~133 KB)
-**Format:** Automatically inferred (supports: pkl, HuggingFace; coming soon: jsonl)
+**Dataset:** The repo includes `tests/datasets/dummy_1k.jsonl` (1000 samples)
+**Format:** Automatically inferred (supports: JSONL, CSV, Parquet, HuggingFace)
 
 ### 2. Start the Echo Server
 
@@ -72,13 +72,13 @@ Waiting for 5 responses...
 inference-endpoint -v benchmark offline \
   --endpoints http://localhost:8765 \
   --model Qwen/Qwen3-8B \
-  --dataset tests/datasets/dummy_1k.pkl
+  --dataset tests/datasets/dummy_1k.jsonl
 
 # Production test with custom params and report generation
 inference-endpoint -v benchmark offline \
   --endpoints http://localhost:8765 \
   --model Qwen/Qwen3-8B \
-  --dataset tests/datasets/dummy_1k.pkl \
+  --dataset tests/datasets/dummy_1k.jsonl \
   --num-samples 5000 \
   --workers 4 \
   --report-dir benchmark_report
@@ -90,7 +90,7 @@ inference-endpoint -v benchmark offline \
 **Expected Output:**
 
 ```
-Loading: dummy_1k.pkl
+Loading: dummy_1k.jsonl
 Loaded 1000 samples
 Mode: TestMode.PERF, QPS: 10.0, Responses: False
 Streaming: disabled (auto, offline mode)
@@ -111,7 +111,7 @@ Cleaning up...
 inference-endpoint -v benchmark online \
   --endpoints http://localhost:8765 \
   --model Qwen/Qwen3-8B \
-  --dataset tests/datasets/dummy_1k.pkl \
+  --dataset tests/datasets/dummy_1k.jsonl \
   --load-pattern poisson \
   --target-qps 100 \
   --report-dir online_benchmark_report
@@ -120,7 +120,7 @@ inference-endpoint -v benchmark online \
 **Expected Output:**
 
 ```
-Loading: dummy_1k.pkl
+Loading: dummy_1k.jsonl
 Loaded 1000 samples
 Mode: TestMode.PERF, QPS: 100.0, Responses: False
 Streaming: enabled (auto, online mode)
@@ -150,7 +150,7 @@ inference-endpoint validate-yaml --config offline_template.yaml
 inference-endpoint benchmark offline \
   --endpoints http://localhost:8765 \
   --model Qwen/Qwen3-8B \
-  --dataset tests/datasets/ds_samples.pkl \
+  --dataset tests/datasets/ds_samples.jsonl \
   -v
 ```
 
@@ -240,7 +240,7 @@ inference-endpoint probe --endpoints http://localhost:8000 --model Qwen/Qwen3-8B
 inference-endpoint -v benchmark offline \
   --endpoints http://localhost:8000 \
   --model Qwen/Qwen3-8B \
-  --dataset tests/datasets/dummy_1k.pkl \
+  --dataset tests/datasets/dummy_1k.jsonl \
   --workers 4 \
   --report-dir benchmark_report
 
@@ -255,14 +255,14 @@ pkill -f echo_server
 inference-endpoint benchmark offline \
   --endpoints http://localhost:8765 \
   --model Qwen/Qwen3-8B \
-  --dataset tests/datasets/dummy_1k.pkl \
+  --dataset tests/datasets/dummy_1k.jsonl \
   --report-dir offline_report
 
 # Online (Poisson distribution)
 inference-endpoint benchmark online \
   --endpoints http://localhost:8765 \
   --model Qwen/Qwen3-8B \
-  --dataset tests/datasets/dummy_1k.pkl \
+  --dataset tests/datasets/dummy_1k.jsonl \
   --load-pattern poisson \
   --target-qps 500 \
   --report-dir online_report
@@ -271,21 +271,21 @@ inference-endpoint benchmark online \
 inference-endpoint benchmark offline \
   --endpoints http://localhost:8765 \
   --model Qwen/Qwen3-8B \
-  --dataset tests/datasets/dummy_1k.pkl \
+  --dataset tests/datasets/dummy_1k.jsonl \
   --num-samples 500
 
 # Force streaming on for offline mode (to test TTFT metrics)
 inference-endpoint benchmark offline \
   --endpoints http://localhost:8765 \
   --model Qwen/Qwen3-8B \
-  --dataset tests/datasets/dummy_1k.pkl \
+  --dataset tests/datasets/dummy_1k.jsonl \
   --streaming on
 
 # Concurrency mode (fixed concurrent requests)
 inference-endpoint benchmark online \
   --endpoints http://localhost:8765 \
   --model Qwen/Qwen3-8B \
-  --dataset tests/datasets/dummy_1k.pkl \
+  --dataset tests/datasets/dummy_1k.jsonl \
   --load-pattern concurrency \
   --concurrency 32
 ```
@@ -310,7 +310,7 @@ inference-endpoint benchmark online \
 - Use `-v` for INFO logging, `-vv` for DEBUG
 - Echo server mirrors prompts back - perfect for quick testing without real inference
 - Press `Ctrl+C` to gracefully interrupt benchmarks
-- Default test dataset: `tests/datasets/dummy_1k.pkl` (1000 samples, ~133 KB)
+- Default test dataset: `tests/datasets/dummy_1k.jsonl` (1000 samples, ~133 KB)
 
 **Advanced:**
 

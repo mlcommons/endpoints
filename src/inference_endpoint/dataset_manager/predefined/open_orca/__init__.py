@@ -27,6 +27,9 @@ from . import presets
 
 logger = getLogger(__name__)
 
+_UPSTREAM_PKL_FILENAME = "open_orca_gpt4_tokenized_llama.sampled_24576.pkl"
+_PARQUET_FILENAME = "open_orca_gpt4_tokenized_llama.sampled_24576.parquet"
+
 
 class OpenOrca(
     Dataset,
@@ -70,15 +73,25 @@ class OpenOrca(
         if variant != "mlperf-inference":
             raise ValueError(f"Unsupported variant: {variant}")
 
-        # The MLPerf Inference variant is stored as a pickle file
-        filename = "open_orca_gpt4_tokenized_llama.sampled_24576.pkl"
-        dst_path = datasets_dir / cls.DATASET_ID / variant / filename
-        if not dst_path.parent.exists():
-            dst_path.parent.mkdir(parents=True)
+        variant_dir = datasets_dir / cls.DATASET_ID / variant
+        if not variant_dir.exists():
+            variant_dir.mkdir(parents=True)
 
-        if dst_path.exists() and not force:
-            logger.info(f"Dataset already exists at {dst_path}. Loading from file.")
-            return pd.read_pickle(dst_path)
+        parquet_path = variant_dir / _PARQUET_FILENAME
+        pkl_path = variant_dir / _UPSTREAM_PKL_FILENAME
+
+        # Return cached parquet if available
+        if parquet_path.exists() and not force:
+            logger.info(f"Dataset already exists at {parquet_path}. Loading from file.")
+            return pd.read_parquet(parquet_path)
+
+        # Legacy pickle cache — convert to parquet and remove
+        if pkl_path.exists() and not force:
+            logger.info("Converting legacy pickle cache to parquet: %s", pkl_path)
+            df = pd.read_pickle(pkl_path)
+            df.to_parquet(parquet_path)
+            pkl_path.unlink()
+            return df
 
         # Dataset URL from README
         dataset_url = "https://inference.mlcommons-storage.org/metadata/llama-2-70b-open-orca-dataset.uri"
@@ -86,8 +99,8 @@ class OpenOrca(
         # Download the r2-downloader script into a temp file in the target dir
         COMMIT_HASH = "27da4421877f2831eeb615b43ee5098c4b70be7e"
         downloader_url = f"https://raw.githubusercontent.com/mlcommons/r2-downloader/{COMMIT_HASH}/mlc-r2-downloader.sh"
-        download_dir = dst_path.parent
-        script_path = dst_path.parent / "mlc-r2-downloader.sh"
+        download_dir = variant_dir
+        script_path = variant_dir / "mlc-r2-downloader.sh"
         r = requests.get(downloader_url, timeout=30)
         r.raise_for_status()
         script_path.write_bytes(r.content)
@@ -111,20 +124,19 @@ class OpenOrca(
         except subprocess.CalledProcessError as e:
             raise RuntimeError(f"R2 downloader failed: {e}") from e
 
-        # Script will generate a new 'open_orca' subdirectory with gzip'd pickle files
+        # Script generates gzip'd pickle files — decompress, convert to parquet, clean up
         gzip_dir = download_dir
         if (gzip_dir / "open_orca").exists():
             gzip_dir = gzip_dir / "open_orca"
 
         for gz_path in gzip_dir.glob("*.pkl.gz"):
-            # Note: .with_suffix removes only one suffix, .pkl.gz -> .pkl
             pkl_filename = gz_path.with_suffix("").name
-            pkl_path = download_dir / pkl_filename
-            if pkl_path.exists():
+            tmp_pkl_path = download_dir / pkl_filename
+            if tmp_pkl_path.exists():
                 continue
 
             with gzip.open(gz_path, "rb") as f_in:
-                with pkl_path.open(mode="wb") as f_out:
+                with tmp_pkl_path.open(mode="wb") as f_out:
                     shutil.copyfileobj(f_in, f_out)
 
         logger.info(
@@ -132,19 +144,24 @@ class OpenOrca(
             download_dir.resolve(),
         )
 
-        # Check if the specific file exists
-        if not dst_path.exists():
+        # Check the upstream pickle file exists, convert to parquet, and clean up
+        if not pkl_path.exists():
             raise FileNotFoundError(
-                f"OpenOrca was downloaded, but {dst_path} does not exist"
+                f"OpenOrca was downloaded, but {pkl_path} does not exist"
             )
 
-        # Clean up the intermediate gz files
+        df = pd.read_pickle(pkl_path)
+        df.to_parquet(parquet_path)
+        logger.info("Converted to parquet: %s", parquet_path)
+
+        # Clean up intermediate pickle and gz files
+        pkl_path.unlink()
         for gz_path in gzip_dir.glob("*.pkl.gz"):
             gz_path.unlink()
 
-        logger.info(f"Cleaned up intermediate gz files in {gzip_dir}")
+        logger.info(f"Cleaned up intermediate files in {gzip_dir}")
 
-        return pd.read_pickle(dst_path)
+        return df
 
 
 __all__ = ["OpenOrca"]
