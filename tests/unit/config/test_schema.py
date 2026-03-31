@@ -30,6 +30,7 @@ from inference_endpoint.config.schema import (
     SubmissionReference,
     TestType,
 )
+from inference_endpoint.exceptions import CLIError
 
 
 class TestOSLDistribution:
@@ -332,12 +333,12 @@ class TestBenchmarkConfigMethods:
 
     @pytest.mark.unit
     def test_create_default_eval_not_implemented(self):
-        with pytest.raises(NotImplementedError):
+        with pytest.raises(CLIError, match="EVAL config not yet implemented"):
             BenchmarkConfig.create_default_config(TestType.EVAL)
 
     @pytest.mark.unit
     def test_create_default_submission_not_implemented(self):
-        with pytest.raises(NotImplementedError):
+        with pytest.raises(CLIError, match="SUBMISSION config not yet implemented"):
             BenchmarkConfig.create_default_config(TestType.SUBMISSION)
 
     @pytest.mark.unit
