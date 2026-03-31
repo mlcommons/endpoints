@@ -113,6 +113,8 @@ class BenchmarkSession:
                         for _ in generator:
                             if self.stop_requested:
                                 break
+                        if self.stop_requested:
+                            break
 
                 self.logger.info("All accuracy samples issued")
 

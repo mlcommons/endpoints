@@ -55,8 +55,8 @@ def _parallel_batch_tokenize(tokenizer: Tokenizer, texts: list[str]) -> list[int
         n_cores = os.cpu_count() or 1
     n_workers = max(1, int(n_cores * 0.95))
 
-    if len(texts) <= n_workers:
-        # Few texts — just tokenize directly, no threading overhead
+    if n_workers <= 1 or len(texts) <= n_workers:
+        # Few texts or single core — just tokenize directly, no threading overhead
         encoded = tokenizer(texts, add_special_tokens=False)
         return [len(ids) for ids in encoded["input_ids"]]
 
