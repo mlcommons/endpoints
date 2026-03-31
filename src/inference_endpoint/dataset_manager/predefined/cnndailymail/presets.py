@@ -16,7 +16,10 @@
 
 """Preset transforms for the CNN/DailyMail dataset."""
 
+from typing import Any
+
 from inference_endpoint.dataset_manager.transforms import (
+    AddStaticColumns,
     Transform,
     UserPromptFormatter,
 )
@@ -29,10 +32,19 @@ def llama3_8b(
     top_p: float = 1.0,
     top_k: int = 1,
 ) -> list[Transform]:
+    # Define custom chat template for Llama 3.1-8b (to sync with tokenized prompts from legacy implementation)
+    template = (
+        "{{- bos_token }}"
+        "{%- for message in messages %}"
+        "{{ message['content'] | trim }}"
+        "{%- endfor %}"
+    )
+    chat_template: dict[str, Any] = {"chat_template": template}
     return [
         # Step 1: Format the prompt from "article"
         UserPromptFormatter(
             user_prompt_format=f"Summarize the following news article in {max_new_tokens} tokens. Please output the summary only, without any other text.\n\nArticle:\n{{article}}\n\nSummary:",
             output_column="prompt",
         ),
+        AddStaticColumns(chat_template),
     ]

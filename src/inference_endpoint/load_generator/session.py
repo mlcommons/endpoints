@@ -22,13 +22,14 @@ import time
 import uuid
 from pathlib import Path
 
-import orjson
+import msgspec.json
 from transformers import AutoTokenizer
 
 from ..config.runtime_settings import RuntimeSettings
 from ..dataset_manager.dataset import Dataset
 from ..metrics.recorder import EventRecorder
 from ..metrics.reporter import MetricsReporter
+from ..utils.version import get_version_info
 from .events import SessionEvent
 from .load_generator import LoadGenerator, SampleIssuer, SchedulerBasedLoadGenerator
 from .scheduler import Scheduler, WithoutReplacementSampleOrder
@@ -78,7 +79,7 @@ class BenchmarkSession:
         self,
         perf_test_generator: LoadGenerator,
         accuracy_test_generators: dict[str, LoadGenerator] | None = None,
-        max_shutdown_timeout_s: float = 300.0,
+        max_shutdown_timeout_s: float | None = 300.0,
         report_dir: os.PathLike | None = None,
         tokenizer_override: AutoTokenizer | None = None,
         dump_events_log: bool = False,
@@ -86,7 +87,9 @@ class BenchmarkSession:
         with self.event_recorder:
             try:
                 EventRecorder.record_event(
-                    SessionEvent.TEST_STARTED, time.monotonic_ns()
+                    SessionEvent.TEST_STARTED,
+                    time.monotonic_ns(),
+                    data=get_version_info(),
                 )
 
                 for _ in perf_test_generator:
@@ -205,15 +208,19 @@ class BenchmarkSession:
                     # from the runtime settings object
                     with (Path(report_dir) / "runtime_settings.json").open("w") as f:
                         f.write(
-                            orjson.dumps(
-                                rt_settings_data,
-                                option=orjson.OPT_INDENT_2 | orjson.OPT_SORT_KEYS,
+                            msgspec.json.format(
+                                msgspec.json.encode(
+                                    dict(sorted(rt_settings_data.items()))
+                                ),
+                                indent=2,
                             ).decode("utf-8")
                         )
 
                     # Save the UUID mapping for output verification
                     with (Path(report_dir) / "sample_idx_map.json").open("w") as f:
-                        f.write(orjson.dumps(self.sample_uuid_map).decode("utf-8"))
+                        f.write(
+                            msgspec.json.encode(self.sample_uuid_map).decode("utf-8")
+                        )
 
                     if dump_events_log:
                         reporter.dump_to_json(Path(report_dir) / "events.jsonl")
@@ -254,7 +261,7 @@ class BenchmarkSession:
         accuracy_datasets: list[Dataset] | None = None,
         load_generator_cls: type[LoadGenerator] = SchedulerBasedLoadGenerator,
         name: str | None = None,
-        max_shutdown_timeout_s: float = 300.0,
+        max_shutdown_timeout_s: float | None = None,
         report_dir: os.PathLike | None = None,
         tokenizer_override: AutoTokenizer | None = None,
         dump_events_log: bool = False,
@@ -298,7 +305,7 @@ class BenchmarkSession:
                     metric_target=runtime_settings.metric_target,
                     reported_metrics=runtime_settings.reported_metrics,
                     min_duration_ms=0,
-                    max_duration_ms=None,  # type: ignore[arg-type]
+                    max_duration_ms=None,
                     n_samples_from_dataset=ds.num_samples(),
                     n_samples_to_issue=ds.num_samples() * ds.repeats,
                     min_sample_count=ds.num_samples() * ds.repeats,

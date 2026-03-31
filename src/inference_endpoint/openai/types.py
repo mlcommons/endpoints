@@ -17,47 +17,75 @@
 msgspec types for OpenAI API serialization/deserialization.
 """
 
+from typing import Any
+
 import msgspec
+
+# ============================================================================
+# Multimodal content (OpenAI vision format)
+# ============================================================================
+
+# prompt/system content: str for text, list[dict] for multimodal
+# e.g. [{"type": "text", "text": "..."}, {"type": "image_url", "image_url": {"url": "data:image/...;base64,..."}}]
+ChatMessageContent = str | list[dict[str, Any]]
 
 # ============================================================================
 # SSE (Server-Sent Events) Types for OpenAI streaming format
 # ============================================================================
 
 
-class SSEDelta(msgspec.Struct):
+# NOTE(vir): msgspec usage
+# omit_defaults=True: Fields with static defaults are omitted if value equals default (ie those not using default_factory)
+# gc=False: Safe for request/response structs with scalar and nested struct fields only.
+# frozen=True: Makes structs immutable and hashable, also enables faster struct decoding
+#              (direct attribute access via fixed memory offset vs hash table lookup)
+
+
+class SSEDelta(msgspec.Struct, frozen=True, kw_only=True, omit_defaults=True, gc=False):  # type: ignore[call-arg]
     """SSE delta object containing content."""
 
     content: str = ""
     reasoning: str = ""
 
 
-class SSEChoice(msgspec.Struct):
+class SSEChoice(
+    msgspec.Struct, frozen=True, kw_only=True, omit_defaults=True, gc=False
+):  # type: ignore[call-arg]
     """SSE choice object containing delta."""
 
-    delta: SSEDelta = msgspec.field(default_factory=SSEDelta)
+    delta: SSEDelta | None = None
     finish_reason: str | None = None
 
 
-class SSEMessage(msgspec.Struct):
+class SSEMessage(
+    msgspec.Struct, frozen=True, kw_only=True, omit_defaults=True, gc=False
+):  # type: ignore[call-arg]
     """SSE message structure for OpenAI streaming responses."""
 
-    choices: list[SSEChoice] = msgspec.field(default_factory=list)
+    choices: tuple[SSEChoice, ...] = ()
 
 
 # ============================================================================
-# OpenAI Chat Completion Types (msgspec-based)
+# OpenAI Chat Completion Types
 # ============================================================================
 
 
-class ChatMessage(msgspec.Struct, kw_only=True, omit_defaults=True):  # type: ignore[call-arg]
-    """Chat message in OpenAI format."""
+class ChatMessage(
+    msgspec.Struct, frozen=True, kw_only=True, omit_defaults=True, gc=False
+):  # type: ignore[call-arg]
+    """Chat message in OpenAI format.
+
+    content: str for text-only messages; list[dict] for multimodal (vision).
+    """
 
     role: str
-    content: str
+    content: ChatMessageContent
     name: str | None = None
 
 
-class ChatCompletionRequest(msgspec.Struct, kw_only=True, omit_defaults=True):  # type: ignore[call-arg]
+class ChatCompletionRequest(
+    msgspec.Struct, frozen=True, kw_only=True, omit_defaults=True, gc=False
+):  # type: ignore[call-arg]
     """OpenAI chat completion request."""
 
     model: str
@@ -74,9 +102,12 @@ class ChatCompletionRequest(msgspec.Struct, kw_only=True, omit_defaults=True):  
     frequency_penalty: float | None = None
     logit_bias: dict[str, float] | None = None
     user: str | None = None
+    chat_template: str | None = None
 
 
-class ChatCompletionResponseMessage(msgspec.Struct, kw_only=True, omit_defaults=True):  # type: ignore[call-arg]
+class ChatCompletionResponseMessage(
+    msgspec.Struct, frozen=True, kw_only=True, omit_defaults=True, gc=False
+):  # type: ignore[call-arg]
     """Response message from OpenAI."""
 
     role: str
@@ -84,7 +115,9 @@ class ChatCompletionResponseMessage(msgspec.Struct, kw_only=True, omit_defaults=
     refusal: str | None
 
 
-class ChatCompletionChoice(msgspec.Struct, kw_only=True, omit_defaults=True):  # type: ignore[call-arg]
+class ChatCompletionChoice(
+    msgspec.Struct, frozen=True, kw_only=True, omit_defaults=True, gc=False
+):  # type: ignore[call-arg]
     """A single choice in the completion response."""
 
     index: int
@@ -92,7 +125,9 @@ class ChatCompletionChoice(msgspec.Struct, kw_only=True, omit_defaults=True):  #
     finish_reason: str | None
 
 
-class CompletionUsage(msgspec.Struct, kw_only=True, omit_defaults=True):  # type: ignore[call-arg]
+class CompletionUsage(
+    msgspec.Struct, frozen=True, kw_only=True, omit_defaults=True, gc=False
+):  # type: ignore[call-arg]
     """Token usage statistics."""
 
     prompt_tokens: int
@@ -100,8 +135,14 @@ class CompletionUsage(msgspec.Struct, kw_only=True, omit_defaults=True):  # type
     total_tokens: int
 
 
-class ChatCompletionResponse(msgspec.Struct, kw_only=True, omit_defaults=True):  # type: ignore[call-arg]
-    """OpenAI chat completion response (msgspec version)."""
+class ChatCompletionResponse(
+    msgspec.Struct,
+    frozen=True,
+    kw_only=True,
+    omit_defaults=False,
+    gc=False,
+):  # type: ignore[call-arg]
+    """OpenAI chat completion response."""
 
     id: str
     object: str = "chat.completion"

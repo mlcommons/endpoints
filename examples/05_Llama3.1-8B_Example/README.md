@@ -1,15 +1,12 @@
 # Running Endpoints with [Llama3.1-8B](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct)
 
+It is recommended to use a config file such as [online_llama3_8b_cnn.yaml](online_llama3_8b_cnn.yaml) to run the benchmark.
+
 ## [Optional] Download dataset
 
-The Llama3.1-8B benchmark uses the [cnn/dailymail](https://huggingface.co/datasets/abisee/cnn_dailymail) dataset (for summarization). Download, modify the input prompt and save it using the following command:
+The Llama3.1-8B benchmark uses the [cnn/dailymail](https://huggingface.co/datasets/abisee/cnn_dailymail) dataset (for summarization). If using a config (such as provided) to run the benchmark, the (validation) dataset is downloaded automatically by specifying dataset name as `- name: cnn_dailymail::llama3_8b` under the `dataset` entry.
 
-```
-python download_cnndm.py --save-dir data --split validation
-# Processed data will be saved at data/cnn_dailymail_validation.json
-```
-
-- To generate calibration dataset, users can use the [cnn-dailymail-calibration-list](https://github.com/mlcommons/inference/blob/v4.0/calibration/CNNDailyMail/calibration-list.txt)
+For post-training quantization, users can use the [cnn-dailymail-calibration-list](https://github.com/mlcommons/inference/blob/v4.0/calibration/CNNDailyMail/calibration-list.txt) to select samples for the calibration.
 
 ```
 curl -OL https://raw.githubusercontent.com/mlcommons/inference/v4.0/calibration/CNNDailyMail/calibration-list.txt
@@ -30,11 +27,12 @@ It is convenient to download the model prior to launch so that the container can
 
 ### [vLLM](https://github.com/vllm-project/vllm)
 
+**Note**: To generate same outputs as the ones produced from submissions with legacy loadgen, we need to apply a custom chat template (this is taken care of automatically by the cnn-dailymail dataset preset). The flag `--trust-request-chat-template` is also required for this behavior. **Security warning:** `--trust-request-chat-template` allows execution of request-provided chat templates and should only be used in trusted environments or when all requests are controlled by the benchmark harness/preset. Do not enable this flag on publicly exposed endpoints receiving untrusted traffic.
+
 We can launch the latest docker image for vllm using the command below:
 
 ```
-docker run --runtime nvidia --gpus all -v ${HF_HOME}:/root/.cache/huggingface --env "HUGGING_FACE_HUB_TOKEN=$HF_TOKEN" -p 8000:8000 --ipc=host vllm/vllm-openai:latest  --model ${MODEL_NAME}
-
+docker run --runtime nvidia --gpus all -v ${HF_HOME}:/root/.cache/huggingface --env "HUGGING_FACE_HUB_TOKEN=$HF_TOKEN" -p 8000:8000 --ipc=host vllm/vllm-openai:latest --model ${MODEL_NAME} --trust-request-chat-template
 ```
 
 ### To run Offline mode

@@ -16,14 +16,16 @@
 import json
 import math
 
-import orjson
+import msgspec.json
 import pytest
+from inference_endpoint.core.types import TextModelOutput
 from inference_endpoint.load_generator.events import SampleEvent, SessionEvent
 from inference_endpoint.metrics.recorder import sqlite3_cursor
 from inference_endpoint.metrics.reporter import (
     MetricsReporter,
     RollupQueryTable,
     TPOTReportingMode,
+    output_sequence_from_data,
 )
 
 
@@ -35,8 +37,12 @@ def test_sample_counting(events_db):
 
 
 def test_error_counting(events_db):
+    """get_error_count returns distinct failed samples, not raw ERROR event count.
+
+    The fixture has 3 ERROR events all belonging to uuid3, so the count should be 1.
+    """
     with MetricsReporter(events_db) as reporter:
-        assert reporter.get_error_count() == 3
+        assert reporter.get_error_count() == 1
 
 
 def test_derive_ttft(events_db, sample_uuids):
@@ -73,6 +79,90 @@ def test_derive_tpot(events_db, sample_uuids, fake_outputs, tokenizer):
     assert len(tpot2) == len(fake_outputs[uuid2][1])
     assert all(tpot == expected_tpot1 for tpot in tpot1)
     assert all(tpot == expected_tpot2 for tpot in tpot2)
+
+
+def test_derive_tpot_with_string_output(tmp_path, sample_uuids, tokenizer):
+    """Test that derive_TPOT handles a plain string output gracefully.
+
+    A single-string output has only one chunk, so TPOT cannot be computed.
+    The reporter should not raise an exception and should return None.
+    """
+    test_db = str(tmp_path / "test_string_output.db")
+    uuid1 = sample_uuids(1)
+
+    with sqlite3_cursor(test_db) as (cursor, conn):
+        cursor.execute(
+            "CREATE TABLE IF NOT EXISTS events (sample_uuid VARCHAR(32), event_type VARCHAR(32), timestamp_ns INTEGER, data BLOB)"
+        )
+        cursor.executemany(
+            "INSERT INTO events (sample_uuid, event_type, timestamp_ns, data) VALUES (?, ?, ?, ?)",
+            [
+                ("", SessionEvent.TEST_STARTED.value, 5000, b""),
+                (uuid1, SessionEvent.LOADGEN_ISSUE_CALLED.value, 10000, b""),
+                (uuid1, SampleEvent.FIRST_CHUNK.value, 10010, b""),
+                (
+                    uuid1,
+                    SampleEvent.COMPLETE.value,
+                    10211,
+                    msgspec.json.encode(TextModelOutput(output="the final answer")),
+                ),
+                ("", SessionEvent.TEST_ENDED.value, 10300, b""),
+            ],
+        )
+        conn.commit()
+
+    with MetricsReporter(test_db) as reporter:
+        tpot_rows = reporter.derive_TPOT(tokenizer)
+
+    # A single-string output produces only 1 chunk — TPOT requires at least 2
+    assert tpot_rows is None
+
+
+def test_derive_tpot_string_output_with_list_reasoning(
+    tmp_path, sample_uuids, tokenizer
+):
+    """Test that derive_TPOT computes TPOT when string output is paired with a list reasoning sequence.
+
+    The fix wraps string outputs into a single-element list so they can be combined with
+    reasoning chunks. Without the fix, the string output causes the sample to be silently
+    skipped before reasoning is considered, so TPOT returns None even though there are
+    enough chunks (output + reasoning) to compute it.
+    """
+    test_db = str(tmp_path / "test_string_output_with_reasoning.db")
+    uuid1 = sample_uuids(1)
+
+    with sqlite3_cursor(test_db) as (cursor, conn):
+        cursor.execute(
+            "CREATE TABLE IF NOT EXISTS events (sample_uuid VARCHAR(32), event_type VARCHAR(32), timestamp_ns INTEGER, data BLOB)"
+        )
+        cursor.executemany(
+            "INSERT INTO events (sample_uuid, event_type, timestamp_ns, data) VALUES (?, ?, ?, ?)",
+            [
+                ("", SessionEvent.TEST_STARTED.value, 5000, b""),
+                (uuid1, SessionEvent.LOADGEN_ISSUE_CALLED.value, 10000, b""),
+                (uuid1, SampleEvent.FIRST_CHUNK.value, 10010, b""),
+                (
+                    uuid1,
+                    SampleEvent.COMPLETE.value,
+                    10211,
+                    msgspec.json.encode(
+                        TextModelOutput(
+                            output="the answer", reasoning=("thought step",)
+                        )
+                    ),
+                ),
+                ("", SessionEvent.TEST_ENDED.value, 10300, b""),
+            ],
+        )
+        conn.commit()
+
+    with MetricsReporter(test_db) as reporter:
+        tpot_rows = reporter.derive_TPOT(tokenizer)
+
+    # String output ("the answer") + list reasoning (["thought step"]) = 2 chunks total,
+    # which is enough for TPOT computation.
+    assert tpot_rows is not None
+    assert len(tpot_rows) == 1
 
 
 def test_derive_sample_latency(events_db, sample_uuids):
@@ -306,6 +396,9 @@ def test_reporter_create_report(events_db, fake_outputs, tokenizer):
 
     assert report.n_samples_issued == 3
     assert report.n_samples_completed == 2
+    assert (
+        report.n_samples_failed == 1
+    )  # 1 distinct failed sample (uuid3), with 3 ERROR events in fixture
     assert report.duration_ns == (10300 - 5000)
 
     for k, expected in ttft_rollup.summarize().items():
@@ -342,8 +435,11 @@ def test_reporter_json(events_db):
     json_dict = json.loads(json_str)
 
     expected_keys = [
+        "version",
+        "git_sha",
         "n_samples_issued",
         "n_samples_completed",
+        "n_samples_failed",
         "duration_ns",
         "ttft",
         "tpot",
@@ -352,10 +448,12 @@ def test_reporter_json(events_db):
         "tpot_reporting_mode",
         "qps",
         "tps",
+        "test_started_at",
     ]
     assert set(json_dict.keys()) == set(expected_keys)
     assert json_dict["n_samples_issued"] == report.n_samples_issued
     assert json_dict["n_samples_completed"] == report.n_samples_completed
+    assert json_dict["n_samples_failed"] == report.n_samples_failed
     assert json_dict["duration_ns"] == report.duration_ns
     assert json_dict["qps"] == report.qps
     assert json_dict["tps"] == report.tps
@@ -401,7 +499,9 @@ def test_display_report(events_db):
     lines = s.splitlines()
 
     assert "- Summary -" in lines[0]
-    assert lines[1].startswith("Total samples issued:")
+    assert lines[1].startswith("Version:")
+    # Git SHA may or may not be present, so Total samples issued can be on line 2 or 3
+    assert any(line.startswith("Total samples issued:") for line in lines[2:4])
 
 
 def test_stop_performance_tracking_timestamp_property(tmp_path, sample_uuids):
@@ -852,13 +952,13 @@ def test_get_output_sequence_lengths_with_stop_performance_tracking(
                     uuid1,
                     SampleEvent.COMPLETE.value,
                     10211,
-                    orjson.dumps({"output": ["Hello, ", "world"]}),
+                    msgspec.json.encode(TextModelOutput(output=("Hello, ", "world"))),
                 ),
                 (
                     uuid2,
                     SampleEvent.COMPLETE.value,
                     10219,
-                    orjson.dumps({"output": ["And ", "goodbye."]}),
+                    msgspec.json.encode(TextModelOutput(output=("And ", "goodbye."))),
                 ),
                 ("", SessionEvent.STOP_PERFORMANCE_TRACKING.value, 10150, b""),
                 (uuid3, SessionEvent.LOADGEN_ISSUE_CALLED.value, 10200, b""),
@@ -866,7 +966,7 @@ def test_get_output_sequence_lengths_with_stop_performance_tracking(
                     uuid3,
                     SampleEvent.COMPLETE.value,
                     10250,
-                    orjson.dumps({"output": ["Extra ", "sample"]}),
+                    msgspec.json.encode(TextModelOutput(output=("Extra ", "sample"))),
                 ),
                 ("", SessionEvent.TEST_ENDED.value, 10300, b""),
             ],
@@ -908,13 +1008,13 @@ def test_create_report_with_stop_performance_tracking(
                     uuid1,
                     SampleEvent.COMPLETE.value,
                     10211,
-                    orjson.dumps({"output": ["Hello, ", "world"]}),
+                    msgspec.json.encode(TextModelOutput(output=("Hello, ", "world"))),
                 ),
                 (
                     uuid2,
                     SampleEvent.COMPLETE.value,
                     10219,
-                    orjson.dumps({"output": ["And ", "goodbye."]}),
+                    msgspec.json.encode(TextModelOutput(output=("And ", "goodbye."))),
                 ),
                 ("", SessionEvent.STOP_PERFORMANCE_TRACKING.value, 10150, b""),
                 (uuid3, SessionEvent.LOADGEN_ISSUE_CALLED.value, 10200, b""),
@@ -923,7 +1023,7 @@ def test_create_report_with_stop_performance_tracking(
                     uuid3,
                     SampleEvent.COMPLETE.value,
                     10250,
-                    orjson.dumps({"output": ["Extra ", "sample"]}),
+                    msgspec.json.encode(TextModelOutput(output=("Extra ", "sample"))),
                 ),
                 ("", SessionEvent.TEST_ENDED.value, 10300, b""),
             ],
@@ -987,3 +1087,94 @@ def test_create_report_with_zero_samples_before_stop_performance_tracking(tmp_pa
 
     assert "Duration: N/A" in display_output
     assert "(no performance samples were issued)" in display_output
+
+
+@pytest.mark.unit
+class TestOutputSequenceFromData:
+    """Tests for output_sequence_from_data covering all supported data formats."""
+
+    def test_text_model_output_string(self):
+        """TextModelOutput with string output (array_like encoding)."""
+        data = msgspec.json.encode(TextModelOutput(output="hello world"))
+        output, reasoning = output_sequence_from_data(data)
+        assert output == "hello world"
+        assert reasoning is None
+
+    def test_text_model_output_chunks(self):
+        """TextModelOutput with tuple output (streaming chunks)."""
+        data = msgspec.json.encode(TextModelOutput(output=("chunk1", "chunk2")))
+        output, reasoning = output_sequence_from_data(data)
+        assert output == "chunk1chunk2"
+        assert reasoning is None
+
+    def test_text_model_output_chunks_no_join(self):
+        """TextModelOutput with join_chunks=False returns raw list."""
+        data = msgspec.json.encode(TextModelOutput(output=("chunk1", "chunk2")))
+        output, reasoning = output_sequence_from_data(data, join_chunks=False)
+        assert output == ["chunk1", "chunk2"]
+        assert reasoning is None
+
+    def test_text_model_output_with_reasoning(self):
+        """TextModelOutput with both output and reasoning."""
+        data = msgspec.json.encode(
+            TextModelOutput(output=("out1", "out2"), reasoning=("r1", "r2"))
+        )
+        output, reasoning = output_sequence_from_data(data)
+        assert output == "out1out2"
+        assert reasoning == "r1r2"
+
+    def test_text_model_output_with_reasoning_no_join(self):
+        """TextModelOutput with reasoning and join_chunks=False."""
+        data = msgspec.json.encode(
+            TextModelOutput(output=("out1", "out2"), reasoning=("r1", "r2"))
+        )
+        output, reasoning = output_sequence_from_data(data, join_chunks=False)
+        assert output == ["out1", "out2"]
+        assert reasoning == ["r1", "r2"]
+
+    def test_legacy_string_format(self):
+        """Legacy plain string format (backward compat)."""
+        data = msgspec.json.encode("just a string")
+        output, reasoning = output_sequence_from_data(data)
+        assert output == "just a string"
+        assert reasoning is None
+
+    def test_legacy_dict_format(self):
+        """Legacy dict format with output key (backward compat)."""
+        data = msgspec.json.encode({"output": "from dict", "reasoning": "think"})
+        output, reasoning = output_sequence_from_data(data)
+        assert output == "from dict"
+        assert reasoning == "think"
+
+    def test_legacy_dict_chunked(self):
+        """Legacy dict format with list output (backward compat)."""
+        data = msgspec.json.encode({"output": ["c1", "c2"]})
+        output, reasoning = output_sequence_from_data(data)
+        assert output == "c1c2"
+        assert reasoning is None
+
+    def test_list_without_tag_returns_none(self):
+        """A list without 'TextModelOutput' tag returns (None, None)."""
+        data = msgspec.json.encode(["not-a-tag", "some", "data"])
+        output, reasoning = output_sequence_from_data(data)
+        assert output is None
+        assert reasoning is None
+
+    def test_short_list_returns_none(self):
+        """A single-element list returns (None, None)."""
+        data = msgspec.json.encode(["only-one"])
+        output, reasoning = output_sequence_from_data(data)
+        assert output is None
+        assert reasoning is None
+
+    def test_none_data(self):
+        """None data returns (None, None)."""
+        output, reasoning = output_sequence_from_data(None)
+        assert output is None
+        assert reasoning is None
+
+    def test_empty_data(self):
+        """Empty bytes returns (None, None)."""
+        output, reasoning = output_sequence_from_data(b"")
+        assert output is None
+        assert reasoning is None

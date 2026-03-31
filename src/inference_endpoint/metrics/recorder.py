@@ -30,7 +30,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any, ClassVar
 
-import orjson
+import msgspec.json
 
 from ..load_generator.events import Event, SampleEvent, SessionEvent
 from ..profiling import profile
@@ -372,6 +372,9 @@ class EventRecorder:
             )
 
         # Update inflight sample tracking
+        # NOTE: n_inflight_samples is not thread-safe (+=/-= from multiple threads).
+        # This is a known issue but EventRecorder is being deprecated in favor of
+        # EventLoggerService (pub-sub based). Not worth fixing here.
         if ev_type == SessionEvent.LOADGEN_ISSUE_CALLED:
             rec_inst.n_inflight_samples += 1
         elif ev_type == SampleEvent.COMPLETE:
@@ -386,14 +389,14 @@ class EventRecorder:
         encoded_bytes: bytes = b""
         try:
             if data is not None:
-                encoded_bytes = orjson.dumps(data)
-        except orjson.JSONEncodeError as e:
+                encoded_bytes = msgspec.json.encode(data)
+        except msgspec.EncodeError as e:
             rec_inst.event_queue.put(
                 (
                     sample_uuid,
                     SessionEvent.ERROR.value,
                     time.monotonic_ns(),
-                    orjson.dumps(
+                    msgspec.json.encode(
                         {
                             "error_type": "JSONEncodeError",
                             "error_message": str(e),

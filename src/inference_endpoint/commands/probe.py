@@ -15,12 +15,18 @@
 
 """Probe command implementation for endpoint health checking."""
 
-import argparse
+from __future__ import annotations
+
 import asyncio
 import logging
 import time
+from typing import Annotated
 from urllib.parse import urljoin
 
+import cyclopts
+from pydantic import BaseModel, ConfigDict, Field
+
+from inference_endpoint.async_utils.runner import run_async
 from inference_endpoint.config.schema import APIType
 from inference_endpoint.core.types import Query, QueryResult
 from inference_endpoint.endpoint_client.config import HTTPClientConfig
@@ -34,22 +40,45 @@ from inference_endpoint.exceptions import (
 logger = logging.getLogger(__name__)
 
 
-async def run_probe_command(args: argparse.Namespace) -> None:
-    """Run endpoint probe to validate connectivity and basic functionality.
+@cyclopts.Parameter(name="*")
+class ProbeConfig(BaseModel):
+    """Probe command config."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+
+    endpoints: str
+    model: str
+    api_type: Annotated[
+        APIType,
+        cyclopts.Parameter(alias="--api-type", help="API type: openai or sglang"),
+    ] = APIType.OPENAI
+    requests: int = Field(10, ge=1)
+    prompt: str = Field(
+        "Please write me a joke in 30 words.", description="Test prompt"
+    )
+
+
+def execute_probe(config: ProbeConfig) -> None:
+    """Execute probe command with typed config.
 
     Actions:
     1. Send test requests using HTTP client with futures
     2. Measure basic latency
     3. Report validation status
     """
+    run_async(_probe_async(config))
+
+
+async def _probe_async(config: ProbeConfig) -> None:
+    """Async probe implementation — preserves all original logging and logic."""
     # Extract arguments
-    endpoints = args.endpoints
-    num_requests = args.requests
-    test_prompt = args.prompt
-    api_type = APIType(getattr(args, "api_type", "openai"))
+    endpoints = config.endpoints
+    num_requests = config.requests
+    test_prompt = config.prompt
+    api_type = config.api_type
 
     # Model: use provided or default to valid OpenAI model name
-    model_name = getattr(args, "model", None)
+    model_name = config.model
     if not model_name:
         logger.error("Model required: --model or specify in YAML config")
         raise InputValidationError("Model required: --model NAME")
@@ -69,7 +98,7 @@ async def run_probe_command(args: argparse.Namespace) -> None:
             ],
             api_type=api_type,
             num_workers=1,
-            warmup_connections=False,
+            warmup_connections=0,
         )
         # Client creates its own event loop in a separate thread
         client = HTTPEndpointClient(http_config)
@@ -119,7 +148,7 @@ async def run_probe_command(args: argparse.Namespace) -> None:
         # Only count successfully issued queries
         num_expected = len(sent_query_ids)
         if num_expected == 0:
-            logger.error("✗ No queries were successfully issued")
+            logger.error("No queries were successfully issued")
             raise ExecutionError("Probe failed: no queries could be issued")
 
         # Wait for all responses with generous timeout (probe queries can be slow)
@@ -174,7 +203,10 @@ async def run_probe_command(args: argparse.Namespace) -> None:
                 else:
                     latencies.append(latency_ms)
                     responses.append(
-                        (query_id, response_output if response_output else "<EMPTY>")
+                        (
+                            query_id,
+                            response_output if response_output else "<EMPTY>",
+                        )
                     )
 
                 # Simple progress indicator
@@ -200,16 +232,16 @@ async def run_probe_command(args: argparse.Namespace) -> None:
 
         # Report results
         success_count = len(latencies)
-        logger.info(f"✓ Completed: {success_count}/{num_expected} successful")
+        logger.info(f"Completed: {success_count}/{num_expected} successful")
 
         if latencies:
             avg_latency = sum(latencies) / len(latencies)
-            logger.info(f"✓ Avg latency: {avg_latency:.0f}ms")
-            logger.info(f"✓ Range: {min(latencies):.0f}ms - {max(latencies):.0f}ms")
+            logger.info(f"Avg latency: {avg_latency:.0f}ms")
+            logger.info(f"Range: {min(latencies):.0f}ms - {max(latencies):.0f}ms")
 
         # Show sample responses for sanity check
         if responses:
-            logger.info(f"✓ Sample responses ({len(responses)} collected):")
+            logger.info(f"Sample responses ({len(responses)} collected):")
             # Show all responses - can be overwhelming, but useful for debugging
             for query_id, response in responses:
                 # Truncate long responses
@@ -219,27 +251,26 @@ async def run_probe_command(args: argparse.Namespace) -> None:
                 logger.info(f"  [{query_id}] {response_preview}")
 
         if errors:
-            logger.warning(f"⚠ Errors: {len(errors)}")
-            if args.verbose:
-                for error in errors[:3]:
-                    logger.warning(f"  {error}")
-                if len(errors) > 3:
-                    logger.warning(f"  ... +{len(errors) - 3} more")
+            logger.warning(f"Errors: {len(errors)}")
+            for error in errors[:3]:
+                logger.warning(f"  {error}")
+            if len(errors) > 3:
+                logger.warning(f"  ... +{len(errors) - 3} more")
 
         # Check if probe was successful
         if success_count < num_requests * 0.5:
-            logger.error("✗ Probe failed: Too many errors")
+            logger.error("Probe failed: Too many errors")
             raise ExecutionError(
                 f"Probe failed: only {success_count}/{num_requests} requests successful"
             )
 
-        logger.info("✓ Probe successful")
+        logger.info("Probe successful")
 
     except ExecutionError:
         # Re-raise our own exceptions
         raise
     except Exception as e:
-        logger.error("✗ Probe failed")
+        logger.error("Probe failed")
         raise SetupError(f"Probe setup failed: {e}") from e
     finally:
         # Cleanup

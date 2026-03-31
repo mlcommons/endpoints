@@ -63,8 +63,8 @@ class RuntimeSettings:
     min_duration_ms: int
     """Minimum benchmark duration in milliseconds"""
 
-    max_duration_ms: int
-    """Maximum benchmark duration in milliseconds (timeout)"""
+    max_duration_ms: int | None
+    """Maximum benchmark duration in milliseconds (timeout). None means no wall-clock limit."""
 
     n_samples_from_dataset: int
     """Number of samples to load from dataset"""
@@ -98,7 +98,7 @@ class RuntimeSettings:
         a validated BenchmarkConfig (Pydantic model).
 
         Args:
-            config: Validated BenchmarkConfig from yaml_loader
+            config: Validated BenchmarkConfig
             dataloader_num_samples: Number of samples loaded from dataset
             ruleset: Optional ruleset to apply constraints (delegates to ruleset's apply_user_config)
             **overrides: Additional fields to override (e.g., for testing)
@@ -152,7 +152,9 @@ class RuntimeSettings:
             "metric_target": metrics.Throughput(effective_qps),
             "reported_metrics": [metrics.Throughput(effective_qps)],
             "min_duration_ms": runtime_cfg.min_duration_ms,
-            "max_duration_ms": runtime_cfg.max_duration_ms,
+            "max_duration_ms": None
+            if runtime_cfg.max_duration_ms == 0
+            else runtime_cfg.max_duration_ms,
             "n_samples_from_dataset": dataloader_num_samples,
             "n_samples_to_issue": runtime_cfg.n_samples_to_issue,  # From config (CLI --num-samples or YAML)
             "min_sample_count": 1,

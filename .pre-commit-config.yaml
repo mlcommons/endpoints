@@ -7,7 +7,7 @@ repos:
       - id: end-of-file-fixer
       - id: check-yaml
       - id: check-added-large-files
-        exclude: ^(src/inference_endpoint/openai/openai_types_gen.py|src/inference_endpoint/openai/openapi.yaml)$
+        exclude: ^(src/inference_endpoint/openai/openai_types_gen.py|src/inference_endpoint/openai/openapi.yaml|docs/res/.*)$
       - id: check-merge-conflict
       - id: debug-statements
 
@@ -46,6 +46,13 @@ repos:
         always_run: true
         args: ["--tb=short", "--strict-markers"]
         stages: [manual]
+
+      - id: validate-templates
+        name: Validate YAML templates against schema
+        entry: python -c "from pathlib import Path; from inference_endpoint.config.schema import BenchmarkConfig; [BenchmarkConfig.from_yaml_file(f) for f in sorted(Path('src/inference_endpoint/config/templates').glob('*.yaml'))]"
+        language: system
+        pass_filenames: false
+        files: ^src/inference_endpoint/config/(schema\.py|templates/)
 
       - id: add-license-header
         name: Add license headers

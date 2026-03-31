@@ -14,47 +14,136 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""
-Main entry point for the MLPerf Inference Endpoint Benchmarking System.
+"""Main entry point — app definition, error formatter, command registration, and dispatch.
 
-This module provides the main application logic and can be run directly
-or imported as a module.
+Benchmark commands are in commands/benchmark/cli.py (lazy-loaded).
+Simple commands (probe, info, validate-yaml, init, eval) are defined here.
 """
 
-import asyncio
+from __future__ import annotations
+
 import logging
 import sys
+import traceback
+from pathlib import Path
+from typing import Annotated
 
-import uvloop
+import cyclopts
 
-from inference_endpoint.cli import main as cli_main
+from inference_endpoint import __version__
+from inference_endpoint.commands.info import execute_info
+from inference_endpoint.commands.init import execute_init
+from inference_endpoint.commands.probe import ProbeConfig, execute_probe
+from inference_endpoint.commands.validate import execute_validate
+from inference_endpoint.config.utils import cli_error_formatter
+from inference_endpoint.exceptions import (
+    CLIError,
+    ExecutionError,
+    InputValidationError,
+    SetupError,
+)
 from inference_endpoint.utils.logging import setup_logging
 
 logger = logging.getLogger(__name__)
 
 
-async def main() -> None:
-    """Main application entry point."""
-    logger.info("Starting MLPerf Inference Endpoint Benchmarking System")
-    await cli_main()
+app = cyclopts.App(
+    name="inference-endpoint",
+    help="MLPerf Inference Endpoint Benchmarking System.",
+    version=__version__,
+    error_formatter=cli_error_formatter,
+)
+
+
+@app.meta.default
+def launcher(
+    *tokens: Annotated[str, cyclopts.Parameter(show=False, allow_leading_hyphen=True)],
+    verbose: Annotated[
+        int,
+        cyclopts.Parameter(
+            name="--verbose",
+            alias="-v",
+            count=True,
+            help="Verbosity level (-v info, -vv debug)",
+        ),
+    ] = 0,
+):
+    """Global options applied before any command."""
+    setup_logging(level="DEBUG" if verbose >= 2 else "INFO")
+    app(tokens)
+
+
+# Benchmark subcommands — lazy-loaded from commands/benchmark/cli.py
+app.command("inference_endpoint.commands.benchmark.cli:benchmark_app", name="benchmark")
+
+
+# --- Misc commands ---
+
+
+@app.command
+def probe(*, config: ProbeConfig):
+    """Test endpoint connectivity."""
+    execute_probe(config)
+
+
+@app.command
+def info():
+    """Show system information."""
+    execute_info()
+
+
+@app.command(name="validate-yaml")
+def validate_yaml(
+    *, config: Annotated[Path, cyclopts.Parameter(name=["--config", "-c"])]
+):
+    """Validate YAML configuration file."""
+    execute_validate(config)
+
+
+@app.command(name="init")
+def init_cmd(template: str):
+    """Generate config template."""
+    execute_init(template)
+
+
+@app.command
+def eval(
+    endpoints: str,
+    *,
+    dataset: str | None = None,
+    api_key: str | None = None,
+    output: Path | None = None,
+    judge: str | None = None,
+):
+    """Run accuracy evaluation."""
+    raise NotImplementedError("Accuracy evaluation not yet implemented")
 
 
 def run() -> None:
-    """Entry point for setuptools."""
-    # Setup logging first
-    setup_logging()
-
+    """Entry point."""
     try:
-        # Use eager task factory for immediate coroutine execution
-        # Tasks start executing synchronously until first await
-        with asyncio.Runner(loop_factory=uvloop.new_event_loop) as runner:
-            runner.get_loop().set_task_factory(asyncio.eager_task_factory)  # type: ignore[arg-type]
-            runner.run(main())
+        app.meta()
+    except SystemExit as e:
+        sys.exit(e.code or 0)
     except KeyboardInterrupt:
-        logger.info("Application interrupted by user")
-        sys.exit(130)  # 128 + SIGINT
-    except Exception as e:
-        logger.error(f"Application error: {e}")
+        sys.exit(130)
+    except NotImplementedError as e:
+        logger.error(str(e))
+        sys.exit(1)
+    except InputValidationError as e:
+        logger.error(str(e))
+        sys.exit(2)
+    except SetupError as e:
+        logger.error(str(e))
+        sys.exit(3)
+    except ExecutionError as e:
+        logger.error(str(e))
+        sys.exit(4)
+    except CLIError as e:
+        logger.error(str(e))
+        sys.exit(1)
+    except Exception:
+        traceback.print_exc()
         sys.exit(1)
 
 

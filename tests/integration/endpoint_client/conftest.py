@@ -25,26 +25,15 @@ def create_futures_client(
     url: str,
     num_workers: int = 1,
     max_connections: int = 10,
-    warmup_connections: bool = False,
+    warmup_connections: int = 0,
 ) -> FuturesHttpClient:
-    """Helper to create a FuturesHttpClient with specific config.
-
-    Args:
-        url: The endpoint URL to connect to
-        num_workers: Number of worker processes (default: 1)
-        max_connections: Max connections per worker (default: 10 for tests)
-        warmup_connections: Whether to warmup connections (default: False for tests)
-
-    Returns:
-        FuturesHttpClient: Configured client ready to use
-    """
+    """Helper to create a FuturesHttpClient with specific config."""
     http_config = HTTPClientConfig(
         endpoint_urls=[url],
         num_workers=num_workers,
         max_connections=max_connections,
         warmup_connections=warmup_connections,
     )
-
     return FuturesHttpClient(http_config)
 
 
@@ -53,12 +42,8 @@ def futures_http_client(mock_http_echo_server):
     """Fixture that creates and manages a FuturesHttpClient instance.
 
     Uses mock_http_echo_server with default configuration.
+    Transport context is managed internally by WorkerManager.
     Automatically handles client shutdown after test completes.
-
-    Usage:
-        async def test_something(self, futures_http_client):
-            future = futures_http_client.issue(query)
-            result = await asyncio.wrap_future(future)
     """
     client = create_futures_client(
         url=f"{mock_http_echo_server.url}/v1/chat/completions",

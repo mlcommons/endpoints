@@ -29,7 +29,7 @@ settings:
     type: "max_throughput"
 
   client:
-    workers: 4
+    num_workers: 4
 
 metrics:
   collect:

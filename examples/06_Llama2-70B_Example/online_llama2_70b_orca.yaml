@@ -11,13 +11,13 @@ model_params:
   max_new_tokens: 1024
 
 datasets:
-  - name: "open_orca"
+  - name: open_orca::llama2_70b
     type: "accuracy"
     accuracy_config:
       eval_method: "rouge"
       extractor: "identity_extractor"
       ground_truth: "output"
-  - name: "open_orca"
+  - name: open_orca::llama2_70b
     type: "performance"
 
 settings:
@@ -32,7 +32,7 @@ settings:
     target_qps: 10
 
   client:
-    workers: 4
+    num_workers: 4
 
 metrics:
   collect:
@@ -46,5 +46,4 @@ endpoint_config:
     - "http://localhost:8000"
   api_key: null
 
-output: results/llama2_70b_orca_output.json
 report_dir: results/llama2_70b_orca_benchmark_mlperf/

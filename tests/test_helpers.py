@@ -29,7 +29,12 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import zmq
-from inference_endpoint.core.types import Query, QueryResult, StreamChunk
+from inference_endpoint.core.types import (
+    Query,
+    QueryResult,
+    StreamChunk,
+    TextModelOutput,
+)
 from inference_endpoint.dataset_manager.dataset import Dataset
 from inference_endpoint.load_generator.load_generator import SampleIssuer
 from inference_endpoint.load_generator.sample import SampleEventHandler
@@ -205,7 +210,9 @@ class SerialSampleIssuer(SampleIssuer):
             )
             SampleEventHandler.stream_chunk_complete(stream_chunk)
             first = False
-        query_result = QueryResult(id=sample.uuid, response_output="".join(chunks))
+        query_result = QueryResult(
+            id=sample.uuid, response_output=TextModelOutput(output="".join(chunks))
+        )
         SampleEventHandler.query_result_complete(query_result)
 
 
@@ -254,7 +261,9 @@ class PooledSampleIssuer(SampleIssuer):
             )
             SampleEventHandler.stream_chunk_complete(stream_chunk)
             first = False
-        query_result = QueryResult(id=sample.uuid, response_output="".join(chunks))
+        query_result = QueryResult(
+            id=sample.uuid, response_output=TextModelOutput(output="".join(chunks))
+        )
         SampleEventHandler.query_result_complete(query_result)
 
     def check_errors(self):

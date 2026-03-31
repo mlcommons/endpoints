@@ -21,7 +21,7 @@ import threading
 import inference_endpoint.config.rulesets.mlcommons.models as mlcommons_models
 from inference_endpoint.config.rulesets.mlcommons.rules import CURRENT
 from inference_endpoint.config.user_config import UserConfig
-from inference_endpoint.core.types import QueryResult, StreamChunk
+from inference_endpoint.core.types import QueryResult, StreamChunk, TextModelOutput
 from inference_endpoint.dataset_manager.dataset import Dataset
 from inference_endpoint.load_generator import (
     BenchmarkSession,
@@ -167,10 +167,15 @@ class SerialSampleIssuer(SampleIssuer):
                 )
                 SampleEventHandler.stream_chunk_complete(stream_chunk)
                 first = False
-            query_result = QueryResult(id=sample.uuid, response_output=chunks)
+            query_result = QueryResult(
+                id=sample.uuid,
+                response_output=TextModelOutput(output=chunks, reasoning=None),
+            )
         else:
             response = self.compute_func(sample.data)
-            query_result = QueryResult(id=sample.uuid, response_output=response)
+            query_result = QueryResult(
+                id=sample.uuid, response_output=TextModelOutput(output=response)
+            )
         SampleEventHandler.query_result_complete(query_result)
 
 
@@ -185,9 +190,9 @@ if __name__ == "__main__":
         help="Enable streaming mode for TTFT metrics",
     )
     parser.add_argument(
-        "--dump-events-csv",
+        "--dump-events-log",
         action="store_true",
-        help="Dump the events to a CSV file",
+        help="Dump the events to a log file",
     )
     parser.add_argument(
         "--total-sample-count",
@@ -248,7 +253,7 @@ if __name__ == "__main__":
             name="tinyllm_benchmark",
             report_dir="tinyllm_benchmark_report",
             tokenizer_override=model_runner.tokenizer,
-            dump_events_csv=args.dump_events_csv,
+            dump_events_log=args.dump_events_log,
         )
         sess.wait_for_test_end()
 

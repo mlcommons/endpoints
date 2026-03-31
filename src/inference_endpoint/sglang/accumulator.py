@@ -15,7 +15,7 @@
 
 """SGLang SSE stream accumulator implementation."""
 
-from inference_endpoint.core.types import QueryResult, StreamChunk
+from inference_endpoint.core.types import QueryResult, StreamChunk, TextModelOutput
 from inference_endpoint.endpoint_client.accumulator_protocol import (
     SSEAccumulatorProtocol,
 )
@@ -76,7 +76,7 @@ class SGLangSSEAccumulator(SSEAccumulatorProtocol):
     def get_final_output(self) -> QueryResult:
         return QueryResult(
             id=self.query_id,
-            response_output=self.text,
+            response_output=TextModelOutput(output=self.text),
             metadata={
                 "first_chunk": not self.first_chunk_sent,
                 "final_chunk": True,

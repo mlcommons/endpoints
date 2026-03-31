@@ -44,9 +44,13 @@ class DeepSeekR1SampleIssuer(HttpClientSampleIssuer):
     def __init__(self, tmp_path: Path, url: str):
         self.http_config = HTTPClientConfig(
             endpoint_urls=[urljoin(url, "/v1/chat/completions")],
-            warmup_connections=False,
+            warmup_connections=0,
         )
-        super().__init__(HTTPEndpointClient(self.http_config))
+        super().__init__(
+            HTTPEndpointClient(
+                self.http_config,
+            )
+        )
 
 
 async def run_benchmark(server_url, dataloader, tmp_path, rt_settings):
@@ -55,7 +59,7 @@ async def run_benchmark(server_url, dataloader, tmp_path, rt_settings):
 
     def on_complete_hook(result: QueryResult):
         """Callback to store the responses from the server."""
-        server_responses[result.id] = result.response_output
+        server_responses[result.id] = result.get_response_output_string()
 
     SampleEventHandler.register_hook(SampleEvent.COMPLETE, on_complete_hook)
 
@@ -66,6 +70,7 @@ async def run_benchmark(server_url, dataloader, tmp_path, rt_settings):
     )
     logging.info(f"Number of samples to issue: {scheduler.total_samples_to_issue}")
 
+    sample_issuer = None
     try:
         # Step 3. Create the sample issuer.
         sample_issuer = DeepSeekR1SampleIssuer(tmp_path, server_url)
@@ -87,8 +92,9 @@ async def run_benchmark(server_url, dataloader, tmp_path, rt_settings):
         return sess.sample_uuid_map, server_responses
     finally:
         # Step 7. Shutdown the sample issuer and the HTTP client.
-        sample_issuer.shutdown()
-        sample_issuer.http_client.shutdown()
+        if sample_issuer is not None:
+            sample_issuer.shutdown()
+            sample_issuer.http_client.shutdown()
 
 
 """

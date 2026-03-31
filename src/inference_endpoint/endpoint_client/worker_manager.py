@@ -20,9 +20,9 @@ import logging
 import time
 from multiprocessing import Process
 
+from inference_endpoint.async_utils.transport import WorkerPoolTransport
 from inference_endpoint.endpoint_client.config import HTTPClientConfig
 from inference_endpoint.endpoint_client.cpu_affinity import set_cpu_affinity
-from inference_endpoint.endpoint_client.transport import WorkerPoolTransport
 from inference_endpoint.endpoint_client.worker import worker_main
 
 logger = logging.getLogger(__name__)
@@ -32,8 +32,10 @@ class WorkerManager:
     """Manages worker processes and IPC transports.
 
     Creates and owns:
-    - WorkerPoolTransport for IPC
+    - WorkerPoolTransport for IPC (created via transport_config.transport_class)
     - Worker processes
+
+    Transport context is managed internally by the transport implementation.
     """
 
     def __init__(
@@ -49,13 +51,11 @@ class WorkerManager:
         """
         self.http_config = http_config
 
-        # Create pool transport via factory
-        # worker_pool_transport is guaranteed to be set by HTTPClientConfig.__post_init__
-        assert http_config.worker_pool_transport is not None
-        self.pool_transport: WorkerPoolTransport = (
-            http_config.worker_pool_transport.create(
-                loop, num_workers=http_config.num_workers
-            )
+        # Transport creates its own context internally
+        assert http_config.transport is not None
+        transport_cls = http_config.transport.transport_class
+        self.pool_transport: WorkerPoolTransport = transport_cls.create(
+            loop, http_config.num_workers, config=http_config.transport
         )
 
         # Worker processes

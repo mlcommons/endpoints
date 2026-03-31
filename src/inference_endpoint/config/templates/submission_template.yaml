@@ -4,12 +4,13 @@ version: "1.0"
 type: "submission"
 benchmark_mode: "offline" # Required for submission: "offline" or "online"
 
-# Baseline configuration (locking handled by ruleset)
-baseline:
+# Submission reference (model + ruleset for compliance checks)
+submission_ref:
   model: "llama-2-70b"
   ruleset: "mlperf-inference-v6.0"
 
 model_params:
+  name: "meta-llama/Llama-2-70B-Chat-HF"
   temperature: 0.7
   top_k: 50
   top_p: 0.9
@@ -55,7 +56,7 @@ settings:
     target_qps: 100
 
   client:
-    workers: 4
+    num_workers: 4
 
 metrics:
   collect:

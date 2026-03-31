@@ -15,60 +15,61 @@
 
 """Utility functions for the endpoint client module."""
 
+import subprocess
 import sys
 
 # Platform detection
 _IS_LINUX = sys.platform.startswith("linux")
+_IS_DARWIN = sys.platform == "darwin"
 
 
 def get_ephemeral_port_range() -> tuple[int, int]:
     """Get the ephemeral port range from system config.
 
     On Linux, reads from /proc/sys/net/ipv4/ip_local_port_range.
+    On macOS, reads from sysctl net.inet.ip.portrange.first/last.
 
     Returns:
         Tuple of (low, high) port numbers.
-
-    Raises:
-        OSError: If not running on Linux.
     """
-    if not _IS_LINUX:
-        raise OSError(
-            f"Ephemeral port range detection is only supported on Linux, not {sys.platform}."
-        )
+    if _IS_LINUX:
+        try:
+            with open("/proc/sys/net/ipv4/ip_local_port_range") as f:
+                low, high = map(int, f.read().split())
+                return low, high
+        except (OSError, ValueError):
+            return 32768, 60999
 
-    try:
-        with open("/proc/sys/net/ipv4/ip_local_port_range") as f:
-            low, high = map(int, f.read().split())
+    if _IS_DARWIN:
+        try:
+            low = int(
+                subprocess.check_output(
+                    ["sysctl", "-n", "net.inet.ip.portrange.first"], text=True
+                ).strip()
+            )
+            high = int(
+                subprocess.check_output(
+                    ["sysctl", "-n", "net.inet.ip.portrange.last"], text=True
+                ).strip()
+            )
             return low, high
-    except (OSError, ValueError):
-        # Fallback to typical Linux default
-        return 32768, 60999
+        except (OSError, ValueError, subprocess.CalledProcessError):
+            return 49152, 65535
+
+    raise OSError(f"Ephemeral port range detection is not supported on {sys.platform}.")
 
 
 def get_used_port_count() -> int:
     """Count TCP sockets using ephemeral ports.
-
-    Only counts sockets whose local port is in the ephemeral range.
-    Excludes LISTEN sockets (servers) and sockets on well-known ports.
     On Linux, reads from /proc/net/tcp and /proc/net/tcp6.
-
-    /proc/net/tcp format (hex values):
-      sl  local_address rem_address   st tx_queue rx_queue ...
-       0: 0100007F:1F90 00000000:0000 0A ...
-          ^^^^^^^^:^^^^
-          IP addr  port (hex)
 
     Returns:
         Number of TCP sockets using ephemeral ports.
-
-    Raises:
-        OSError: If not running on Linux.
     """
+    if _IS_DARWIN:
+        return 0
     if not _IS_LINUX:
-        raise OSError(
-            f"TCP socket counting is only supported on Linux, not {sys.platform}."
-        )
+        raise OSError(f"TCP socket counting is not supported on {sys.platform}.")
 
     low, high = get_ephemeral_port_range()
     count = 0
@@ -83,7 +84,6 @@ def get_used_port_count() -> int:
                     if len(parts) < 2:
                         continue
                     local_addr = parts[1]  # e.g., "0100007F:1F90"
-                    # Port is after the colon, in hex
                     port_hex = local_addr.split(":")[1]
                     port = int(port_hex, 16)
                     if low <= port <= high:
@@ -102,9 +102,6 @@ def get_ephemeral_port_limit() -> int:
 
     Returns:
         Number of available ephemeral ports.
-
-    Raises:
-        OSError: If not running on Linux.
     """
     low, high = get_ephemeral_port_range()
     total_range = high - low + 1

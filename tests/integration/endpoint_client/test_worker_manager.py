@@ -109,7 +109,7 @@ class TestWorkerLifecycle:
             endpoint_urls=[f"{mock_http_echo_server.url}/v1/chat/completions"],
             num_workers=2,
             max_connections=10,
-            warmup_connections=False,
+            warmup_connections=0,
         )
         return http_config
 
@@ -119,10 +119,7 @@ class TestWorkerLifecycle:
         http_config = manager_config
         loop = asyncio.get_running_loop()
 
-        manager = WorkerManager(
-            http_config=http_config,
-            loop=loop,
-        )
+        manager = WorkerManager(http_config, loop)
 
         # Initialize manager (spawns workers)
         await manager.initialize()
@@ -157,14 +154,10 @@ class TestWorkerLifecycle:
         self, manager_config, signal_type, signal_method
     ):
         """Test workers handle signals correctly and are reaped without leaving zombies."""
-        http_config = manager_config
-        http_config.num_workers = 1
+        http_config = manager_config.with_updates(num_workers=1)
         loop = asyncio.get_running_loop()
 
-        manager = WorkerManager(
-            http_config=http_config,
-            loop=loop,
-        )
+        manager = WorkerManager(http_config, loop)
 
         # Initialize manager
         await manager.initialize()
@@ -187,11 +180,11 @@ class TestWorkerLifecycle:
         # Check zombie state before shutdown
         zombies_before = check_for_zombies([worker_pid])
         if zombies_before:
-            print(f"✓ Worker {worker_pid} became zombie after {signal_type}")
+            print(f"Worker {worker_pid} became zombie after {signal_type}")
         elif not worker.is_alive():
-            print(f"✓ Worker {worker_pid} exited after {signal_type}")
+            print(f"Worker {worker_pid} exited after {signal_type}")
         else:
-            print(f"⚠ Worker {worker_pid} still running after {signal_type}")
+            print(f"Worker {worker_pid} still running after {signal_type}")
 
         # Shutdown should handle the worker properly
         await manager.shutdown()
@@ -202,20 +195,15 @@ class TestWorkerLifecycle:
             worker.exitcode is not None
         ), f"Worker should be reaped after {signal_type}"
         assert_no_zombies([worker_pid])
-
-        print(f"✓ Worker properly handled {signal_type} and was reaped")
+        print(f"Worker properly handled {signal_type} and was reaped")
 
     @pytest.mark.asyncio
     async def test_multiple_workers_with_mixed_signals(self, manager_config):
         """Test shutdown handles multiple workers killed with different signals simultaneously."""
-        http_config = manager_config
-        http_config.num_workers = 3
+        http_config = manager_config.with_updates(num_workers=3)
         loop = asyncio.get_running_loop()
 
-        manager = WorkerManager(
-            http_config=http_config,
-            loop=loop,
-        )
+        manager = WorkerManager(http_config, loop)
 
         # Initialize manager
         await manager.initialize()
@@ -247,7 +235,7 @@ class TestWorkerLifecycle:
 
         # No zombies should remain
         assert_no_zombies(worker_pids)
-        print(f"✓ All {len(worker_pids)} workers properly reaped after mixed signals")
+        print(f"All {len(worker_pids)} workers properly reaped after mixed signals")
 
 
 class TestWorkerDeathScenarios:
@@ -260,7 +248,7 @@ class TestWorkerDeathScenarios:
             endpoint_urls=["http://localhost:59999/advanced"],
             num_workers=2,
             max_connections=10,
-            warmup_connections=False,
+            warmup_connections=0,
         )
         return http_config
 
@@ -270,10 +258,7 @@ class TestWorkerDeathScenarios:
         http_config = worker_death_config
         loop = asyncio.get_running_loop()
 
-        manager = WorkerManager(
-            http_config=http_config,
-            loop=loop,
-        )
+        manager = WorkerManager(http_config, loop)
 
         # Initialize manager
         await manager.initialize()
@@ -302,10 +287,10 @@ class TestWorkerDeathScenarios:
         )
         if zombies_before:
             print(
-                f"✓ Verified: {len(zombies_before)} zombie(s) exist before shutdown: {zombies_before}"
+                f"Verified: {len(zombies_before)} zombie(s) exist before shutdown: {zombies_before}"
             )
         else:
-            print("⚠ All workers auto-reaped by OS before shutdown check")
+            print("All workers auto-reaped by OS before shutdown check")
 
         # Shutdown should reap all zombies
         await manager.shutdown()
@@ -318,10 +303,9 @@ class TestWorkerDeathScenarios:
 
         # Verify all zombies were reaped using assert_no_zombies
         assert_no_zombies(original_pids)
-
         if zombies_before:
             print(
-                f"✓ Verified: All {len(zombies_before)} zombie(s) were reaped by shutdown"
+                f"Verified: All {len(zombies_before)} zombie(s) were reaped by shutdown"
             )
 
     @pytest.mark.asyncio
@@ -330,10 +314,7 @@ class TestWorkerDeathScenarios:
         http_config = worker_death_config
         loop = asyncio.get_running_loop()
 
-        manager = WorkerManager(
-            http_config=http_config,
-            loop=loop,
-        )
+        manager = WorkerManager(http_config, loop)
 
         # Initialize manager
         await manager.initialize()
@@ -351,7 +332,7 @@ class TestWorkerDeathScenarios:
         # Check for zombies before shutdown
         zombies_before = check_for_zombies([dead_pid])
         if zombies_before:
-            print(f"✓ Verified: Worker {dead_pid} is zombie before shutdown")
+            print(f"Verified: Worker {dead_pid} is zombie before shutdown")
 
         # Immediately shutdown manager (should handle dead worker gracefully)
         await manager.shutdown()
@@ -367,8 +348,7 @@ class TestWorkerDeathScenarios:
 
         # Verify no zombies in process table after shutdown
         assert_no_zombies(all_pids)
-
         if zombies_before:
             zombies_after = check_for_zombies([dead_pid])
             assert len(zombies_after) == 0, f"Shutdown failed to reap zombie {dead_pid}"
-            print(f"✓ Verified: Zombie {dead_pid} was reaped by shutdown")
+            print(f"Verified: Zombie {dead_pid} was reaped by shutdown")

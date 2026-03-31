@@ -41,7 +41,7 @@ async def test_external_serving(vllm_docker_server, streaming, num_requests):
             endpoint_urls=[f"{vllm_docker_server['url']}/v1/chat/completions"],
             num_workers=num_workers,
             max_connections=50,
-            warmup_connections=False,
+            warmup_connections=0,
         )
 
         # TODO(vir):

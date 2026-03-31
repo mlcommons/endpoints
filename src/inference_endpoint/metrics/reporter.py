@@ -29,8 +29,8 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import msgspec.json
 import numpy as np
-import orjson
 
 from ..load_generator.events import SampleEvent, SessionEvent
 from ..profiling import profile
@@ -189,7 +189,7 @@ class RollupQueryTable:
 
     def summarize(
         self,
-        percentiles: Iterable[float] = (99.9, 99, 95, 90, 80, 75, 50, 25, 10, 5, 1),
+        percentiles: Iterable[float] = (99.9, 99, 97, 95, 90, 80, 75, 50, 25, 10, 5, 1),
     ) -> dict[str, float]:
         if len(self._sorted_vals) == 0:
             return {
@@ -207,7 +207,7 @@ class RollupQueryTable:
             }
         else:
             # Note values are sorted, we can avoid using np.max and np.min
-            # Need to convert to default Python types since orjson doesn't support numpy dtypes
+            # Need to convert to default Python types since msgspec doesn't support numpy dtypes
             if self.repeats is None:
                 values = self._sorted_vals
                 counts = np.ones(self._sorted_vals.shape, dtype=self._sorted_vals.dtype)
@@ -349,9 +349,13 @@ class RollupQueryTable:
 class Report:
     """Represents a summarized report of metrics"""
 
+    version: str
+    git_sha: str | None
+    test_started_at: int
     n_samples_issued: int
     n_samples_completed: int
-    duration_ns: int
+    n_samples_failed: int
+    duration_ns: int | None
 
     # For the following metrics, the key is a rollup statistic (i.e. mean, median, etc.)
     ttft: dict[str, float]
@@ -399,8 +403,8 @@ class Report:
         d = dataclasses.asdict(self)
         d["qps"] = self.qps
         d["tps"] = self.tps
-        json_str = orjson.dumps(
-            d, option=orjson.OPT_INDENT_2 | orjson.OPT_SORT_KEYS
+        json_str = msgspec.json.format(
+            msgspec.json.encode(dict(sorted(d.items()))), indent=2
         ).decode("utf-8")
         if save_to is not None:
             with Path(save_to).open("w") as f:
@@ -482,8 +486,17 @@ class Report:
         """
 
         fn(f"----------------- Summary -----------------{newline}")
+        fn(f"Version: {self.version}{newline}")
+        if self.git_sha:
+            fn(f"Git SHA: {self.git_sha}{newline}")
+        # Approximate absolute time of the test started at using monotime_to_datetime from utils.py
+        test_started_at_approx = monotime_to_datetime(self.test_started_at)
+        fn(
+            f"Test started at: (timestamp_ns):{self.test_started_at}, approx. wall-clock time: ({test_started_at_approx.strftime('%Y-%m-%d %H:%M:%S')}){newline}"
+        )
         fn(f"Total samples issued: {self.n_samples_issued}{newline}")
         fn(f"Total samples completed: {self.n_samples_completed}{newline}")
+        fn(f"Total samples failed: {self.n_samples_failed}{newline}")
         if self.duration_ns is not None:
             fn(f"Duration: {self.duration_ns / 1e9:.2f} seconds{newline}")
         else:
@@ -536,13 +549,15 @@ def _output_sequence_to_str(output_sequence: str | list[str]) -> str | None:
 
 
 def output_sequence_from_data(
-    data_bytes: bytes,
+    data_bytes: bytes | None,
     join_chunks: bool = True,
 ) -> tuple[str | list[str] | None, str | list[str] | None]:
     """Parse the data column from a COMPLETE event and extract output and reasoning sequences.
 
     The data column is expected to be a JSON-encoded byte string. The decoded value can be:
     - A string: treated as the output sequence directly
+    - A list: tagged msgspec array from TextModelOutput (array_like=True, tag=True),
+      formatted as ["TextModelOutput", output, reasoning]
     - A dictionary with 'output' key (required) and optionally 'reasoning' key
       - Both 'output' and 'reasoning' can be either strings or lists of strings
       - If a list of strings, they will be joined together
@@ -560,8 +575,8 @@ def output_sequence_from_data(
         return None, None
 
     try:
-        decoded_data = orjson.loads(data_bytes)
-    except (orjson.JSONDecodeError, TypeError):
+        decoded_data = msgspec.json.decode(data_bytes)
+    except (msgspec.DecodeError, TypeError):
         logging.warning("Failed to decode data bytes")
         return None, None
 
@@ -569,6 +584,24 @@ def output_sequence_from_data(
     if isinstance(decoded_data, str):
         # If decoded value is a string, it's the output sequence
         output = decoded_data
+    elif isinstance(decoded_data, list):
+        # Tagged msgspec array_like Struct: ["TextModelOutput", output, reasoning]
+        # The tag is at index 0, output at index 1, reasoning at index 2
+        if len(decoded_data) < 2 or decoded_data[0] != "TextModelOutput":
+            logging.warning(
+                f"Invalid TextModelOutput tagged array data: {decoded_data}"
+            )
+            return None, None
+        raw_output = decoded_data[1]
+        raw_reasoning = decoded_data[2] if len(decoded_data) > 2 else None
+        output = _output_sequence_to_str(raw_output) if join_chunks else raw_output
+        if output is None and raw_output is not None:
+            logging.warning(f"Output field has unexpected type: {type(raw_output)}")
+            return None, None
+        if raw_reasoning is not None:
+            reasoning = (
+                _output_sequence_to_str(raw_reasoning) if join_chunks else raw_reasoning
+            )
     elif isinstance(decoded_data, dict):
         # If decoded value is a dict, extract 'output' and optionally 'reasoning'
         if "output" not in decoded_data:
@@ -920,11 +953,35 @@ class MetricsReporter:
         }
 
     def get_error_count(self) -> int:
+        """Returns the number of distinct samples that encountered an error within the performance window.
+
+        A sample with multiple ERROR events is counted only once. Only samples whose
+        LOADGEN_ISSUE_CALLED event occurred before the STOP_PERFORMANCE_TRACKING timestamp
+        are included, keeping this metric consistent with n_samples_issued and n_samples_completed.
+        If no STOP_PERFORMANCE_TRACKING event exists, all errored samples are counted.
+
+        Returns:
+            int: The number of distinct failed sample UUIDs.
+        """
+        stop_ts = self.stop_performance_tracking_timestamp_ns
+
+        where_clause = ""
+        if stop_ts != float("inf"):
+            where_clause = f"""
+            AND sample_uuid IN (
+                SELECT DISTINCT sample_uuid FROM events
+                WHERE event_type = '{SessionEvent.LOADGEN_ISSUE_CALLED.value}'
+                AND timestamp_ns < {stop_ts}
+            )
+            """
+
         return self.cur_.execute(f"""
         SELECT
-            COUNT(*) AS error_count
+            COUNT(DISTINCT sample_uuid) AS error_count
         FROM events
         WHERE event_type = '{SessionEvent.ERROR.value}'
+        AND sample_uuid NOT IN ('', '<NO_SAMPLE_UUID>')
+        {where_clause}
         """).fetchone()[0]
 
     def get_sample_outputs(
@@ -1064,7 +1121,12 @@ class MetricsReporter:
             output_sequence, reasoning_sequence = output_sequence_from_data(
                 data_bytes, join_chunks=False
             )
+            if isinstance(output_sequence, str):
+                output_sequence = [output_sequence]
             if not isinstance(output_sequence, list):
+                logging.warning(
+                    f"Output sequence for sample {sample_uuid} is not a list but {type(output_sequence)}: {output_sequence}"
+                )
                 continue
 
             all_chunks = output_sequence
@@ -1179,9 +1241,9 @@ class MetricsReporter:
                         ):
                             # For other event types, just decode and stringify
                             try:
-                                decoded_data = orjson.loads(data_bytes)
+                                decoded_data = msgspec.json.decode(data_bytes)
                                 value = str(decoded_data) if decoded_data else ""
-                            except (orjson.JSONDecodeError, TypeError) as e:
+                            except (msgspec.DecodeError, TypeError) as e:
                                 value = f"<DECODE_ERROR: {e}>"
 
                     approx_datetime_str = monotime_to_datetime(timestamp_ns).isoformat()
@@ -1193,9 +1255,8 @@ class MetricsReporter:
                         "approx_datetime_str": approx_datetime_str,
                         "value": value,
                     }
-                    # Use orjson.dumps for each line
                     f.write(
-                        orjson.dumps(json_obj, option=orjson.OPT_SORT_KEYS).decode(
+                        msgspec.json.encode(dict(sorted(json_obj.items()))).decode(
                             "utf-8"
                         )
                         + "\n"
@@ -1208,6 +1269,41 @@ class MetricsReporter:
 
     def __exit__(self, exc_type, exc_value, traceback):
         self.close()
+
+    def _get_version_info(self) -> dict[str, str | None]:
+        """Extract version info from TEST_STARTED event data.
+
+        Returns:
+            Dictionary with 'version' and 'git_sha' keys.
+        """
+        query = f"""
+        SELECT data FROM events
+        WHERE event_type = '{SessionEvent.TEST_STARTED.value}'
+        LIMIT 1
+        """
+        result = self.cur_.execute(query).fetchone()
+        if result and result[0]:
+            try:
+                return msgspec.json.decode(result[0])
+            except Exception:
+                pass
+        return {"version": "unknown", "git_sha": None}
+
+    def get_test_started_at(self) -> int | None:
+        """Gets the timestamp of the TEST_STARTED event.
+
+        Returns:
+            int|None: The timestamp of the TEST_STARTED event in nanoseconds, or None if not found.
+        """
+        query = f"""
+        SELECT timestamp_ns FROM events
+        WHERE event_type = '{SessionEvent.TEST_STARTED.value}'
+        ORDER BY timestamp_ns ASC
+        LIMIT 1"""
+        result = self.cur_.execute(query).fetchone()
+        if result and result[0]:
+            return result[0]
+        return None
 
     def create_report(
         self,
@@ -1223,6 +1319,10 @@ class MetricsReporter:
         Returns:
             Report: A Report object containing the metrics.
         """
+        test_started_at = self.get_test_started_at()
+        if test_started_at is None:
+            raise RuntimeError("TEST_STARTED event not found in database")
+
         sample_statuses = self.get_sample_statuses()
         ttft_rollup = self.derive_TTFT()
         sample_latency_rollup = self.derive_sample_latency()
@@ -1248,9 +1348,17 @@ class MetricsReporter:
             ttft_summary = None
         else:
             ttft_summary = ttft_rollup.summarize()
+
+        # Extract version information
+        version_info = self._get_version_info()
+
         return Report(
+            version=version_info.get("version", "unknown"),
+            git_sha=version_info.get("git_sha"),
+            test_started_at=test_started_at,
             n_samples_issued=sample_statuses["total_sent"],
             n_samples_completed=sample_statuses["completed"],
+            n_samples_failed=self.get_error_count(),
             duration_ns=self.derive_duration(),
             ttft=ttft_summary,
             tpot=tpot_summary,

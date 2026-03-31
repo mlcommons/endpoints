@@ -26,13 +26,15 @@ TODO:(vir): dump out hw-view in verbose mode
 import logging
 import os
 import platform
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 # Platform check - most APIs in this module require Linux
-_IS_LINUX = platform.system() == "Linux"
+_CURRENT_PLATFORM = platform.system().lower()
+_IS_LINUX = _CURRENT_PLATFORM == "linux"
 
 
 class UnsupportedPlatformError(RuntimeError):
@@ -41,19 +43,25 @@ class UnsupportedPlatformError(RuntimeError):
     pass
 
 
-def _require_linux(func_name: str) -> None:
-    """Raise if not on Linux."""
-    if not _IS_LINUX:
-        raise UnsupportedPlatformError(
-            f"{func_name}() requires Linux (current platform: {platform.system()})"
-        )
+def require_linux(func: Callable) -> Callable:
+    """Decorator to wrap functions that should error if not on Linux."""
+
+    def wrapper(*args, **kwargs):
+        if not _IS_LINUX:
+            raise UnsupportedPlatformError(
+                f"{func.__name__}() requires Linux (current platform: {_CURRENT_PLATFORM})"
+            )
+        return func(*args, **kwargs)
+
+    return wrapper
 
 
-# NOTE(vir): seeing high jitter when loadgen has <2 Physical CPUs
+# NOTE(vir): seeing high jitter when loadgen has <=2 Physical CPUs
 # Default physical cores for LoadGen (main process):
 #   - Session thread (scheduler, busy-wait timing)
 #   - Event loop thread (uvloop, response handling)
-DEFAULT_LOADGEN_CORES = 2
+#   - ZMQ I/O threads (up to 4)
+DEFAULT_LOADGEN_CORES = 5
 
 
 # =============================================================================
@@ -122,6 +130,7 @@ class AffinityPlan:
 # =============================================================================
 
 
+@require_linux
 def compute_affinity_plan(
     num_workers: int, loadgen_cores: int = DEFAULT_LOADGEN_CORES
 ) -> AffinityPlan:
@@ -143,7 +152,6 @@ def compute_affinity_plan(
     Raises:
         UnsupportedPlatformError: If not running on Linux.
     """
-    _require_linux("compute_affinity_plan")
     all_cpus = get_all_online_cpus()
     if not all_cpus:
         logger.warning("No CPUs available for affinity plan")
@@ -275,6 +283,7 @@ def compute_affinity_plan(
     )
 
 
+@require_linux
 def pin_loadgen(
     num_workers: int, loadgen_cores: int = DEFAULT_LOADGEN_CORES
 ) -> AffinityPlan | None:
@@ -290,7 +299,6 @@ def pin_loadgen(
     Raises:
         UnsupportedPlatformError: If not running on Linux.
     """
-    _require_linux("pin_loadgen")
     plan = compute_affinity_plan(num_workers, loadgen_cores)
 
     if not plan.loadgen_cpus:
@@ -298,7 +306,7 @@ def pin_loadgen(
         return None
 
     try:
-        os.sched_setaffinity(os.getpid(), set(plan.loadgen_cpus))
+        os.sched_setaffinity(os.getpid(), set(plan.loadgen_cpus))  # type: ignore[attr-defined]
         logger.info(
             f"LoadGen pinned to {len(plan.loadgen_cpus)} CPUs "
             f"({plan.num_loadgen_physical_cores} physical cores)"
@@ -309,6 +317,7 @@ def pin_loadgen(
         return None
 
 
+@require_linux
 def set_cpu_affinity(pid: int, cpus: set[int]) -> bool:
     """Set CPU affinity for a process.
 
@@ -322,12 +331,11 @@ def set_cpu_affinity(pid: int, cpus: set[int]) -> bool:
     Raises:
         UnsupportedPlatformError: If not running on Linux.
     """
-    _require_linux("set_cpu_affinity")
     if not cpus:
         return False
 
     try:
-        os.sched_setaffinity(pid, cpus)
+        os.sched_setaffinity(pid, cpus)  # type: ignore[attr-defined]
         logger.debug(f"Process {pid} pinned to CPUs {sorted(cpus)}")
         return True
     except (OSError, AttributeError) as e:
@@ -374,38 +382,38 @@ def _parse_cpulist(cpulist_str: str) -> set[int]:
     return cpus
 
 
+@require_linux
 def get_current_numa_node() -> int | None:
     """Get the NUMA node of the current process.
 
     Raises:
         UnsupportedPlatformError: If not running on Linux.
     """
-    _require_linux("get_current_numa_node")
     try:
-        if current_cpus := os.sched_getaffinity(0):
+        if current_cpus := os.sched_getaffinity(0):  # type: ignore[attr-defined]
             return get_numa_node(min(current_cpus))
     except OSError:
         pass
     return None
 
 
+@require_linux
 def get_cpus_in_numa_node(node: int) -> set[int]:
     """Get all CPUs in a given NUMA node.
 
     Raises:
         UnsupportedPlatformError: If not running on Linux.
     """
-    _require_linux("get_cpus_in_numa_node")
     return _read_sysfs_cpulist(_SYSFS_NODE / f"node{node}" / "cpulist") or set()
 
 
+@require_linux
 def get_numa_node(cpu: int) -> int | None:
     """Get the NUMA node for a given CPU.
 
     Raises:
         UnsupportedPlatformError: If not running on Linux.
     """
-    _require_linux("get_numa_node")
 
     # Try direct lookup via cpu's node symlink
     try:
@@ -428,16 +436,17 @@ def get_numa_node(cpu: int) -> int | None:
     return None
 
 
+@require_linux
 def get_physical_core_id(cpu: int) -> int | None:
     """Get physical core ID for a logical CPU.
 
     Raises:
         UnsupportedPlatformError: If not running on Linux.
     """
-    _require_linux("get_physical_core_id")
     return _read_sysfs_int(_SYSFS_CPU / f"cpu{cpu}" / "topology" / "core_id")
 
 
+@require_linux
 def get_all_online_cpus() -> set[int]:
     """Get all online CPUs available to the current process.
 
@@ -446,11 +455,10 @@ def get_all_online_cpus() -> set[int]:
     Raises:
         UnsupportedPlatformError: If not running on Linux.
     """
-    _require_linux("get_all_online_cpus")
 
     # Get cgroup-allowed CPUs
     try:
-        allowed = os.sched_getaffinity(0)
+        allowed = os.sched_getaffinity(0)  # type: ignore[attr-defined]
     except OSError:
         allowed = None
 
@@ -485,6 +493,7 @@ def get_all_online_cpus() -> set[int]:
     return allowed or set()
 
 
+@require_linux
 def get_cpus_ranked_by_performance(cpus: set[int] | None = None) -> list[int]:
     """Get CPUs ranked by performance (fastest first).
 
@@ -493,7 +502,6 @@ def get_cpus_ranked_by_performance(cpus: set[int] | None = None) -> list[int]:
     Raises:
         UnsupportedPlatformError: If not running on Linux.
     """
-    _require_linux("get_cpus_ranked_by_performance")
     if cpus is None:
         cpus = get_all_online_cpus()
     if not cpus:

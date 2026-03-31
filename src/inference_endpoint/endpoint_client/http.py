@@ -51,18 +51,22 @@ class _SocketConfig:
 
     # Connection keepalive-probe settings for long-lived connections
     # client kernel sends probe, server's kernel ACKs - no application overhead
+    #
+    # TODO(vir): verify impact on failure-detection, we want to fail fast
+    # detection time: KEEPIDLE + (KEEPCNT × KEEPINTVL) = 1 + 5×1 = 6s
     SO_KEEPALIVE: int = 1  # Enable keepalive at socket level
     TCP_KEEPIDLE: int = 1  # Probe after 1s idle
-    TCP_KEEPCNT: int = 1  # 1 failed probe = dead
+    TCP_KEEPCNT: int = 5  # 5 failed probes = dead
     TCP_KEEPINTVL: int = 1  # 1s between probes
 
-    # Make sure socket buffers are never the bottle neck
-    # With HTTP/1.1, a TCP socket will only be used for a single request
-    # Largest message size would be server response in Offline Mode
-    # 4MB /4 bytes per token = 1M tokens in any given packet
-    # TODO(vir): analyze workloads to better tune buffer sizes
-    SO_RCVBUF: int = 1024 * 1024 * 4  # 4MB receive buffer
-    SO_SNDBUF: int = 1024 * 1024 * 4  # 4MB send buffer
+    # Socket buffer sizing: sliding windows, not full-message buffers.
+    # The event loop reads eagerly so the buffer only holds data between
+    # kernel delivery and application read — typically one RTT worth.
+    #
+    # 128KB ≈ 128K chars buffered in-flight at any instant.
+    # Responses larger than the buffer stream through fine (TCP sliding window).
+    SO_RCVBUF: int = 1024 * 128  # 128KB receive buffer
+    SO_SNDBUF: int = 1024 * 128  # 128KB send buffer
 
     # Linux-specific:
     # kernel closes socket if sent data not ACKed within timeout
@@ -370,6 +374,8 @@ class PooledConnection:
         "last_used",
         "in_use",
         "idle_time_on_acquire",
+        "_fd",
+        "_stale_poller",
     )
 
     def __init__(
@@ -384,6 +390,11 @@ class PooledConnection:
         self.last_used = created_at
         self.in_use = True
         self.idle_time_on_acquire = 0.0
+
+        # Cache fd for stale checks — stable for the lifetime of the connection
+        sock = transport.get_extra_info("socket")
+        self._fd: int = sock.fileno() if sock is not None else -1
+        self._stale_poller: select.poll | None = None
 
     def is_alive(self) -> bool:
         """Check if the connection is still usable.
@@ -405,31 +416,34 @@ class PooledConnection:
         For idle HTTP keep-alive connections, there should be no pending data.
         If the socket is readable, it means the server sent FIN (EOF).
 
-        Optimization: Skip check for recently-used connections (< 1 second).
+        Uses poll() instead of select() to avoid FD_SETSIZE limit on high fds.
+        Poller is created lazily on first call and reused (fd is stable per connection).
         """
         # Skip stale check for recently-used connections
         # Server unlikely to close within 1 second of last use
         if time.monotonic() - self.last_used < 1.0:
             return False
 
-        if self.transport is None:
-            return True
+        # Fast path: poller already registered from a previous call
+        if self._stale_poller is not None:
+            try:
+                return bool(self._stale_poller.poll(0))
+            except (OSError, ValueError):
+                # fd closed or invalid — connection is dead, treat as stale
+                return True
 
-        # Get the socket file descriptor
-        sock = self.transport.get_extra_info("socket")
-        if sock is None:
+        # Slow path: first call — create poller and register fd
+        if self._fd < 0:
             return True
 
         try:
-            fd = sock.fileno()
-            if fd < 0:
-                return True
-
-            # Use select with zero timeout - avoids poll() object creation overhead
-            readable, _, exceptional = select.select([fd], [], [fd], 0)
-            return bool(readable or exceptional)
+            poller = select.poll()
+            poller.register(self._fd, select.POLLIN | select.POLLERR | select.POLLHUP)
+            self._stale_poller = poller
+            return bool(poller.poll(0))
 
         except (OSError, ValueError):
+            # fd closed or invalid — connection is dead, treat as stale
             return True
 
 
@@ -562,7 +576,10 @@ class ConnectionPool:
             self._creating -= 1
 
     def release(self, conn: PooledConnection) -> None:
-        """Return connection to pool for reuse and notify waiters."""
+        """Return connection to pool for reuse and notify waiters (idempotent)."""
+        if not conn.in_use:
+            return
+
         # Must close if: dead, server requested close, or error occurred
         if not conn.is_alive() or conn.protocol.should_close:
             self._close_connection(conn)
@@ -657,10 +674,16 @@ class HttpRequestTemplate:
     that remain constant across requests to a given endpoint.
 
     Attributes:
-        static_prefix: Pre-merged request line + host header bytes
+        static_prefix: Pre-merged request line + host header bytes.
+        cached_headers: Pre-encoded headers from cache_headers(), included in every request.
     """
 
-    __slots__ = ("static_prefix", "_extra_headers_cache", "extra_cached_headers")
+    __slots__ = (
+        "static_prefix",
+        "cached_headers",
+        "_prefix_streaming",
+        "_prefix_non_streaming",
+    )
 
     # Pre-encoded general headers
     HEADERS_STREAMING = (
@@ -672,8 +695,8 @@ class HttpRequestTemplate:
 
     def __init__(self, static_prefix: bytes):
         self.static_prefix = static_prefix
-        self._extra_headers_cache: dict[frozenset, bytes] = {}
-        self.extra_cached_headers = b""
+        self.cached_headers = b""
+        self._rebuild_prefixes()
 
     @classmethod
     def from_url(cls, host: str, port: int, path: str = "/") -> HttpRequestTemplate:
@@ -701,22 +724,30 @@ class HttpRequestTemplate:
 
         return cls(static_prefix=(request_line + host_header).encode("ascii"))
 
+    def _rebuild_prefixes(self) -> None:
+        """Merge static_prefix + cached_headers + content-type into two ready-to-use prefixes."""
+        base = self.static_prefix + self.cached_headers
+        self._prefix_streaming = base + self.HEADERS_STREAMING
+        self._prefix_non_streaming = base + self.HEADERS_NON_STREAMING
+
     def cache_headers(self, headers: dict[str, str]) -> None:
         """
-        Pre-cache extra headers to avoid first-call encoding overhead.
+        Pre-encode headers that repeat on every request.
 
-        Call this during setup to prime the cache for headers that will be
-        used repeatedly at runtime.
+        Call this during setup so build_request() only needs body + content_length
+        at runtime.
 
         Args:
-            headers: Headers to pre-encode and cache
+            headers: Headers to pre-encode and merge into the request prefix
         """
-        cache_key = frozenset(headers.items())
-        if cache_key not in self._extra_headers_cache:
-            self._extra_headers_cache[cache_key] = "".join(
-                f"{k}: {v}\r\n" for k, v in headers.items()
-            ).encode("utf-8", "surrogateescape")
-            self.extra_cached_headers = b"".join(self._extra_headers_cache.values())
+        encoded = "".join(f"{k}: {v}\r\n" for k, v in headers.items()).encode(
+            "utf-8", "surrogateescape"
+        )
+        # Substring dedup: safe because this is called once at setup with
+        # full header lines (e.g. "Authorization: Bearer ...\r\n"), not arbitrary fragments.
+        if encoded not in self.cached_headers:
+            self.cached_headers += encoded
+            self._rebuild_prefixes()
 
     def build_request(
         self,
@@ -735,41 +766,19 @@ class HttpRequestTemplate:
         Returns:
             Complete HTTP request in bytes.
         """
-        content_type_headers = (
-            self.HEADERS_STREAMING if streaming else self.HEADERS_NON_STREAMING
-        )
+        prefix = self._prefix_streaming if streaming else self._prefix_non_streaming
         content_length = f"Content-Length: {len(body)}\r\n\r\n".encode("ascii")
 
-        # Fast path: no extra headers
+        # Fast path: only body + content_length vary per request
         if not extra_headers:
-            return b"".join(
-                [
-                    self.static_prefix,
-                    self.extra_cached_headers,
-                    content_type_headers,
-                    content_length,
-                    body,
-                ]
-            )
+            return b"".join([prefix, content_length, body])
 
-        # Slow path: extra headers (~1us uncached, ~50ns per extra-header cached)
-        cache_key = frozenset(extra_headers.items())
-        if (extra := self._extra_headers_cache.get(cache_key)) is None:
-            extra = "".join(f"{k}: {v}\r\n" for k, v in extra_headers.items()).encode(
-                "utf-8", "surrogateescape"
-            )
-            self._extra_headers_cache[cache_key] = extra
-
-        return b"".join(
-            [
-                self.static_prefix,
-                self.extra_cached_headers,
-                content_type_headers,
-                extra,
-                content_length,
-                body,
-            ]
+        # Slow path: extra headers are encoded per-call;
+        # use cache_headers() at setup time for headers that repeat every request.
+        extra = "".join(f"{k}: {v}\r\n" for k, v in extra_headers.items()).encode(
+            "utf-8", "surrogateescape"
         )
+        return b"".join([prefix, extra, content_length, body])
 
 
 @dataclass(slots=True)
@@ -780,10 +789,10 @@ class InFlightRequest:
         query_id: Correlates response back to original Query.
         http_bytes: Serialized HTTP request for socket.write().
         is_streaming: Whether this is a streaming (SSE) request or not.
-        connection: PooledConnection if any assigned to this request.
+        connection: PooledConnection assigned to this request (set once request is fired).
     """
 
     query_id: str
     http_bytes: bytes
     is_streaming: bool
-    connection: PooledConnection | None = field(default=None, repr=False)
+    connection: PooledConnection = field(default=None, repr=False)  # type: ignore[assignment]

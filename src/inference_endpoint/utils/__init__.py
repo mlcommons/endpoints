@@ -19,10 +19,14 @@ Utility functions for the MLPerf Inference Endpoint Benchmarking System.
 This module contains common utilities used throughout the system.
 """
 
+from __future__ import annotations
+
 import ctypes
+import threading
 import time
 import warnings
 from datetime import datetime
+from typing import Any, ClassVar
 
 try:
     libc = ctypes.CDLL("libc.so.6")
@@ -92,3 +96,46 @@ def monotime_to_datetime(monotime_ns: int) -> datetime:
     """
     wall_time = (monotime_ns + _G_MONOTIME_DELTA) / 1e9
     return datetime.fromtimestamp(wall_time)
+
+
+class WithUpdatesMixin:
+    """Mixin for Pydantic models that need ``with_updates(**overrides)``.
+
+    Reconstructs with overrides, re-running all validators.
+    """
+
+    def with_updates(self, **updates: object) -> Any:
+        """Reconstruct with updates, re-running all validators.
+
+        Reads all field values directly (including exclude=True fields
+        that model_dump() would drop), merges updates, and re-validates.
+        """
+        cls = type(self)
+        data = {name: getattr(self, name) for name in cls.model_fields}  # type: ignore[attr-defined]
+        return cls.model_validate(data | updates)  # type: ignore[attr-defined]
+
+
+class SingletonMixin:
+    """Mixin that makes a class a singleton.
+
+    The first call to the constructor creates the instance; subsequent calls
+    return the same instance. Subclasses must guard their __init__ body with::
+
+        if getattr(self, "_initialized", False):
+            return
+        self._initialized = True
+        # ... rest of init
+    """
+
+    _instance: ClassVar[Any] = None
+    _instance_lock: ClassVar[threading.Lock] = threading.Lock()
+
+    def __new__(cls, *args: Any, **kwargs: Any) -> Any:
+        if cls._instance is None:
+            with cls._instance_lock:
+                if cls._instance is None:
+                    obj = super().__new__(cls)
+                    # Inject _initialized attribute if child class does not define it.
+                    obj._initialized = False  # type: ignore[attr-defined]
+                    cls._instance = obj
+        return cls._instance
