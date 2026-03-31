@@ -715,7 +715,7 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
             BenchmarkConfig (or subclass) instance
 
         Raises:
-            NotImplementedError: If test_type is EVAL or SUBMISSION
+            CLIError: If test_type is EVAL or SUBMISSION (not yet implemented)
             ValueError: If test_type is invalid
         """
         _common = {
