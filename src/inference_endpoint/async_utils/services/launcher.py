@@ -126,7 +126,7 @@ class ServiceLauncher:
             crashed = [
                 (proc.pid, exit_code)
                 for proc in self._procs
-                if (exit_code := proc.poll()) is not None and exit_code != 0
+                if (exit_code := proc.poll()) != 0
             ]
 
             self.kill_all()
@@ -139,6 +139,9 @@ class ServiceLauncher:
                 raise RuntimeError(
                     f"{len(crashed)} service(s) crashed during startup: {details}"
                 ) from e
+
+            # If for some reason the reason for the exception is not a crashed subprocess,
+            # re-raise the exception.
             raise
 
     def kill_all(self) -> None:

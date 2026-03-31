@@ -58,6 +58,7 @@ logger = logging.getLogger(__name__)
 _HEADER_BYTES = 8  # uint64 count for series
 _VALUE_BYTES = 8  # float64 per value
 _DEFAULT_CAPACITY = 128 * 1024  # pre-allocate for 128k values (~1 MB)
+_DEFAULT_FILE_MODE = 0o600  # rw-------
 
 
 class SeriesStats:
@@ -154,7 +155,7 @@ class _CounterItem:
     def __init__(self, path: Path) -> None:
         self._path = path
         self._closed = False
-        fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o666)
+        fd = os.open(str(path), os.O_CREAT | os.O_RDWR, _DEFAULT_FILE_MODE)
         try:
             os.ftruncate(fd, _VALUE_BYTES)
             self._mm = mmap.mmap(fd, _VALUE_BYTES)
@@ -224,7 +225,7 @@ class _SeriesItem:
         self._count = 0
         self._closed = False
         total = _HEADER_BYTES + capacity * _VALUE_BYTES
-        fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o666)
+        fd = os.open(str(path), os.O_CREAT | os.O_RDWR, _DEFAULT_FILE_MODE)
         try:
             os.ftruncate(fd, total)
             self._mm = mmap.mmap(fd, total)
