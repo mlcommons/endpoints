@@ -47,6 +47,8 @@ def _parallel_batch_tokenize(tokenizer: Tokenizer, texts: list[str]) -> list[int
     Uses a ThreadPoolExecutor to parallelize across ~95% of CPU cores.
     HuggingFace tokenizers use a Rust backend that releases the GIL,
     so threads achieve real parallelism without GIL contention.
+    A single tokenizer instance is shared across threads — this is safe for
+    PreTrainedTokenizerFast (Rust-backed, thread-safe by design).
     """
 
     try:

@@ -106,7 +106,10 @@ class BenchmarkSession:
                 EventRecorder.record_event(
                     SessionEvent.STOP_PERFORMANCE_TRACKING, time.monotonic_ns()
                 )
-                self.logger.info("All performance samples issued")
+                if self.stop_requested:
+                    self.logger.info("Performance sample issuance aborted early")
+                else:
+                    self.logger.info("All performance samples issued")
 
                 if accuracy_test_generators and not self.stop_requested:
                     for _, generator in accuracy_test_generators.items():
@@ -116,7 +119,10 @@ class BenchmarkSession:
                         if self.stop_requested:
                             break
 
-                self.logger.info("All accuracy samples issued")
+                if self.stop_requested:
+                    self.logger.info("Accuracy sample issuance aborted early")
+                else:
+                    self.logger.info("All accuracy samples issued")
 
                 self.event_recorder.should_check_idle = True
                 EventRecorder.record_event(

@@ -1186,12 +1186,14 @@ class TestOutputSequenceFromData:
 def test_parallel_batch_tokenize_threaded_path(tokenizer, monkeypatch):
     """Exercise the threaded branch of _parallel_batch_tokenize.
 
-    Monkeypatches os.sched_getaffinity to return 2 CPUs so the threaded path
+    Monkeypatches os.sched_getaffinity to return 4 CPUs so the threaded path
     triggers with a modest number of texts, and verifies ordering and counts.
     """
     # Force 4 CPUs so n_workers=3, then provide 5 texts to exceed the
     # direct-tokenize threshold and exercise the threaded chunking path.
-    monkeypatch.setattr(os, "sched_getaffinity", lambda _pid: {0, 1, 2, 3})
+    monkeypatch.setattr(
+        os, "sched_getaffinity", lambda _pid: {0, 1, 2, 3}, raising=False
+    )
     texts = ["hello", "ab", "xyz", "a", "test!"]
     result = _parallel_batch_tokenize(tokenizer, texts)
     # CharacterTokenizer returns len(text) as token count
