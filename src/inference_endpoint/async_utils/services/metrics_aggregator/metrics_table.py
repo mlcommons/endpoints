@@ -21,6 +21,7 @@ import asyncio
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 import msgspec
@@ -37,6 +38,31 @@ if TYPE_CHECKING:
     from inference_endpoint.core.record import EventRecord
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# SampleField enum
+# ---------------------------------------------------------------------------
+
+
+class SampleField(str, Enum):
+    """SampleRow field names that triggers can be registered on."""
+
+    ISSUED_NS = "issued_ns"
+    RECV_FIRST_NS = "recv_first_ns"
+    LAST_RECV_NS = "last_recv_ns"
+    COMPLETE_NS = "complete_ns"
+
+
+class MetricSeriesKey(str, Enum):
+    """Series metric keys written by triggers to the KV store."""
+
+    ISL = "isl"
+    OSL = "osl"
+    SAMPLE_LATENCY_NS = "sample_latency_ns"
+    TTFT_NS = "ttft_ns"
+    CHUNK_DELTA_NS = "chunk_delta_ns"
+    TPOT_NS = "tpot_ns"
 
 
 # ---------------------------------------------------------------------------
@@ -195,7 +221,7 @@ class TtftTrigger(TimeDeltaTrigger):
     """TTFT = recv_first_ns (new) - issued_ns."""
 
     def __init__(self):
-        super().__init__("ttft_ns", subtract_field="issued_ns")
+        super().__init__(MetricSeriesKey.TTFT_NS, subtract_field=SampleField.ISSUED_NS)
 
 
 class ChunkDeltaTrigger(TimeDeltaTrigger):
@@ -205,14 +231,18 @@ class ChunkDeltaTrigger(TimeDeltaTrigger):
     """
 
     def __init__(self):
-        super().__init__("chunk_delta_ns", subtract_field="last_recv_ns")
+        super().__init__(
+            MetricSeriesKey.CHUNK_DELTA_NS, subtract_field=SampleField.LAST_RECV_NS
+        )
 
 
 class SampleLatencyTrigger(TimeDeltaTrigger):
     """sample_latency_ns = complete_ns (new) - issued_ns."""
 
     def __init__(self):
-        super().__init__("sample_latency_ns", subtract_field="issued_ns")
+        super().__init__(
+            MetricSeriesKey.SAMPLE_LATENCY_NS, subtract_field=SampleField.ISSUED_NS
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -226,7 +256,7 @@ class IslTrigger(AsyncTokenTrigger):
     def __init__(
         self, tokenize_pool: TokenizePool | None, loop: asyncio.AbstractEventLoop | None
     ):
-        super().__init__("isl", tokenize_pool, loop)
+        super().__init__(MetricSeriesKey.ISL, tokenize_pool, loop)
 
     def fire(self, ev_rec, row, pre_change):
         # Sync fast path: pre-tokenized IDs (SGLang)
@@ -248,7 +278,7 @@ class OslTrigger(AsyncTokenTrigger):
     def __init__(
         self, tokenize_pool: TokenizePool | None, loop: asyncio.AbstractEventLoop | None
     ):
-        super().__init__("osl", tokenize_pool, loop)
+        super().__init__(MetricSeriesKey.OSL, tokenize_pool, loop)
 
     def _extract_text(self, ev_rec, row, pre_change):
         if isinstance(ev_rec.data, TextModelOutput):
@@ -275,10 +305,15 @@ class TpotTrigger(AsyncTokenTrigger):
     def __init__(
         self, tokenize_pool: TokenizePool | None, loop: asyncio.AbstractEventLoop | None
     ):
-        super().__init__("tpot_ns", tokenize_pool, loop, requires=("recv_first_ns",))
+        super().__init__(
+            MetricSeriesKey.TPOT_NS,
+            tokenize_pool,
+            loop,
+            requires=(SampleField.RECV_FIRST_NS,),
+        )
 
     def _extract_text(self, ev_rec, row, pre_change):
-        if pre_change.get("recv_first_ns") is None:
+        if pre_change.get(SampleField.RECV_FIRST_NS) is None:
             return None
         if isinstance(ev_rec.data, TextModelOutput):
             return ev_rec.data.text_after_first_chunk() or None
@@ -287,7 +322,7 @@ class TpotTrigger(AsyncTokenTrigger):
     def _compute_value(self, token_count, ev_rec, pre_change):
         if token_count <= 0:
             return None
-        recv_first_ns = pre_change["recv_first_ns"]
+        recv_first_ns = pre_change[SampleField.RECV_FIRST_NS]
         return (ev_rec.timestamp_ns - recv_first_ns) / token_count
 
 

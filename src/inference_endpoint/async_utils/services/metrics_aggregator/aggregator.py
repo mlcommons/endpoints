@@ -37,6 +37,7 @@ from .metrics_table import (
     IslTrigger,
     MetricsTable,
     OslTrigger,
+    SampleField,
     SampleLatencyTrigger,
     TpotTrigger,
     TtftTrigger,
@@ -111,15 +112,15 @@ class MetricsAggregatorService(ZmqEventRecordSubscriber):
         when ``streaming=True``.
         """
         # Always registered
-        table.add_trigger("issued_ns", IslTrigger(tokenize_pool, loop))
-        table.add_trigger("complete_ns", SampleLatencyTrigger())
-        table.add_trigger("complete_ns", OslTrigger(tokenize_pool, loop))
+        table.add_trigger(SampleField.ISSUED_NS, IslTrigger(tokenize_pool, loop))
+        table.add_trigger(SampleField.COMPLETE_NS, SampleLatencyTrigger())
+        table.add_trigger(SampleField.COMPLETE_NS, OslTrigger(tokenize_pool, loop))
 
         # Streaming-only
         if streaming:
-            table.add_trigger("recv_first_ns", TtftTrigger())
-            table.add_trigger("last_recv_ns", ChunkDeltaTrigger())
-            table.add_trigger("complete_ns", TpotTrigger(tokenize_pool, loop))
+            table.add_trigger(SampleField.RECV_FIRST_NS, TtftTrigger())
+            table.add_trigger(SampleField.LAST_RECV_NS, ChunkDeltaTrigger())
+            table.add_trigger(SampleField.COMPLETE_NS, TpotTrigger(tokenize_pool, loop))
 
     async def process(self, records: list[EventRecord]) -> None:
         saw_shutdown = False
@@ -144,6 +145,7 @@ class MetricsAggregatorService(ZmqEventRecordSubscriber):
                             MetricCounterKey.DURATION_NS.value,
                             table.total_tracked_duration_ns,
                         )
+                logger.debug("Session event: %s", ev)
                 continue
 
             # --- Error events ---
@@ -165,16 +167,16 @@ class MetricsAggregatorService(ZmqEventRecordSubscriber):
             ts = record.timestamp_ns
 
             if ev == SampleEventType.ISSUED:
-                table.set_field(uuid, "issued_ns", ts, record)
+                table.set_field(uuid, SampleField.ISSUED_NS, ts, record)
                 self._n_issued += 1
                 store.update(MetricCounterKey.N_SAMPLES_ISSUED.value, self._n_issued)
             elif ev == SampleEventType.RECV_FIRST:
-                table.set_field(uuid, "recv_first_ns", ts, record)
-                table.set_field(uuid, "last_recv_ns", ts, record)
+                table.set_field(uuid, SampleField.RECV_FIRST_NS, ts, record)
+                table.set_field(uuid, SampleField.LAST_RECV_NS, ts, record)
             elif ev == SampleEventType.RECV_NON_FIRST:
-                table.set_field(uuid, "last_recv_ns", ts, record)
+                table.set_field(uuid, SampleField.LAST_RECV_NS, ts, record)
             elif ev == SampleEventType.COMPLETE:
-                table.set_field(uuid, "complete_ns", ts, record)
+                table.set_field(uuid, SampleField.COMPLETE_NS, ts, record)
                 self._n_completed += 1
                 store.update(
                     MetricCounterKey.N_SAMPLES_COMPLETED.value, self._n_completed
