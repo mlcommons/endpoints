@@ -26,6 +26,7 @@ from __future__ import annotations
 import logging
 import subprocess
 import sys
+import time
 import uuid
 from dataclasses import dataclass, field
 
@@ -154,14 +155,19 @@ class ServiceLauncher:
         """Wait for all service subprocesses to exit.
 
         Services self-terminate on SessionEventType.ENDED. This method
-        blocks until all have exited or timeout is reached.
+        blocks until all have exited or the total timeout is reached.
 
         Args:
-            timeout: Maximum seconds to wait per process.
+            timeout: Maximum total seconds to wait across all processes.
+                If None, waits indefinitely.
         """
+        deadline = None if timeout is None else time.monotonic() + timeout
         for proc in self._procs:
+            remaining = (
+                None if deadline is None else max(0, deadline - time.monotonic())
+            )
             try:
-                proc.wait(timeout=timeout)
+                proc.wait(timeout=remaining)
             except subprocess.TimeoutExpired:
                 logger.warning(
                     "Service pid=%d did not exit within timeout, killing", proc.pid
