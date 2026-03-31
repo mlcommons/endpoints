@@ -22,21 +22,16 @@ from pathlib import Path
 
 from inference_endpoint.async_utils.loop_manager import LoopManager
 from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
+from inference_endpoint.async_utils.transport.zmq.ready_check import send_ready_signal
 
 from .aggregator import MetricsAggregatorService
-from .emitter import JsonlMetricEmitter
+from .kv_store import BasicKVStore
 from .token_metrics import TokenizePool
 
 
 async def main() -> None:
     parser = argparse.ArgumentParser(
         description="Metrics aggregator service - subscribes to EventRecords and computes real-time metrics"
-    )
-    parser.add_argument(
-        "--metrics-dir",
-        type=Path,
-        required=True,
-        help="Directory for metrics output (JSONL file)",
     )
     parser.add_argument(
         "--socket-dir",
@@ -49,6 +44,12 @@ async def main() -> None:
         type=str,
         required=True,
         help="Socket name within socket-dir",
+    )
+    parser.add_argument(
+        "--metrics-dir",
+        type=str,
+        required=True,
+        help="Directory for mmap-backed metric files (created by the parent process)",
     )
     parser.add_argument(
         "--tokenizer",
@@ -68,11 +69,21 @@ async def main() -> None:
         default=False,
         help="Enable streaming metrics (TTFT, chunk_delta, TPOT). Off by default.",
     )
+    parser.add_argument(
+        "--readiness-path",
+        type=str,
+        default=None,
+        help="ZMQ socket path to signal readiness (optional)",
+    )
+    parser.add_argument(
+        "--readiness-id",
+        type=int,
+        default=0,
+        help="Identity to send in the readiness signal",
+    )
     args = parser.parse_args()
 
-    args.metrics_dir.mkdir(parents=True, exist_ok=True)
-    metrics_file = args.metrics_dir / "metrics"
-
+    metrics_dir = Path(args.metrics_dir)
     shutdown_event = asyncio.Event()
     loop = LoopManager().default_loop
 
@@ -89,19 +100,26 @@ async def main() -> None:
         pool_cm as pool,
         ManagedZMQContext.scoped(socket_dir=args.socket_dir) as zmq_ctx,
     ):
-        emitter = JsonlMetricEmitter(metrics_file, flush_interval=100)
-        aggregator = MetricsAggregatorService(
-            args.socket_name,
-            zmq_ctx,
-            loop,
-            topics=None,
-            emitter=emitter,
-            tokenize_pool=pool,
-            streaming=args.streaming,
-            shutdown_event=shutdown_event,
-        )
-        loop.call_soon(aggregator.start)
-        await shutdown_event.wait()
+        kv_store = BasicKVStore(metrics_dir)
+        try:
+            aggregator = MetricsAggregatorService(
+                args.socket_name,
+                zmq_ctx,
+                loop,
+                topics=None,
+                kv_store=kv_store,
+                tokenize_pool=pool,
+                streaming=args.streaming,
+                shutdown_event=shutdown_event,
+            )
+            aggregator.start()
+
+            if args.readiness_path:
+                await send_ready_signal(zmq_ctx, args.readiness_path, args.readiness_id)
+
+            await shutdown_event.wait()
+        finally:
+            kv_store.close()
 
 
 if __name__ == "__main__":
