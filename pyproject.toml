@@ -75,6 +75,8 @@ dev = [
     "sphinx-rtd-theme==3.0.2",
     "sphinx-autodoc-typehints==3.1.0",
     "myst-parser==4.0.1",
+    # Security auditing
+    "pip-audit==2.10.0",
 ]
 test = [
     # Includes optional dependencies for full test coverage

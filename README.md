@@ -84,7 +84,7 @@ See [Local Testing Guide](docs/LOCAL_TESTING.md) for detailed instructions.
 
 ```bash
 # Install test dependencies
-pip install .[test]
+pip install ".[test]"
 
 # Run tests (excluding performance and explicit-run tests)
 pytest -m "not performance and not run_explicitly"
