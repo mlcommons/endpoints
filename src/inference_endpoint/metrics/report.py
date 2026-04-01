@@ -21,17 +21,18 @@ import math
 import os
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import msgspec.json
 import numpy as np
 
-from ..utils import monotime_to_datetime
+from inference_endpoint.async_utils.services.metrics_aggregator.kv_store import (
+    BasicKVStoreReader,
+    SeriesStats,
+)
+from inference_endpoint.utils.version import get_version_info
 
-if TYPE_CHECKING:
-    from inference_endpoint.async_utils.services.metrics_aggregator.kv_store import (
-        SeriesStats,
-    )
+from ..utils import monotime_to_datetime
 
 # ---------------------------------------------------------------------------
 # Summary computation
@@ -76,13 +77,21 @@ def compute_summary(
         std_dev = 0.0
 
     # Percentiles and histogram require raw values
-    arr = np.array(stats.values, dtype=np.float64)
+    # Don't force float64 — numpy preserves int for uint64 series,
+    # so percentile(method="lower") returns actual observed values
+    # in their original type.
+    arr = np.array(stats.values)
     arr.sort()
 
-    perc_values = np.percentile(arr, percentiles, method="linear")
+    # Inject 50th percentile for median if not already requested
+    need_median = 50 not in percentiles
+    all_percentiles = (*percentiles, 50) if need_median else percentiles
+
+    perc_values = np.percentile(arr, all_percentiles, method="lower")
     perc_dict = {
-        str(p): float(v) for p, v in zip(percentiles, perc_values, strict=True)
+        str(p): v.item() for p, v in zip(all_percentiles, perc_values, strict=True)
     }
+    median = perc_dict.pop("50") if need_median else perc_dict["50"]
 
     bounds = np.histogram_bin_edges(arr, bins=n_histogram_buckets)
     counts, _ = np.histogram(arr, bins=bounds)
@@ -94,7 +103,7 @@ def compute_summary(
         "total": stats.total,
         "min": stats.min_val,
         "max": stats.max_val,
-        "median": float(np.median(arr)),
+        "median": median,
         "avg": avg,
         "std_dev": std_dev,
         "percentiles": perc_dict,
@@ -136,6 +145,45 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
             return None
         total = self.output_sequence_lengths.get("total", 0)
         return total / (self.duration_ns / 1e9)
+
+    @classmethod
+    def from_kv_reader(cls, reader: BasicKVStoreReader) -> Report:
+        """Build a Report from the current KVStore state.
+
+        Reads counters and series from the reader, computes rollup summaries
+        (percentiles, histograms) for each series metric, and returns a Report.
+
+        Works identically for live metrics (mid-test) and final reports
+        (post-drain). The caller decides when to call.
+        """
+        snap = reader.snapshot()
+
+        def _counter(key: str) -> int:
+            val = snap.get(key)
+            return int(val) if isinstance(val, int) else 0
+
+        def _summarize(key: str) -> dict:
+            val = snap.get(key)
+            if isinstance(val, SeriesStats) and val.count > 0:
+                return compute_summary(val)
+            return {}
+
+        version_info = get_version_info()
+        duration_ns = _counter("duration_ns")
+
+        return cls(
+            version=str(version_info.get("version", "unknown")),
+            git_sha=version_info.get("git_sha"),
+            test_started_at=_counter("test_started_at"),
+            n_samples_issued=_counter("n_samples_issued"),
+            n_samples_completed=_counter("n_samples_completed"),
+            n_samples_failed=_counter("n_samples_failed"),
+            duration_ns=duration_ns if duration_ns > 0 else None,
+            ttft=_summarize("ttft_ns"),
+            tpot=_summarize("tpot_ns"),
+            latency=_summarize("sample_latency_ns"),
+            output_sequence_lengths=_summarize("osl"),
+        )
 
     def to_json(self, save_to: os.PathLike | None = None) -> bytes:
         json_bytes = msgspec.json.format(msgspec.json.encode(self), indent=2)

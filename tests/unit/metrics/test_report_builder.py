@@ -25,7 +25,6 @@ from inference_endpoint.async_utils.services.metrics_aggregator.kv_store import 
     SeriesStats,
 )
 from inference_endpoint.metrics.report import Report, compute_summary
-from inference_endpoint.metrics.report_builder import build_report
 
 # ---------------------------------------------------------------------------
 # compute_summary
@@ -126,7 +125,7 @@ def _make_store(tmp_path: Path, n_samples: int = 50):
 class TestBuildReport:
     def test_empty_store(self, tmp_path: Path):
         w, r = _make_store(tmp_path, n_samples=0)
-        report = build_report(r)
+        report = Report.from_kv_reader(r)
 
         assert report.n_samples_issued == 0
         assert report.duration_ns is None
@@ -139,7 +138,7 @@ class TestBuildReport:
 
     def test_with_metrics(self, tmp_path: Path):
         w, r = _make_store(tmp_path, n_samples=50)
-        report = build_report(r)
+        report = Report.from_kv_reader(r)
 
         assert report.n_samples_issued == 50
         assert report.n_samples_completed == 50
@@ -167,7 +166,7 @@ class TestBuildReport:
 class TestReport:
     def test_display_summary(self, tmp_path: Path):
         w, r = _make_store(tmp_path, n_samples=10)
-        report = build_report(r)
+        report = Report.from_kv_reader(r)
 
         lines: list[str] = []
         report.display(fn=lines.append, summary_only=True)
@@ -182,7 +181,7 @@ class TestReport:
 
     def test_display_full(self, tmp_path: Path):
         w, r = _make_store(tmp_path, n_samples=10)
-        report = build_report(r)
+        report = Report.from_kv_reader(r)
 
         lines: list[str] = []
         report.display(fn=lines.append, summary_only=False)
@@ -198,7 +197,7 @@ class TestReport:
 
     def test_to_json(self, tmp_path: Path):
         w, r = _make_store(tmp_path, n_samples=5)
-        report = build_report(r)
+        report = Report.from_kv_reader(r)
 
         data = json.loads(report.to_json())
         assert data["n_samples_completed"] == 5
@@ -209,7 +208,7 @@ class TestReport:
 
     def test_to_json_save(self, tmp_path: Path):
         w, r = _make_store(tmp_path, n_samples=5)
-        report = build_report(r)
+        report = Report.from_kv_reader(r)
 
         out_path = tmp_path / "report.json"
         report.to_json(save_to=out_path)
