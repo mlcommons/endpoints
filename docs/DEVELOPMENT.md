@@ -22,8 +22,8 @@ cd inference-endpoint
 python3.12 -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 
-# 3. Install development dependencies (with pinned transitive deps)
-pip install -c constraints.txt -e ".[dev,test]"
+# 3. Install development dependencies
+pip install -e ".[dev,test]"
 
 # 4. Install pre-commit hooks
 pre-commit install
@@ -285,15 +285,11 @@ Add dependencies to `pyproject.toml` (always pin to exact versions with `==`):
 - **Runtime dependencies**: `[project.dependencies]`
 - **Optional groups** (dev, test, etc.): `[project.optional-dependencies]`
 
-After updating, regenerate the constraints file and install:
+Install after updating:
 
 ```bash
-pip-compile pyproject.toml --extra dev --extra test --extra sql --extra performance \
-  --output-file constraints.txt --generate-hashes --strip-extras --allow-unsafe
-pip install -c constraints.txt -e ".[dev,test]"
+pip install -e ".[dev,test]"
 ```
-
-The `constraints.txt` file pins all transitive dependencies with SHA256 hashes. CI uses `--require-hashes -c constraints.txt` to ensure deterministic, hash-verified installs.
 
 ## 🚨 Troubleshooting
 

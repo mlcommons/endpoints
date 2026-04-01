@@ -11,7 +11,7 @@ High-performance benchmarking tool for LLM inference endpoints targeting 50k+ QP
 ```bash
 # Development setup
 python3.12 -m venv venv && source venv/bin/activate
-pip install -c constraints.txt -e ".[dev,test]"
+pip install -e ".[dev,test]"
 pre-commit install
 
 # Testing
@@ -347,5 +347,5 @@ Known failure modes when AI tools generate code for this project. Reference thes
 
 ### Dependency & Environment
 
-- **Adding new dependencies without justification**: AI may `pip install` or add imports for packages not in `pyproject.toml`. Any new dependency must be justified, added to the correct optional group, and pinned to an exact version (`==`). After adding a dependency, run `pip-audit` (included in `dev` extras) to verify it has no known vulnerabilities, then regenerate `constraints.txt` with `pip-compile pyproject.toml --extra dev --extra test --extra sql --extra performance --output-file constraints.txt --generate-hashes --strip-extras --allow-unsafe`.
+- **Adding new dependencies without justification**: AI may `pip install` or add imports for packages not in `pyproject.toml`. Any new dependency must be justified, added to the correct optional group, and pinned to an exact version (`==`). After adding a dependency, run `pip-audit` (included in `dev` extras) to verify it has no known vulnerabilities.
 - **Using `requests`/`aiohttp` for HTTP**: This project has its own HTTP client (`endpoint_client/http.py`) using `httptools`. AI defaults to `requests` or `aiohttp` — these should not appear in production code (test dependencies are fine).
