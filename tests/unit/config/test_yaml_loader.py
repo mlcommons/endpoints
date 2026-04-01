@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 from inference_endpoint.config.schema import BenchmarkConfig, LoadPatternType
 from inference_endpoint.config.schema import TestType as BenchmarkTestType
+from inference_endpoint.exceptions import CLIError
 from pydantic import ValidationError
 
 
@@ -189,11 +190,11 @@ class TestDefaultConfigs:
         assert config.settings.runtime.min_duration_ms == 600000
 
     def test_create_default_eval_not_implemented(self):
-        with pytest.raises(NotImplementedError, match="EVAL"):
+        with pytest.raises(CLIError, match="EVAL"):
             BenchmarkConfig.create_default_config(BenchmarkTestType.EVAL)
 
     def test_create_default_submission_not_implemented(self):
-        with pytest.raises(NotImplementedError, match="SUBMISSION"):
+        with pytest.raises(CLIError, match="SUBMISSION"):
             BenchmarkConfig.create_default_config(BenchmarkTestType.SUBMISSION)
 
 

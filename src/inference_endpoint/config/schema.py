@@ -43,6 +43,7 @@ from pydantic import (
 from .. import metrics
 from ..core.types import APIType
 from ..endpoint_client.config import HTTPClientConfig
+from ..exceptions import CLIError
 from ..utils import WithUpdatesMixin
 from .ruleset_base import BenchmarkSuiteRuleset
 from .utils import parse_dataset_string, resolve_env_vars
@@ -714,7 +715,7 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
             BenchmarkConfig (or subclass) instance
 
         Raises:
-            NotImplementedError: If test_type is EVAL or SUBMISSION
+            CLIError: If test_type is EVAL or SUBMISSION (not yet implemented)
             ValueError: If test_type is invalid
         """
         _common = {
@@ -734,14 +735,14 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
                 ),
             )
         if test_type == TestType.EVAL:
-            raise NotImplementedError(
+            raise CLIError(
                 "Default EVAL config not yet implemented. "
-                "EVAL templates will be added in future release."
+                "Track progress at: https://github.com/mlcommons/endpoints/issues/4"
             )
         if test_type == TestType.SUBMISSION:
-            raise NotImplementedError(
+            raise CLIError(
                 "Default SUBMISSION config not yet implemented. "
-                "SUBMISSION templates will be added in future release."
+                "Track progress at: https://github.com/mlcommons/endpoints/issues/5"
             )
         raise ValueError(f"Unknown test type: {test_type}")
 

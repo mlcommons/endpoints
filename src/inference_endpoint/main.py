@@ -116,7 +116,10 @@ def eval(
     judge: str | None = None,
 ):
     """Run accuracy evaluation."""
-    raise NotImplementedError("Accuracy evaluation not yet implemented")
+    raise CLIError(
+        "Accuracy evaluation is not yet implemented. "
+        "Track progress at: https://github.com/mlcommons/endpoints/issues/4"
+    )
 
 
 def run() -> None:

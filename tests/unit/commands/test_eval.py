@@ -16,6 +16,7 @@
 """Tests for eval command."""
 
 import pytest
+from inference_endpoint.exceptions import CLIError
 from inference_endpoint.main import app
 
 
@@ -24,6 +25,6 @@ class TestRunEvalCommand:
 
     @pytest.mark.unit
     def test_eval_not_implemented(self):
-        """Test that eval raises NotImplementedError."""
-        with pytest.raises(NotImplementedError, match="not yet implemented"):
+        """Test that eval raises CLIError."""
+        with pytest.raises(CLIError, match="not yet implemented"):
             app(["eval", "http://test.com"])
