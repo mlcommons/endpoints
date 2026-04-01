@@ -1,0 +1,71 @@
+name: "gpt-oss-120b-benchmark"
+version: "1.0"
+type: "online"
+timeout: 60000
+
+model_params:
+  name: "openai/gpt-oss-120b"
+  temperature: 1.0
+  max_new_tokens: 32768
+  top_k: -1
+  top_p: 1.0
+  streaming: "on"
+
+datasets:
+  - name: "perf-test"
+    type: "performance"
+    path: "examples/04_GPTOSS120B_Example/data/perf_eval_ref.parquet"
+    parser:
+      # input_tokens: "input_tokens"
+      input_text: "prompt"
+  # livecodebench not included: vLLM chat completions endpoint does not support
+  # pre-tokenized input required by this scorer. Use sglang_gptoss_120b_example.yaml instead.
+  # - name: "livecodebench::gptoss"
+  #   type: "accuracy"
+  #   accuracy_config:
+  #     eval_method: "code_bench_scorer"
+  #     extractor: "python_code_extractor"
+  #     num_repeats: 3
+  - name: "aime25::gptoss"
+    type: "accuracy"
+    accuracy_config:
+      eval_method: "pass_at_1"
+      ground_truth: "answer"
+      extractor: "boxed_math_extractor"
+      num_repeats: 8
+  - name: "gpqa::gptoss"
+    type: "accuracy"
+    accuracy_config:
+      eval_method: "pass_at_1"
+      extractor: "abcd_extractor"
+      ground_truth: "ground_truth"
+      num_repeats: 5
+settings:
+  runtime:
+    min_duration_ms: 3000
+    max_duration_ms: 60000
+    scheduler_random_seed: 42
+    dataloader_random_seed: 42
+
+  load_pattern:
+    type: "concurrency"
+    target_concurrency: 512
+
+  client:
+    num_workers: 8
+    record_worker_events: false
+
+metrics:
+  collect:
+    - "throughput"
+    - "latency"
+    - "ttft"
+    - "tpot"
+
+endpoint_config:
+  endpoints:
+    - "http://localhost:8000"
+  api_key: null
+  api_type: "openai"
+
+report_dir: "results/vllm_gptoss_120b_benchmark_full/"
