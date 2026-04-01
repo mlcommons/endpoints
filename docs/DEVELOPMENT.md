@@ -280,7 +280,7 @@ python -m pdb -m pytest test_file.py
 
 ### Adding Dependencies
 
-Add dependencies to `pyproject.toml`:
+Add dependencies to `pyproject.toml` (always pin to exact versions with `==`):
 
 - **Runtime dependencies**: `[project.dependencies]`
 - **Optional groups** (dev, test, etc.): `[project.optional-dependencies]`
@@ -289,9 +289,6 @@ Install after updating:
 
 ```bash
 pip install -e ".[dev,test]"
-
-# Check for outdated packages
-pip list --outdated
 ```
 
 ## 🚨 Troubleshooting
