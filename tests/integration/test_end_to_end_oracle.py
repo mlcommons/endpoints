@@ -162,13 +162,13 @@ async def _run_load_generator_full_run_url(
 @pytest.mark.asyncio
 async def test_load_generator_full_run_mock_http_oracle_server(
     mock_http_oracle_server,
-    ds_pickle_dataset_path,
+    ds_dataset_path,
     tmp_path,
     clean_sample_event_hooks,
     hf_model_name,
 ):
     dummy_dataloader = Dataset.load_from_file(
-        ds_pickle_dataset_path,
+        ds_dataset_path,
         transforms=[
             ColumnRemap({"text_input": "prompt", "ref_output": "output"}),
             AddStaticColumns({"model": hf_model_name}),
@@ -231,14 +231,14 @@ async def test_load_generator_full_run_mock_http_oracle_server(
 @pytest.mark.timeout(0)
 async def test_load_generator_full_run_vllm_docker_server(
     vllm_docker_server,
-    ds_pickle_dataset_path,
+    ds_dataset_path,
     tmp_path,
     clean_sample_event_hooks,
     hf_model_name,
 ):
     await _run_load_generator_full_run_url(
         vllm_docker_server.url,
-        ds_pickle_dataset_path,
+        ds_dataset_path,
         tmp_path,
         clean_sample_event_hooks,
         hf_model_name,
@@ -251,14 +251,14 @@ async def test_load_generator_full_run_vllm_docker_server(
 @pytest.mark.timeout(0)
 async def test_load_generator_full_run_sglang_docker_server(
     sglang_docker_server,
-    ds_pickle_dataset_path,
+    ds_dataset_path,
     tmp_path,
     clean_sample_event_hooks,
     hf_model_name,
 ):
     await _run_load_generator_full_run_url(
         sglang_docker_server.url,
-        ds_pickle_dataset_path,
+        ds_dataset_path,
         tmp_path,
         clean_sample_event_hooks,
         hf_model_name,
@@ -271,14 +271,14 @@ async def test_load_generator_full_run_sglang_docker_server(
 @pytest.mark.timeout(0)
 async def test_load_generator_full_run_trtllm_docker_server(
     trtllm_docker_server,
-    ds_pickle_dataset_path,
+    ds_dataset_path,
     tmp_path,
     clean_sample_event_hooks,
     hf_model_name,
 ):
     await _run_load_generator_full_run_url(
         trtllm_docker_server.url,
-        ds_pickle_dataset_path,
+        ds_dataset_path,
         tmp_path,
         clean_sample_event_hooks,
         hf_model_name,

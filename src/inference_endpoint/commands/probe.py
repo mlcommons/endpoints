@@ -120,10 +120,6 @@ async def _probe_async(config: ProbeConfig) -> None:
                     "max_tokens": 50,
                     "stream": False,
                 },
-                headers={
-                    "Content-Type": "application/json",
-                    "Accept": "application/json",
-                },
             )
 
             try:

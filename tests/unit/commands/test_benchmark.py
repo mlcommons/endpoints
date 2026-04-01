@@ -62,7 +62,7 @@ TEMPLATE_DIR = (
 _OFFLINE_KWARGS = {
     "endpoint_config": {"endpoints": ["http://test:8000"]},
     "model_params": {"name": "test-model"},
-    "datasets": [{"path": "test.pkl"}],
+    "datasets": [{"path": "test.jsonl"}],
 }
 
 
@@ -109,7 +109,7 @@ class TestCLIConfigModels:
         with pytest.raises(ValidationError, match="model"):
             OfflineConfig(
                 endpoint_config={"endpoints": ["http://x"]},
-                datasets=[{"path": "test.pkl"}],
+                datasets=[{"path": "test.jsonl"}],
             )
 
 
@@ -144,9 +144,9 @@ class TestDatasetParsing:
     @pytest.mark.parametrize(
         "raw, path, dtype, samples, parser, acc_eval_method",
         [
-            ("test.pkl", "test.pkl", DatasetType.PERFORMANCE, None, None, None),
-            ("perf:a.pkl", "a.pkl", DatasetType.PERFORMANCE, None, None, None),
-            ("acc:gpqa.pkl", "gpqa.pkl", DatasetType.ACCURACY, None, None, None),
+            ("test.jsonl", "test.jsonl", DatasetType.PERFORMANCE, None, None, None),
+            ("perf:a.jsonl", "a.jsonl", DatasetType.PERFORMANCE, None, None, None),
+            ("acc:gpqa.jsonl", "gpqa.jsonl", DatasetType.ACCURACY, None, None, None),
             (
                 "data.csv,samples=500,parser.prompt=article,parser.system=inst",
                 "data.csv",
@@ -156,7 +156,7 @@ class TestDatasetParsing:
                 None,
             ),
             (
-                "perf:d.jsonl,format=jsonl,parser.prompt=text",
+                "perf:d.jsonl,format=.jsonl,parser.prompt=text",
                 "d.jsonl",
                 DatasetType.PERFORMANCE,
                 None,
@@ -164,8 +164,8 @@ class TestDatasetParsing:
                 None,
             ),
             (
-                "acc:eval.pkl,accuracy_config.eval_method=pass_at_1,accuracy_config.ground_truth=answer",
-                "eval.pkl",
+                "acc:eval.jsonl,accuracy_config.eval_method=pass_at_1,accuracy_config.ground_truth=answer",
+                "eval.jsonl",
                 DatasetType.ACCURACY,
                 None,
                 None,
@@ -206,9 +206,9 @@ class TestCommandHandlers:
                         ),
                     ),
                 ),
-                ["data.pkl"],
+                ["data.jsonl"],
                 TestMode.PERF,
-                "data.pkl",
+                "data.jsonl",
                 DatasetType.PERFORMANCE,
             ),
             (
@@ -225,9 +225,9 @@ class TestCommandHandlers:
                         ),
                     ),
                 ),
-                ["acc:eval.pkl"],
+                ["acc:eval.jsonl"],
                 TestMode.ACC,
-                "eval.pkl",
+                "eval.jsonl",
                 DatasetType.ACCURACY,
             ),
         ],
@@ -259,7 +259,7 @@ model_params:
 endpoint_config:
   endpoints: ["http://test:8000"]
 datasets:
-  - path: "test.pkl"
+  - path: "test.jsonl"
 """
         config_file = tmp_path / "test.yaml"
         config_file.write_text(yaml_content)
@@ -286,7 +286,7 @@ model_params:
 endpoint_config:
   endpoints: ["http://test:8000"]
 datasets:
-  - path: "test.pkl"
+  - path: "test.jsonl"
 submission_ref:
   model: "test-model"
   ruleset: "test"
@@ -309,7 +309,7 @@ type: "offline"
 model_params:
   name: "test-model"
 datasets:
-  - path: "tests/datasets/dummy_1k.pkl"
+  - path: "tests/datasets/dummy_1k.jsonl"
 endpoint_config:
   endpoints: ["http://test:8000"]
 """)
@@ -356,7 +356,7 @@ endpoint_config:
             BenchmarkConfig(
                 endpoint_config={"endpoints": ["http://x"]},
                 model_params={"name": "M"},
-                datasets=[{"path": "test.pkl"}],
+                datasets=[{"path": "test.jsonl"}],
                 **overrides,
             )
 

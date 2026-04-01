@@ -21,11 +21,9 @@ source venv/bin/activate
 # As a user
 pip install .
 
-# As a developer
-pip install -e .     # Editable installation
-pip install .[dev]   # For developer tools
-pip install .[test]  # For pytest deps
-pre-commit install   # Git commit hooks
+# As a developer (with hash-verified transitive deps)
+pip install -e ".[dev,test]"
+pre-commit install
 ```
 
 ### Basic Usage
@@ -46,13 +44,13 @@ inference-endpoint probe \
 inference-endpoint benchmark offline \
   --endpoints http://your-endpoint:8000 \
   --model Qwen/Qwen3-8B \
-  --dataset tests/datasets/dummy_1k.pkl
+  --dataset tests/datasets/dummy_1k.jsonl
 
 # Run online benchmark (sustained QPS - requires --target-qps, --load-pattern)
 inference-endpoint benchmark online \
   --endpoints http://your-endpoint:8000 \
   --model Qwen/Qwen3-8B \
-  --dataset tests/datasets/dummy_1k.pkl \
+  --dataset tests/datasets/dummy_1k.jsonl \
   --load-pattern poisson \
   --target-qps 100
 
@@ -60,7 +58,7 @@ inference-endpoint benchmark online \
 inference-endpoint benchmark offline \
   --endpoints http://your-endpoint:8000 \
   --model Qwen/Qwen3-8B \
-  --dataset tests/datasets/dummy_1k.pkl \
+  --dataset tests/datasets/dummy_1k.jsonl \
   --num-samples 5000
 ```
 
@@ -74,7 +72,7 @@ python -m inference_endpoint.testing.echo_server --port 8765 &
 inference-endpoint benchmark offline \
   --endpoints http://localhost:8765 \
   --model Qwen/Qwen3-8B \
-  --dataset tests/datasets/dummy_1k.pkl
+  --dataset tests/datasets/dummy_1k.jsonl
 
 # Stop echo server
 pkill -f echo_server
@@ -85,8 +83,8 @@ See [Local Testing Guide](docs/LOCAL_TESTING.md) for detailed instructions.
 ### Running Tests and Examples
 
 ```bash
-# Install tests/ and examples/ dependencies
-pip install .[test]
+# Install test dependencies
+pip install ".[test]"
 
 # Run tests (excluding performance and explicit-run tests)
 pytest -m "not performance and not run_explicitly"
