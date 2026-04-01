@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import gzip
+import hashlib
 import shutil
 import subprocess
 from logging import getLogger
@@ -37,10 +38,22 @@ class OpenOrca(
     PRESETS = presets
     SOURCE_FILENAME = "open_orca_gpt4_tokenized_llama.sampled_24576.pkl"
     CACHE_FILENAME = "open_orca_gpt4_tokenized_llama.sampled_24576.jsonl"
+    SOURCE_SHA256 = "b64e66e54b6267f79eb4f9ccec52d466bab3ac94747ed258c3b0f337ed166fab"
+
+    @classmethod
+    def _verify_sha256(cls, path: Path) -> None:
+        """Raise ValueError if the file's SHA-256 digest does not match SOURCE_SHA256."""
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        if digest != cls.SOURCE_SHA256:
+            raise ValueError(
+                f"SHA-256 mismatch for {path.name}: "
+                f"expected {cls.SOURCE_SHA256}, got {digest}"
+            )
 
     @classmethod
     def _convert_pickle_cache(cls, pickle_path: Path, jsonl_path: Path) -> pd.DataFrame:
         """Convert the upstream pickle artifact into the local JSONL cache."""
+        cls._verify_sha256(pickle_path)
         dataframe = pd.read_pickle(pickle_path)
         tmp_path = jsonl_path.with_suffix(".jsonl.tmp")
         dataframe.to_json(tmp_path, orient="records", lines=True)
@@ -154,6 +167,8 @@ class OpenOrca(
             raise FileNotFoundError(
                 f"OpenOrca was downloaded, but {pickle_path} does not exist"
             )
+
+        cls._verify_sha256(pickle_path)
 
         # Clean up the intermediate gz files
         for gz_path in gzip_dir.glob("*.pkl.gz"):
