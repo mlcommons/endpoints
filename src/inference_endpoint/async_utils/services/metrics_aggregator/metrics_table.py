@@ -123,11 +123,16 @@ class EmitTrigger(ABC):
     """
 
     def __init__(
-        self, metric_name: str, kv_store: KVStore, requires: tuple[str, ...] = ()
+        self,
+        metric_name: str,
+        kv_store: KVStore,
+        requires: tuple[str, ...] = (),
+        dtype: type = int,
     ):
         self.metric_name = metric_name
         self.kv_store = kv_store
         self.requires = requires
+        self.dtype = dtype
 
     @abstractmethod
     def fire(
@@ -174,8 +179,9 @@ class AsyncTokenTrigger(EmitTrigger):
         tokenize_pool: TokenizePool | None,
         loop: asyncio.AbstractEventLoop | None,
         requires: tuple[str, ...] = (),
+        dtype: type = int,
     ):
-        super().__init__(metric_name, kv_store, requires=requires)
+        super().__init__(metric_name, kv_store, requires=requires, dtype=dtype)
         self._pool = tokenize_pool
         self._loop = loop
 
@@ -188,9 +194,9 @@ class AsyncTokenTrigger(EmitTrigger):
 
     def _compute_value(
         self, token_count: int, ev_rec: EventRecord, pre_change: dict[str, Any]
-    ) -> float | None:
+    ) -> int | float | None:
         """Transform token count into the metric value. Default: count as-is."""
-        return float(token_count)
+        return token_count
 
     def fire(self, ev_rec, row, pre_change):
         if self._pool is None or self._loop is None:
@@ -329,6 +335,7 @@ class TpotTrigger(AsyncTokenTrigger):
             tokenize_pool,
             loop,
             requires=(SampleField.RECV_FIRST_NS,),
+            dtype=float,
         )
 
     def _extract_text(self, ev_rec, row, pre_change):
@@ -381,9 +388,10 @@ class MetricsTable:
     def add_trigger(self, field_name: str, trigger: EmitTrigger) -> None:
         """Register a trigger for a SampleRow field.
 
-        Creates the trigger's metric key in the KV store as a series.
+        Creates the trigger's metric key in the KV store as a series,
+        using the trigger's declared dtype.
         """
-        self._kv_store.create_key(trigger.metric_name, "series")
+        self._kv_store.create_key(trigger.metric_name, "series", dtype=trigger.dtype)
         self._triggers.setdefault(field_name, []).append(trigger)
 
     # --- Session event handling ---

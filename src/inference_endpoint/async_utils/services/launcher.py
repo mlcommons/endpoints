@@ -157,6 +157,10 @@ class ServiceLauncher:
         Services self-terminate on SessionEventType.ENDED. This method
         blocks until all have exited or the total timeout is reached.
 
+        If the timeout is reached, the process will be killed without
+        waiting for proper cleanup (it is assumed that the process is
+        hanging).
+
         Args:
             timeout: Maximum total seconds to wait across all processes.
                 If None, waits indefinitely.

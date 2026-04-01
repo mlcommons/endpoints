@@ -44,37 +44,43 @@ class InMemoryKVStore(KVStore):
     """In-memory KVStore for unit tests. No /dev/shm files needed."""
 
     def __init__(self) -> None:
-        self._counters: dict[str, float] = {}
-        self._series: dict[str, list[float]] = {}
+        self._counters: dict[str, int] = {}
+        self._series: dict[str, list] = {}
+        self._series_dtype: dict[str, type] = {}
         self.closed: bool = False
 
-    def create_key(self, key: str, type: Literal["series", "counter"]) -> None:
-        if type == "counter" and key not in self._counters:
-            self._counters[key] = 0.0
-        elif type == "series" and key not in self._series:
+    def create_key(
+        self, key: str, key_type: Literal["series", "counter"], dtype: type = int
+    ) -> None:
+        if key_type == "counter" and key not in self._counters:
+            self._counters[key] = 0
+        elif key_type == "series" and key not in self._series:
             self._series[key] = []
+            self._series_dtype[key] = dtype
 
-    def update(self, key: str, value: float) -> None:
+    def update(self, key: str, value: int | float) -> None:
         if key in self._counters:
-            self._counters[key] = value
+            self._counters[key] = int(value)
         elif key in self._series:
             self._series[key].append(value)
         else:
             raise KeyError(f"Key not created: {key}")
 
-    def get(self, key: str) -> float | SeriesStats:
+    def get(self, key: str) -> int | SeriesStats:
         if key in self._counters:
             return self._counters[key]
         if key in self._series:
-            return SeriesStats(list(self._series[key]))
+            dtype = self._series_dtype[key]
+            return SeriesStats(list(self._series[key]), dtype=dtype)
         raise KeyError(f"Key not created: {key}")
 
-    def snapshot(self) -> dict[str, float | SeriesStats]:
-        result: dict[str, float | SeriesStats] = {}
+    def snapshot(self) -> dict[str, int | SeriesStats]:
+        result: dict[str, int | SeriesStats] = {}
         for k, v in self._counters.items():
             result[k] = v
         for k, vals in self._series.items():
-            result[k] = SeriesStats(list(vals))
+            dtype = self._series_dtype[k]
+            result[k] = SeriesStats(list(vals), dtype=dtype)
         return result
 
     def close(self) -> None:
@@ -82,11 +88,11 @@ class InMemoryKVStore(KVStore):
 
     # --- Test helpers ---
 
-    def get_series_values(self, key: str) -> list[float]:
+    def get_series_values(self, key: str) -> list:
         return list(self._series.get(key, []))
 
-    def get_counter(self, key: str) -> float:
-        return self._counters.get(key, 0.0)
+    def get_counter(self, key: str) -> int:
+        return self._counters.get(key, 0)
 
     def get_all_series(self) -> dict[str, list[float]]:
         """All series as {metric_name: [values]}."""

@@ -16,6 +16,7 @@
 """Tests for the KVStore (BasicKVStore + BasicKVStoreReader)."""
 
 import multiprocessing
+import struct
 from pathlib import Path
 
 import pytest
@@ -68,32 +69,52 @@ class TestBasicKVStore:
     def test_counter(self, tmp_path: Path):
         store = BasicKVStore(tmp_path / "kv")
         store.create_key("error_count", "counter")
-        store.update("error_count", 5.0)
-        assert store.get("error_count") == 5.0
-        store.update("error_count", 10.0)
-        assert store.get("error_count") == 10.0
+        store.update("error_count", 5)
+        assert store.get("error_count") == 5
+        store.update("error_count", 10)
+        assert store.get("error_count") == 10
         store.close()
 
-    def test_series(self, tmp_path: Path):
+    def test_counter_returns_int(self, tmp_path: Path):
+        store = BasicKVStore(tmp_path / "kv")
+        store.create_key("c", "counter")
+        store.update("c", 42)
+        val = store.get("c")
+        assert isinstance(val, int)
+        store.close()
+
+    def test_series_uint64(self, tmp_path: Path):
         store = BasicKVStore(tmp_path / "kv")
         store.create_key("ttft_ns", "series")
-        store.update("ttft_ns", 100.0)
-        store.update("ttft_ns", 200.0)
+        store.update("ttft_ns", 100)
+        store.update("ttft_ns", 200)
         result = store.get("ttft_ns")
         assert isinstance(result, SeriesStats)
         assert result.count == 2
+        assert result.values == [100, 200]
+        store.close()
+
+    def test_series_float64(self, tmp_path: Path):
+        store = BasicKVStore(tmp_path / "kv")
+        store.create_key("ratio", "series", dtype=float)
+        store.update("ratio", 1.5)
+        store.update("ratio", 2.5)
+        result = store.get("ratio")
+        assert isinstance(result, SeriesStats)
+        assert result.count == 2
+        assert result.values == [1.5, 2.5]
         store.close()
 
     def test_snapshot(self, tmp_path: Path):
         store = BasicKVStore(tmp_path / "kv")
         store.create_key("n_issued", "counter")
         store.create_key("latency", "series")
-        store.update("n_issued", 42.0)
-        store.update("latency", 1.5)
-        store.update("latency", 2.5)
+        store.update("n_issued", 42)
+        store.update("latency", 150)
+        store.update("latency", 250)
 
         snap = store.snapshot()
-        assert snap["n_issued"] == 42.0
+        assert snap["n_issued"] == 42
         assert isinstance(snap["latency"], SeriesStats)
         assert snap["latency"].count == 2
         store.close()
@@ -101,15 +122,15 @@ class TestBasicKVStore:
     def test_update_unknown_key_raises(self, tmp_path: Path):
         store = BasicKVStore(tmp_path / "kv")
         with pytest.raises(KeyError, match="Key not created"):
-            store.update("missing", 1.0)
+            store.update("missing", 1)
         store.close()
 
     def test_create_key_idempotent(self, tmp_path: Path):
         store = BasicKVStore(tmp_path / "kv")
         store.create_key("x", "counter")
-        store.update("x", 5.0)
+        store.update("x", 5)
         store.create_key("x", "counter")  # should not reset
-        assert store.get("x") == 5.0
+        assert store.get("x") == 5
         store.close()
 
     def test_unlink(self, tmp_path: Path):
@@ -132,11 +153,11 @@ class TestBasicKVStoreReader:
         store_dir = tmp_path / "kv"
         writer = BasicKVStore(store_dir)
         writer.create_key("count", "counter")
-        writer.update("count", 7.0)
+        writer.update("count", 7)
 
         reader = BasicKVStoreReader(store_dir)
         reader.register_key("count", "counter")
-        assert reader.get("count") == 7.0
+        assert reader.get("count") == 7
 
         reader.close()
         writer.close()
@@ -145,15 +166,15 @@ class TestBasicKVStoreReader:
         store_dir = tmp_path / "kv"
         writer = BasicKVStore(store_dir)
         writer.create_key("ttft", "series")
-        writer.update("ttft", 100.0)
-        writer.update("ttft", 200.0)
+        writer.update("ttft", 100)
+        writer.update("ttft", 200)
 
         reader = BasicKVStoreReader(store_dir)
         reader.register_key("ttft", "series")
         stats = reader.get("ttft")
         assert isinstance(stats, SeriesStats)
         assert stats.count == 2
-        assert stats.values == [100.0, 200.0]
+        assert stats.values == [100, 200]
 
         reader.close()
         writer.close()
@@ -162,7 +183,7 @@ class TestBasicKVStoreReader:
         store_dir = tmp_path / "kv"
         writer = BasicKVStore(store_dir)
         writer.create_key("lat", "series")
-        writer.update("lat", 1.0)
+        writer.update("lat", 1000)
 
         reader = BasicKVStoreReader(store_dir)
         reader.register_key("lat", "series")
@@ -170,12 +191,12 @@ class TestBasicKVStoreReader:
         assert isinstance(s1, SeriesStats)
         assert s1.count == 1
 
-        writer.update("lat", 2.0)
-        writer.update("lat", 3.0)
+        writer.update("lat", 2000)
+        writer.update("lat", 3000)
         s2 = reader.get("lat")
         assert isinstance(s2, SeriesStats)
         assert s2.count == 3
-        assert s2.total == 6.0
+        assert s2.total == 6000
 
         reader.close()
         writer.close()
@@ -185,14 +206,14 @@ class TestBasicKVStoreReader:
         writer = BasicKVStore(store_dir)
         writer.create_key("n", "counter")
         writer.create_key("s", "series")
-        writer.update("n", 5.0)
-        writer.update("s", 10.0)
+        writer.update("n", 5)
+        writer.update("s", 10)
 
         reader = BasicKVStoreReader(store_dir)
         reader.register_key("n", "counter")
         reader.register_key("s", "series")
         snap = reader.snapshot()
-        assert snap["n"] == 5.0
+        assert snap["n"] == 5
         assert isinstance(snap["s"], SeriesStats)
         assert snap["s"].count == 1
 
@@ -212,12 +233,12 @@ class TestBasicKVStoreReader:
         # Now create the writer and write
         writer = BasicKVStore(store_dir)
         writer.create_key("lat", "series")
-        writer.update("lat", 42.0)
+        writer.update("lat", 42)
 
         s = reader.get("lat")
         assert isinstance(s, SeriesStats)
         assert s.count == 1
-        assert s.values == [42.0]
+        assert s.values == [42]
 
         reader.close()
         writer.close()
@@ -247,9 +268,9 @@ class TestCrossProcess:
         writer = BasicKVStore(store_dir)
         writer.create_key("n", "counter")
         writer.create_key("ttft", "series")
-        writer.update("n", 2.0)
-        writer.update("ttft", 42.0)
-        writer.update("ttft", 99.0)
+        writer.update("n", 2)
+        writer.update("ttft", 42)
+        writer.update("ttft", 99)
 
         q: multiprocessing.Queue = multiprocessing.Queue()
         proc = multiprocessing.Process(target=_child_read, args=(str(store_dir), q))
@@ -258,8 +279,90 @@ class TestCrossProcess:
 
         assert not q.empty()
         n, count, values = q.get()
-        assert n == 2.0
+        assert n == 2
         assert count == 2
-        assert values == [42.0, 99.0]
+        assert values == [42, 99]
 
+        writer.close()
+
+
+# ---------------------------------------------------------------------------
+# Integer precision
+# ---------------------------------------------------------------------------
+
+# First integer not exactly representable in IEEE 754 float64 (53-bit mantissa).
+_BEYOND_FLOAT64 = 2**53 + 1
+
+
+@pytest.mark.unit
+class TestIntegerPrecision:
+    """Verify uint64 storage preserves integers that exceed float64 precision."""
+
+    def test_float64_struct_loses_precision(self):
+        """Confirm struct float64 roundtrip is lossy for _BEYOND_FLOAT64.
+
+        If this test fails, the other tests in TestIntegerPrecision lose
+        validity — they depend on _BEYOND_FLOAT64 being unrepresentable
+        in float64.
+        """
+        packed_d = struct.pack("<d", _BEYOND_FLOAT64)
+        (recovered_d,) = struct.unpack("<d", packed_d)
+        assert int(recovered_d) != _BEYOND_FLOAT64
+
+        # uint64 roundtrip must be exact
+        packed_q = struct.pack("<Q", _BEYOND_FLOAT64)
+        (recovered_q,) = struct.unpack("<Q", packed_q)
+        assert recovered_q == _BEYOND_FLOAT64
+
+    def test_counter_preserves_large_int(self, tmp_path: Path):
+        store = BasicKVStore(tmp_path / "kv")
+        store.create_key("ts", "counter")
+        store.update("ts", _BEYOND_FLOAT64)
+        assert store.get("ts") == _BEYOND_FLOAT64
+        store.close()
+
+    def test_series_uint64_preserves_large_int(self, tmp_path: Path):
+        store = BasicKVStore(tmp_path / "kv")
+        store.create_key("s", "series")
+        store.update("s", _BEYOND_FLOAT64)
+        store.update("s", _BEYOND_FLOAT64 + 1)
+
+        result = store.get("s")
+        assert isinstance(result, SeriesStats)
+        assert result.values[0] == _BEYOND_FLOAT64
+        assert result.values[1] == _BEYOND_FLOAT64 + 1
+        assert result.values[1] - result.values[0] == 1
+        store.close()
+
+    def test_series_float64_loses_large_int(self, tmp_path: Path):
+        """float64 series cannot distinguish 2^53 and 2^53+1."""
+        store = BasicKVStore(tmp_path / "kv")
+        store.create_key("f", "series", dtype=float)
+        # 2^53 is exactly representable; 2^53+1 rounds down to 2^53 in float64
+        store.update("f", float(2**53))
+        store.update("f", float(_BEYOND_FLOAT64))
+
+        result = store.get("f")
+        assert isinstance(result, SeriesStats)
+        assert result.values[0] == result.values[1]
+        store.close()
+
+    def test_reader_preserves_large_int(self, tmp_path: Path):
+        store_dir = tmp_path / "kv"
+        writer = BasicKVStore(store_dir)
+        writer.create_key("ts", "counter")
+        writer.create_key("lat", "series")
+        writer.update("ts", _BEYOND_FLOAT64)
+        writer.update("lat", _BEYOND_FLOAT64)
+
+        reader = BasicKVStoreReader(store_dir)
+        reader.register_key("ts", "counter")
+        reader.register_key("lat", "series")
+
+        assert reader.get("ts") == _BEYOND_FLOAT64
+        lat = reader.get("lat")
+        assert isinstance(lat, SeriesStats)
+        assert lat.values[0] == _BEYOND_FLOAT64
+
+        reader.close()
         writer.close()

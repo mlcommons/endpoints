@@ -424,7 +424,7 @@ def finalize_benchmark(
     elapsed = report.duration_ns / 1e9 if report.duration_ns is not None else 0.0
     total_issued = report.n_samples_issued
     success = total_issued - report.n_samples_failed
-    qps = report.qps or 0.0
+    qps = report.qps() or 0.0
 
     logger.info(f"Completed in {elapsed:.1f}s")
     logger.info(f"Results: {success}/{total_issued} successful")

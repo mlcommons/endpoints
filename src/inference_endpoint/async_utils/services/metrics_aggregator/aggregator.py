@@ -114,7 +114,7 @@ class MetricsAggregatorService(ZmqEventRecordSubscriber):
         self._tracked_issued = 0
         self._tracked_completed = 0
         self._session_start_ns: int | None = None
-        self._total_duration_ns: float = 0.0
+        self._total_duration_ns: int = 0
 
         self._table = MetricsTable(kv_store)
         self._register_triggers(streaming)
