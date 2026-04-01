@@ -51,6 +51,16 @@ class OpenOrca(
             )
 
     @classmethod
+    def _extract_gz_files(cls, download_dir: Path, gzip_dir: Path) -> None:
+        """Extract .pkl.gz files into download_dir, overwriting any existing .pkl files."""
+        for gz_path in gzip_dir.glob("*.pkl.gz"):
+            pkl_path = download_dir / gz_path.with_suffix("").name
+            with gzip.open(gz_path, "rb") as f_in:
+                with pkl_path.open(mode="wb") as f_out:
+                    shutil.copyfileobj(f_in, f_out)
+        logger.info("OpenOrca dataset extracted to: %s", download_dir.resolve())
+
+    @classmethod
     def _convert_pickle_cache(cls, pickle_path: Path, jsonl_path: Path) -> pd.DataFrame:
         """Convert the upstream pickle artifact into the local JSONL cache."""
         cls._verify_sha256(pickle_path)
@@ -105,7 +115,7 @@ class OpenOrca(
             logger.info("Dataset already exists at %s. Loading from file.", jsonl_path)
             return pd.read_json(jsonl_path, lines=True)
 
-        if pickle_path.exists():
+        if pickle_path.exists() and not force:
             logger.info(
                 "Converting existing upstream pickle cache at %s to JSONL.", pickle_path
             )
@@ -147,37 +157,19 @@ class OpenOrca(
         if (gzip_dir / "open_orca").exists():
             gzip_dir = gzip_dir / "open_orca"
 
-        for gz_path in gzip_dir.glob("*.pkl.gz"):
-            # Note: .with_suffix removes only one suffix, .pkl.gz -> .pkl
-            pkl_filename = gz_path.with_suffix("").name
-            pkl_path = download_dir / pkl_filename
-            if pkl_path.exists():
-                continue
-
-            with gzip.open(gz_path, "rb") as f_in:
-                with pkl_path.open(mode="wb") as f_out:
-                    shutil.copyfileobj(f_in, f_out)
-
-        logger.info(
-            "OpenOrca dataset downloaded and extracted to: %s",
-            download_dir.resolve(),
-        )
+        cls._extract_gz_files(download_dir, gzip_dir)
 
         if not pickle_path.exists():
             raise FileNotFoundError(
                 f"OpenOrca was downloaded, but {pickle_path} does not exist"
             )
 
-        cls._verify_sha256(pickle_path)
-
-        # Clean up the intermediate gz files
-        for gz_path in gzip_dir.glob("*.pkl.gz"):
-            gz_path.unlink()
-
-        script_path.unlink(missing_ok=True)
-        logger.info(f"Cleaned up intermediate gz files in {gzip_dir}")
-
-        return cls._convert_pickle_cache(pickle_path, jsonl_path)
+        try:
+            return cls._convert_pickle_cache(pickle_path, jsonl_path)
+        finally:
+            for gz_path in gzip_dir.glob("*.pkl.gz"):
+                gz_path.unlink()
+            script_path.unlink(missing_ok=True)
 
 
 __all__ = ["OpenOrca"]
