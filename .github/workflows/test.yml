@@ -24,7 +24,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install pip==26.0.1
-          pip install -e .[test]
+          pip install --require-hashes -c constraints.txt -e ".[test]"
 
       - name: Run tests
         run: |
@@ -51,5 +51,5 @@ jobs:
       - name: Audit dependencies for known vulnerabilities
         run: |
           python -m pip install pip==26.0.1
-          pip install -e ".[dev,test,performance]"
+          pip install --require-hashes -c constraints.txt -e ".[dev,test,performance]"
           pip-audit

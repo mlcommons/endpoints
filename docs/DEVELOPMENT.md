@@ -285,11 +285,15 @@ Add dependencies to `pyproject.toml` (always pin to exact versions with `==`):
 - **Runtime dependencies**: `[project.dependencies]`
 - **Optional groups** (dev, test, etc.): `[project.optional-dependencies]`
 
-Install after updating:
+After updating, regenerate the constraints file and install:
 
 ```bash
-pip install -e ".[dev,test]"
+pip-compile pyproject.toml --extra dev --extra test --extra sql --extra performance \
+  --output-file constraints.txt --generate-hashes --strip-extras --allow-unsafe
+pip install -c constraints.txt -e ".[dev,test]"
 ```
+
+The `constraints.txt` file pins all transitive dependencies with SHA256 hashes. CI uses `--require-hashes -c constraints.txt` to ensure deterministic, hash-verified installs.
 
 ## 🚨 Troubleshooting
 
