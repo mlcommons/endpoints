@@ -66,8 +66,11 @@ class OpenOrca(
         cls._verify_sha256(pickle_path)
         dataframe = pd.read_pickle(pickle_path)
         tmp_path = jsonl_path.with_suffix(".jsonl.tmp")
-        dataframe.to_json(tmp_path, orient="records", lines=True)
-        tmp_path.replace(jsonl_path)
+        try:
+            dataframe.to_json(tmp_path, orient="records", lines=True)
+            tmp_path.replace(jsonl_path)
+        finally:
+            tmp_path.unlink(missing_ok=True)
         pickle_path.unlink()
         return dataframe
 
