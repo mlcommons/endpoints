@@ -54,7 +54,7 @@ dependencies = [
     # Color support for cross-platform terminals
     "colorama==0.4.6",
     # Fix pytz-2024 import warning
-    "pytz==2025.2",
+    "pytz==2026.1.post1",
 ]
 
 [project.optional-dependencies]
