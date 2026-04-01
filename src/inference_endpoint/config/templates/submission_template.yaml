@@ -26,21 +26,21 @@ model_params:
 datasets:
   - name: "performance-test"
     type: "performance"
-    path: "datasets/openorca.pkl"
-    format: "pkl"
+    path: "datasets/openorca.jsonl"
+    format: "jsonl"
     samples: 5000
 
   - name: "gpqa-accuracy"
     type: "accuracy"
-    path: "datasets/gpqa.pkl"
-    format: "pkl"
+    path: "datasets/gpqa.jsonl"
+    format: "jsonl"
     samples: 500
     eval_method: "exact_match"
 
   - name: "aime-accuracy"
     type: "accuracy"
-    path: "datasets/aime.pkl"
-    format: "pkl"
+    path: "datasets/aime.jsonl"
+    format: "jsonl"
     samples: 300
     eval_method: "exact_match"
 

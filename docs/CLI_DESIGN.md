@@ -102,7 +102,7 @@ The first segment is the file path, optionally prefixed with `perf:` or `acc:` t
 
 ```bash
 # Simple
---dataset data.pkl
+--dataset data.jsonl
 
 # Accuracy dataset
 --dataset acc:eval.jsonl
@@ -111,15 +111,15 @@ The first segment is the file path, optionally prefixed with `perf:` or `acc:` t
 --dataset data.csv,samples=500,parser.prompt=article
 
 # With accuracy config
---dataset acc:eval.pkl,accuracy_config.eval_method=pass_at_1,accuracy_config.ground_truth=answer
+--dataset acc:eval.jsonl,accuracy_config.eval_method=pass_at_1,accuracy_config.ground_truth=answer
 
 # Multiple datasets
---dataset perf:train.pkl --dataset acc:eval.pkl,accuracy_config.eval_method=pass_at_1 --mode both
+--dataset perf:train.jsonl --dataset acc:eval.jsonl,accuracy_config.eval_method=pass_at_1 --mode both
 ```
 
 Parser remaps use `parser.TARGET=SOURCE` — "rename my dataset's SOURCE column to TARGET". Valid targets are derived from `MakeAdapterCompatible` (`prompt`, `system`). Invalid targets are rejected at parse time. Invalid source columns are rejected at dataset load time.
 
-Pydantic validates all fields: `extra="forbid"` on `Dataset` and `AccuracyConfig` catches typos like `--dataset data.pkl,samles=500`. Format is auto-detected from file extension.
+Pydantic validates all fields: `extra="forbid"` on `Dataset` and `AccuracyConfig` catches typos like `--dataset data.jsonl,samles=500`. Format is auto-detected from file extension.
 
 The only YAML-only features are `submission_ref` and `benchmark_mode` (for official submissions).
 
@@ -202,5 +202,5 @@ class HTTPClientConfig(WithUpdatesMixin, BaseModel):
 `BenchmarkConfig` is frozen. Use `with_updates()` to produce new instances with re-validation:
 
 ```python
-config = config.with_updates(timeout=300, datasets=["new_data.pkl"])
+config = config.with_updates(timeout=300, datasets=["new_data.jsonl"])
 ```

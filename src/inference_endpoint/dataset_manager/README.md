@@ -162,7 +162,6 @@ dataset = Dataset.load_from_file(
 
 - `.csv` - CSV files with headers
 - `.parquet` - Apache Parquet files
-- `.pkl` - Pickled list of dictionaries
 - `.json` - JSON files
 - `.jsonl` - JSON Lines files
 - `huggingface` - HuggingFace datasets

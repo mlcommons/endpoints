@@ -18,10 +18,11 @@ import pytest
 from inference_endpoint.dataset_manager.predefined.random import RandomDataset
 
 
-def test_ds_pickle_reader(ds_pickle_reader):
-    ds_pickle_reader.load()
-    assert ds_pickle_reader.num_samples() == 5
-    data_item = ds_pickle_reader.load_sample(0)
+@pytest.mark.unit
+def test_ds_jsonl_reader(ds_jsonl_reader):
+    ds_jsonl_reader.load()
+    assert ds_jsonl_reader.num_samples() == 5
+    data_item = ds_jsonl_reader.load_sample(0)
     assert isinstance(data_item, dict)
     print(data_item["dataset"])
     print(data_item["ground_truth"])
@@ -31,15 +32,17 @@ def test_ds_pickle_reader(ds_pickle_reader):
     assert "ref_accuracy" in data_item and data_item["ref_accuracy"] == 100.0
 
 
-def test_ds_pickle_reader_unique_dataset(ds_pickle_reader):
-    ds_pickle_reader.load()
+@pytest.mark.unit
+def test_ds_jsonl_reader_unique_dataset(ds_jsonl_reader):
+    ds_jsonl_reader.load()
     unique_datasets = set()
-    for i in range(ds_pickle_reader.num_samples()):
-        samples = ds_pickle_reader.load_sample(i)
+    for i in range(ds_jsonl_reader.num_samples()):
+        samples = ds_jsonl_reader.load_sample(i)
         unique_datasets.add(samples["dataset"])
     assert len(unique_datasets) == 5
 
 
+@pytest.mark.unit
 @pytest.mark.skip(reason="Skipping dataset test for now due to refactoring")
 def test_hf_squad_dataset(hf_squad_dataset):
     hf_squad_dataset.load()

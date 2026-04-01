@@ -26,7 +26,7 @@ from inference_endpoint.openai.openai_types_gen import CreateChatCompletionRespo
 
 @pytest.mark.asyncio
 async def test_ds_chat_completion_data_loader_with_oracle_server(
-    ds_pickle_dataset_path, mock_http_oracle_server
+    ds_jsonl_dataset_path, mock_http_oracle_server
 ):
     """
     Test the PickleReader by performing a roundtrip request through a mock HTTP Oracle server.
@@ -38,7 +38,7 @@ async def test_ds_chat_completion_data_loader_with_oracle_server(
     and checks that the server returns a response matching the sample's reference output.
     """
     ds_chat_completion_data_loader = Dataset.load_from_file(
-        ds_pickle_dataset_path,
+        ds_jsonl_dataset_path,
         transforms=[ColumnRemap({"text_input": "prompt", "ref_output": "output"})],
     )
     ds_chat_completion_data_loader.load()

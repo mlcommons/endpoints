@@ -35,6 +35,16 @@ class OpenOrca(
     """OpenOrca GPT4 tokenized dataset for accuracy evaluation."""
 
     PRESETS = presets
+    SOURCE_FILENAME = "open_orca_gpt4_tokenized_llama.sampled_24576.pkl"
+    CACHE_FILENAME = "open_orca_gpt4_tokenized_llama.sampled_24576.jsonl"
+
+    @classmethod
+    def _convert_pickle_cache(cls, pickle_path: Path, jsonl_path: Path) -> pd.DataFrame:
+        """Convert the upstream pickle artifact into the local JSONL cache."""
+        dataframe = pd.read_pickle(pickle_path)
+        dataframe.to_json(jsonl_path, orient="records", lines=True)
+        pickle_path.unlink()
+        return dataframe
 
     @classmethod
     def generate(
@@ -70,15 +80,21 @@ class OpenOrca(
         if variant != "mlperf-inference":
             raise ValueError(f"Unsupported variant: {variant}")
 
-        # The MLPerf Inference variant is stored as a pickle file
-        filename = "open_orca_gpt4_tokenized_llama.sampled_24576.pkl"
-        dst_path = datasets_dir / cls.DATASET_ID / variant / filename
-        if not dst_path.parent.exists():
-            dst_path.parent.mkdir(parents=True)
+        cache_dir = datasets_dir / cls.DATASET_ID / variant
+        jsonl_path = cache_dir / cls.CACHE_FILENAME
+        pickle_path = cache_dir / cls.SOURCE_FILENAME
+        if not cache_dir.exists():
+            cache_dir.mkdir(parents=True)
 
-        if dst_path.exists() and not force:
-            logger.info(f"Dataset already exists at {dst_path}. Loading from file.")
-            return pd.read_pickle(dst_path)
+        if jsonl_path.exists() and not force:
+            logger.info("Dataset already exists at %s. Loading from file.", jsonl_path)
+            return pd.read_json(jsonl_path, lines=True)
+
+        if pickle_path.exists():
+            logger.info(
+                "Converting existing upstream pickle cache at %s to JSONL.", pickle_path
+            )
+            return cls._convert_pickle_cache(pickle_path, jsonl_path)
 
         # Dataset URL from README
         dataset_url = "https://inference.mlcommons-storage.org/metadata/llama-2-70b-open-orca-dataset.uri"
@@ -86,8 +102,8 @@ class OpenOrca(
         # Download the r2-downloader script into a temp file in the target dir
         COMMIT_HASH = "27da4421877f2831eeb615b43ee5098c4b70be7e"
         downloader_url = f"https://raw.githubusercontent.com/mlcommons/r2-downloader/{COMMIT_HASH}/mlc-r2-downloader.sh"
-        download_dir = dst_path.parent
-        script_path = dst_path.parent / "mlc-r2-downloader.sh"
+        download_dir = cache_dir
+        script_path = cache_dir / "mlc-r2-downloader.sh"
         r = requests.get(downloader_url, timeout=30)
         r.raise_for_status()
         script_path.write_bytes(r.content)
@@ -132,19 +148,19 @@ class OpenOrca(
             download_dir.resolve(),
         )
 
-        # Check if the specific file exists
-        if not dst_path.exists():
+        if not pickle_path.exists():
             raise FileNotFoundError(
-                f"OpenOrca was downloaded, but {dst_path} does not exist"
+                f"OpenOrca was downloaded, but {pickle_path} does not exist"
             )
 
         # Clean up the intermediate gz files
         for gz_path in gzip_dir.glob("*.pkl.gz"):
             gz_path.unlink()
 
+        script_path.unlink(missing_ok=True)
         logger.info(f"Cleaned up intermediate gz files in {gzip_dir}")
 
-        return pd.read_pickle(dst_path)
+        return cls._convert_pickle_cache(pickle_path, jsonl_path)
 
 
 __all__ = ["OpenOrca"]

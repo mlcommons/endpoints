@@ -42,7 +42,7 @@ model_params:
 datasets:
   - name: "test"
     type: "performance"
-    path: "test.pkl"
+    path: "test.jsonl"
 
 settings:
   runtime:
@@ -108,7 +108,7 @@ endpoint_config:
 datasets:
   - name: "test"
     type: "performance"
-    path: "test.pkl"
+    path: "test.jsonl"
 """
         config_file = tmp_path / "env_config.yaml"
         config_file.write_text(config_content)
@@ -133,7 +133,7 @@ endpoint_config:
 datasets:
   - name: "test"
     type: "performance"
-    path: "test.pkl"
+    path: "test.jsonl"
 """
         config_file = tmp_path / "bare_env.yaml"
         config_file.write_text(config_content)

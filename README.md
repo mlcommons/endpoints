@@ -46,13 +46,13 @@ inference-endpoint probe \
 inference-endpoint benchmark offline \
   --endpoints http://your-endpoint:8000 \
   --model Qwen/Qwen3-8B \
-  --dataset tests/datasets/dummy_1k.pkl
+  --dataset tests/datasets/dummy_1k.jsonl
 
 # Run online benchmark (sustained QPS - requires --target-qps, --load-pattern)
 inference-endpoint benchmark online \
   --endpoints http://your-endpoint:8000 \
   --model Qwen/Qwen3-8B \
-  --dataset tests/datasets/dummy_1k.pkl \
+  --dataset tests/datasets/dummy_1k.jsonl \
   --load-pattern poisson \
   --target-qps 100
 
@@ -60,7 +60,7 @@ inference-endpoint benchmark online \
 inference-endpoint benchmark offline \
   --endpoints http://your-endpoint:8000 \
   --model Qwen/Qwen3-8B \
-  --dataset tests/datasets/dummy_1k.pkl \
+  --dataset tests/datasets/dummy_1k.jsonl \
   --num-samples 5000
 ```
 
@@ -74,7 +74,7 @@ python -m inference_endpoint.testing.echo_server --port 8765 &
 inference-endpoint benchmark offline \
   --endpoints http://localhost:8765 \
   --model Qwen/Qwen3-8B \
-  --dataset tests/datasets/dummy_1k.pkl
+  --dataset tests/datasets/dummy_1k.jsonl
 
 # Stop echo server
 pkill -f echo_server

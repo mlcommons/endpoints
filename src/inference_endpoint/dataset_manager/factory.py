@@ -32,7 +32,6 @@ class DataLoaderFactory:
     """Factory for creating dataset loaders based on format.
 
     Supports:
-    - pkl: Pickle format (PickleReader)
     - parquet: Parquet format (ParquetReader)
     - jsonl: JSON Lines format (JsonlReader)
     - hf: HuggingFace datasets (HFDataLoader)
