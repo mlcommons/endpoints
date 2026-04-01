@@ -23,7 +23,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          python -m pip install pip==24.3.1
+          python -m pip install pip==26.0.1
           pip install -e .[test]
 
       - name: Run tests
@@ -50,7 +50,7 @@ jobs:
 
       - name: Audit dependencies for known vulnerabilities
         run: |
-          python -m pip install pip==24.3.1
+          python -m pip install pip==26.0.1
           pip install -e .
           pip install pip-audit==2.10.0
           pip-audit
