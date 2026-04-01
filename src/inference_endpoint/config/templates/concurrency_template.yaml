@@ -14,7 +14,6 @@ datasets:
   - name: "concurrency-test"
     type: "performance"
     path: "datasets/queries.jsonl"
-    format: "jsonl"
     samples: 500
 
 settings:

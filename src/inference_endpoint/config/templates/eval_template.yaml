@@ -12,7 +12,6 @@ datasets:
   - name: "gpqa"
     type: "accuracy"
     path: "datasets/gpqa.jsonl"
-    format: "jsonl"
     samples: 500
     eval_method: "exact_match"
 

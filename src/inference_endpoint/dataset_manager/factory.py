@@ -32,9 +32,11 @@ class DataLoaderFactory:
     """Factory for creating dataset loaders based on format.
 
     Supports:
-    - parquet: Parquet format (ParquetReader)
-    - jsonl: JSON Lines format (JsonlReader)
-    - hf: HuggingFace datasets (HFDataLoader)
+    - csv: CSV format (CSVLoader)
+    - json: JSON format (JsonLoader)
+    - parquet: Parquet format (ParquetLoader)
+    - jsonl: JSON Lines format (JsonlLoader)
+    - hf: HuggingFace datasets (HuggingFaceLoader)
     """
 
     @staticmethod

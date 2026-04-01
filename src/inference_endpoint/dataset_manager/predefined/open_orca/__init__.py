@@ -42,7 +42,9 @@ class OpenOrca(
     def _convert_pickle_cache(cls, pickle_path: Path, jsonl_path: Path) -> pd.DataFrame:
         """Convert the upstream pickle artifact into the local JSONL cache."""
         dataframe = pd.read_pickle(pickle_path)
-        dataframe.to_json(jsonl_path, orient="records", lines=True)
+        tmp_path = jsonl_path.with_suffix(".jsonl.tmp")
+        dataframe.to_json(tmp_path, orient="records", lines=True)
+        tmp_path.replace(jsonl_path)
         pickle_path.unlink()
         return dataframe
 

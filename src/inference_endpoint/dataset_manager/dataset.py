@@ -47,7 +47,7 @@ class DatasetFormat(Enum):
     """Apache Parquet file."""
 
     JSON = ".json"
-    """JSON file in the same structure as the PY_DICT format, but saved as a JSON file."""
+    """JSON file containing a list of records (dictionaries), where keys are column names."""
 
     JSONL = ".jsonl"
     """JSON Lines file. Each line is a JSON object where the keys are the column names. It is assumed that

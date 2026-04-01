@@ -137,7 +137,7 @@ model_params:
 
 Format is auto-detected from file extension. Override with `format:` in the dataset string.
 
-**Supported:** `csv`, `json`, `jsonl`, `parquet`, `npy`, `huggingface`
+**Supported:** `csv`, `json`, `jsonl`, `parquet`, `huggingface`
 
 ## Test Modes
 

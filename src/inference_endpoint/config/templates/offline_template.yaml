@@ -13,7 +13,6 @@ datasets:
   - name: "perf-test"
     type: "performance"
     path: "tests/datasets/dummy_1k.jsonl"
-    format: "jsonl"
     samples: 1000
     parser:
       prompt: "text_input"
