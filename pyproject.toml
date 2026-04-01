@@ -46,7 +46,7 @@ dependencies = [
     # Needed for tokenization and OSL reporting
     "transformers==4.57.1",
     "numpy==2.3.4",
-    "datasets==4.1.1",
+    "datasets==4.8.4",
     "Pillow==12.1.1",
     "sentencepiece==0.2.1",
     "protobuf==6.33.5",
