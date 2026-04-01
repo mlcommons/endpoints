@@ -28,7 +28,7 @@ settings:
     dataloader_random_seed: 42 # For dataset shuffling
 
   load_pattern:
-    type: "max_throughput"
+    type: "poisson"
     target_qps: 10
 
   client:

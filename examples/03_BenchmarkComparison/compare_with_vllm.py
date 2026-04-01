@@ -182,7 +182,7 @@ def generate_ie_config(
                 "n_samples_to_issue": num_requests,
             },
             "load_pattern": {"type": "max_throughput"},
-            "client": {"workers": workers},
+            "client": {"num_workers": workers},
         },
         "endpoint_config": {"endpoints": [endpoint_url]},
         "report_dir": str(report_dir),
@@ -348,20 +348,37 @@ def run_inference_endpoint(
     full_output = "".join(captured_output)
     results = parse_inference_endpoint_output(full_output)
 
-    # Load report JSON for total generated tokens
+    # Load report JSON for metrics not printed to stdout (TTFT, TPOT, output lengths)
     report_json_path = report_dir / "result_summary.json"
     if report_json_path.exists():
         try:
             with open(report_json_path) as f:
                 report_data = json.load(f)
-                if report_data.get("output_sequence_lengths"):
-                    results["total_output_tokens"] = report_data[
-                        "output_sequence_lengths"
-                    ]["total"]
-                    if verbose:
-                        logger.info(
-                            f"Loaded total output tokens from report: {results['total_output_tokens']}"
-                        )
+
+            if report_data.get("output_sequence_lengths"):
+                osl = report_data["output_sequence_lengths"]
+                results["total_output_tokens"] = osl["total"]
+                results["output_len_mean"] = osl["avg"]
+                results["output_len_median"] = osl["median"]
+                results["output_len_p99"] = osl["percentiles"]["99"]
+                if verbose:
+                    logger.info(
+                        f"Loaded total output tokens from report: {results['total_output_tokens']}"
+                    )
+
+            # TTFT and TPOT are stored in nanoseconds — convert to ms
+            if report_data.get("ttft"):
+                ttft = report_data["ttft"]
+                results["ttft_mean"] = ttft["avg"] / 1e6
+                results["ttft_median"] = ttft["median"] / 1e6
+                results["ttft_p99"] = ttft["percentiles"]["99"] / 1e6
+
+            if report_data.get("tpot"):
+                tpot = report_data["tpot"]
+                results["tpot_mean"] = tpot["avg"] / 1e6
+                results["tpot_median"] = tpot["median"] / 1e6
+                results["tpot_p99"] = tpot["percentiles"]["99"] / 1e6
+
         except Exception as e:
             logger.warning(f"Failed to parse report JSON from {report_json_path}: {e}")
     else:
