@@ -19,10 +19,10 @@ from inference_endpoint.dataset_manager.predefined.random import RandomDataset
 
 
 @pytest.mark.unit
-def test_ds_jsonl_reader(ds_jsonl_reader):
-    ds_jsonl_reader.load()
-    assert ds_jsonl_reader.num_samples() == 5
-    data_item = ds_jsonl_reader.load_sample(0)
+def test_ds_reader(ds_reader):
+    ds_reader.load()
+    assert ds_reader.num_samples() == 5
+    data_item = ds_reader.load_sample(0)
     assert isinstance(data_item, dict)
     print(data_item["dataset"])
     print(data_item["ground_truth"])
@@ -33,11 +33,11 @@ def test_ds_jsonl_reader(ds_jsonl_reader):
 
 
 @pytest.mark.unit
-def test_ds_jsonl_reader_unique_dataset(ds_jsonl_reader):
-    ds_jsonl_reader.load()
+def test_ds_reader_unique_dataset(ds_reader):
+    ds_reader.load()
     unique_datasets = set()
-    for i in range(ds_jsonl_reader.num_samples()):
-        samples = ds_jsonl_reader.load_sample(i)
+    for i in range(ds_reader.num_samples()):
+        samples = ds_reader.load_sample(i)
         unique_datasets.add(samples["dataset"])
     assert len(unique_datasets) == 5
 

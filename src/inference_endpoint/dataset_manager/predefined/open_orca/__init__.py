@@ -53,6 +53,7 @@ class OpenOrca(
     @classmethod
     def _convert_pickle_cache(cls, pickle_path: Path, jsonl_path: Path) -> pd.DataFrame:
         """Convert the upstream pickle artifact into the local JSONL cache."""
+        cls._verify_sha256(pickle_path)
         dataframe = pd.read_pickle(pickle_path)
         tmp_path = jsonl_path.with_suffix(".jsonl.tmp")
         dataframe.to_json(tmp_path, orient="records", lines=True)
@@ -108,7 +109,6 @@ class OpenOrca(
             logger.info(
                 "Converting existing upstream pickle cache at %s to JSONL.", pickle_path
             )
-            cls._verify_sha256(pickle_path)
             return cls._convert_pickle_cache(pickle_path, jsonl_path)
 
         # Dataset URL from README

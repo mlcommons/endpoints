@@ -174,7 +174,7 @@ def dummy_dataset():
 
 
 @pytest.fixture
-def ds_jsonl_dataset_path():
+def ds_dataset_path():
     """
     Returns the path to the ds_samples.jsonl file.
     """
@@ -182,11 +182,11 @@ def ds_jsonl_dataset_path():
 
 
 @pytest.fixture
-def ds_jsonl_reader(ds_jsonl_dataset_path):
+def ds_reader(ds_dataset_path):
     """
     Returns a Dataset object for the ds_samples.jsonl file.
     """
-    return Dataset.load_from_file(file_path=ds_jsonl_dataset_path)
+    return Dataset.load_from_file(file_path=ds_dataset_path)
 
 
 @pytest.fixture
@@ -358,7 +358,7 @@ class OracleServer(EchoServer):
 
 
 @pytest.fixture
-def mock_http_oracle_server(ds_jsonl_dataset_path):
+def mock_http_oracle_server(ds_dataset_path):
     """
     Pytest fixture that creates and manages a mock HTTP oracle server for dataset-driven testing.
 
@@ -366,7 +366,7 @@ def mock_http_oracle_server(ds_jsonl_dataset_path):
     on a dynamically allocated port, and manages its lifecycle during testing.
 
     Args:
-        ds_jsonl_dataset_path (str): Path to the JSONL dataset file containing chat completion samples
+        ds_dataset_path (str): Path to the JSONL dataset file containing chat completion samples
 
     Yields:
         OracleServer: A running mock HTTP server serving predefined responses from the dataset
@@ -375,7 +375,7 @@ def mock_http_oracle_server(ds_jsonl_dataset_path):
         RuntimeError: If any errors occur during server setup or execution
     """
     # Create and start the server with dynamic port allocation (port=0)
-    server = OracleServer(ds_jsonl_dataset_path)
+    server = OracleServer(ds_dataset_path)
     server.start()
 
     try:
