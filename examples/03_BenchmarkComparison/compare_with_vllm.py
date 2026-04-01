@@ -360,7 +360,7 @@ def run_inference_endpoint(
                 results["total_output_tokens"] = osl["total"]
                 results["output_len_mean"] = osl["avg"]
                 results["output_len_median"] = osl["median"]
-                results["output_len_p99"] = osl["percentiles"]["99"]
+                results["output_len_p99"] = osl.get("percentiles", {}).get("99")
                 if verbose:
                     logger.info(
                         f"Loaded total output tokens from report: {results['total_output_tokens']}"
@@ -371,13 +371,15 @@ def run_inference_endpoint(
                 ttft = report_data["ttft"]
                 results["ttft_mean"] = ttft["avg"] / 1e6
                 results["ttft_median"] = ttft["median"] / 1e6
-                results["ttft_p99"] = ttft["percentiles"]["99"] / 1e6
+                p99 = ttft.get("percentiles", {}).get("99")
+                results["ttft_p99"] = p99 / 1e6 if p99 is not None else None
 
             if report_data.get("tpot"):
                 tpot = report_data["tpot"]
                 results["tpot_mean"] = tpot["avg"] / 1e6
                 results["tpot_median"] = tpot["median"] / 1e6
-                results["tpot_p99"] = tpot["percentiles"]["99"] / 1e6
+                p99 = tpot.get("percentiles", {}).get("99")
+                results["tpot_p99"] = p99 / 1e6 if p99 is not None else None
 
         except Exception as e:
             logger.warning(f"Failed to parse report JSON from {report_json_path}: {e}")

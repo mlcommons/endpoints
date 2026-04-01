@@ -16,14 +16,14 @@ Dataset will be downloaded automatically to ./open_orca before benchmark if not 
 
 ## Get Model
 
-First go to [meta-llama/Llama2-70b-chat-hf](https://huggingface.co/meta-llama/Llama-2-70b-chat-hf) and make a request, sign in to HuggingFace (if you don't have account, you'll need to create one). Create an access token with read permissions.
+First go to [meta-llama/Llama2-70b-chat-hf](https://huggingface.co/meta-llama/Llama-2-70b-chat-hf) and make a request, sign in to HuggingFace (if you don't have an account, you'll need to create one). Create an access token with read permissions.
 
 Set the following environment variables, then download the model to the local HuggingFace cache. Setting `HF_HOME` before downloading ensures the model lands in the same directory that Docker will mount, so the container reuses the cached weights instead of downloading them at startup:
 
 ```
 export MODEL_NAME=meta-llama/Llama-2-70b-chat-hf
 export HF_TOKEN=<your Hugging Face token>
-export HF_HOME=<Path to your hf_home, usually /USERNAME/.cache/huggingface>
+export HF_HOME=<Path to your hf_home, e.g. ~/.cache/huggingface>
 hf download $MODEL_NAME
 ```
 
