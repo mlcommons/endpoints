@@ -348,7 +348,7 @@ def run_inference_endpoint(
     full_output = "".join(captured_output)
     results = parse_inference_endpoint_output(full_output)
 
-    # Load report JSON for metrics not printed to stdout (TTFT, TPOT, output lengths)
+    # Load report JSON to enrich metrics with additional fields/percentiles (TTFT, TPOT, output lengths)
     report_json_path = report_dir / "result_summary.json"
     if report_json_path.exists():
         try:

@@ -12,7 +12,7 @@ The following environment variables are used by the commands below to make the s
 
 ```
 export HF_TOKEN=<your Hugging Face token>
-export HF_HOME=<Path to your hf_home, usually /USERNAME/.cache/huggingface>
+export HF_HOME=<Path to your hf_home, e.g. ~/.cache/huggingface>
 export MODEL_NAME=<model to run, for instance meta-llama/Llama-3.1-8B-Instruct>
 ```
 
