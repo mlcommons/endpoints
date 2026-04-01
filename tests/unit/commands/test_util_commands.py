@@ -61,7 +61,7 @@ model_params:
 endpoint_config:
   endpoints: ["http://localhost:8000"]
 datasets:
-  - path: "test.pkl"
+  - path: "test.jsonl"
 """)
         execute_validate(config_file)
 
@@ -76,7 +76,7 @@ model_params:
 endpoint_config:
   endpoints: ["http://localhost:8000"]
 datasets:
-  - path: "test.pkl"
+  - path: "test.jsonl"
 submission_ref:
   model: "llama"
   ruleset: "mlperf-v6"

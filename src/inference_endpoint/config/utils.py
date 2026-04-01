@@ -88,12 +88,12 @@ def parse_dataset_string(s: str) -> dict[str, object]:
 
     Examples::
 
-        "data.pkl"
+        "data.jsonl"
         "acc:eval.jsonl"
         "data.csv,samples=500"
         "data.csv,parser.prompt=article,parser.system=inst"
         "perf:d.jsonl,samples=500,parser.prompt=article"
-        "acc:e.pkl,accuracy_config.eval_method=pass_at_1,accuracy_config.ground_truth=answer"
+        "acc:e.jsonl,accuracy_config.eval_method=pass_at_1,accuracy_config.ground_truth=answer"
     """
     parts = s.split(",")
     path_part = parts[0]

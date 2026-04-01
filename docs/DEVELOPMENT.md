@@ -94,7 +94,7 @@ pytest -v 2>&1 | tee test_results.log
 - **Unit Tests** (`tests/unit/`): Test individual components in isolation
 - **Integration Tests** (`tests/integration/`): Test component interactions with real servers
 - **Performance Tests** (`tests/performance/`): Test performance characteristics (marked with @pytest.mark.performance, no timeout)
-- **Test Datasets** (`tests/datasets/`): Sample datasets for testing (dummy_1k.pkl, squad_pruned/)
+- **Test Datasets** (`tests/datasets/`): Sample datasets for testing (dummy_1k.jsonl, squad_pruned/)
 
 ### Writing Tests
 

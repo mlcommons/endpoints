@@ -18,13 +18,13 @@ cyclopts. schema.py is the single source of truth for both YAML configs and CLI 
 inference-endpoint benchmark offline \
   --endpoints URL \
   --model Qwen/Qwen3-8B \
-  --dataset tests/datasets/dummy_1k.pkl
+  --dataset tests/datasets/dummy_1k.jsonl
 
 # Online (sustained QPS - requires --load-pattern, --target-qps)
 inference-endpoint benchmark online \
   --endpoints URL \
   --model Qwen/Qwen3-8B \
-  --dataset tests/datasets/dummy_1k.pkl \
+  --dataset tests/datasets/dummy_1k.jsonl \
   --load-pattern poisson \
   --target-qps 100
 
@@ -32,30 +32,30 @@ inference-endpoint benchmark online \
 inference-endpoint benchmark offline \
   --endpoints URL \
   --model Qwen/Qwen3-8B \
-  --dataset perf:performance.pkl \
-  --dataset acc:accuracy.pkl \
+  --dataset perf:performance.jsonl \
+  --dataset acc:accuracy.jsonl \
   --mode both
 
 # With detailed report generation
 inference-endpoint benchmark offline \
   --endpoints URL \
   --model Qwen/Qwen3-8B \
-  --dataset tests/datasets/dummy_1k.pkl \
+  --dataset tests/datasets/dummy_1k.jsonl \
   --report-dir my_benchmark_report
 
 # YAML-based
 inference-endpoint benchmark from-config --config test.yaml
 ```
 
-**Default Test Dataset:** Use `tests/datasets/dummy_1k.pkl` (1000 samples, ~133 KB) for local testing.
+**Default Test Dataset:** Use `tests/datasets/dummy_1k.jsonl` (1000 samples) for local testing.
 
 **Dataset format:** `--dataset [perf|acc:]<path>[,key=value...]` — TOML-style dotted paths. Type prefix is optional (defaults to `perf`):
 
 ```bash
---dataset data.pkl                                           # simple path
+--dataset data.jsonl                                         # simple path
 --dataset acc:eval.jsonl                                     # accuracy dataset
 --dataset data.csv,samples=500,parser.prompt=article         # with options
---dataset perf:data.jsonl,format=jsonl,parser.prompt=text    # explicit format + remap
+--dataset perf:data.jsonl,format=.jsonl,parser.prompt=text    # explicit format + remap
 ```
 
 ### Accuracy Evaluation (stub - future implementation)
@@ -135,9 +135,9 @@ model_params:
 
 ## Dataset Formats
 
-Format is auto-detected from file extension. Override with `format:` in the dataset string.
+Format is auto-detected from file extension. Override with `format=<ext>` in the dataset string.
 
-**Supported:** `pkl`, `csv`, `json`, `jsonl`, `parquet`, `npy`, `pandas_pkl`, `huggingface`
+**Supported:** `.csv`, `.json`, `.jsonl`, `.parquet`, `huggingface`
 
 ## Test Modes
 
@@ -163,13 +163,13 @@ Accuracy config is supported in both CLI and YAML:
 
 ```bash
 # CLI — accuracy config via dotted paths
---dataset acc:eval.pkl,accuracy_config.eval_method=pass_at_1,accuracy_config.ground_truth=answer,accuracy_config.extractor=boxed_math_extractor
+--dataset acc:eval.jsonl,accuracy_config.eval_method=pass_at_1,accuracy_config.ground_truth=answer,accuracy_config.extractor=boxed_math_extractor
 
 # Combined perf + accuracy
 inference-endpoint benchmark offline \
   --endpoints URL --model M \
-  --dataset perf:perf.pkl \
-  --dataset acc:eval.pkl,accuracy_config.eval_method=pass_at_1,accuracy_config.ground_truth=answer \
+  --dataset perf:perf.jsonl \
+  --dataset acc:eval.jsonl,accuracy_config.eval_method=pass_at_1,accuracy_config.ground_truth=answer \
   --mode both
 ```
 
@@ -203,7 +203,7 @@ inference-endpoint benchmark offline \
 inference-endpoint benchmark offline \
   --endpoints http://localhost:8000 \
   --model Qwen/Qwen3-8B \
-  --dataset tests/datasets/dummy_1k.pkl
+  --dataset tests/datasets/dummy_1k.jsonl
 ```
 
 ### Production Benchmark
@@ -213,7 +213,7 @@ inference-endpoint benchmark offline \
 inference-endpoint benchmark online \
   --endpoints https://api.production.com \
   --model Qwen/Qwen3-8B \
-  --dataset prod_queries.pkl \
+  --dataset prod_queries.jsonl \
   --load-pattern poisson \
   --target-qps 100 \
   --num-samples 10000 \
@@ -225,7 +225,7 @@ inference-endpoint benchmark online \
 inference-endpoint benchmark online \
   --endpoints https://api.production.com \
   --model Qwen/Qwen3-8B \
-  --dataset prod_queries.pkl \
+  --dataset prod_queries.jsonl \
   --load-pattern poisson \
   --target-qps 100 \
   --duration 5m \
@@ -278,10 +278,10 @@ model_params:
 datasets:
   - name: "perf"
     type: "performance"
-    path: "openorca.pkl"
+    path: "openorca.jsonl"
   - name: "gpqa"
     type: "accuracy"
-    path: "gpqa.pkl"
+    path: "gpqa.jsonl"
     eval_method: "exact_match"
 
 settings:

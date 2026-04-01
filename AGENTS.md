@@ -50,7 +50,7 @@ Dataset Manager --> Load Generator --> Endpoint Client --> External Endpoint
 | ------------------- | ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Load Generator**  | `src/inference_endpoint/load_generator/`                      | Central orchestrator: `BenchmarkSession` owns the lifecycle, `Scheduler` controls timing, `LoadGenerator` issues queries                    |
 | **Endpoint Client** | `src/inference_endpoint/endpoint_client/`                     | Multi-process HTTP workers communicating via ZMQ IPC. `HTTPEndpointClient` is the main entry point                                          |
-| **Dataset Manager** | `src/inference_endpoint/dataset_manager/`                     | Loads pickle, HuggingFace, JSONL datasets. `Dataset` base class with `load_sample()`/`num_samples()` interface                              |
+| **Dataset Manager** | `src/inference_endpoint/dataset_manager/`                     | Loads JSONL, HuggingFace, CSV, JSON, Parquet datasets. `Dataset` base class with `load_sample()`/`num_samples()` interface                  |
 | **Metrics**         | `src/inference_endpoint/metrics/`                             | `EventRecorder` writes to SQLite, `MetricsReporter` reads and aggregates (QPS, latency, TTFT, TPOT)                                         |
 | **Config**          | `src/inference_endpoint/config/`, `endpoint_client/config.py` | Pydantic-based YAML schema (`schema.py`), `HTTPClientConfig` (single Pydantic model for CLI/YAML/runtime), `RuntimeSettings`                |
 | **CLI**             | `src/inference_endpoint/main.py`, `commands/benchmark/cli.py` | cyclopts-based, auto-generated from `schema.py` and `HTTPClientConfig` Pydantic models. Flat shorthands via `cyclopts.Parameter(alias=...)` |
@@ -187,7 +187,7 @@ tests/
 │   ├── endpoint_client/       # HTTP client integration tests
 │   └── commands/              # CLI command integration tests
 ├── performance/               # Performance benchmarks (pytest-benchmark)
-└── datasets/                  # Test data (dummy_1k.pkl, squad_pruned/)
+└── datasets/                  # Test data (dummy_1k.jsonl, squad_pruned/)
 ```
 
 ## Development Standards
@@ -245,7 +245,7 @@ All of these run automatically on commit:
 - `max_throughput_runtime_settings`, `poisson_runtime_settings`, `concurrency_runtime_settings` — preset configs
 - `clean_sample_event_hooks` — ensures event hooks are cleared between tests
 
-**Test data**: `tests/datasets/dummy_1k.pkl` (1000 samples), `tests/datasets/squad_pruned/`
+**Test data**: `tests/datasets/dummy_1k.jsonl` (1000 samples), `tests/datasets/squad_pruned/`
 
 ### Performance Guidelines
 
