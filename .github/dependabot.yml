@@ -16,5 +16,5 @@ updates:
   - package-ecosystem: "docker"
     directory: "/scripts"
     schedule:
-      interval: "weekly"
+      interval: "daily"
     labels: ["dependencies", "docker"]
