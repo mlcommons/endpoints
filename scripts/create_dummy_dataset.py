@@ -91,6 +91,10 @@ def create_dummy_dataset(num_samples: int = 1000, output_path: str = None):
         output_path = repo_root / "tests" / "datasets" / "dummy_1k.jsonl"
 
     output_path = Path(output_path)
+    if output_path.suffix != ".jsonl":
+        raise ValueError(
+            f"Output path must have a .jsonl extension, got: {output_path.suffix}"
+        )
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Save as JSONL

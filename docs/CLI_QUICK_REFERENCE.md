@@ -55,7 +55,7 @@ inference-endpoint benchmark from-config --config test.yaml
 --dataset data.jsonl                                         # simple path
 --dataset acc:eval.jsonl                                     # accuracy dataset
 --dataset data.csv,samples=500,parser.prompt=article         # with options
---dataset perf:data.jsonl,format=jsonl,parser.prompt=text    # explicit format + remap
+--dataset perf:data.jsonl,format=.jsonl,parser.prompt=text    # explicit format + remap
 ```
 
 ### Accuracy Evaluation (stub - future implementation)

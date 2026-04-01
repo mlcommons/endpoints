@@ -36,7 +36,7 @@ class DataLoaderFactory:
     - json: JSON format (JsonLoader)
     - parquet: Parquet format (ParquetLoader)
     - jsonl: JSON Lines format (JsonlLoader)
-    - hf: HuggingFace datasets (HuggingFaceLoader)
+    - huggingface: HuggingFace datasets (HuggingFaceLoader)
     """
 
     @staticmethod

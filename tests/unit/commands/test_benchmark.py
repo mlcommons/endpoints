@@ -156,7 +156,7 @@ class TestDatasetParsing:
                 None,
             ),
             (
-                "perf:d.jsonl,format=jsonl,parser.prompt=text",
+                "perf:d.jsonl,format=.jsonl,parser.prompt=text",
                 "d.jsonl",
                 DatasetType.PERFORMANCE,
                 None,
