@@ -11,7 +11,7 @@ High-performance benchmarking tool for LLM inference endpoints targeting 50k+ QP
 ```bash
 # Development setup
 python3.12 -m venv venv && source venv/bin/activate
-pip install -e ".[dev,test]"
+pip install -c constraints.txt -e ".[dev,test]"
 pre-commit install
 
 # Testing

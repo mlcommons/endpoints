@@ -19,10 +19,10 @@ python3.12 -m venv venv
 source venv/bin/activate
 
 # As a user
-pip install .
+pip install -c constraints.txt .
 
-# As a developer
-pip install -e ".[dev,test]"
+# As a developer (with hash-verified transitive deps)
+pip install -c constraints.txt -e ".[dev,test]"
 pre-commit install
 ```
 
@@ -84,7 +84,7 @@ See [Local Testing Guide](docs/LOCAL_TESTING.md) for detailed instructions.
 
 ```bash
 # Install test dependencies
-pip install ".[test]"
+pip install -c constraints.txt ".[test]"
 
 # Run tests (excluding performance and explicit-run tests)
 pytest -m "not performance and not run_explicitly"

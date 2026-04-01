@@ -22,8 +22,8 @@ cd inference-endpoint
 python3.12 -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 
-# 3. Install development dependencies
-pip install -e ".[dev,test]"
+# 3. Install development dependencies (with pinned transitive deps)
+pip install -c constraints.txt -e ".[dev,test]"
 
 # 4. Install pre-commit hooks
 pre-commit install
