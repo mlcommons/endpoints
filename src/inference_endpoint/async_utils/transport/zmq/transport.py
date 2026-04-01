@@ -553,13 +553,13 @@ class _ZmqWorkerConnector(WorkerConnector):
                 loop, self.response_path, zmq_context, self.config, bind=False
             )
 
-        try:
-            await send_ready_signal(zmq_context, self.readiness_path, worker_id)
+            try:
+                await send_ready_signal(zmq_context, self.readiness_path, worker_id)
 
-            yield requests, responses
-        finally:
-            requests.close()
-            responses.close()
+                yield requests, responses
+            finally:
+                requests.close()
+                responses.close()
 
 
 # =============================================================================

@@ -82,7 +82,6 @@ async def run_benchmark(server_url, dataloader, tmp_path, rt_settings):
             sample_issuer,
             scheduler,
             name="pytest_run_benchmark",
-            max_shutdown_timeout_s=3 * 60,
         )
 
         # Step 5. Wait for the test to end.
@@ -159,6 +158,7 @@ async def _run_load_generator_full_run_url(
             )
 
 
+@pytest.mark.integration
 @pytest.mark.asyncio
 async def test_load_generator_full_run_mock_http_oracle_server(
     mock_http_oracle_server,

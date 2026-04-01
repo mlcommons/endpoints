@@ -346,10 +346,7 @@ def run_benchmark_threaded(ctx: BenchmarkContext) -> tuple[Any, ResponseCollecto
             ctx.scheduler,
             name=f"cli_benchmark_{uuid.uuid4().hex[0:8]}",
             report_dir=ctx.report_dir,
-            tokenizer_override=ctx.tokenizer,
             accuracy_datasets=ctx.accuracy_datasets,
-            max_shutdown_timeout_s=config.timeout or SystemDefaults.DEFAULT_TIMEOUT,
-            dump_events_log=True,
         )
 
         # Wait for test end with ability to interrupt
