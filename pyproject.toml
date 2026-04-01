@@ -68,7 +68,7 @@ dev = [
     # Development tools
     "pre-commit==4.2.0",
     # Profiling tools
-    "line-profiler==5.0.0",
+    "line-profiler==5.0.2",
     "Pympler==1.1",
     # Documentation
     "sphinx==8.2.3",
@@ -90,7 +90,7 @@ test = [
     "pytest-xdist==3.8.0",
     # Test utilities
     "coverage==7.13.4",
-    "line-profiler==5.0.0",
+    "line-profiler==5.0.2",
     "Pympler==1.1",
     "scipy==1.16.3",
     # HTTP server and client for mock server fixture
