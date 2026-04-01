@@ -22,10 +22,8 @@ source venv/bin/activate
 pip install .
 
 # As a developer
-pip install -e .     # Editable installation
-pip install .[dev]   # For developer tools
-pip install .[test]  # For pytest deps
-pre-commit install   # Git commit hooks
+pip install -e ".[dev,test]"
+pre-commit install
 ```
 
 ### Basic Usage
@@ -85,7 +83,7 @@ See [Local Testing Guide](docs/LOCAL_TESTING.md) for detailed instructions.
 ### Running Tests and Examples
 
 ```bash
-# Install tests/ and examples/ dependencies
+# Install test dependencies
 pip install .[test]
 
 # Run tests (excluding performance and explicit-run tests)

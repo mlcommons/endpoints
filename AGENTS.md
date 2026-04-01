@@ -347,5 +347,5 @@ Known failure modes when AI tools generate code for this project. Reference thes
 
 ### Dependency & Environment
 
-- **Adding new dependencies without justification**: AI may `pip install` or add imports for packages not in `pyproject.toml`. Any new dependency must be justified, added to the correct optional group, and pinned.
+- **Adding new dependencies without justification**: AI may `pip install` or add imports for packages not in `pyproject.toml`. Any new dependency must be justified, added to the correct optional group, and pinned to an exact version (`==`). After adding a dependency, run `pip install pip-audit && pip-audit` to verify it has no known vulnerabilities.
 - **Using `requests`/`aiohttp` for HTTP**: This project has its own HTTP client (`endpoint_client/http.py`) using `httptools`. AI defaults to `requests` or `aiohttp` — these should not appear in production code (test dependencies are fine).
