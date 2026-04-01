@@ -312,6 +312,33 @@ class QueryResult(
         else:
             return "<EMPTY>"
 
+    def with_metadata(
+        self, additional_metadata: dict[str, Any] | None
+    ) -> "QueryResult":
+        """Return a new QueryResult with merged metadata.
+
+        Args:
+            additional_metadata: Metadata to merge into existing metadata.
+                                Values in additional_metadata override existing keys.
+
+        Returns:
+            New QueryResult with merged metadata (existing + additional).
+            If additional_metadata is None or empty, returns self unchanged.
+        """
+        if not additional_metadata:
+            return self
+
+        merged = dict(self.metadata)
+        merged.update(additional_metadata)
+
+        # Manually reconstruct since msgspec has no built-in replace()
+        return QueryResult(
+            id=self.id,
+            response_output=self.response_output,
+            metadata=merged,
+            error=self.error,
+        )
+
 
 class StreamChunk(
     msgspec.Struct,

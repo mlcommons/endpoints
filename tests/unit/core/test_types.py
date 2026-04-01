@@ -912,3 +912,42 @@ class TestMixedTypeSerialization:
         assert decoded.metadata["large_int"] == 9999999999999999
         assert decoded.metadata["negative"] == -123.456
         assert decoded.metadata["zero"] == 0
+
+
+@pytest.mark.unit
+class TestQueryResultWithMetadata:
+    """Test QueryResult.with_metadata() method for metadata merging."""
+
+    def test_with_metadata_merge_behavior(self):
+        """Test that with_metadata adds new keys and overwrites existing ones."""
+        result = QueryResult(
+            id="test",
+            response_output=TextModelOutput(output="hello"),
+            metadata={"key1": "old_value", "key2": "keep_me"},
+        )
+
+        updated = result.with_metadata({"key1": "new_value", "key3": "added"})
+
+        assert updated.metadata == {
+            "key1": "new_value",  # Overwritten
+            "key2": "keep_me",  # Preserved
+            "key3": "added",  # New key
+        }
+        assert updated.id == "test"
+        assert updated.response_output == TextModelOutput(output="hello")
+
+    def test_with_metadata_none_or_empty(self):
+        """Test that None/empty dict returns self unchanged."""
+        result = QueryResult(id="test", metadata={"key1": "value1"})
+
+        assert result.with_metadata(None) is result
+        assert result.with_metadata({}) is result
+
+    def test_with_metadata_immutability(self):
+        """Test that with_metadata doesn't mutate the original."""
+        original = QueryResult(id="test", metadata={"key1": "original"})
+
+        updated = original.with_metadata({"key2": "added"})
+
+        assert original.metadata == {"key1": "original"}
+        assert updated.metadata == {"key1": "original", "key2": "added"}

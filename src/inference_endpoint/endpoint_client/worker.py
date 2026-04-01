@@ -53,23 +53,6 @@ from inference_endpoint.utils.logging import setup_logging
 logger = logging.getLogger(__name__)
 
 
-def _merge_query_metadata(
-    result: QueryResult, query_metadata: dict[str, Any] | None
-) -> QueryResult:
-    """Merge transport metadata into a QueryResult without losing adapter metadata."""
-    if not query_metadata:
-        return result
-
-    merged_metadata = dict(result.metadata)
-    merged_metadata.update(query_metadata)
-    return QueryResult(
-        id=result.id,
-        response_output=result.response_output,
-        metadata=merged_metadata,
-        error=result.error,
-    )
-
-
 # Configure multiprocessing to use 'spawn' method for worker creation
 # - 'spawn' starts a fresh Python interpreter for each worker (clean slate)
 # - Slower startup (re-import modules) vs fork's copy-on-write
@@ -399,7 +382,7 @@ class Worker:
             query_id=query.id,
             http_bytes=http_bytes,
             is_streaming=is_streaming,
-            query_metadata=dict(query.metadata),
+            query_metadata=query.metadata,
         )
 
         return req
@@ -414,9 +397,7 @@ class Worker:
         Returns True on success, False on failure (error response sent).
         """
         if self._shutdown:
-            await self._handle_error(
-                req.query_id, "Worker is shutting down", req.query_metadata
-            )
+            await self._handle_error(req, "Worker is shutting down")
             return False
 
         try:
@@ -432,7 +413,7 @@ class Worker:
             return True
 
         except Exception as e:
-            await self._handle_error(req.query_id, e, req.query_metadata)
+            await self._handle_error(req, e)
             logger.error(f"Request {req.query_id} failed: {type(e).__name__}: {e}")
             return False
 
@@ -448,9 +429,8 @@ class Worker:
                 error_body = await conn.protocol.read_body()
                 self._pool.release(conn)
                 await self._handle_error(
-                    req.query_id,
+                    req,
                     f"HTTP {status_code}: {error_body.decode('utf-8', errors='replace')}",
-                    req.query_metadata,
                 )
                 return
 
@@ -461,7 +441,7 @@ class Worker:
                 await self._handle_non_streaming_body(req)
 
         except Exception as e:
-            await self._handle_error(req.query_id, e, req.query_metadata)
+            await self._handle_error(req, e)
             logger.warning(f"Request {req.query_id} failed: {type(e).__name__}: {e}")
 
         finally:
@@ -512,7 +492,7 @@ class Worker:
 
         # Send final complete back to main rank
         self._responses.send(
-            _merge_query_metadata(accumulator.get_final_output(), req.query_metadata)
+            accumulator.get_final_output().with_metadata(req.query_metadata)
         )
         if self.http_config.record_worker_events:
             EventRecorder.record_event(
@@ -536,7 +516,7 @@ class Worker:
 
         # Decode using adapter
         result = self._adapter.decode_response(response_bytes, query_id)
-        result = _merge_query_metadata(result, req.query_metadata)
+        result = result.with_metadata(req.query_metadata)
 
         # Send result back to main rank
         self._responses.send(result)
@@ -550,9 +530,8 @@ class Worker:
 
     async def _handle_error(
         self,
-        query_id: str,
+        req: InFlightRequest,
         error: Exception | str,
-        query_metadata: dict[str, Any] | None = None,
     ) -> None:
         """Send error response for a query."""
         # Skip if we're shutting down or response socket is not available
@@ -567,9 +546,9 @@ class Worker:
         else:
             error_data = ErrorData(error_type="error", error_message=error)
         error_response = QueryResult(
-            id=query_id,
+            id=req.query_id,
             response_output=None,
-            metadata=dict(query_metadata or {}),
+            metadata=dict(req.query_metadata or {}),
             error=error_data,
         )
         self._responses.send(error_response)
@@ -577,7 +556,7 @@ class Worker:
             EventRecorder.record_event(
                 SampleEvent.ZMQ_RESPONSE_SENT,
                 time.monotonic_ns(),
-                sample_uuid=query_id,
+                sample_uuid=req.query_id,
                 assert_active=True,
             )
 
