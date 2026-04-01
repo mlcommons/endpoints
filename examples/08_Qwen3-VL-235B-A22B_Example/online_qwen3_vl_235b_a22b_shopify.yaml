@@ -18,7 +18,7 @@ datasets:
 settings:
   runtime:
     min_duration_ms: 600000 # 10 minutes
-    n_samples_to_issue: 48289 # Limit queries for testing (remove or increase for full run)
+    n_samples_to_issue: 48289 # Full dataset size for this benchmark; lower this (e.g., 1000 or 100) for quick tests, or remove for an unconstrained full run
     scheduler_random_seed: 42
     dataloader_random_seed: 42
 
