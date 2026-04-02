@@ -66,7 +66,7 @@ inference-endpoint benchmark offline \
 
 ```bash
 # Start local echo server
-python -m inference_endpoint.testing.echo_server --port 8765 &
+python3 -m inference_endpoint.testing.echo_server --port 8765 &
 
 # Test with dummy dataset (included in repo)
 inference-endpoint benchmark offline \
@@ -94,33 +94,51 @@ pytest -m "not performance and not run_explicitly"
 
 ## 📚 Documentation
 
+- [AGENTS.md](AGENTS.md) - Architecture, conventions, and AI agent guidelines
 - [CLI Quick Reference](docs/CLI_QUICK_REFERENCE.md) - Command-line interface guide
 - [Local Testing Guide](docs/LOCAL_TESTING.md) - Test with echo server
 - [Development Guide](docs/DEVELOPMENT.md) - How to contribute and develop
+- [Performance Architecture](docs/PERF_ARCHITECTURE.md) - Hot-path design and tuning
+- [Performance Tuning](docs/CLIENT_PERFORMANCE_TUNING.md) - CPU affinity and client tuning
 - [GitHub Setup Guide](docs/GITHUB_SETUP.md) - GitHub authentication and setup
+
+### Component Design Specs
+
+Each top-level component under `src/inference_endpoint/` has a corresponding spec:
+
+| Component         | Spec                                                             |
+| ----------------- | ---------------------------------------------------------------- |
+| Core types        | [docs/core/Design.md](docs/core/Design.md)                       |
+| Load generator    | [docs/load_generator/Design.md](docs/load_generator/Design.md)   |
+| Endpoint client   | [docs/endpoint_client/Design.md](docs/endpoint_client/Design.md) |
+| Metrics           | [docs/metrics/Design.md](docs/metrics/Design.md)                 |
+| Config            | [docs/config/Design.md](docs/config/Design.md)                   |
+| Async utils       | [docs/async_utils/Design.md](docs/async_utils/Design.md)         |
+| Dataset manager   | [docs/dataset_manager/Design.md](docs/dataset_manager/Design.md) |
+| Commands (CLI)    | [docs/commands/Design.md](docs/commands/Design.md)               |
+| OpenAI adapter    | [docs/openai/Design.md](docs/openai/Design.md)                   |
+| SGLang adapter    | [docs/sglang/Design.md](docs/sglang/Design.md)                   |
+| Evaluation        | [docs/evaluation/Design.md](docs/evaluation/Design.md)           |
+| Testing utilities | [docs/testing/Design.md](docs/testing/Design.md)                 |
+| Profiling         | [docs/profiling/Design.md](docs/profiling/Design.md)             |
+| Plugins           | [docs/plugins/Design.md](docs/plugins/Design.md)                 |
+| Utils             | [docs/utils/Design.md](docs/utils/Design.md)                     |
 
 ## 🎯 Architecture
 
 The system follows a modular, event-driven architecture:
 
 ```
-┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   Dataset       │    │   Load          │    │   Endpoint      │
-│   Manager       │───▶│   Generator     │───▶│   Client        │
-└─────────────────┘    └─────────────────┘    └─────────────────┘
-         │                       │                       │
-         ▼                       ▼                       ▼
-┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   Metrics       │    │   Configuration │    │   Endpoint      │
-│   Collector     │◄───│   Manager       │    │   (External)    │
-└─────────────────┘    └─────────────────┘    └─────────────────┘
+Dataset Manager ──► Load Generator ──► Endpoint Client ──► External Endpoint
+                          │
+                    Metrics Collector
+                  (EventRecorder + MetricsReporter)
 ```
 
-- **Load Generator**: Central orchestrator managing query lifecycle
-- **Dataset Manager**: Handles benchmark datasets and preprocessing
-- **Endpoint Client**: Abstract interface for endpoint communication
-- **Metrics Collector**: Performance measurement and analysis
-- **Configuration Manager**: System configuration (TBD)
+- **Dataset Manager**: Loads benchmark datasets and applies transform pipelines
+- **Load Generator**: Central orchestrator — controls timing (scheduler), issues queries, and emits sample events
+- **Endpoint Client**: Multi-process HTTP worker pool communicating over ZMQ IPC
+- **Metrics Collector**: Receives sample events from Load Generator; writes to SQLite (EventRecorder), aggregates after the run (MetricsReporter)
 
 ## Accuracy Evaluation
 
@@ -132,14 +150,13 @@ configuration. Currently, Inference Endpoints provides the following pre-defined
 - LiveCodeBench (default: lite, release_v6)
 
 However, LiveCodeBench will not work out-of-the-box and requires some additional setup. See the
-[LiveCodeBench](src/inference_endpoint/dataset_manager/predefined/livecodebench/README.md) documentation
-for details and explanations.
+[LiveCodeBench](src/inference_endpoint/evaluation/livecodebench/README.md) documentation for
+details and explanations.
 
 ## 🚧 Pending Features
 
 The following features are planned for future releases:
 
-- [ ] **Performance Tuning** - Advanced performance optimization features
 - [ ] **Submission Ruleset Integration** - Full MLPerf submission workflow support
 - [ ] **Documentation Generation and Hosting** - Sphinx-based API documentation with GitHub Pages
 
@@ -166,7 +183,8 @@ We are grateful to these communities for their contributions to LLM benchmarking
 
 ## 📄 License
 
-This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE.md) file for
+details.
 
 ## 🔗 Links
 

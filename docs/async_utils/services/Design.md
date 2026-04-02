@@ -1,5 +1,7 @@
 # System Design: EventRecord Pub-Sub
 
+> Design of the ZMQ-backed pub/sub system for `EventRecord` messages: how events are published from the benchmark path, how subscriber services receive and process them, and how process separation and async behaviour are managed.
+
 This document describes the design of the pub-sub system for **EventRecords**: how events are published from the inference/benchmark path, how subscribers receive and process them, and how process separation, latency, de-sync, and async behavior are handled.
 
 ---

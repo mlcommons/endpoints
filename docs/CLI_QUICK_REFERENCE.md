@@ -1,13 +1,6 @@
 # CLI Quick Reference
 
-## Architecture
-
-The CLI is auto-generated from Pydantic models in `config/schema.py` using
-cyclopts. schema.py is the single source of truth for both YAML configs and CLI flags.
-
-- **All schema fields** available as CLI flags on each subcommand (dotted kebab-case)
-- **Shorthand aliases** declared via `cyclopts.Parameter(alias="--flag")` on schema fields
-- **`${VAR}` interpolation** in YAML files (with `${VAR:-default}` fallback)
+Command-line reference for all `inference-endpoint` subcommands, flags, load patterns, and usage examples.
 
 ## Commands
 
@@ -109,6 +102,8 @@ Flag names shown as `--full.dotted.path --alias`. Both forms work.
 - `--endpoint-config.api-key --api-key` - API authentication
 - `--endpoint-config.api-type --api-type` - API type: openai/sglang (default: openai)
 - `--report-dir` - Report output directory
+  Note: applies to CLI-driven `benchmark offline` / `benchmark online`; `benchmark from-config`
+  does not expose a CLI override for `report_dir`, so set it in the YAML.
 - `--timeout` - Global timeout in seconds
 - `--enable-cpu-affinity / --no-cpu-affinity` - NUMA-aware CPU pinning (default: true)
 
@@ -169,7 +164,7 @@ Accuracy config is supported in both CLI and YAML:
 inference-endpoint benchmark offline \
   --endpoints URL --model M \
   --dataset perf:perf.jsonl \
-  --dataset acc:eval.jsonl,accuracy_config.eval_method=pass_at_1,accuracy_config.ground_truth=answer \
+  --dataset acc:eval.jsonl,accuracy_config.eval_method=pass_at_1,accuracy_config.ground_truth=answer,accuracy_config.extractor=boxed_math_extractor \
   --mode both
 ```
 
@@ -242,10 +237,9 @@ inference-endpoint init submission
 
 # 2. Edit submission_template.yaml (set model, datasets, ruleset, endpoint)
 
-# 3. Run (YAML mode)
+# 3. Run (YAML mode - config-driven; CLI only allows --config, --timeout, and --mode; set report-dir in the YAML)
 inference-endpoint benchmark from-config \
-  --config submission_template.yaml \
-  --report-dir official_results
+  --config submission_template.yaml
 ```
 
 ### Validate First

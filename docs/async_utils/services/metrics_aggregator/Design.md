@@ -1,5 +1,7 @@
 # Metrics Aggregator Service — Design Document
 
+> ZMQ subscriber service that computes per-sample metrics in real time from `EventRecord` messages and pushes them to a `MetricEmitter` backend (currently JSONL; extensible to Prometheus).
+
 ## Overview
 
 The metrics aggregator receives `EventRecord` messages from a ZMQ SUB socket,

@@ -1,5 +1,9 @@
 # MLPerf Inference Endpoints: HttpClient Design Document
 
+> **Note:** The canonical design reference is now [docs/endpoint_client/Design.md](endpoint_client/Design.md). This document contains deeper implementation detail on connection pool architecture and functional requirements.
+
+Detailed design for the `HTTPEndpointClient`: functional requirements, performance constraints, connection pool architecture, and worker process integration.
+
 ## Table of Contents
 
 - [1. Introduction \& Constraints](#1-introduction--constraints)

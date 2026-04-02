@@ -1,5 +1,7 @@
 # Local Testing Guide
 
+How to run and test the CLI locally using the built-in echo server and the included dummy dataset, without a real inference endpoint.
+
 ## Quick Start: Testing CLI with Echo Server
 
 ### 1. Prepare Test Environment
@@ -141,7 +143,7 @@ Cleaning up...
 inference-endpoint -v info
 
 # Generate template
-inference-endpoint init --template offline
+inference-endpoint init offline
 
 # Validate config
 inference-endpoint validate-yaml --config offline_template.yaml
@@ -302,8 +304,8 @@ inference-endpoint benchmark online \
 
 **Sample Count Control:**
 
-- Sample priority: `--num-samples` > dataset size (duration=0) > calculated (target_qps × duration)
-- Default duration: 0 (runs until dataset exhausted or max_duration reached)
+- Sample priority: `--num-samples` > dataset size (when duration=0) > calculated (target_qps × duration)
+- Default duration: 600000ms (10 minutes)
 
 **Testing & Debugging:**
 

@@ -18,6 +18,10 @@ Automatically requests code reviews on new PRs.
 
 Runs pytest test suite and generates coverage reports.
 
+### CLA Workflow (`.github/workflows/cla.yml`)
+
+Checks contributor license agreement requirements.
+
 ### PR Template (`.github/pull_request_template.md`)
 
 Standardized PR description template.
@@ -30,7 +34,7 @@ Standardized PR description template.
 
 - Branch pattern: `main`
 - ✓ Require PR before merging (1 approval)
-- ✓ Require status checks: pre-commit, test, branch-validator
+- ✓ Require status checks: pre-commit, test, cla
 - ✓ Require conversation resolution
 - ✓ Auto-delete head branches
 
@@ -72,10 +76,6 @@ Edit `.github/workflows/auto-review.yml`:
 ```javascript
 const defaultReviewers = ["username1", "username2"];
 ```
-
-### Modify Branch Patterns
-
-Edit `.github/workflows/branch-validator.yml` to add/remove allowed patterns.
 
 ### Update PR Template
 
