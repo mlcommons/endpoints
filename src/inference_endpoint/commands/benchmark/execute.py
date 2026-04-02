@@ -61,7 +61,7 @@ from inference_endpoint.config.schema import (
     TestMode,
     TestType,
 )
-from inference_endpoint.core.types import QueryResult
+from inference_endpoint.core.types import QueryResult, StreamChunk
 from inference_endpoint.dataset_manager.dataset import Dataset
 from inference_endpoint.dataset_manager.factory import DataLoaderFactory
 from inference_endpoint.endpoint_client.cpu_affinity import AffinityPlan, pin_loadgen
@@ -104,14 +104,17 @@ class ResponseCollector:
         self.count = 0
         self.pbar = pbar
 
-    def on_complete_hook(self, result: QueryResult) -> None:
+    def on_complete_hook(self, result: QueryResult | StreamChunk) -> None:
+        """Handle both QueryResult and terminal StreamChunk completions."""
         self.count += 1
-        if result.error:
-            self.errors.append(f"Sample {result.id}: {result.error}")
-            if self.pbar:
-                self.pbar.set_postfix(refresh=True, errors=len(self.errors))
-        elif self.collect_responses:
-            self.responses[result.id] = result.get_response_output_string()
+        if isinstance(result, QueryResult):
+            if result.error:
+                self.errors.append(f"Sample {result.id}: {result.error}")
+                if self.pbar:
+                    self.pbar.set_postfix(refresh=True, errors=len(self.errors))
+            elif self.collect_responses:
+                self.responses[result.id] = result.get_response_output_string()
+        # StreamChunk(is_complete=True) — no response text to collect, just count it
         if self.pbar:
             self.pbar.update(1)
 
@@ -343,9 +346,10 @@ def _build_phases(ctx: BenchmarkContext) -> list[PhaseConfig]:
         )
     )
 
-    # Accuracy phases
-    for acc_ds in ctx.accuracy_datasets:
-        ds_name = getattr(acc_ds.__class__, "DATASET_ID", acc_ds.__class__.__name__)
+    # Accuracy phases — use eval_cfg.dataset_name as phase name so it matches
+    # what Scorer._load_sample_index_map() looks up in sample_idx_map.json
+    for eval_cfg in ctx.eval_configs:
+        acc_ds = eval_cfg.dataset
         acc_settings = RuntimeSettings(
             metric_target=ctx.rt_settings.metric_target,
             reported_metrics=ctx.rt_settings.reported_metrics,
@@ -358,7 +362,9 @@ def _build_phases(ctx: BenchmarkContext) -> list[PhaseConfig]:
             rng_sample_index=ctx.rt_settings.rng_sample_index,
             load_pattern=LoadPattern(type=LoadPatternType.MAX_THROUGHPUT),
         )
-        phases.append(PhaseConfig(ds_name, acc_settings, acc_ds, PhaseType.ACCURACY))
+        phases.append(
+            PhaseConfig(eval_cfg.dataset_name, acc_settings, acc_ds, PhaseType.ACCURACY)
+        )
 
     return phases
 
@@ -410,7 +416,7 @@ async def _run_benchmark_async(
     zmq_ctx = ManagedZMQContext(io_threads=2)
 
     # Event publisher
-    pub_socket_name = f"ev_pub_{session_id[:8]}"
+    pub_socket_name = f"ev_pub_{session_id}"
     publisher = ZmqEventRecordPublisher(pub_socket_name, zmq_ctx, loop=loop)
 
     # Tmpfs directories for high-frequency writes (metrics mmap + event log)
@@ -525,7 +531,7 @@ async def _run_benchmark_async(
         except Exception as e:
             logger.warning(f"Client cleanup error: {e}")
         publisher.close()
-        launcher.wait_for_exit(timeout=10.0)
+        await asyncio.to_thread(launcher.wait_for_exit, 10.0)
         zmq_ctx.cleanup()
         pbar.close()
 
@@ -679,9 +685,13 @@ def run_benchmark(config: BenchmarkConfig, test_mode: TestMode) -> None:
         config.model_dump_json(indent=2, exclude_none=True),
     )
     ctx = setup_benchmark(config, test_mode)
+    bench: BenchmarkResult | None = None
     try:
         bench = run_benchmark_async(ctx)
+        finalize_benchmark(ctx, bench)
     except KeyboardInterrupt:
         logger.warning("Benchmark interrupted by user")
-        return
-    finalize_benchmark(ctx, bench)
+    finally:
+        # Clean up tmpfs even on crash/interrupt
+        if bench and bench.tmpfs_dir.exists():
+            shutil.rmtree(bench.tmpfs_dir, ignore_errors=True)

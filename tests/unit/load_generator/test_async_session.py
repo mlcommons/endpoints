@@ -457,7 +457,11 @@ class TestBenchmarkSession:
 
     @pytest.mark.asyncio
     async def test_on_sample_complete_called_for_stream_chunk_complete(self):
-        """Bug #4: on_sample_complete must fire for StreamChunk(is_complete=True)."""
+        """Bug #4: on_sample_complete must fire for StreamChunk(is_complete=True).
+
+        Also verifies the callback doesn't crash when receiving StreamChunk
+        (Bug #1 round 2: ResponseCollector.on_complete_hook must handle both types).
+        """
         loop = asyncio.get_running_loop()
         publisher = FakePublisher()
 
@@ -465,10 +469,16 @@ class TestBenchmarkSession:
         issuer._loop = loop
         issuer._auto_respond = False
 
+        # Use a realistic callback that accesses type-specific attributes
         completed_ids: list[str] = []
+        errors: list[str] = []
 
         def on_complete(result: QueryResult | StreamChunk) -> None:
             completed_ids.append(result.id)
+            # This is what ResponseCollector does — must not crash for StreamChunk
+            if isinstance(result, QueryResult):
+                if result.error:
+                    errors.append(result.id)
 
         session = BenchmarkSession(
             issuer, publisher, loop, on_sample_complete=on_complete
@@ -490,8 +500,8 @@ class TestBenchmarkSession:
         asyncio.create_task(inject())
         await asyncio.wait_for(session.run(phases), timeout=5.0)
 
-        # on_sample_complete should have been called for the terminal StreamChunk
         assert len(completed_ids) == 1
+        assert len(errors) == 0
 
     @pytest.mark.asyncio
     async def test_failed_query_published_as_error_event(self):

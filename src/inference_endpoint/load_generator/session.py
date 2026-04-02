@@ -172,6 +172,10 @@ class PhaseIssuer:
         """Load data, build Query, publish ISSUED, send to endpoint.
 
         Returns query_id on success, None if session is stopping.
+
+        Note: load_sample() runs synchronously before the ISSUED timestamp.
+        For accurate timing, datasets MUST be pre-loaded into memory.
+        Disk-backed datasets will inflate timing and delay subsequent issues.
         """
         if self._stop_check():
             return None
@@ -214,7 +218,7 @@ class BenchmarkSession:
         issuer: SampleIssuer,
         event_publisher: EventPublisher,
         loop: asyncio.AbstractEventLoop,
-        on_sample_complete: Callable[[QueryResult], None] | None = None,
+        on_sample_complete: Callable[[QueryResult | StreamChunk], None] | None = None,
         session_id: str | None = None,
     ):
         self._issuer = issuer
@@ -236,9 +240,11 @@ class BenchmarkSession:
         """Signal early termination. Safe to call from signal handler.
 
         Cancels the running strategy task to unblock strategies that may be
-        waiting on semaphores or other async primitives.
+        waiting on semaphores or other async primitives. Also sets the drain
+        event to unblock _drain_inflight if it's waiting for responses.
         """
         self._stop_requested = True
+        self._drain_event.set()
         if self._strategy_task and not self._strategy_task.done():
             self._strategy_task.cancel()
 

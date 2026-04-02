@@ -36,7 +36,7 @@ try:
 except ImportError:
     websocket = None
 
-from ..core.record import SampleEventType
+from ..core.record import EventRecord, EventType, SampleEventType
 from ..dataset_manager.dataset import Dataset
 from ..dataset_manager.predefined.shopify_product_catalogue import ProductMetadata
 from .extractor import Extractor, PythonCodeExtractor
@@ -123,22 +123,30 @@ class Scorer(ABC):
             return d[self.dataset_name]  # Implicitly raises KeyError
 
     def get_outputs(self):
-        # TODO: Currently, the outputs are only saved in the events.jsonl file, which is quite
-        # large, and only saved optionally. Later, we should move to saving the outputs in a
-        # separate file for easier compute.
+        """Read COMPLETE events from events.jsonl and extract response text.
+
+        The EventLoggerService writes EventRecord objects serialized via msgspec.
+        We decode them using the EventRecord decoder and extract the response
+        text from TextModelOutput data.
+        """
         events_log_path = self.report_dir / "events.jsonl"
         if not events_log_path.exists():
             raise FileNotFoundError(f"Events log file not found at {events_log_path}")
 
-        outputs = []
+        decoder = msgspec.json.Decoder(type=EventRecord, dec_hook=EventType.decode_hook)
+        outputs: list[dict[str, str]] = []
         with events_log_path.open("r") as f:
             for line in f:
-                event = msgspec.json.decode(line.strip())
-                if event["event_type"] == SampleEventType.COMPLETE.value:
-                    outputs.append(event)
-        df = pd.DataFrame(outputs, columns=["sample_uuid", "value"])
-        df.rename(columns={"value": "output"}, inplace=True)
-        return df
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                record = decoder.decode(stripped)
+                if record.event_type == SampleEventType.COMPLETE:
+                    output_text = str(record.data) if record.data is not None else ""
+                    outputs.append(
+                        {"sample_uuid": record.sample_uuid, "output": output_text}
+                    )
+        return pd.DataFrame(outputs)
 
     def match_sample_index(self, row: pd.Series) -> pd.Series:
         # Pandas Apply function to create a new 'sample_index' column
