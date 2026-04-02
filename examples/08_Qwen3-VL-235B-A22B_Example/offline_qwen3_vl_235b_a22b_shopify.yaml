@@ -14,10 +14,8 @@ model_params:
 datasets:
   - name: shopify_product_catalogue::q3vl
     type: "performance"
-    force: true
   - name: shopify_product_catalogue::q3vl
     type: "accuracy"
-    force: true
     accuracy_config:
       eval_method: "shopify_category_f1"
       ground_truth: "ground_truth_category"
@@ -36,14 +34,11 @@ settings:
 
   client:
     num_workers: 2
-    # Transport buffer sizes. Default 16MB; increase for large multimodal payloads.
     transport:
       type: zmq
       recv_buffer_size: 16777216
       send_buffer_size: 16777216
-    # Cap connections to avoid overwhelming server. Default -1 uses ~25k (ephemeral ports),
-    # causing warmup failures and connection timeouts. 256-512 is typical for vLLM.
-    max_connections: 512
+    max_connections: 1000
     # Increase timeout for slow worker startup (spawn, imports). Default 40s may be too short.
     worker_initialization_timeout: 120
 
@@ -57,4 +52,4 @@ endpoint_config:
     - "http://localhost:8000"
   api_key: null
 
-report_dir: results/qwen3_vl_235b_a22b_shopify_benchmark_mlperf/
+report_dir: results/qwen3_vl_235b_a22b_shopify_benchmark_offline/
