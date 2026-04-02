@@ -15,10 +15,10 @@ The echo server is included for local testing and mirrors requests back as respo
 
 ```bash
 # Terminal 1: Start echo server on port 8765
-python -m inference_endpoint.testing.echo_server --port 8765
+python3 -m inference_endpoint.testing.echo_server --port 8765
 
 # Or use default port 12345
-python -m inference_endpoint.testing.echo_server
+python3 -m inference_endpoint.testing.echo_server
 ```
 
 The server will log:
@@ -159,8 +159,8 @@ inference-endpoint benchmark offline \
 ### 6. View Results
 
 When run with `--report-dir`, a directory is created containing benchmark artifacts such as
-`result_summary.json`, `runtime_settings.json`, `sample_idx_map.json`, `report.txt`, and, when
-enabled, `events.jsonl`.
+`result_summary.json`, `runtime_settings.json`, `sample_idx_map.json`, `report.txt`, and
+`events.jsonl`.
 
 ### 7. Stop the Echo Server
 
@@ -174,10 +174,10 @@ pkill -f echo_server
 
 ```bash
 # Custom host and port
-python -m inference_endpoint.testing.echo_server --host 0.0.0.0 --port 9000
+python3 -m inference_endpoint.testing.echo_server --host 0.0.0.0 --port 9000
 
 # Check help
-python -m inference_endpoint.testing.echo_server --help
+python3 -m inference_endpoint.testing.echo_server --help
 ```
 
 ## Request Format
@@ -190,7 +190,7 @@ The echo server expects OpenAI-compatible format but simplifies it:
 {
   "prompt": "Your query text",
   "model": "model-name",
-  "max_tokens": 50,
+  "max_completion_tokens": 50,
   "stream": false
 }
 ```
@@ -210,7 +210,7 @@ Error: Connection failed
 ### Validation Errors
 
 ```
-Error: prompt not found in json_value
+Error: prompt not found in query.data
 ```
 
 **Solution:** Use `"prompt"` format in Query data, not `"messages"` (client converts it)
@@ -229,7 +229,7 @@ Error: Timeout (>60s)
 
 ```bash
 # 1. Start echo server
-python -m inference_endpoint.testing.echo_server --port 8000 &
+python3 -m inference_endpoint.testing.echo_server --port 8000 &
 
 # 2. Generate fresh dataset if needed
 python scripts/create_dummy_dataset.py
