@@ -33,7 +33,8 @@ python -m inference_endpoint.testing.echo_server --host 0.0.0.0 --port 9000
 ```
 
 The server implements the OpenAI Chat Completions API and accepts the standard `messages` request
-shape. Responses are returned with a configurable delay to simulate latency.
+shape. It is intended for functional testing of the request/response path, not for configurable
+latency simulation.
 
 ### `max_throughput_server.py`
 

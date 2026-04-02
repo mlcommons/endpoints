@@ -158,7 +158,9 @@ inference-endpoint benchmark offline \
 
 ### 6. View Results
 
-When run with `--report-dir`, a directory is created containing benchmark metrics files (JSON/CSV) with detailed QPS, latency, TTFT, and TPOT data.
+When run with `--report-dir`, a directory is created containing benchmark artifacts such as
+`result_summary.json`, `runtime_settings.json`, `sample_idx_map.json`, `report.txt`, and, when
+enabled, `events.jsonl`.
 
 ### 7. Stop the Echo Server
 

@@ -118,6 +118,7 @@ class TestQuery:
         assert query.data["prompt"] == "Test"
         assert query.data["model"] == "test-model"
 
+    @pytest.mark.unit
     @pytest.mark.asyncio(mode="strict")
     async def test_async_operation(self):
         """Test async operations."""

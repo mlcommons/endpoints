@@ -27,16 +27,16 @@ already-parsed models rather than raw `argparse.Namespace` objects.
 
 ## Command Map
 
-| Subcommand              | Entry point                 | Execution module                    | Status                    |
-| ----------------------- | --------------------------- | ----------------------------------- | ------------------------- |
-| `benchmark offline`     | `commands/benchmark/cli.py` | `commands/benchmark/execute.py`     | Implemented               |
-| `benchmark online`      | `commands/benchmark/cli.py` | `commands/benchmark/execute.py`     | Implemented               |
-| `benchmark from-config` | `commands/benchmark/cli.py` | `commands/benchmark/execute.py`     | Implemented               |
-| `probe`                 | `main.py`                   | `commands/probe.py`                 | Implemented               |
-| `info`                  | `main.py`                   | `commands/info.py`                  | Implemented               |
-| `validate-yaml`         | `main.py`                   | `commands/validate.py`              | Implemented               |
-| `init`                  | `main.py`                   | `commands/init.py`                  | Implemented               |
-| `eval`                  | `main.py`                   | inline stub (`NotImplementedError`) | Reserved, not implemented |
+| Subcommand              | Entry point                 | Execution module                | Status                    |
+| ----------------------- | --------------------------- | ------------------------------- | ------------------------- |
+| `benchmark offline`     | `commands/benchmark/cli.py` | `commands/benchmark/execute.py` | Implemented               |
+| `benchmark online`      | `commands/benchmark/cli.py` | `commands/benchmark/execute.py` | Implemented               |
+| `benchmark from-config` | `commands/benchmark/cli.py` | `commands/benchmark/execute.py` | Implemented               |
+| `probe`                 | `main.py`                   | `commands/probe.py`             | Implemented               |
+| `info`                  | `main.py`                   | `commands/info.py`              | Implemented               |
+| `validate-yaml`         | `main.py`                   | `commands/validate.py`          | Implemented               |
+| `init`                  | `main.py`                   | `commands/init.py`              | Implemented               |
+| `eval`                  | `main.py`                   | inline stub (`CLIError`)        | Reserved, not implemented |
 
 ## CLI Structure
 
@@ -134,7 +134,8 @@ topology visible in one place without introducing extra wrapper files.
 
 **`eval` is intentionally reserved**
 
-The `eval` command is exposed in help output but still raises `NotImplementedError`. The benchmark
+The `eval` command is exposed in help output but still raises `CLIError` with a tracking issue
+link. The benchmark
 path already supports dataset-specific accuracy evaluation, but the standalone `eval` command has
 not been implemented yet.
 
