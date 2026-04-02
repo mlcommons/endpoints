@@ -11,6 +11,7 @@ repos:
       - id: check-merge-conflict
       - id: debug-statements
 
+  # TODO: sync rev with ruff version in pyproject.toml (currently 0.15.8)
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.3.3
     hooks:

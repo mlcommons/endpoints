@@ -31,10 +31,8 @@ To add accuracy evaluation, include an accuracy dataset alongside the performanc
 datasets:
   - name: shopify_product_catalogue::q3vl
     type: "performance"
-    force: true
   - name: shopify_product_catalogue::q3vl
     type: "accuracy"
-    force: true
     accuracy_config:
       eval_method: "shopify_category_f1"
       ground_truth: "ground_truth_category"
@@ -70,10 +68,16 @@ docker run --runtime nvidia --gpus all \
   --limit-mm-per-prompt.video 0
 ```
 
-Run the benchmark:
+Two benchmark scenarios are provided as examples: **offline** (maximum throughput, all queries issued at once) and **online** (sustained QPS load with latency tracking, targeting the MLPerf server scenario).
+
+Run the **offline** benchmark:
 
 ```
-inference-endpoint benchmark from-config -c examples/08_Qwen3-VL-235B-A22B_Example/offline_qwen3_vl_235b_a22b_shopify.yaml --timeout 600
+inference-endpoint benchmark from-config -c examples/08_Qwen3-VL-235B-A22B_Example/offline_qwen3_vl_235b_a22b_shopify.yaml
 ```
 
-This config uses `test_mode: "acc"` for accuracy-only (hierarchical F1). Change to `"both"` for perf+acc or `"perf"` for perf-only.
+Run the **online** benchmark:
+
+```
+inference-endpoint benchmark from-config -c examples/08_Qwen3-VL-235B-A22B_Example/online_qwen3_vl_235b_a22b_shopify.yaml
+```

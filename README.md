@@ -21,7 +21,7 @@ source venv/bin/activate
 # As a user
 pip install .
 
-# As a developer (with hash-verified transitive deps)
+# As a developer (with development and test extras)
 pip install -e ".[dev,test]"
 pre-commit install
 ```

@@ -15,15 +15,21 @@ python download_cnndm.py --save-dir data --calibration-ids-file calibration-list
 
 ## Launch the server
 
-The following environment variables are used by the commands below to make the scripts easier to run
+The following environment variables are used by the commands below to make the scripts easier to run:
 
 ```
 export HF_TOKEN=<your Hugging Face token>
-export HF_HOME=<Path to your hf_home, usually /USERNAME/.cache/huggingface>
+export HF_HOME=<Path to your hf_home, e.g. ~/.cache/huggingface>
 export MODEL_NAME=<model to run, for instance meta-llama/Llama-3.1-8B-Instruct>
 ```
 
-It is convenient to download the model prior to launch so that the container can reuse the model instead of having to download it post-launch. This can be done via `hf download $MODEL_NAME`. The models downloaded can be verified via `hf cache scan`
+Download the model to the local HuggingFace cache before launching the container. This allows the container to reuse the already-downloaded weights via the volume mount rather than downloading them at startup:
+
+```
+hf download $MODEL_NAME
+```
+
+The cached models can be verified with `hf cache scan`.
 
 ### [vLLM](https://github.com/vllm-project/vllm)
 

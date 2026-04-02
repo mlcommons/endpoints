@@ -16,13 +16,16 @@ datasets:
     type: "performance"
     path: "examples/04_GPTOSS120B_Example/data/perf_eval_ref.parquet"
     parser:
-      input_tokens: "input_tokens"
-  - name: "livecodebench::gptoss"
-    type: "accuracy"
-    accuracy_config:
-      eval_method: "code_bench_scorer"
-      extractor: "python_code_extractor"
-      num_repeats: 3
+      # input_tokens: "input_tokens"
+      prompt: "prompt"
+  # livecodebench not included: vLLM chat completions endpoint does not support
+  # pre-tokenized input required by this scorer. Use sglang_gptoss_120b_example.yaml instead.
+  # - name: "livecodebench::gptoss"
+  #   type: "accuracy"
+  #   accuracy_config:
+  #     eval_method: "code_bench_scorer"
+  #     extractor: "python_code_extractor"
+  #     num_repeats: 3
   - name: "aime25::gptoss"
     type: "accuracy"
     accuracy_config:
@@ -61,8 +64,8 @@ metrics:
 
 endpoint_config:
   endpoints:
-    - "http://localhost:30000"
+    - "http://localhost:8000"
   api_key: null
-  api_type: "sglang"
+  api_type: "openai"
 
-report_dir: "results/sglang_gptoss_120b_benchmark_full/"
+report_dir: "results/vllm_gptoss_120b_benchmark_full/"
