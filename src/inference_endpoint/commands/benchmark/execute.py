@@ -36,10 +36,18 @@ from typing import Any
 from urllib.parse import urljoin
 
 from tqdm import tqdm
-from transformers import AutoTokenizer
 from transformers.utils import logging as transformers_logging
 
 from inference_endpoint.async_utils.loop_manager import LoopManager
+from inference_endpoint.async_utils.services.launcher import (
+    ServiceConfig,
+    ServiceLauncher,
+)
+from inference_endpoint.async_utils.services.metrics_aggregator.kv_store import (
+    BasicKVStoreReader,
+)
+from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
+from inference_endpoint.async_utils.transport.zmq.pubsub import ZmqEventRecordPublisher
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import (
     APIType,
@@ -51,7 +59,6 @@ from inference_endpoint.config.schema import (
     TestMode,
     TestType,
 )
-from inference_endpoint.core.record import EventRecord
 from inference_endpoint.core.types import QueryResult
 from inference_endpoint.dataset_manager.dataset import Dataset
 from inference_endpoint.dataset_manager.factory import DataLoaderFactory
@@ -71,6 +78,7 @@ from inference_endpoint.load_generator.session import (
     PhaseType,
     SessionResult,
 )
+from inference_endpoint.metrics.report import Report
 
 transformers_logging.set_verbosity_error()
 
@@ -127,7 +135,7 @@ class BenchmarkContext:
     config: BenchmarkConfig
     test_mode: TestMode
     report_dir: Path
-    tokenizer: AutoTokenizer | None
+    tokenizer_name: str | None
     dataloader: Dataset
     rt_settings: RuntimeSettings
     total_samples: int
@@ -148,17 +156,39 @@ class BenchmarkContext:
         return self.config.model_params.streaming == StreamingMode.ON
 
 
-def _load_tokenizer(model_name: str) -> AutoTokenizer | None:
-    """Load HuggingFace tokenizer, warn on failure."""
+def _check_tokenizer_exists(model_name: str) -> bool:
+    """Check if a HuggingFace tokenizer exists for the model (API only, no download).
+
+    Returns True if the model repo exists and has tokenizer files, False otherwise.
+    The actual tokenizer is loaded later by the MetricsAggregator subprocess and
+    by Harmony transforms (each loads their own instance as needed).
+    """
     try:
-        logger.info(f"Loading tokenizer for model: {model_name}")
-        tokenizer = AutoTokenizer.from_pretrained(model_name)
-        logger.info("Tokenizer loaded successfully")
-        return tokenizer
+        from huggingface_hub import model_info
+
+        info = model_info(model_name)
+        # Check for tokenizer files in the repo
+        siblings = {s.rfilename for s in (info.siblings or [])}
+        has_tokenizer = (
+            "tokenizer_config.json" in siblings or "tokenizer.json" in siblings
+        )
+        if has_tokenizer:
+            logger.info(f"Tokenizer available for model: {model_name}")
+        else:
+            logger.warning(f"Model {model_name} found but has no tokenizer files")
+        return has_tokenizer
+    except ImportError:
+        # huggingface_hub not installed — fall back to assuming it works
+        logger.info(
+            f"huggingface_hub not installed, assuming tokenizer exists for {model_name}"
+        )
+        return True
     except Exception as e:
-        logger.warning(f"Failed to load tokenizer for {model_name}: {e}")
-        logger.warning("Continuing without tokenizer (report metrics may be limited)")
-        return None
+        logger.warning(f"Could not verify tokenizer for {model_name}: {e}")
+        logger.warning(
+            "Continuing without tokenizer (ISL/OSL/TPOT metrics will be unavailable)"
+        )
+        return False
 
 
 def _load_datasets(
@@ -247,8 +277,9 @@ def setup_benchmark(config: BenchmarkConfig, test_mode: TestMode) -> BenchmarkCo
     report_dir.mkdir(parents=True, exist_ok=True)
     config.to_yaml_file(report_dir / "config.yaml")
 
-    # Tokenizer (model name validated by BenchmarkConfig._resolve_and_validate)
-    tokenizer = _load_tokenizer(config.model_params.name)
+    # Tokenizer check (light API call, no download)
+    model_name = config.model_params.name
+    tokenizer_name = model_name if _check_tokenizer_exists(model_name) else None
 
     # Streaming
     logger.info(
@@ -279,7 +310,7 @@ def setup_benchmark(config: BenchmarkConfig, test_mode: TestMode) -> BenchmarkCo
         config=config,
         test_mode=test_mode,
         report_dir=report_dir,
-        tokenizer=tokenizer,
+        tokenizer_name=tokenizer_name,
         dataloader=dataloader,
         rt_settings=rt_settings,
         total_samples=total_samples,
@@ -320,12 +351,40 @@ def _build_phases(ctx: BenchmarkContext) -> list[PhaseConfig]:
     return phases
 
 
+def _setup_kv_reader(
+    metrics_dir: Path,
+    streaming: bool,
+) -> BasicKVStoreReader:
+    """Create a KVStoreReader pre-registered with all metric keys."""
+    reader = BasicKVStoreReader(metrics_dir)
+    # Counter keys (from MetricCounterKey enum)
+    for key in [
+        "total_samples_issued",
+        "total_samples_completed",
+        "total_samples_failed",
+        "tracked_samples_issued",
+        "tracked_samples_completed",
+        "tracked_duration_ns",
+        "total_duration_ns",
+    ]:
+        reader.register_key(key, "counter")
+    # Series keys (from MetricSeriesKey enum)
+    for key in ["isl", "osl", "sample_latency_ns"]:
+        reader.register_key(key, "series")
+    reader.register_key("tpot_ns", "series", dtype=float)
+    if streaming:
+        for key in ["ttft_ns", "chunk_delta_ns"]:
+            reader.register_key(key, "series")
+    return reader
+
+
 async def _run_benchmark_async(
     ctx: BenchmarkContext,
     loop: asyncio.AbstractEventLoop,
-) -> tuple[SessionResult, ResponseCollector]:
-    """Run async benchmark session. Returns (SessionResult, ResponseCollector)."""
+) -> tuple[SessionResult, ResponseCollector, Report | None]:
+    """Run async benchmark session. Returns (SessionResult, ResponseCollector, Report)."""
     config = ctx.config
+    session_id = f"cli_benchmark_{uuid.uuid4().hex[:8]}"
 
     # Progress bar + response collector
     pbar = tqdm(
@@ -335,9 +394,49 @@ async def _run_benchmark_async(
     )
     collector = ResponseCollector(collect_responses=ctx.collect_responses, pbar=pbar)
 
-    # Create endpoint client on the shared loop (async factory avoids deadlock)
+    # ZMQ context for event publishing + service launcher
+    zmq_ctx = ManagedZMQContext(io_threads=2)
+
+    # Event publisher
+    pub_socket_name = f"ev_pub_{session_id[:8]}"
+    publisher = ZmqEventRecordPublisher(pub_socket_name, zmq_ctx, loop=loop)
+
+    # Metrics directory for KVStore (mmap-backed, on /dev/shm if available)
+    metrics_dir = ctx.report_dir / "metrics"
+    metrics_dir.mkdir(parents=True, exist_ok=True)
+
+    # Launch MetricsAggregator service subprocess
+    launcher = ServiceLauncher(zmq_ctx)
+    assert (
+        zmq_ctx.socket_dir is not None
+    ), "ZMQ socket_dir must be set after publisher bind"
+    aggregator_args: list[str] = [
+        "--socket-dir",
+        zmq_ctx.socket_dir,
+        "--socket-name",
+        pub_socket_name,
+        "--metrics-dir",
+        str(metrics_dir),
+    ]
+    if ctx.enable_streaming:
+        aggregator_args.append("--streaming")
+    if ctx.tokenizer_name is not None:
+        aggregator_args.extend(["--tokenizer", ctx.tokenizer_name])
+
+    await launcher.launch(
+        [
+            ServiceConfig(
+                module="inference_endpoint.async_utils.services.metrics_aggregator",
+                args=aggregator_args,
+            ),
+        ],
+        timeout=30.0,
+    )
+
+    # Create endpoint client on the shared loop
     endpoints = config.endpoint_config.endpoints
     logger.info(f"Connecting: {endpoints}")
+    http_client: HTTPEndpointClient | None = None
     try:
         api_type: APIType = config.endpoint_config.api_type
         http_config = config.settings.client.with_updates(
@@ -351,45 +450,56 @@ async def _run_benchmark_async(
         issuer = HttpClientSampleIssuer(http_client)
     except Exception as e:
         pbar.close()
+        publisher.close()
+        launcher.kill_all()
+        zmq_ctx.cleanup()
         raise SetupError(f"Failed to connect to endpoint: {e}") from e
 
     # Create session
-    # TODO: Wire EventPublisher when ServiceLauncher integration is complete.
-    # For now, use a no-op publisher that discards events.
-    class _NoOpPublisher:
-        def publish(self, event_record: EventRecord) -> None:
-            pass
-
     session = BenchmarkSession(
         issuer=issuer,
-        event_publisher=_NoOpPublisher(),
+        event_publisher=publisher,
         loop=loop,
         on_sample_complete=collector.on_complete_hook,
-        session_id=f"cli_benchmark_{uuid.uuid4().hex[:8]}",
+        session_id=session_id,
     )
 
     phases = _build_phases(ctx)
+    report: Report | None = None
 
     loop.add_signal_handler(signal.SIGINT, session.stop)
     try:
         result = await session.run(phases)
+
+        # Build report from KVStore metrics
+        try:
+            kv_reader = _setup_kv_reader(metrics_dir, ctx.enable_streaming)
+            report = Report.from_kv_reader(kv_reader)
+            kv_reader.close()
+        except Exception as e:
+            logger.warning(f"Failed to build report from metrics: {e}")
+
     except Exception as e:
         raise ExecutionError(f"Benchmark execution failed: {e}") from e
     finally:
         loop.remove_signal_handler(signal.SIGINT)
         logger.info("Cleaning up...")
         try:
-            await http_client.shutdown_async()
+            if http_client:
+                await http_client.shutdown_async()
         except Exception as e:
             logger.warning(f"Client cleanup error: {e}")
+        publisher.close()
+        launcher.wait_for_exit(timeout=10.0)
+        zmq_ctx.cleanup()
         pbar.close()
 
-    return result, collector
+    return result, collector, report
 
 
 def run_benchmark_async(
     ctx: BenchmarkContext,
-) -> tuple[SessionResult, ResponseCollector]:
+) -> tuple[SessionResult, ResponseCollector, Report | None]:
     """Run async benchmark. Sync entry point — drives the event loop."""
     loop = LoopManager().default_loop
     return loop.run_until_complete(_run_benchmark_async(ctx, loop))
@@ -399,9 +509,15 @@ def finalize_benchmark(
     ctx: BenchmarkContext,
     result: SessionResult,
     collector: ResponseCollector,
+    report: Report | None = None,
 ) -> None:
     """Score accuracy, aggregate results, write JSON."""
     config = ctx.config
+
+    # Display report if available (from MetricsAggregator KVStore)
+    if report is not None:
+        report.display(fn=lambda s: logger.info(s), summary_only=True)
+        report.to_json(save_to=ctx.report_dir / "result_summary.json")
 
     # Accuracy scoring
     accuracy_scores: dict[str, Any] = {}
@@ -425,23 +541,27 @@ def finalize_benchmark(
         }
         logger.info(f"Score for {eval_cfg.dataset_name}: {score} ({n_repeats} repeats)")
 
-    # Report metrics scoped to the performance phase
-    perf = result.perf_results[0] if result.perf_results else None
-    if perf:
-        perf_elapsed = (perf.end_time_ns - perf.start_time_ns) / 1e9
-        total_issued = perf.issued_count
+    # Report metrics: prefer Report from KVStore, fall back to SessionResult
+    if report is not None and report.duration_ns is not None:
+        perf_elapsed = report.duration_ns / 1e9
+        total_issued = report.n_samples_issued
+        n_errors = report.n_samples_failed
+        qps = report.qps() or 0.0
     else:
-        perf_elapsed = (result.end_time_ns - result.start_time_ns) / 1e9
-        total_issued = 0
-
-    # Count errors only from perf phase queries
-    perf_uuids = perf.uuid_to_index.keys() if perf else set()
-    n_errors = sum(1 for e in collector.errors if any(uid in e for uid in perf_uuids))
+        perf = result.perf_results[0] if result.perf_results else None
+        if perf:
+            perf_elapsed = (perf.end_time_ns - perf.start_time_ns) / 1e9
+            total_issued = perf.issued_count
+        else:
+            perf_elapsed = (result.end_time_ns - result.start_time_ns) / 1e9
+            total_issued = 0
+        n_errors = len(collector.errors)
+        qps = total_issued / perf_elapsed if perf_elapsed > 0 else 0.0
 
     logger.info(f"Completed in {perf_elapsed:.1f}s")
     logger.info(f"Results: {total_issued - n_errors}/{total_issued} successful")
-    if perf_elapsed > 0 and total_issued > 0:
-        logger.info(f"Estimated QPS: {total_issued / perf_elapsed:.1f}")
+    if qps > 0:
+        logger.info(f"Estimated QPS: {qps:.1f}")
 
     if collector.errors:
         logger.warning(f"Errors: {len(collector.errors)}")
@@ -463,7 +583,7 @@ def finalize_benchmark(
                 "successful": total_issued - n_errors,
                 "failed": n_errors,
                 "elapsed_time": perf_elapsed,
-                "qps": total_issued / perf_elapsed if perf_elapsed > 0 else 0,
+                "qps": qps,
             },
         }
         if accuracy_scores:
@@ -490,8 +610,8 @@ def run_benchmark(config: BenchmarkConfig, test_mode: TestMode) -> None:
     )
     ctx = setup_benchmark(config, test_mode)
     try:
-        result, collector = run_benchmark_async(ctx)
+        result, collector, report = run_benchmark_async(ctx)
     except KeyboardInterrupt:
         logger.warning("Benchmark interrupted by user")
         return
-    finalize_benchmark(ctx, result, collector)
+    finalize_benchmark(ctx, result, collector, report)
