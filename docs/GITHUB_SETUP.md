@@ -34,7 +34,7 @@ Standardized PR description template.
 
 - Branch pattern: `main`
 - ✓ Require PR before merging (1 approval)
-- ✓ Require status checks: pre-commit, test, cla
+- ✓ Require status checks: Pre-commit, Tests, cla-bot
 - ✓ Require conversation resolution
 - ✓ Auto-delete head branches
 

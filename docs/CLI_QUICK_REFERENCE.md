@@ -103,7 +103,8 @@ Flag names shown as `--full.dotted.path --alias`. Both forms work.
 - `--endpoint-config.api-type --api-type` - API type: openai/sglang (default: openai)
 - `--report-dir` - Report output directory
   Note: applies to CLI-driven `benchmark offline` / `benchmark online`; `benchmark from-config`
-  does not expose a CLI override for `report_dir`, so set it in the YAML.
+  does not expose a CLI override for `report_dir`. Set it in the YAML only if you need to control
+  the output location; otherwise a default report directory is used.
 - `--timeout` - Global timeout in seconds
 - `--enable-cpu-affinity / --no-cpu-affinity` - NUMA-aware CPU pinning (default: true)
 
@@ -237,7 +238,7 @@ inference-endpoint init submission
 
 # 2. Edit submission_template.yaml (set model, datasets, ruleset, endpoint)
 
-# 3. Run (YAML mode - config-driven; CLI only allows --config, --timeout, and --mode; set report-dir in the YAML)
+# 3. Run (YAML mode - config-driven; CLI only allows --config, --timeout, and --mode; report_dir is configured in YAML if desired, otherwise a default is used and cannot be overridden via CLI)
 inference-endpoint benchmark from-config \
   --config submission_template.yaml
 ```

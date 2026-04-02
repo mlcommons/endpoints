@@ -38,7 +38,7 @@ scheduler. It is useful for diagnosing whether performance bottlenecks are in th
 or in the scheduling/coordination layer. It can be run directly:
 
 ```bash
-python -m inference_endpoint.utils.benchmark_httpclient --endpoint URL --workers 4
+python3 -m inference_endpoint.utils.benchmark_httpclient --endpoint URL --workers 4
 ```
 
 ## Integration Points

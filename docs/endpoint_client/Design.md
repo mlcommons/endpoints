@@ -12,6 +12,11 @@
 load generator. It uses a **multi-process worker pool** communicating over ZMQ IPC to bypass the
 GIL and sustain high request rates.
 
+This file is the primary component-level design spec for the endpoint client. For deeper
+implementation detail on the connection pool, worker internals, SSE handling, and performance
+analysis, see the companion deep-dive document
+[ENDPOINT_CLIENT.md](../ENDPOINT_CLIENT.md).
+
 For detailed CPU affinity configuration and tuning parameters, see
 [CLIENT_PERFORMANCE_TUNING.md](../CLIENT_PERFORMANCE_TUNING.md) and
 [PERF_ARCHITECTURE.md](../PERF_ARCHITECTURE.md).
