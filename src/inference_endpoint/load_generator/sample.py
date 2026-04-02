@@ -99,7 +99,14 @@ class ConversationSample(Sample):
         conversation_state: Reference to ConversationState (set by LoadGenerator).
     """
 
-    __slots__ = ["uuid", "data", "conversation_id", "turn_number", "conversation_state"]
+    __slots__ = [
+        "uuid",
+        "data",
+        "conversation_id",
+        "turn_number",
+        "conversation_state",
+        "dataset_assistant_response",
+    ]
 
     def __init__(
         self,
@@ -107,6 +114,7 @@ class ConversationSample(Sample):
         conversation_id: str,
         turn_number: int,
         sample_uuid: str | None = None,
+        dataset_assistant_response: str | None = None,
     ):
         """Initialize conversation sample with metadata.
 
@@ -115,11 +123,14 @@ class ConversationSample(Sample):
             conversation_id: Unique identifier for the conversation.
             turn_number: Turn number within the conversation (1-indexed).
             sample_uuid: Optional UUID to use instead of generating a new one.
+            dataset_assistant_response: Reference assistant response from dataset for
+                building conversation history in subsequent turns.
         """
         super().__init__(data, sample_uuid=sample_uuid)
         self.conversation_id = conversation_id
         self.turn_number = turn_number
         self.conversation_state = None  # Set by LoadGenerator
+        self.dataset_assistant_response = dataset_assistant_response
 
 
 class _SampleEventHandler:
@@ -144,6 +155,7 @@ class _SampleEventHandler:
         "non_first_chunk_hooks",
         "complete_hooks",
         "conversation_manager",
+        "use_dataset_history",
     ]
 
     SINGLETON = None
@@ -163,14 +175,20 @@ class _SampleEventHandler:
         self.non_first_chunk_hooks = []
         self.complete_hooks = []
         self.conversation_manager = None
+        self.use_dataset_history = True
 
-    def set_conversation_manager(self, manager):
+    def set_conversation_manager(self, manager, use_dataset_history: bool = True):
         """Enable multi-turn mode by setting conversation manager.
 
         Args:
             manager: ConversationManager instance for tracking conversation state.
+            use_dataset_history: When True (default), dataset reference responses are
+                used to build conversation history. When False, the model's actual
+                output is used instead (for agentic benchmarks where model responses
+                drive subsequent turns).
         """
         self.conversation_manager = manager
+        self.use_dataset_history = use_dataset_history
 
     def clear_conversation_manager(self) -> None:
         """Disable multi-turn mode by clearing the conversation manager.
@@ -179,6 +197,7 @@ class _SampleEventHandler:
         conversation state between benchmark runs.
         """
         self.conversation_manager = None
+        self.use_dataset_history = True
 
     def register_hook(
         self,
@@ -260,7 +279,14 @@ class _SampleEventHandler:
                 # Success: mark turn complete with response
                 try:
                     response_text = result.get_response_output_string()
-                    self.conversation_manager.mark_turn_complete(conv_id, response_text)
+                    dataset_response = (
+                        (result.metadata or {}).get("dataset_assistant_response")
+                        if self.use_dataset_history
+                        else None
+                    )
+                    self.conversation_manager.mark_turn_complete(
+                        conv_id, response_text, history_content=dataset_response
+                    )
                 except KeyError:
                     logger.warning(
                         f"Cannot mark turn complete for unknown conversation {conv_id}"

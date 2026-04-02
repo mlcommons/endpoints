@@ -380,6 +380,9 @@ class SchedulerBasedLoadGenerator(LoadGenerator):
                 conversation_id=conv_id,
                 turn_number=turn,
                 sample_uuid=sample_uuid,
+                dataset_assistant_response=sample_data_raw.get(
+                    "dataset_assistant_response"
+                ),
             )
 
             self.conversation_manager.mark_turn_issued(

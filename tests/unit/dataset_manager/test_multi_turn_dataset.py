@@ -786,3 +786,63 @@ def test_validation_with_dataframe_direct():
 
     with pytest.raises(ValueError, match="Non-contiguous"):
         MultiTurnDataset(df)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "sample_index,expected_response",
+    [
+        pytest.param(0, "I'm doing well, thank you!", id="non_final_turn_has_response"),
+        pytest.param(1, None, id="final_turn_no_response"),
+        pytest.param(
+            2,
+            "I don't have access to real-time weather data.",
+            id="second_conv_has_response",
+        ),
+    ],
+)
+def test_load_sample_dataset_assistant_response(
+    valid_multi_turn_jsonl, sample_index, expected_response
+):
+    """load_sample() includes dataset_assistant_response iff a same-conversation assistant row follows."""
+    dataset = MultiTurnDataset.load_from_file(
+        valid_multi_turn_jsonl, format=DatasetFormat.JSONL
+    )
+    dataset.load()
+
+    sample = dataset.load_sample(sample_index)
+    if expected_response is None:
+        assert "dataset_assistant_response" not in sample
+    else:
+        assert sample["dataset_assistant_response"] == expected_response
+
+
+@pytest.mark.unit
+def test_load_sample_dataset_assistant_response_correct_conversation():
+    """dataset_assistant_response must belong to the same conversation."""
+    # Two conversations interleaved in the data; make sure we don't cross conversation boundaries.
+    data = [
+        {"conversation_id": "c1", "turn": 1, "role": "user", "content": "c1 user"},
+        # No assistant row for c1 turn 1 — next row is a different conversation
+        {"conversation_id": "c2", "turn": 1, "role": "user", "content": "c2 user"},
+        {"conversation_id": "c2", "turn": 2, "role": "assistant", "content": "c2 resp"},
+    ]
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+        for item in data:
+            f.write(json.dumps(item) + "\n")
+        temp_path = f.name
+
+    try:
+        dataset = MultiTurnDataset.load_from_file(temp_path, format=DatasetFormat.JSONL)
+        dataset.load()
+
+        # c1's user turn: next row is c2's user turn (different conv) → no dataset_assistant_response
+        sample_c1 = dataset.load_sample(0)
+        assert "dataset_assistant_response" not in sample_c1
+
+        # c2's user turn: next row is c2's assistant turn → has dataset_assistant_response
+        sample_c2 = dataset.load_sample(1)
+        assert sample_c2["dataset_assistant_response"] == "c2 resp"
+    finally:
+        Path(temp_path).unlink()

@@ -705,6 +705,83 @@ def test_all_turns_fail():
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "history_content,expected_in_history",
+    [
+        pytest.param(
+            "dataset reference response",
+            "dataset reference response",
+            id="uses_history_content",
+        ),
+        pytest.param(None, "actual model output", id="falls_back_to_model_response"),
+    ],
+)
+def test_add_assistant_turn_history_content(history_content, expected_in_history):
+    """add_assistant_turn() uses history_content when provided, falls back to model_response otherwise."""
+    state = ConversationState(conversation_id="conv_001")
+
+    state.add_user_turn(1, "Hello")
+    state.add_assistant_turn("actual model output", history_content=history_content)
+
+    assert state.message_history[1] == {
+        "role": "assistant",
+        "content": expected_in_history,
+    }
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "history_content,expected_in_history",
+    [
+        pytest.param(
+            "dataset ground truth", "dataset ground truth", id="uses_history_content"
+        ),
+        pytest.param(None, "model output text", id="falls_back_to_model_response"),
+    ],
+)
+def test_mark_turn_complete_history_content(history_content, expected_in_history):
+    """mark_turn_complete() stores history_content in message_history when provided, model response otherwise."""
+    manager = ConversationManager()
+    state = manager.get_or_create("conv_001", None)
+
+    manager.mark_turn_issued("conv_001", 1, "User message")
+    manager.mark_turn_complete(
+        "conv_001", "model output text", history_content=history_content
+    )
+
+    assert state.message_history[1]["content"] == expected_in_history
+
+
+@pytest.mark.unit
+def test_history_content_does_not_affect_turn_completion_tracking():
+    """history_content only affects what is stored in history; turn tracking is unchanged."""
+    manager = ConversationManager()
+    state = manager.get_or_create("conv_001", None, expected_user_turns=2)
+
+    manager.mark_turn_issued("conv_001", 1, "msg1")
+    manager.mark_turn_complete(
+        "conv_001", "model resp 1", history_content="dataset resp 1"
+    )
+
+    assert state.current_turn == 2
+    assert state.completed_user_turns == 1
+    assert not state.is_complete()
+
+    manager.mark_turn_issued("conv_001", 3, "msg2")
+    manager.mark_turn_complete(
+        "conv_001", "model resp 2", history_content="dataset resp 2"
+    )
+
+    assert state.current_turn == 4
+    assert state.completed_user_turns == 2
+    assert state.is_complete()
+
+    # Verify history uses dataset responses throughout
+    assert state.message_history[1]["content"] == "dataset resp 1"
+    assert state.message_history[3]["content"] == "dataset resp 2"
+
+
+@pytest.mark.unit
 @pytest.mark.slow
 @pytest.mark.run_explicitly
 @pytest.mark.parametrize(

@@ -309,6 +309,18 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
         if system_prompt and isinstance(system_prompt, str):
             sample["system"] = system_prompt
 
+        # Include the dataset's reference assistant response (the turn immediately following
+        # this user turn in the same conversation), so history uses ground-truth context.
+        user_data_index = self._user_turn_indices[index]
+        next_index = user_data_index + 1
+        if next_index < len(self.data):
+            next_row = self.data[next_index]
+            if (
+                next_row.get("role") == "assistant"
+                and next_row.get("conversation_id") == row["conversation_id"]
+            ):
+                sample["dataset_assistant_response"] = next_row["content"]
+
         return sample
 
     def num_samples(self) -> int:

@@ -98,6 +98,10 @@ class HttpClientSampleIssuer(SampleIssuer):
                 "conversation_id": sample.conversation_id,
                 "turn_number": sample.turn_number,
             }
+            if sample.dataset_assistant_response is not None:
+                metadata["dataset_assistant_response"] = (
+                    sample.dataset_assistant_response
+                )
 
         query = Query(id=sample.uuid, data=sample.data, metadata=metadata)
 

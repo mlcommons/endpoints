@@ -69,12 +69,18 @@ class ConversationState:
         self.pending_user_turn = turn
         self.issued_user_turns += 1
 
-    def add_assistant_turn(self, content: str):
+    def add_assistant_turn(
+        self, model_response: str, history_content: str | None = None
+    ):
         """Add assistant response and mark turn complete (success).
 
         Args:
-            content: Assistant response content.
+            model_response: Actual model output (used for metrics/timing).
+            history_content: Content to append to message history. When provided
+                (e.g. dataset reference response), this is used instead of
+                model_response so history is deterministic across runs.
         """
+        content = history_content if history_content is not None else model_response
         self.message_history.append({"role": "assistant", "content": content})
         # After assistant responds to turn N, conversation is at turn N+1
         # (e.g., after user turn 1 + assistant turn 2, we're ready for turn 3)
@@ -338,12 +344,20 @@ class ConversationManager:
                 raise KeyError(f"Conversation {conversation_id} not initialized")
             state.add_user_turn(turn, content)
 
-    def mark_turn_complete(self, conversation_id: str, response: str):
+    def mark_turn_complete(
+        self,
+        conversation_id: str,
+        response: str,
+        history_content: str | None = None,
+    ):
         """Mark that assistant response has arrived.
 
         Args:
             conversation_id: Conversation ID.
-            response: Assistant response content.
+            response: Actual model output (used to trigger completion/metrics).
+            history_content: Content to store in message history. When provided
+                (e.g. dataset reference response), this is used instead of
+                response so history is deterministic across runs.
 
         Raises:
             KeyError: If conversation_id not found in manager.
@@ -352,7 +366,7 @@ class ConversationManager:
             state = self._conversations.get(conversation_id)
             if state is None:
                 raise KeyError(f"Conversation {conversation_id} not initialized")
-            state.add_assistant_turn(response)
+            state.add_assistant_turn(response, history_content)
             self._condition.notify_all()
 
     def mark_turn_failed(self, conversation_id: str):

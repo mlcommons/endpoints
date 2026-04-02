@@ -257,6 +257,9 @@ class MultiTurnConfig(BaseModel):
     mode: ConversationMode = ConversationMode.PARALLEL
     turn_timeout_s: float = 300.0
     conversations_per_second: float | None = None  # For POISSON mode
+    use_dataset_history: bool = (
+        True  # Use dataset reference responses in history (False = use model output)
+    )
 
 
 class Dataset(BaseModel):

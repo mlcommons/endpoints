@@ -223,7 +223,10 @@ def test_basic_end_to_end(
             dataset.conversation_metadata,
             multi_turn_config,
         )
-        SampleEventHandler.set_conversation_manager(conversation_manager)
+        SampleEventHandler.set_conversation_manager(
+            conversation_manager,
+            use_dataset_history=multi_turn_config.use_dataset_history,
+        )
 
         with ManagedZMQContext.scoped() as zmq_ctx:
             sample_issuer = MultiTurnSampleIssuer(
@@ -398,7 +401,10 @@ def test_concurrency_control(
             dataset.conversation_metadata,
             multi_turn_config,
         )
-        SampleEventHandler.set_conversation_manager(conversation_manager)
+        SampleEventHandler.set_conversation_manager(
+            conversation_manager,
+            use_dataset_history=multi_turn_config.use_dataset_history,
+        )
 
         with ManagedZMQContext.scoped() as zmq_ctx:
             sample_issuer = MultiTurnSampleIssuer(
@@ -558,7 +564,10 @@ def test_large_scale(
         )
 
         try:
-            SampleEventHandler.set_conversation_manager(conversation_manager)
+            SampleEventHandler.set_conversation_manager(
+                conversation_manager,
+                use_dataset_history=multi_turn_config.use_dataset_history,
+            )
 
             session = BenchmarkSession.start(
                 runtime_settings=rt_settings,
@@ -653,7 +662,10 @@ def test_sequential_no_overlap(small_dataset, endpoint_url, multi_turn_model_nam
             dataset.conversation_metadata,
             multi_turn_config,
         )
-        SampleEventHandler.set_conversation_manager(conversation_manager)
+        SampleEventHandler.set_conversation_manager(
+            conversation_manager,
+            use_dataset_history=multi_turn_config.use_dataset_history,
+        )
 
         with ManagedZMQContext.scoped() as zmq_ctx:
             sample_issuer = MultiTurnSampleIssuer(
