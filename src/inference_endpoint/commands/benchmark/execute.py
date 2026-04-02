@@ -13,16 +13,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Benchmark execution — phased architecture for threaded and future async runners.
+"""Benchmark execution — phased architecture.
 
 Phases:
-    1. setup_benchmark()        — load tokenizer, dataset, scheduler (no IO)
-    2. run_benchmark_threaded() — HTTP client + BenchmarkSession (threaded IO)
+    1. setup_benchmark()        — load tokenizer, dataset, config (no IO)
+    2. run_benchmark_async()    — HTTP client + async BenchmarkSession
     3. finalize_benchmark()     — accuracy scoring, results JSON
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import signal
@@ -38,15 +39,19 @@ from tqdm import tqdm
 from transformers import AutoTokenizer
 from transformers.utils import logging as transformers_logging
 
+from inference_endpoint.async_utils.loop_manager import LoopManager
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import (
     APIType,
     BenchmarkConfig,
     DatasetType,
+    LoadPattern,
+    LoadPatternType,
     StreamingMode,
     TestMode,
     TestType,
 )
+from inference_endpoint.core.record import EventRecord
 from inference_endpoint.core.types import QueryResult
 from inference_endpoint.dataset_manager.dataset import Dataset
 from inference_endpoint.dataset_manager.factory import DataLoaderFactory
@@ -60,13 +65,12 @@ from inference_endpoint.exceptions import (
     InputValidationError,
     SetupError,
 )
-from inference_endpoint.load_generator import (
+from inference_endpoint.load_generator.session import (
     BenchmarkSession,
-    SampleEvent,
-    SampleEventHandler,
-    WithoutReplacementSampleOrder,
+    PhaseConfig,
+    PhaseType,
+    SessionResult,
 )
-from inference_endpoint.load_generator.scheduler import Scheduler
 
 transformers_logging.set_verbosity_error()
 
@@ -126,7 +130,6 @@ class BenchmarkContext:
     tokenizer: AutoTokenizer | None
     dataloader: Dataset
     rt_settings: RuntimeSettings
-    scheduler: Scheduler
     total_samples: int
     accuracy_datasets: list[Dataset] = field(default_factory=list)
     eval_configs: list[AccuracyConfiguration] = field(default_factory=list)
@@ -228,22 +231,6 @@ def _load_datasets(
     return dataloader, accuracy_datasets, eval_configs
 
 
-def _create_scheduler(
-    config: BenchmarkConfig, rt_settings: RuntimeSettings
-) -> Scheduler:
-    """Create scheduler using __init_subclass__ registry."""
-    load_pattern_type = config.settings.load_pattern.type
-    try:
-        scheduler_class = Scheduler.get_implementation(load_pattern_type)
-        scheduler = scheduler_class(rt_settings, WithoutReplacementSampleOrder)
-        logger.info(
-            f"Scheduler: {scheduler_class.__name__} (pattern: {load_pattern_type.value})"
-        )
-        return scheduler
-    except KeyError as e:
-        raise SetupError(str(e)) from e
-
-
 def setup_benchmark(config: BenchmarkConfig, test_mode: TestMode) -> BenchmarkContext:
     """Load tokenizer, dataset, create scheduler, setup report dir."""
     # CPU affinity
@@ -288,8 +275,6 @@ def setup_benchmark(config: BenchmarkConfig, test_mode: TestMode) -> BenchmarkCo
         f"Min Duration: {rt_settings.min_duration_ms / 1000:.1f}s, Expected samples: {total_samples}"
     )
 
-    scheduler = _create_scheduler(config, rt_settings)
-
     return BenchmarkContext(
         config=config,
         test_mode=test_mode,
@@ -297,7 +282,6 @@ def setup_benchmark(config: BenchmarkConfig, test_mode: TestMode) -> BenchmarkCo
         tokenizer=tokenizer,
         dataloader=dataloader,
         rt_settings=rt_settings,
-        scheduler=scheduler,
         total_samples=total_samples,
         accuracy_datasets=accuracy_datasets,
         eval_configs=eval_configs,
@@ -305,25 +289,53 @@ def setup_benchmark(config: BenchmarkConfig, test_mode: TestMode) -> BenchmarkCo
     )
 
 
-def run_benchmark_threaded(ctx: BenchmarkContext) -> tuple[Any, ResponseCollector]:
-    """Run benchmark session with threaded HTTP client. Returns (report, collector).
+def _build_phases(ctx: BenchmarkContext) -> list[PhaseConfig]:
+    """Build the phase list from BenchmarkContext."""
+    phases: list[PhaseConfig] = []
 
-    DEPRECATED: This function uses the old threading-based BenchmarkSession which
-    has been replaced by the async BenchmarkSession. It will be replaced by
-    run_benchmark_async in a future commit. See docs/load_generator/design.md.
-    """
+    # Performance phase
+    phases.append(
+        PhaseConfig(
+            "performance", ctx.rt_settings, ctx.dataloader, PhaseType.PERFORMANCE
+        )
+    )
+
+    # Accuracy phases
+    for acc_ds in ctx.accuracy_datasets:
+        ds_name = getattr(acc_ds.__class__, "DATASET_ID", acc_ds.__class__.__name__)
+        acc_settings = RuntimeSettings(
+            metric_target=ctx.rt_settings.metric_target,
+            reported_metrics=ctx.rt_settings.reported_metrics,
+            min_duration_ms=0,
+            max_duration_ms=None,
+            n_samples_from_dataset=acc_ds.num_samples(),
+            n_samples_to_issue=acc_ds.num_samples() * acc_ds.repeats,
+            min_sample_count=acc_ds.num_samples() * acc_ds.repeats,
+            rng_sched=ctx.rt_settings.rng_sched,
+            rng_sample_index=ctx.rt_settings.rng_sample_index,
+            load_pattern=LoadPattern(type=LoadPatternType.MAX_THROUGHPUT),
+        )
+        phases.append(PhaseConfig(ds_name, acc_settings, acc_ds, PhaseType.ACCURACY))
+
+    return phases
+
+
+async def _run_benchmark_async(
+    ctx: BenchmarkContext,
+    loop: asyncio.AbstractEventLoop,
+) -> tuple[SessionResult, ResponseCollector]:
+    """Run async benchmark session. Returns (SessionResult, ResponseCollector)."""
     config = ctx.config
 
-    # Setup response collector
+    # Progress bar + response collector
     pbar = tqdm(
         desc=f"{config.model_params.name} (Streaming: {ctx.enable_streaming})",
         total=ctx.total_samples,
-        smoothing=0,  # smoothing=0 shows average instead of EMA
+        smoothing=0,
     )
     collector = ResponseCollector(collect_responses=ctx.collect_responses, pbar=pbar)
-    SampleEventHandler.register_hook(SampleEvent.COMPLETE, collector.on_complete_hook)
 
-    # Create endpoint client
+    # Create endpoint client on the shared loop (async factory avoids deadlock)
     endpoints = config.endpoint_config.endpoints
     logger.info(f"Connecting: {endpoints}")
     try:
@@ -335,66 +347,57 @@ def run_benchmark_threaded(ctx: BenchmarkContext) -> tuple[Any, ResponseCollecto
             event_logs_dir=ctx.report_dir,
             cpu_affinity=ctx.affinity_plan,
         )
-        http_client = HTTPEndpointClient(http_config)
-        sample_issuer = HttpClientSampleIssuer(http_client)
+        http_client = await HTTPEndpointClient.create(http_config, loop)
+        issuer = HttpClientSampleIssuer(http_client)
     except Exception as e:
+        pbar.close()
         raise SetupError(f"Failed to connect to endpoint: {e}") from e
 
-    # Run benchmark
-    logger.info("Running...")
-    sess = None
+    # Create session
+    # TODO: Wire EventPublisher when ServiceLauncher integration is complete.
+    # For now, use a no-op publisher that discards events.
+    class _NoOpPublisher:
+        def publish(self, event_record: EventRecord) -> None:
+            pass
+
+    session = BenchmarkSession(
+        issuer=issuer,
+        event_publisher=_NoOpPublisher(),
+        loop=loop,
+        on_sample_complete=collector.on_complete_hook,
+        session_id=f"cli_benchmark_{uuid.uuid4().hex[:8]}",
+    )
+
+    phases = _build_phases(ctx)
+
+    loop.add_signal_handler(signal.SIGINT, session.stop)
     try:
-        sess = BenchmarkSession.start(
-            ctx.rt_settings,
-            ctx.dataloader,
-            sample_issuer,
-            ctx.scheduler,
-            name=f"cli_benchmark_{uuid.uuid4().hex[0:8]}",
-            report_dir=ctx.report_dir,
-            accuracy_datasets=ctx.accuracy_datasets,
-        )
-
-        # Wait for test end with ability to interrupt
-        def _raise_keyboard_interrupt(*_: object) -> None:
-            raise KeyboardInterrupt
-
-        old_handler = signal.signal(signal.SIGINT, _raise_keyboard_interrupt)
-        try:
-            sess.wait_for_test_end()
-        finally:
-            # Always restore original handler
-            signal.signal(signal.SIGINT, old_handler)
-
-        # Prefer authoritative metrics from the session report
-        report = getattr(sess, "report", None)
-        if report is None:
-            raise ExecutionError("Session report missing — cannot produce results")
-        return report, collector
-
-    except KeyboardInterrupt:
-        logger.warning("Benchmark interrupted by user")
-        raise
-    except ExecutionError:
-        # Re-raise our own exceptions
-        raise
+        result = await session.run(phases)
     except Exception as e:
         raise ExecutionError(f"Benchmark execution failed: {e}") from e
     finally:
-        # Cleanup - always execute
+        loop.remove_signal_handler(signal.SIGINT)
         logger.info("Cleaning up...")
         try:
-            if sess is not None:
-                sess.stop()
-            pbar.close()
-            sample_issuer.shutdown()
-            http_client.shutdown()
+            await http_client.shutdown_async()
         except Exception as e:
-            logger.debug(f"Cleanup error: {e}")
+            logger.warning(f"Client cleanup error: {e}")
+        pbar.close()
+
+    return result, collector
+
+
+def run_benchmark_async(
+    ctx: BenchmarkContext,
+) -> tuple[SessionResult, ResponseCollector]:
+    """Run async benchmark. Sync entry point — drives the event loop."""
+    loop = LoopManager().default_loop
+    return loop.run_until_complete(_run_benchmark_async(ctx, loop))
 
 
 def finalize_benchmark(
     ctx: BenchmarkContext,
-    report: Any,
+    result: SessionResult,
     collector: ResponseCollector,
 ) -> None:
     """Score accuracy, aggregate results, write JSON."""
@@ -422,15 +425,23 @@ def finalize_benchmark(
         }
         logger.info(f"Score for {eval_cfg.dataset_name}: {score} ({n_repeats} repeats)")
 
-    # Report metrics
-    elapsed = report.duration_ns / 1e9 if report.duration_ns is not None else 0.0
-    total_issued = report.n_samples_issued
-    success = total_issued - report.n_samples_failed
-    qps = report.qps() or 0.0
+    # Report metrics scoped to the performance phase
+    perf = result.perf_results[0] if result.perf_results else None
+    if perf:
+        perf_elapsed = (perf.end_time_ns - perf.start_time_ns) / 1e9
+        total_issued = perf.issued_count
+    else:
+        perf_elapsed = (result.end_time_ns - result.start_time_ns) / 1e9
+        total_issued = 0
 
-    logger.info(f"Completed in {elapsed:.1f}s")
-    logger.info(f"Results: {success}/{total_issued} successful")
-    logger.info(f"Estimated QPS: {qps:.1f}")
+    # Count errors only from perf phase queries
+    perf_uuids = perf.uuid_to_index.keys() if perf else set()
+    n_errors = sum(1 for e in collector.errors if any(uid in e for uid in perf_uuids))
+
+    logger.info(f"Completed in {perf_elapsed:.1f}s")
+    logger.info(f"Results: {total_issued - n_errors}/{total_issued} successful")
+    if perf_elapsed > 0 and total_issued > 0:
+        logger.info(f"Estimated QPS: {total_issued / perf_elapsed:.1f}")
 
     if collector.errors:
         logger.warning(f"Errors: {len(collector.errors)}")
@@ -449,10 +460,10 @@ def finalize_benchmark(
             },
             "results": {
                 "total": total_issued,
-                "successful": success,
-                "failed": report.n_samples_failed,
-                "elapsed_time": elapsed,
-                "qps": qps,
+                "successful": total_issued - n_errors,
+                "failed": n_errors,
+                "elapsed_time": perf_elapsed,
+                "qps": total_issued / perf_elapsed if perf_elapsed > 0 else 0,
             },
         }
         if accuracy_scores:
@@ -478,5 +489,9 @@ def run_benchmark(config: BenchmarkConfig, test_mode: TestMode) -> None:
         config.model_dump_json(indent=2, exclude_none=True),
     )
     ctx = setup_benchmark(config, test_mode)
-    report, collector = run_benchmark_threaded(ctx)
-    finalize_benchmark(ctx, report, collector)
+    try:
+        result, collector = run_benchmark_async(ctx)
+    except KeyboardInterrupt:
+        logger.warning("Benchmark interrupted by user")
+        return
+    finalize_benchmark(ctx, result, collector)

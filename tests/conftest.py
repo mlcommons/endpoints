@@ -31,10 +31,8 @@ import pytest
 from inference_endpoint import metrics
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import LoadPattern, LoadPatternType
-from inference_endpoint.core.types import TextModelOutput
 from inference_endpoint.dataset_manager.dataset import Dataset, DatasetFormat
 from inference_endpoint.dataset_manager.transforms import ColumnRemap
-from inference_endpoint.load_generator.sample import SampleEventHandler
 from inference_endpoint.testing.docker_server import DockerServer
 from inference_endpoint.testing.echo_server import EchoServer, HTTPServer
 
@@ -236,8 +234,6 @@ def fake_outputs(sample_uuids):
         uuid1: ["Hello, ", "world"],
         uuid2: ["And ", "goodbye."],
     }
-
-
 
 
 class CharacterTokenizer:
@@ -474,7 +470,5 @@ def concurrency_runtime_settings(random_seed, target_concurrency):
 
 @pytest.fixture
 def clean_sample_event_hooks():
-    """Fixture to ensure SampleEventHandler hooks are cleared before and after each test."""
-    SampleEventHandler.clear_hooks()
-    yield SampleEventHandler
-    SampleEventHandler.clear_hooks()
+    """Legacy fixture — no-op now that SampleEventHandler has been removed."""
+    yield None

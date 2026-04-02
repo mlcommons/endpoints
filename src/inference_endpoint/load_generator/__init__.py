@@ -41,20 +41,6 @@ from .strategy import (
     create_load_strategy,
 )
 
-# Legacy re-exports for backward compatibility during migration.
-# These will be removed once all callers are updated.
-try:
-    from .load_generator import LoadGenerator, SampleIssuer, SchedulerBasedLoadGenerator
-    from .sample import IssuedSample, Sample, SampleEvent, SampleEventHandler
-    from .scheduler import (
-        ConcurrencyScheduler,
-        MaxThroughputScheduler,
-        PoissonDistributionScheduler,
-        Scheduler,
-    )
-except ImportError:
-    pass
-
 __all__ = [
     # New async API
     "BenchmarkSession",

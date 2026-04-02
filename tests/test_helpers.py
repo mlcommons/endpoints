@@ -24,20 +24,13 @@ import hashlib
 import random
 import string
 import uuid
-from asyncio import Future
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import zmq
 from inference_endpoint.core.types import (
     Query,
-    QueryResult,
-    StreamChunk,
-    TextModelOutput,
 )
 from inference_endpoint.dataset_manager.dataset import Dataset
-from inference_endpoint.load_generator.load_generator import SampleIssuer
-from inference_endpoint.load_generator.sample import SampleEventHandler
 
 
 def _generate_random_word(
@@ -184,111 +177,3 @@ def get_test_socket_path(tmp_path: Path, test_name: str, suffix: str = "") -> st
         len(socket_path) <= zmq.IPC_PATH_MAX_LEN
     ), "socket path is too long for ZMQ IPC"
     return socket_path
-
-
-class SerialSampleIssuer(SampleIssuer):
-    """SampleIssuer for testing. No threading, and is blocking. Whenever issue is called,
-    it performs the provided compute function, calling callbacks when necessary.
-
-    The compute function should be a generator, yielding the 'chunks' of the supposed
-    response.
-    """
-
-    def __init__(self, compute_func=None):
-        if compute_func is None:
-            self.compute_func = lambda x: [x]
-        else:
-            self.compute_func = compute_func
-
-    def issue(self, sample):
-        first = True
-        chunks = []
-        for chunk in self.compute_func(sample.data):
-            chunks.append(chunk)
-            stream_chunk = StreamChunk(
-                id=sample.uuid, metadata={"first_chunk": first}, response_chunk=chunk
-            )
-            SampleEventHandler.stream_chunk_complete(stream_chunk)
-            first = False
-        query_result = QueryResult(
-            id=sample.uuid, response_output=TextModelOutput(output="".join(chunks))
-        )
-        SampleEventHandler.query_result_complete(query_result)
-
-
-class PooledSampleIssuer(SampleIssuer):
-    """SampleIssuer that has a non-blocking issue() method. Has a pool of workers which compute
-    the samples in parallel.
-
-    Uses ThreadPoolExecutor to properly propagate exceptions from worker threads to the main thread.
-    Call check_errors() to raise any exceptions that occurred in workers and clean up completed futures.
-    """
-
-    def __init__(self, compute_func=None, n_workers: int = 4):
-        self.n_workers = n_workers
-        if compute_func is None:
-            self.compute_func = lambda x: [x]
-        else:
-            self.compute_func = compute_func
-        self.executor = ThreadPoolExecutor(max_workers=n_workers)
-        self.futures: list[Future[None]] = []
-
-    def shutdown(self, wait: bool = True):
-        """Shutdown the executor and wait for all tasks to complete.
-
-        Args:
-            wait: Whether to wait for all tasks to complete before returning.
-                  If False, the executor will be shutdown and the method will return immediately.
-                  The caller is responsible for checking the futures for exceptions. (Default: True)
-
-        Raises any exceptions that occurred in worker threads.
-        """
-        self.executor.shutdown(wait=wait)
-
-        if wait:
-            # Check all futures for exceptions
-            for future in self.futures:
-                future.result()  # This will raise if the worker raised an exception
-            self.futures.clear()
-
-    def handle_sample(self, sample):
-        first = True
-        chunks = []
-        for chunk in self.compute_func(sample.data):
-            chunks.append(chunk)
-            stream_chunk = StreamChunk(
-                id=sample.uuid, metadata={"first_chunk": first}, response_chunk=chunk
-            )
-            SampleEventHandler.stream_chunk_complete(stream_chunk)
-            first = False
-        query_result = QueryResult(
-            id=sample.uuid, response_output=TextModelOutput(output="".join(chunks))
-        )
-        SampleEventHandler.query_result_complete(query_result)
-
-    def check_errors(self):
-        """Check if any worker thread has raised an exception and re-raise it.
-
-        This checks completed futures without blocking and removes them from the list
-        to prevent unbounded memory growth.
-        """
-        remaining_futures = []
-        for future in self.futures:
-            if future.done():
-                # This will raise if the worker raised an exception
-                future.result()
-                # Don't keep completed futures
-            else:
-                # Keep incomplete futures
-                remaining_futures.append(future)
-        self.futures = remaining_futures
-
-    def issue(self, sample):
-        """Submit a sample to be processed by the worker pool."""
-        future = self.executor.submit(self.handle_sample, sample)
-        self.futures.append(future)
-
-        # Periodically clean up completed futures to prevent unbounded growth
-        # Check every 100 submissions to balance cleanup overhead vs memory usage
-        if len(self.futures) >= 100:
-            self.check_errors()

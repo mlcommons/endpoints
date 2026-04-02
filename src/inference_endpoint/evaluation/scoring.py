@@ -36,9 +36,9 @@ try:
 except ImportError:
     websocket = None
 
+from ..core.record import SampleEventType
 from ..dataset_manager.dataset import Dataset
 from ..dataset_manager.predefined.shopify_product_catalogue import ProductMetadata
-from ..load_generator.sample import SampleEvent
 from .extractor import Extractor, PythonCodeExtractor
 
 
@@ -134,7 +134,7 @@ class Scorer(ABC):
         with events_log_path.open("r") as f:
             for line in f:
                 event = msgspec.json.decode(line.strip())
-                if event["event_type"] == SampleEvent.COMPLETE.value:
+                if event["event_type"] == SampleEventType.COMPLETE.value:
                     outputs.append(event)
         df = pd.DataFrame(outputs, columns=["sample_uuid", "value"])
         df.rename(columns={"value": "output"}, inplace=True)
