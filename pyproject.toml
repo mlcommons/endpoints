@@ -71,7 +71,7 @@ dev = [
     "line-profiler==5.0.2",
     "Pympler==1.1",
     # Documentation
-    "sphinx==8.2.3",
+    "sphinx==9.1.0",
     "sphinx-rtd-theme==3.0.2",
     "sphinx-autodoc-typehints==3.1.0",
     "myst-parser==4.0.1",
