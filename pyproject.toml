@@ -72,7 +72,7 @@ dev = [
     "Pympler==1.1",
     # Documentation
     "sphinx==8.2.3",
-    "sphinx-rtd-theme==3.0.2",
+    "sphinx-rtd-theme==3.1.0",
     "sphinx-autodoc-typehints==3.1.0",
     "myst-parser==4.0.1",
     # Security auditing
