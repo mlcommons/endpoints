@@ -44,7 +44,7 @@ dependencies = [
     "cyclopts==4.10.0",
     "rich==14.3.3",
     # Needed for tokenization and OSL reporting
-    "transformers==4.57.1",
+    "transformers==5.4.0",
     "numpy==2.4.4",
     "datasets==4.8.4",
     "Pillow==12.1.1",
