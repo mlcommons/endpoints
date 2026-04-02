@@ -27,7 +27,7 @@ export HF_HOME=<Path to your hf_home, e.g. ~/.cache/huggingface>
 hf download $MODEL_NAME
 ```
 
-# Prepare for accuracy evaluation
+## Prepare for accuracy evaluation
 
 Accuracy evaluation for MLPerf Llama2-70B requires additional setup. Before running the benchmark, run the following:
 
@@ -48,7 +48,7 @@ docker run --runtime nvidia --gpus all \
     --env "HUGGING_FACE_HUB_TOKEN=$HF_TOKEN" \
     -p 8000:8000 \
     --ipc=host \
-    vllm/vllm-openai:latest --model ${MODEL_NAME} --gpu_memory_utilization 0.95
+    vllm/vllm-openai:latest --model ${MODEL_NAME} --gpu-memory-utilization 0.95
 ```
 
 And launch the benchmark using the config file `online_llama2_70b_orca.yaml`

@@ -348,7 +348,7 @@ def run_inference_endpoint(
     full_output = "".join(captured_output)
     results = parse_inference_endpoint_output(full_output)
 
-    # Load report JSON to enrich metrics with additional fields/percentiles (TTFT, TPOT, output lengths)
+    # Load report JSON to enrich or backfill metrics from stdout (e.g., detailed TTFT/TPOT stats, output lengths)
     report_json_path = report_dir / "result_summary.json"
     if report_json_path.exists():
         try:
@@ -372,14 +372,16 @@ def run_inference_endpoint(
                 results["ttft_mean"] = ttft["avg"] / 1e6
                 results["ttft_median"] = ttft["median"] / 1e6
                 p99 = ttft.get("percentiles", {}).get("99")
-                results["ttft_p99"] = p99 / 1e6 if p99 is not None else None
+                if p99 is not None:
+                    results["ttft_p99"] = p99 / 1e6
 
             if report_data.get("tpot"):
                 tpot = report_data["tpot"]
                 results["tpot_mean"] = tpot["avg"] / 1e6
                 results["tpot_median"] = tpot["median"] / 1e6
                 p99 = tpot.get("percentiles", {}).get("99")
-                results["tpot_p99"] = p99 / 1e6 if p99 is not None else None
+                if p99 is not None:
+                    results["tpot_p99"] = p99 / 1e6
 
         except Exception as e:
             logger.warning(f"Failed to parse report JSON from {report_json_path}: {e}")

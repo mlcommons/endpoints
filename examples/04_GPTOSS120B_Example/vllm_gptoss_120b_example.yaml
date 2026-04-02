@@ -1,7 +1,7 @@
 name: "gpt-oss-120b-benchmark"
 version: "1.0"
 type: "online"
-timeout: 60000
+timeout: 60
 
 model_params:
   name: "openai/gpt-oss-120b"
@@ -17,7 +17,7 @@ datasets:
     path: "examples/04_GPTOSS120B_Example/data/perf_eval_ref.parquet"
     parser:
       # input_tokens: "input_tokens"
-      input_text: "prompt"
+      prompt: "prompt"
   # livecodebench not included: vLLM chat completions endpoint does not support
   # pre-tokenized input required by this scorer. Use sglang_gptoss_120b_example.yaml instead.
   # - name: "livecodebench::gptoss"

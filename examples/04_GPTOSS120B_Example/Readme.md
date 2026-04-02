@@ -42,10 +42,10 @@ The config [`vllm_gptoss_120b_example.yaml`](vllm_gptoss_120b_example.yaml) runs
 ```bash
 inference-endpoint benchmark from-config \
   -c examples/04_GPTOSS120B_Example/vllm_gptoss_120b_example.yaml \
-  --timeout 60000
+  --timeout 60
 ```
 
-> **Note:** The performance dataset uses `input_text: "prompt"` to pass the pre-processed prompt text through the chat completions API. vLLM does not support pre-tokenized input via this endpoint, unlike SGLang's `input_tokens` path.
+> **Note:** In the YAML config, the dataset's `prompt` column is mapped into the benchmark's expected `prompt` field, which is then sent through the chat completions API. vLLM does not support pre-tokenized input via this endpoint, unlike SGLang's `input_tokens` path.
 
 ### vllm bench serve (reference comparison)
 
@@ -109,10 +109,10 @@ The config [`sglang_gptoss_120b_example.yaml`](sglang_gptoss_120b_example.yaml) 
 ```bash
 inference-endpoint benchmark from-config \
   -c examples/04_GPTOSS120B_Example/sglang_gptoss_120b_example.yaml \
-  --timeout 60000
+  --timeout 60
 ```
 
-For a performance-only run with a simpler config, see [`gptoss_120b_example.yaml`](gptoss_120b_example.yaml).
+For a performance-only run with a simpler config, see [`gptoss_120b_example.yaml`](gptoss_120b_example.yaml). Update `endpoint_config.endpoints` in that file to match your server port (e.g. `http://localhost:8000` for vLLM, `http://localhost:30000` for SGLang).
 
 ## Debugging
 
