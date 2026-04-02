@@ -49,7 +49,7 @@ dependencies = [
     "datasets==4.8.4",
     "Pillow==12.1.1",
     "sentencepiece==0.2.1",
-    "protobuf==6.33.5",
+    "protobuf==7.34.1",
     "openai_harmony==0.0.8",
     # Color support for cross-platform terminals
     "colorama==0.4.6",
