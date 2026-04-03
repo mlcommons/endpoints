@@ -27,6 +27,8 @@ uv run pre-commit install
 
 # Activate the venv to use python/pytest/etc. directly (optional)
 source .venv/bin/activate
+pytest -m "not performance and not run_explicitly"
+inference-endpoint --help
 ```
 
 **Option B: pip + venv**
