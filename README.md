@@ -13,7 +13,22 @@ A high-performance benchmarking tool for LLM endpoints.
 # Note: This repo will be migrated to https://github.com/mlcommons/endpoints
 git clone https://github.com/mlcommons/endpoints.git
 cd endpoints
+```
 
+**Option A: uv (recommended)** — faster, lockfile-verified dependencies
+
+```bash
+# As a user
+uv sync
+
+# As a developer (with development and test extras)
+uv sync --extra dev --extra test
+uv run pre-commit install
+```
+
+**Option B: pip + venv**
+
+```bash
 # Create virtual environment
 python3.12 -m venv venv
 source venv/bin/activate
@@ -83,10 +98,11 @@ See [Local Testing Guide](docs/LOCAL_TESTING.md) for detailed instructions.
 ### Running Tests and Examples
 
 ```bash
-# Install test dependencies
-pip install ".[test]"
+# With uv (after uv sync --extra test)
+uv run pytest -m "not performance and not run_explicitly"
 
-# Run tests (excluding performance and explicit-run tests)
+# With pip (activate venv first)
+pip install ".[test]"
 pytest -m "not performance and not run_explicitly"
 
 # Run examples: follow instructions in examples/*/README.md
