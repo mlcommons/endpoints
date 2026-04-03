@@ -3,7 +3,7 @@ requires = ["uv_build>=0.7.6,<0.8"]
 build-backend = "uv_build"
 
 [tool.uv]
-default-index = "https://pypi.org/simple"
+index-url = "https://pypi.org/simple"
 environments = [
     "sys_platform == 'linux' and platform_machine == 'x86_64'",
     "sys_platform == 'linux' and platform_machine == 'aarch64'",
