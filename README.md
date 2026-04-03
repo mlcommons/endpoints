@@ -24,6 +24,9 @@ uv sync
 # As a developer (with development and test extras)
 uv sync --extra dev --extra test
 uv run pre-commit install
+
+# Activate the venv to use python/pytest/etc. directly (optional)
+source .venv/bin/activate
 ```
 
 **Option B: pip + venv**
