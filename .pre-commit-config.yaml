@@ -62,3 +62,10 @@ repos:
         types: [python]
         pass_filenames: true
         exclude: ^(src/inference_endpoint/openai/openai_types_gen.py)$
+
+      - id: uv-lock-check
+        name: Check uv.lock is up-to-date
+        entry: uv lock --check
+        language: system
+        pass_filenames: false
+        files: ^pyproject\.toml$
