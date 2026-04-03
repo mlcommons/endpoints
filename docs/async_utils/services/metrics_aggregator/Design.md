@@ -316,7 +316,8 @@ have already been applied by this point. This matters because:
 ```python
 python -m inference_endpoint.async_utils.services.metrics_aggregator \
     --metrics-dir /tmp/metrics \
-    --socket-address ipc:///tmp/events.sock \
+    --socket-dir /path/to/socket_dir \
+    --socket-name ev_pub_<uuid> \
     --tokenizer gpt2 \
     --tokenizer-workers 2
 ```

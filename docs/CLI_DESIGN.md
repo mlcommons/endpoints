@@ -172,7 +172,7 @@ InputValidationError    2           Bad user input, invalid config
 SetupError              3           Dataset load failure, connection error
 ExecutionError          4           Benchmark failed after setup
 CLIError                1           Generic CLI error (base class)
-NotImplementedError     1           Unimplemented command (eval)
+CLIError                1           Unimplemented command (eval, with tracking issue link)
 ```
 
 ## Development Guide

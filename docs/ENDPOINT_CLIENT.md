@@ -240,9 +240,9 @@ class QueryStatus(Enum):
 
 **Classes:**
 
-| Class              | Source      | Description                                              |
-| ------------------ | ----------- | -------------------------------------------------------- |
-| `HTTPClientConfig` | `config.py` | `@dataclass`: client, worker pool, and connection config |
+| Class              | Source      | Description                                             |
+| ------------------ | ----------- | ------------------------------------------------------- |
+| `HTTPClientConfig` | `config.py` | `BaseModel`: client, worker pool, and connection config |
 
 ```python
 class APIType(str, Enum):

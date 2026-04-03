@@ -238,9 +238,11 @@ inference-endpoint init submission
 
 # 2. Edit submission_template.yaml (set model, datasets, ruleset, endpoint)
 
-# 3. Run (YAML mode - config-driven; CLI only allows --config, --timeout, and --mode; report_dir is configured in YAML if desired, otherwise a default is used and cannot be overridden via CLI)
+# 3. Run (YAML mode)
 inference-endpoint benchmark from-config \
   --config submission_template.yaml
+# Note: from-config only accepts --config, --timeout, and --mode via CLI.
+# Set report_dir in the YAML if you need a specific output location.
 ```
 
 ### Validate First

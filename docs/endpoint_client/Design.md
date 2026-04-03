@@ -74,8 +74,7 @@ class HTTPEndpointClient:
 ### `HTTPClientConfig`
 
 ```python
-@dataclass
-class HTTPClientConfig:
+class HTTPClientConfig(WithUpdatesMixin, BaseModel):
     endpoint_urls: list[str]
     api_type: APIType = APIType.OPENAI
     api_key: str | None = None
