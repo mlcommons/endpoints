@@ -1,6 +1,20 @@
 [build-system]
-requires = ["setuptools==78.1.1", "wheel==0.46.3"]
-build-backend = "setuptools.build_meta"
+requires = ["uv_build>=0.7.6,<0.8"]
+build-backend = "uv_build"
+
+[tool.uv]
+default-index = "https://pypi.org/simple"
+environments = [
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "sys_platform == 'linux' and platform_machine == 'aarch64'",
+    "sys_platform == 'darwin' and platform_machine == 'x86_64'",
+    "sys_platform == 'darwin' and platform_machine == 'arm64'",
+]
+
+[tool.uv.build]
+module-root = "src"
+data = {"inference_endpoint" = ["config/templates/*.yaml"]}
+exclude = ["evaluation/livecodebench/_server.py"]
 
 [project]
 name = "inference-endpoint"
@@ -111,21 +125,6 @@ Homepage = "https://github.com/mlperf/inference-endpoint"
 Documentation = "https://github.com/mlperf/inference-endpoint#readme"
 Repository = "https://github.com/mlperf/inference-endpoint.git"
 Issues = "https://github.com/mlperf/inference-endpoint/issues"
-
-[tool.setuptools.packages.find]
-where = ["src"]
-
-[tool.setuptools.package-dir]
-"" = "src"
-
-[tool.setuptools.package-data]
-inference_endpoint = ["config/templates/*.yaml"]
-
-[tool.setuptools.exclude-package-data]
-"inference_endpoint.evaluation.livecodebench" = ["_server.py"]
-
-[tool.autopep8]
-max_line_length = 88
 
 [tool.ruff]
 target-version = "py312"
