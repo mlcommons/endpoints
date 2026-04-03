@@ -74,7 +74,8 @@ Waiting for 5 responses...
 inference-endpoint -v benchmark offline \
   --endpoints http://localhost:8765 \
   --model Qwen/Qwen3-8B \
-  --dataset tests/datasets/dummy_1k.jsonl
+  --dataset tests/datasets/dummy_1k.jsonl \
+  --duration 0
 
 # Production test with custom params and report generation
 inference-endpoint -v benchmark offline \
@@ -114,6 +115,7 @@ inference-endpoint -v benchmark online \
   --endpoints http://localhost:8765 \
   --model Qwen/Qwen3-8B \
   --dataset tests/datasets/dummy_1k.jsonl \
+  --duration 0 \
   --load-pattern poisson \
   --target-qps 100 \
   --report-dir online_benchmark_report
@@ -306,7 +308,8 @@ inference-endpoint benchmark online \
 
 **Sample Count Control:**
 
-- Sample priority: `--num-samples` > dataset size (when duration=0) > calculated (target_qps × duration)
+- Use `--duration 0` when you want a local test to stop after exhausting the dataset instead of running for the default timed duration
+- Sample priority: `--num-samples` > dataset size (when `--duration 0`) > calculated (target_qps × duration)
 - Default duration: 600000ms (10 minutes)
 
 **Testing & Debugging:**
