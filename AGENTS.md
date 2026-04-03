@@ -9,7 +9,11 @@ High-performance benchmarking tool for LLM inference endpoints targeting 50k+ QP
 ## Common Commands
 
 ```bash
-# Development setup
+# Development setup (uv — recommended)
+uv sync --extra dev --extra test
+uv run pre-commit install
+
+# Development setup (pip — still works)
 python3.12 -m venv venv && source venv/bin/activate
 pip install -e ".[dev,test]"
 pre-commit install
@@ -32,6 +36,9 @@ inference-endpoint probe --endpoints http://localhost:8765 --model test-model
 inference-endpoint benchmark offline --endpoints URL --model NAME --dataset PATH
 inference-endpoint benchmark online --endpoints URL --model NAME --dataset PATH --load-pattern poisson --target-qps 100
 inference-endpoint benchmark from-config --config config.yaml
+
+# Or with uv (auto-creates venv, uses lockfile)
+uv run inference-endpoint benchmark offline --endpoints URL --model NAME --dataset PATH
 ```
 
 ## Architecture
@@ -347,5 +354,5 @@ Known failure modes when AI tools generate code for this project. Reference thes
 
 ### Dependency & Environment
 
-- **Adding new dependencies without justification**: AI may `pip install` or add imports for packages not in `pyproject.toml`. Any new dependency must be justified, added to the correct optional group, and pinned to an exact version (`==`). After adding a dependency, run `pip-audit` (included in `dev` extras) to verify it has no known vulnerabilities.
+- **Adding new dependencies without justification**: AI may `pip install` or add imports for packages not in `pyproject.toml`. Any new dependency must be justified, added to the correct optional group, and pinned to an exact version (`==`). After adding a dependency, run `pip-audit` (included in `dev` extras) to verify it has no known vulnerabilities. When adding dependencies, use `uv add <package>==<version>` to update both `pyproject.toml` and `uv.lock` atomically, then run `uv run pip-audit` to check for vulnerabilities.
 - **Using `requests`/`aiohttp` for HTTP**: This project has its own HTTP client (`endpoint_client/http.py`) using `httptools`. AI defaults to `requests` or `aiohttp` — these should not appear in production code (test dependencies are fine).
