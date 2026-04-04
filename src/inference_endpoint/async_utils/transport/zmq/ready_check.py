@@ -133,8 +133,11 @@ class ReadyCheckReceiver:
                     len(identities),
                     self._count,
                 )
+        except TimeoutError:
+            # Don't close socket on timeout — caller may retry.
+            raise
         except BaseException:
-            # Clean up socket on any failure (timeout, cancellation, etc.)
+            # Clean up socket on non-retryable failures (cancellation, etc.)
             self.close()
             raise
 

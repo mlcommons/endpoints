@@ -460,7 +460,10 @@ class EndpointConfig(BaseModel):
     endpoints: Annotated[
         list[str],
         cyclopts.Parameter(alias="--endpoints", help="Endpoint URL(s)", negative=""),
-    ] = Field(min_length=1)
+    ] = Field(
+        min_length=1,
+        description="Endpoint URL(s). Must include scheme, e.g. 'http://host:port'.",
+    )
     api_key: Annotated[
         str | None, cyclopts.Parameter(alias="--api-key", help="API key")
     ] = None
@@ -468,6 +471,16 @@ class EndpointConfig(BaseModel):
         APIType,
         cyclopts.Parameter(alias="--api-type", help="API type: openai or sglang"),
     ] = APIType.OPENAI
+
+    @field_validator("endpoints", mode="after")
+    @classmethod
+    def _validate_endpoint_scheme(cls, v: list[str]) -> list[str]:
+        for url in v:
+            if not url.startswith(("http://", "https://")):
+                raise ValueError(
+                    f"Endpoint URL must include scheme (http:// or https://), got: {url!r}"
+                )
+        return v
 
 
 class BenchmarkConfig(WithUpdatesMixin, BaseModel):
