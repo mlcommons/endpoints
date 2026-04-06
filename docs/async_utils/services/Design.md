@@ -17,7 +17,7 @@ The publisher is created inside a **scoped** `ManagedZMQContext` (e.g. in the ma
 
 ### 1.2 In-process vs out-of-process subscribers
 
-- **In-process**: Subscriber runs in the same process as the publisher but on a **different event loop** (e.g. `LoopManager().create_loop("subscriber_name")`). It uses the same `ManagedZMQContext` (same `socket_dir`) and connects to the publisher's `bind_address`. Example: `ConsoleSubscriber`, `DurationSubscriber` in the demo.
+- **In-process**: Subscriber runs in the same process as the publisher but on a **different event loop** (e.g. `LoopManager().create_loop("subscriber_name")`). It uses the same `ManagedZMQContext` (same `socket_dir`) and connects via `ctx.connect(socket, publisher.bind_path)`. Example: `ConsoleSubscriber`, `DurationSubscriber` in the demo.
 - **Out-of-process**: Subscriber runs in a **separate process** (e.g. `subprocess.Popen`). That process creates its own `ManagedZMQContext` with a **shared socket directory** (e.g. `socket_dir=log_dir.parent` so the IPC path exists and is writable). It is passed the publisher's socket directory and socket name via CLI (`--socket-dir <dir>` and `--socket-name <name>`) and connects via `ctx.connect(socket, socket_name)`. Example: **event_logger** and **metrics_aggregator** services launched from the demo/benchmark.
 
 So: one publisher process; zero or more subscribers in the same process (each with its own loop) and/or in child processes (each with its own context and loop). All subscribers share the same logical stream of events (subject to topic filters and to de-sync; see §3).
@@ -26,7 +26,7 @@ So: one publisher process; zero or more subscribers in the same process (each wi
 
 - **ManagedZMQContext** is a per-process singleton. It owns the ZMQ context and a **socket directory** used for IPC paths.
 - The publisher **binds** in that directory (e.g. `ipc://{socket_dir}/ev_pub_{uuid}`).
-- Subscribers in the same process use the same context and connect to that address. Subscribers in another process must be given the same **socket directory** and the **socket name** (the relative name used when binding), so the parent passes `--socket-dir` and `--socket-name` to the child subprocess.
+- Subscribers in the same process use the same context and connect via `ctx.connect(socket, publisher.bind_path)`. Subscribers in another process must be given the same **socket directory** and the **socket name** (the relative name used when binding), so the parent passes `--socket-dir` and `--socket-name` to the child subprocess.
 - Cleanup: when the scoped context in the publisher process exits, it closes sockets and terminates the context; the publisher also unlinks the IPC file. Subscriber processes must connect before the publisher exits and should shut down when they see `session.ended` (or similar) to avoid using a closed socket.
 
 ### 1.4 Process architecture diagram
@@ -301,7 +301,7 @@ stateDiagram-v2
 
 - **Role**: Subscribes to all (or a configured set of) topics and **persists** event records.
 - **Outputs**: JSONL and/or SQL (SQLAlchemy; default sqlite). Writers are pluggable (`RecordWriter`); each record is written to all configured writers.
-- **Lifecycle**: On **session.ended**, it stops accepting new non-error events, flushes and closes writers, and signals shutdown (e.g. sets an event so the process can exit). Error events after **session.ended** are still written so that failures during shutdown are not dropped.
+- **Lifecycle**: On **session.ended**, it writes the ENDED record, then drops all subsequent events (including error events) in any later batch, flushes and closes writers, and signals shutdown. Note: the current implementation does not make an exception for error events — all records after ENDED are discarded.
 - **Process**: Typically run as a **subprocess**; given `--log-dir`, `--socket-dir`, `--socket-name`, and optionally `--writers jsonl sql`. Uses the same socket directory as the publisher so the IPC path is valid.
 
 ### 6.2 Metrics aggregator
