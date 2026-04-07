@@ -613,6 +613,12 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
         report.display(fn=lambda s: logger.info(s), summary_only=True)
         report.to_json(save_to=ctx.report_dir / "result_summary.json")
 
+        # Write human-readable report.txt
+        report_txt = ctx.report_dir / "report.txt"
+        with report_txt.open("w") as f:
+            report.display(fn=lambda s: print(s, file=f))
+        logger.info(f"Report written to {report_txt}")
+
     # Write scoring artifacts + copy event log from tmpfs to disk
     _write_scoring_artifacts(ctx, result, bench.tmpfs_dir)
 
