@@ -24,6 +24,7 @@ import logging
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -242,14 +243,26 @@ async def main() -> None:
     logger.info("ZMQ Pub-Sub Demo (async_utils)")
     logger.info("=" * 80)
 
-    event_log_dir = Path("/tmp/zmq_demo_event_logger")
+    event_log_dir = Path(tempfile.gettempdir()) / "zmq_demo_event_logger"
     event_log_dir.mkdir(parents=True, exist_ok=True)
 
     with ManagedZMQContext.scoped() as zmq_ctx:
-        publisher = EventPublisherService(zmq_ctx)
+        # extra_eager=True: publish() is a blocking ZMQ send, so it doesn't need a
+        # running event loop for the buffered-send path. This avoids a conflict
+        # between asyncio.run()'s loop and LoopManager().default_loop.
+        publisher = EventPublisherService(zmq_ctx, extra_eager=True)
         connect_path = publisher.bind_path
 
-        # Start event_logger as a subprocess (logs to both JSONL and SQL under event_log_dir).
+        # Use SQL writer only if sqlalchemy is available.
+        try:
+            import sqlalchemy  # noqa: F401
+
+            writers = ["jsonl", "sql"]
+        except ImportError:
+            logger.warning("sqlalchemy not installed; using JSONL writer only")
+            writers = ["jsonl"]
+
+        # Start event_logger as a subprocess (logs to JSONL and optionally SQL under event_log_dir).
         event_logger_cmd = [
             sys.executable,
             "-m",
@@ -261,8 +274,7 @@ async def main() -> None:
             "--socket-name",
             str(connect_path),
             "--writers",
-            "jsonl",
-            "sql",
+            *writers,
         ]
         logger.info("Starting event_logger subprocess: %s", " ".join(event_logger_cmd))
         event_logger_proc = subprocess.Popen(
@@ -308,16 +320,26 @@ async def main() -> None:
             except subprocess.TimeoutExpired:
                 logger.warning("event_logger did not exit within 5s, terminating")
                 event_logger_proc.terminate()
-                event_logger_proc.wait(timeout=2)
+                try:
+                    event_logger_proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    logger.warning("event_logger did not respond to SIGTERM, killing")
+                    event_logger_proc.kill()
+                    event_logger_proc.wait()
         except KeyboardInterrupt:
             logger.info("Interrupted by user")
         finally:
             logger.info("Cleaning up (closing subscribers)...")
-            console_sub.close()
-            duration_sub.close()
+            # Subscribers run on their own loops — schedule close thread-safely.
+            console_loop.call_soon_threadsafe(console_sub.close)
+            duration_loop.call_soon_threadsafe(duration_sub.close)
             if event_logger_proc.poll() is None:
                 event_logger_proc.terminate()
-                event_logger_proc.wait(timeout=2)
+                try:
+                    event_logger_proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    event_logger_proc.kill()
+                    event_logger_proc.wait()
 
             # Verify SQLWriter: open the SQLite DB and show contents.
             events_db = event_log_dir / "events.db"

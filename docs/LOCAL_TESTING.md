@@ -160,9 +160,9 @@ inference-endpoint benchmark offline \
 
 ### 6. View Results
 
-When run with `--report-dir`, a directory is created containing benchmark artifacts such as
-`result_summary.json`, `runtime_settings.json`, `sample_idx_map.json`, `report.txt`, and
-`events.jsonl`.
+A report directory is always created (at `--report-dir` if specified, or at a default path
+otherwise), containing benchmark artifacts: `result_summary.json`, `runtime_settings.json`,
+`sample_idx_map.json`, `report.txt`, and `events.jsonl`.
 
 ### 7. Stop the Echo Server
 

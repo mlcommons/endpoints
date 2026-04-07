@@ -9,7 +9,10 @@ High-performance benchmarking tool for LLM inference endpoints targeting 50k+ QP
 ## Common Commands
 
 ```bash
-# Development setup — see docs/DEVELOPMENT.md for full instructions
+# Development setup
+python3.12 -m venv venv && source venv/bin/activate
+pip install -e ".[dev,test]"
+pre-commit install
 
 # Testing
 pytest                                        # All tests (excludes slow/performance)
@@ -195,7 +198,17 @@ tests/
 
 ### Code Style and Pre-commit Hooks
 
-See [Development Guide](docs/DEVELOPMENT.md) for formatting, linting, and pre-commit hook details.
+- **Formatter/Linter**: `ruff` (line-length 88, target Python 3.12)
+- **Type checking**: `mypy` (via pre-commit)
+- **Formatting**: `ruff-format` (double quotes, space indent)
+- **License headers**: Required on all Python files (enforced by pre-commit hook `scripts/add_license_header.py`)
+- **Conventional commits**: `feat:`, `fix:`, `docs:`, `test:`, `chore:`
+
+All of these hooks run automatically on commit: trailing-whitespace, end-of-file-fixer, check-yaml, check-merge-conflict, debug-statements, `ruff` (lint + autofix), `ruff-format`, `mypy`, `prettier` (YAML/JSON/Markdown), license header enforcement.
+
+**Always run `pre-commit run --all-files` before committing.**
+
+See [Development Guide](docs/DEVELOPMENT.md) for full setup and workflow details.
 
 ### Data Types & Serialization
 

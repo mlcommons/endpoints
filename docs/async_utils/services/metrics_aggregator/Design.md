@@ -92,6 +92,7 @@ SampleRow
 ├── client_resp_done_ns: int | None  ← set on CLIENT_RESP_DONE
 ├── prompt_text: str | None          ← from ISSUED event data (for ISL tokenization)
 ├── first_chunk_text: str | None     ← from RECV_FIRST event data (for TPOT denominator)
+├── first_chunk_tokens: int | None   ← token count of first_chunk_text, resolved after async tokenization
 └── output_chunks: list[str]         ← accumulated from RECV_FIRST/RECV_NON_FIRST data
 ```
 
