@@ -468,6 +468,7 @@ Full mapping follows, organized by priority tier.
 | # | Title | Labels |
 |---|-------|--------|
 | 86 | Warmup runs | `priority: P0`, `type: feature`, `area: core-engine` |
+| 232 | Multi-turn implementation | `priority: P0`, `type: feature`, `area: dataset` |
 | 183 | Pub/Sub event recorder | `priority: P0`, `type: feature`, `area: metrics` |
 | 138 | CI stress test upper bound | `priority: P0`, `type: chore`, `area: core-engine` |
 | 6 | Final report structure | `priority: P0`, `type: feature`, `area: metrics` |
@@ -485,17 +486,14 @@ Full mapping follows, organized by priority tier.
 | 221 | RuntimeSettings non-reproducible | `priority: P1`, `type: bug`, `area: config-cli` |
 | 202 | max_throughput connection timeouts | `priority: P1`, `type: bug`, `area: client` |
 | 199 | Perf discrepancy submission vs perf config | `priority: P1`, `type: bug`, `area: config-cli` |
-| 217 | BURST and STEP load patterns | `priority: P1`, `type: feature`, `area: core-engine` |
 | 222 | KVStore/ServiceLauncher lack tests | `priority: P1`, `type: chore`, `area: core-engine` |
 | 220 | SGLang adapter tests skipped | `priority: P1`, `type: chore`, `area: adapters` |
 | 182 | Text vs token perf on TRTLLM | `priority: P1`, `type: performance`, `area: metrics` |
-| 179 | Humanity's Last Exam | `priority: P1`, `type: feature`, `area: evaluation`, `area: dataset` |
-| 178 | Healthbench integration | `priority: P1`, `type: feature`, `area: evaluation`, `area: dataset` |
 | 177 | MATH500 dataset | `priority: P1`, `type: feature`, `area: evaluation`, `area: dataset` |
 | 176 | MMLU/MMLU-Pro | `priority: P1`, `type: feature`, `area: evaluation`, `area: dataset` |
-| 173 | Investigate mlcr failures | `priority: P1`, `type: bug`, `mlcommons` |
 | 113 | DeepSeek | `priority: P1`, `type: feature` |
 | 210 | Wan2.2-T2V support | `priority: P1`, `type: feature` |
+| 268 | Phase 2 model selection | `priority: P1`, `type: feature` |
 | 10 | System bottleneck tests | `priority: P1`, `type: performance`, `area: core-engine` |
 | 7 | Runtime visualization | `priority: P1`, `type: feature`, `area: metrics` |
 
@@ -503,9 +501,11 @@ Full mapping follows, organized by priority tier.
 
 | # | Title | Labels |
 |---|-------|--------|
-| 268 | Phase 2 model selection | `priority: P2`, `type: feature` |
 | 254 | Handling failed requests | `priority: P2`, `type: feature`, `area: client` |
-| 232 | Multi-turn implementation | `priority: P2`, `type: feature`, `area: dataset` |
+| 217 | BURST and STEP load patterns | `priority: P2`, `type: feature`, `area: core-engine` |
+| 179 | Humanity's Last Exam | `priority: P2`, `type: feature`, `area: evaluation`, `area: dataset` |
+| 178 | Healthbench integration | `priority: P2`, `type: feature`, `area: evaluation`, `area: dataset` |
+| 173 | Investigate mlcr failures | `priority: P2`, `type: bug`, `mlcommons` |
 | 224 | Multiple perf configs | `priority: P2`, `type: feature`, `area: config-cli` |
 | 208 | Optimize report generation | `priority: P2`, `type: performance`, `area: metrics` |
 | 158 | SGLang adapter + OpenAI compat | `priority: P2`, `type: feature`, `area: adapters` |
@@ -583,4 +583,23 @@ Order of operations for the migration:
 8. **Configure board automations** — auto-add, auto-done, auto-archive
 9. **Create issue templates** — add all 4 YAML templates + config.yml
 10. **Update CONTRIBUTING.md** — replace with expanded version
-11. **Commit and push** — templates + CONTRIBUTING.md in a single PR
+11. **Link open PRs to issues** — add "Relates to #N" comments where applicable
+12. **Commit and push** — templates + CONTRIBUTING.md in a single PR
+
+### Open PR → Issue Linkages
+
+| PR | Linked Issue | Relationship |
+|----|-------------|--------------|
+| #255 Make Loadgen Async | #255 (same) | PR is the issue |
+| #237 CLI fix --load-pattern + --target-qps | #237 (same) | PR is the issue |
+| #226 Initial multi-turn enabling | #232 multi-turn implementation | PR implements #232; #226 issue closed as dup |
+| #207 Speedup tokenizer report | #208 optimize report generation | PR implements #208; #207 issue closed as dup |
+| #205 Fully async benchmark | #255 Make Loadgen Async | Duplicate PR; #205 issue closed as dup |
+| #204 Documentation cleanup | #204 (same) | PR is the issue |
+| #190 Skills, design docs, tooling | #190 (same) | PR is the issue |
+| #181 Sweep qwen scripts | #181 (same) | PR is the issue |
+| #170 Warmup with random dataset | #86 Warmup runs | PR implements #86; #170 issue closed as dup |
+| #158 SGLang adapter + OpenAI compat | #158 (same) | PR is the issue |
+| #125 Multi-concurrency scans | #125 (same) | PR is the issue |
+| #79 Submission checker compat | #79 (same) + #29 (superseded) | PR is the issue |
+| #267 Bump transformers | #267 (dependabot) | PR is the issue |
