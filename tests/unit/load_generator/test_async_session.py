@@ -389,8 +389,13 @@ class TestBenchmarkSession:
         assert result is not None
 
     @pytest.mark.asyncio
-    async def test_stream_chunk_complete_decrements_inflight(self):
-        """StreamChunk(is_complete=True) should decrement inflight like QueryResult."""
+    async def test_streaming_query_completes_via_queryresult(self):
+        """Streaming: StreamChunks publish timing events, QueryResult handles completion.
+
+        The worker sends StreamChunk(first) → StreamChunk(delta) → QueryResult.
+        StreamChunks never have is_complete=True. Only the QueryResult decrements
+        inflight and releases the concurrency semaphore.
+        """
         loop = asyncio.get_running_loop()
         publisher = FakePublisher()
 
@@ -400,7 +405,6 @@ class TestBenchmarkSession:
 
         session = BenchmarkSession(issuer, publisher, loop)
 
-        # Use concurrency=1 so we can observe gating
         settings = _make_settings(
             load_pattern=LoadPattern(
                 type=LoadPatternType.CONCURRENCY, target_concurrency=1
@@ -409,25 +413,32 @@ class TestBenchmarkSession:
         )
         phases = [PhaseConfig("perf", settings, FakeDataset(2))]
 
-        async def inject_stream_completions():
-            """Wait for issues, then complete them via StreamChunk(is_complete=True)."""
+        async def inject_streaming_responses():
+            """Simulate worker: StreamChunk(first) → StreamChunk(delta) → QueryResult."""
             while not issuer._issued:
                 await asyncio.sleep(0.005)
-            # Complete first query with terminal StreamChunk
             q1 = issuer._issued[0]
-            issuer.inject_response(StreamChunk(id=q1.id, is_complete=True))
-            # Wait for second issue
+            issuer.inject_response(
+                StreamChunk(id=q1.id, metadata={"first_chunk": True})
+            )
+            issuer.inject_response(StreamChunk(id=q1.id, response_chunk="more"))
+            issuer.inject_response(QueryResult(id=q1.id, response_output="out1"))
             while len(issuer._issued) < 2:
                 await asyncio.sleep(0.005)
             q2 = issuer._issued[1]
-            issuer.inject_response(StreamChunk(id=q2.id, is_complete=True))
+            issuer.inject_response(
+                StreamChunk(id=q2.id, metadata={"first_chunk": True})
+            )
+            issuer.inject_response(StreamChunk(id=q2.id, response_chunk="more"))
+            issuer.inject_response(QueryResult(id=q2.id, response_output="out2"))
 
-        injector = asyncio.create_task(inject_stream_completions())
+        injector = asyncio.create_task(inject_streaming_responses())
         result = await asyncio.wait_for(session.run(phases), timeout=5.0)
         await injector
 
-        # Both samples should have been issued — semaphore was released by StreamChunk
         assert result.perf_results[0].issued_count == 2
+        recv_first = publisher.events_of_type(SampleEventType.RECV_FIRST)
+        assert len(recv_first) == 2
 
     @pytest.mark.asyncio
     async def test_concurrency_strategy_transport_close_no_deadlock(self):
@@ -456,11 +467,10 @@ class TestBenchmarkSession:
         assert result is not None
 
     @pytest.mark.asyncio
-    async def test_on_sample_complete_called_for_stream_chunk_complete(self):
-        """Bug #4: on_sample_complete must fire for StreamChunk(is_complete=True).
+    async def test_on_sample_complete_called_for_streaming_query(self):
+        """on_sample_complete fires exactly once per streaming query (on QueryResult).
 
-        Also verifies the callback doesn't crash when receiving StreamChunk
-        (Bug #1 round 2: ResponseCollector.on_complete_hook must handle both types).
+        StreamChunks only publish timing events — callback fires only for QueryResult.
         """
         loop = asyncio.get_running_loop()
         publisher = FakePublisher()
@@ -469,16 +479,10 @@ class TestBenchmarkSession:
         issuer._loop = loop
         issuer._auto_respond = False
 
-        # Use a realistic callback that accesses type-specific attributes
-        completed_ids: list[str] = []
-        errors: list[str] = []
+        completed: list[QueryResult | StreamChunk] = []
 
         def on_complete(result: QueryResult | StreamChunk) -> None:
-            completed_ids.append(result.id)
-            # This is what ResponseCollector does — must not crash for StreamChunk
-            if isinstance(result, QueryResult):
-                if result.error:
-                    errors.append(result.id)
+            completed.append(result)
 
         session = BenchmarkSession(
             issuer, publisher, loop, on_sample_complete=on_complete
@@ -495,13 +499,15 @@ class TestBenchmarkSession:
             while not issuer._issued:
                 await asyncio.sleep(0.005)
             q = issuer._issued[0]
-            issuer.inject_response(StreamChunk(id=q.id, is_complete=True))
+            issuer.inject_response(StreamChunk(id=q.id, metadata={"first_chunk": True}))
+            issuer.inject_response(StreamChunk(id=q.id, response_chunk="more"))
+            issuer.inject_response(QueryResult(id=q.id, response_output="done"))
 
         asyncio.create_task(inject())
         await asyncio.wait_for(session.run(phases), timeout=5.0)
 
-        assert len(completed_ids) == 1
-        assert len(errors) == 0
+        assert len(completed) == 1
+        assert isinstance(completed[0], QueryResult)
 
     @pytest.mark.asyncio
     async def test_failed_query_published_as_error_event(self):
@@ -832,9 +838,9 @@ class TestBenchmarkSessionStaleStreamChunk:
             while len(issuer._issued) < 3:
                 await asyncio.sleep(0.005)
 
-            # Inject stale StreamChunk from saturation phase into perf phase
-            issuer.inject_response(StreamChunk(id=sat_ids[0], is_complete=True))
-            issuer.inject_response(StreamChunk(id=sat_ids[1], is_complete=True))
+            # Inject stale StreamChunks from saturation phase into perf phase
+            issuer.inject_response(StreamChunk(id=sat_ids[0], response_chunk="stale"))
+            issuer.inject_response(StreamChunk(id=sat_ids[1], response_chunk="stale"))
 
             # Now complete the perf queries
             perf_queries = issuer._issued[2:]
@@ -859,6 +865,48 @@ class TestBenchmarkSessionStaleStreamChunk:
         # (stale sat queries are not in perf's uuid_to_index)
         for cid in completed:
             assert cid in result.perf_results[0].uuid_to_index
+
+
+@pytest.mark.unit
+class TestStreamChunkIsCompleteRejected:
+    """StreamChunk(is_complete=True) violates the transport contract and is logged as error."""
+
+    @pytest.mark.asyncio
+    async def test_is_complete_true_rejected(self, caplog):
+        """StreamChunk(is_complete=True) should be logged as an error and ignored."""
+        loop = asyncio.get_running_loop()
+        publisher = FakePublisher()
+        issuer = FakeIssuer()
+        issuer._loop = loop
+        issuer._auto_respond = False
+
+        session = BenchmarkSession(issuer, publisher, loop)
+        settings = _make_settings(n_samples=1)
+        phases = [PhaseConfig("perf", settings, FakeDataset(1))]
+
+        async def inject():
+            while not issuer._issued:
+                await asyncio.sleep(0.005)
+            q = issuer._issued[0]
+            # Inject an invalid StreamChunk(is_complete=True) — should be rejected
+            issuer.inject_response(StreamChunk(id=q.id, is_complete=True))
+            # Then the real completion via QueryResult
+            issuer.inject_response(QueryResult(id=q.id, response_output="ok"))
+
+        asyncio.create_task(inject())
+        with caplog.at_level("ERROR"):
+            result = await asyncio.wait_for(session.run(phases), timeout=5.0)
+
+        assert result.perf_results[0].issued_count == 1
+        assert "violates the transport contract" in caplog.text
+        # No RECV_FIRST/RECV_NON_FIRST event for the rejected StreamChunk
+        recv_events = [
+            e
+            for e in publisher.events
+            if e.event_type
+            in (SampleEventType.RECV_FIRST, SampleEventType.RECV_NON_FIRST)
+        ]
+        assert len(recv_events) == 0
 
 
 @pytest.mark.unit

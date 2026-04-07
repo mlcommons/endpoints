@@ -382,9 +382,10 @@ class BenchmarkSession:
     def _handle_response(self, resp: QueryResult | StreamChunk) -> None:
         """Route a response to the appropriate handler.
 
-        Transport contract: for each issued query, exactly ONE of these signals
-        completion: QueryResult OR StreamChunk(is_complete=True), never both.
-        If the transport violates this, inflight will be double-decremented.
+        Transport contract for streaming: the worker sends intermediate
+        StreamChunk(is_complete=False) messages for timing events, then a
+        final QueryResult with accumulated output for completion. The worker
+        never sends StreamChunk(is_complete=True).
         """
         phase_issuer = self._current_phase_issuer
 
@@ -400,7 +401,6 @@ class BenchmarkSession:
                     data=resp.response_output,
                 )
             )
-            # Publish error event so MetricsAggregator counts failures
             if resp.error is not None:
                 self._publisher.publish(
                     EventRecord(
@@ -410,7 +410,6 @@ class BenchmarkSession:
                         data=resp.error,
                     )
                 )
-            # Only affect current phase state if this is a current-phase query
             if phase_issuer is not None and query_id in phase_issuer.uuid_to_index:
                 phase_issuer.inflight -= 1
                 if phase_issuer.inflight <= 0:
@@ -421,6 +420,14 @@ class BenchmarkSession:
                     self._on_sample_complete(resp)
 
         elif isinstance(resp, StreamChunk):
+            if resp.is_complete:
+                logger.error(
+                    "Received StreamChunk(is_complete=True) for %s. "
+                    "This violates the transport contract — the worker should "
+                    "send a QueryResult for completion, not a terminal StreamChunk.",
+                    resp.id,
+                )
+                return
             is_first = resp.metadata.get("first_chunk", False)
             event_type = (
                 SampleEventType.RECV_FIRST
@@ -434,21 +441,6 @@ class BenchmarkSession:
                     sample_uuid=resp.id,
                 )
             )
-            # Terminal stream chunks affect inflight tracking just like QueryResult.
-            # Note: the worker also sends a final QueryResult after all StreamChunks,
-            # which publishes the COMPLETE event with accumulated output.
-            if (
-                resp.is_complete
-                and phase_issuer is not None
-                and resp.id in phase_issuer.uuid_to_index
-            ):
-                phase_issuer.inflight -= 1
-                if phase_issuer.inflight <= 0:
-                    self._drain_event.set()
-                if self._current_strategy:
-                    self._current_strategy.on_query_complete(resp.id)
-                if self._on_sample_complete:
-                    self._on_sample_complete(resp)
 
     def _make_stop_check(
         self, settings: RuntimeSettings, phase_start_ns: int
