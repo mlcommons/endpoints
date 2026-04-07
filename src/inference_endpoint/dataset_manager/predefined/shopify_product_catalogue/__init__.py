@@ -32,7 +32,7 @@ from .metadata import ProductMetadata
 
 logger = getLogger(__name__)
 
-CALIBRATION_SAMPLE_INDEX = [
+CALIBRATION_SAMPLE_INDEX = {
     20232,
     21162,
     33584,
@@ -53,7 +53,7 @@ CALIBRATION_SAMPLE_INDEX = [
     39746,
     13568,
     22527,
-]
+}
 
 
 def _process_sample_to_row(sample: dict[str, Any]) -> dict[str, Any]:
