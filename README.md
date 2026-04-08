@@ -115,8 +115,6 @@ We welcome contributions from the community. See [CONTRIBUTING.md](CONTRIBUTING.
 
 Issues are tracked on our [project board](https://github.com/orgs/mlcommons/projects/57). Look for [`good first issue`](https://github.com/mlcommons/endpoints/labels/good%20first%20issue) or [`help wanted`](https://github.com/mlcommons/endpoints/labels/help%20wanted) to get started.
 
-All contributors must sign the [MLCommons CLA](https://mlcommons.org/membership/membership-overview/).
-
 ## Acknowledgements
 
 This project draws inspiration from:
