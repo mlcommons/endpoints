@@ -189,10 +189,7 @@ outputs/
 # Example vLLM virtualenv
 examples/03_BenchmarkComparison/vllm_venv/
 
-# Agent artifacts (local development only)
+# AI tool artifacts (local development only)
 .cursor_artifacts/
-.claude/agent-memory/
-
-# User-specific local rules (local Docker dev); do not commit
-.cursor/rules/local-docker-dev.mdc
-CLAUDE.local.md
+.cursor/
+docs/superpowers/
