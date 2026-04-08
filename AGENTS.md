@@ -21,7 +21,7 @@ pytest -m integration                         # Integration tests only
 pytest --cov=src --cov-report=html            # With coverage
 pytest -xvs tests/unit/path/to/test_file.py  # Single test file
 
-# Code quality (run before commits)
+# Code quality — MUST run before every commit, no exceptions
 pre-commit run --all-files
 
 # Local testing with echo server
@@ -215,7 +215,7 @@ All of these run automatically on commit:
 - License header enforcement
 - `regenerate-templates`: auto-regenerates YAML config templates from schema defaults when `schema.py`, `config.py`, or `regenerate_templates.py` change
 
-**Always run `pre-commit run --all-files` before committing.**
+**IMPORTANT: Always run `pre-commit run --all-files` before every commit.** Hooks may modify files (prettier, ruff-format, license headers). If files are modified, stage the changes and commit once. Never commit without running pre-commit first.
 
 See [Development Guide](docs/DEVELOPMENT.md) for full setup and workflow details.
 
