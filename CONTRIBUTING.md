@@ -82,7 +82,7 @@ pre-commit run --all-files
 - **Quotes:** Double quotes
 - **License headers:** Required on all Python files (auto-added by pre-commit)
 - **Commit messages:** [Conventional commits](https://www.conventionalcommits.org/) — `feat:`, `fix:`, `docs:`, `test:`, `chore:`, `perf:`
-- **Comments:** Only where the *why* isn't obvious from the code. No over-documenting.
+- **Comments:** Only where the _why_ isn't obvious from the code. No over-documenting.
 
 ### Serialization
 
@@ -185,13 +185,13 @@ and flow through: **Inbox → Triage → Ready → In Progress → In Review →
 
 ### Priority Levels
 
-| Priority | Meaning |
-|----------|---------|
+| Priority        | Meaning                            |
+| --------------- | ---------------------------------- |
 | **ShowStopper** | Drop everything — critical blocker |
-| **P0** | Blocks release or users |
-| **P1** | Must address this cycle |
-| **P2** | Address within quarter |
-| **P3** | Backlog, nice to have |
+| **P0**          | Blocks release or users            |
+| **P1**          | Must address this cycle            |
+| **P2**          | Address within quarter             |
+| **P3**          | Backlog, nice to have              |
 
 ## MLCommons CLA
 
@@ -200,6 +200,7 @@ All contributors must sign the
 A CLA bot will check your PR automatically.
 
 To sign up:
+
 1. Visit the [MLCommons Subscription form](https://mlcommons.org/membership/membership-overview/)
 2. Submit your GitHub username
 3. The CLA bot will verify on your next PR

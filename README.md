@@ -60,13 +60,13 @@ Dataset Manager ──> Load Generator ──> Endpoint Client ──> External 
                     Metrics Collector (EventRecorder + MetricsReporter)
 ```
 
-| Component | Purpose |
-|-----------|---------|
-| **Load Generator** | Central orchestrator: `BenchmarkSession` owns lifecycle, `Scheduler` controls timing |
-| **Endpoint Client** | Multi-process HTTP workers communicating via ZMQ IPC |
-| **Dataset Manager** | Loads JSONL, HuggingFace, CSV, JSON, Parquet datasets |
-| **Metrics** | SQLite-backed event recording, aggregation (QPS, latency, TTFT, TPOT) |
-| **Config** | Pydantic-based YAML schema, CLI auto-generated via cyclopts |
+| Component           | Purpose                                                                              |
+| ------------------- | ------------------------------------------------------------------------------------ |
+| **Load Generator**  | Central orchestrator: `BenchmarkSession` owns lifecycle, `Scheduler` controls timing |
+| **Endpoint Client** | Multi-process HTTP workers communicating via ZMQ IPC                                 |
+| **Dataset Manager** | Loads JSONL, HuggingFace, CSV, JSON, Parquet datasets                                |
+| **Metrics**         | SQLite-backed event recording, aggregation (QPS, latency, TTFT, TPOT)                |
+| **Config**          | Pydantic-based YAML schema, CLI auto-generated via cyclopts                          |
 
 ### Benchmark Modes
 
@@ -94,15 +94,15 @@ Run accuracy evaluation with Pass@1 scoring using pre-defined benchmarks:
 
 ## Documentation
 
-| Guide | Description |
-|-------|-------------|
-| [CLI Quick Reference](docs/CLI_QUICK_REFERENCE.md) | Command-line interface guide |
-| [CLI Design](docs/CLI_DESIGN.md) | CLI architecture and design decisions |
-| [Local Testing](docs/LOCAL_TESTING.md) | Test with the echo server |
-| [Client Performance Tuning](docs/CLIENT_PERFORMANCE_TUNING.md) | Endpoint client optimization |
-| [Performance Architecture](docs/PERF_ARCHITECTURE.md) | Performance architecture deep dive |
-| [Development Guide](docs/DEVELOPMENT.md) | Development setup and workflow |
-| [CONTRIBUTING.md](CONTRIBUTING.md) | How to contribute |
+| Guide                                                          | Description                           |
+| -------------------------------------------------------------- | ------------------------------------- |
+| [CLI Quick Reference](docs/CLI_QUICK_REFERENCE.md)             | Command-line interface guide          |
+| [CLI Design](docs/CLI_DESIGN.md)                               | CLI architecture and design decisions |
+| [Local Testing](docs/LOCAL_TESTING.md)                         | Test with the echo server             |
+| [Client Performance Tuning](docs/CLIENT_PERFORMANCE_TUNING.md) | Endpoint client optimization          |
+| [Performance Architecture](docs/PERF_ARCHITECTURE.md)          | Performance architecture deep dive    |
+| [Development Guide](docs/DEVELOPMENT.md)                       | Development setup and workflow        |
+| [CONTRIBUTING.md](CONTRIBUTING.md)                             | How to contribute                     |
 
 ## Contributing
 
