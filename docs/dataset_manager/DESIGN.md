@@ -25,15 +25,15 @@ from model and adapter requirements (how data must be shaped).
 DataLoaderFactory
       |
       +-- format -> DatafileLoader subclass
-      |                      (jsonl / json / csv / parquet / hf)
-      |                  |
-      |                  v
-      |           raw DataFrame
-      |                  |
+      |                 (jsonl / json / csv / parquet / hf)
+      |                           |
+      |                           v
+      |                    raw DataFrame
+      |                           |
       +-- transforms -> Transform pipeline
-                             |
-                             v
-                        Dataset  (load_sample / num_samples)
+                         |
+                         v
+                    Dataset  (load_sample / num_samples)
 ```
 
 ## Public Interface
@@ -62,7 +62,9 @@ widely and are not enforced at the base class level.
 ```python
 class DataLoaderFactory:
     @staticmethod
-    def create_loader(config: DatasetConfig, num_repeats: int = 1, **kwargs) -> Dataset
+    def create_loader(
+        config: DatasetConfig, num_repeats: int = 1, **kwargs
+    ) -> Dataset: ...
 ```
 
 `config` is the `Dataset` Pydantic model from `config/schema.py`; it carries path, format,

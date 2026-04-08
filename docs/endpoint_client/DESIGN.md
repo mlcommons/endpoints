@@ -36,7 +36,7 @@ Main Process
 ┌─────────────────────────────────────────┐
 │  HTTPEndpointClient                     │
 │    ├── uvloop event loop                │
-│    └── WorkerManager                   │
+│    └── WorkerManager                    │
 │          └── WorkerPoolTransport (ZMQ) │
 └──────────────┬──────────────────────────┘
                │ ZMQ IPC (inproc/ipc)

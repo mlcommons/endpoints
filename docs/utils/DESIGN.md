@@ -35,7 +35,8 @@ a reusable helper.
 
 This module benchmarks the raw HTTP client throughput independent of the load generator and
 scheduler. It is useful for diagnosing whether performance bottlenecks are in the client layer
-or in the scheduling/coordination layer. It can be run directly:
+or in the scheduling/coordination layer. For broader tuning guidance, see
+[CLIENT_PERFORMANCE_TUNING.md](../CLIENT_PERFORMANCE_TUNING.md). It can be run directly:
 
 ```bash
 python3 -m inference_endpoint.utils.benchmark_httpclient --endpoint URL --workers 4

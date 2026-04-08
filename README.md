@@ -132,7 +132,7 @@ The system follows a modular, event-driven architecture:
 Dataset Manager ──► Load Generator ──► Endpoint Client ──► External Endpoint
                           │
                     Metrics Collector
-                  (EventRecorder + MetricsReporter)
+                 (event logging + reporting)
 ```
 
 - **Dataset Manager**: Loads benchmark datasets and applies transform pipelines
