@@ -2,7 +2,7 @@
 
 > Async infrastructure shared across the system: uvloop event loop lifecycle management, ZMQ-based IPC transport between processes, and a pub/sub event bus for real-time metric streaming.
 
-**Component specs:** **async_utils** · [commands](../commands/Design.md) · [config](../config/Design.md) · [core](../core/Design.md) · [dataset_manager](../dataset_manager/Design.md) · [endpoint_client](../endpoint_client/Design.md) · [evaluation](../evaluation/Design.md) · [load_generator](../load_generator/Design.md) · [metrics](../metrics/Design.md) · [openai](../openai/Design.md) · [plugins](../plugins/Design.md) · [profiling](../profiling/Design.md) · [sglang](../sglang/Design.md) · [testing](../testing/Design.md) · [utils](../utils/Design.md)
+**Component specs:** **async_utils** · [commands](../commands/DESIGN.md) · [config](../config/DESIGN.md) · [core](../core/DESIGN.md) · [dataset_manager](../dataset_manager/DESIGN.md) · [endpoint_client](../endpoint_client/DESIGN.md) · [evaluation](../evaluation/DESIGN.md) · [load_generator](../load_generator/DESIGN.md) · [metrics](../metrics/DESIGN.md) · [openai](../openai/DESIGN.md) · [plugins](../plugins/DESIGN.md) · [profiling](../profiling/DESIGN.md) · [sglang](../sglang/DESIGN.md) · [testing](../testing/DESIGN.md) · [utils](../utils/DESIGN.md)
 
 ---
 
@@ -33,14 +33,14 @@ async_utils/
 │       ├── pubsub.py        ← PUB/SUB socket pair
 │       └── transport.py     ← PUSH/PULL worker pool transport
 └── services/
-    ├── event_logger/        ← writes events to JSONL or SQLite (see Design.md)
-    └── metrics_aggregator/  ← real-time metric computation (see Design.md)
+    ├── event_logger/        ← writes events to JSONL or SQLite (see DESIGN.md)
+    └── metrics_aggregator/  ← real-time metric computation (see DESIGN.md)
 ```
 
 Sub-service specs:
 
-- [Event Logger](services/event_logger/Design.md)
-- [Metrics Aggregator](services/metrics_aggregator/Design.md)
+- [Event Logger](services/event_logger/DESIGN.md)
+- [Metrics Aggregator](services/metrics_aggregator/DESIGN.md)
 
 ## Public Interface
 

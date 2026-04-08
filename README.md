@@ -108,21 +108,21 @@ Each top-level component under `src/inference_endpoint/` has a corresponding spe
 
 | Component         | Spec                                                             |
 | ----------------- | ---------------------------------------------------------------- |
-| Core types        | [docs/core/Design.md](docs/core/Design.md)                       |
-| Load generator    | [docs/load_generator/Design.md](docs/load_generator/Design.md)   |
-| Endpoint client   | [docs/endpoint_client/Design.md](docs/endpoint_client/Design.md) |
-| Metrics           | [docs/metrics/Design.md](docs/metrics/Design.md)                 |
-| Config            | [docs/config/Design.md](docs/config/Design.md)                   |
-| Async utils       | [docs/async_utils/Design.md](docs/async_utils/Design.md)         |
-| Dataset manager   | [docs/dataset_manager/Design.md](docs/dataset_manager/Design.md) |
-| Commands (CLI)    | [docs/commands/Design.md](docs/commands/Design.md)               |
-| OpenAI adapter    | [docs/openai/Design.md](docs/openai/Design.md)                   |
-| SGLang adapter    | [docs/sglang/Design.md](docs/sglang/Design.md)                   |
-| Evaluation        | [docs/evaluation/Design.md](docs/evaluation/Design.md)           |
-| Testing utilities | [docs/testing/Design.md](docs/testing/Design.md)                 |
-| Profiling         | [docs/profiling/Design.md](docs/profiling/Design.md)             |
-| Plugins           | [docs/plugins/Design.md](docs/plugins/Design.md)                 |
-| Utils             | [docs/utils/Design.md](docs/utils/Design.md)                     |
+| Core types        | [docs/core/DESIGN.md](docs/core/DESIGN.md)                       |
+| Load generator    | [docs/load_generator/DESIGN.md](docs/load_generator/DESIGN.md)   |
+| Endpoint client   | [docs/endpoint_client/DESIGN.md](docs/endpoint_client/DESIGN.md) |
+| Metrics           | [docs/metrics/DESIGN.md](docs/metrics/DESIGN.md)                 |
+| Config            | [docs/config/DESIGN.md](docs/config/DESIGN.md)                   |
+| Async utils       | [docs/async_utils/DESIGN.md](docs/async_utils/DESIGN.md)         |
+| Dataset manager   | [docs/dataset_manager/DESIGN.md](docs/dataset_manager/DESIGN.md) |
+| Commands (CLI)    | [docs/commands/DESIGN.md](docs/commands/DESIGN.md)               |
+| OpenAI adapter    | [docs/openai/DESIGN.md](docs/openai/DESIGN.md)                   |
+| SGLang adapter    | [docs/sglang/DESIGN.md](docs/sglang/DESIGN.md)                   |
+| Evaluation        | [docs/evaluation/DESIGN.md](docs/evaluation/DESIGN.md)           |
+| Testing utilities | [docs/testing/DESIGN.md](docs/testing/DESIGN.md)                 |
+| Profiling         | [docs/profiling/DESIGN.md](docs/profiling/DESIGN.md)             |
+| Plugins           | [docs/plugins/DESIGN.md](docs/plugins/DESIGN.md)                 |
+| Utils             | [docs/utils/DESIGN.md](docs/utils/DESIGN.md)                     |
 
 ## 🎯 Architecture
 

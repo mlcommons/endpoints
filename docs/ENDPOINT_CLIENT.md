@@ -1,10 +1,10 @@
 # Endpoint Client Implementation Deep Dive
 
-> Primary component spec: [docs/endpoint_client/Design.md](endpoint_client/Design.md)
+> Primary component spec: [docs/endpoint_client/DESIGN.md](endpoint_client/DESIGN.md)
 >
 > This document is the detailed companion reference for the endpoint client implementation. Use
 > it for deeper material on connection pool architecture, worker internals, SSE handling, and
-> performance analysis. Treat `docs/endpoint_client/Design.md` as the canonical high-level design
+> performance analysis. Treat `docs/endpoint_client/DESIGN.md` as the canonical high-level design
 > spec.
 
 Detailed design for the `HTTPEndpointClient`: functional requirements, performance constraints, connection pool architecture, and worker process integration.
