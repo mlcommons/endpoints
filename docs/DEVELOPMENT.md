@@ -2,7 +2,7 @@
 
 This guide provides everything you need to contribute to the MLPerf Inference Endpoint Benchmarking System.
 
-## Getting Started
+## 🚀 Getting Started
 
 ### Prerequisites
 
@@ -14,48 +14,40 @@ This guide provides everything you need to contribute to the MLPerf Inference En
 ### Development Environment Setup
 
 ```bash
-# 1. Fork https://github.com/mlcommons/endpoints on GitHub, then clone your fork
-git clone https://github.com/YOUR_USERNAME/endpoints.git
-cd endpoints
+# 1. Clone the repository
+git clone https://github.com/mlperf/inference-endpoint.git
+cd inference-endpoint
 
-# 2. Add the upstream repo as a remote
-git remote add upstream https://github.com/mlcommons/endpoints.git
-
-# 3. Create virtual environment (Python 3.12+ required)
+# 2. Create virtual environment (Python 3.12+ required)
 python3.12 -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 
-# 4. Install development dependencies
+# 3. Install development dependencies
 pip install -e ".[dev,test]"
 
-# 5. Install pre-commit hooks
+# 4. Install pre-commit hooks
 pre-commit install
 
-# 6. Verify installation
+# 5. Verify installation
 inference-endpoint --version
 pytest --version
 ```
 
-## Project Structure
+## 🏗️ Project Structure
 
 ```
-endpoints/
+inference-endpoint/
 ├── src/inference_endpoint/     # Main package source
-│   ├── main.py                 # Entry point and CLI app
-│   ├── exceptions.py           # Project-wide exception types
-│   ├── async_utils/            # Event loop, ZMQ transport, pub/sub
+│   ├── cli.py                  # Command-line interface
 │   ├── commands/               # CLI command implementations
 │   ├── config/                 # Configuration and schema management
 │   ├── core/                   # Core types and orchestration
 │   ├── dataset_manager/        # Dataset handling and loading
 │   ├── endpoint_client/        # HTTP/ZMQ endpoint communication
-│   ├── evaluation/             # Accuracy evaluation and scoring
 │   ├── load_generator/         # Load generation and scheduling
 │   ├── metrics/                # Performance measurement and reporting
 │   ├── openai/                 # OpenAI API compatibility
-│   ├── plugins/                # Plugin system
 │   ├── profiling/              # Performance profiling tools
-│   ├── sglang/                 # SGLang API adapter
 │   ├── testing/                # Test utilities (echo server, etc.)
 │   └── utils/                  # Common utilities
 ├── tests/                      # Test suite
@@ -68,7 +60,7 @@ endpoints/
 └── scripts/                    # Utility scripts
 ```
 
-## Testing
+## 🧪 Testing
 
 ### Running Tests
 
@@ -111,36 +103,24 @@ import pytest
 from inference_endpoint.core.types import Query
 
 class TestQuery:
-    @pytest.mark.unit
     def test_query_creation(self):
         """Test creating a basic query."""
-        query = Query(data={"prompt": "Test", "model": "test-model"})
-        assert query.data["prompt"] == "Test"
-        assert query.data["model"] == "test-model"
+        query = Query(prompt="Test", model="test-model")
+        assert query.prompt == "Test"
+        assert query.model == "test-model"
 
-    @pytest.mark.unit
-    @pytest.mark.asyncio(mode="strict")
+    @pytest.mark.asyncio
     async def test_async_operation(self):
         """Test async operations."""
         # Your async test here
         pass
 ```
 
-## Code Quality
+## 📝 Code Quality
 
 ### Pre-commit Hooks
 
-The project uses pre-commit hooks to ensure code quality.
-
-Hooks that run automatically on commit:
-
-- trailing-whitespace, end-of-file-fixer, check-yaml, check-merge-conflict, debug-statements
-- `ruff` (lint + autofix) and `ruff-format`
-- `mypy` type checking
-- `prettier` for YAML/JSON/Markdown
-- License header enforcement (Apache 2.0 SPDX header required on all Python files, added by `scripts/add_license_header.py`)
-
-**Always run `pre-commit run --all-files` before committing.**
+The project uses pre-commit hooks to ensure code quality:
 
 ```bash
 # Install hooks (done during setup)
@@ -151,11 +131,12 @@ pre-commit run
 
 # Run all hooks on all files
 pre-commit run --all-files
+
+# Skip hooks (use sparingly)
+git commit --no-verify
 ```
 
 ### Code Formatting
-
-Configuration: `ruff` (line-length 88, target Python 3.12), `ruff-format` (double quotes, space indent).
 
 ```bash
 # Format code with ruff
@@ -178,17 +159,12 @@ mypy src/
 pre-commit run --all-files
 ```
 
-## Development Workflow
+## 🔧 Development Workflow
 
 ### 1. Feature Development
 
 ```bash
-# Sync your fork with upstream before starting
-git fetch upstream
-git checkout main
-git merge upstream/main
-
-# Create a feature branch on your fork
+# Create feature branch
 git checkout -b feature/your-feature-name
 
 # Make changes and test
@@ -199,7 +175,7 @@ pre-commit run --all-files
 git add .
 git commit -m "feat: add your feature description"
 
-# Push to your fork and open a PR against mlcommons/endpoints
+# Push and create PR
 git push origin feature/your-feature-name
 ```
 
@@ -221,15 +197,42 @@ When developing a new component:
 - **Performance Tests**: Ensure no performance regressions
 - **Documentation**: Update docs for new features
 
-## Documentation
+## 📚 Documentation
 
 ### Writing Documentation
 
-- **Code Comments**: Add comments only where the _why_ is not obvious from the code; avoid restating what the code does
+- **Code Comments**: Use docstrings for all public APIs
 - **README Updates**: Update README.md for user-facing changes
+- **API Documentation**: Document new interfaces and changes
 - **Examples**: Provide usage examples for new features
 
-## Performance Considerations
+### Documentation Standards
+
+```python
+def process_query(query: Query) -> QueryResult:
+    """
+    Process a query and return the result.
+
+    Args:
+        query: The query to process
+
+    Returns:
+        QueryResult containing the processed response
+
+    Raises:
+        QueryError: If the query cannot be processed
+
+    Example:
+        >>> query = Query(prompt="Hello")
+        >>> result = process_query(query)
+        >>> print(result.content)
+        'Hello there!'
+    """
+    # Implementation here
+    pass
+```
+
+## 🚀 Performance Considerations
 
 ### Development Guidelines
 
@@ -251,7 +254,7 @@ pytest --benchmark-only
 pytest --benchmark-compare
 ```
 
-## Debugging
+## 🔍 Debugging
 
 ### Common Issues
 
@@ -273,22 +276,7 @@ pytest -s -v
 python -m pdb -m pytest test_file.py
 ```
 
-## YAML Config Templates
-
-Config templates in `src/inference_endpoint/config/templates/` are auto-generated from schema defaults. When you change `config/schema.py`, regenerate them:
-
-```bash
-python scripts/regenerate_templates.py
-```
-
-The pre-commit hook auto-regenerates templates when `schema.py`, `config.py`, or `regenerate_templates.py` change. CI validates templates are up to date via `--check` mode.
-
-Two variants are generated per mode (offline, online, concurrency):
-
-- `_template.yaml` — minimal: only required fields + placeholders
-- `_template_full.yaml` — all fields with schema defaults + inline `# options:` comments
-
-## Package Management
+## 📦 Package Management
 
 ### Adding Dependencies
 
@@ -303,7 +291,7 @@ Install after updating:
 pip install -e ".[dev,test]"
 ```
 
-## Troubleshooting
+## 🚨 Troubleshooting
 
 ### Common Problems
 
@@ -338,20 +326,17 @@ python -c "import sys; print(sys.path)"
 export PYTHONPATH="${PYTHONPATH}:$(pwd)/src"
 ```
 
-## Contributing Guidelines
+## 🤝 Contributing Guidelines
 
 ### Pull Request Process
 
-1. **Fork** `mlcommons/endpoints` on GitHub
-2. **Clone your fork** and add `upstream` as a remote (see [Development Environment Setup](#development-environment-setup))
-3. **Sync with upstream** (`git fetch upstream && git merge upstream/main`) before starting work
-4. **Create a feature branch** on your fork (`git checkout -b feature/your-feature-name`)
-5. **Make your changes** following the coding standards
-6. **Add tests** for new functionality
-7. **Update documentation** as needed
-8. **Run all checks** locally: `pytest` and `pre-commit run --all-files`
-9. **Push to your fork** and open a PR against `mlcommons/endpoints:main`
-10. **Address review comments** promptly
+1. **Fork the repository** and create a feature branch
+2. **Make your changes** following the coding standards
+3. **Add tests** for new functionality
+4. **Update documentation** as needed
+5. **Run all checks** locally before submitting
+6. **Create a PR** with clear description and tests
+7. **Address review comments** promptly
 
 ### Commit Message Format
 
@@ -366,8 +351,6 @@ docs(readme): update installation instructions
 test(loadgen): add performance benchmarks
 ```
 
-Allowed types: `feat`, `fix`, `docs`, `test`, `chore`, `refactor`, `perf`, `ci`.
-
 ### Code Review Checklist
 
 - [ ] Code follows style guidelines
@@ -377,9 +360,20 @@ Allowed types: `feat`, `fix`, `docs`, `test`, `chore`, `refactor`, `perf`, `ci`.
 - [ ] Security implications are reviewed
 - [ ] Error handling is appropriate
 
-## Getting Help
+## 📞 Getting Help
 
-- **Issues**: [GitHub Issues](https://github.com/mlcommons/endpoints/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/mlcommons/endpoints/discussions)
+- **Issues**: [GitHub Issues](https://github.com/mlperf/inference-endpoint/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/mlperf/inference-endpoint/discussions)
 - **Documentation**: Check this guide and project docs
 - **Team**: Reach out to the development team
+
+## 🎯 Next Steps
+
+1. **Set up your environment** using this guide
+2. **Explore the codebase** to understand the architecture
+3. **Pick a component** to work on from the project board
+4. **Start with tests** to understand the expected behavior
+5. **Implement incrementally** with regular testing
+6. **Ask questions** when you need help
+
+Happy coding! 🚀

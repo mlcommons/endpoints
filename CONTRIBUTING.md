@@ -127,7 +127,7 @@ Every test function **must** have a marker:
 
 ```python
 @pytest.mark.unit
-@pytest.mark.asyncio(mode="strict")  # for async tests — must use strict mode
+@pytest.mark.asyncio  # strict mode is configured globally in pyproject.toml
 async def test_something():
     ...
 ```
