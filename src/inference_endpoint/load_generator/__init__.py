@@ -13,40 +13,51 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""
-Load Generator for the MLPerf Inference Endpoint Benchmarking System.
+"""Async load generator for the MLPerf Inference Endpoint Benchmarking System.
 
-This module handles load pattern generation and query lifecycle management.
-Status: To be implemented by the development team.
+See docs/load_generator/design.md for the full design.
 """
 
-from .load_generator import LoadGenerator, SampleIssuer, SchedulerBasedLoadGenerator
-from .sample import IssuedSample, Sample, SampleEvent, SampleEventHandler
-from .scheduler import (
-    ConcurrencyScheduler,
-    MaxThroughputScheduler,
-    PoissonDistributionScheduler,
+from .delay import make_delay_fn, poisson_delay_fn
+from .sample_order import (
     SampleOrder,
-    Scheduler,
     WithoutReplacementSampleOrder,
     WithReplacementSampleOrder,
+    create_sample_order,
 )
-from .session import BenchmarkSession
+from .session import (
+    BenchmarkSession,
+    PhaseConfig,
+    PhaseIssuer,
+    PhaseResult,
+    PhaseType,
+    SessionResult,
+)
+from .strategy import (
+    BurstStrategy,
+    ConcurrencyStrategy,
+    LoadStrategy,
+    TimedIssueStrategy,
+    create_load_strategy,
+)
 
 __all__ = [
-    "SampleEvent",
-    "Sample",
-    "SampleEventHandler",
-    "IssuedSample",
-    "Scheduler",
-    "ConcurrencyScheduler",
-    "MaxThroughputScheduler",
-    "PoissonDistributionScheduler",
-    "SampleOrder",
-    "WithReplacementSampleOrder",
-    "WithoutReplacementSampleOrder",
-    "LoadGenerator",
-    "SampleIssuer",
-    "SchedulerBasedLoadGenerator",
+    # New async API
     "BenchmarkSession",
+    "PhaseConfig",
+    "PhaseType",
+    "PhaseResult",
+    "SessionResult",
+    "PhaseIssuer",
+    "LoadStrategy",
+    "TimedIssueStrategy",
+    "BurstStrategy",
+    "ConcurrencyStrategy",
+    "create_load_strategy",
+    "SampleOrder",
+    "WithoutReplacementSampleOrder",
+    "WithReplacementSampleOrder",
+    "create_sample_order",
+    "make_delay_fn",
+    "poisson_delay_fn",
 ]

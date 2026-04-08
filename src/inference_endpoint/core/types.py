@@ -348,18 +348,12 @@ class StreamChunk(
     display and accurate Time-To-First-Token (TTFT) measurements.
 
     Multiple StreamChunks with the same id collectively form the complete response.
-    The is_complete flag indicates the final chunk in the sequence.
+    The final QueryResult (sent by the worker after all chunks) signals completion.
 
     Attributes:
         id: Query identifier (matches the originating Query.id).
         response_chunk: Partial response text for this chunk (delta, not cumulative).
-        is_complete: True if this is the final chunk, False for intermediate chunks.
         metadata: Additional metadata for this chunk (timing, token info, etc.).
-
-    Example:
-        Streaming "Hello World" might produce:
-        >>> StreamChunk(id="q1", response_chunk="Hello", is_complete=False)
-        >>> StreamChunk(id="q1", response_chunk=" World", is_complete=True)
 
     Note:
         gc=False: Safe because metadata contains only scalar key-value pairs.
@@ -368,13 +362,12 @@ class StreamChunk(
         omit_defaults=True: Fields with static defaults (ie. those NOT using default_factory)
         are omitted if value equals default.
 
-        array_like=True: Encodes as array instead of object (e.g. ["id", "chunk", false, {}]
+        array_like=True: Encodes as array instead of object (e.g. ["id", "chunk", {}]
         instead of {"id": ..., "response_chunk": ..., ...}). Reduces payload size.
     """
 
     id: str = ""
     response_chunk: str = ""
-    is_complete: bool = False
     metadata: dict[str, Any] = msgspec.field(default_factory=dict)
 
 

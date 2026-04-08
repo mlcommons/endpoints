@@ -169,15 +169,17 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
             return {}
 
         version_info = get_version_info()
-        duration_ns = _counter("duration_ns")
+        duration_ns = _counter("tracked_duration_ns")
 
         return cls(
             version=str(version_info.get("version", "unknown")),
             git_sha=version_info.get("git_sha"),
-            test_started_at=_counter("test_started_at"),
-            n_samples_issued=_counter("n_samples_issued"),
-            n_samples_completed=_counter("n_samples_completed"),
-            n_samples_failed=_counter("n_samples_failed"),
+            test_started_at=0,  # TODO: add test_started_at counter to aggregator
+            n_samples_issued=_counter("tracked_samples_issued"),
+            n_samples_completed=_counter("tracked_samples_completed"),
+            # TODO: Add tracked_samples_failed to MetricCounterKey.
+            # For now, total_samples_failed is the best available.
+            n_samples_failed=_counter("total_samples_failed"),
             duration_ns=duration_ns if duration_ns > 0 else None,
             ttft=_summarize("ttft_ns"),
             tpot=_summarize("tpot_ns"),

@@ -13,212 +13,460 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Async benchmark session: orchestrates phases, issues samples, receives responses.
+
+See docs/load_generator/design.md for the full design.
+"""
+
 from __future__ import annotations
 
+import asyncio
 import logging
-import os
-import threading
+import time
 import uuid
-from pathlib import Path
-
-import msgspec.json
+from collections.abc import Callable
+from dataclasses import dataclass
+from enum import Enum
+from typing import Protocol
 
 from ..config.runtime_settings import RuntimeSettings
+from ..core.record import (
+    ErrorEventType,
+    EventRecord,
+    SampleEventType,
+    SessionEventType,
+)
+from ..core.types import PromptData, Query, QueryResult, StreamChunk
 from ..dataset_manager.dataset import Dataset
-from .load_generator import LoadGenerator, SampleIssuer, SchedulerBasedLoadGenerator
-from .scheduler import Scheduler, WithoutReplacementSampleOrder
+from .sample_order import create_sample_order
+from .strategy import LoadStrategy, create_load_strategy
 
 logger = logging.getLogger(__name__)
 
 
-class BenchmarkSession:
-    def __init__(
-        self,
-        runtime_settings: RuntimeSettings,
-        session_id: str | None = None,
-    ):
-        self.logger = logging.getLogger(__name__)
-        self.runtime_settings = runtime_settings
-        self.session_id = session_id if session_id else uuid.uuid4().hex
+# ---------------------------------------------------------------------------
+# Phase configuration
+# ---------------------------------------------------------------------------
 
-        self.end_event = threading.Event()
-        self.thread: threading.Thread | None = None
 
-        # CPython GIL provides atomic boolean writes, no need for threading.Event()
-        self.stop_requested = False
+class PhaseType(str, Enum):
+    """Phase types control tracking and reporting behavior."""
 
-        # Will be populated after the test finishes by _run_test
-        self.report = None
+    PERFORMANCE = "performance"
+    ACCURACY = "accuracy"
+    SATURATION = "saturation"
 
-        self.sample_uuid_map: dict[str, dict[str, int]] | None = None
+
+@dataclass(frozen=True, slots=True)
+class PhaseConfig:
+    """Configuration for a single benchmark phase."""
+
+    name: str
+    runtime_settings: RuntimeSettings
+    dataset: Dataset
+    phase_type: PhaseType = PhaseType.PERFORMANCE
+
+
+# ---------------------------------------------------------------------------
+# Results
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class PhaseResult:
+    """Result of a single benchmark phase."""
+
+    name: str
+    phase_type: PhaseType
+    uuid_to_index: dict[str, int]
+    issued_count: int
+    start_time_ns: int
+    end_time_ns: int
+
+
+@dataclass(frozen=True)
+class SessionResult:
+    """Combined results from all phases in a session."""
+
+    session_id: str
+    phase_results: list[PhaseResult]
+    start_time_ns: int
+    end_time_ns: int
 
     @property
-    def is_running(self):
-        return self.thread is not None and self.thread.is_alive()
+    def perf_results(self) -> list[PhaseResult]:
+        return [r for r in self.phase_results if r.phase_type == PhaseType.PERFORMANCE]
+
+    @property
+    def accuracy_results(self) -> list[PhaseResult]:
+        return [r for r in self.phase_results if r.phase_type == PhaseType.ACCURACY]
+
+
+# ---------------------------------------------------------------------------
+# SampleIssuer protocol
+# ---------------------------------------------------------------------------
+
+
+class SampleIssuer(Protocol):
+    """Sends queries to an endpoint and receives responses.
+
+    Matches HTTPEndpointClient's interface: issue (sync ZMQ push),
+    recv (async ZMQ recv), shutdown.
+    """
+
+    def issue(self, query: Query) -> None: ...
+    async def recv(self) -> QueryResult | StreamChunk | None: ...
+    def shutdown(self) -> None: ...
+
+
+# ---------------------------------------------------------------------------
+# EventRecordPublisher protocol
+# ---------------------------------------------------------------------------
+
+
+class EventPublisher(Protocol):
+    """Publishes EventRecords to the metrics pipeline."""
+
+    def publish(self, event_record: EventRecord) -> None: ...
+
+
+# ---------------------------------------------------------------------------
+# PhaseIssuer
+# ---------------------------------------------------------------------------
+
+
+class PhaseIssuer:
+    """Per-phase state holder that wraps the issue logic.
+
+    Created fresh for each phase. Holds the phase-scoped uuid_to_index map,
+    inflight counter, and issued count. Strategies call issue(sample_index)
+    to load data, build a Query, publish ISSUED, and send to the endpoint.
+    """
+
+    __slots__ = (
+        "_dataset",
+        "_issuer",
+        "_publisher",
+        "_stop_check",
+        "uuid_to_index",
+        "inflight",
+        "issued_count",
+    )
+
+    def __init__(
+        self,
+        dataset: Dataset,
+        issuer: SampleIssuer,
+        publisher: EventPublisher,
+        stop_check: Callable[[], bool],
+    ):
+        self._dataset = dataset
+        self._issuer = issuer
+        self._publisher = publisher
+        self._stop_check = stop_check
+        self.uuid_to_index: dict[str, int] = {}
+        self.inflight: int = 0
+        self.issued_count: int = 0
+
+    def issue(self, sample_index: int) -> str | None:
+        """Load data, build Query, publish ISSUED, send to endpoint.
+
+        Returns query_id on success, None if session is stopping.
+
+        Note: load_sample() runs synchronously before the ISSUED timestamp.
+        For accurate timing, datasets MUST be pre-loaded into memory.
+        Disk-backed datasets will inflate timing and delay subsequent issues.
+        """
+        if self._stop_check():
+            return None
+        query_id = uuid.uuid4().hex
+        data = self._dataset.load_sample(sample_index)
+        query = Query(id=query_id, data=data)
+        self.uuid_to_index[query_id] = sample_index
+        ts = time.monotonic_ns()
+        prompt_data: PromptData
+        if isinstance(data, dict):
+            token_ids = data.get("input_tokens") or data.get("token_ids")
+            prompt_data = PromptData(
+                text=data.get("prompt"),
+                token_ids=tuple(token_ids) if token_ids is not None else None,
+            )
+        else:
+            prompt_data = PromptData()
+        self._publisher.publish(
+            EventRecord(
+                event_type=SampleEventType.ISSUED,
+                timestamp_ns=ts,
+                sample_uuid=query_id,
+                data=prompt_data,
+            )
+        )
+        self._issuer.issue(query)
+        self.inflight += 1
+        self.issued_count += 1
+        return query_id
+
+
+# ---------------------------------------------------------------------------
+# BenchmarkSession
+# ---------------------------------------------------------------------------
+
+
+class BenchmarkSession:
+    """Async benchmark orchestrator. Single thread, single event loop.
+
+    Runs phases sequentially. Each phase gets its own PhaseIssuer and
+    LoadStrategy. The receiver coroutine runs concurrently throughout,
+    processing responses and routing completions to the active strategy.
+    """
+
+    def __init__(
+        self,
+        issuer: SampleIssuer,
+        event_publisher: EventPublisher,
+        loop: asyncio.AbstractEventLoop,
+        on_sample_complete: Callable[[QueryResult | StreamChunk], None] | None = None,
+        session_id: str | None = None,
+    ):
+        self._issuer = issuer
+        self._publisher = event_publisher
+        self._loop = loop
+        self._on_sample_complete = on_sample_complete
+        self.session_id = session_id or uuid.uuid4().hex
+
+        # Mutable state
+        self._stop_requested = False
+        self._done = False
+        self._current_phase_issuer: PhaseIssuer | None = None
+        self._current_strategy: LoadStrategy | None = None
+        self._recv_task: asyncio.Task | None = None
+        self._strategy_task: asyncio.Task | None = None
+        self._drain_event = asyncio.Event()
 
     def stop(self) -> None:
-        """Signal the session to stop early."""
-        self.stop_requested = True
-        # wakeup _run_test if needed, short-circuit SHUTDOWN_POLL_INTERVAL_S
-        self.end_event.set()
+        """Signal early termination. Safe to call from signal handler.
 
-    def _run_test(
-        self,
-        perf_test_generator: LoadGenerator,
-        accuracy_test_generators: dict[str, LoadGenerator] | None = None,
-        report_dir: os.PathLike | None = None,
-    ):
+        Cancels the running strategy task to unblock strategies that may be
+        waiting on semaphores or other async primitives. Also sets the drain
+        event to unblock _drain_inflight if it's waiting for responses.
+        """
+        self._stop_requested = True
+        self._drain_event.set()
+        if self._strategy_task and not self._strategy_task.done():
+            self._strategy_task.cancel()
+
+    async def run(self, phases: list[PhaseConfig]) -> SessionResult:
+        """Run all benchmark phases sequentially.
+
+        Returns SessionResult with per-phase results.
+        """
+        session_start = time.monotonic_ns()
+        self._publish_session_event(SessionEventType.STARTED)
+
+        self._recv_task = asyncio.create_task(self._receive_responses())
+        phase_results: list[PhaseResult] = []
+
         try:
-            for _ in perf_test_generator:
-                pass
+            for phase in phases:
+                if self._stop_requested:
+                    break
+                result = await self._run_phase(phase)
+                if result is not None:
+                    phase_results.append(result)
+        finally:
+            self._done = True
+            if self._recv_task and not self._recv_task.done():
+                self._recv_task.cancel()
+                try:
+                    await self._recv_task
+                except asyncio.CancelledError:
+                    pass
+            self._publish_session_event(SessionEventType.ENDED)
 
-            self.logger.info("All performance samples issued")
-
-            if accuracy_test_generators:
-                for _, generator in accuracy_test_generators.items():
-                    for _ in generator:
-                        pass
-
-            self.logger.info("All accuracy samples issued")
-
-            # TODO: Wire in EventPublisherService + ServiceLauncher (Phase 5)
-            # For now, no event recording or report generation.
-
-        except Exception as e:
-            logger.error(f"Error running benchmark session: {e}")
-            raise e
-
-        # Consolidate UUID->index mappings
-        perf_name = (
-            perf_test_generator.name if perf_test_generator.name else "performance"
+        return SessionResult(
+            session_id=self.session_id,
+            phase_results=phase_results,
+            start_time_ns=session_start,
+            end_time_ns=time.monotonic_ns(),
         )
-        sample_idx_map = {
-            perf_name: perf_test_generator.uuid_to_index_map,
-        }
-        if accuracy_test_generators:
-            for default_name, generator in accuracy_test_generators.items():
-                name = generator.name if generator.name else default_name
-                sample_idx_map[name] = generator.uuid_to_index_map
-        self.sample_uuid_map = sample_idx_map
 
-        # Save runtime settings and UUID map if report_dir provided
-        if report_dir:
-            Path(report_dir).mkdir(parents=True, exist_ok=True)
+    async def _run_phase(self, phase: PhaseConfig) -> PhaseResult | None:
+        """Run a single phase. Returns PhaseResult or None for saturation."""
+        logger.info("Starting phase: %s (%s)", phase.name, phase.phase_type.value)
+        phase_start = time.monotonic_ns()
 
-            rt_settings_data: dict[str, int | str | None] = {
-                "min_duration_ms": self.runtime_settings.min_duration_ms,
-                "max_duration_ms": self.runtime_settings.max_duration_ms,
-                "n_samples_from_dataset": self.runtime_settings.n_samples_from_dataset,
-                "n_samples_to_issue": self.runtime_settings.n_samples_to_issue,
-                "min_sample_count": self.runtime_settings.min_sample_count,
-                "total_samples_to_issue": self.runtime_settings.total_samples_to_issue(),
-            }
-            has_model = hasattr(self.runtime_settings, "model")
-            if has_model:
-                model = getattr(self.runtime_settings, "model", None)
-                if model is not None:
-                    rt_settings_data["model"] = (
-                        model if isinstance(model, str) else str(model.name)
+        # Create per-phase state
+        sample_order = create_sample_order(phase.runtime_settings)
+        strategy = create_load_strategy(
+            phase.runtime_settings, self._loop, sample_order
+        )
+        phase_issuer = PhaseIssuer(
+            dataset=phase.dataset,
+            issuer=self._issuer,
+            publisher=self._publisher,
+            stop_check=self._make_stop_check(phase.runtime_settings, phase_start),
+        )
+
+        self._current_phase_issuer = phase_issuer
+        self._current_strategy = strategy
+
+        # Performance phases get tracking events
+        if phase.phase_type == PhaseType.PERFORMANCE:
+            self._publish_session_event(SessionEventType.START_PERFORMANCE_TRACKING)
+
+        # Execute the strategy as a task so it can be cancelled on transport close
+        self._strategy_task = asyncio.create_task(strategy.execute(phase_issuer))
+        try:
+            await self._strategy_task
+        except asyncio.CancelledError:
+            logger.info("Strategy cancelled for phase %s", phase.name)
+        finally:
+            self._strategy_task = None
+
+        # Drain in-flight (skip for saturation — keep concurrency hot)
+        if phase.phase_type != PhaseType.SATURATION:
+            await self._drain_inflight(phase_issuer)
+
+        if phase.phase_type == PhaseType.PERFORMANCE:
+            self._publish_session_event(SessionEventType.STOP_PERFORMANCE_TRACKING)
+
+        phase_end = time.monotonic_ns()
+        logger.info(
+            "Phase %s complete: %d samples issued",
+            phase.name,
+            phase_issuer.issued_count,
+        )
+
+        # Saturation phases produce no result
+        if phase.phase_type == PhaseType.SATURATION:
+            return None
+
+        return PhaseResult(
+            name=phase.name,
+            phase_type=phase.phase_type,
+            uuid_to_index=phase_issuer.uuid_to_index,
+            issued_count=phase_issuer.issued_count,
+            start_time_ns=phase_start,
+            end_time_ns=phase_end,
+        )
+
+    async def _drain_inflight(self, phase_issuer: PhaseIssuer) -> None:
+        """Wait for all in-flight responses from this phase to complete.
+
+        Currently, there is no timeout for the drain step. In the future,
+        we can possibly add a dynamic timeout based on the rate of completion
+        throughout the current phase."""
+        if phase_issuer.inflight <= 0 or self._stop_requested:
+            return
+        logger.info("Draining %d in-flight responses...", phase_issuer.inflight)
+        self._drain_event.clear()
+        await self._drain_event.wait()
+
+    async def _receive_responses(self) -> None:
+        """Receive responses from the issuer. Runs as a concurrent task."""
+        while not self._done:
+            resp = await self._issuer.recv()
+            if resp is None:
+                # Transport closed unexpectedly — trigger stop so strategy
+                # and drain don't hang waiting for responses that will never arrive.
+                logger.warning("Issuer recv() returned None — transport closed")
+                self._stop_requested = True
+                self._drain_event.set()  # Unblock _drain_inflight
+                # Cancel the strategy task if it's blocked (e.g., ConcurrencyStrategy
+                # awaiting sem.acquire() that will never be released).
+                if self._strategy_task and not self._strategy_task.done():
+                    self._strategy_task.cancel()
+                break
+            self._handle_response(resp)
+
+    def _handle_response(self, resp: QueryResult | StreamChunk) -> None:
+        """Route a response to the appropriate handler.
+
+        Transport contract for streaming: the worker sends intermediate
+        StreamChunk messages for timing events, then a final QueryResult
+        with accumulated output for completion.
+        """
+        phase_issuer = self._current_phase_issuer
+
+        if isinstance(resp, QueryResult):
+            query_id = resp.id
+            self._publisher.publish(
+                EventRecord(
+                    event_type=SampleEventType.COMPLETE,
+                    timestamp_ns=resp.completed_at
+                    if isinstance(resp.completed_at, int)
+                    else time.monotonic_ns(),
+                    sample_uuid=query_id,
+                    data=resp.response_output,
+                )
+            )
+            if resp.error is not None:
+                self._publisher.publish(
+                    EventRecord(
+                        event_type=ErrorEventType.GENERIC,
+                        timestamp_ns=time.monotonic_ns(),
+                        sample_uuid=query_id,
+                        data=resp.error,
                     )
-
-            with (Path(report_dir) / "runtime_settings.json").open("w") as f:
-                f.write(
-                    msgspec.json.format(
-                        msgspec.json.encode(dict(sorted(rt_settings_data.items()))),
-                        indent=2,
-                    ).decode("utf-8")
                 )
+            if phase_issuer is not None and query_id in phase_issuer.uuid_to_index:
+                phase_issuer.inflight -= 1
+                if phase_issuer.inflight <= 0:
+                    self._drain_event.set()
+                if self._current_strategy:
+                    self._current_strategy.on_query_complete(query_id)
+                if self._on_sample_complete:
+                    self._on_sample_complete(resp)
 
-            with (Path(report_dir) / "sample_idx_map.json").open("w") as f:
-                f.write(msgspec.json.encode(self.sample_uuid_map).decode("utf-8"))
+        elif isinstance(resp, StreamChunk):
+            is_first = resp.metadata.get("first_chunk", False)
+            event_type = (
+                SampleEventType.RECV_FIRST
+                if is_first
+                else SampleEventType.RECV_NON_FIRST
+            )
+            self._publisher.publish(
+                EventRecord(
+                    event_type=event_type,
+                    timestamp_ns=time.monotonic_ns(),
+                    sample_uuid=resp.id,
+                )
+            )
 
-    def wait_for_test_end(self, timeout: float | None = None) -> bool:
+    def _make_stop_check(
+        self, settings: RuntimeSettings, phase_start_ns: int
+    ) -> Callable[[], bool]:
+        """Create a stop-check closure for a phase.
+
+        Reads self._current_phase_issuer at call time (not creation time).
+        Invariant: _current_phase_issuer must not change while a phase's
+        strategy is executing. This is guaranteed by sequential phase execution.
         """
-        Join the test thread and return True if the test completed, False if it timed out.
-
-        Args:
-            timeout: The maximum time to wait for the test to complete. If None, wait indefinitely.
-
-        Returns:
-            bool: True if the test thread has completed, False if it timed out.
-        """
-        if not self.thread:
-            return False
-        self.thread.join(timeout=timeout)
-        return not self.thread.is_alive()
-
-    @classmethod
-    def start(
-        cls,
-        runtime_settings: RuntimeSettings,
-        dataset: Dataset,
-        sample_issuer: SampleIssuer,
-        scheduler: Scheduler,
-        *args,
-        accuracy_datasets: list[Dataset] | None = None,
-        load_generator_cls: type[LoadGenerator] = SchedulerBasedLoadGenerator,
-        name: str | None = None,
-        report_dir: os.PathLike | None = None,
-    ) -> BenchmarkSession:
-        """Start a new BenchmarkSession in a thread.
-
-        Args:
-            runtime_settings: The runtime settings to use for the session.
-            dataset: The dataset to use for the performance test.
-            sample_issuer: The sample issuer to use for the session.
-            scheduler: The scheduler to use for the session.
-            accuracy_datasets: The datasets to use for the accuracy tests.
-            load_generator_cls: The load generator class to use for the session.
-            name: The name of the session.
-            report_dir: The path to save the report to. If None, no report will be saved.
-
-        Returns:
-            The new BenchmarkSession.
-        """
-        session = cls(runtime_settings, session_id=name)
-        load_generator = load_generator_cls(sample_issuer, dataset, scheduler, *args)  # type: ignore[arg-type]
-
-        # Create accuracy test generators
-        accuracy_test_generators = None
-        if accuracy_datasets:
-            accuracy_test_generators = {}
-            for ds in accuracy_datasets:
-                if hasattr(ds.__class__, "DATASET_ID"):
-                    ds_name = ds.__class__.DATASET_ID
-                else:
-                    ds_name = ds.__class__.__name__
-
-                # Create accuracy dataset specific runtime settings
-                acc_rt_settings = RuntimeSettings(
-                    metric_target=runtime_settings.metric_target,
-                    reported_metrics=runtime_settings.reported_metrics,
-                    min_duration_ms=0,
-                    max_duration_ms=None,
-                    n_samples_from_dataset=ds.num_samples(),
-                    n_samples_to_issue=ds.num_samples() * ds.repeats,
-                    min_sample_count=ds.num_samples() * ds.repeats,
-                    rng_sched=runtime_settings.rng_sched,
-                    rng_sample_index=runtime_settings.rng_sample_index,
-                    load_pattern=runtime_settings.load_pattern,
-                )
-                acc_sched = scheduler.__class__(
-                    acc_rt_settings, WithoutReplacementSampleOrder
-                )
-
-                accuracy_test_generators[ds_name] = load_generator_cls(
-                    sample_issuer,
-                    ds,
-                    acc_sched,  # type: ignore[arg-type]
-                    *args,
-                )
-
-        session.thread = threading.Thread(
-            target=session._run_test,
-            args=(load_generator,),
-            kwargs={
-                "accuracy_test_generators": accuracy_test_generators,
-                "report_dir": report_dir,
-            },
+        max_duration_ns = (
+            settings.max_duration_ms * 1_000_000
+            if settings.max_duration_ms is not None
+            else 0
         )
-        session.thread.start()
-        return session
+        total_samples = settings.total_samples_to_issue()
+
+        def check() -> bool:
+            if self._stop_requested:
+                return True
+            if (
+                self._current_phase_issuer
+                and self._current_phase_issuer.issued_count >= total_samples
+            ):
+                return True
+            if (
+                max_duration_ns > 0
+                and (time.monotonic_ns() - phase_start_ns) >= max_duration_ns
+            ):
+                return True
+            return False
+
+        return check
+
+    def _publish_session_event(self, event_type: SessionEventType) -> None:
+        self._publisher.publish(
+            EventRecord(event_type=event_type, timestamp_ns=time.monotonic_ns())
+        )

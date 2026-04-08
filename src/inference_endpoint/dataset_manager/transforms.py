@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from importlib import import_module
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -24,6 +25,7 @@ if TYPE_CHECKING:
 
 import pandas as pd
 
+from ..endpoint_client.config import ADAPTER_MAP
 from ..openai.harmony import Harmonizer
 
 
@@ -405,10 +407,6 @@ def get_transforms_for_api_type(
     Returns:
         A list of transforms required for the given API type
     """
-    from importlib import import_module
-
-    from inference_endpoint.endpoint_client.config import ADAPTER_MAP
-
     adapter_path = ADAPTER_MAP.get(api_type)
     if not adapter_path:
         raise ValueError(f"Invalid or unsupported API type: {api_type}")

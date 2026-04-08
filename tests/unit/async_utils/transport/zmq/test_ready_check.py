@@ -82,13 +82,15 @@ class TestReadyCheck:
                 receiver.close()
                 receiver.close()
 
-    async def test_close_on_timeout(self):
+    async def test_socket_survives_timeout(self):
+        """Socket must NOT be closed on timeout — caller may retry."""
         with tempfile.TemporaryDirectory() as tmpdir:
             with ManagedZMQContext.scoped(socket_dir=tmpdir) as ctx:
                 receiver = ReadyCheckReceiver("ready_close_timeout", ctx, count=1)
                 with pytest.raises(TimeoutError):
                     await receiver.wait(timeout=0.1)
-                assert receiver._sock.closed
+                assert not receiver._sock.closed
+                receiver.close()
 
 
 def _child_send_ready(socket_dir: str, path: str, identity: int) -> None:

@@ -29,6 +29,7 @@ from aiohttp import web
 from inference_endpoint.core.types import QueryResult, TextModelOutput
 from inference_endpoint.openai.openai_adapter import OpenAIAdapter
 from inference_endpoint.openai.openai_types_gen import CreateChatCompletionRequest
+from inference_endpoint.utils.logging import setup_logging
 
 
 class HTTPServer:
@@ -427,8 +428,6 @@ def main():
     """
 
     #
-    from inference_endpoint.utils.logging import setup_logging
-
     setup_logging()
     parser = create_parser()
     args = parser.parse_args()

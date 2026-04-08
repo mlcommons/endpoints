@@ -43,12 +43,13 @@ import logging
 import math
 import mmap
 import os
-import platform
 import shutil
 import struct
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Literal
+
+from .fs_check import needs_msync
 
 # ---------------------------------------------------------------------------
 # Series rollup stats (computed on read)
@@ -257,6 +258,7 @@ class _SeriesItem:
         "_dtype",
         "_char",
         "_fmt",
+        "_needs_msync",
     )
 
     def __init__(
@@ -272,6 +274,7 @@ class _SeriesItem:
         self._dtype = dtype
         self._char = _STRUCT_CHAR[dtype]
         self._fmt = f"{_ENDIAN}{self._char}"
+        self._needs_msync = needs_msync(path.parent)
         total = _HEADER_BYTES + capacity * _VALUE_BYTES
         fd = os.open(str(path), os.O_CREAT | os.O_RDWR, _DEFAULT_FILE_MODE)
         try:
@@ -285,7 +288,7 @@ class _SeriesItem:
         if self._closed:
             logger.warning("append() called on closed series: %s", self._path)
             return
-        if type(value) != self._dtype:
+        if not isinstance(value, self._dtype):
             raise TypeError(
                 f"Expected {self._dtype.__name__}, got {type(value).__name__}"
             )
@@ -293,25 +296,9 @@ class _SeriesItem:
             self._grow()
         offset = _HEADER_BYTES + self._count * _VALUE_BYTES
         struct.pack_into(self._fmt, self._mm, offset, value)
-        # NOTE: This flush() calls msync(), which is a no-op on tmpfs (/dev/shm)
-        # and does NOT act as a CPU memory barrier. On x86-64 (TSO), store ordering
-        # is guaranteed — the value write above is visible before the count update
-        # below without any explicit barrier. On ARM (weak memory model), a reader
-        # could observe the count update before the value write. To support ARM
-        # properly, Python's mmap doesn't expose memory fences; you would need
-        # ctypes to call libc's __sync_synchronize() or use atomic operations via
-        # a C extension.
-        # The primary safety guarantee is the single-writer protocol:
-        # readers only read up to the count they observed, and on the target
-        # platform (x86-64 Linux), TSO provides the required ordering.
-        #
-        # For ARM platforms: Prometheus integration is planned as a replacement
-        # for mmap-backed metrics. As a temporary workaround, an on-disk metrics
-        # directory can be used instead of tmpfs — msync will then act as a real
-        # flush, providing ordering at the cost of performance.
-        if platform.machine() != "x86_64":
-            # Do not flush on x86-64 to avoid a no-op syscall on every append()
-            # For ARM, flush() and use an on-disk metrics directory instead of tmpfs.
+        # Flush between value write and count update for cross-process ordering.
+        # See fs_check.needs_msync() for when this is needed and why.
+        if self._needs_msync:
             self._mm.flush()
         self._count += 1
         struct.pack_into("<Q", self._mm, 0, self._count)

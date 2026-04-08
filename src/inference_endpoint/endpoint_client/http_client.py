@@ -68,7 +68,10 @@ class HTTPEndpointClient:
             self.loop = loop
         assert self.loop is not None
 
-        # Initialize on event loop
+        # Initialize on event loop.
+        # NOTE: This uses run_coroutine_threadsafe().result() which DEADLOCKS
+        # if called from the same event loop thread. For shared-loop usage,
+        # use the async factory: await HTTPEndpointClient.create(config, loop)
         asyncio.run_coroutine_threadsafe(self._initialize(), self.loop).result()
 
         logger.info(
@@ -78,6 +81,36 @@ class HTTPEndpointClient:
             f"accumulator={self.config.accumulator.__name__ if self.config.accumulator else 'none'}, "
             f"transport={self.config.transport.type if self.config.transport else 'none'}"
         )
+
+    @classmethod
+    async def create(
+        cls,
+        config: HTTPClientConfig,
+        loop: asyncio.AbstractEventLoop,
+    ) -> "HTTPEndpointClient":
+        """Async factory for shared-loop usage.
+
+        Use this instead of __init__ when the caller is already running on
+        the target event loop (e.g., inside run_benchmark_async). The regular
+        constructor uses run_coroutine_threadsafe().result() which deadlocks
+        when called from the same loop.
+        """
+        self = cls.__new__(cls)
+        self.client_id = uuid.uuid4().hex[:8]
+        self.config = config
+        self._worker_cycle = cycle(range(config.num_workers))
+        self._owns_loop = False
+        self._loop_name = None
+        self.loop = loop
+        await self._initialize()
+        logger.info(
+            f"EndpointClient initialized with num_workers={config.num_workers}, "
+            f"endpoints={config.endpoint_urls}, "
+            f"adapter={config.adapter.__name__ if config.adapter else 'none'}, "
+            f"accumulator={config.accumulator.__name__ if config.accumulator else 'none'}, "
+            f"transport={config.transport.type if config.transport else 'none'}"
+        )
+        return self
 
     async def _initialize(self) -> None:
         """Initialize worker manager and transports."""
@@ -113,10 +146,21 @@ class HTTPEndpointClient:
         return list(iter(self.poll, None))
 
     def shutdown(self) -> None:
-        """Gracefully shutdown client. Synchronous — blocks the caller until complete."""
-        if self._shutdown:  # Already shutdown, no-op
+        """Gracefully shutdown client. Synchronous — blocks the caller until complete.
+
+        NOTE: This uses run_coroutine_threadsafe().result() which DEADLOCKS
+        if called from the same event loop thread. For shared-loop usage,
+        use: await client.shutdown_async()
+        """
+        if self._shutdown:
             return
         asyncio.run_coroutine_threadsafe(self._shutdown_async(), self.loop).result()
+
+    async def shutdown_async(self) -> None:
+        """Async shutdown for shared-loop usage. Must be called from the event loop."""
+        if self._shutdown:
+            return
+        await self._shutdown_async()
 
     async def _shutdown_async(self) -> None:
         """Async shutdown internals - must be called on the event loop."""

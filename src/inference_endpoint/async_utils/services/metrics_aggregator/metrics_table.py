@@ -129,7 +129,11 @@ class EmitTrigger(ABC):
         requires: tuple[str, ...] = (),
         dtype: type = int,
     ):
-        self.metric_name = metric_name
+        # Resolve enum to its value string so KVStore filenames match
+        # what the reader expects (e.g. "ttft_ns" not "MetricSeriesKey.TTFT_NS").
+        self.metric_name = (
+            metric_name.value if isinstance(metric_name, Enum) else metric_name
+        )
         self.kv_store = kv_store
         self.requires = requires
         self.dtype = dtype

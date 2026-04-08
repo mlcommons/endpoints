@@ -77,23 +77,26 @@ def _make_store(tmp_path: Path, n_samples: int = 50):
     store_dir = tmp_path / "kv"
     w = BasicKVStore(store_dir)
 
+    # Counter keys matching MetricCounterKey enum
     for key in [
-        "n_samples_issued",
-        "n_samples_completed",
-        "n_samples_failed",
-        "duration_ns",
-        "test_started_at",
+        "total_samples_issued",
+        "total_samples_completed",
+        "total_samples_failed",
+        "tracked_samples_issued",
+        "tracked_samples_completed",
+        "tracked_duration_ns",
+        "total_duration_ns",
     ]:
         w.create_key(key, "counter")
     for key in ["ttft_ns", "sample_latency_ns", "osl", "isl", "chunk_delta_ns"]:
         w.create_key(key, "series")
     w.create_key("tpot_ns", "series", dtype=float)
 
-    w.update("n_samples_issued", n_samples)
-    w.update("n_samples_completed", n_samples)
-    w.update("n_samples_failed", 0)
+    w.update("tracked_samples_issued", n_samples)
+    w.update("tracked_samples_completed", n_samples)
+    w.update("total_samples_failed", 0)
     if n_samples > 0:
-        w.update("duration_ns", 10_000_000_000)
+        w.update("tracked_duration_ns", 10_000_000_000)
 
     for i in range(n_samples):
         w.update("ttft_ns", 1_000_000 + i * 10_000)
@@ -102,11 +105,13 @@ def _make_store(tmp_path: Path, n_samples: int = 50):
 
     r = BasicKVStoreReader(store_dir)
     for key in [
-        "n_samples_issued",
-        "n_samples_completed",
-        "n_samples_failed",
-        "duration_ns",
-        "test_started_at",
+        "total_samples_issued",
+        "total_samples_completed",
+        "total_samples_failed",
+        "tracked_samples_issued",
+        "tracked_samples_completed",
+        "tracked_duration_ns",
+        "total_duration_ns",
     ]:
         r.register_key(key, "counter")
     for key in ["ttft_ns", "sample_latency_ns", "osl", "isl", "chunk_delta_ns"]:

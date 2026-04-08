@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import gc
 import math
 import multiprocessing
 import multiprocessing.sharedctypes
@@ -57,8 +58,10 @@ import os
 import random
 import signal
 import socket
+import sys
 import threading
 import time
+import warnings
 
 import httptools
 import uvloop
@@ -446,8 +449,6 @@ def _worker(
     global _req_counter, _resp_counter, _byte_counter
     _req_counter, _resp_counter, _byte_counter = counters
 
-    import gc
-
     gc.disable()
     uvloop.install()
 
@@ -501,8 +502,6 @@ def _worker(
     try:
         asyncio.run(run())
     except Exception as exc:
-        import sys
-
         print(
             f"[VariableResponseServer] Worker {wid} failed: {exc}",
             file=sys.stderr,
@@ -648,8 +647,6 @@ class VariableResponseServer:
         if max_concurrency > 0:
             self._max_concurrency_per_worker = max(1, max_concurrency // num_workers)
             if max_concurrency < num_workers:
-                import warnings
-
                 warnings.warn(
                     f"max_concurrency ({max_concurrency}) < num_workers ({num_workers}): "
                     f"each worker gets 1 slot, effective total={num_workers} exceeds cap.",

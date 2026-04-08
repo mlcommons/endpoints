@@ -15,6 +15,7 @@
 
 """Tests for utility commands (info, validate, init, probe) and main.py dispatch."""
 
+import asyncio
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -22,7 +23,7 @@ import pytest
 from inference_endpoint import __version__
 from inference_endpoint.commands.info import execute_info
 from inference_endpoint.commands.init import execute_init
-from inference_endpoint.commands.probe import ProbeConfig, execute_probe
+from inference_endpoint.commands.probe import ProbeConfig, _probe_async, execute_probe
 from inference_endpoint.commands.validate import execute_validate
 from inference_endpoint.config.schema import APIType
 from inference_endpoint.exceptions import (
@@ -31,6 +32,7 @@ from inference_endpoint.exceptions import (
     InputValidationError,
     SetupError,
 )
+from inference_endpoint.main import run
 
 
 class TestInfoCommand:
@@ -160,10 +162,6 @@ class TestProbeExecution:
     def test_empty_model_raises(self):
         config = ProbeConfig(endpoints="http://localhost:8000", model="")
         with pytest.raises(InputValidationError, match="Model required"):
-            import asyncio
-
-            from inference_endpoint.commands.probe import _probe_async
-
             asyncio.run(_probe_async(config))
 
     @pytest.mark.unit
@@ -173,10 +171,6 @@ class TestProbeExecution:
 
         config = ProbeConfig(endpoints="http://localhost:8000", model="test")
         with pytest.raises(SetupError, match="Probe setup failed"):
-            import asyncio
-
-            from inference_endpoint.commands.probe import _probe_async
-
             asyncio.run(_probe_async(config))
 
     @pytest.mark.unit
@@ -190,10 +184,6 @@ class TestProbeExecution:
             endpoints="http://localhost:8000", model="test", requests=2
         )
         with pytest.raises(ExecutionError, match="no queries could be issued"):
-            import asyncio
-
-            from inference_endpoint.commands.probe import _probe_async
-
             asyncio.run(_probe_async(config))
 
 
@@ -213,8 +203,6 @@ class TestMainRunExceptionHandling:
         ],
     )
     def test_exception_exit_codes(self, exc, code):
-        from inference_endpoint.main import run
-
         with patch("inference_endpoint.main.app") as mock_app:
             mock_app.meta.side_effect = exc
             with pytest.raises(SystemExit) as exc_info:
