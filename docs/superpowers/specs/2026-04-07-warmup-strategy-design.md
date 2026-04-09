@@ -26,6 +26,14 @@ Empirical analysis of a 13-concurrency-level sweep on a B200 server (GPT OSS 120
 
 The cold-start effect is primarily a prefill/TTFT problem. TPOT (decode performance) is stable from the first token at all concurrency levels.
 
+**Figure 1** shows the per-sample TTFT for each concurrency level. The orange shaded zone marks the first N=concurrency samples — the cold-start region that warmup would absorb.
+
+![Cold-start TTFT scatter](plots/fig1_coldstart_scatter.png)
+
+**Figure 2** shows rolling TTFT, TPOT, and TPS over the full 30-minute run. Note the TTFT spike at t=0 for c>=256 and the stable TPOT at all levels.
+
+![Rolling metrics over time](plots/fig2_rolling_metrics.png)
+
 ## Goals
 
 1. Measure steady-state inference performance by warming both server and client before measurement begins
@@ -62,6 +70,10 @@ Phase:     Warmup Issuance        Performance Issuance
                                 --> START_PERFORMANCE_TRACKING event
                                 --> perf samples issued AFTER this count
 ```
+
+**Figure 3** visualizes the three strategies for c=256 using real data from the Apr 8 run. The hybrid approach (bottom) maintains continuous server load through the transition.
+
+![Warmup strategy timeline](plots/fig3_warmup_timeline.png)
 
 ### Why Not Drain-Then-Measure?
 
@@ -298,6 +310,20 @@ Steady-state metrics (middle 80% of measurement window) are unaffected by warmup
 | 1024        | TTFT p50 | 93998.7 ms | 103918.4 ms | 1555 (26.7%)     |
 
 At high concurrency (512+), the no-warmup TTFT p50 is artificially lowered by the cold-start samples having shorter output sequences (they get prefilled while the batch is underfull, so they see lower TTFT than steady state). The hybrid approach gives the true steady-state measurement.
+
+**Figure 5** shows the projected impact of hybrid warmup on all four key metrics. The TTFT improvement is visible at c>=256; TPOT and TPS are essentially unchanged; the sample allocation chart shows the cost (excluded overlap samples) is proportional to concurrency.
+
+![Warmup impact projection](plots/fig5_warmup_impact.png)
+
+### Cross-Run Validation
+
+The design was validated against two independent sweeps (Apr 3 at 20 min, Apr 8 at 30 min) on the same hardware. **Figure 4** confirms all three key assumptions are reproducible:
+
+1. **Cold-start ratio** is consistent across runs (left panel)
+2. **TPOT is unaffected** by cold start at all concurrency levels (center panel)
+3. **Backfill quality** is near 1.0 for c<=256 — post-burst samples immediately see steady-state TTFT (right panel)
+
+![Cross-run validation](plots/fig4_cross_run_validation.png)
 
 ### Files Modified
 
