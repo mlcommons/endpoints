@@ -101,7 +101,9 @@ class TestInitCommand:
             execute_init("unknown")
 
     @pytest.mark.unit
-    @pytest.mark.parametrize("template", ["offline", "online", "eval", "submission"])
+    @pytest.mark.parametrize(
+        "template", ["offline", "online", "concurrency", "eval", "submission"]
+    )
     def test_generates_template(self, template):
         output_file = Path(f"{template}_template.yaml")
         try:
@@ -122,31 +124,13 @@ class TestInitCommand:
             output_file.unlink(missing_ok=True)
 
     @pytest.mark.unit
-    def test_fallback_when_template_missing(self, tmp_path, monkeypatch):
-        """When template file doesn't exist, falls back to create_default_config."""
+    def test_missing_template_raises_setup_error(self, tmp_path, monkeypatch):
         monkeypatch.setattr(
             "inference_endpoint.commands.init.TEMPLATES_DIR",
             tmp_path / "nonexistent",
         )
-        output_file = Path("offline_template.yaml")
-        try:
-            execute_init("offline")
-            assert output_file.exists()
-        finally:
-            output_file.unlink(missing_ok=True)
-
-    @pytest.mark.unit
-    def test_os_error_raises_setup_error(self, monkeypatch):
-        monkeypatch.setattr(
-            "inference_endpoint.commands.init.TEMPLATES_DIR",
-            Path("/nonexistent"),
-        )
-        monkeypatch.setattr(
-            "inference_endpoint.commands.init.BenchmarkConfig.create_default_config",
-            MagicMock(side_effect=OSError("permission denied")),
-        )
-        with pytest.raises(SetupError, match="Failed to create"):
-            execute_init("offline")
+        with pytest.raises(SetupError, match="Template file not found"):
+            execute_init("eval")
 
 
 class TestProbeConfig:

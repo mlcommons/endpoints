@@ -162,7 +162,7 @@ src/inference_endpoint/
 │   ├── ruleset_registry.py    # Ruleset registry
 │   ├── user_config.py         # UserConfig dataclass for ruleset user overrides
 │   ├── rulesets/mlcommons/    # MLCommons-specific rules, datasets, models
-│   └── templates/             # YAML config templates (offline, online, eval, etc.)
+│   └── templates/             # YAML config templates (_template.yaml minimal, _template_full.yaml all defaults)
 ├── openai/                    # OpenAI-compatible API types and adapters
 │   ├── types.py               # OpenAI response types
 │   ├── openai_adapter.py      # Request/response adapter
@@ -204,7 +204,16 @@ tests/
 - **License headers**: Required on all Python files (enforced by pre-commit hook `scripts/add_license_header.py`)
 - **Conventional commits**: `feat:`, `fix:`, `docs:`, `test:`, `chore:`
 
-All of these hooks run automatically on commit: trailing-whitespace, end-of-file-fixer, check-yaml, check-merge-conflict, debug-statements, `ruff` (lint + autofix), `ruff-format`, `mypy`, `prettier` (YAML/JSON/Markdown), license header enforcement.
+### Pre-commit Hooks
+
+All of these run automatically on commit:
+
+- trailing-whitespace, end-of-file-fixer, check-yaml, check-merge-conflict, debug-statements
+- `ruff` (lint + autofix) and `ruff-format`
+- `mypy` type checking
+- `prettier` for YAML/JSON/Markdown
+- License header enforcement
+- `regenerate-templates`: auto-regenerates YAML config templates from schema defaults when `schema.py`, `config.py`, or `regenerate_templates.py` change
 
 **Always run `pre-commit run --all-files` before committing.**
 

@@ -88,6 +88,16 @@ class EvalMethod(str, Enum):
     JUDGE = "judge"
 
 
+class ScorerMethod(str, Enum):
+    """Registered scorer methods for accuracy evaluation."""
+
+    PASS_AT_1 = "pass_at_1"
+    STRING_MATCH = "string_match"
+    ROUGE = "rouge"
+    CODE_BENCH = "code_bench_scorer"
+    SHOPIFY_CATEGORY_F1 = "shopify_category_f1"
+
+
 class TestMode(str, Enum):
     """Test mode determining what to collect.
 
@@ -244,7 +254,9 @@ class Dataset(BaseModel):
     eval_method: EvalMethod | None = Field(
         None, description="Accuracy evaluation method"
     )
-    parser: dict[str, str] | None = Field(None, description="Column remapping")
+    parser: dict[str, str] | None = Field(
+        None, description="Column remapping: {prompt: <col>, system: <col>}"
+    )
     accuracy_config: AccuracyConfig | None = Field(
         None, description="Accuracy evaluation settings"
     )
@@ -260,14 +272,11 @@ class Dataset(BaseModel):
 class AccuracyConfig(BaseModel):
     """Accuracy configuration.
 
-    The eval_method is the method to use to evaluate the accuracy of the model.
-    Currently only "pass_at_1" is supported.
-    The ground_truth is the column in the dataset that contains the ground truth.
-    Defaults to "ground_truth" if not specified.
-    The extractor is the extractor to use to extract the ground truth from the output.
-    Currently "boxed_math_extractor" and "abcd_extractor" are supported.
-    The num_repeats is the number of times to repeat the dataset for evaluation.
-    Defaults to 1 if not specified.
+    eval_method: Scorer to use (see ScorerMethod enum for options).
+    ground_truth: Column in the dataset containing ground truth. Defaults to "ground_truth".
+    extractor: Post-processor to extract answers from model output
+        (abcd_extractor, boxed_math_extractor, identity_extractor, python_code_extractor).
+    num_repeats: Number of times to repeat the dataset for evaluation. Defaults to 1.
 
     Example:
         accuracy_config:
@@ -279,10 +288,15 @@ class AccuracyConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    eval_method: str | None = None
-    ground_truth: str | None = None
-    extractor: str | None = None
-    num_repeats: int = Field(1, ge=1)
+    eval_method: ScorerMethod | None = Field(None, description="Scorer method")
+    ground_truth: str | None = Field(None, description="Ground truth column name")
+    extractor: str | None = Field(
+        None,
+        description="Answer extractor (abcd_extractor, boxed_math_extractor, identity_extractor, python_code_extractor)",
+    )
+    num_repeats: int = Field(
+        1, ge=1, description="Repeat dataset N times for evaluation"
+    )
 
 
 class RuntimeConfig(BaseModel):
@@ -339,6 +353,7 @@ class RuntimeConfig(BaseModel):
         return self
 
 
+@cyclopts.Parameter(name="*")
 class LoadPattern(BaseModel):
     """Load pattern configuration.
 
@@ -352,7 +367,7 @@ class LoadPattern(BaseModel):
 
     type: Annotated[
         LoadPatternType,
-        cyclopts.Parameter(alias="--load-pattern", help="Load pattern type"),
+        cyclopts.Parameter(name="--load-pattern", help="Load pattern type"),
     ] = LoadPatternType.MAX_THROUGHPUT
     target_qps: Annotated[
         float | None, cyclopts.Parameter(alias="--target-qps", help="Target QPS")
@@ -514,7 +529,9 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
         cyclopts.Parameter(alias="--timeout", help="Global timeout in seconds"),
     ] = None
     # verbose is handled by cyclopts meta app (-v flag), not here
-    verbose: Annotated[bool, cyclopts.Parameter(show=False)] = False
+    verbose: Annotated[bool, cyclopts.Parameter(show=False)] = Field(
+        False, description="Enable verbose logging"
+    )
     enable_cpu_affinity: Annotated[
         bool,
         cyclopts.Parameter(

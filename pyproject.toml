@@ -97,6 +97,8 @@ test = [
     "aiohttp==3.13.5",
     # Plotting for benchmark sweep mode
     "matplotlib==3.10.8",
+    # Property-based testing (CLI fuzz)
+    "hypothesis==6.151.10",
 ]
 performance = [
     "pytest-benchmark==5.2.3",
@@ -184,6 +186,7 @@ markers = [
     "integration: marks tests as integration tests",
     "unit: marks tests as unit tests",
     "run_explicitly: mark test to only run explicitly",
+    "schema_fuzz: hypothesis CLI fuzz tests (run in CI on schema changes)",
 ]
 filterwarnings = [
     "ignore:Session timeout reached:RuntimeWarning",

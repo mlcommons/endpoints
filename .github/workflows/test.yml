@@ -53,3 +53,44 @@ jobs:
           python -m pip install pip==26.0.1
           pip install -e ".[dev,test,performance]"
           pip-audit
+
+  schema-updated:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Check for schema changes
+        id: schema
+        run: |
+          CHANGED=$(git diff --name-only origin/${{ github.base_ref }}...HEAD -- \
+            'src/inference_endpoint/config/schema.py' \
+            'src/inference_endpoint/endpoint_client/config.py' \
+            'src/inference_endpoint/commands/benchmark/cli.py' \
+            'scripts/regenerate_templates.py' \
+            'src/inference_endpoint/config/templates/*.yaml')
+          echo "changed=$([[ -n "$CHANGED" ]] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Python 3.12
+        if: steps.schema.outputs.changed == 'true'
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        if: steps.schema.outputs.changed == 'true'
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[test]"
+
+      - name: Run schema fuzz tests
+        if: steps.schema.outputs.changed == 'true'
+        run: |
+          pytest -xv -m schema_fuzz
+
+      - name: Check YAML templates are up to date
+        if: steps.schema.outputs.changed == 'true'
+        run: |
+          python scripts/regenerate_templates.py --check

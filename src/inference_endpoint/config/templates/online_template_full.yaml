@@ -1,0 +1,86 @@
+name: online_benchmark
+version: '1.0'  # Config version
+type: online  # Test type: offline, online, eval, submission | options: offline, online, eval, submission
+submission_ref: null
+benchmark_mode: null  # options: offline, online
+model_params:
+  name: '<MODEL_NAME eg: meta-llama/Llama-3.1-8B-Instruct>'
+  temperature: null  # Sampling temperature
+  top_k: null  # Top-K sampling
+  top_p: null  # Top-P (nucleus) sampling
+  repetition_penalty: null  # Repetition penalty
+  max_new_tokens: 1024  # Max output tokens
+  osl_distribution: null  # Output sequence length distribution
+  streaming: 'on'  # Streaming mode: auto/on/off | options: auto, on, off
+datasets:  # Dataset configs
+- name: perf
+  type: performance  # Dataset purpose: performance or accuracy | options: performance, accuracy
+  path: '<DATASET_PATH eg: tests/datasets/dummy_1k.jsonl>'  # Dataset file path
+  format: null  # Dataset format (auto-detected)
+  samples: null  # Number of samples to use
+  eval_method: null
+  parser:  # Column remapping: {prompt: <col>, system: <col>}
+    prompt: text_input
+  accuracy_config: null  # Accuracy evaluation settings
+- name: accuracy
+  type: accuracy  # Dataset purpose: performance or accuracy | options: performance, accuracy
+  path: '<DATASET_PATH eg: tests/datasets/ds_samples.jsonl>'  # Dataset file path
+  format: null  # Dataset format (auto-detected)
+  samples: null  # Number of samples to use
+  eval_method: exact_match  # Accuracy evaluation method | options: exact_match, contains, judge
+  parser:  # Column remapping: {prompt: <col>, system: <col>}
+    prompt: question
+    system: system_prompt
+  accuracy_config:  # Accuracy evaluation settings
+    eval_method: pass_at_1  # Scorer method | options: pass_at_1, string_match, rouge, code_bench_scorer, shopify_category_f1
+    ground_truth: ground_truth  # Ground truth column name
+    extractor: boxed_math_extractor  # Answer extractor (abcd_extractor, boxed_math_extractor, identity_extractor, python_code_extractor)
+    num_repeats: 1  # Repeat dataset N times for evaluation
+settings:
+  runtime:
+    min_duration_ms: 600000  # Min duration (ms, or with suffix: 600s, 10m)
+    max_duration_ms: 0  # Maximum test duration in ms (0 for no limit)
+    n_samples_to_issue: null  # Sample count override
+    scheduler_random_seed: 42  # Scheduler RNG seed
+    dataloader_random_seed: 42  # Dataloader RNG seed
+  load_pattern:
+    type: poisson  # Load pattern type | options: max_throughput, poisson, concurrency, burst, step
+    target_qps: 10.0  # Target QPS
+    target_concurrency: null  # Concurrent requests
+  client:
+    num_workers: -1  # Worker processes (-1=auto)
+    record_worker_events: false  # Record per-worker events
+    log_level: INFO  # Worker log level
+    warmup_connections: -1  # Pre-establish TCP connections (-1=auto, 0=disabled)
+    max_connections: -1  # Max TCP connections (-1=unlimited)
+    transport:
+      type: zmq  # options: zmq
+      recv_buffer_size: 16777216  # IPC receive buffer size in bytes (default 16MB). Increase for multimodal payloads.
+      send_buffer_size: 16777216  # IPC send buffer size in bytes (default 16MB). Increase for multimodal payloads.
+      io_threads: 4  # ZMQ I/O thread pool size (main process)
+      worker_io_threads: 1  # ZMQ I/O thread pool size (worker processes)
+      high_water_mark: 0  # ZMQ HWM (0=unlimited)
+      linger: -1  # ZMQ linger on close (-1=block until sent)
+      immediate: 1  # ZMQ IMMEDIATE (1=only enqueue on ready)
+    stream_all_chunks: false  # Stream all chunks to main thread (caution: perf overhead)
+    worker_initialization_timeout: 60.0  # Worker init timeout (seconds)
+    worker_graceful_shutdown_wait: 0.5  # Post-run graceful shutdown wait (seconds)
+    worker_force_kill_timeout: 0.5  # Force kill timeout after graceful wait (seconds)
+    max_idle_time: 4.0  # Discard connections idle longer than this (seconds)
+    min_required_connections: -1  # Min connections to initialize (-1=auto, 0=disabled)
+    worker_gc_mode: relaxed  # Worker GC strategy | options: disabled, relaxed, system
+metrics:
+  collect:
+  - throughput
+  - latency
+  - ttft
+  - tpot
+endpoint_config:
+  endpoints:  # Endpoint URL(s)
+  - '<ENDPOINT_URL eg: http://localhost:8000>'
+  api_key: null  # API key
+  api_type: openai  # API type: openai or sglang | options: openai, sglang
+report_dir: null  # Report output directory
+timeout: null  # Global timeout in seconds
+verbose: false  # Enable verbose logging
+enable_cpu_affinity: true  # NUMA-aware CPU pinning

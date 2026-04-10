@@ -273,6 +273,21 @@ pytest -s -v
 python -m pdb -m pytest test_file.py
 ```
 
+## YAML Config Templates
+
+Config templates in `src/inference_endpoint/config/templates/` are auto-generated from schema defaults. When you change `config/schema.py`, regenerate them:
+
+```bash
+python scripts/regenerate_templates.py
+```
+
+The pre-commit hook auto-regenerates templates when `schema.py`, `config.py`, or `regenerate_templates.py` change. CI validates templates are up to date via `--check` mode.
+
+Two variants are generated per mode (offline, online, concurrency):
+
+- `_template.yaml` — minimal: only required fields + placeholders
+- `_template_full.yaml` — all fields with schema defaults + inline `# options:` comments
+
 ## Package Management
 
 ### Adding Dependencies
