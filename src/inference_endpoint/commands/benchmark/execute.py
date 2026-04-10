@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import platform
 import shutil
 import signal
 import tempfile
@@ -126,6 +127,7 @@ class BenchmarkResult:
     collector: ResponseCollector
     report: Report | None
     tmpfs_dir: Path
+    metrics_dir: Path | None = None
 
 
 @dataclass
@@ -415,17 +417,30 @@ async def _run_benchmark_async(
         pub_socket_name = f"ev_pub_{session_id}"
         publisher = ZmqEventRecordPublisher(pub_socket_name, zmq_ctx, loop=loop)
 
-        # Tmpfs directories for high-frequency writes (metrics mmap + event log)
-        # These are memory-backed; copied to report_dir on disk during finalization.
-        shm_base = (
-            Path("/dev/shm")
-            if Path("/dev/shm").exists()
-            else Path(tempfile.gettempdir())
-        )
-        tmpfs_dir = shm_base / f"benchmark_{session_id}"
+        # Tmpfs for high-frequency writes (metrics mmap + event log).
+        # On ARM, metrics need an on-disk directory so msync provides
+        # write ordering for cross-process mmap reads. Event logs are
+        # append-only and don't have ordering requirements, so they
+        # can stay on tmpfs.
+        shm = Path("/dev/shm")
+        use_shm = shm.exists()
+        tmpfs_base = shm if use_shm else Path(tempfile.gettempdir())
+        tmpfs_dir = tmpfs_base / f"benchmark_{session_id}"
         tmpfs_dir.mkdir(parents=True, exist_ok=True)
-        metrics_dir = tmpfs_dir / "metrics"
-        metrics_dir.mkdir(parents=True, exist_ok=True)
+
+        # On ARM, mmap write ordering requires msync on a real filesystem.
+        # msync is a no-op on tmpfs, so metrics must use an on-disk directory.
+        if use_shm and platform.machine() != "x86_64":
+            logger.info(
+                "ARM platform: using on-disk metrics directory for mmap ordering"
+            )
+            metrics_dir = Path(
+                tempfile.mkdtemp(prefix=f"metrics_{session_id}_", dir=".")
+            )
+        else:
+            metrics_dir = tmpfs_dir / "metrics"
+            metrics_dir.mkdir(parents=True, exist_ok=True)
+
         event_log_dir = tmpfs_dir / "events"
         event_log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -532,8 +547,14 @@ async def _run_benchmark_async(
 
             pbar.close()
 
+    # Track metrics_dir separately if it's not under tmpfs_dir (ARM on-disk case)
+    separate_metrics = metrics_dir if metrics_dir.parent != tmpfs_dir else None
     return BenchmarkResult(
-        session=result, collector=collector, report=report, tmpfs_dir=tmpfs_dir
+        session=result,
+        collector=collector,
+        report=report,
+        tmpfs_dir=tmpfs_dir,
+        metrics_dir=separate_metrics,
     )
 
 
@@ -716,8 +737,10 @@ def run_benchmark(config: BenchmarkConfig, test_mode: TestMode) -> None:
     except KeyboardInterrupt:
         logger.warning("Benchmark interrupted by user")
     finally:
-        if bench and bench.tmpfs_dir.exists():
-            # Salvage logs from tmpfs before cleanup (no-op if finalize already copied)
-            _salvage_tmpfs(ctx.report_dir, bench.tmpfs_dir)
-            shutil.rmtree(bench.tmpfs_dir, ignore_errors=True)
+        if bench:
+            if bench.tmpfs_dir.exists():
+                _salvage_tmpfs(ctx.report_dir, bench.tmpfs_dir)
+                shutil.rmtree(bench.tmpfs_dir, ignore_errors=True)
+            if bench.metrics_dir and bench.metrics_dir.exists():
+                shutil.rmtree(bench.metrics_dir, ignore_errors=True)
             logger.info(f"Partial results saved to {ctx.report_dir}")
