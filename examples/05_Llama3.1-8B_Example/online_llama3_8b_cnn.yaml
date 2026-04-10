@@ -10,16 +10,16 @@ model_params:
   max_new_tokens: 128
 
 datasets:
-  - name: cnn_dailymail::llama3_8b
-    type: accuracy
-    samples: 13368
-    parser:
-      input: prompt
-    accuracy_config:
-      eval_method: "rouge"
-      ground_truth: "highlights"
-      extractor: identity_extractor
-      num_repeats: 1
+  # - name: cnn_dailymail::llama3_8b
+  #   type: accuracy
+  #   samples: 13368
+  #   parser:
+  #     input: prompt
+  #   accuracy_config:
+  #     eval_method: "rouge"
+  #     ground_truth: "highlights"
+  #     extractor: identity_extractor
+  #     num_repeats: 1
   - name: cnn_dailymail::llama3_8b
     type: "performance"
     samples: 13368
