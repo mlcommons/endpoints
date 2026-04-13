@@ -210,5 +210,4 @@ during the PR process.
 
 ## Questions?
 
-Open a [Discussion](https://github.com/mlcommons/endpoints/discussions) or
-file an issue. We aim to respond within a few business days.
+File an [issue](https://github.com/mlcommons/endpoints/issues). We aim to respond within a few business days.

@@ -1,5 +1,1 @@
 blank_issues_enabled: true
-contact_links:
-  - name: Questions & Discussion
-    url: https://github.com/mlcommons/endpoints/discussions
-    about: Ask questions and discuss ideas before filing an issue
