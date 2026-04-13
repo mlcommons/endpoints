@@ -379,7 +379,10 @@ class EventRecorder:
             def commit_buffer():
                 """Helper to commit and clear the event buffer."""
                 if event_buffer:
+                    #                                          disable auto prepare
+                    # this prevents prepared statements from persisting on the server side and causing errors
                     cur.executemany(insert_query, event_buffer)
+                    # cur.executemany(insert_query, event_buffer, prepare=False)
                     conn.commit()
                     event_buffer.clear()
 
