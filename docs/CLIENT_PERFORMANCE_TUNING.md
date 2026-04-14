@@ -18,20 +18,18 @@ The CPU affinity system partitions physical cores between LoadGen (main process)
 
 ## Configuration
 
-| Setting        | Location  | Default | Purpose                                       |
-| -------------- | --------- | ------- | --------------------------------------------- |
-| `cpu_affinity` | Top-level | `-1`    | Pin loadgen and worker processes to CPU cores |
+| Setting               | Location  | Default | Purpose                                       |
+| --------------------- | --------- | ------- | --------------------------------------------- |
+| `enable_cpu_affinity` | Top-level | `true`  | Pin loadgen and worker processes to CPU cores |
 
 **Values:**
 
-- `-1` (auto): Physical core isolation with SMT siblings, fastest cores to loadgen
-- `list[int]`: Use specific cores (shared by loadgen and workers)
-- `null`: Disabled
+- `true` (default): Auto-compute NUMA-aware plan — physical core isolation with SMT siblings, fastest cores assigned to loadgen
+- `false`: Disabled — no CPU pinning (use `--no-cpu-affinity` on the CLI)
 
 ```yaml
-cpu_affinity: -1 # Auto: physical core isolation with SMT siblings
-# cpu_affinity: [4, 5, 6, 7, 8, 9, 10, 11]  # Explicit cores
-# cpu_affinity: null  # Disabled
+enable_cpu_affinity: true # Auto-compute NUMA-aware plan (default)
+# enable_cpu_affinity: false  # Disabled
 ```
 
 **Auto mode allocation** (default 6 physical cores for loadgen):

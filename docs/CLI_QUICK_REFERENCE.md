@@ -75,8 +75,7 @@ inference-endpoint validate-yaml -c test.yaml
 
 ```bash
 # Generate config templates
-inference-endpoint init offline        # or: online, eval, submission
-inference-endpoint init submission
+inference-endpoint init offline        # or: online, concurrency, eval, submission
 
 # Show system info
 inference-endpoint info

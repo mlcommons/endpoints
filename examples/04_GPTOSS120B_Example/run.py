@@ -200,13 +200,17 @@ def run_main(args):
         # Always generate GPQA diamond dataset
         logging.info("Generating GPQA diamond dataset...")
         gpqa_dataset = GPQA.get_dataloader(
-            num_repeats=num_repeats, transforms=GPQA.PRESETS.gptoss()
+            num_repeats=num_repeats,
+            transforms=GPQA.PRESETS.gptoss(),
+            force_regenerate=args.force_regenerate,
         )
         gpqa_dataset.load(api_type=APIType.SGLANG, model_params=model_params)
         # Always generate AIME25 dataset
         logging.info("Generating AIME25 dataset...")
         aime25_dataset = AIME25.get_dataloader(
-            num_repeats=num_repeats, transforms=AIME25.PRESETS.gptoss()
+            num_repeats=num_repeats,
+            transforms=AIME25.PRESETS.gptoss(),
+            force_regenerate=args.force_regenerate,
         )
         aime25_dataset.load(api_type=APIType.SGLANG, model_params=model_params)
         logging.info(f"Dataset loaded with {aime25_dataset.num_samples()} samples")
@@ -215,6 +219,7 @@ def run_main(args):
         lcb_dataset = LiveCodeBench.get_dataloader(
             num_repeats=num_repeats,
             transforms=LiveCodeBench.PRESETS.gptoss(),
+            force_regenerate=args.force_regenerate,
         )
         lcb_dataset.load(api_type=APIType.SGLANG, model_params=model_params)
         logging.info(f"Dataset loaded with {lcb_dataset.num_samples()} samples")

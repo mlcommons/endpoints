@@ -145,7 +145,9 @@ src/inference_endpoint/
 │   ├── info.py                # execute_info()
 │   ├── validate.py            # execute_validate()
 │   └── init.py                # execute_init()
-├── core/types.py              # APIType, Query, QueryResult, StreamChunk, QueryStatus (msgspec Structs)
+├── core/
+│   ├── types.py               # APIType, Query, QueryResult, StreamChunk, QueryStatus (msgspec Structs)
+│   └── record.py              # EventRecord — transport record used by event logger and ZMQ transport
 ├── load_generator/
 │   ├── session.py             # BenchmarkSession - top-level orchestrator
 │   ├── load_generator.py      # LoadGenerator, SchedulerBasedLoadGenerator
@@ -172,7 +174,6 @@ src/inference_endpoint/
 │   │   └── metrics_aggregator/ # MetricsAggregatorService: real-time metrics (TTFT, TPOT, ISL, OSL)
 │   └── transport/             # ZMQ-based IPC transport layer
 │       ├── protocol.py        # Transport protocols + TransportConfig base
-│       ├── record.py          # Transport records
 │       └── zmq/               # ZMQ implementation (context, pubsub, transport, ZMQTransportConfig)
 ├── dataset_manager/
 │   ├── dataset.py             # Dataset base class, DatasetFormat enum
