@@ -115,6 +115,8 @@ class MetricsAggregatorService(ZmqEventRecordSubscriber):
         self._tracked_completed = 0
         self._session_start_ns: int | None = None
         self._total_duration_ns: int = 0
+        self._total_processed = 0
+        self._last_log_count = 0
 
         self._table = MetricsTable(kv_store)
         self._register_triggers(streaming)
@@ -145,6 +147,15 @@ class MetricsAggregatorService(ZmqEventRecordSubscriber):
         saw_shutdown = False
         table = self._table
         store = self._kv_store
+
+        self._total_processed += len(records)
+        if self._total_processed - self._last_log_count >= 10000:
+            logger.info(
+                "Aggregator processed %d records (%d in this batch)",
+                self._total_processed,
+                len(records),
+            )
+            self._last_log_count = self._total_processed
 
         for record in records:
             if self._shutdown_received:
@@ -241,6 +252,9 @@ class MetricsAggregatorService(ZmqEventRecordSubscriber):
             self._finalize()
 
     def _finalize(self) -> None:
+        logger.info(
+            "Aggregator finalized: %d total records processed", self._total_processed
+        )
         self.close()
         if self._shutdown_event is not None:
             self._shutdown_event.set()

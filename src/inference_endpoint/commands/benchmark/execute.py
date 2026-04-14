@@ -534,7 +534,8 @@ async def _run_benchmark_async(
             except Exception as e:
                 logger.warning(f"Client cleanup error: {e}")
             publisher.close()
-            await asyncio.to_thread(launcher.wait_for_exit, 10.0)
+            logger.info("Waiting for services to finish processing...")
+            await asyncio.to_thread(launcher.wait_for_exit, None)
 
             # Build report AFTER aggregator has exited — ensures all metrics
             # (TTFT, TPOT, OSL, latency) are fully written to KVStore.
