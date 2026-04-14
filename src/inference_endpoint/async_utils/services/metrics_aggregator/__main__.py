@@ -23,6 +23,7 @@ from pathlib import Path
 from inference_endpoint.async_utils.loop_manager import LoopManager
 from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
 from inference_endpoint.async_utils.transport.zmq.ready_check import send_ready_signal
+from inference_endpoint.utils.logging import setup_logging
 
 from .aggregator import MetricsAggregatorService
 from .kv_store import BasicKVStore
@@ -82,6 +83,7 @@ async def main() -> None:
         help="Identity to send in the readiness signal",
     )
     args = parser.parse_args()
+    setup_logging(level="INFO")
 
     metrics_dir = Path(args.metrics_dir)
     shutdown_event = asyncio.Event()

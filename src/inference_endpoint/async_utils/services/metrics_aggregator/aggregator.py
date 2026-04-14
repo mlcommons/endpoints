@@ -176,6 +176,7 @@ class MetricsAggregatorService(ZmqEventRecordSubscriber):
             # --- Session events ---
             if isinstance(ev, SessionEventType):
                 if ev == SessionEventType.ENDED:
+                    logger.info("ENDED event received, shutting down aggregator")
                     self._shutdown_received = True
                     saw_shutdown = True
                 else:
@@ -244,7 +245,9 @@ class MetricsAggregatorService(ZmqEventRecordSubscriber):
                     )
 
         if saw_shutdown:
+            logger.info("Draining %d async tasks...", len(table._in_flight_tasks))
             await table.drain_tasks()
+            logger.info("Async tasks drained")
             store.update(
                 MetricCounterKey.TRACKED_DURATION_NS.value,
                 table.total_tracked_duration_ns,
