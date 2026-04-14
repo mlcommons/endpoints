@@ -150,7 +150,7 @@ class MetricsAggregatorService(ZmqEventRecordSubscriber):
 
         self._total_processed += len(records)
         if self._total_processed - self._last_log_count >= 10000:
-            logger.info(
+            logger.debug(
                 "Aggregator processed %d records (%d in this batch)",
                 self._total_processed,
                 len(records),

@@ -533,6 +533,11 @@ async def _run_benchmark_async(
                     await http_client.shutdown_async()
             except Exception as e:
                 logger.warning(f"Client cleanup error: {e}")
+            logger.info(
+                "Closing publisher (buffer=%d, pending=%d)...",
+                len(publisher._batch_buffer),
+                len(publisher._pending),
+            )
             publisher.close()
             logger.info("Waiting for services to finish processing...")
             await asyncio.to_thread(launcher.wait_for_exit, None)
