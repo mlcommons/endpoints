@@ -105,6 +105,9 @@ class FakePublisher:
     def publish(self, event_record: EventRecord) -> None:
         self.events.append(event_record)
 
+    def flush(self) -> None:
+        pass
+
     def events_of_type(self, event_type) -> list[EventRecord]:
         return [e for e in self.events if e.event_type == event_type]
 

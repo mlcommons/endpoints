@@ -1,104 +1,65 @@
-# Review Council — PR "Make Loadgen Async" (Round 4)
+# Review Council — Batched ZMQ Publisher
 
 Reviewed by: **Claude** (Codex produced no structured findings) | Depth: **thorough** | Mode: **--no-post**
 
-Focus areas: data flow correctness after metrics/report fixes, remaining bugs, testing gaps.
+## 🔴 Must Fix (high)
 
-## 🔴 Must Fix (critical/high)
-
-| # | File | Line | Category | Summary |
-|---|------|------|----------|---------|
-| 1 | `session.py` | 437-451 | bug | Double-decrement of `inflight` for streaming queries — `StreamChunk(is_complete=True)` and subsequent `QueryResult` both decrement. |
+| #   | File        | Line | Category | Summary                                                                                                     |
+| --- | ----------- | ---- | -------- | ----------------------------------------------------------------------------------------------------------- |
+| 1   | `pubsub.py` | 234  | bug      | Batch messages bypass ZMQ topic filtering — topic-filtered subscribers receive all event types from batches |
+| 2   | `pubsub.py` | 183  | bug      | `close()` sets `is_closed=True` before flushing — concurrent `publish()` calls silently dropped             |
 
 ### Detail
 
-**#1 — Double-decrement of inflight for streaming queries**
+**#1 — Batch bypasses topic filtering**
 
-For streaming responses, the worker sends intermediate `StreamChunk` messages, then a final `StreamChunk(is_complete=True)`, then a `QueryResult` from `get_final_output()`. Both the terminal `StreamChunk` (line 445) and the `QueryResult` (line 415) decrement `phase_issuer.inflight` and call `on_query_complete()`. This causes:
+When a subscriber has specific topic filters (e.g., `topics=["session"]`), it also subscribes to `BATCH_TOPIC` (line 234). Batches contain records of all event types. `receive()` yields every payload without checking if the record's event type matches the subscription. A `"session"`-only subscriber would receive `"sample"` records from batches.
 
-- `inflight` goes negative
-- Premature `drain_event.set()` (drain completes before all responses are in)
-- Double `on_query_complete()` on ConcurrencyStrategy releases the semaphore twice, corrupting concurrency control
-- Double `on_sample_complete` callback fires for the same query
+Not a production bug today (all subscribers use `topics=None`), but violates the filtering contract. Fix: either filter after unpack, or raise an error when topic filters are combined with a batching publisher.
 
-Fix: Remove the inflight tracking from the `StreamChunk(is_complete=True)` path. The `QueryResult` that follows will handle it. Or track completed query_ids and skip duplicates.
+**#2 — Close ordering issue**
+
+`close()` sets `is_closed = True` at line 183, then calls `_flush_batch()` at line 187. The base class `publish()` checks `is_closed` and returns immediately. Any `publish()` between these lines is silently dropped. If `_flush_batch()` fails, the buffer is lost (already replaced with `[]` inside `_flush_batch`). Fix: flush before setting `is_closed`.
 
 ---
 
 ## 🟡 Should Fix (medium)
 
-| # | File | Line | Category | Summary |
-|---|------|------|----------|---------|
-| 2 | `kv_store.py` | 288 | api-contract | `_SeriesItem.append()` uses `type(value) != self._dtype` — rejects numpy int64, bool subclasses. |
-| 3 | `kv_store.py` | 296 | concurrency | ARM mmap ordering: `msync()` is not a memory barrier — reader may see stale values on ARM. |
-| 4 | `session.py` | 424 | bug | If a custom accumulator doesn't set `first_chunk` metadata, all chunks are `RECV_NON_FIRST` — TTFT/TPOT silently dropped. |
-| 5 | `execute.py` | 371-394 | data-integrity | `_setup_kv_reader` hardcodes metric key strings — should use `MetricCounterKey`/`MetricSeriesKey` enums. |
-| 6 | `execute.py` | 510 | error-handling | SIGINT during cleanup (`launcher.wait_for_exit`) may hang up to 10s if services don't process ENDED fast enough. |
+| #   | File         | Line | Category       | Summary                                                                                                                                 |
+| --- | ------------ | ---- | -------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| 3   | `pubsub.py`  | 271  | error-handling | Corrupt batch silently drops all records (potentially thousands) with only a warning log                                                |
+| 4   | `pubsub.py`  | 267  | bug            | Batch topic detection `raw[:TOPIC_FRAME_SIZE] == BATCH_TOPIC` could collide with future event categories starting with "batch"          |
+| 5   | `session.py` | 479  | performance    | `flush()` on session events synchronously encodes/sends up to 999 buffered records — session event latency proportional to buffer size  |
+| 6   | `execute.py` | 417  | design         | `EventPublisherService` hides loop selection behind `LoopManager` singleton; `send_threshold=1000` not configurable from benchmark path |
 
 ### Detail
 
-**#2 — Strict type identity check rejects valid subtypes**
+**#3** — A corrupt batch drops the entire message (could be 1000 records) with just `logger.warning`. For a system that guarantees delivery (`SNDHWM=0`, `LINGER=-1`), this is a data integrity gap. Consider logging the raw data size and raising severity.
 
-`type(value) != self._dtype` uses identity, not isinstance. `numpy.int64`, `bool` (subclass of int), etc. are rejected. Use `isinstance(value, self._dtype)` or coerce with `self._dtype(value)`.
+**#4** — `BATCH_TOPIC` is not registered via `EventTypeMeta`, so the collision check in `EventTypeMeta.__new__` won't catch a future category named "batch". Add a guard in the metaclass.
 
-**#3 — ARM mmap ordering (known limitation)**
+**#5** — At 50k QPS, the buffer may have 999 records when a session event triggers `flush()`. Encoding and sending ~70KB synchronously delays the session event. Acceptable for now but worth documenting.
 
-The code documents this (lines 299-311) and uses `msync()` as mitigation, but `msync` is a filesystem flush, not a memory barrier. On ARM (aarch64 clusters, Apple Silicon dev machines), a reader process could observe the incremented count before the value is visible. In practice, the reader runs after the aggregator exits (post-fix from this PR), so this is mitigated. But concurrent reads during the benchmark would be unsafe on ARM.
-
-**#4 — Missing RECV_FIRST event for non-OpenAI accumulators**
-
-If a custom or third-party accumulator doesn't set `metadata["first_chunk"]`, the session defaults to `False` and all chunks are published as `RECV_NON_FIRST`. The MetricsAggregator never sees `RECV_FIRST`, so TTFT and TPOT are silently zero. Consider logging a warning when COMPLETE arrives without a prior RECV_FIRST for a streaming sample.
-
-**#5 — Hardcoded metric key strings**
-
-`_setup_kv_reader` uses string literals (`"tracked_samples_issued"`, `"ttft_ns"`, etc.) that must match enum values. If an enum value is renamed, the reader silently reads 0/empty. Import and iterate over the enums directly.
-
-**#6 — SIGINT during cleanup**
-
-`launcher.wait_for_exit(10.0)` blocks for up to 10 seconds. If the user hits Ctrl+C during this, the default SIGINT handler (removed at line 525) is no longer installed — a second SIGINT would raise `KeyboardInterrupt` unhandled inside the `finally` block. This is unlikely but could leave orphaned service processes.
+**#6** — The old explicit `ZmqEventRecordPublisher(name, ctx, loop=loop)` was replaced with `EventPublisherService(ctx)` which implicitly uses `LoopManager().default_loop`. Functionally equivalent but less transparent.
 
 ---
 
 ## 🔵 Consider (low)
 
-| # | File | Line | Category | Summary |
-|---|------|------|----------|---------|
-| 7 | `session.py` | 462 | design | `max_duration_ms=0` means "no limit" (same as None) — could be confusing. |
-| 8 | `session.py` | 353 | design | No drain timeout — documented as intentional, but transport message loss causes indefinite hang. |
-| 9 | `scoring.py` | 124 | error-handling | KeyError on missing dataset name gives no context (available keys). |
-| 10 | `execute.py` | 423 | performance | macOS fallback to `tempfile.gettempdir()` (no `/dev/shm`) means mmap files on disk with msync overhead. |
-| 11 | `strategy.py` | 281 | design | `match` statement in factory (cold path — acceptable per AGENTS.md). |
+| #   | File                      | Line | Category     | Summary                                                                                                        |
+| --- | ------------------------- | ---- | ------------ | -------------------------------------------------------------------------------------------------------------- |
+| 7   | `event_publisher.py`      | 36   | api-contract | `send_threshold` parameter not documented in docstring                                                         |
+| 8   | `session.py`              | 131  | api-contract | `flush()` added to `EventPublisher` protocol — breaking change for any external implementations                |
+| 9   | `test_event_publisher.py` | 226  | testing      | No dedicated test for: threshold-triggered auto-flush, mixed event types in batch, batch + single interleaving |
 
 ---
 
-## Testing Coverage Notes
+## Summary
 
-The new tests (19 added) cover strategies and session well. Remaining gaps:
+The batching design is sound — 19x throughput improvement, 29% smaller wire size, ordering preserved via insertion-order list encoding. The main issues are:
 
-| Scenario | Coverage |
-|----------|----------|
-| Streaming + session (StreamChunk flow) | Partial — stale chunk tested but double-decrement not caught |
-| ARM mmap reader correctness | Not tested (x86 test env) |
-| Custom accumulator without `first_chunk` metadata | Not tested |
-| SIGINT during drain | Not tested |
-| Concurrent KVStore reader + writer | Not tested (reader runs after writer exits) |
-
----
-
-## Progress Since Round 3
-
-Issues fixed since the last review:
-
-- ✅ **#1 (Round 3)** Report snapshot race — moved report build after `launcher.wait_for_exit()`
-- ✅ **#3 (Round 3)** PromptData drops token_ids — now passes `input_tokens`/`token_ids` to PromptData
-- ✅ **#5 (Round 3)** 60s drain timeout — removed, now waits indefinitely
-- ✅ **#6 (Round 3)** sample_idx_map name collision — uses full dataset name
-- ✅ **ReadyCheck ENOTSOCK** — socket no longer closed on TimeoutError
-- ✅ **MetricSeriesKey filename** — enum resolved to `.value` in EmitTrigger
-- ✅ **Endpoint URL validation** — rejects URLs without `http://`/`https://` scheme
-- ✅ **report.txt** — human-readable report written to report directory
-- ✅ **Crash recovery** — `_salvage_tmpfs` copies logs on interrupt before cleanup
-
-New issue found: **#1 (Round 4) double-decrement** is critical and should be fixed before merge.
+1. **Topic filtering incompatibility** (#1) — needs either subscriber-side filtering or a documented restriction
+2. **Close ordering** (#2) — simple fix: flush before `is_closed = True`
+3. **Silent batch drop** (#3) — should at least log estimated record count
 
 Generated with [Claude Code](https://claude.com/claude-code)

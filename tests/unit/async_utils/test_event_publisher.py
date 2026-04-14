@@ -99,11 +99,9 @@ def ev_pub_zmq_context():
 @pytest.fixture
 def event_publisher_service(ev_pub_zmq_context):
     """Create EventPublisherService; socket directory comes from zmq_context."""
-    EventPublisherService._instance = None
     service = EventPublisherService(ev_pub_zmq_context)
     yield service
     service.close()
-    EventPublisherService._instance = None
 
 
 @pytest.fixture
@@ -154,6 +152,7 @@ class TestEventPublisherService:
             sample_uuid="",
         )
         event_publisher_service.publish(record)
+        event_publisher_service.flush()
         # Yield so the publisher's event loop can drain the send buffer
         await asyncio.sleep(0.1)
         loop = asyncio.get_event_loop()
@@ -171,15 +170,6 @@ class TestEventPublisherService:
         assert rec.data is None
         # Socket is closed by ManagedZMQContext.cleanup() in ev_pub_zmq_context fixture teardown.
 
-    def test_singleton_returns_same_instance(
-        self, event_publisher_service, ev_pub_zmq_context
-    ):
-        """Multiple EventPublisherService(ctx) calls return the same instance."""
-        p1 = event_publisher_service
-        p2 = EventPublisherService(ev_pub_zmq_context)
-        assert p1 is p2
-        assert p1 is event_publisher_service
-
     @pytest.mark.asyncio
     async def test_publish_session_event_received_by_subscriber(
         self, event_publisher_service, collecting_subscriber
@@ -192,6 +182,7 @@ class TestEventPublisherService:
             sample_uuid="",
         )
         event_publisher_service.publish(record)
+        event_publisher_service.flush()
         await asyncio.sleep(0.05)  # Let publisher drain send buffer
         await asyncio.wait_for(received_event.wait(), timeout=_WAIT_RECORDS_TIMEOUT)
         assert len(collecting_subscriber.received) == 1
@@ -213,6 +204,7 @@ class TestEventPublisherService:
             data=data,
         )
         event_publisher_service.publish(record)
+        event_publisher_service.flush()
         await asyncio.sleep(0.05)  # Let publisher drain send buffer
         await asyncio.wait_for(received_event.wait(), timeout=_WAIT_RECORDS_TIMEOUT)
         assert len(collecting_subscriber.received) == 1
@@ -234,7 +226,8 @@ class TestEventPublisherService:
                 sample_uuid=f"sample-{i}",
             )
             event_publisher_service.publish(record)
-            await asyncio.sleep(0.05)  # Small delay between events (demo-style)
+        event_publisher_service.flush()
+        await asyncio.sleep(0.05)  # Let publisher drain send buffer
         await asyncio.wait_for(received_event.wait(), timeout=_WAIT_RECORDS_TIMEOUT)
         assert len(collecting_subscriber.received) == 3
         for i in range(3):

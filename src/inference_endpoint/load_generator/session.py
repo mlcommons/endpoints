@@ -128,6 +128,7 @@ class EventPublisher(Protocol):
     """Publishes EventRecords to the metrics pipeline."""
 
     def publish(self, event_record: EventRecord) -> None: ...
+    def flush(self) -> None: ...
 
 
 # ---------------------------------------------------------------------------
@@ -467,6 +468,15 @@ class BenchmarkSession:
         return check
 
     def _publish_session_event(self, event_type: SessionEventType) -> None:
+        """Publish a session event and flush the publisher immediately.
+
+        Session events are control signals (STARTED, ENDED, START/STOP
+        PERFORMANCE_TRACKING) that subscribers must receive promptly for
+        correct state transitions. Flushing ensures any buffered sample
+        events are sent first, followed by the session event, so ordering
+        is preserved and the signal is not delayed by batching.
+        """
         self._publisher.publish(
             EventRecord(event_type=event_type, timestamp_ns=time.monotonic_ns())
         )
+        self._publisher.flush()

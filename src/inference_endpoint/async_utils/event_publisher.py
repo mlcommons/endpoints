@@ -19,42 +19,41 @@ import uuid
 from inference_endpoint.async_utils.loop_manager import LoopManager
 from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
 from inference_endpoint.async_utils.transport.zmq.pubsub import ZmqEventRecordPublisher
-from inference_endpoint.utils import SingletonMixin
 
 
-class EventPublisherService(SingletonMixin, ZmqEventRecordPublisher):
-    """Singleton publisher for publishing event records."""
+class EventPublisherService(ZmqEventRecordPublisher):
+    """Publisher for publishing event records over ZMQ PUB socket.
+
+    Wraps ZmqEventRecordPublisher with LoopManager integration and
+    auto-generated socket names.
+    """
 
     def __init__(
         self,
         managed_zmq_context: ManagedZMQContext,
         extra_eager: bool = False,
         isolated_event_loop: bool = False,
+        send_threshold: int = 1000,
     ):
         """Creates a new EventPublisherService.
 
-        By default, the publisher will be run on the main thread's event loop (i.e. the default loop).
-
         Args:
-            managed_zmq_context (ManagedZMQContext): The managed ZMQ context to use for the publisher.
-            extra_eager (bool): If True, the publisher will be a blocking call and calls to .publish()
-                will block until the message has been successfully sent. In most cases, this should not
-                be turned on, but it is useful for testing, or specifically in the use case where
-                EventRecords are being used as a synchronization mechanism (i.e. sending a specific
-                EventRecord as a STOP signal to subscribers to ensure the ordering of cleanup.)
-            isolated_event_loop (bool): If True, the publisher will be run in a separate event loop.
+            managed_zmq_context: The managed ZMQ context to use.
+            extra_eager: If True, publish() blocks until the message is sent.
+                Useful for testing or when EventRecords are used as a
+                synchronization mechanism (e.g., ENDED as a stop signal).
+            isolated_event_loop: If True, runs on a separate event loop thread.
         """
-        if getattr(self, "_initialized", False):
-            return
-        self._initialized = True
-
-        # Set up event loop settings
         if extra_eager:
             loop = None
         elif isolated_event_loop:
             loop = LoopManager().create_loop("ev_pub")
         else:
             loop = LoopManager().default_loop
+        self.socket_name = f"ev_pub_{uuid.uuid4().hex[:8]}"
         super().__init__(
-            f"ev_pub_{uuid.uuid4().hex[:8]}", managed_zmq_context, loop=loop
+            self.socket_name,
+            managed_zmq_context,
+            loop=loop,
+            send_threshold=send_threshold,
         )

@@ -279,8 +279,16 @@ class EventRecordPublisher(ABC):
         raise NotImplementedError("Subclasses must implement this method.")
 
     @abstractmethod
+    def flush(self) -> None:
+        """Force-send any buffered records. No-op for unbuffered implementations."""
+        pass
+
+    @abstractmethod
     def close(self) -> None:
-        """Close the publisher and release resources."""
+        """Close the publisher and release resources.
+
+        Implementations must flush any buffered records before closing.
+        """
         raise NotImplementedError("Subclasses must implement this method.")
 
 
