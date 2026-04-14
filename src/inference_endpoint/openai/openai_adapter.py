@@ -88,7 +88,7 @@ class OpenAIAdapter(HttpRequestAdapter):
     def to_endpoint_request(cls, query: Query) -> CreateChatCompletionRequest:
         """Convert a Query to an OpenAI request."""
         if "prompt" not in query.data:
-            raise ValueError("prompt not found in json_value")
+            raise ValueError("prompt not found in query.data")
 
         messages = [{"role": Role5.user.value, "content": query.data["prompt"]}]
         if "system" in query.data:

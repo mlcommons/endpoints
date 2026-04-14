@@ -1,5 +1,7 @@
 # Local Testing Guide
 
+How to run and test the CLI locally using the built-in echo server and the included dummy dataset, without a real inference endpoint.
+
 ## Quick Start: Testing CLI with Echo Server
 
 ### 1. Prepare Test Environment
@@ -13,10 +15,10 @@ The echo server is included for local testing and mirrors requests back as respo
 
 ```bash
 # Terminal 1: Start echo server on port 8765
-python -m inference_endpoint.testing.echo_server --port 8765
+python3 -m inference_endpoint.testing.echo_server --port 8765
 
 # Or use default port 12345
-python -m inference_endpoint.testing.echo_server
+python3 -m inference_endpoint.testing.echo_server
 ```
 
 The server will log:
@@ -72,7 +74,8 @@ Waiting for 5 responses...
 inference-endpoint -v benchmark offline \
   --endpoints http://localhost:8765 \
   --model Qwen/Qwen3-8B \
-  --dataset tests/datasets/dummy_1k.jsonl
+  --dataset tests/datasets/dummy_1k.jsonl \
+  --duration 0
 
 # Production test with custom params and report generation
 inference-endpoint -v benchmark offline \
@@ -112,6 +115,7 @@ inference-endpoint -v benchmark online \
   --endpoints http://localhost:8765 \
   --model Qwen/Qwen3-8B \
   --dataset tests/datasets/dummy_1k.jsonl \
+  --duration 0 \
   --load-pattern poisson \
   --target-qps 100 \
   --report-dir online_benchmark_report
@@ -141,7 +145,7 @@ Cleaning up...
 inference-endpoint -v info
 
 # Generate template
-inference-endpoint init --template offline
+inference-endpoint init offline
 
 # Validate config
 inference-endpoint validate-yaml --config offline_template.yaml
@@ -156,7 +160,9 @@ inference-endpoint benchmark offline \
 
 ### 6. View Results
 
-When run with `--report-dir`, a directory is created containing benchmark metrics files (JSON/CSV) with detailed QPS, latency, TTFT, and TPOT data.
+A report directory is always created (at `--report-dir` if specified, or at a default path
+otherwise), containing benchmark artifacts: `result_summary.json`, `runtime_settings.json`,
+`sample_idx_map.json`, `report.txt`, and `events.jsonl`.
 
 ### 7. Stop the Echo Server
 
@@ -170,10 +176,10 @@ pkill -f echo_server
 
 ```bash
 # Custom host and port
-python -m inference_endpoint.testing.echo_server --host 0.0.0.0 --port 9000
+python3 -m inference_endpoint.testing.echo_server --host 0.0.0.0 --port 9000
 
 # Check help
-python -m inference_endpoint.testing.echo_server --help
+python3 -m inference_endpoint.testing.echo_server --help
 ```
 
 ## Request Format
@@ -186,7 +192,7 @@ The echo server expects OpenAI-compatible format but simplifies it:
 {
   "prompt": "Your query text",
   "model": "model-name",
-  "max_tokens": 50,
+  "max_completion_tokens": 50,
   "stream": false
 }
 ```
@@ -206,7 +212,7 @@ Error: Connection failed
 ### Validation Errors
 
 ```
-Error: prompt not found in json_value
+Error: prompt not found in query.data
 ```
 
 **Solution:** Use `"prompt"` format in Query data, not `"messages"` (client converts it)
@@ -225,7 +231,7 @@ Error: Timeout (>60s)
 
 ```bash
 # 1. Start echo server
-python -m inference_endpoint.testing.echo_server --port 8000 &
+python3 -m inference_endpoint.testing.echo_server --port 8000 &
 
 # 2. Generate fresh dataset if needed
 python scripts/create_dummy_dataset.py
@@ -302,8 +308,9 @@ inference-endpoint benchmark online \
 
 **Sample Count Control:**
 
-- Sample priority: `--num-samples` > dataset size (duration=0) > calculated (target_qps × duration)
-- Default duration: 0 (runs until dataset exhausted or max_duration reached)
+- Use `--duration 0` when you want a local test to stop after exhausting the dataset instead of running for the default timed duration
+- Sample priority: `--num-samples` > dataset size (when `--duration 0`) > calculated (target_qps × duration)
+- Default duration: 600000ms (10 minutes)
 
 **Testing & Debugging:**
 

@@ -24,6 +24,18 @@ Sample yaml configuration to benchmark `openai/gpt-oss-120b`.
 
 Sample yaml configuration to benchmark `meta-llama/Llama-3.1-8B-Instruct`.
 
+### [06_Llama2-70B_Example](06_Llama2-70B_Example/)
+
+Sample yaml configuration for online benchmarking of `meta-llama/Llama-2-70b-chat-hf`.
+
+### [07_GPT-OSS-120B_SGLang_Example](07_GPT-OSS-120B_SGLang_Example/)
+
+End-to-end example for benchmarking `openai/gpt-oss-120b` served with SGLang, including helper scripts for AIME, GPQA, and LiveCodeBench evaluation.
+
+### [08_Qwen3-VL-235B-A22B_Example](08_Qwen3-VL-235B-A22B_Example/)
+
+Sample yaml configuration to benchmark the multimodal `Qwen/Qwen3-VL-235B-A22B` model on a visual reasoning workload.
+
 ## Getting Help
 
 - For general usage: See main [README](../README.md)

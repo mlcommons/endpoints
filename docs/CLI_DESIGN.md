@@ -172,8 +172,10 @@ InputValidationError    2           Bad user input, invalid config
 SetupError              3           Dataset load failure, connection error
 ExecutionError          4           Benchmark failed after setup
 CLIError                1           Generic CLI error (base class)
-NotImplementedError     1           Unimplemented command (eval)
 ```
+
+The reserved `eval` command currently raises `CLIError` with a tracking issue link rather than a
+dedicated exception type.
 
 ## Development Guide
 

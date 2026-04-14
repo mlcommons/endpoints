@@ -1,0 +1,48 @@
+name: Dataset Integration
+description: Request support for a new dataset or evaluation benchmark
+title: "[Dataset]: "
+labels: ["type: feature", "area: dataset", "status: needs-triage"]
+body:
+  - type: textarea
+    id: dataset
+    attributes:
+      label: Dataset Information
+      description: Name, URL, and brief description
+      placeholder: |
+        Name: MATH-500
+        URL: https://huggingface.co/datasets/...
+        Description: 500 competition math problems for testing reasoning
+    validations:
+      required: true
+  - type: dropdown
+    id: format
+    attributes:
+      label: Dataset Format
+      options:
+        - JSONL
+        - HuggingFace Dataset
+        - CSV
+        - JSON
+        - Parquet
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: evaluation
+    attributes:
+      label: Evaluation Method
+      description: How should responses be scored?
+      placeholder: "Exact match after extracting boxed answer, or pass@1 for code"
+    validations:
+      required: true
+  - type: textarea
+    id: samples
+    attributes:
+      label: Scale
+      description: Number of samples, expected prompt/response lengths
+      placeholder: "500 samples, avg prompt ~200 tokens, avg response ~500 tokens"
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional Context
+      description: Related benchmarks, papers, or prior art

@@ -13,22 +13,20 @@ This document describes the design of the pub-sub system for **EventRecords**: h
 | **Publisher**   | Main process (benchmark/loadgen)       | Holds `EventPublisherService` (singleton). Binds a ZMQ PUB socket to an IPC (or TCP) address. Publishes `EventRecord` instances as events occur (e.g. sample issued, first token, complete). |
 | **Subscribers** | Same process and/or separate processes | Connect to the publisher's address via ZMQ SUB sockets. Each runs its own event loop (if async). Filter by topic and process batches of decoded `EventRecord`s.                              |
 
-The publisher is created inside a **scoped** `ManagedZMQContext` (e.g. in the main process). The publisher binds via `ctx.bind(socket, path)` which constructs an IPC address from the context's `socket_dir` and the given path. Subscribers connect using the same `socket_dir` and path via `ctx.connect(socket, path)`.
+The publisher is created inside a **scoped** `ManagedZMQContext` (e.g. in the main process). It binds a ZMQ PUB socket using a **socket name** within the context's socket directory (e.g. `ev_pub_<uuid>`), producing an IPC path like `ipc:///path/to/socket_dir/ev_pub_<uuid>`. The socket directory and socket name must be passed to any subscriber so it can connect.
 
 ### 1.2 In-process vs out-of-process subscribers
 
-- **In-process**: Subscriber runs in the same process as the publisher but on a **different event loop** (e.g. `LoopManager().create_loop("subscriber_name")`). It uses the same `ManagedZMQContext` (same `socket_dir`) and connects using the publisher's `bind_path`. Example: `ConsoleSubscriber`, `DurationSubscriber` in the demo.
-- **Out-of-process**: Subscriber runs in a **separate process** (e.g. `subprocess.Popen`). That process creates its own `ManagedZMQContext` with the publisher's **socket directory** via `--socket-dir`. It is also passed the socket name via `--socket-name` and connects using `ctx.connect(socket, socket_name)`. Example: **event_logger** and **metrics_aggregator** services launched from the demo/benchmark.
+- **In-process**: Subscriber runs in the same process as the publisher but on a **different event loop** (e.g. `LoopManager().create_loop("subscriber_name")`). It uses the same `ManagedZMQContext` (same `socket_dir`) and connects via `ctx.connect(socket, publisher.bind_path)`. Example: `ConsoleSubscriber`, `DurationSubscriber` in the demo.
+- **Out-of-process**: Subscriber runs in a **separate process** (e.g. `subprocess.Popen`). That process creates its own `ManagedZMQContext` with a **shared socket directory** (e.g. `socket_dir=log_dir.parent` so the IPC path exists and is writable). It is passed the publisher's socket directory and socket name via CLI (`--socket-dir <dir>` and `--socket-name <name>`) and connects via `ctx.connect(socket, socket_name)`. Example: **event_logger** and **metrics_aggregator** services launched from the demo/benchmark.
 
 So: one publisher process; zero or more subscribers in the same process (each with its own loop) and/or in child processes (each with its own context and loop). All subscribers share the same logical stream of events (subject to topic filters and to de-sync; see §3).
 
 ### 1.3 ZMQ context and socket directory
 
-- **ManagedZMQContext** is a per-process singleton. It owns the ZMQ context and an optional **socket directory** used for IPC paths.
-- All socket binding and connecting goes through `ctx.bind(socket, path)` and `ctx.connect(socket, path)`. These methods construct the full IPC address (`ipc://<socket_dir>/<path>`) using `urllib.parse.urlunparse`.
-- On `bind()`: if `socket_dir` is `None`, a temporary directory is created automatically. If it's a string, the directory is created via `mkdir(parents=True, exist_ok=True)`.
-- On `connect()`: `socket_dir` must already be set (either via `__init__` or a prior `bind()`). This ensures subscribers point to the publisher's actual socket directory.
-- Subscribers in the same process use the same context and `socket_dir`. Subscribers in another process receive the `socket_dir` and socket name via CLI args (`--socket-dir`, `--socket-name`).
+- **ManagedZMQContext** is a per-process singleton. It owns the ZMQ context and a **socket directory** used for IPC paths.
+- The publisher **binds** in that directory (e.g. `ipc://{socket_dir}/ev_pub_{uuid}`).
+- Subscribers in the same process use the same context and connect via `ctx.connect(socket, publisher.bind_path)`. Subscribers in another process must be given the same **socket directory** and the **socket name** (the relative name used when binding), so the parent passes `--socket-dir` and `--socket-name` to the child subprocess.
 - Cleanup: when the scoped context in the publisher process exits, it closes sockets and terminates the context; the publisher also unlinks the IPC file. Subscriber processes must connect before the publisher exits and should shut down when they see `session.ended` (or similar) to avoid using a closed socket.
 
 ### 1.4 Process architecture diagram
@@ -303,14 +301,14 @@ stateDiagram-v2
 
 - **Role**: Subscribes to all (or a configured set of) topics and **persists** event records.
 - **Outputs**: JSONL and/or SQL (SQLAlchemy; default sqlite). Writers are pluggable (`RecordWriter`); each record is written to all configured writers.
-- **Lifecycle**: On **session.ended**, the ENDED record is written, all subsequent events in the batch are dropped, and the service flushes and closes writers and signals shutdown (e.g. sets an event so the process can exit). No events of any kind are accepted after **session.ended**.
-- **Process**: Typically run as a **subprocess**; given `--log-dir`, `--socket-dir`, `--socket-name` (and optionally `--writers jsonl sql`). Creates `ManagedZMQContext.scoped(socket_dir=...)` with the publisher's socket directory and connects via `ctx.connect(socket, socket_name)`.
+- **Lifecycle**: On **session.ended**, it writes the ENDED record, then drops all subsequent events (including error events) in any later batch, flushes and closes writers, and signals shutdown. Note: the current implementation does not make an exception for error events — all records after ENDED are discarded.
+- **Process**: Typically run as a **subprocess**; given `--log-dir`, `--socket-dir`, `--socket-name`, and optionally `--writers jsonl sql`. Uses the same socket directory as the publisher so the IPC path is valid.
 
 ### 6.2 Metrics aggregator
 
 - **Role**: Subscribes to EventRecords and derives real-time metrics (e.g. TTFT, sample latency, token counts). May use a tokenizer pool for token-based metrics. Shuts down on **session.ended**.
 - **Outputs**: Planned is to push real time metrics to Prometheus via PushGateway. Currently, logging / writing final report to JSON is sufficient legacy behavior.
-- **Process**: Run as a **subprocess**; given `--metrics-dir`, `--socket-dir`, `--socket-name`, and optional tokenizer options. Uses a dedicated event loop and `ManagedZMQContext.scoped(socket_dir=...)` so it can connect to the publisher's IPC socket via `ctx.connect(socket, socket_name)`.
+- **Process**: Run as a **subprocess**; given `--metrics-dir`, `--socket-dir`, `--socket-name`, and optional tokenizer options. Uses a dedicated event loop and `ManagedZMQContext.scoped(socket_dir=...)` so it can connect to the publisher's IPC address.
 
 ---
 

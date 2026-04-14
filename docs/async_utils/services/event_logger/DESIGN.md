@@ -1,5 +1,7 @@
 # Event Logger Service — Design Document
 
+> ZMQ subscriber service that consumes `EventRecord` messages from the pub/sub bus and persists them to JSONL or SQLite storage backends; runs as an independent subprocess.
+
 ## Overview
 
 The event logger is a ZMQ subscriber service that consumes `EventRecord` messages
