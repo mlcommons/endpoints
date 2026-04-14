@@ -21,7 +21,7 @@ pytest -m integration                         # Integration tests only
 pytest --cov=src --cov-report=html            # With coverage
 pytest -xvs tests/unit/path/to/test_file.py  # Single test file
 
-# Code quality (run before commits)
+# Code quality — MUST run before every commit, no exceptions
 pre-commit run --all-files
 
 # Local testing with echo server
@@ -215,7 +215,7 @@ All of these run automatically on commit:
 - License header enforcement
 - `regenerate-templates`: auto-regenerates YAML config templates from schema defaults when `schema.py`, `config.py`, or `regenerate_templates.py` change
 
-**Always run `pre-commit run --all-files` before committing.**
+**IMPORTANT: Always run `pre-commit run --all-files` before every commit.** Hooks may modify files (prettier, ruff-format, license headers). If files are modified, stage the changes and commit once. Never commit without running pre-commit first.
 
 See [Development Guide](docs/DEVELOPMENT.md) for full setup and workflow details.
 
@@ -240,7 +240,7 @@ See [Development Guide](docs/DEVELOPMENT.md) for full setup and workflow details
 @pytest.mark.run_explicitly # Only run when explicitly selected
 ```
 
-**Async tests**: Use `@pytest.mark.asyncio(mode="strict")` — the project uses strict asyncio mode.
+**Async tests**: Use `@pytest.mark.asyncio` — strict mode is configured globally in `pyproject.toml` (`asyncio_mode = "strict"`). Do NOT pass `mode="strict"` to the marker — it's not a valid argument.
 
 **Key fixtures** (defined in `tests/conftest.py`):
 
@@ -342,7 +342,7 @@ Known failure modes when AI tools generate code for this project. Reference thes
 
 - **Generating mock-heavy tests for integration scenarios**: This project has real echo/oracle server fixtures. AI tends to mock HTTP calls even when `mock_http_echo_server` or `mock_http_oracle_server` fixtures exist and should be used.
 - **Missing test markers**: Every test function needs `@pytest.mark.unit`, `@pytest.mark.integration`, or another marker. AI-generated tests almost always omit markers, which breaks CI filtering.
-- **Wrong asyncio mode**: Tests must use `@pytest.mark.asyncio(mode="strict")` — AI often writes bare `@pytest.mark.asyncio` or forgets it entirely, causing silent test skips or failures.
+- **Wrong asyncio marker**: Tests must use bare `@pytest.mark.asyncio` — strict mode is configured globally in `pyproject.toml`. Do NOT pass `mode="strict"` to the marker (it's not a valid argument and will cause errors). AI sometimes hallucinates this parameter.
 - **Fabricating fixture names**: AI may invent fixtures that don't exist in `conftest.py`. Always check that referenced fixtures actually exist before using them.
 
 ### Code Style & Repo Conventions
