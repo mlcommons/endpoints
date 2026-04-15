@@ -218,21 +218,19 @@ class HTTPClientConfig(WithUpdatesMixin, BaseModel):
         if self.num_workers == -1:
             object.__setattr__(self, "num_workers", _get_auto_num_workers())
 
-        if self.adapter is None:
-            adapter_path = ADAPTER_MAP.get(self.api_type)
-            if not adapter_path:
-                raise ValueError(f"Invalid or unsupported API type: {self.api_type}")
-            module_path, class_name = adapter_path.rsplit(".", 1)
-            module = import_module(module_path)
-            object.__setattr__(self, "adapter", getattr(module, class_name))
+        adapter_path = ADAPTER_MAP.get(self.api_type)
+        if not adapter_path:
+            raise ValueError(f"Invalid or unsupported API type: {self.api_type}")
+        module_path, class_name = adapter_path.rsplit(".", 1)
+        module = import_module(module_path)
+        object.__setattr__(self, "adapter", getattr(module, class_name))
 
-        if self.accumulator is None:
-            accumulator_path = ACCUMULATOR_MAP.get(
-                self.api_type, ACCUMULATOR_MAP[APIType.OPENAI]
-            )
-            module_path, class_name = accumulator_path.rsplit(".", 1)
-            module = import_module(module_path)
-            object.__setattr__(self, "accumulator", getattr(module, class_name))
+        accumulator_path = ACCUMULATOR_MAP.get(
+            self.api_type, ACCUMULATOR_MAP[APIType.OPENAI]
+        )
+        module_path, class_name = accumulator_path.rsplit(".", 1)
+        module = import_module(module_path)
+        object.__setattr__(self, "accumulator", getattr(module, class_name))
 
         # Only resolve ports when endpoint_urls are set (runtime config, not settings default)
         if self.endpoint_urls:
