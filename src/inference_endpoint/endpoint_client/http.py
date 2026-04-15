@@ -56,9 +56,13 @@ class _SocketConfig:
     # we hit lots of connection timed out errors in offline and high-concurrency modes,
     # disabling since we handle dead-connections in http.py connection_lost/eof_received
     SO_KEEPALIVE: int = 0  # Disabled
-    TCP_KEEPIDLE: int = 1  # Probe after 1s idle (disabled)
-    TCP_KEEPCNT: int = 5  # 5 failed probes = dead (disabled)
-    TCP_KEEPINTVL: int = 1  # 1s between probes (disabled)
+    TCP_KEEPIDLE: int = (
+        1  # Probe after 1s idle (only used when SO_KEEPALIVE is enabled)
+    )
+    TCP_KEEPCNT: int = (
+        5  # 5 failed probes = dead (only used when SO_KEEPALIVE is enabled)
+    )
+    TCP_KEEPINTVL: int = 1  # 1s between probes (only used when SO_KEEPALIVE is enabled)
 
     # Socket buffer sizing: sliding windows, not full-message buffers.
     # The event loop reads eagerly so the buffer only holds data between
