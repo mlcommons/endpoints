@@ -6,6 +6,19 @@ The load generator is the central scheduling component that controls _when_ and 
 samples are issued to inference endpoints during benchmarking. It is fully async with a
 single-thread, single-event-loop-per-process constraint.
 
+## File Structure
+
+```
+src/inference_endpoint/load_generator/
+├── __init__.py          # Public exports
+├── session.py           # BenchmarkSession, SessionResult
+├── strategy.py          # LoadStrategy protocol, TimedIssueStrategy,
+│                        #   BurstStrategy, ConcurrencyStrategy,
+│                        #   create_load_strategy()
+├── sample_order.py      # SampleOrder, WithoutReplacement, WithReplacement
+└── delay.py             # poisson_delay_fn, uniform_delay_fn
+```
+
 ## Architecture
 
 A `BenchmarkSession` runs one or more **phases** sequentially. Each phase has its own
@@ -724,43 +737,6 @@ The GIL contention from the executor busy-wait thread penalizes low-QPS latency.
 | -------------- | ------- | -------------- |
 | `loop.call_at` | 104,039 | 1.47 ms        |
 | `run_in_exec`  | 78,261  | 8.28 ms        |
-
----
-
-## Removed Constructs
-
-| Removed                                         | Reason                                        |
-| ----------------------------------------------- | --------------------------------------------- |
-| `Sample` class                                  | Replaced by `Query` (frozen `msgspec.Struct`) |
-| `Sample.__setattr__` hack                       | UUID generated before `Query` construction    |
-| `SampleEventHandler` singleton                  | Events via `EventPublisher` ZMQ PUB/SUB       |
-| `IssuedSample` dataclass                        | `uuid_to_index` dict on session is sufficient |
-| `Scheduler` class hierarchy                     | Replaced by `LoadStrategy` + factory function |
-| `LoadGenerator` / `SchedulerBasedLoadGenerator` | Replaced by `LoadStrategy`                    |
-| `threading.Thread` in `BenchmarkSession`        | Fully async                                   |
-| `threading.Condition` in `ConcurrencyScheduler` | `asyncio.Semaphore`                           |
-| `HttpClientSampleIssuer._handle_responses`      | Session owns the receive loop                 |
-
----
-
-## File Structure
-
-```
-src/inference_endpoint/load_generator/
-├── __init__.py          # Public exports
-├── session.py           # BenchmarkSession, SessionResult
-├── strategy.py          # LoadStrategy protocol, TimedIssueStrategy,
-│                        #   BurstStrategy, ConcurrencyStrategy,
-│                        #   create_load_strategy()
-├── sample_order.py      # SampleOrder, WithoutReplacement, WithReplacement
-└── delay.py             # poisson_delay_fn, uniform_delay_fn
-```
-
-Deleted:
-
-- `load_generator.py` (LoadGenerator, SchedulerBasedLoadGenerator)
-- `scheduler.py` (Scheduler hierarchy)
-- `sample.py` (Sample, SampleEventHandler, IssuedSample)
 
 ---
 
