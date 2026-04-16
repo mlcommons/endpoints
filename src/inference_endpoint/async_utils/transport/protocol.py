@@ -278,10 +278,12 @@ class EventRecordPublisher(ABC):
         """
         raise NotImplementedError("Subclasses must implement this method.")
 
-    @abstractmethod
-    def flush(self) -> None:
-        """Force-send any buffered records. No-op for unbuffered implementations."""
-        pass
+    def flush(self) -> None:  # noqa: B027 — intentionally non-abstract
+        """Force-send any buffered records.
+
+        Unbuffered implementations need no override. Buffered subclasses
+        (e.g., ZmqEventRecordPublisher) override this to drain their buffer.
+        """
 
     @abstractmethod
     def close(self) -> None:

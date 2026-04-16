@@ -15,7 +15,7 @@
 
 """Async load generator for the MLPerf Inference Endpoint Benchmarking System.
 
-See docs/load_generator/design.md for the full design.
+See docs/load_generator/DESIGN.md for the full design.
 """
 
 from .delay import make_delay_fn, poisson_delay_fn

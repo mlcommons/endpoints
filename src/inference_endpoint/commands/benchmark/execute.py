@@ -535,8 +535,8 @@ async def _run_benchmark_async(
                 logger.warning(f"Client cleanup error: {e}")
             logger.info(
                 "Closing publisher (buffer=%d, pending=%d)...",
-                len(publisher._batch_buffer),
-                len(publisher._pending),
+                publisher.buffered_count,
+                publisher.pending_count,
             )
             publisher.close()
             logger.info("Waiting for services to finish processing...")

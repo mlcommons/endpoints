@@ -43,6 +43,8 @@ class EventPublisherService(ZmqEventRecordPublisher):
                 Useful for testing or when EventRecords are used as a
                 synchronization mechanism (e.g., ENDED as a stop signal).
             isolated_event_loop: If True, runs on a separate event loop thread.
+            send_threshold: Minimum number of buffered records before an
+                automatic flush is triggered. See ZmqEventRecordPublisher.
         """
         if extra_eager:
             loop = None

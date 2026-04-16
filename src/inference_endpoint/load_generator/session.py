@@ -15,7 +15,7 @@
 
 """Async benchmark session: orchestrates phases, issues samples, receives responses.
 
-See docs/load_generator/design.md for the full design.
+See docs/load_generator/DESIGN.md for the full design.
 """
 
 from __future__ import annotations
@@ -226,7 +226,7 @@ class BenchmarkSession:
         issuer: SampleIssuer,
         event_publisher: EventPublisher,
         loop: asyncio.AbstractEventLoop,
-        on_sample_complete: Callable[[QueryResult | StreamChunk], None] | None = None,
+        on_sample_complete: Callable[[QueryResult], None] | None = None,
         session_id: str | None = None,
     ):
         self._issuer = issuer

@@ -86,6 +86,16 @@ class ZmqEventRecordPublisher(EventRecordPublisher):
         self._pending: deque[bytes] = deque()
         self._writing = False
 
+    @property
+    def buffered_count(self) -> int:
+        """Number of records currently buffered (not yet sent)."""
+        return len(self._batch_buffer)
+
+    @property
+    def pending_count(self) -> int:
+        """Number of frames queued for async write (socket was busy)."""
+        return len(self._pending)
+
     def send(self, topic: bytes, payload: bytes) -> None:
         """Buffer a record for batched sending.
 
@@ -111,21 +121,32 @@ class ZmqEventRecordPublisher(EventRecordPublisher):
             self._flush_batch()
 
     def _flush_batch(self) -> None:
-        """Encode and send the buffered payloads."""
+        """Encode and send the buffered payloads.
+
+        The buffer is only cleared after a successful send (or successful
+        enqueue into the pending queue). If ``_send_frame`` raises, the
+        buffer is restored so records are not lost.
+        """
         buf = self._batch_buffer
-        self._batch_buffer = []
 
         if len(buf) == 1:
             # Single record: send with its own topic (no batch overhead).
             # _last_topic is the topic from the most recent send() call.
-            self._send_frame(self._last_topic + buf[0])
+            frame = self._last_topic + buf[0]
         else:
             # Multiple records: encode payloads as msgpack list[bytes],
             # prefix with BATCH_TOPIC for routing. Individual topics are
             # not included — subscribers decode EventRecord.event_type
             # from the payload for dispatching.
-            batch_payload = _batch_encoder.encode(buf)
-            self._send_frame(BATCH_TOPIC + batch_payload)
+            frame = BATCH_TOPIC + _batch_encoder.encode(buf)
+
+        try:
+            self._batch_buffer = []
+            self._send_frame(frame)
+        except Exception:
+            # Restore buffer so records are not lost.
+            self._batch_buffer = buf
+            raise
 
     def _send_frame(self, frame: bytes) -> None:
         """Attempt direct send; fall back to pending queue + writer."""

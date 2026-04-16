@@ -196,3 +196,4 @@ examples/03_BenchmarkComparison/vllm_venv/
 # User-specific local rules (local Docker dev); do not commit
 .cursor/rules/local-docker-dev.mdc
 CLAUDE.local.md
+.cursor_artifacts/

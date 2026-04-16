@@ -62,7 +62,7 @@ for its scheduling semantics, validated by benchmarking:
 | ----------------- | --------------------- | ---------------------------- | ------------------- |
 | POISSON           | `TimedIssueStrategy`  | `loop.call_at` (default)     | ≤50k QPS            |
 | POISSON (precise) | `TimedIssueStrategy`  | `run_in_executor(busy_wait)` | Sub-100μs precision |
-| MAX_THROUGHPUT    | `BurstStrategy`       | `loop.call_at` / sync batch  | Max fire rate       |
+| MAX_THROUGHPUT    | `BurstStrategy`       | `loop.call_soon`             | Max fire rate       |
 | CONCURRENCY       | `ConcurrencyStrategy` | `asyncio.Semaphore`          | Fixed concurrency   |
 
 **Default for Poisson is `loop.call_at`:** Sub-millisecond timing precision (600–700μs)
@@ -128,8 +128,10 @@ class BenchmarkSession:
     def __init__(
         self,
         issuer: SampleIssuer,
-        event_publisher: EventRecordPublisher,
-        on_sample_complete: Callable[[QueryResult], None] | None = None,
+        event_publisher: EventPublisher,
+        loop: asyncio.AbstractEventLoop,
+        on_sample_complete: Callable[[QueryResult | StreamChunk], None] | None = None,
+        session_id: str | None = None,
     ): ...
 
     async def run(self, phases: list[PhaseConfig]) -> SessionResult: ...
@@ -249,13 +251,16 @@ to build the `PhaseResult`.
 
 ```python
 async def _receive_responses(self):
-    while True:
-        resp = await self.issuer.recv()
+    while not self._done:
+        resp = await self._issuer.recv()
         if resp is None:
+            # Transport closed — trigger stop so strategy and drain don't hang.
+            self._stop_requested = True
+            self._drain_event.set()
+            if self._strategy_task and not self._strategy_task.done():
+                self._strategy_task.cancel()
             break
         self._handle_response(resp)
-        if self._done and self._inflight <= 0:
-            break
 ```
 
 Uses `recv()` exclusively — no `poll()` spin. The ZMQ fd is registered with
@@ -279,6 +284,10 @@ is no added latency compared to a poll-based approach.
 
 - ISSUED: `monotonic_ns()` taken immediately before `issuer.issue()`. The ZMQ push is
   sync and non-blocking, so this honestly represents when the query entered the transport.
+  Note: with batched publishing, `publisher.publish()` buffers the ISSUED EventRecord
+  in memory — the actual ZMQ send is deferred until the batch threshold is reached or
+  `flush()` is called. The timestamp itself is still accurate (captured before buffering),
+  but the EventRecord reaches subscribers with batching latency.
 - COMPLETE: `QueryResult.completed_at` is set via `force_setattr(monotonic_ns())` in
   `__post_init__`, regenerated on deserialization. Both ISSUED and COMPLETE timestamps
   share the same ZMQ transit bias. TTFT (`RECV_FIRST - ISSUED`) is still sensitive
@@ -437,13 +446,12 @@ class ConcurrencyStrategy(LoadStrategy):
 ```python
 class SampleIssuer(Protocol):
     def issue(self, query: Query) -> None: ...
-    def poll(self) -> QueryResult | StreamChunk | None: ...
     async def recv(self) -> QueryResult | StreamChunk | None: ...
     def shutdown(self) -> None: ...
 ```
 
-`issue()` is sync (ZMQ push). `poll()` is non-blocking sync drain. `recv()` is
-async blocking wait. This matches `HTTPEndpointClient`'s existing interface.
+`issue()` is sync (ZMQ push). `recv()` is async blocking wait.
+This matches `HTTPEndpointClient`'s existing interface.
 
 ### SampleOrder (unchanged)
 
@@ -452,23 +460,23 @@ async blocking wait. This matches `HTTPEndpointClient`'s existing interface.
 - `WithoutReplacementSampleOrder` — shuffle, exhaust, reshuffle
 - `WithReplacementSampleOrder` — uniform random
 
-Termination is controlled by `BenchmarkSession._should_stop()`, not the iterator.
+Termination is controlled by `BenchmarkSession._make_stop_check()`, not the iterator.
 
 ### SessionResult
 
 ```python
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class PhaseResult:
     """Result of a single benchmark phase."""
     name: str
     phase_type: PhaseType
     uuid_to_index: dict[str, int]
-    report: Report | None  # Only for PERFORMANCE phases
+    issued_count: int
     start_time_ns: int
     end_time_ns: int
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class SessionResult:
     """Combined results from all phases in a session."""
     session_id: str
@@ -511,7 +519,7 @@ sequenceDiagram
     I->>W: ZMQ PUSH (Query)
     W->>W: HTTP request → endpoint
     W-->>I: ZMQ PUSH (QueryResult)
-    I-->>B: poll() / recv()
+    I-->>B: recv()
     B->>E: publish(COMPLETE, uuid, completed_at)
     E->>M: ZMQ PUB (EventRecord)
     B->>S: on_query_complete(uuid)
@@ -540,7 +548,7 @@ sequenceDiagram
     B->>B: drain in-flight
     B->>E: STOP_PERFORMANCE_TRACKING
     B->>K: snapshot metrics → Report
-    Note over B: PhaseResult("perf_qps1k", report)
+    Note over B: PhaseResult("perf_qps1k", issued_count=N)
 
     Note over B: === Perf Phase 2 (e.g. QPS=5000) ===
     B->>E: START_PERFORMANCE_TRACKING
@@ -548,7 +556,7 @@ sequenceDiagram
     B->>B: drain in-flight
     B->>E: STOP_PERFORMANCE_TRACKING
     B->>K: snapshot metrics → Report
-    Note over B: PhaseResult("perf_qps5k", report)
+    Note over B: PhaseResult("perf_qps5k", issued_count=N)
 
     Note over B: === Accuracy Phase ===
     B->>B: execute strategy (untracked)
@@ -577,7 +585,7 @@ sequenceDiagram
     B->>I: issue(query)
     I->>W: ZMQ PUSH
     W-->>I: ZMQ PUSH (QueryResult)
-    I-->>B: poll() / recv()
+    I-->>B: recv()
     Note over B: publish COMPLETE
 ```
 
@@ -599,7 +607,7 @@ graph TD
         A --> B
         A --> C
         B -->|"issue_fn → issuer.issue()"| E
-        C -->|"poll() / recv()"| E
+        C -->|"recv()"| E
         B --> D
         C --> D
     end
@@ -640,7 +648,7 @@ graph TD
 
         R -->|"sample_index"| A
         A -->|"issue()"| E
-        C -->|"poll/recv"| E
+        C -->|"recv()"| E
         A --> D
         C --> D
     end
@@ -665,10 +673,9 @@ graph TD
 ```python
 def create_load_strategy(
     runtime_settings: RuntimeSettings,
-    sample_order: SampleOrder,
     loop: asyncio.AbstractEventLoop,
+    sample_order: SampleOrder | None = None,
     use_executor: bool = False,
-    use_timer_process: bool = False,
 ) -> LoadStrategy:
     lp = runtime_settings.load_pattern
 
@@ -677,9 +684,7 @@ def create_load_strategy(
             return BurstStrategy(sample_order, loop)
 
         case LoadPatternType.POISSON:
-            delay_fn = poisson_delay_fn(lp.target_qps, runtime_settings.rng_sched)
-            if use_timer_process:
-                return TimerProcessStrategy(delay_fn, sample_order)
+            delay_fn = make_delay_fn(lp, runtime_settings.rng_sched)
             return TimedIssueStrategy(delay_fn, sample_order, loop,
                                       use_executor=use_executor)
 
@@ -691,7 +696,7 @@ def create_load_strategy(
 
 ## Benchmark Data Summary
 
-From `.cursor_artifacts/async_lg_benchmarks/` (MaxThroughputServer + real HTTPEndpointClient):
+Measured with MaxThroughputServer + real HTTPEndpointClient:
 
 ### Poisson Mode — Strategy Comparison
 
@@ -809,9 +814,6 @@ class HttpClientSampleIssuer:
     def issue(self, query: Query) -> None:
         self.http_client.issue(query)
 
-    def poll(self) -> QueryResult | StreamChunk | None:
-        return self.http_client.poll()
-
     async def recv(self) -> QueryResult | StreamChunk | None:
         return await self.http_client.recv()
 
@@ -899,63 +901,55 @@ and finalization as three sync phases:
 ```python
 def run_benchmark(config: BenchmarkConfig, test_mode: TestMode) -> None:
     ctx = setup_benchmark(config, test_mode)        # sync: datasets, tokenizer, config
-    result, collector = run_benchmark_async(ctx)     # async: issuance on event loop
-    finalize_benchmark(ctx, result, collector)       # sync: scoring, report, JSON output
-```
+    bench = run_benchmark_async(ctx)                # async: returns BenchmarkResult
+    finalize_benchmark(ctx, bench)                  # sync: scoring, report, JSON output
 
-`run_benchmark_async` is called via `loop.run_until_complete()` from the main thread.
-Signal handling uses `loop.add_signal_handler(signal.SIGINT, session.stop)` which
-only works on the main thread — this is enforced by the sync-to-async boundary.
-
-```python
-def run_benchmark_async(ctx: BenchmarkContext) -> tuple[SessionResult, ResponseCollector]:
+def run_benchmark_async(ctx: BenchmarkContext) -> BenchmarkResult:
     loop = LoopManager().default_loop
     return loop.run_until_complete(_run_benchmark_async(ctx, loop))
-
-async def _run_benchmark_async(
-    ctx: BenchmarkContext,
-    loop: asyncio.AbstractEventLoop,
-) -> tuple[SessionResult, ResponseCollector]:
-    collector = ResponseCollector(collect_responses=ctx.collect_responses)
-
-    # Setup: HTTP client, event publisher, service subprocesses
-    client = await HTTPEndpointClient.create(ctx.http_config, loop)
-    issuer = HttpClientSampleIssuer(client)
-    zmq_ctx = ManagedZMQContext()
-    publisher = ZmqEventRecordPublisher(pub_socket_name, zmq_ctx, loop=loop)
-    launcher = ServiceLauncher(zmq_ctx)
-    await launcher.launch([
-        ServiceConfig(
-            module="inference_endpoint.async_utils.services.metrics_aggregator",
-            args=["--socket-dir", zmq_ctx.socket_dir,
-                  "--socket-name", pub_socket_name,
-                  "--metrics-dir", str(metrics_dir)],
-        ),
-    ])
-
-    session = BenchmarkSession(
-        issuer=issuer,
-        event_publisher=publisher,
-        on_sample_complete=collector.on_complete,
-    )
-
-    # Build phases from config
-    phases = _build_phases(ctx)
-
-    loop.add_signal_handler(signal.SIGINT, session.stop)
-    try:
-        result = await session.run(phases)
-    except Exception as e:
-        raise ExecutionError(f"Benchmark execution failed: {e}") from e
-    finally:
-        loop.remove_signal_handler(signal.SIGINT)
-        await client.shutdown_async()
-        launcher.wait_for_exit()
-        publisher.close()
-        zmq_ctx.cleanup()
-
-    return result, collector
 ```
+
+`_run_benchmark_async` sets up the ZMQ context, event publisher, service subprocesses
+(metrics_aggregator and event_logger), HTTP client, and session — all inside a
+`ManagedZMQContext.scoped()` block. The HTTP config is constructed locally via
+`config.settings.client.with_updates(...)`.
+
+```python
+async def _run_benchmark_async(ctx, loop) -> BenchmarkResult:
+    collector = ResponseCollector(collect_responses=ctx.collect_responses, pbar=pbar)
+
+    with ManagedZMQContext.scoped(io_threads=2) as zmq_ctx:
+        publisher = EventPublisherService(zmq_ctx)
+        launcher = ServiceLauncher(zmq_ctx)
+        await launcher.launch([
+            ServiceConfig(module="...metrics_aggregator", args=aggregator_args),
+            ServiceConfig(module="...event_logger", args=event_logger_args),
+        ], timeout=30.0)
+
+        http_config = config.settings.client.with_updates(...)
+        http_client = await HTTPEndpointClient.create(http_config, loop)
+        session = BenchmarkSession(
+            issuer=HttpClientSampleIssuer(http_client),
+            event_publisher=publisher, loop=loop,
+            on_sample_complete=collector.on_complete_hook,
+        )
+        phases = _build_phases(ctx)
+        loop.add_signal_handler(signal.SIGINT, session.stop)
+        try:
+            result = await session.run(phases)
+        finally:
+            loop.remove_signal_handler(signal.SIGINT)
+            await http_client.shutdown_async()
+            publisher.close()
+            await asyncio.to_thread(launcher.wait_for_exit, None)
+            report = Report.from_kv_reader(kv_reader)  # after aggregator exits
+
+    return BenchmarkResult(session=result, collector=collector, report=report, ...)
+```
+
+`BenchmarkResult` is a dataclass bundling `SessionResult`, `ResponseCollector`,
+`Report`, and tmpfs paths. `finalize_benchmark(ctx, bench)` unpacks it for
+accuracy scoring, report display, and results JSON output.
 
 ### Logging
 
@@ -970,19 +964,24 @@ Log level is configurable via `RuntimeSettings` / CLI `--log-level`.
 
 ### Progress Reporting (tqdm)
 
-`ResponseCollector.on_complete` drives the progress bar:
+`ResponseCollector.on_complete_hook` drives the progress bar:
 
 ```python
 class ResponseCollector:
-    def __init__(self, collect_responses: bool, pbar: tqdm | None = None):
+    def __init__(self, collect_responses: bool = False, pbar: tqdm | None = None):
+        self.collect_responses = collect_responses
         self.responses: dict[str, str] = {}
         self.errors: list[str] = []
+        self.count = 0
         self.pbar = pbar
 
-    def on_complete(self, result: QueryResult) -> None:
+    def on_complete_hook(self, result: QueryResult) -> None:
+        self.count += 1
         if result.error:
-            self.errors.append(f"{result.id}: {result.error}")
-        elif self.responses is not None:
+            self.errors.append(f"Sample {result.id}: {result.error}")
+            if self.pbar:
+                self.pbar.set_postfix(refresh=True, errors=len(self.errors))
+        elif self.collect_responses:
             self.responses[result.id] = result.get_response_output_string()
         if self.pbar:
             self.pbar.update(1)
