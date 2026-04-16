@@ -48,8 +48,14 @@ from inference_endpoint.async_utils.services.launcher import (
     ServiceConfig,
     ServiceLauncher,
 )
+from inference_endpoint.async_utils.services.metrics_aggregator.aggregator import (
+    MetricCounterKey,
+)
 from inference_endpoint.async_utils.services.metrics_aggregator.kv_store import (
     BasicKVStoreReader,
+)
+from inference_endpoint.async_utils.services.metrics_aggregator.metrics_table import (
+    MetricSeriesKey,
 )
 from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
 from inference_endpoint.config.runtime_settings import RuntimeSettings
@@ -374,24 +380,15 @@ def _setup_kv_reader(
 ) -> BasicKVStoreReader:
     """Create a KVStoreReader pre-registered with all metric keys."""
     reader = BasicKVStoreReader(metrics_dir)
-    # Counter keys (from MetricCounterKey enum)
-    for key in [
-        "total_samples_issued",
-        "total_samples_completed",
-        "total_samples_failed",
-        "tracked_samples_issued",
-        "tracked_samples_completed",
-        "tracked_duration_ns",
-        "total_duration_ns",
-    ]:
-        reader.register_key(key, "counter")
-    # Series keys (from MetricSeriesKey enum)
-    for key in ["isl", "osl", "sample_latency_ns"]:
-        reader.register_key(key, "series")
-    reader.register_key("tpot_ns", "series", dtype=float)
-    if streaming:
-        for key in ["ttft_ns", "chunk_delta_ns"]:
-            reader.register_key(key, "series")
+    for counter_key in MetricCounterKey:
+        reader.register_key(counter_key.value, "counter")
+    _STREAMING_ONLY = {MetricSeriesKey.TTFT_NS, MetricSeriesKey.CHUNK_DELTA_NS}
+    _FLOAT_SERIES = {MetricSeriesKey.TPOT_NS}
+    for series_key in MetricSeriesKey:
+        if series_key in _STREAMING_ONLY and not streaming:
+            continue
+        dtype = float if series_key in _FLOAT_SERIES else int
+        reader.register_key(series_key.value, "series", dtype=dtype)
     return reader
 
 
@@ -591,11 +588,9 @@ def _write_scoring_artifacts(
         f.write(msgspec.json.format(msgspec.json.encode(sample_idx_map), indent=2))
     logger.debug(f"Wrote {map_path}")
 
-    # Copy events.jsonl from tmpfs to report_dir
+    # Copy events.jsonl from tmpfs to report_dir.
+    # Tmpfs cleanup is handled by run_benchmark()'s finally block.
     _salvage_tmpfs(ctx.report_dir, tmpfs_dir)
-
-    # Clean up tmpfs
-    shutil.rmtree(tmpfs_dir, ignore_errors=True)
 
 
 def _salvage_tmpfs(report_dir: Path, tmpfs_dir: Path) -> None:

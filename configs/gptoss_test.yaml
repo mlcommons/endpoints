@@ -59,7 +59,7 @@ metrics:
 
 endpoint_config:
   endpoints:
-    - "http://umbriel-b200-145.nvidia.com:8000"
+    - "http://localhost:8000"
   api_key: null
   api_type: "openai"
 
