@@ -16,7 +16,7 @@
 """Sample ordering strategies for benchmark dataset traversal.
 
 SampleOrder is an infinite iterator yielding dataset indices. It never raises
-StopIteration — termination is controlled by BenchmarkSession._should_stop().
+StopIteration — termination is controlled by BenchmarkSession._make_stop_check().
 """
 
 from __future__ import annotations

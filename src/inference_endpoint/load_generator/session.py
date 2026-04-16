@@ -15,7 +15,7 @@
 
 """Async benchmark session: orchestrates phases, issues samples, receives responses.
 
-See docs/load_generator/design.md for the full design.
+See docs/load_generator/DESIGN.md for the full design.
 """
 
 from __future__ import annotations
@@ -54,7 +54,7 @@ class PhaseType(str, Enum):
 
     PERFORMANCE = "performance"
     ACCURACY = "accuracy"
-    SATURATION = "saturation"
+    WARMUP = "warmup"
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,6 +128,7 @@ class EventPublisher(Protocol):
     """Publishes EventRecords to the metrics pipeline."""
 
     def publish(self, event_record: EventRecord) -> None: ...
+    def flush(self) -> None: ...
 
 
 # ---------------------------------------------------------------------------
@@ -225,7 +226,7 @@ class BenchmarkSession:
         issuer: SampleIssuer,
         event_publisher: EventPublisher,
         loop: asyncio.AbstractEventLoop,
-        on_sample_complete: Callable[[QueryResult | StreamChunk], None] | None = None,
+        on_sample_complete: Callable[[QueryResult], None] | None = None,
         session_id: str | None = None,
     ):
         self._issuer = issuer
@@ -291,7 +292,7 @@ class BenchmarkSession:
         )
 
     async def _run_phase(self, phase: PhaseConfig) -> PhaseResult | None:
-        """Run a single phase. Returns PhaseResult or None for saturation."""
+        """Run a single phase. Returns PhaseResult or None for warmup."""
         logger.info("Starting phase: %s (%s)", phase.name, phase.phase_type.value)
         phase_start = time.monotonic_ns()
 
@@ -323,8 +324,8 @@ class BenchmarkSession:
         finally:
             self._strategy_task = None
 
-        # Drain in-flight (skip for saturation — keep concurrency hot)
-        if phase.phase_type != PhaseType.SATURATION:
+        # Drain in-flight (skip for warmup — keep concurrency hot)
+        if phase.phase_type != PhaseType.WARMUP:
             await self._drain_inflight(phase_issuer)
 
         if phase.phase_type == PhaseType.PERFORMANCE:
@@ -338,7 +339,7 @@ class BenchmarkSession:
         )
 
         # Saturation phases produce no result
-        if phase.phase_type == PhaseType.SATURATION:
+        if phase.phase_type == PhaseType.WARMUP:
             return None
 
         return PhaseResult(
@@ -467,6 +468,15 @@ class BenchmarkSession:
         return check
 
     def _publish_session_event(self, event_type: SessionEventType) -> None:
+        """Publish a session event and flush the publisher immediately.
+
+        Session events are control signals (STARTED, ENDED, START/STOP
+        PERFORMANCE_TRACKING) that subscribers must receive promptly for
+        correct state transitions. Flushing ensures any buffered sample
+        events are sent first, followed by the session event, so ordering
+        is preserved and the signal is not delayed by batching.
+        """
         self._publisher.publish(
             EventRecord(event_type=event_type, timestamp_ns=time.monotonic_ns())
         )
+        self._publisher.flush()

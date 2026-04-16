@@ -296,10 +296,16 @@ class _SeriesItem:
             self._grow()
         offset = _HEADER_BYTES + self._count * _VALUE_BYTES
         struct.pack_into(self._fmt, self._mm, offset, value)
-        # Flush between value write and count update for cross-process ordering.
-        # See fs_check.needs_msync() for when this is needed and why.
-        if self._needs_msync:
-            self._mm.flush()
+        # Cross-process ordering note: msync between value write and count
+        # update is only needed for concurrent readers. In the current
+        # architecture, the reader (Report builder) runs after the writer
+        # process exits, so process exit flushes all dirty pages and
+        # ordering is guaranteed by the kernel. msync is skipped entirely.
+        # If concurrent reading is ever needed, re-enable via needs_msync():
+        # if self._needs_msync:
+        #     self._mm.flush()
+        # This has shown to be a considerable bottleneck on ARM systems - this will require a more
+        # sophisticated redesign for concurrent read/write and live metrics.
         self._count += 1
         struct.pack_into("<Q", self._mm, 0, self._count)
 

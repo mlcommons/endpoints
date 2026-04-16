@@ -20,7 +20,7 @@ Three implementations, each optimized for a different load pattern:
 - BurstStrategy: Max throughput (loop.call_soon)
 - ConcurrencyStrategy: Fixed concurrency (asyncio.Semaphore)
 
-See docs/load_generator/design.md for benchmark data and design rationale.
+See docs/load_generator/DESIGN.md for benchmark data and design rationale.
 """
 
 from __future__ import annotations

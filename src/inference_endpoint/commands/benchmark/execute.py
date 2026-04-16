@@ -42,6 +42,7 @@ from huggingface_hub import model_info
 from tqdm import tqdm
 from transformers.utils import logging as transformers_logging
 
+from inference_endpoint.async_utils.event_publisher import EventPublisherService
 from inference_endpoint.async_utils.loop_manager import LoopManager
 from inference_endpoint.async_utils.services.launcher import (
     ServiceConfig,
@@ -51,7 +52,6 @@ from inference_endpoint.async_utils.services.metrics_aggregator.kv_store import 
     BasicKVStoreReader,
 )
 from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
-from inference_endpoint.async_utils.transport.zmq.pubsub import ZmqEventRecordPublisher
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import (
     APIType,
@@ -414,8 +414,8 @@ async def _run_benchmark_async(
     # ZMQ context for event publishing + service launcher
     with ManagedZMQContext.scoped(io_threads=2) as zmq_ctx:
         # Event publisher
-        pub_socket_name = f"ev_pub_{session_id}"
-        publisher = ZmqEventRecordPublisher(pub_socket_name, zmq_ctx, loop=loop)
+        publisher = EventPublisherService(zmq_ctx)
+        pub_socket_name = publisher.socket_name
 
         # Tmpfs for high-frequency writes (metrics mmap + event log).
         # On ARM, metrics need an on-disk directory so msync provides
@@ -533,8 +533,14 @@ async def _run_benchmark_async(
                     await http_client.shutdown_async()
             except Exception as e:
                 logger.warning(f"Client cleanup error: {e}")
+            logger.info(
+                "Closing publisher (buffer=%d, pending=%d)...",
+                publisher.buffered_count,
+                publisher.pending_count,
+            )
             publisher.close()
-            await asyncio.to_thread(launcher.wait_for_exit, 10.0)
+            logger.info("Waiting for services to finish processing...")
+            await asyncio.to_thread(launcher.wait_for_exit, None)
 
             # Build report AFTER aggregator has exited — ensures all metrics
             # (TTFT, TPOT, OSL, latency) are fully written to KVStore.

@@ -51,6 +51,9 @@ class _NoOpPublisher:
     def publish(self, event_record: EventRecord) -> None:
         pass
 
+    def flush(self) -> None:
+        pass
+
 
 async def _run_oracle_test(url: str, dataloader: Dataset, rt_settings: RuntimeSettings):
     """Run benchmark session against an oracle server and verify responses."""

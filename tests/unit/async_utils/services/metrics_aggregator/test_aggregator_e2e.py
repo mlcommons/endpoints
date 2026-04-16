@@ -88,15 +88,12 @@ def zmq_context():
 
 @pytest.fixture
 def publisher(zmq_context):
-    EventPublisherService._instance = None
     try:
         service = EventPublisherService(zmq_context)
     except zmq.ZMQError as exc:
-        EventPublisherService._instance = None
         pytest.skip(f"ZMQ IPC bind unavailable (sandboxed?): {exc}")
     yield service
     service.close()
-    EventPublisherService._instance = None
 
 
 @pytest.fixture
@@ -141,8 +138,9 @@ def aggregator(
 
 
 def _publish_and_sleep(publisher, record, delay=0.05):
-    """Publish a record and sleep briefly to let the event loop drain."""
+    """Publish a record, flush, and sleep briefly to let the event loop drain."""
     publisher.publish(record)
+    publisher.flush()
     time.sleep(delay)
 
 

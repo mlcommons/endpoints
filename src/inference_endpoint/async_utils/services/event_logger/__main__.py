@@ -35,6 +35,7 @@ from inference_endpoint.core.record import (
     EventRecord,
     SessionEventType,
 )
+from inference_endpoint.utils.logging import setup_logging
 
 from .file_writer import JSONLWriter
 from .writer import RecordWriter
@@ -170,6 +171,7 @@ async def main() -> None:
         help="Identity to send in the readiness signal",
     )
     args = parser.parse_args()
+    setup_logging(level="INFO")
 
     writer_classes = tuple(_WRITER_REGISTRY[name] for name in args.writers)
     shutdown_event = asyncio.Event()
