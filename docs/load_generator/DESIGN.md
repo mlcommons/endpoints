@@ -20,10 +20,10 @@ each producing an independent report.
 BenchmarkSession.run(phases)
     |
     +-- STARTED
-    +-- [saturation]     strategy.execute() → NO drain (keep in-flight saturated)
-    +-- [perf phase 1]   START_PERFORMANCE_TRACKING → strategy.execute() → drain → STOP_PERFORMANCE_TRACKING → snapshot report
-    +-- [saturation]     strategy.execute() → drain
-    +-- [perf phase 2]   START_PERFORMANCE_TRACKING → strategy.execute() → drain → STOP_PERFORMANCE_TRACKING → snapshot report
+    +-- [warmup]     strategy.execute() → NO drain (keep in-flight saturated)
+    +-- [perf phase 1]   START_PERFORMANCE_TRACKING → strategy.execute() → drain → STOP_PERFORMANCE_TRACKING
+    +-- [warmup]     strategy.execute() → NO drain (keep in-flight saturated)
+    +-- [perf phase 2]   START_PERFORMANCE_TRACKING → strategy.execute() → drain → STOP_PERFORMANCE_TRACKING
     +-- [accuracy x N]   strategy.execute() → drain (uuid maps collected)
     +-- ENDED
     |
@@ -46,7 +46,7 @@ metrics are snapshotted from the KVStoreReader and a `Report` is built.
 
 Saturation phases exist to bring the endpoint to steady-state before a
 performance measurement. In-flight requests are **not drained** at the end
-of a saturation phase — the next phase starts immediately with concurrency
+of a warmup phase — the next phase starts immediately with concurrency
 already at the target level. Common uses:
 
 - Fill KV caches so perf phase measures warm inference, not cold start
@@ -112,7 +112,7 @@ class PhaseType(str, Enum):
     """Phase types control tracking and reporting behavior."""
     PERFORMANCE = "performance"  # Tracked, produces a report
     ACCURACY = "accuracy"        # Untracked, for eval scoring
-    SATURATION = "saturation"    # Untracked, ramp up concurrency before perf phase
+    WARMUP = "warmup"    # Untracked, ramp up concurrency before perf phase
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,7 +145,7 @@ class BenchmarkSession:
 3. For each phase:
    a. Create `SampleOrder` and `LoadStrategy` from phase settings
    b. Set `self._current_dataset` to phase dataset
-   c. **SATURATION**: execute strategy, **do not drain** in-flight. No tracking
+   c. **WARMUP**: execute strategy, **do not drain** in-flight. No tracking
    events, no report. Purpose: bring endpoint to steady-state concurrency
    (e.g., fill KV caches, warm up connection pools). The next phase starts
    immediately with concurrency already at the target level.
@@ -163,7 +163,7 @@ A common pattern:
 ```python
 phases = [
     # Ramp up to target concurrency, fill endpoint caches
-    PhaseConfig("warmup", warmup_settings, dataset, PhaseType.SATURATION),
+    PhaseConfig("warmup", warmup_settings, dataset, PhaseType.WARMUP),
     # Measured performance run
     PhaseConfig("perf", perf_settings, dataset, PhaseType.PERFORMANCE),
     # Accuracy eval (uses same warmed endpoint)
@@ -171,13 +171,13 @@ phases = [
 ]
 ```
 
-Or multiple performance sweeps with saturation between each:
+Or multiple performance sweeps with warmup between each:
 
 ```python
 phases = [
-    PhaseConfig("saturate_c32", sat_32, dataset, PhaseType.SATURATION),
+    PhaseConfig("saturate_c32", sat_32, dataset, PhaseType.WARMUP),
     PhaseConfig("perf_c32", perf_32, dataset, PhaseType.PERFORMANCE),
-    PhaseConfig("saturate_c64", sat_64, dataset, PhaseType.SATURATION),
+    PhaseConfig("saturate_c64", sat_64, dataset, PhaseType.WARMUP),
     PhaseConfig("perf_c64", perf_64, dataset, PhaseType.PERFORMANCE),
     PhaseConfig("accuracy", acc_settings, acc_dataset, PhaseType.ACCURACY),
 ]
@@ -846,7 +846,7 @@ to match.
 
 ### Stale Completions After Saturation
 
-After a saturation phase (no drain), in-flight responses arrive during the perf
+After a warmup phase (no drain), in-flight responses arrive during the perf
 phase. The receiver must distinguish stale vs current-phase completions:
 
 ```python
@@ -1054,11 +1054,11 @@ Concurrency sweep against same endpoint:
 
 ```python
 phases = [
-    PhaseConfig("sat_c16", sat_settings(16), ds, PhaseType.SATURATION),
+    PhaseConfig("sat_c16", sat_settings(16), ds, PhaseType.WARMUP),
     PhaseConfig("perf_c16", perf_settings(16), ds, PhaseType.PERFORMANCE),
-    PhaseConfig("sat_c32", sat_settings(32), ds, PhaseType.SATURATION),
+    PhaseConfig("sat_c32", sat_settings(32), ds, PhaseType.WARMUP),
     PhaseConfig("perf_c32", perf_settings(32), ds, PhaseType.PERFORMANCE),
-    PhaseConfig("sat_c64", sat_settings(64), ds, PhaseType.SATURATION),
+    PhaseConfig("sat_c64", sat_settings(64), ds, PhaseType.WARMUP),
     PhaseConfig("perf_c64", perf_settings(64), ds, PhaseType.PERFORMANCE),
     PhaseConfig("accuracy", acc_settings, acc_ds, PhaseType.ACCURACY),
 ]

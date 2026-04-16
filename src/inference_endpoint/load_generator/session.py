@@ -54,7 +54,7 @@ class PhaseType(str, Enum):
 
     PERFORMANCE = "performance"
     ACCURACY = "accuracy"
-    SATURATION = "saturation"
+    WARMUP = "warmup"
 
 
 @dataclass(frozen=True, slots=True)
@@ -292,7 +292,7 @@ class BenchmarkSession:
         )
 
     async def _run_phase(self, phase: PhaseConfig) -> PhaseResult | None:
-        """Run a single phase. Returns PhaseResult or None for saturation."""
+        """Run a single phase. Returns PhaseResult or None for warmup."""
         logger.info("Starting phase: %s (%s)", phase.name, phase.phase_type.value)
         phase_start = time.monotonic_ns()
 
@@ -324,8 +324,8 @@ class BenchmarkSession:
         finally:
             self._strategy_task = None
 
-        # Drain in-flight (skip for saturation — keep concurrency hot)
-        if phase.phase_type != PhaseType.SATURATION:
+        # Drain in-flight (skip for warmup — keep concurrency hot)
+        if phase.phase_type != PhaseType.WARMUP:
             await self._drain_inflight(phase_issuer)
 
         if phase.phase_type == PhaseType.PERFORMANCE:
@@ -339,7 +339,7 @@ class BenchmarkSession:
         )
 
         # Saturation phases produce no result
-        if phase.phase_type == PhaseType.SATURATION:
+        if phase.phase_type == PhaseType.WARMUP:
             return None
 
         return PhaseResult(

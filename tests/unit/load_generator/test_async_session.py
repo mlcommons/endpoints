@@ -243,7 +243,7 @@ class TestBenchmarkSession:
         )
 
     @pytest.mark.asyncio
-    async def test_saturation_produces_no_result(self):
+    async def test_warmup_produces_no_result(self):
         loop = asyncio.get_running_loop()
         issuer = FakeIssuer()
         issuer._loop = loop
@@ -255,7 +255,7 @@ class TestBenchmarkSession:
                 "warmup",
                 _make_settings(n_samples=3),
                 FakeDataset(3),
-                PhaseType.SATURATION,
+                PhaseType.WARMUP,
             ),
         ]
         result = await session.run(phases)
@@ -274,7 +274,7 @@ class TestBenchmarkSession:
                 "warmup",
                 _make_settings(n_samples=2),
                 FakeDataset(2),
-                PhaseType.SATURATION,
+                PhaseType.WARMUP,
             ),
             PhaseConfig(
                 "perf",
@@ -339,7 +339,7 @@ class TestBenchmarkSession:
 
     @pytest.mark.asyncio
     async def test_stale_completions_ignored_by_strategy(self):
-        """Responses from saturation phase should not affect perf phase strategy."""
+        """Responses from warmup phase should not affect perf phase strategy."""
         loop = asyncio.get_running_loop()
         publisher = FakePublisher()
 
@@ -357,7 +357,7 @@ class TestBenchmarkSession:
         )
         phases = [
             PhaseConfig(
-                "sat", _make_settings(n_samples=2), FakeDataset(2), PhaseType.SATURATION
+                "sat", _make_settings(n_samples=2), FakeDataset(2), PhaseType.WARMUP
             ),
             PhaseConfig(
                 "perf", concurrency_settings, FakeDataset(3), PhaseType.PERFORMANCE
@@ -726,7 +726,7 @@ class TestBenchmarkSessionAccuracyErrorHandling:
 
 @pytest.mark.unit
 class TestBenchmarkSessionMultiPhaseSatPerfSequence:
-    """Multi-perf + saturation sequence (sat -> perf -> sat -> perf)."""
+    """Multi-perf + warmup sequence (sat -> perf -> sat -> perf)."""
 
     @pytest.mark.asyncio
     async def test_sat_perf_sat_perf(self):
@@ -741,7 +741,7 @@ class TestBenchmarkSessionMultiPhaseSatPerfSequence:
                 "warmup1",
                 _make_settings(n_samples=2),
                 FakeDataset(2),
-                PhaseType.SATURATION,
+                PhaseType.WARMUP,
             ),
             PhaseConfig(
                 "perf1",
@@ -753,7 +753,7 @@ class TestBenchmarkSessionMultiPhaseSatPerfSequence:
                 "warmup2",
                 _make_settings(n_samples=3),
                 FakeDataset(3),
-                PhaseType.SATURATION,
+                PhaseType.WARMUP,
             ),
             PhaseConfig(
                 "perf2",
@@ -791,7 +791,7 @@ class TestBenchmarkSessionStaleStreamChunk:
 
     @pytest.mark.asyncio
     async def test_stale_stream_chunk_ignored(self):
-        """StreamChunk from saturation phase should not affect perf phase counts."""
+        """StreamChunk from warmup phase should not affect perf phase counts."""
         loop = asyncio.get_running_loop()
         publisher = FakePublisher()
 
@@ -818,12 +818,12 @@ class TestBenchmarkSessionStaleStreamChunk:
         )
 
         phases = [
-            PhaseConfig("sat", sat_settings, FakeDataset(2), PhaseType.SATURATION),
+            PhaseConfig("sat", sat_settings, FakeDataset(2), PhaseType.WARMUP),
             PhaseConfig("perf", perf_settings, FakeDataset(2), PhaseType.PERFORMANCE),
         ]
 
         async def inject_responses():
-            # Wait for saturation queries
+            # Wait for warmup queries
             while len(issuer._issued) < 2:
                 await asyncio.sleep(0.005)
             sat_ids = [q.id for q in issuer._issued[:2]]
@@ -832,7 +832,7 @@ class TestBenchmarkSessionStaleStreamChunk:
             while len(issuer._issued) < 3:
                 await asyncio.sleep(0.005)
 
-            # Inject stale StreamChunks from saturation phase into perf phase
+            # Inject stale StreamChunks from warmup phase into perf phase
             issuer.inject_response(StreamChunk(id=sat_ids[0], response_chunk="stale"))
             issuer.inject_response(StreamChunk(id=sat_ids[1], response_chunk="stale"))
 
@@ -865,7 +865,7 @@ class TestBenchmarkSessionStaleStreamChunk:
 class TestSessionResult:
     def test_perf_results_filter(self):
         results = [
-            PhaseResult("sat", PhaseType.SATURATION, {}, 0, 0, 0),
+            PhaseResult("sat", PhaseType.WARMUP, {}, 0, 0, 0),
             PhaseResult("perf1", PhaseType.PERFORMANCE, {"a": 1}, 10, 0, 100),
             PhaseResult("perf2", PhaseType.PERFORMANCE, {"b": 2}, 20, 100, 200),
             PhaseResult("acc", PhaseType.ACCURACY, {"c": 3}, 5, 200, 300),
