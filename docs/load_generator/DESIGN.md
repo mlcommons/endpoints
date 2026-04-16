@@ -531,9 +531,25 @@ sequenceDiagram
     B->>I: issue(query)
     I->>W: ZMQ PUSH (Query)
     W->>W: HTTP request → endpoint
-    W-->>I: ZMQ PUSH (QueryResult)
-    I-->>B: recv()
-    B->>E: publish(COMPLETE, uuid, completed_at)
+
+    alt Non-streaming
+        W-->>I: ZMQ PUSH (QueryResult)
+        I-->>B: recv()
+        B->>E: publish(COMPLETE, uuid, completed_at)
+    else Streaming
+        W-->>I: ZMQ PUSH (StreamChunk first_chunk)
+        I-->>B: recv()
+        B->>E: publish(RECV_FIRST, uuid, timestamp_ns)
+        loop For each subsequent chunk
+            W-->>I: ZMQ PUSH (StreamChunk)
+            I-->>B: recv()
+            B->>E: publish(RECV_NON_FIRST, uuid, timestamp_ns)
+        end
+        W-->>I: ZMQ PUSH (QueryResult — final accumulated output)
+        I-->>B: recv()
+        B->>E: publish(COMPLETE, uuid, completed_at)
+    end
+
     E->>M: ZMQ PUB (EventRecord)
     B->>S: on_query_complete(uuid)
     Note over S: ConcurrencyStrategy: sem.release()
