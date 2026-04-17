@@ -99,7 +99,7 @@ def psycopg3_cursor(conninfo: str):
         print("supabase: return cursor, conn from iterator")
         yield cursor, conn
     finally:
-        cursor.close()
+        cursor.close()  # CLOSE on completion
         conn.close()
 
 
@@ -124,7 +124,7 @@ def register_pg_cleanup(conninfo: str, table_name: str):
 
     # do we want to drop the table ??
     print("SKIP dropping the table")
-    ## atexit.register(_drop_table)  # del Postgres table
+    ## atexit.register(_drop_table)  # del Postgres table               # CLOSE api ? or cleanup / deinit  ; not in use
     logger.debug(f"Registered at-exit cleanup for Postgres table {table_name}")
 
 
@@ -356,7 +356,7 @@ class EventRecorder:
 
         if self.backend == "postgres":
             print(f"Set up postgres cursor {self.pg_conninfo}")
-            ctx = psycopg3_cursor(self.pg_conninfo)
+            ctx = psycopg3_cursor(self.pg_conninfo)  # OPEN
             print(f"after psycopg3 ctx = {ctx}")
         else:
             ctx = sqlite3_cursor(self.connection_name)
@@ -364,7 +364,7 @@ class EventRecorder:
         with ctx as (cur, conn):
             # Initialize the database table
             cur.execute(
-                EventRow.to_table_query(
+                EventRow.to_table_query(  # INIT api
                     table_name=self.table_name, backend=self.backend
                 )
             )
@@ -381,9 +381,10 @@ class EventRecorder:
                 if event_buffer:
                     #                                          disable auto prepare
                     # this prevents prepared statements from persisting on the server side and causing errors
-                    cur.executemany(insert_query, event_buffer)
+
+                    cur.executemany(insert_query, event_buffer)  # WRITE api; UPDATE api
                     # cur.executemany(insert_query, event_buffer, prepare=False)
-                    conn.commit()
+                    conn.commit()  # part of WRITE api
                     event_buffer.clear()
 
             while True:
@@ -431,7 +432,9 @@ class EventRecorder:
                 ):
                     self.notify_idle.set()
 
-                if item is EventRecorder._STOP_SENTINEL:
+                if (
+                    item is EventRecorder._STOP_SENTINEL
+                ):  # triggers cursor.close(), conn.close()
                     break
         logging.debug(f"Writer thread stopped for {self.connection_name}")
 
@@ -572,7 +575,7 @@ class EventRecorder:
 
         logging.debug("Stopping writer thread...")
         # Send stop sentinel to writer thread
-        self.event_queue.put(self._STOP_SENTINEL)
+        self.event_queue.put(self._STOP_SENTINEL)  # trigger cursor.close, conn.close
 
         # Wait for the writer thread to finish
         if self.writer_thread is not None:
