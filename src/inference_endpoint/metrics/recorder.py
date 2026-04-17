@@ -20,7 +20,6 @@ import contextlib
 import dataclasses
 import logging
 import multiprocessing
-import os
 import queue
 import shutil
 import sqlite3
@@ -35,6 +34,7 @@ import orjson
 
 from ..load_generator.events import Event, SampleEvent, SessionEvent
 from ..profiling import profile
+from ..storage.base import StorageBackend
 from ..utils import byte_quantity_to_str
 
 logger = logging.getLogger(__name__)
@@ -57,75 +57,6 @@ def sqlite3_cursor(path: Path):
     finally:
         cursor.close()
         conn.close()
-
-
-@contextlib.contextmanager
-def psycopg3_cursor(conninfo: str):
-    """Context manager for psycopg3 cursor that properly handles connection lifecycle.
-
-    Args:
-        conninfo: PostgreSQL connection string (DSN or URI).
-
-    Yields:
-        A tuple of (cursor, connection) matching the sqlite3_cursor interface.
-    """
-    print("import psycopg3")
-    # conninfo = "postgresql://postgres:[password]@db.[project-ref].supabase.co:5432/postgres"
-    #
-    # password = "8+_3!KXa+sL$g2x"
-    #
-    # postgresql://postgres:[YOUR-PASSWORD]@db.lczeskqdhwkfdgbgttqr.supabase.co:5432/postgres
-    #
-    ###################################################
-
-    import psycopg
-    # password = quote_plus("8+_3!KXa+sL$g2x")
-    # conninfo1 = "postgresql://postgres:{password}@db.[project-ref].supabase.co:5432/postgres"
-    # conninfo1 = f"postgresql://postgres:{password}@db.lczeskqdhwkfdgbgttqr.supabase.co:5432/postgres"
-
-    # 2/11
-    # password1 = "YyM77YSsFGgdkURA"
-    # spooler connection
-    # conninfo1 = f"postgresql://postgres.lczeskqdhwkfdgbgttqr:{password1}@aws-1-us-east-2.pooler.supabase.com:6543/postgres"
-
-    print(f"connecting to supabase ORIG {conninfo}")
-    # print(f"connecting to supabase NEW {conninfo1}")
-    ## conn = psycopg.connect(conninfo, autocommit=False)
-    conn = psycopg.connect(conninfo, autocommit=True)  # 3/3 changed to True
-    # conn = psycopg.connect(conninfo1, autocommit=False)
-    cursor = conn.cursor()
-    print(f" psycopg3_cursor: {cursor}")
-    try:
-        print("supabase: return cursor, conn from iterator")
-        yield cursor, conn
-    finally:
-        cursor.close()  # CLOSE on completion
-        conn.close()
-
-
-def register_pg_cleanup(conninfo: str, table_name: str):
-    """Register at-exit cleanup to drop a Postgres session table."""
-    if multiprocessing.parent_process() is not None:
-        return
-
-    def _drop_table():
-        try:
-            import psycopg
-        except ImportError:
-            return
-
-        try:
-            with psycopg.connect(conninfo) as conn:
-                print("DROP the table if it exists \n\n")
-                conn.execute(f"DROP TABLE IF EXISTS {table_name}")
-                conn.commit()
-        except Exception:
-            pass
-
-    # do we want to drop the table ??
-    print("SKIP dropping the table")
-    ## atexit.register(_drop_table)  # del Postgres table               # CLOSE api ? or cleanup / deinit  ; not in use
-    logger.debug(f"Registered at-exit cleanup for Postgres table {table_name}")
 
 
 @dataclasses.dataclass
@@ -235,7 +166,7 @@ class EventRecorder:
         notify_idle: threading.Event | None = None,
         close_timeout_s: float = 10.0,
         backend: str = "sqlite",
-        pg_conninfo: str | None = None,
+        storage: StorageBackend | None = None,
     ):
         """Creates a new EventRecorder.
 
@@ -245,15 +176,15 @@ class EventRecorder:
             min_memory_req_bytes: The minimum amount of free space (in bytes) in /dev/shm required to create a new database. (Default: 1GB)
             notify_idle: Optional threading.Event. If provided, EventRecorder will set when the number of inflight samples is 0.
             close_timeout_s: The timeout in seconds to wait for the writer thread to finish processing when calling close(). (Default: 10.0)
-            backend: Database backend — "sqlite" (default) or "postgres".
-            pg_conninfo: PostgreSQL connection string. Required when backend="postgres", or set DATABASE_URL env var.
+            backend: Storage backend — "sqlite" (default) or "postgres".
+            storage: An already-constructed StorageBackend instance. Required when backend="postgres".
         """
         if session_id is None:
             session_id = uuid.uuid4().hex
 
         self.session_id = session_id
         self.backend = backend
-        self.pg_conninfo = pg_conninfo
+        self.storage = storage
 
         if backend == "sqlite":
             if self.connection_name not in EventRecorder._created_session_dbs:
@@ -288,15 +219,10 @@ class EventRecorder:
                     )
 
         elif backend == "postgres":
-            if pg_conninfo is None:
-                pg_conninfo = os.environ.get("DATABASE_URL")
-            if not pg_conninfo:
+            if storage is None:
                 raise ValueError(
-                    "Postgres backend requires a connection string via pg_conninfo "
-                    "parameter or DATABASE_URL env var"
+                    "Postgres backend requires an injected StorageBackend via the storage= parameter"
                 )
-            self.pg_conninfo = pg_conninfo
-            register_pg_cleanup(self.pg_conninfo, self.table_name)
 
         else:
             raise ValueError(
@@ -328,10 +254,10 @@ class EventRecorder:
         """Returns the connection identifier for this recorder.
 
         For sqlite: path to the /dev/shm database file.
-        For postgres: the connection string.
+        For postgres: a descriptive label (connection details live in the StorageBackend).
         """
         if self.backend == "postgres":
-            return self.pg_conninfo
+            return f"postgres:{self.session_id}"
         return EventRecorder.db_path(self.session_id)
 
     @staticmethod
@@ -346,96 +272,95 @@ class EventRecorder:
         """
         return Path(f"/dev/shm/mlperf_testsession_{session_id}.db")
 
-    def _writer_loop(self):
-        """Writer thread loop that processes events from the queue and commits them to the database.
+    def _run_event_loop(self, event_buffer: list, commit_buffer) -> None:
+        """Shared event-processing loop for all backends.
 
-        This method runs in a dedicated thread and owns the database connection and cursor.
-        It processes events from the queue, buffering them until the buffer is full or a force commit is requested.
+        Reads from the queue, buffers rows, and delegates commits to commit_buffer.
+        Exits when _STOP_SENTINEL is received.
         """
+        while True:
+            try:
+                item = self.event_queue.get(timeout=1.0)
+            except queue.Empty:
+                continue
+
+            should_commit = False
+            if item is EventRecorder._STOP_SENTINEL:
+                if event_buffer:
+                    logging.debug(
+                        f"Writer thread stopping - committing final {len(event_buffer)} transactions"
+                    )
+                should_commit = True
+            elif item is EventRecorder._FORCE_COMMIT_SENTINEL:
+                if event_buffer:
+                    logging.debug(f"Force committing {len(event_buffer)} transactions")
+                should_commit = True
+            else:
+                event_buffer.append(item)
+                should_commit = len(event_buffer) >= self.txn_buffer_size
+
+            if should_commit:
+                logging.debug(
+                    f"Committing {len(event_buffer)} transactions (max buffer size: {self.txn_buffer_size})"
+                )
+                commit_buffer()
+            self.event_queue.task_done()
+
+            if (
+                self.should_check_idle
+                and self.notify_idle is not None
+                and self.n_inflight_samples == 0
+                and self.event_queue.empty()
+            ):
+                self.notify_idle.set()
+
+            if item is EventRecorder._STOP_SENTINEL:
+                break
+
+    def _writer_loop(self):
+        """Writer thread — owns the storage lifecycle and drives the event loop."""
         logging.debug(f"Writer thread started for {self.connection_name}")
+        event_buffer: list = []
 
         if self.backend == "postgres":
-            print(f"Set up postgres cursor {self.pg_conninfo}")
-            ctx = psycopg3_cursor(self.pg_conninfo)  # OPEN
-            print(f"after psycopg3 ctx = {ctx}")
-        else:
-            ctx = sqlite3_cursor(self.connection_name)
-
-        with ctx as (cur, conn):
-            # Initialize the database table
-            cur.execute(
-                EventRow.to_table_query(  # INIT api
+            with self.storage:
+                self.storage.write(
+                    EventRow.to_table_query(
+                        table_name=self.table_name, backend=self.backend
+                    ),
+                    (),
+                )
+                insert_query = EventRow.insert_query(
                     table_name=self.table_name, backend=self.backend
                 )
-            )
-            conn.commit()
 
-            event_buffer = []
-
-            insert_query = EventRow.insert_query(
-                table_name=self.table_name, backend=self.backend
-            )
-
-            def commit_buffer():
-                """Helper to commit and clear the event buffer."""
-                if event_buffer:
-                    #                                          disable auto prepare
-                    # this prevents prepared statements from persisting on the server side and causing errors
-
-                    cur.executemany(insert_query, event_buffer)  # WRITE api; UPDATE api
-                    # cur.executemany(insert_query, event_buffer, prepare=False)
-                    conn.commit()  # part of WRITE api
-                    event_buffer.clear()
-
-            while True:
-                try:
-                    # Get item from queue, blocking until available
-                    item = self.event_queue.get(timeout=1.0)
-                except queue.Empty:
-                    # Timeout - continue loop to check for stop condition
-                    continue
-
-                # Check for sentinel values
-                should_commit = False
-                if item is EventRecorder._STOP_SENTINEL:
-                    # Commit any remaining events before stopping
+                def commit_buffer():
                     if event_buffer:
-                        logging.debug(
-                            f"Writer thread stopping - committing final {len(event_buffer)} transactions"
-                        )
-                    should_commit = True
-                elif item is EventRecorder._FORCE_COMMIT_SENTINEL:
-                    # Force commit current buffer
-                    if event_buffer:
-                        logging.debug(
-                            f"Force committing {len(event_buffer)} transactions"
-                        )
-                    should_commit = True
-                else:
-                    # Regular event - add to buffer
-                    event_buffer.append(item)
-                    should_commit = len(event_buffer) >= self.txn_buffer_size
+                        self.storage.write(insert_query, event_buffer, batch=True)
+                        event_buffer.clear()
 
-                # Commit if buffer is full
-                if should_commit:
-                    logging.debug(
-                        f"Committing {len(event_buffer)} transactions (max buffer size: {self.txn_buffer_size})"
+                self._run_event_loop(event_buffer, commit_buffer)
+                print(f"Postgres table: {self.table_name}")
+        else:
+            with sqlite3_cursor(self.connection_name) as (cur, conn):
+                cur.execute(
+                    EventRow.to_table_query(
+                        table_name=self.table_name, backend=self.backend
                     )
-                    commit_buffer()
-                self.event_queue.task_done()
+                )
+                conn.commit()
+                insert_query = EventRow.insert_query(
+                    table_name=self.table_name, backend=self.backend
+                )
 
-                if (
-                    self.should_check_idle
-                    and self.notify_idle is not None
-                    and self.n_inflight_samples == 0
-                    and self.event_queue.empty()
-                ):
-                    self.notify_idle.set()
+                def commit_buffer():
+                    if event_buffer:
+                        cur.executemany(insert_query, event_buffer)
+                        conn.commit()
+                        event_buffer.clear()
 
-                if (
-                    item is EventRecorder._STOP_SENTINEL
-                ):  # triggers cursor.close(), conn.close()
-                    break
+                self._run_event_loop(event_buffer, commit_buffer)
+
         logging.debug(f"Writer thread stopped for {self.connection_name}")
 
     def _start_writer_thread(self):

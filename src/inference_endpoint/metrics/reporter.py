@@ -34,6 +34,7 @@ import orjson
 
 from ..load_generator.events import SampleEvent, SessionEvent
 from ..profiling import profile
+from ..storage.base import StorageBackend
 from ..utils import monotime_to_datetime
 
 if TYPE_CHECKING:
@@ -586,6 +587,33 @@ def output_sequence_from_data(
     return output, reasoning
 
 
+class _CursorAdapter:
+    """Bridges StorageBackend.read() to a cursor-like interface.
+
+    Allows the postgres path to use the same self.cur_.execute().fetchall()
+    call pattern as the duckdb/sqlite paths, without any direct psycopg usage.
+    """
+
+    def __init__(self, backend: StorageBackend) -> None:
+        self._backend = backend
+        self._rows: list = []
+
+    def execute(self, query: str, params=()):
+        self._rows = self._backend.read(query, params=params)
+        return self
+
+    def fetchall(self) -> list:
+        rows = self._rows
+        self._rows = []
+        return rows
+
+    def fetchone(self):
+        return self._rows[0] if self._rows else None
+
+    def close(self) -> None:
+        pass  # backend owns the lifecycle
+
+
 class MetricsReporter:
     """Derives metrics from events via rollup queries. This is a *read only* client."""
 
@@ -594,14 +622,16 @@ class MetricsReporter:
         connection_name: os.PathLike | str,
         client_type: str = "duckdb",
         table_name: str = "events",
+        storage: StorageBackend | None = None,
     ):
         """
         Creates a new MetricsReporter.
 
         Args:
-            connection_name: The path to the database file, or a connection string for postgres.
-            client_type: The client type to use to connect to the database. Choices: ["duckdb", "sqlite", "postgres"] (Default: "duckdb")
+            connection_name: The path to the database file (duckdb/sqlite), or a label for postgres.
+            client_type: The client type to use. Choices: ["duckdb", "sqlite", "postgres"] (Default: "duckdb")
             table_name: The table name to query. Defaults to "events". Use session-specific names for postgres.
+            storage: An already-constructed StorageBackend. Required when client_type="postgres".
         """
         self.connection_name = (
             connection_name
@@ -610,6 +640,7 @@ class MetricsReporter:
         )
         self.client_type = client_type
         self.table_name = table_name
+        self.storage = storage
         self.is_closed = True
 
     def init_connection(self):
@@ -657,24 +688,13 @@ class MetricsReporter:
             self.cur_ = self.conn.cursor()
         elif self.client_type == "postgres":
             logging.debug("Initializing postgres connection for metrics reporting")
-            if importlib.util.find_spec("psycopg") is None:
-                raise ImportError(
-                    "psycopg is not installed. Install with: pip install 'psycopg[binary]'"
+            if self.storage is None:
+                raise ValueError(
+                    "Postgres client requires an injected StorageBackend via the storage= parameter"
                 )
-            psycopg = importlib.import_module("psycopg")
-
-            try:
-                print(str(self.connection_name))
-                self.conn = psycopg.connect(  # call stack is here
-                    str(self.connection_name),
-                    autocommit=True,  # False ? as we are only reading the DB
-                )
-            except Exception as e:
-                print(f"pyscopg3 conn error {e}")
-            finally:
-                pass
-
-            self.cur_ = self.conn.cursor()
+            self.storage.connect()
+            self.cur_ = _CursorAdapter(self.storage)
+            self.conn = self.storage
         else:
             raise ValueError(f"Invalid client type: {self.client_type}")
         self.is_closed = False

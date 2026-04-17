@@ -61,11 +61,17 @@ class BenchmarkSession:
         # CPython GIL provides atomic boolean writes, no need for threading.Event()
         self.stop_requested = False
 
+        pg_storage = None
+        if db_backend == "postgres":
+            from ..storage.db import PostgresBackend
+
+            pg_storage = PostgresBackend(conninfo=db_conninfo)
+
         self.event_recorder = EventRecorder(
             session_id=self.session_id,
             notify_idle=self.end_event,
             backend=db_backend,
-            pg_conninfo=db_conninfo,
+            storage=pg_storage,
         )
         # Will be populated after the test finishes by _run_test
         self.report = None
@@ -159,23 +165,20 @@ class BenchmarkSession:
             if self.db_backend == "postgres":
                 reporter_client = "postgres"
                 reporter_table = self.event_recorder.table_name
-                print(f"reporter_table = {self.event_recorder.table_name}")
+                from ..storage.db import PostgresBackend
+
+                reporter_storage = PostgresBackend(conninfo=self.db_conninfo)
             else:
                 reporter_client = "duckdb"
                 reporter_table = "events"
+                reporter_storage = None
 
-            # Does this handle reporting for end of run ??
-            print(
-                f"BenchmarkSession connection_name  = {self.event_recorder.connection_name}"
-            )
-            print(f"reporter_table = {self.event_recorder.table_name}")
-            with (
-                MetricsReporter(
-                    self.event_recorder.connection_name,  # Here reporter_client is coming from PostGres
-                    client_type=reporter_client,
-                    table_name=reporter_table,
-                ) as reporter
-            ):  # reporter has JSON data we will write down for
+            with MetricsReporter(
+                self.event_recorder.connection_name,
+                client_type=reporter_client,
+                table_name=reporter_table,
+                storage=reporter_storage,
+            ) as reporter:  # reporter has JSON data we will write down for
                 has_model = hasattr(
                     self.runtime_settings, "model"
                 )  #      result_summary.json
