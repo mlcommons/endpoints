@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 import uuid
 from collections.abc import Callable
@@ -42,6 +43,8 @@ from .sample_order import create_sample_order
 from .strategy import LoadStrategy, create_load_strategy
 
 logger = logging.getLogger(__name__)
+
+_WARMUP_ENABLED = os.environ.get("ENABLE_WARMUP") == "1"
 
 
 # ---------------------------------------------------------------------------
@@ -271,6 +274,12 @@ class BenchmarkSession:
             for phase in phases:
                 if self._stop_requested:
                     break
+                if phase.phase_type == PhaseType.WARMUP and not _WARMUP_ENABLED:
+                    logger.info(
+                        "Skipping warmup phase %s (set ENABLE_WARMUP=1 to enable)",
+                        phase.name,
+                    )
+                    continue
                 result = await self._run_phase(phase)
                 if result is not None:
                     phase_results.append(result)
