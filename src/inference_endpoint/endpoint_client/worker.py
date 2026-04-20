@@ -340,7 +340,9 @@ class Worker:
                 if self.http_config.db_backend == "postgres":
                     from inference_endpoint.storage.db import PostgresBackend
 
-                    pg_storage = PostgresBackend(conninfo=self.http_config.db_conninfo)
+                    pg_storage = PostgresBackend(
+                        conninfo=self.http_config.db_conninfo
+                    )  # call PostgresBackend #1
 
                 with EventRecorder(
                     session_id=worker_db_name,
@@ -357,7 +359,7 @@ class Worker:
                         reporter_table = event_recorder.table_name
                         from inference_endpoint.storage.db import PostgresBackend
 
-                        reporter_storage = PostgresBackend(
+                        reporter_storage = PostgresBackend(  # call PostgresBackend #2
                             conninfo=self.http_config.db_conninfo
                         )
                     else:

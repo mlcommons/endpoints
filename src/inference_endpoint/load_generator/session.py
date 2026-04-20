@@ -65,7 +65,7 @@ class BenchmarkSession:
         if db_backend == "postgres":
             from ..storage.db import PostgresBackend
 
-            pg_storage = PostgresBackend(conninfo=db_conninfo)
+            pg_storage = PostgresBackend(conninfo=db_conninfo)  # WRITER
 
         self.event_recorder = EventRecorder(
             session_id=self.session_id,
@@ -167,7 +167,7 @@ class BenchmarkSession:
                 reporter_table = self.event_recorder.table_name
                 from ..storage.db import PostgresBackend
 
-                reporter_storage = PostgresBackend(conninfo=self.db_conninfo)
+                reporter_storage = PostgresBackend(conninfo=self.db_conninfo)  # READER
             else:
                 reporter_client = "duckdb"
                 reporter_table = "events"
