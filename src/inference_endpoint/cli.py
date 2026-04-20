@@ -37,6 +37,7 @@ from inference_endpoint.commands import (
     run_probe_command,
     run_validate_command,
 )
+from inference_endpoint.commands.pg_export import add_pg_export_parser
 from inference_endpoint.exceptions import (
     CLIError,
     ExecutionError,
@@ -159,6 +160,8 @@ def create_parser() -> argparse.ArgumentParser:
     )
 
     # ===== Utility commands =====
+    add_pg_export_parser(subparsers)
+
     subparsers.add_parser("info", help="Show system info")
 
     validate_parser = subparsers.add_parser("validate", help="Validate YAML config")
@@ -342,6 +345,10 @@ async def main() -> None:
             await run_validate_command(args)
         elif args.command == "init":
             await run_init_command(args)
+        elif args.command == "pg-export":
+            from inference_endpoint.commands.pg_export import run_pg_export_command
+
+            run_pg_export_command(args)
         elif not args.command:
             parser.print_help()
         else:
