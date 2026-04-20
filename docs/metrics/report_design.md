@@ -38,6 +38,19 @@ this complexity is needed when the input is a `list[float]` from the KVStore.
 The entire rollup is a single function: `compute_summary(values) → dict`.
 It calls numpy for percentiles and histograms. No classes, no state.
 
+**Reports are reproducible from the event log.**
+
+The KVStore is lossy aggregation — it stores per-metric series, not per-sample
+provenance. The authoritative record of what happened during a run is the event
+log written by the `EventLoggerService`. Every number in a `Report` can be
+recomputed by replaying the event log through the same aggregator logic: if a
+production report shows a TTFT spike, the event log is the ground truth a user
+can mine to attribute the spike to specific samples or time windows.
+
+New metrics must preserve this property: the aggregator may only derive values
+from event fields, never from out-of-band state. If a metric cannot be rebuilt
+from the event log alone, it does not belong in the KVStore.
+
 ## Components
 
 ### `compute_summary(values, percentiles, n_histogram_buckets) → dict`

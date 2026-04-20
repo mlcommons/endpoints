@@ -58,9 +58,17 @@ class TestTrackingWindow:
                 sample_event(SampleEventType.ISSUED, "s1", ts=100),
             ]
         )
-        assert agg._table.get_row("s1") is None
-        assert store.get_series_values("ttft_ns") == []
-        assert store.get_series_values("sample_latency_ns") == []
+        assert agg._table.get_row("s1") is None, (
+            "Sample issued before START_PERFORMANCE_TRACKING must not create a "
+            "table row — warmup samples should be excluded from the tracked set."
+        )
+        assert (
+            store.get_series_values("ttft_ns") == []
+        ), "No TTFT should be recorded for samples issued before tracking begins."
+        assert store.get_series_values("sample_latency_ns") == [], (
+            "No sample_latency should be recorded for samples issued before "
+            "tracking begins."
+        )
 
     @pytest.mark.asyncio
     async def test_tracked_after_start(self):
@@ -72,7 +80,10 @@ class TestTrackingWindow:
                 sample_event(SampleEventType.ISSUED, "s1", ts=100),
             ]
         )
-        assert agg._table.get_row("s1") is not None
+        assert agg._table.get_row("s1") is not None, (
+            "Sample issued after START_PERFORMANCE_TRACKING must create a table "
+            "row so its metrics are included in the tracked set."
+        )
 
     @pytest.mark.asyncio
     async def test_not_tracked_after_stop(self):
@@ -85,7 +96,10 @@ class TestTrackingWindow:
                 sample_event(SampleEventType.ISSUED, "s1", ts=100),
             ]
         )
-        assert agg._table.get_row("s1") is None
+        assert agg._table.get_row("s1") is None, (
+            "Sample issued after STOP_PERFORMANCE_TRACKING must not create a "
+            "table row — the tracking window has closed."
+        )
 
     @pytest.mark.asyncio
     async def test_inflight_sample_continues_after_stop(self):

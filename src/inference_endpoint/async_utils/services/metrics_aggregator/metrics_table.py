@@ -150,18 +150,20 @@ class EmitTrigger(ABC):
 
 
 class TimeDeltaTrigger(EmitTrigger):
-    """Sync trigger: emits ev_rec.timestamp_ns - pre_change[required_field].
+    """Sync trigger: emits ev_rec.timestamp_ns - pre_change[delta_start_fieldname].
 
-    Subclass only needs to set metric_name and the required field name.
-    Skips silently if the required field is None (event hasn't occurred yet).
+    The emitted metric is a time delta: the firing event marks the end of the
+    delta, and ``delta_start_fieldname`` names the SampleField whose timestamp
+    marks the start. Skips silently if the start field is None (the delta has
+    not yet opened for this sample).
     """
 
-    def __init__(self, metric_name: str, kv_store: KVStore, subtract_field: str):
-        super().__init__(metric_name, kv_store, requires=(subtract_field,))
-        self._subtract_field = subtract_field
+    def __init__(self, metric_name: str, kv_store: KVStore, delta_start_fieldname: str):
+        super().__init__(metric_name, kv_store, requires=(delta_start_fieldname,))
+        self._delta_start_fieldname = delta_start_fieldname
 
     def fire(self, ev_rec, row, pre_change):
-        baseline = pre_change.get(self._subtract_field)
+        baseline = pre_change.get(self._delta_start_fieldname)
         if baseline is not None:
             self.kv_store.update(self.metric_name, ev_rec.timestamp_ns - baseline)
         return None
@@ -235,7 +237,9 @@ class TtftTrigger(TimeDeltaTrigger):
 
     def __init__(self, kv_store: KVStore):
         super().__init__(
-            MetricSeriesKey.TTFT_NS, kv_store, subtract_field=SampleField.ISSUED_NS
+            MetricSeriesKey.TTFT_NS,
+            kv_store,
+            delta_start_fieldname=SampleField.ISSUED_NS,
         )
 
 
@@ -249,7 +253,7 @@ class ChunkDeltaTrigger(TimeDeltaTrigger):
         super().__init__(
             MetricSeriesKey.CHUNK_DELTA_NS,
             kv_store,
-            subtract_field=SampleField.LAST_RECV_NS,
+            delta_start_fieldname=SampleField.LAST_RECV_NS,
         )
 
 
@@ -260,7 +264,7 @@ class SampleLatencyTrigger(TimeDeltaTrigger):
         super().__init__(
             MetricSeriesKey.SAMPLE_LATENCY_NS,
             kv_store,
-            subtract_field=SampleField.ISSUED_NS,
+            delta_start_fieldname=SampleField.ISSUED_NS,
         )
 
 
@@ -281,11 +285,12 @@ class IslTrigger(AsyncTokenTrigger):
         super().__init__(MetricSeriesKey.ISL, kv_store, tokenize_pool, loop)
 
     def fire(self, ev_rec, row, pre_change):
-        # Sync fast path: pre-tokenized IDs (SGLang)
+        # Sync fast path: any backend that pre-populates token_ids (e.g. SGLang).
         if isinstance(ev_rec.data, PromptData) and ev_rec.data.token_ids is not None:
             self.kv_store.update(self.metric_name, len(ev_rec.data.token_ids))
             return None
-        # Async path: tokenize raw text (OpenAI) — handled by base class
+        # Async path: tokenize raw text — used when token_ids are unavailable
+        # (e.g. OpenAI-compatible endpoints). Handled by the base class.
         return super().fire(ev_rec, row, pre_change)
 
     def _extract_text(self, ev_rec, row, pre_change):

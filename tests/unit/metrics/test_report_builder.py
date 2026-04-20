@@ -37,6 +37,8 @@ class TestComputeSummary:
         s = compute_summary(SeriesStats())
         assert s["total"] == 0
         assert s["min"] == 0
+        assert s["max"] == 0
+        assert s["std_dev"] == 0
         assert s["histogram"]["buckets"] == []
 
     def test_single_value(self):

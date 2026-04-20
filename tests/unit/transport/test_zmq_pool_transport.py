@@ -109,60 +109,24 @@ class TestReadyCheckReceiverTimeout:
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-class TestZmqPoolTransportWithPublisher:
-    """Test pool transport creation with a publisher on the same context."""
-
-    async def _create_publisher_and_pool(
-        self, loop: asyncio.AbstractEventLoop, num_workers: int
-    ):
-        """Helper: create publisher + pool transport, test ready check socket."""
-        sid = uuid.uuid4().hex[:8]
-        zmq_ctx = ManagedZMQContext(io_threads=2)
-        publisher = ZmqEventRecordPublisher(f"ev_pub_{sid}", zmq_ctx, loop=loop)
-
-        pool = ZmqWorkerPoolTransport.create(
-            loop, num_workers, config=ZMQTransportConfig()
-        )
-
-        rc = pool._ready_check
-        assert not rc._sock.closed
-        _ = rc._sock.rcvtimeo
-
-        with pytest.raises(TimeoutError):
-            await pool.wait_for_workers_ready(timeout=0.1)
-
-        pool.cleanup()
-        publisher.close()
-        zmq_ctx.cleanup()
-
-    async def test_2_workers(self):
-        loop = asyncio.get_running_loop()
-        await self._create_publisher_and_pool(loop, 2)
-
-    async def test_3_workers(self):
-        loop = asyncio.get_running_loop()
-        await self._create_publisher_and_pool(loop, 3)
-
-    async def test_4_workers(self):
-        loop = asyncio.get_running_loop()
-        await self._create_publisher_and_pool(loop, 4)
-
-    async def test_8_workers(self):
-        loop = asyncio.get_running_loop()
-        await self._create_publisher_and_pool(loop, 8)
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-class TestZmqPoolTransportWithoutPublisher:
-    """Test pool transport creation without a publisher (baseline)."""
+class TestZmqPoolTransport:
+    """Pool transport creation with and without a publisher on the same context."""
 
     @pytest.mark.parametrize("num_workers", [2, 3, 4, 8])
-    async def test_pool_only(self, num_workers: int):
+    @pytest.mark.parametrize("create_publisher", [True, False])
+    async def test_pool(self, num_workers: int, create_publisher: bool):
         loop = asyncio.get_running_loop()
         zmq_ctx = ManagedZMQContext(io_threads=2)
-        dummy = zmq_ctx.socket(zmq.PUB)
-        zmq_ctx.bind(dummy, "dummy")
+
+        publisher = None
+        dummy = None
+        if create_publisher:
+            sid = uuid.uuid4().hex[:8]
+            publisher = ZmqEventRecordPublisher(f"ev_pub_{sid}", zmq_ctx, loop=loop)
+        else:
+            # Baseline: bind an unrelated PUB socket so the context is non-empty.
+            dummy = zmq_ctx.socket(zmq.PUB)
+            zmq_ctx.bind(dummy, "dummy")
 
         pool = ZmqWorkerPoolTransport.create(
             loop, num_workers, config=ZMQTransportConfig()
@@ -176,5 +140,8 @@ class TestZmqPoolTransportWithoutPublisher:
             await pool.wait_for_workers_ready(timeout=0.1)
 
         pool.cleanup()
-        dummy.close()
+        if publisher is not None:
+            publisher.close()
+        if dummy is not None:
+            dummy.close()
         zmq_ctx.cleanup()

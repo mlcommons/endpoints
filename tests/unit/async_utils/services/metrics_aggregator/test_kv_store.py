@@ -15,6 +15,7 @@
 
 """Tests for the KVStore (BasicKVStore + BasicKVStoreReader)."""
 
+import math
 import multiprocessing
 import struct
 from pathlib import Path
@@ -48,6 +49,10 @@ class TestSeriesStats:
         stats = SeriesStats()
         assert stats.count == 0
         assert stats.total == 0.0
+        # Sentinel values for an empty series — compute_summary() is responsible
+        # for normalizing these to 0 before exposing them to users.
+        assert stats.min_val == math.inf
+        assert stats.max_val == -math.inf
 
     def test_incremental_rollup(self):
         stats = SeriesStats([1.0, 2.0])
@@ -117,6 +122,28 @@ class TestBasicKVStore:
         assert snap["n_issued"] == 42
         assert isinstance(snap["latency"], SeriesStats)
         assert snap["latency"].count == 2
+        store.close()
+
+    def test_snapshot_is_isolated_from_later_writes(self, tmp_path: Path):
+        """Mutations after snapshot() must not alter the captured snapshot."""
+        store = BasicKVStore(tmp_path / "kv")
+        store.create_key("n_issued", "counter")
+        store.create_key("latency", "series")
+        store.update("n_issued", 5)
+        store.update("latency", 100)
+        store.update("latency", 200)
+
+        snap = store.snapshot()
+
+        store.update("n_issued", 99)
+        store.update("latency", 300)
+
+        assert snap["n_issued"] == 5
+        latency_snap = snap["latency"]
+        assert isinstance(latency_snap, SeriesStats)
+        assert latency_snap.count == 2
+        assert latency_snap.values == [100, 200]
+        assert latency_snap.total == 300
         store.close()
 
     def test_update_unknown_key_raises(self, tmp_path: Path):

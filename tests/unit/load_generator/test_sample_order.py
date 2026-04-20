@@ -23,43 +23,52 @@ from inference_endpoint.load_generator.sample_order import (
     WithReplacementSampleOrder,
 )
 
+# Exercise small/medium/large dataset sizes so shuffle-buffer behavior is
+# covered for inputs both much smaller and much larger than typical batches.
+_DATASET_SIZES = [3, 100, 10_000]
+
 
 @pytest.mark.unit
 class TestWithoutReplacementSampleOrder:
-    def test_yields_all_indices(self):
+    @pytest.mark.parametrize("n_samples", _DATASET_SIZES)
+    def test_yields_all_indices(self, n_samples: int):
         order = WithoutReplacementSampleOrder(
-            n_samples_in_dataset=5, rng=random.Random(42)
+            n_samples_in_dataset=n_samples, rng=random.Random(42)
         )
-        indices = [next(order) for _ in range(5)]
-        assert sorted(indices) == [0, 1, 2, 3, 4]
+        indices = [next(order) for _ in range(n_samples)]
+        assert sorted(indices) == list(range(n_samples))
 
-    def test_reshuffles_after_exhaustion(self):
+    @pytest.mark.parametrize("n_samples", _DATASET_SIZES)
+    def test_reshuffles_after_exhaustion(self, n_samples: int):
         order = WithoutReplacementSampleOrder(
-            n_samples_in_dataset=3, rng=random.Random(42)
+            n_samples_in_dataset=n_samples, rng=random.Random(42)
         )
-        first_pass = [next(order) for _ in range(3)]
-        second_pass = [next(order) for _ in range(3)]
-        assert sorted(first_pass) == [0, 1, 2]
-        assert sorted(second_pass) == [0, 1, 2]
+        first_pass = [next(order) for _ in range(n_samples)]
+        second_pass = [next(order) for _ in range(n_samples)]
+        assert sorted(first_pass) == list(range(n_samples))
+        assert sorted(second_pass) == list(range(n_samples))
 
-    def test_never_raises_stop_iteration(self):
+    @pytest.mark.parametrize("n_samples", _DATASET_SIZES)
+    def test_never_raises_stop_iteration(self, n_samples: int):
         order = WithoutReplacementSampleOrder(
-            n_samples_in_dataset=2, rng=random.Random(42)
+            n_samples_in_dataset=n_samples, rng=random.Random(42)
         )
         # Should be able to draw far more than dataset size
-        indices = [next(order) for _ in range(100)]
-        assert len(indices) == 100
-        assert all(0 <= i < 2 for i in indices)
+        draws = max(100, n_samples * 3)
+        indices = [next(order) for _ in range(draws)]
+        assert len(indices) == draws
+        assert all(0 <= i < n_samples for i in indices)
 
-    def test_reproducible_with_seed(self):
+    @pytest.mark.parametrize("n_samples", _DATASET_SIZES)
+    def test_reproducible_with_seed(self, n_samples: int):
         order1 = WithoutReplacementSampleOrder(
-            n_samples_in_dataset=10, rng=random.Random(42)
+            n_samples_in_dataset=n_samples, rng=random.Random(42)
         )
         order2 = WithoutReplacementSampleOrder(
-            n_samples_in_dataset=10, rng=random.Random(42)
+            n_samples_in_dataset=n_samples, rng=random.Random(42)
         )
-        seq1 = [next(order1) for _ in range(20)]
-        seq2 = [next(order2) for _ in range(20)]
+        seq1 = [next(order1) for _ in range(n_samples * 2)]
+        seq2 = [next(order2) for _ in range(n_samples * 2)]
         assert seq1 == seq2
 
     def test_invalid_size_raises(self):
@@ -69,20 +78,22 @@ class TestWithoutReplacementSampleOrder:
 
 @pytest.mark.unit
 class TestWithReplacementSampleOrder:
-    def test_yields_valid_indices(self):
+    @pytest.mark.parametrize("n_samples", _DATASET_SIZES)
+    def test_yields_valid_indices(self, n_samples: int):
         order = WithReplacementSampleOrder(
-            n_samples_in_dataset=5, rng=random.Random(42)
+            n_samples_in_dataset=n_samples, rng=random.Random(42)
         )
-        indices = [next(order) for _ in range(100)]
-        assert all(0 <= i < 5 for i in indices)
+        indices = [next(order) for _ in range(max(100, n_samples))]
+        assert all(0 <= i < n_samples for i in indices)
 
-    def test_reproducible_with_seed(self):
+    @pytest.mark.parametrize("n_samples", _DATASET_SIZES)
+    def test_reproducible_with_seed(self, n_samples: int):
         order1 = WithReplacementSampleOrder(
-            n_samples_in_dataset=10, rng=random.Random(42)
+            n_samples_in_dataset=n_samples, rng=random.Random(42)
         )
         order2 = WithReplacementSampleOrder(
-            n_samples_in_dataset=10, rng=random.Random(42)
+            n_samples_in_dataset=n_samples, rng=random.Random(42)
         )
-        seq1 = [next(order1) for _ in range(20)]
-        seq2 = [next(order2) for _ in range(20)]
+        seq1 = [next(order1) for _ in range(n_samples * 2)]
+        seq2 = [next(order2) for _ in range(n_samples * 2)]
         assert seq1 == seq2
