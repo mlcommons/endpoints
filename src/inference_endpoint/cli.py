@@ -346,7 +346,9 @@ async def main() -> None:
         elif args.command == "init":
             await run_init_command(args)
         elif args.command == "pg-export":
-            from inference_endpoint.commands.pg_export import run_pg_export_command
+            from inference_endpoint.commands.pg_export import (
+                run_pg_export_command,  # py ABC exposes type at top level
+            )
 
             run_pg_export_command(args)
         elif not args.command:
