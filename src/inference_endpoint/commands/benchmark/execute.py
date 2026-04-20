@@ -382,7 +382,7 @@ def _setup_kv_reader(
     reader = BasicKVStoreReader(metrics_dir)
     for counter_key in MetricCounterKey:
         reader.register_key(counter_key.value, "counter")
-    _STREAMING_ONLY = {MetricSeriesKey.TTFT_NS, MetricSeriesKey.CHUNK_DELTA_NS}
+    _STREAMING_ONLY = {MetricSeriesKey.TTFT_NS, MetricSeriesKey.CHUNK_DELTA_NS, MetricSeriesKey.TPOT_NS}
     _FLOAT_SERIES = {MetricSeriesKey.TPOT_NS}
     for series_key in MetricSeriesKey:
         if series_key in _STREAMING_ONLY and not streaming:
