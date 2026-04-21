@@ -1,7 +1,7 @@
 name: Test llama3-8b GPU run on MLC2 server
 
 on:
-  pull_request:
+  pull_request_target:
     types: [opened, synchronize, reopened]
     paths:
       - 'src/inference_endpoints/**'
@@ -174,7 +174,7 @@ jobs:
           inference-endpoint benchmark from-config -c "$CFG" --timeout 600000
           rm -f "$CFG"
           echo "===== result_summary.json (main) ====="
-          rm logs/llama3_8b_cnn_online/events.jsonl
+          rm -f logs/llama3_8b_cnn_online/events.jsonl
           cat logs/llama3_8b_cnn_online/result_summary.json
 
       - name: Upload main branch results as artifact
@@ -226,7 +226,7 @@ jobs:
           inference-endpoint benchmark from-config -c "$CFG" --timeout 600000
           rm -f "$CFG"
           echo "===== result_summary.json (PR) ====="
-          rm logs/llama3_8b_cnn_online/events.jsonl
+          rm -f logs/llama3_8b_cnn_online/events.jsonl
           cat logs/llama3_8b_cnn_online/result_summary.json
 
       - name: Upload PR branch results as artifact
