@@ -182,8 +182,11 @@ def _check_tokenizer_exists(model_name: str) -> bool:
     """Check if a HuggingFace tokenizer exists for the model (API only, no download).
 
     Returns True if the model repo exists and has tokenizer files, False otherwise.
-    The actual tokenizer is loaded later by the MetricsAggregator subprocess and
-    by Harmony transforms (each loads their own instance as needed).
+    This function is a probe — it never loads or downloads the tokenizer itself.
+    Downstream consumers that need tokenization (e.g. the MetricsAggregator
+    subprocess for ISL/OSL/TPOT, Harmony transforms for prompt preprocessing,
+    and any future plugin with its own tokenization need) each load their own
+    instance as required.
     """
     try:
         info = model_info(model_name)
@@ -382,7 +385,11 @@ def _setup_kv_reader(
     reader = BasicKVStoreReader(metrics_dir)
     for counter_key in MetricCounterKey:
         reader.register_key(counter_key.value, "counter")
-    _STREAMING_ONLY = {MetricSeriesKey.TTFT_NS, MetricSeriesKey.CHUNK_DELTA_NS, MetricSeriesKey.TPOT_NS}
+    _STREAMING_ONLY = {
+        MetricSeriesKey.TTFT_NS,
+        MetricSeriesKey.CHUNK_DELTA_NS,
+        MetricSeriesKey.TPOT_NS,
+    }
     _FLOAT_SERIES = {MetricSeriesKey.TPOT_NS}
     for series_key in MetricSeriesKey:
         if series_key in _STREAMING_ONLY and not streaming:
