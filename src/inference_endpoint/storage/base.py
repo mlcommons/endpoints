@@ -40,11 +40,11 @@ class StorageBackend(abc.ABC):
         """Delete the item identified by key."""
 
     @abc.abstractmethod
-    def exists(self, key: str) -> bool:
+    def exists(self, key: str, **kwargs) -> bool:
         """Return True if the item identified by key exists."""
 
     @abc.abstractmethod
-    def list(self, prefix: str = "") -> Iterator[str]:
+    def list(self, prefix: str = "", **kwargs) -> Iterator[str]:
         """Iterate over available keys, optionally filtered by prefix."""
 
     @abc.abstractmethod

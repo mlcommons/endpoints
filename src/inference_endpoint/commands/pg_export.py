@@ -41,15 +41,20 @@ def run_pg_export_command(args) -> None:
     backend: StorageBackend = PostgresBackend(conninfo=conninfo)
 
     with backend:
-        col_name_rows = backend.read(
-            "SELECT column_name FROM information_schema.columns "
-            "WHERE table_name = %s ORDER BY ordinal_position",
+        if not backend.exists(
+            "SELECT 1 FROM information_schema.tables WHERE table_name = %s",
             params=(table,),
-        )
-        if not col_name_rows:
+        ):
             print(f"Error: table '{table}' not found", file=sys.stderr)
             sys.exit(1)
-        col_names = [r[0] for r in col_name_rows]
+
+        col_names = list(
+            backend.list(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = %s ORDER BY ordinal_position",
+                params=(table,),
+            )
+        )
 
         rows = backend.read(f"SELECT * FROM {table}")
 

@@ -29,7 +29,9 @@ class SQLiteBackend(StorageBackend):
 
     write(key=sql, data=params) — single row insert; pass batch=True in kwargs for executemany.
     read(key=sql, params=()) — returns list of rows.
-    exists/delete/list are no-ops (not applicable to relational tables).
+    delete(key=sql) — executes a DELETE statement via write().
+    exists(key=sql) — runs a SELECT via read(); returns True if any rows returned.
+    list(prefix=sql) — runs a SELECT via read(); yields first column of each row.
     """
 
     def __init__(self, path: str, read_only: bool = False) -> None:
@@ -57,13 +59,13 @@ class SQLiteBackend(StorageBackend):
         return self._cur.fetchall()
 
     def delete(self, key: str) -> None:
-        raise NotImplementedError("Use write() with a DELETE statement")
+        self.write(key, ())
 
-    def exists(self, key: str) -> bool:
-        raise NotImplementedError("Use read() with a SELECT statement")
+    def exists(self, key: str, **kwargs) -> bool:
+        return bool(self.read(key, **kwargs))
 
-    def list(self, prefix: str = "") -> Iterator[str]:
-        raise NotImplementedError("Use read() with a SELECT statement")
+    def list(self, prefix: str = "", **kwargs) -> Iterator[str]:
+        yield from (row[0] for row in self.read(prefix, **kwargs))
 
     def close(self) -> None:
         if self._cur:
@@ -74,12 +76,14 @@ class SQLiteBackend(StorageBackend):
         self._conn = None
 
 
-class PostgresBackend(StorageBackend):
+class PostgresBackend(StorageBackend):  # Derived from ABC StorageBackend
     """PostgreSQL backend via psycopg3.
 
     write(key=sql, data=params) — single row insert; pass batch=True in kwargs for executemany.
     read(key=sql, params=()) — returns list of rows.
-    exists/delete/list are no-ops (not applicable to relational tables).
+    delete(key=sql) — executes a DELETE statement via write().
+    exists(key=sql) — runs a SELECT via read(); returns True if any rows returned.
+    list(prefix=sql) — runs a SELECT via read(); yields first column of each row.
     """
 
     def __init__(self, conninfo: str, autocommit: bool = True) -> None:
@@ -109,13 +113,13 @@ class PostgresBackend(StorageBackend):
         return self._cur.fetchall()
 
     def delete(self, key: str) -> None:
-        raise NotImplementedError("Use write() with a DELETE statement")
+        self.write(key, ())
 
-    def exists(self, key: str) -> bool:
-        raise NotImplementedError("Use read() with a SELECT statement")
+    def exists(self, key: str, **kwargs) -> bool:
+        return bool(self.read(key, **kwargs))
 
-    def list(self, prefix: str = "") -> Iterator[str]:
-        raise NotImplementedError("Use read() with a SELECT statement")
+    def list(self, prefix: str = "", **kwargs) -> Iterator[str]:
+        yield from (row[0] for row in self.read(prefix, **kwargs))
 
     def close(self) -> None:
         if self._cur:
