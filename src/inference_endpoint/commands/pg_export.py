@@ -64,7 +64,7 @@ def run_pg_export_command(args) -> None:
 
         output.parent.mkdir(parents=True, exist_ok=True)
         with output.open("w", newline="") as f:
-            writer = csv.writer(f)
+            writer = csv.writer(f, lineterminator="\n")
             writer.writerow(col_names)
             writer.writerows(rows)
 
