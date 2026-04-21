@@ -28,7 +28,7 @@ from typing import Any
 from .base import StorageBackend
 
 
-class S3ObjectBackend(StorageBackend):
+class S3ObjectBackend(StorageBackend):  # Note: not currently in use
     """Object storage backed by AWS S3 (requires boto3)."""
 
     def __init__(self, bucket: str, prefix: str = "") -> None:
@@ -36,7 +36,7 @@ class S3ObjectBackend(StorageBackend):
         self.prefix = prefix.rstrip("/")
         self._client = None
 
-    def _key(self, key: str) -> str:
+    def _key(self, key: str) -> str:  # hack to get at key
         return f"{self.prefix}/{key}" if self.prefix else key
 
     def connect(self) -> None:
