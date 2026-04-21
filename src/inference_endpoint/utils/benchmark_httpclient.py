@@ -37,6 +37,8 @@ import threading
 import time
 from dataclasses import dataclass
 
+import uvloop
+
 from inference_endpoint.core.types import Query, QueryResult
 from inference_endpoint.endpoint_client.config import HTTPClientConfig
 from inference_endpoint.endpoint_client.cpu_affinity import (
@@ -49,6 +51,19 @@ from inference_endpoint.testing.max_throughput_server import (
     MaxThroughputServer,
     build_response,
 )
+
+try:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.colors as mcolors
+    import matplotlib.pyplot as plt
+    import matplotlib.ticker as ticker
+except ImportError:
+    matplotlib = None
+    mcolors = None
+    plt = None
+    ticker = None
 
 # Suppress transformers "no framework found" warning (only tokenizers used)
 os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
@@ -1054,14 +1069,7 @@ def generate_sweep_plot(
       4 params: MxNxK facet grid — rows=param3, columns=param4.
     Where N = 2 (non-streaming) or 3 (streaming, adds SSE Rate).
     """
-    try:
-        import matplotlib
-
-        matplotlib.use("Agg")
-        import matplotlib.colors as mcolors
-        import matplotlib.pyplot as plt
-        import matplotlib.ticker as ticker
-    except ImportError:
+    if plt is None:
         print("\nMatplotlib not installed. Skipping plot generation.")
         print("  Install with: pip install matplotlib")
         return
@@ -1446,9 +1454,6 @@ def main() -> None:
     )
 
     gc.set_threshold(70000, 10, 100)
-
-    import uvloop
-
     uvloop.install()
 
     server: MaxThroughputServer | None = None

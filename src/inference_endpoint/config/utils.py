@@ -124,10 +124,8 @@ def parse_dataset_string(s: str) -> dict[str, object]:
 
     # Validate parser remap targets (CLI only — YAML validated in factory)
     if "parser" in result and isinstance(result["parser"], dict):
-        # Lazy import to avoid circular dep: schema_utils → dataset_manager → schema
-        from inference_endpoint.dataset_manager.transforms import (
-            MakeAdapterCompatible,
-        )
+        # Lazy import: circular dependency (config.schema → config.utils → dataset_manager → config.schema)
+        from inference_endpoint.dataset_manager.transforms import MakeAdapterCompatible
 
         valid = set(MakeAdapterCompatible().remap.values())
         invalid = set(result["parser"].keys()) - valid

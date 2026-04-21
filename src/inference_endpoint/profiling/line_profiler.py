@@ -28,6 +28,11 @@ import contextlib
 import io
 import os
 import sys
+
+try:
+    from line_profiler import LineProfiler
+except ImportError:
+    LineProfiler = None
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Optional, TypeVar
@@ -68,18 +73,15 @@ class ProfilerState:
         self._atexit_registered = False
 
         if self.enabled:
-            try:
-                from line_profiler import LineProfiler
-
-                self.profiler = LineProfiler()
-                self.profiler.enable()
-                atexit.register(self._safe_cleanup)
-                self._atexit_registered = True
-            except ImportError as e:
+            if LineProfiler is None:
                 raise ImportError(
                     f"line_profiler not installed but {ENV_VAR_ENABLE_LINE_PROFILER}={enable_profiler} is set. "
                     f"Install with: pip install line_profiler"
-                ) from e
+                )
+            self.profiler = LineProfiler()
+            self.profiler.enable()
+            atexit.register(self._safe_cleanup)
+            self._atexit_registered = True
 
     def _safe_cleanup(self):
         """Safe cleanup wrapper that suppresses all errors during atexit."""

@@ -26,6 +26,7 @@ Automatically configures profiling for pytest test runs when ENABLE_LINE_PROFILE
 import atexit
 import glob
 import os
+import shutil
 import sys
 
 from inference_endpoint.profiling import shutdown
@@ -102,8 +103,6 @@ def _print_worker_profiles():
 def _cleanup_profile_files(output_file: str):
     """Remove profile directory and files after displaying results."""
     try:
-        import shutil
-
         profile_dir = os.path.dirname(output_file)
         if profile_dir and os.path.exists(profile_dir):
             shutil.rmtree(profile_dir, ignore_errors=True)

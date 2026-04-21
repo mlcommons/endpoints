@@ -97,11 +97,10 @@ class TestStreamChunk:
 
     def test_stream_chunk_creation(self) -> None:
         """Test creating a stream chunk."""
-        chunk = StreamChunk(id="test-123", response_chunk="partial", is_complete=False)
+        chunk = StreamChunk(id="test-123", response_chunk="partial")
 
         assert chunk.id == "test-123"
         assert chunk.response_chunk == "partial"
-        assert chunk.is_complete is False
         assert chunk.metadata == {}
 
 

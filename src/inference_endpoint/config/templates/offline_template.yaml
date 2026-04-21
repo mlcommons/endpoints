@@ -15,4 +15,4 @@ settings:
     n_samples_to_issue: null  # Sample count override
 endpoint_config:
   endpoints:  # Endpoint URL(s)
-  - '<ENDPOINT_URL eg: http://localhost:8000>'
+  - 'http://localhost:8000'

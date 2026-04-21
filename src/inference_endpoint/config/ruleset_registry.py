@@ -28,6 +28,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from .rulesets.mlcommons.rules import CURRENT as mlcommons_current
+
 if TYPE_CHECKING:
     from .ruleset_base import BenchmarkSuiteRuleset
 
@@ -77,18 +79,10 @@ def list_rulesets() -> list[str]:
 # Auto-register MLCommons rulesets
 def _auto_register_mlcommons():
     """Auto-register MLCommons rulesets."""
-    try:
-        from .rulesets.mlcommons.rules import CURRENT as mlcommons_current
-
-        # Register with version-specific name
-        register_ruleset(
-            f"mlperf-inference-{mlcommons_current.version}", mlcommons_current
-        )
-        # Also register as "mlcommons-current" for convenience
-        register_ruleset("mlcommons-current", mlcommons_current)
-    except ImportError:
-        # MLCommons rulesets not available
-        pass
+    # Register with version-specific name
+    register_ruleset(f"mlperf-inference-{mlcommons_current.version}", mlcommons_current)
+    # Also register as "mlcommons-current" for convenience
+    register_ruleset("mlcommons-current", mlcommons_current)
 
 
 # Auto-register on import

@@ -49,7 +49,6 @@ settings:
     target_concurrency: null  # Concurrent requests
   client:
     num_workers: -1  # Worker processes (-1=auto)
-    record_worker_events: false  # Record per-worker events
     log_level: INFO  # Worker log level
     warmup_connections: -1  # Pre-establish TCP connections (-1=auto, 0=disabled)
     max_connections: -1  # Max TCP connections (-1=unlimited)
@@ -71,7 +70,7 @@ settings:
     worker_gc_mode: relaxed  # Worker GC strategy | options: disabled, relaxed, system
 endpoint_config:
   endpoints:  # Endpoint URL(s)
-  - '<ENDPOINT_URL eg: http://localhost:8000>'
+    - 'http://localhost:8000'
   api_key: null  # API key
   api_type: openai  # API type: openai or sglang | options: openai, sglang
 report_dir: null  # Report output directory

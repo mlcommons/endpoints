@@ -22,22 +22,17 @@ This file provides shared fixtures and configuration for all tests.
 import logging
 import os
 import random
-import sqlite3
 import sys
 import uuid
 from pathlib import Path
 from typing import Any
 
-import msgspec.json
 import pytest
 from inference_endpoint import metrics
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import LoadPattern, LoadPatternType
-from inference_endpoint.core.types import TextModelOutput
 from inference_endpoint.dataset_manager.dataset import Dataset, DatasetFormat
 from inference_endpoint.dataset_manager.transforms import ColumnRemap
-from inference_endpoint.load_generator.events import SampleEvent, SessionEvent
-from inference_endpoint.load_generator.sample import SampleEventHandler
 from inference_endpoint.testing.docker_server import DockerServer
 from inference_endpoint.testing.echo_server import EchoServer, HTTPServer
 
@@ -239,69 +234,6 @@ def fake_outputs(sample_uuids):
         uuid1: ["Hello, ", "world"],
         uuid2: ["And ", "goodbye."],
     }
-
-
-@pytest.fixture
-def events_db(tmp_path, sample_uuids, fake_outputs):
-    """Returns a sample in-memory sqlite database for events.
-    This database contains events for 3 sent queries, but only 2 are completed. The 3rd query has no 'received' events.
-    """
-    logger.info(f"Creating events database at {tmp_path}")
-    test_db = str(tmp_path / f"test_events_{uuid.uuid4().hex}.db")
-    conn = sqlite3.connect(test_db)
-    cur = conn.cursor()
-    cur.execute(
-        "CREATE TABLE IF NOT EXISTS events (sample_uuid VARCHAR(32), event_type VARCHAR(32), timestamp_ns INTEGER, data BLOB)"
-    )
-
-    # Use deterministic UUIDs for testing
-    uuid1 = sample_uuids(1)
-    uuid2 = sample_uuids(2)
-    uuid3 = sample_uuids(3)
-
-    # Define output data for COMPLETE events
-    events = [
-        ("", SessionEvent.TEST_STARTED.value, 5000, b""),
-        (uuid1, SessionEvent.LOADGEN_ISSUE_CALLED.value, 10000, b""),
-        (uuid2, SessionEvent.LOADGEN_ISSUE_CALLED.value, 10003, b""),
-        (uuid1, SampleEvent.FIRST_CHUNK.value, 10010, b""),
-        (uuid2, SampleEvent.FIRST_CHUNK.value, 10190, b""),
-        (uuid1, SampleEvent.NON_FIRST_CHUNK.value, 10201, b""),
-        (uuid3, SessionEvent.LOADGEN_ISSUE_CALLED.value, 10202, b""),
-        (uuid1, SampleEvent.NON_FIRST_CHUNK.value, 10203, b""),
-        (uuid2, SampleEvent.NON_FIRST_CHUNK.value, 10210, b""),
-        (uuid3, SessionEvent.ERROR.value, 10211, b""),
-        (uuid1, SampleEvent.NON_FIRST_CHUNK.value, 10211, b""),
-        (
-            uuid1,
-            SampleEvent.COMPLETE.value,
-            10211,
-            msgspec.json.encode(TextModelOutput(output=tuple(fake_outputs[uuid1]))),
-        ),
-        (uuid2, SampleEvent.NON_FIRST_CHUNK.value, 10214, b""),
-        (uuid3, SessionEvent.ERROR.value, 10216, b""),
-        (uuid2, SampleEvent.NON_FIRST_CHUNK.value, 10217, b""),
-        (uuid2, SampleEvent.NON_FIRST_CHUNK.value, 10219, b""),
-        (
-            uuid2,
-            SampleEvent.COMPLETE.value,
-            10219,
-            msgspec.json.encode(TextModelOutput(output=tuple(fake_outputs[uuid2]))),
-        ),
-        (uuid3, SessionEvent.ERROR.value, 10225, b""),
-        ("", SessionEvent.TEST_ENDED.value, 10300, b""),
-    ]
-    cur.executemany(
-        "INSERT INTO events (sample_uuid, event_type, timestamp_ns, data) VALUES (?, ?, ?, ?)",
-        events,
-    )
-    conn.commit()
-    yield test_db
-
-    cur.close()
-    conn.close()
-    Path(test_db).unlink()
-    logger.info(f"Events database at {test_db} deleted")
 
 
 class CharacterTokenizer:
@@ -534,11 +466,3 @@ def concurrency_runtime_settings(random_seed, target_concurrency):
             type=LoadPatternType.CONCURRENCY, target_concurrency=target_concurrency
         ),
     )
-
-
-@pytest.fixture
-def clean_sample_event_hooks():
-    """Fixture to ensure SampleEventHandler hooks are cleared before and after each test."""
-    SampleEventHandler.clear_hooks()
-    yield SampleEventHandler
-    SampleEventHandler.clear_hooks()

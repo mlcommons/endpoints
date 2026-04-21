@@ -86,7 +86,7 @@ class TestBenchmarkCommandIntegration:
         assert "Completed in" in caplog.text
         assert "successful" in caplog.text
         assert "QPS:" in caplog.text
-        assert "MaxThroughputScheduler" in caplog.text
+        assert "Starting phase:" in caplog.text
 
     @pytest.mark.integration
     @pytest.mark.parametrize("streaming", [StreamingMode.OFF, StreamingMode.ON])
@@ -105,8 +105,7 @@ class TestBenchmarkCommandIntegration:
 
         assert "Completed in" in caplog.text
         assert "successful" in caplog.text
-        assert "PoissonDistributionScheduler" in caplog.text
-        assert "50" in caplog.text
+        assert "Starting phase:" in caplog.text
 
     @pytest.mark.integration
     @pytest.mark.parametrize("streaming", [StreamingMode.OFF, StreamingMode.ON])

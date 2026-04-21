@@ -77,7 +77,6 @@ class HTTPClientConfig(WithUpdatesMixin, BaseModel):
         ),
     ] = Field(-1, ge=-1)
 
-    record_worker_events: bool = Field(False, description="Record per-worker events")
     log_level: str = Field("INFO", description="Worker log level")
 
     # Pre-establish TCP connections during init for reuse at runtime.

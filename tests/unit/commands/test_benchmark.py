@@ -45,6 +45,7 @@ from inference_endpoint.config.schema import (
 from inference_endpoint.config.schema import (
     OnlineBenchmarkConfig as OnlineConfig,
 )
+from inference_endpoint.config.utils import cli_error_formatter as _error_formatter
 from inference_endpoint.core.types import QueryResult
 from inference_endpoint.endpoint_client.config import HTTPClientConfig
 from inference_endpoint.exceptions import InputValidationError
@@ -434,10 +435,6 @@ class TestErrorFormatter:
 
     @pytest.mark.unit
     def test_cyclopts_arg_with_children(self):
-        from inference_endpoint.config.utils import (
-            cli_error_formatter as _error_formatter,
-        )
-
         child = SimpleNamespace(
             name="--endpoints", names=("--endpoints",), required=True, has_tokens=False
         )
@@ -449,10 +446,6 @@ class TestErrorFormatter:
 
     @pytest.mark.unit
     def test_cyclopts_leaf_arg(self):
-        from inference_endpoint.config.utils import (
-            cli_error_formatter as _error_formatter,
-        )
-
         arg = SimpleNamespace(
             name="--model", names=("--model-params.name", "--model"), children=[]
         )
@@ -463,10 +456,6 @@ class TestErrorFormatter:
 
     @pytest.mark.unit
     def test_pydantic_validation_error(self):
-        from inference_endpoint.config.utils import (
-            cli_error_formatter as _error_formatter,
-        )
-
         try:
             BenchmarkConfig(
                 type=TestType.OFFLINE,
@@ -481,10 +470,6 @@ class TestErrorFormatter:
 
     @pytest.mark.unit
     def test_generic_error_fallback(self):
-        from inference_endpoint.config.utils import (
-            cli_error_formatter as _error_formatter,
-        )
-
         class FakeError:
             argument = None
             __cause__ = None

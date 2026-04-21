@@ -77,7 +77,6 @@ def make_stream_chunk(payload_chars: int, idx: int) -> StreamChunk:
     return StreamChunk(
         id=str(idx),
         response_chunk="x" * payload_chars,
-        is_complete=False,
     )
 
 

@@ -69,7 +69,7 @@ class FuturesHttpClient(HTTPEndpointClient):
                     break  # None signals transport closed - exit handler
 
                 match response:
-                    case StreamChunk(is_complete=False):
+                    case StreamChunk():
                         # Intermediate stream chunk - future stays pending
                         pass
 

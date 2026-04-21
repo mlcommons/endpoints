@@ -19,6 +19,7 @@ TODO: Very simple factory for now. Will be expanded to support multiple formats 
 """
 
 import logging
+from pathlib import Path
 
 from inference_endpoint.config.schema import Dataset as DatasetConfig
 from inference_endpoint.dataset_manager.dataset import Dataset, DatasetFormat
@@ -103,8 +104,6 @@ class DataLoaderFactory:
         transforms.append(MakeAdapterCompatible())
 
         assert dataset_path is not None
-        from pathlib import Path
-
         return Dataset.load_from_file(
             Path(dataset_path),
             transforms=transforms,
