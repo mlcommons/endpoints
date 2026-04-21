@@ -500,6 +500,8 @@ async def _run_benchmark_async(
             http_config = config.settings.client.with_updates(
                 endpoint_urls=[urljoin(e, api_type.default_route()) for e in endpoints],
                 api_type=api_type,
+                adapter=None,  # reset so validator re-resolves adapter from api_type
+                accumulator=None,  # reset so validator re-resolves accumulator from api_type
                 api_key=config.endpoint_config.api_key,
                 event_logs_dir=ctx.report_dir,
                 cpu_affinity=ctx.affinity_plan,
