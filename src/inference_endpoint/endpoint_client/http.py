@@ -52,12 +52,17 @@ class _SocketConfig:
     # Connection keepalive-probe settings for long-lived connections
     # client kernel sends probe, server's kernel ACKs - no application overhead
     #
-    # TODO(vir): verify impact on failure-detection, we want to fail fast
-    # detection time: KEEPIDLE + (KEEPCNT × KEEPINTVL) = 1 + 5×1 = 6s
-    SO_KEEPALIVE: int = 1  # Enable keepalive at socket level
-    TCP_KEEPIDLE: int = 1  # Probe after 1s idle
-    TCP_KEEPCNT: int = 5  # 5 failed probes = dead
-    TCP_KEEPINTVL: int = 1  # 1s between probes
+    # NOTE(vir):
+    # we hit lots of connection timed out errors in offline and high-concurrency modes,
+    # disabling since we handle dead-connections in http.py connection_lost/eof_received
+    SO_KEEPALIVE: int = 0  # Disabled
+    TCP_KEEPIDLE: int = (
+        1  # Probe after 1s idle (only used when SO_KEEPALIVE is enabled)
+    )
+    TCP_KEEPCNT: int = (
+        5  # 5 failed probes = dead (only used when SO_KEEPALIVE is enabled)
+    )
+    TCP_KEEPINTVL: int = 1  # 1s between probes (only used when SO_KEEPALIVE is enabled)
 
     # Socket buffer sizing: sliding windows, not full-message buffers.
     # The event loop reads eagerly so the buffer only holds data between
@@ -79,11 +84,9 @@ class _SocketConfig:
         # Low-latency optimizations for streaming
         sock.setsockopt(socket.SOL_TCP, socket.TCP_NODELAY, cls.TCP_NODELAY)
 
-        # Connection keepalive settings for long-lived SSE connections
+        # Connection keepalive (disabled by default, tune via SO_KEEPALIVE)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, cls.SO_KEEPALIVE)
-
-        # Fine-tune keepalive timing
-        if hasattr(socket, "TCP_KEEPIDLE"):
+        if cls.SO_KEEPALIVE and hasattr(socket, "TCP_KEEPIDLE"):
             sock.setsockopt(socket.SOL_TCP, socket.TCP_KEEPIDLE, cls.TCP_KEEPIDLE)
             sock.setsockopt(socket.SOL_TCP, socket.TCP_KEEPINTVL, cls.TCP_KEEPINTVL)
             sock.setsockopt(socket.SOL_TCP, socket.TCP_KEEPCNT, cls.TCP_KEEPCNT)
