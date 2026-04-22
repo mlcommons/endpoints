@@ -37,7 +37,12 @@ from inference_endpoint.utils import WithUpdatesMixin
 
 from .accumulator_protocol import SSEAccumulatorProtocol
 from .adapter_protocol import HttpRequestAdapter
-from .cpu_affinity import AffinityPlan, get_cpus_in_numa_node, get_current_numa_node
+from .cpu_affinity import (
+    AffinityPlan,
+    UnsupportedPlatformError,
+    get_cpus_in_numa_node,
+    get_current_numa_node,
+)
 from .utils import get_ephemeral_port_limit, get_ephemeral_port_range
 
 ADAPTER_MAP = {
@@ -262,17 +267,24 @@ def _get_auto_num_workers() -> int:
     Users can override with explicit num_workers to use more cores (workers
     will be pinned to additional cores outside NUMA domain if needed).
 
+    On non-Linux platforms (NUMA probing is Linux-only) falls back to
+    ``min_workers`` so the config can still be constructed for local
+    development, template regeneration, and tests.
+
     Returns:
         Number of workers to use when num_workers is -1 (auto).
     """
     min_workers = 10
     max_workers = 24
 
-    numa_node = get_current_numa_node()
-    if numa_node is None:
+    try:
+        numa_node = get_current_numa_node()
+        if numa_node is None:
+            return min_workers
+        numa_cpus = get_cpus_in_numa_node(numa_node)
+    except UnsupportedPlatformError:
         return min_workers
 
-    numa_cpus = get_cpus_in_numa_node(numa_node)
     if not numa_cpus:
         return min_workers
 
