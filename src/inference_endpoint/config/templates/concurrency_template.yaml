@@ -17,5 +17,5 @@ settings:
     type: concurrency  # Load pattern type | options: max_throughput, poisson, concurrency, burst, step
     target_concurrency: 32  # Concurrent requests
 endpoint_config:
-  endpoints:  # Endpoint URL(s)
-  - 'http://localhost:8000'
+  endpoints:  # Endpoint URL(s). Must include scheme, e.g. 'http://host:port'.
+  - '<ENDPOINT_URL eg: http://localhost:8000>'

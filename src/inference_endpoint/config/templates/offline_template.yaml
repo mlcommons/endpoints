@@ -14,5 +14,5 @@ settings:
     max_duration_ms: 0  # Maximum test duration in ms (0 for no limit)
     n_samples_to_issue: null  # Sample count override
 endpoint_config:
-  endpoints:  # Endpoint URL(s)
-  - 'http://localhost:8000'
+  endpoints:  # Endpoint URL(s). Must include scheme, e.g. 'http://host:port'.
+  - '<ENDPOINT_URL eg: http://localhost:8000>'

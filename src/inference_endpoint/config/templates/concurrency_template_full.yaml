@@ -69,8 +69,8 @@ settings:
     min_required_connections: -1  # Min connections to initialize (-1=auto, 0=disabled)
     worker_gc_mode: relaxed  # Worker GC strategy | options: disabled, relaxed, system
 endpoint_config:
-  endpoints:  # Endpoint URL(s)
-    - 'http://localhost:8000'
+  endpoints:  # Endpoint URL(s). Must include scheme, e.g. 'http://host:port'.
+  - '<ENDPOINT_URL eg: http://localhost:8000>'
   api_key: null  # API key
   api_type: openai  # API type: openai or sglang | options: openai, sglang
 report_dir: null  # Report output directory
