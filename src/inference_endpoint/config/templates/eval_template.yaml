@@ -4,7 +4,7 @@ version: "1.0"
 type: "eval"
 
 model_params:
-  name: "meta-llama/Llama-3.1-8B-Instruct"
+  name: "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
   temperature: 0.0
   max_new_tokens: 2048
 
