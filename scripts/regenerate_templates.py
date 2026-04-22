@@ -149,6 +149,17 @@ def _dump_defaults(model: type[BaseModel]) -> dict:
         if info.default is not PydanticUndefined:
             default = info.default
         elif info.default_factory is not None:
+            # If the factory is itself a BaseModel subclass (e.g.
+            # default_factory=HTTPClientConfig), recurse into it instead of
+            # calling it — calling would run validators, defeating the point
+            # of this function. Factories that dynamically pick a concrete
+            # subclass (e.g. TransportConfig.create_default → ZMQTransportConfig)
+            # aren't types, so they fall through and get called as before.
+            if isinstance(info.default_factory, type) and issubclass(
+                info.default_factory, BaseModel
+            ):
+                out[name] = _dump_defaults(info.default_factory)
+                continue
             default = info.default_factory()
         else:
             # Required field — recurse if BaseModel, else None
