@@ -18,4 +18,4 @@ settings:
     target_concurrency: 32  # Concurrent requests
 endpoint_config:
   endpoints:  # Endpoint URL(s). Must include scheme, e.g. 'http://host:port'.
-  - '<ENDPOINT_URL eg: http://localhost:8000>'
+  - http://localhost:8000

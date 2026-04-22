@@ -93,7 +93,7 @@ ACC_DATASET = {
 }
 
 PLACEHOLDER_MODEL = "<MODEL_NAME eg: meta-llama/Llama-3.1-8B-Instruct>"
-PLACEHOLDER_ENDPOINT = "<ENDPOINT_URL eg: http://localhost:8000>"
+PLACEHOLDER_ENDPOINT = "http://localhost:8000"
 
 
 # ---------------------------------------------------------------------------
