@@ -40,26 +40,31 @@ class SQLiteBackend(StorageBackend):
         self._conn: sqlite3.Connection | None = None
         self._cur: sqlite3.Cursor | None = None
 
-    def connect(self) -> None:
+    def connect(self) -> bool:
         uri = f"file:{self.path}?mode=ro" if self.read_only else self.path
         self._conn = sqlite3.connect(uri, uri=self.read_only)
         self._cur = self._conn.cursor()
+        return True
 
-    def write(self, key: str, data: Any, **kwargs) -> None:
+    def write(self, key: str, data: Any, **kwargs) -> bool:
         assert self._cur is not None and self._conn is not None
         if kwargs.get("batch"):
             self._cur.executemany(key, data)
         else:
             self._cur.execute(key, data)
         self._conn.commit()
+        return True
 
     def read(self, key: str, **kwargs) -> list[Any]:
         assert self._cur is not None
         self._cur.execute(key, kwargs.get("params", ()))
         return self._cur.fetchall()
 
-    def delete(self, key: str) -> None:
-        self.write(key, ())
+    def delete(self, key: str) -> bool:
+        assert self._cur is not None and self._conn is not None
+        self._cur.execute(key, ())
+        self._conn.commit()
+        return self._cur.rowcount > 0
 
     def exists(self, key: str, **kwargs) -> bool:
         return bool(self.read(key, **kwargs))
@@ -67,13 +72,14 @@ class SQLiteBackend(StorageBackend):
     def list(self, prefix: str = "", **kwargs) -> Iterator[str]:
         yield from (row[0] for row in self.read(prefix, **kwargs))
 
-    def close(self) -> None:
+    def close(self) -> bool:
         if self._cur:
             self._cur.close()
         if self._conn:
             self._conn.close()
         self._cur = None
         self._conn = None
+        return True
 
 
 class PostgresBackend(StorageBackend):  # Derived from ABC StorageBackend
@@ -92,13 +98,14 @@ class PostgresBackend(StorageBackend):  # Derived from ABC StorageBackend
         self._conn = None
         self._cur = None
 
-    def connect(self) -> None:
+    def connect(self) -> bool:
         import psycopg
 
         self._conn = psycopg.connect(self.conninfo, autocommit=self.autocommit)
         self._cur = self._conn.cursor()
+        return True
 
-    def write(self, key: str, data: Any, **kwargs) -> None:
+    def write(self, key: str, data: Any, **kwargs) -> bool:
         assert self._cur is not None
         if kwargs.get("batch"):
             self._cur.executemany(key, data)
@@ -106,14 +113,19 @@ class PostgresBackend(StorageBackend):  # Derived from ABC StorageBackend
             self._cur.execute(key, data)
         if not self.autocommit:
             self._conn.commit()
+        return True
 
     def read(self, key: str, **kwargs) -> list[Any]:
         assert self._cur is not None
         self._cur.execute(key, kwargs.get("params", ()))
         return self._cur.fetchall()
 
-    def delete(self, key: str) -> None:
-        self.write(key, ())
+    def delete(self, key: str) -> bool:
+        assert self._cur is not None
+        self._cur.execute(key, ())
+        if not self.autocommit:
+            self._conn.commit()
+        return self._cur.rowcount > 0
 
     def exists(self, key: str, **kwargs) -> bool:
         return bool(self.read(key, **kwargs))
@@ -121,10 +133,11 @@ class PostgresBackend(StorageBackend):  # Derived from ABC StorageBackend
     def list(self, prefix: str = "", **kwargs) -> Iterator[str]:
         yield from (row[0] for row in self.read(prefix, **kwargs))
 
-    def close(self) -> None:
+    def close(self) -> bool:
         if self._cur:
             self._cur.close()
         if self._conn:
             self._conn.close()
         self._cur = None
         self._conn = None
+        return True

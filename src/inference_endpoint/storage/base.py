@@ -13,7 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Abstract interface for all storage backends."""
+"""Abstract interface for all storage backends
+(Eg. PostGres, SQL, GCS - Object storage).
+"""
 
 from __future__ import annotations
 
@@ -24,20 +26,20 @@ from typing import Any
 
 class StorageBackend(abc.ABC):
     @abc.abstractmethod
-    def connect(self) -> None:
-        """Open the underlying connection or session."""
+    def connect(self) -> bool:
+        """Open the underlying connection or session. Returns True on success."""
 
     @abc.abstractmethod
-    def write(self, key: str, data: Any, **kwargs) -> None:
-        """Write data identified by key."""
+    def write(self, key: str, data: Any, **kwargs) -> bool:
+        """Write data identified by key. Returns True on success."""
 
     @abc.abstractmethod
     def read(self, key: str, **kwargs) -> Any:
         """Read data identified by key."""
 
     @abc.abstractmethod
-    def delete(self, key: str) -> None:
-        """Delete the item identified by key."""
+    def delete(self, key: str) -> bool:
+        """Delete the item identified by key. Returns True if the item existed and was deleted."""
 
     @abc.abstractmethod
     def exists(self, key: str, **kwargs) -> bool:
@@ -48,8 +50,8 @@ class StorageBackend(abc.ABC):
         """Iterate over available keys, optionally filtered by prefix."""
 
     @abc.abstractmethod
-    def close(self) -> None:
-        """Close the connection or session and release resources."""
+    def close(self) -> bool:
+        """Close the connection or session and release resources. Returns True on success."""
 
     def __enter__(self) -> StorageBackend:
         self.connect()

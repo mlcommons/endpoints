@@ -39,21 +39,25 @@ class S3ObjectBackend(StorageBackend):  # Note: not currently in use
     def _key(self, key: str) -> str:  # hack to get at key
         return f"{self.prefix}/{key}" if self.prefix else key
 
-    def connect(self) -> None:
+    def connect(self) -> bool:
         import boto3
 
         self._client = boto3.client("s3")
+        return True
 
-    def write(self, key: str, data: Any, **kwargs) -> None:
+    def write(self, key: str, data: Any, **kwargs) -> bool:
         self._client.upload_fileobj(io.BytesIO(data), self.bucket, self._key(key))
+        return True
 
     def read(self, key: str, **kwargs) -> bytes:
         buf = io.BytesIO()
         self._client.download_fileobj(self.bucket, self._key(key), buf)
         return buf.getvalue()
 
-    def delete(self, key: str) -> None:
+    def delete(self, key: str) -> bool:
+        existed = self.exists(key)
         self._client.delete_object(Bucket=self.bucket, Key=self._key(key))
+        return existed
 
     def exists(self, key: str) -> bool:
         import botocore.exceptions
@@ -74,5 +78,6 @@ class S3ObjectBackend(StorageBackend):  # Note: not currently in use
                     k = k[len(self.prefix) + 1 :]
                 yield k
 
-    def close(self) -> None:
+    def close(self) -> bool:
         self._client = None
+        return True
