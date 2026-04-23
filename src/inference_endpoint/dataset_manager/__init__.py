@@ -21,6 +21,7 @@ This module handles dataset loading, preprocessing, and management.
 
 from .dataset import Dataset, EmptyDataset
 from .factory import DataLoaderFactory
+from .multi_turn_dataset import MultiTurnDataset
 from .predefined.aime25 import AIME25
 from .predefined.cnndailymail import CNNDailyMail
 from .predefined.gpqa import GPQA
@@ -58,4 +59,5 @@ __all__ = [
     "CNNDailyMail",
     "RandomDataset",
     "ShopifyProductCatalogue",
+    "MultiTurnDataset",
 ]

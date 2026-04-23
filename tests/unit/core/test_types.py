@@ -891,3 +891,57 @@ class TestMixedTypeSerialization:
         assert decoded.metadata["large_int"] == 9999999999999999
         assert decoded.metadata["negative"] == -123.456
         assert decoded.metadata["zero"] == 0
+
+
+@pytest.mark.unit
+class TestQueryResultWithMetadata:
+    """Test QueryResult.with_metadata() method for metadata merging."""
+
+    def test_with_metadata_merge_behavior(self):
+        """Test that with_metadata adds new keys and overwrites existing ones."""
+        result = QueryResult(
+            id="test",
+            response_output=TextModelOutput(output="hello"),
+            metadata={"key1": "old_value", "key2": "keep_me"},
+        )
+
+        updated = result.with_metadata({"key1": "new_value", "key3": "added"})
+
+        assert updated.metadata == {
+            "key1": "new_value",
+            "key2": "keep_me",
+            "key3": "added",
+        }
+        assert updated.id == "test"
+        assert updated.response_output == TextModelOutput(output="hello")
+
+    def test_with_metadata_none_returns_self(self):
+        """Test that with_metadata(None) returns self unchanged."""
+        result = QueryResult(
+            id="test",
+            response_output=TextModelOutput(output="hello"),
+            metadata={"key1": "value"},
+        )
+        assert result.with_metadata(None) is result
+
+    def test_with_metadata_empty_returns_self(self):
+        """Test that with_metadata({}) returns self unchanged."""
+        result = QueryResult(
+            id="test",
+            response_output=TextModelOutput(output="hello"),
+            metadata={"key1": "value"},
+        )
+        assert result.with_metadata({}) is result
+
+    def test_query_metadata_field_roundtrips(self):
+        """Test that Query.metadata round-trips through msgspec encoding."""
+        query = Query(
+            data={"prompt": "Hello"},
+            metadata={"conversation_id": "conv-1", "turn": 2},
+        )
+
+        encoded = msgspec.json.encode(query)
+        decoded = msgspec.json.decode(encoded, type=Query)
+
+        assert decoded.metadata["conversation_id"] == "conv-1"
+        assert decoded.metadata["turn"] == 2

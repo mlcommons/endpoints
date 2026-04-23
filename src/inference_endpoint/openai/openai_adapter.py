@@ -36,7 +36,7 @@ from .openai_types_gen import (
     Role6,
     ServiceTier,
 )
-from .types import SSEMessage
+from .types import SSEChoice, SSEMessage
 
 
 class OpenAIAdapter(HttpRequestAdapter):
@@ -75,10 +75,12 @@ class OpenAIAdapter(HttpRequestAdapter):
         return cls.from_endpoint_response(openai_response, result_id=query_id)
 
     @classmethod
-    def decode_sse_message(cls, json_bytes: bytes) -> str:
-        """Decode SSE message and extract content string."""
+    def decode_sse_message(cls, json_bytes: bytes) -> SSEChoice | None:
+        """Decode SSE message and return SSEChoice (delta + finish_reason)."""
         msg = msgspec.json.decode(json_bytes, type=SSEMessage)
-        return msg.choices[0].delta
+        if not msg.choices:
+            return None
+        return msg.choices[0]
 
     # ========================================================================
     # Internal APIs
@@ -86,15 +88,21 @@ class OpenAIAdapter(HttpRequestAdapter):
 
     @classmethod
     def to_endpoint_request(cls, query: Query) -> CreateChatCompletionRequest:
-        """Convert a Query to an OpenAI request."""
-        if "prompt" not in query.data:
-            raise ValueError("prompt not found in query.data")
+        """Convert a Query to an OpenAI request.
 
-        messages = [{"role": Role5.user.value, "content": query.data["prompt"]}]
-        if "system" in query.data:
-            messages.insert(
-                0, {"role": Role3.system.value, "content": query.data["system"]}
-            )
+        Supports both single-turn (prompt/system) and multi-turn (messages array) formats.
+        """
+        if "messages" in query.data and isinstance(query.data["messages"], list):
+            messages = query.data["messages"]
+        else:
+            if "prompt" not in query.data:
+                raise ValueError("prompt not found in query.data")
+
+            messages = [{"role": Role5.user.value, "content": query.data["prompt"]}]
+            if "system" in query.data:
+                messages.insert(
+                    0, {"role": Role3.system.value, "content": query.data["system"]}
+                )
 
         request = CreateChatCompletionRequest(
             model=ModelIdsShared(query.data.get("model", "no-model-name")),

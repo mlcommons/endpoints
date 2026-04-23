@@ -1,0 +1,33 @@
+name: "agentic-workflow-benchmark"
+version: "1.0"
+type: "online"
+
+model_params:
+  name: "your-model-name" # Replace with your actual model name
+  max_new_tokens: 512
+
+datasets:
+  - name: agentic_workflow
+    type: performance
+    # Run: python scripts/convert_agentic_snapshot.py <input.jsonl> examples/09_MultiTurn/datasets/agentic_workflow_flat.jsonl --verify
+    path: examples/09_MultiTurn/datasets/agentic_workflow_flat.jsonl
+    format: ".jsonl"
+    multi_turn:
+      mode: independent
+      turn_timeout_s: 600.0
+
+settings:
+  runtime:
+    min_duration_ms: 0
+    max_duration_ms: 3600000
+
+  load_pattern:
+    type: multi_turn
+    target_concurrency: 96
+
+endpoint_config:
+  endpoints:
+    - "http://localhost:8868"
+  api_type: openai
+
+report_dir: logs/agentic_workflow

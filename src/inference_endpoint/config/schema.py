@@ -60,8 +60,15 @@ class LoadPatternType(str, Enum):
     MAX_THROUGHPUT = "max_throughput"  # Offline: all queries at t=0
     POISSON = "poisson"  # Online: fixed QPS with Poisson distribution
     CONCURRENCY = "concurrency"  # Online: fixed concurrent requests
+    MULTI_TURN = "multi_turn"  # Multi-turn conversations with turn sequencing
     BURST = "burst"  # Burst pattern (TODO)
     STEP = "step"  # Step pattern (TODO)
+
+
+class ConversationMode(str, Enum):
+    """Multi-turn conversation scheduling modes."""
+
+    INDEPENDENT = "independent"  # Per-conv pipelines; no cross-conv turn barrier
 
 
 class OSLDistributionType(str, Enum):
@@ -230,6 +237,26 @@ class SubmissionReference(BaseModel):
         return get_ruleset(self.ruleset)
 
 
+class MultiTurnConfig(BaseModel):
+    """Multi-turn conversation configuration.
+
+    Configuration for benchmarking conversational AI workloads with turn sequencing.
+    Enables testing multi-turn conversations where each turn depends on previous responses.
+    Presence of this block in the dataset config enables multi-turn mode.
+
+    Attributes:
+        mode: Conversation scheduling strategy (currently only independent).
+        turn_timeout_s: Maximum seconds to wait for previous turn completion.
+        use_dataset_history: If True, use pre-built message history from dataset.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    mode: ConversationMode = ConversationMode.INDEPENDENT
+    turn_timeout_s: float = 300.0
+    use_dataset_history: bool = True
+
+
 class Dataset(BaseModel):
     """Dataset configuration.
 
@@ -259,6 +286,9 @@ class Dataset(BaseModel):
     )
     accuracy_config: AccuracyConfig | None = Field(
         None, description="Accuracy evaluation settings"
+    )
+    multi_turn: MultiTurnConfig | None = Field(
+        None, description="Multi-turn conversation configuration"
     )
 
     @model_validator(mode="after")
@@ -584,9 +614,13 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
                     f"Offline benchmarks must use 'max_throughput', got '{lp.type}'"
                 )
         elif effective_mode == TestType.ONLINE:
-            if lp.type not in (LoadPatternType.POISSON, LoadPatternType.CONCURRENCY):
+            if lp.type not in (
+                LoadPatternType.POISSON,
+                LoadPatternType.CONCURRENCY,
+                LoadPatternType.MULTI_TURN,
+            ):
                 raise ValueError(
-                    "Online mode requires --load-pattern (poisson or concurrency)"
+                    "Online mode requires --load-pattern (poisson, concurrency, or multi_turn)"
                 )
 
         return self
