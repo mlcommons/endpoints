@@ -13,15 +13,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Public API for the WAN 2.2 inference module."""
+"""Verify videogen public namespace exports."""
 
-from .adapter import Wan22Accumulator, Wan22Adapter
-from .types import VideoPathRequest, VideoPathResponse, VideoPayloadResponse
+import pytest
+from inference_endpoint.videogen import (
+    VideoPathRequest,
+    VideoPathResponse,
+    VideoPayloadResponse,
+    VideoGenAccumulator,
+    VideoGenAdapter,
+)
 
-__all__ = [
-    "Wan22Adapter",
-    "Wan22Accumulator",
-    "VideoPathRequest",
-    "VideoPathResponse",
-    "VideoPayloadResponse",
-]
+
+@pytest.mark.unit
+class TestVideoGenPublicExports:
+    def test_all_public_exports_importable(self):
+        assert VideoPathRequest is not None
+        assert VideoPathResponse is not None
+        assert VideoPayloadResponse is not None
+        assert VideoGenAdapter is not None
+        assert VideoGenAccumulator is not None

@@ -30,7 +30,7 @@ from .predefined.random import RandomDataset
 from .predefined.shopify_product_catalogue import ShopifyProductCatalogue
 
 # Import workload-specific datasets so they register in Dataset.PREDEFINED
-from inference_endpoint.wan22.dataset import Wan22Dataset  # noqa: E402
+from inference_endpoint.videogen.dataset import VideoGenDataset  # noqa: E402
 
 from .transforms import (
     AddStaticColumns,
@@ -62,5 +62,5 @@ __all__ = [
     "CNNDailyMail",
     "RandomDataset",
     "ShopifyProductCatalogue",
-    "Wan22Dataset",
+    "VideoGenDataset",
 ]

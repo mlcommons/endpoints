@@ -12,7 +12,7 @@
 #   Seed:        42 (fixed for reproducibility; combine with fixed_latent.pt)
 #   Dataset:     248 prompts from shopify_product_catalogue::q3vl
 #
-# These params are baked into Wan22Adapter defaults so only `prompt` is
+# These params are baked into VideoGenAdapter defaults so only `prompt` is
 # required from the dataset. Override via AddStaticColumns transform if needed.
 
 name: "offline-wan22-video-generation-benchmark"
@@ -53,11 +53,11 @@ metrics:
 endpoint_config:
   endpoints:
     - "http://localhost:8000"
-  api_type: "wan22"
+  api_type: "videogen"
   api_key: null
 
-# Fixed latent path is injected into every request via Wan22Dataset.
-# Set latent_path in dataset config or pass it when constructing Wan22Dataset.
+# Fixed latent path is injected into every request via VideoGenDataset.
+# Set latent_path in dataset config or pass it when constructing VideoGenDataset.
 # latent_path: /lustre/share/coreai_mlperf_inference/mlperf_inference_storage_clone/preprocessed_data/wan22-a14b/fixed_latent.pt
 
 report_dir: logs/wan22_video_generation_benchmark

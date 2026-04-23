@@ -23,11 +23,11 @@ import pandas as pd
 from inference_endpoint.dataset_manager.dataset import Dataset
 
 
-class Wan22Dataset(Dataset, dataset_id="wan22_mlperf"):
+class VideoGenDataset(Dataset, dataset_id="wan22_mlperf"):
     """Dataset that loads MLPerf WAN2.2 prompt text files.
 
     Each non-blank line in the file is one prompt. MLPerf endpoints run perf
-    and accuracy in a single pass, so Wan22Adapter always requests video_bytes.
+    and accuracy in a single pass, so VideoGenAdapter always requests video_bytes.
     """
 
     COLUMN_NAMES = ["prompt"]
@@ -38,8 +38,8 @@ class Wan22Dataset(Dataset, dataset_id="wan22_mlperf"):
         path: Path | str | None = None,
         negative_prompt: str = "",
         **kwargs: Any,
-    ) -> "Wan22Dataset":
-        """Create a Wan22Dataset from a prompts file path.
+    ) -> "VideoGenDataset":
+        """Create a VideoGenDataset from a prompts file path.
 
         Called by DataLoaderFactory when ``--dataset <path>`` is used with
         ``name=wan22_mlperf``.  The ``path`` argument maps directly to
@@ -47,7 +47,7 @@ class Wan22Dataset(Dataset, dataset_id="wan22_mlperf"):
         """
         if path is None:
             raise ValueError(
-                "Wan22Dataset requires a prompts file path. "
+                "VideoGenDataset requires a prompts file path. "
                 "Pass --dataset <path/to/prompts.txt> or set path= in the dataset config."
             )
         return cls(prompts_path=path, negative_prompt=negative_prompt)

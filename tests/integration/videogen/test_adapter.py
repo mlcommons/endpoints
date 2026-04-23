@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Integration tests: Wan22Adapter encode/decode round-trip against mock trtllm-serve."""
+"""Integration tests: VideoGenAdapter encode/decode round-trip against mock trtllm-serve."""
 
 import base64
 import json
@@ -24,7 +24,7 @@ import pytest
 from pydantic import ValidationError
 
 from inference_endpoint.core.types import Query
-from inference_endpoint.wan22.adapter import Wan22Adapter
+from inference_endpoint.videogen.adapter import VideoGenAdapter
 
 from .conftest import DUMMY_VIDEO_BYTES, MockTrtllmServe, MockTrtllmServeError
 
@@ -45,21 +45,21 @@ def _post(url: str, body: bytes) -> tuple[int, bytes]:
 
 
 @pytest.mark.integration
-class TestWan22AdapterRoundTrip:
+class TestVideoGenAdapterRoundTrip:
     """Verify encode_query → HTTP POST → decode_response against mock trtllm-serve."""
 
     def test_successful_generation_returns_video_bytes(
         self, mock_trtllm_serve: MockTrtllmServe
     ) -> None:
         query = Query(id="q1", data={"prompt": "a golden retriever running on a beach"})
-        request_bytes = Wan22Adapter.encode_query(query)
+        request_bytes = VideoGenAdapter.encode_query(query)
 
         status, content = _post(
             f"{mock_trtllm_serve.url}/v1/videos/generations", request_bytes
         )
         assert status == 200
 
-        result = Wan22Adapter.decode_response(content, query.id)
+        result = VideoGenAdapter.decode_response(content, query.id)
         assert result.id == "q1"
         assert result.error is None
         assert "video_bytes" in result.metadata
@@ -70,14 +70,14 @@ class TestWan22AdapterRoundTrip:
         self, mock_trtllm_serve: MockTrtllmServe
     ) -> None:
         query = Query(id="q2", data={"prompt": "ocean waves at sunset"})
-        payload = json.loads(Wan22Adapter.encode_query(query))
+        payload = json.loads(VideoGenAdapter.encode_query(query))
         assert payload["response_format"] == "video_bytes"
 
     def test_request_carries_mlperf_defaults(
         self, mock_trtllm_serve: MockTrtllmServe
     ) -> None:
         query = Query(id="q3", data={"prompt": "ocean waves at sunset"})
-        payload = json.loads(Wan22Adapter.encode_query(query))
+        payload = json.loads(VideoGenAdapter.encode_query(query))
         assert payload["fps"] == 16
         assert payload["seconds"] == pytest.approx(5.0)
         assert payload["size"] == "720x1280"
@@ -87,29 +87,29 @@ class TestWan22AdapterRoundTrip:
 
 
 @pytest.mark.integration
-class TestWan22AdapterErrorHandling:
+class TestVideoGenAdapterErrorHandling:
     def test_http_500_response_raises_on_decode(
         self, mock_trtllm_serve_error: MockTrtllmServeError
     ) -> None:
         query = Query(id="q4", data={"prompt": "a cat"})
         status, content = _post(
             f"{mock_trtllm_serve_error.url}/v1/videos/generations",
-            Wan22Adapter.encode_query(query),
+            VideoGenAdapter.encode_query(query),
         )
         assert status == 500
         with pytest.raises(Exception):
-            Wan22Adapter.decode_response(content, query.id)
+            VideoGenAdapter.decode_response(content, query.id)
 
     def test_malformed_json_response_raises(self) -> None:
         with pytest.raises(Exception):
-            Wan22Adapter.decode_response(b"not json at all", "q5")
+            VideoGenAdapter.decode_response(b"not json at all", "q5")
 
     def test_missing_video_bytes_field_raises_validation_error(self) -> None:
         bad_body = b'{"video_id": "vid_001"}'  # missing video_bytes
         with pytest.raises(ValidationError):
-            Wan22Adapter.decode_response(bad_body, "q6")
+            VideoGenAdapter.decode_response(bad_body, "q6")
 
     def test_missing_video_id_field_raises_validation_error(self) -> None:
         bad_body = b'{"video_bytes": "AAEC"}'  # missing video_id
         with pytest.raises(ValidationError):
-            Wan22Adapter.decode_response(bad_body, "q7")
+            VideoGenAdapter.decode_response(bad_body, "q7")

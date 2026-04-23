@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests that APIType.WAN22 is registered and wired up correctly."""
+"""Tests that APIType.VIDEOGEN is registered and wired up correctly."""
 
 from importlib import import_module
 
@@ -23,30 +23,30 @@ from inference_endpoint.endpoint_client.config import ACCUMULATOR_MAP, ADAPTER_M
 
 
 @pytest.mark.unit
-def test_api_type_wan22_exists():
-    assert APIType.WAN22 == "wan22"
+def test_api_type_videogen_exists():
+    assert APIType.VIDEOGEN == "videogen"
 
 
 @pytest.mark.unit
-def test_api_type_wan22_default_route():
-    assert APIType.WAN22.default_route() == "/v1/videos/generations"
+def test_api_type_videogen_default_route():
+    assert APIType.VIDEOGEN.default_route() == "/v1/videos/generations"
 
 
 @pytest.mark.unit
-def test_wan22_in_adapter_map():
-    assert APIType.WAN22 in ADAPTER_MAP
-    assert "Wan22Adapter" in ADAPTER_MAP[APIType.WAN22]
+def test_videogen_in_adapter_map():
+    assert APIType.VIDEOGEN in ADAPTER_MAP
+    assert "VideoGenAdapter" in ADAPTER_MAP[APIType.VIDEOGEN]
 
 
 @pytest.mark.unit
-def test_wan22_in_accumulator_map():
-    assert APIType.WAN22 in ACCUMULATOR_MAP
-    assert "Wan22Accumulator" in ACCUMULATOR_MAP[APIType.WAN22]
+def test_videogen_in_accumulator_map():
+    assert APIType.VIDEOGEN in ACCUMULATOR_MAP
+    assert "VideoGenAccumulator" in ACCUMULATOR_MAP[APIType.VIDEOGEN]
 
 
 @pytest.mark.unit
-def test_wan22_adapter_loadable():
-    path = ADAPTER_MAP[APIType.WAN22]
+def test_videogen_adapter_loadable():
+    path = ADAPTER_MAP[APIType.VIDEOGEN]
     module_path, class_name = path.rsplit(".", 1)
     mod = import_module(module_path)
     cls = getattr(mod, class_name)
@@ -54,8 +54,8 @@ def test_wan22_adapter_loadable():
 
 
 @pytest.mark.unit
-def test_wan22_accumulator_loadable():
-    path = ACCUMULATOR_MAP[APIType.WAN22]
+def test_videogen_accumulator_loadable():
+    path = ACCUMULATOR_MAP[APIType.VIDEOGEN]
     module_path, class_name = path.rsplit(".", 1)
     mod = import_module(module_path)
     cls = getattr(mod, class_name)

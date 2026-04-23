@@ -62,7 +62,7 @@ sql = [
     # SQL event logger (swappable backends, default sqlite)
     "sqlalchemy==2.0.48",
 ]
-wan22 = []
+videogen = []
 dev = [
     # Code quality
     "ruff==0.15.8",

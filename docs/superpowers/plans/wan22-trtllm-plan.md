@@ -11,7 +11,7 @@
 ```
 endpoints client                         trtllm-serve (inference server)
 ─────────────────                        ────────────────────────────────────────────
-Wan22Dataset
+VideoGenDataset
   └─ prompt                ──────────►  VideoGenerationRequest   (openai_protocol.py)
   └─ negative_prompt                          │
   └─ guidance_scale_2  ✗ (dropped today)      │  parse_visual_gen_params()
@@ -314,7 +314,7 @@ Expected: `OK: forward() has latent_path`
 
 ## Task 3: Fix `negative_prompt` in endpoints client
 
-`VideoPathRequest.negative_prompt` defaults to `""`, which trtllm-serve sets unconditionally, overriding any model default. Fix: use `None` as default (omitted from JSON via `exclude_none=True`), and inject the MLPerf canonical negative prompt via `Wan22Dataset`.
+`VideoPathRequest.negative_prompt` defaults to `""`, which trtllm-serve sets unconditionally, overriding any model default. Fix: use `None` as default (omitted from JSON via `exclude_none=True`), and inject the MLPerf canonical negative prompt via `VideoGenDataset`.
 
 **Files:**
 - Modify: `wan22/types.py`
@@ -324,17 +324,17 @@ Expected: `OK: forward() has latent_path`
 
 - [ ] **Step 1: Write failing tests**
 
-In `test_adapter.py`, add to `TestWan22Adapter`:
+In `test_adapter.py`, add to `TestVideoGenAdapter`:
 
 ```python
     def test_encode_query_omits_negative_prompt_when_absent(self):
         query = Query(id="q1", data={"prompt": "test"})
-        payload = json.loads(Wan22Adapter.encode_query(query))
+        payload = json.loads(VideoGenAdapter.encode_query(query))
         assert payload.get("negative_prompt") is None
 
     def test_encode_query_sends_negative_prompt_when_set(self):
         query = Query(id="q1", data={"prompt": "test", "negative_prompt": "blurry"})
-        payload = json.loads(Wan22Adapter.encode_query(query))
+        payload = json.loads(VideoGenAdapter.encode_query(query))
         assert payload["negative_prompt"] == "blurry"
 ```
 
@@ -342,7 +342,7 @@ In `test_adapter.py`, add to `TestWan22Adapter`:
 
 ```bash
 cd <endpoints-repo>
-pytest tests/unit/wan22/test_adapter.py::TestWan22Adapter::test_encode_query_omits_negative_prompt_when_absent -xvs
+pytest tests/unit/wan22/test_adapter.py::TestVideoGenAdapter::test_encode_query_omits_negative_prompt_when_absent -xvs
 ```
 
 Expected: FAIL — payload currently has `negative_prompt: ""`.
@@ -391,7 +391,7 @@ _MLPERF_NEGATIVE_PROMPT = (
 )
 
 
-class Wan22Dataset(Dataset, dataset_id="wan22_mlperf"):
+class VideoGenDataset(Dataset, dataset_id="wan22_mlperf"):
     def __init__(
         self,
         prompts_path: Path | str,

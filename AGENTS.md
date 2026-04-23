@@ -56,7 +56,7 @@ Dataset Manager --> Load Generator --> Endpoint Client --> External Endpoint
 | **CLI**             | `src/inference_endpoint/main.py`, `commands/benchmark/cli.py` | cyclopts-based, auto-generated from `schema.py` and `HTTPClientConfig` Pydantic models. Flat shorthands via `cyclopts.Parameter(alias=...)`                                                                                      |
 | **Async Utils**     | `src/inference_endpoint/async_utils/`                         | `LoopManager` (uvloop + eager_task_factory), ZMQ transport layer, event publisher                                                                                                                                                |
 | **OpenAI/SGLang**   | `src/inference_endpoint/openai/`, `sglang/`                   | Protocol adapters and response accumulators for different API formats                                                                                                                                                            |
-| **WAN22**           | `src/inference_endpoint/wan22/`                               | Client adapter and dataset loader for MLPerf WAN2.2-T2V-A14B. `Wan22Adapter` POSTs `VideoPathRequest` directly to trtllm-serve's `/v1/videos/generations` with `response_format=video_path`; server saves video to Lustre and returns path, avoiding large byte payloads. |
+| **VideoGen**           | `src/inference_endpoint/videogen/`                               | Client adapter and dataset loader for MLPerf WAN2.2-T2V-A14B. `VideoGenAdapter` POSTs `VideoPathRequest` directly to trtllm-serve's `/v1/videos/generations` with `response_format=video_path`; server saves video to Lustre and returns path, avoiding large byte payloads. |
 
 ### Hot-Path Architecture
 
@@ -171,11 +171,11 @@ src/inference_endpoint/
 │   ├── accumulator.py         # Streaming response accumulator
 │   └── harmony.py             # openai_harmony integration
 ├── sglang/                    # SGLang API adapter
-├── wan22/                     # WAN2.2 text-to-video MLPerf workload
+├── videogen/                  # WAN2.2 text-to-video MLPerf workload
 │   ├── __init__.py
 │   ├── types.py               # Pydantic: VideoPathRequest, VideoPathResponse, HealthResponse
-│   ├── adapter.py             # Wan22Adapter (HttpRequestAdapter) + Wan22Accumulator (no-op)
-│   └── dataset.py             # Wan22Dataset — loads MLPerf prompt text files
+│   ├── adapter.py             # VideoGenAdapter (HttpRequestAdapter) + VideoGenAccumulator (no-op)
+│   └── dataset.py             # VideoGenDataset — loads MLPerf prompt text files
 ├── evaluation/                # Accuracy evaluation (extractor, scoring, livecodebench)
 ├── plugins/                   # Plugin system
 ├── profiling/                 # line_profiler integration, pytest plugin
