@@ -22,6 +22,7 @@ datasets:  # Dataset configs
   parser:  # Column remapping: {prompt: <col>, system: <col>}
     prompt: text_input
   accuracy_config: null  # Accuracy evaluation settings
+  multi_turn: null  # Multi-turn conversation configuration
 - name: accuracy
   type: accuracy  # Dataset purpose: performance or accuracy | options: performance, accuracy
   path: '<DATASET_PATH eg: tests/datasets/ds_samples.jsonl>'  # Dataset file path
@@ -36,6 +37,7 @@ datasets:  # Dataset configs
     ground_truth: ground_truth  # Ground truth column name
     extractor: boxed_math_extractor  # Answer extractor (abcd_extractor, boxed_math_extractor, identity_extractor, python_code_extractor)
     num_repeats: 1  # Repeat dataset N times for evaluation
+  multi_turn: null  # Multi-turn conversation configuration
 settings:
   runtime:
     min_duration_ms: 600000  # Min duration (ms, or with suffix: 600s, 10m)
@@ -44,7 +46,7 @@ settings:
     scheduler_random_seed: 42  # Scheduler RNG seed
     dataloader_random_seed: 42  # Dataloader RNG seed
   load_pattern:
-    type: poisson  # Load pattern type | options: max_throughput, poisson, concurrency, burst, step
+    type: poisson  # Load pattern type | options: max_throughput, poisson, concurrency, multi_turn, burst, step
     target_qps: 10.0  # Target QPS
     target_concurrency: null  # Concurrent requests
   client:

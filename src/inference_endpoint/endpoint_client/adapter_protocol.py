@@ -95,22 +95,22 @@ class HttpRequestAdapter(ABC):
     @abstractmethod
     def decode_sse_message(cls, json_bytes: bytes) -> Any:
         """
-        Decode SSE message and extract content.
+        Decode SSE message and return adapter-specific chunk object.
 
         Args:
             json_bytes: Raw JSON bytes from SSE stream
 
         Returns:
-            Decoded SSE content (type depends on the adapter implementation)
+            Adapter-specific chunk object passed to accumulator.add_chunk()
         """
         raise NotImplementedError("decode_sse_message not implemented")
 
     @classmethod
-    def parse_sse_chunk(cls, buffer: bytes, end_pos: int) -> list[str]:
+    def parse_sse_chunk(cls, buffer: bytes, end_pos: int) -> list[Any]:
         """
-        Parse SSE chunk and extract all content strings.
+        Parse SSE chunk and extract all chunk objects.
 
-        Extracts JSON documents from SSE stream and decodes them to content strings.
+        Extracts JSON documents from SSE stream and decodes them to chunk objects.
         Silently ignores non-content SSE messages (role, finish_reason, etc).
 
         Args:
@@ -118,7 +118,7 @@ class HttpRequestAdapter(ABC):
             end_pos: End position in buffer to parse up to
 
         Returns:
-            List of content strings extracted from the SSE chunk
+            List of chunk objects extracted from the SSE chunk
         """
         json_docs = cls.SSE_DATA_PATTERN.findall(buffer[:end_pos])
         parsed_contents = []

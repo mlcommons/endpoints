@@ -24,6 +24,7 @@ from pathlib import Path
 from inference_endpoint.config.schema import Dataset as DatasetConfig
 from inference_endpoint.dataset_manager.dataset import Dataset, DatasetFormat
 
+from .multi_turn_dataset import MultiTurnDataset
 from .transforms import ColumnRemap, MakeAdapterCompatible, Transform
 
 logger = logging.getLogger(__name__)
@@ -95,18 +96,24 @@ class DataLoaderFactory:
         if file_format is not None:
             format_enum = DatasetFormat(file_format)
 
+        dataset_id = None
+        if config.multi_turn is not None:
+            dataset_id = MultiTurnDataset.DATASET_ID
+
         transforms: list[Transform] = []
         if remap is not None:
             # Parser convention is {target: source} (e.g. {prompt: article}).
             # ColumnRemap expects {source: target} — flip it.
             flipped = {src: dst for dst, src in remap.items()}
             transforms.append(ColumnRemap(flipped))  # type: ignore[arg-type]
-        transforms.append(MakeAdapterCompatible())
+        if dataset_id != MultiTurnDataset.DATASET_ID:
+            transforms.append(MakeAdapterCompatible())
 
         assert dataset_path is not None
         return Dataset.load_from_file(
             Path(dataset_path),
             transforms=transforms,
             format=format_enum,
+            dataset_id=dataset_id,
             num_repeats=num_repeats,
         )
