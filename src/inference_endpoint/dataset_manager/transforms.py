@@ -139,6 +139,7 @@ class Harmonize(RowProcessor):
         prompt_column: str = "prompt",
         tokenized_column: str = "input_tokens",
         harmonized_column: str | None = "harmonized_prompt",
+        mode: str = "harmony",
     ):
         """Initialize the Harmonize transform.
 
@@ -151,10 +152,14 @@ class Harmonize(RowProcessor):
             tokenized_column: The name of the column containing the tokenized prompt.
             harmonized_column: The name of the column containing the harmonized prompt. If None,
                 the harmonized prompt will not be stored as text.
+            mode: "harmony" to render a Harmony conversation; "plain" to tokenize the raw prompt.
         """
         self.prompt_column = prompt_column
         self.tokenized_column = tokenized_column
         self.harmonized_column = harmonized_column
+        self.mode = mode
+        if self.mode not in {"harmony", "plain"}:
+            raise ValueError(f"Invalid harmonize mode: {self.mode}")
         self.harmonizer = Harmonizer(
             tokenizer_name=tokenizer_name,
             encoding_name=encoding_name,
@@ -177,7 +182,19 @@ class Harmonize(RowProcessor):
         Returns:
             Row dictionary with the harmonized prompt added
         """
-        row[self.tokenized_column] = self.harmonizer(row[self.prompt_column])
+        # Guard pre-tokenized rows: the SGLang adapter adds a default Harmonize
+        # (GPT-OSS tokenizer + harmony mode). When row processors are fused, the
+        # dataframe-level skip is bypassed, so without this guard, adapter
+        # Harmonize would overwrite input tokens. Alternative: remove Harmonize
+        # from the adapter transforms and require each SGLang preset to add its
+        # own Harmonize with the desired tokenizer/args.
+        if self.tokenized_column in row and row[self.tokenized_column] is not None:
+            return row
+        if self.mode == "plain":
+            tokens = self.harmonizer.to_tokens(row[self.prompt_column])
+            row[self.tokenized_column] = tokens
+        else:
+            row[self.tokenized_column] = self.harmonizer(row[self.prompt_column])
         if self.harmonized_column is not None:
             row[self.harmonized_column] = self.harmonizer.to_text(
                 row[self.tokenized_column]

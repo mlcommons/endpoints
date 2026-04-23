@@ -1,0 +1,56 @@
+# Offline Throughput Benchmark
+name: "offline-llama3.1-8b-cnn-benchmark"
+version: "1.0"
+type: "offline"
+
+model_params:
+  name: "meta-llama/Llama-3.1-8B-Instruct" # Path to the model
+  temperature: 0.0
+  top_p: 1.0
+  max_new_tokens: 128
+
+datasets:
+  - name: cnn_dailymail::llama3_8b_sglang
+    type: accuracy
+    samples: 13368
+    parser:
+      input: prompt
+    accuracy_config:
+      eval_method: "rouge"
+      ground_truth: "highlights"
+      extractor: identity_extractor
+      num_repeats: 1
+  - name: cnn_dailymail::llama3_8b_sglang
+    type: "performance"
+    samples: 13368
+    parser:
+      input: prompt
+
+settings:
+  runtime:
+    min_duration_ms: 60000 # 1 minute
+    max_duration_ms: 360000 # 6 minutes (Arbitrary here, and doesn't have counterpart in legacy loadgen)
+    scheduler_random_seed: 137 # For Poisson/distribution sampling
+    dataloader_random_seed: 111 # For dataset shuffling (Will be updated after rng seeds are finalized for submission)
+    n_samples_to_issue: 13368 # Number of samples to issue (for offline, this should match the dataset samples)
+
+  load_pattern:
+    type: "max_throughput"
+
+  client:
+    workers: 4 # Number of client workers
+
+metrics:
+  collect:
+    - "throughput"
+    - "latency"
+    - "ttft"
+    - "tpot"
+
+endpoint_config:
+  endpoints:
+    - "http://localhost:8080"
+  api_type: "sglang"
+  api_key: null
+
+report_dir: logs/llama3_8b_cnn_sglang_offline # Directory to save the benchmark report

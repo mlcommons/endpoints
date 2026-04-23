@@ -112,7 +112,7 @@ class ChatCompletionResponseMessage(
 
     role: str
     content: str | None
-    refusal: str | None
+    refusal: str | None = None
 
 
 class ChatCompletionChoice(
@@ -149,5 +149,5 @@ class ChatCompletionResponse(
     created: int
     model: str
     choices: list[ChatCompletionChoice]
-    usage: CompletionUsage | None
-    system_fingerprint: str | None
+    usage: CompletionUsage | None = None
+    system_fingerprint: str | None = None
