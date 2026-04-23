@@ -30,6 +30,7 @@ from .predefined.open_orca import OpenOrca
 from .predefined.random import RandomDataset
 from .predefined.shopify_product_catalogue import ShopifyProductCatalogue
 from .transforms import (
+    AddDefaultColumns,
     AddStaticColumns,
     ColumnFilter,
     ColumnRemap,
@@ -46,6 +47,7 @@ __all__ = [
     "DataLoaderFactory",
     "ColumnFilter",
     "ColumnRemap",
+    "AddDefaultColumns",
     "AddStaticColumns",
     "UserPromptFormatter",
     "FusedRowProcessor",

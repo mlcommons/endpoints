@@ -26,9 +26,9 @@ import os
 import time
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
-from typing import Protocol
+from typing import Any, Protocol
 
 from ..config.runtime_settings import RuntimeSettings
 from ..core.record import (
@@ -60,7 +60,7 @@ class PhaseType(str, Enum):
     WARMUP = "warmup"
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class PhaseConfig:
     """Configuration for a single benchmark phase."""
 
@@ -68,6 +68,7 @@ class PhaseConfig:
     runtime_settings: RuntimeSettings
     dataset: Dataset
     phase_type: PhaseType = PhaseType.PERFORMANCE
+    strategy: LoadStrategy | None = field(default=None, compare=False)
 
 
 # ---------------------------------------------------------------------------
@@ -172,10 +173,18 @@ class PhaseIssuer:
         self.inflight: int = 0
         self.issued_count: int = 0
 
-    def issue(self, sample_index: int) -> str | None:
+    def issue(
+        self, sample_index: int, data_override: dict[str, Any] | None = None
+    ) -> str | None:
         """Load data, build Query, publish ISSUED, send to endpoint.
 
         Returns query_id on success, None if session is stopping.
+
+        Args:
+            sample_index: Index into the dataset.
+            data_override: If provided, merged over the loaded sample data.
+                Keys in data_override take precedence. Used by MultiTurnStrategy
+                to substitute live-accumulated message history.
 
         Note: load_sample() runs synchronously before the ISSUED timestamp.
         For accurate timing, datasets MUST be pre-loaded into memory.
@@ -185,6 +194,8 @@ class PhaseIssuer:
             return None
         query_id = uuid.uuid4().hex
         data = self._dataset.load_sample(sample_index)
+        if data_override is not None:
+            data = {**data, **data_override}
         query = Query(id=query_id, data=data)
         self.uuid_to_index[query_id] = sample_index
         ts = time.monotonic_ns()
@@ -306,10 +317,13 @@ class BenchmarkSession:
         phase_start = time.monotonic_ns()
 
         # Create per-phase state
-        sample_order = create_sample_order(phase.runtime_settings)
-        strategy = create_load_strategy(
-            phase.runtime_settings, self._loop, sample_order
-        )
+        if phase.strategy is not None:
+            strategy = phase.strategy
+        else:
+            sample_order = create_sample_order(phase.runtime_settings)
+            strategy = create_load_strategy(
+                phase.runtime_settings, self._loop, sample_order
+            )
         phase_issuer = PhaseIssuer(
             dataset=phase.dataset,
             issuer=self._issuer,

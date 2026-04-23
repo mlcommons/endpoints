@@ -19,56 +19,15 @@ from typing import Any
 
 import pandas as pd
 
-from ..config.schema import APIType, ModelParams, StreamingMode
+from ..config.schema import APIType, ModelParams
 from ..exceptions import InputValidationError
 from .dataset import Dataset
-from .transforms import apply_transforms
-
-# Known generation parameter fields to forward from dataset to API requests.
-# Aligned with OpenAI API specification and openai_msgspec_adapter.py implementation.
-# These parameters work in both single-turn and multi-turn modes.
-GENERATION_PARAMS = {
-    "model",
-    "max_new_tokens",
-    "max_completion_tokens",
-    "stream",
-    "temperature",
-    "top_p",
-    "top_k",
-    "seed",
-    "repetition_penalty",
-    "frequency_penalty",
-    "presence_penalty",
-    "stop",
-    "n",
-    "logit_bias",  # Token probability adjustments
-    "name",  # Entity name for role (NOT model name, e.g., 'Bob' for tracking)
-    "user",  # End-user identifier for monitoring/abuse detection
-    "chat_template",  # Custom chat formatting template
-    "tools",  # OpenAI tool definitions (list[dict]) for tool-calling models
-}
-
-
-def _model_param_defaults(model_params: ModelParams | None) -> dict[str, Any]:
-    """Build per-request defaults for multi-turn rows from model params.
-
-    Multi-turn datasets use `content` and conversation metadata rather than the
-    single-turn `prompt` field expected by adapter dataset transforms. Applying
-    those transforms would drop the conversation schema before load_sample() can
-    construct the messages array. Instead, we inject the request defaults here.
-    """
-    if model_params is None:
-        return {}
-
-    return {
-        "model": model_params.name,
-        "stream": model_params.streaming == StreamingMode.ON,
-        "max_completion_tokens": model_params.max_new_tokens,
-        "temperature": model_params.temperature,
-        "top_p": model_params.top_p,
-        "top_k": model_params.top_k,
-        "repetition_penalty": model_params.repetition_penalty,
-    }
+from .transforms import (
+    AddDefaultColumns,
+    AddStaticColumns,
+    apply_transforms,
+    get_transforms_for_api_type,
+)
 
 
 def _expand_tool_results(row: dict) -> list[dict]:
@@ -113,7 +72,7 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
     Optional columns:
         - system: System prompt associated with the conversation (typically set on the first user turn)
         - model: Model name override
-        - max_new_tokens: Max tokens for this turn
+        - max_new_tokens / max_completion_tokens: Max tokens for this turn (alias; mapped to max_completion_tokens)
 
     Attributes:
         conversation_metadata: Metadata dict containing:
@@ -139,7 +98,6 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
         self._validate_conversation_structure()
         self._validate_turn_numbering()
         self.conversation_metadata = self._build_metadata()
-        self._client_turn_indices: list[int] | None = None
 
     def _validate_conversation_grouping(self) -> None:
         """Validate that all rows for each conversation_id appear consecutively in file order.
@@ -321,23 +279,18 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
         model_params: ModelParams | None = None,
         force: bool = False,
     ):
-        """Load dataset and build a dense user-turn index.
+        """Load dataset, apply adapter defaults, and pre-bake client-turn samples.
 
-        Multi-turn benchmarks only issue user turns. Assistant turns remain in the
-        backing data so the conversation structure can still be validated.
+        Unlike single-turn datasets, multi-turn rows do not have a `prompt` column,
+        so ColumnFilter (which requires prompt) is skipped. AddStaticColumns entries
+        from the adapter are applied via AddDefaultColumns (fill-missing-only) so that
+        per-row dataset overrides are preserved.
 
-        Unlike single-turn datasets, multi-turn rows do not have a `prompt`
-        column, so adapter dataset transforms are intentionally skipped here.
-        They would apply a single-turn ColumnFilter and strip the conversation
-        fields required by load_sample(). Request defaults from model_params are
-        merged directly into the conversation rows instead.
+        After transforms, only client turns (user + tool) are stored in self.data as
+        fully assembled sample dicts (with messages, current_turn_message, system_content
+        attached). load_sample() and num_samples() are inherited from the base class.
         """
         if not force and self.data is not None:
-            self._client_turn_indices = [
-                index
-                for index, row in enumerate(self.data)
-                if row["role"] in ("user", "tool")
-            ]
             return
 
         df = self.dataframe
@@ -353,76 +306,57 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
         if transforms:
             df = apply_transforms(df, transforms)
 
-        defaults = _model_param_defaults(model_params)
-        for key, value in defaults.items():
-            if value is None:
+        # Extract AddStaticColumns defaults from adapter transforms and apply as
+        # fill-missing-only (preserves per-row dataset values).
+        if api_type is not None and model_params is not None:
+            adapter_transforms = get_transforms_for_api_type(api_type, model_params)
+            defaults: dict[str, Any] = {}
+            for t in adapter_transforms:
+                if isinstance(t, AddStaticColumns):
+                    defaults.update(t.data)
+            if defaults:
+                df = AddDefaultColumns(defaults)(df)
+
+        all_rows = df.to_dict(orient="records")
+
+        # Pre-bake: assemble one complete sample dict per client turn.
+        # NaN filtering replaces the GENERATION_PARAMS allowlist — any key whose
+        # value is float NaN was absent in the original dataset row.
+        pre_built = self.conversation_metadata.get("pre_built_messages_by_key", {})
+        client_turn_samples: list[dict[str, Any]] = []
+
+        for row in all_rows:
+            if row.get("role") not in ("user", "tool"):
                 continue
-            if key in df.columns:
-                df[key] = df[key].where(pd.notna(df[key]), value)
-            else:
-                df[key] = value
 
-        self.data = df.to_dict(orient="records")
-        assert self.data is not None, "Failed to convert DataFrame to records"
+            # Filter NaN values; keep all meaningful fields (extra keys are harmless
+            # since adapters consume only what they recognize).
+            sample: dict[str, Any] = {
+                k: v
+                for k, v in row.items()
+                if v is not None and not (isinstance(v, float) and pd.isna(v))
+            }
 
-        self._client_turn_indices = [
-            index
-            for index, row in enumerate(self.data)
-            if row["role"] in ("user", "tool")
-        ]
+            # max_new_tokens → max_completion_tokens alias
+            if "max_completion_tokens" not in sample and "max_new_tokens" in sample:
+                sample["max_completion_tokens"] = sample.pop("max_new_tokens")
+            if "max_completion_tokens" not in sample:
+                sample["max_completion_tokens"] = 128
+            if "stream" not in sample:
+                sample["stream"] = False
 
-    def load_sample(self, index: int) -> dict[str, Any]:
-        """Load the Nth client turn (user or tool) as a benchmark sample."""
-        assert self.data is not None, "Dataset not loaded. Call load() first."
-        assert (
-            self._client_turn_indices is not None
-        ), "Dataset not loaded. Call load() first."
-        row = self.data[self._client_turn_indices[index]]
+            # Attach pre-built message list (system + history + current turn).
+            key = (row["conversation_id"], int(row["turn"]))
+            messages = pre_built.get(key, [])
+            sample["messages"] = messages
 
-        content_val = row.get("content")
-        sample: dict[str, Any] = {
-            "conversation_id": row["conversation_id"],
-            "turn": row["turn"],
-            "role": row["role"],
-        }
-        if content_val is not None and not (
-            isinstance(content_val, float) and pd.isna(content_val)
-        ):
-            sample["content"] = content_val
+            # Fields for use_dataset_history=False path (live history accumulation).
+            sample["current_turn_message"] = messages[-1] if messages else {}
+            first = messages[0] if messages else {}
+            sample["system_content"] = (
+                first.get("content") if first.get("role") == "system" else None
+            )
 
-        for param in GENERATION_PARAMS:
-            if param in row:
-                value = row[param]
-                # Skip pandas NaN/None values
-                if value is not None and (
-                    not isinstance(value, float) or not pd.isna(value)
-                ):
-                    sample[param] = value
+            client_turn_samples.append(sample)
 
-        # Set defaults for critical params if not present
-        if "max_new_tokens" not in sample and "max_completion_tokens" not in sample:
-            sample["max_new_tokens"] = 128
-        if "stream" not in sample:
-            sample["stream"] = False
-
-        # Attach pre-built message list (system + history + current turn).
-        key = (row["conversation_id"], int(row["turn"]))
-        pre_built = self.conversation_metadata.get("pre_built_messages_by_key", {}).get(
-            key, []
-        )
-        sample["pre_built_messages"] = pre_built
-
-        # Fields for use_dataset_history=False path (live history accumulation).
-        sample["current_turn_message"] = pre_built[-1] if pre_built else {}
-        first = pre_built[0] if pre_built else {}
-        sample["system_content"] = (
-            first.get("content") if first.get("role") == "system" else None
-        )
-
-        return sample
-
-    def num_samples(self) -> int:
-        assert (
-            self._client_turn_indices is not None
-        ), "Dataset not loaded. Call load() first."
-        return len(self._client_turn_indices)
+        self.data = client_turn_samples
