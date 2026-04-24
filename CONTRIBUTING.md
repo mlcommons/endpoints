@@ -39,28 +39,39 @@ benchmarking tool for LLM inference endpoints targeting 50k+ QPS.
 git clone https://github.com/<your-username>/endpoints.git
 cd endpoints
 
-# Create virtual environment
-python3.12 -m venv venv
-source venv/bin/activate
-
 # Install with dev and test extras
-pip install -e ".[dev,test]"
+uv sync --extra dev --extra test
 
 # Install pre-commit hooks
-pre-commit install
+uv run pre-commit install
 
 # Verify your setup
-pytest -m unit -x --timeout=60
+uv run pytest -m unit -x --timeout=60
 ```
+
+<details>
+<summary>Using pip + venv instead (backward-compatible)</summary>
+
+> **Note:** Does not use `uv.lock` — dependency versions may differ from the lockfile.
+
+```bash
+python3.12 -m venv venv && source venv/bin/activate
+pip install -e ".[dev,test]"
+pre-commit install
+```
+
+After activating the venv, commands work without the `uv run` prefix.
+
+</details>
 
 ### Local Testing with Echo Server
 
 ```bash
 # Start a local echo server
-python -m inference_endpoint.testing.echo_server --port 8765
+uv run python -m inference_endpoint.testing.echo_server --port 8765
 
 # Run a quick probe
-inference-endpoint probe --endpoints http://localhost:8765 --model test-model
+uv run inference-endpoint probe --endpoints http://localhost:8765 --model test-model
 ```
 
 ## Code Style and Conventions
@@ -73,7 +84,7 @@ these automatically.
 
 ```bash
 # Run all checks manually
-pre-commit run --all-files
+uv run pre-commit run --all-files
 ```
 
 ### Key Conventions
@@ -106,19 +117,19 @@ is latency-critical. In these paths:
 
 ```bash
 # All tests (excludes slow/performance)
-pytest
+uv run pytest
 
 # Unit tests only
-pytest -m unit
+uv run pytest -m unit
 
 # Integration tests
-pytest -m integration
+uv run pytest -m integration
 
 # Single file
-pytest -xvs tests/unit/path/to/test_file.py
+uv run pytest -xvs tests/unit/path/to/test_file.py
 
 # With coverage
-pytest --cov=src --cov-report=html
+uv run pytest --cov=src --cov-report=html
 ```
 
 ### Test Markers
@@ -154,7 +165,7 @@ docs/short-description
 
 1. **Create a focused PR** — one logical change per PR
 2. **Fill out the PR template** — describe what, why, and how to test
-3. **Ensure CI passes** — `pre-commit run --all-files` and `pytest -m unit` locally before pushing
+3. **Ensure CI passes** — `uv run pre-commit run --all-files` and `uv run pytest -m unit` locally before pushing
 4. **Link related issues** — use `Closes #123` or `Relates to #123`
 5. **Expect review within 2-3 business days** — reviewers are auto-assigned based on changed files
 

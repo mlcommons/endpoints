@@ -10,7 +10,7 @@ The following tasks need to be completed to enable full documentation:
 
 ```bash
 cd docs/sphinx
-pip install sphinx sphinx-rtd-theme sphinx-autodoc-typehints myst-parser
+uv sync --extra dev  # sphinx and related packages are included in dev extras
 
 # Run sphinx-quickstart
 sphinx-quickstart
@@ -84,15 +84,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@e58605a9b6da7c637471fab8847a5e5a6b8df081 # v5
         with:
-          python-version: "3.12"
+          python-version-file: .python-version
 
       - name: Install dependencies
-        run: |
-          pip install -e .
-          pip install sphinx sphinx-rtd-theme sphinx-autodoc-typehints myst-parser
+        run: uv sync --frozen --extra dev
 
       - name: Build documentation
         run: |
@@ -128,8 +126,8 @@ myst-parser>=2.0.0
 ### 7. Build Locally
 
 ```bash
-# Install dependencies
-pip install -r requirements/dev.txt
+# Install dependencies (sphinx is included in dev extras)
+uv sync --extra dev
 
 # Build HTML documentation
 cd docs/sphinx

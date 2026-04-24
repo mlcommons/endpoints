@@ -15,8 +15,8 @@ in the yaml file change, we include the generated definitions as well.
 ```
 
 wget https://raw.githubusercontent.com/openai/openai-openapi/498c71ddf6f1c45b983f972ccabca795da211a3e/openapi.yaml
-pip install datamodel-code-generator
-datamodel-codegen --input-file-type openapi --input openapi.yaml --output openai_types_gen.py --output-model-type pydantic_v2.BaseModel
+uv pip install datamodel-code-generator
+uv run datamodel-codegen --input-file-type openapi --input openapi.yaml --output openai_types_gen.py --output-model-type pydantic_v2.BaseModel
 sed -i 's/min_items/min_length/g' openai_types_gen.py
 ```
 

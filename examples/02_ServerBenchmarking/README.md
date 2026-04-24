@@ -49,7 +49,7 @@ enroot start -e HF_TOKEN=$HF_TOKEN -m $HF_HOME:/root/.cache/huggingface vllm+vll
 Once the server is up and running, we can send requests to the endpoint by passing in the endpoint address via `-e` as well as the model name
 
 ```
-inference-endpoint benchmark offline -e http://localhost:8000 -d tests/datasets/dummy_1k.jsonl  --model ${MODEL_NAME}
+uv run inference-endpoint benchmark offline -e http://localhost:8000 -d tests/datasets/dummy_1k.jsonl  --model ${MODEL_NAME}
 ```
 
 # Using a config file
@@ -81,6 +81,6 @@ dataset["train"].to_json("cnn_dailymail_train.json")
 And then launch the example template.
 
 ```
-inference-endpoint benchmark from-config -c examples/02_ServerBenchmarking/online_llama2_70b_cnn.yaml --timeout 600
+uv run inference-endpoint benchmark from-config -c examples/02_ServerBenchmarking/online_llama2_70b_cnn.yaml --timeout 600
 
 ```

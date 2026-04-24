@@ -39,7 +39,7 @@ or in the scheduling/coordination layer. For broader tuning guidance, see
 [CLIENT_PERFORMANCE_TUNING.md](../CLIENT_PERFORMANCE_TUNING.md). It can be run directly:
 
 ```bash
-python3 -m inference_endpoint.utils.benchmark_httpclient --endpoint URL --workers 4
+uv run python -m inference_endpoint.utils.benchmark_httpclient --endpoint URL --workers 4
 ```
 
 ## Integration Points

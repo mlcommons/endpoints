@@ -2,6 +2,8 @@
 
 Command-line reference for all `inference-endpoint` subcommands, flags, load patterns, and usage examples.
 
+> **Note:** Commands below assume an activated venv (`source .venv/bin/activate`). Without activation, prefix all commands with `uv run`.
+
 ## Commands
 
 ### Performance Benchmarking

@@ -28,8 +28,8 @@ Mirrors the request prompt back as the response. Used for:
 - CI integration tests
 
 ```bash
-python3 -m inference_endpoint.testing.echo_server --port 8765
-python3 -m inference_endpoint.testing.echo_server --host 0.0.0.0 --port 9000
+uv run python -m inference_endpoint.testing.echo_server --port 8765
+uv run python -m inference_endpoint.testing.echo_server --host 0.0.0.0 --port 9000
 ```
 
 The server implements the OpenAI Chat Completions API and accepts the standard `messages` request

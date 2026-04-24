@@ -28,7 +28,7 @@ This creates a `vllm_venv` directory with vLLM installed. You can specify a cust
 
 ```bash
 cd examples/03_BenchmarkComparison
-python compare_with_vllm.py --model "Qwen/Qwen2.5-0.5B-Instruct" --endpoint http://localhost:8000
+uv run python compare_with_vllm.py --model "Qwen/Qwen2.5-0.5B-Instruct" --endpoint http://localhost:8000
 ```
 
 ### Options
@@ -48,7 +48,7 @@ python compare_with_vllm.py --model "Qwen/Qwen2.5-0.5B-Instruct" --endpoint http
 ### Example
 
 ```bash
-python compare_with_vllm.py \
+uv run python compare_with_vllm.py \
     --model "Qwen/Qwen2.5-0.5B-Instruct" \
     --num-prompts 200 \
     --max-output-tokens 1000
@@ -60,7 +60,7 @@ The script runs both benchmarks and displays a comparison table:
 
 ```
 
-$ python examples/03_BenchmarkComparison/compare_with_vllm.py --model Qwen/Qwen2.5-0.5B-Instruct --num-prompts 10000
+$ uv run python examples/03_BenchmarkComparison/compare_with_vllm.py --model Qwen/Qwen2.5-0.5B-Instruct --num-prompts 10000
 
 ====================================================================================================
 Metric                              | Inference Endpoint        | vLLM Benchmark

@@ -75,13 +75,13 @@ If you prefer to run `lcb-service` standalone without the docker container, do t
 
 ```bash
 # Enter your venv for inference-endpoint
-source /path/to/inference-endpoint/venv/bin/activate
+source /path/to/inference-endpoint/.venv/bin/activate
 
 # Downgrade Huggingface Datasets to 3.6.0
-pip install datasets==3.6.0
+uv pip install datasets==3.6.0
 
 # Install other dependencies
-pip install fastapi==0.128.0 uvicorn[standard]==0.40.0
+uv pip install fastapi==0.128.0 uvicorn[standard]==0.40.0
 
 # Enable cli-based calling of LCBServe
 export ALLOW_LCB_LOCAL_EVAL=true
@@ -96,7 +96,7 @@ After these steps, the `LiveCodeBenchScorer` will fallback to running `lcb_serve
 The `run.py` script runs all three benchmarks (GPQA, AIME25, and LiveCodeBench) in sequence:
 
 ```bash
-python run.py \
+uv run python run.py \
     --report-dir ./results \
     --num-repeats 1 \
     --min-duration 10 \
@@ -131,7 +131,7 @@ is complete and the report directory has been generated.
 ### GPQA Evaluation
 
 ```bash
-python eval_gpqa.py \
+uv run python eval_gpqa.py \
     --dataset-path datasets/gpqa/diamond/gpqa_diamond.parquet \
     --report-dir sglang_accuracy_report
 ```
@@ -139,7 +139,7 @@ python eval_gpqa.py \
 ### AIME25 Evaluation
 
 ```bash
-python eval_aime.py \
+uv run python eval_aime.py \
     --dataset-path datasets/aime25/aime25.parquet \
     --report-dir sglang_accuracy_report
 ```
@@ -147,7 +147,7 @@ python eval_aime.py \
 ### LiveCodeBench Evaluation
 
 ```bash
-python eval_livecodebench.py \
+uv run python eval_livecodebench.py \
     --dataset-path datasets/livecodebench/release_v6/livecodebench_release_v6.parquet \
     --report-dir sglang_accuracy_report \
     --lcb-version release_v6 \

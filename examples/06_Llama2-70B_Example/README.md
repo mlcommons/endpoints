@@ -32,8 +32,8 @@ hf download $MODEL_NAME
 Accuracy evaluation for MLPerf Llama2-70B requires additional setup. Before running the benchmark, run the following:
 
 ```
-python3 -m pip install nltk evaluate rouge_score
-python3 -c 'import nltk; nltk.download("punkt"); nltk.download("punkt_tab")'
+uv pip install nltk evaluate rouge_score
+uv run python -c 'import nltk; nltk.download("punkt"); nltk.download("punkt_tab")'
 ```
 
 These steps are not needed when doing performance-only runs.
@@ -54,5 +54,5 @@ docker run --runtime nvidia --gpus all \
 And launch the benchmark using the config file `online_llama2_70b_orca.yaml`
 
 ```
-inference-endpoint benchmark from-config -c examples/06_Llama2-70B_Example/online_llama2_70b_orca.yaml --timeout 600
+uv run inference-endpoint benchmark from-config -c examples/06_Llama2-70B_Example/online_llama2_70b_orca.yaml --timeout 600
 ```
