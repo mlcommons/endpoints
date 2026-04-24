@@ -195,6 +195,8 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
         # This includes assistant rows (tool dispatches or terminal responses)
         # so no runtime injection is required.
         pre_built_messages_by_key: dict[tuple, list[dict]] = {}
+        current_turn_messages_by_key: dict[tuple, list[dict]] = {}
+        system_prompts_by_conv: dict[str, str | None] = {}
 
         for conv_id, group in self.dataframe.groupby("conversation_id"):
             sorted_group = group.sort_values("turn")
@@ -207,6 +209,7 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
                 if val and isinstance(val, str):
                     system_content = val
                     break
+            system_prompts_by_conv[str(conv_id)] = system_content
 
             for idx, row in client_rows.iterrows():
                 t_n = int(row["turn"])
@@ -220,12 +223,18 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
                 prior_rows = sorted_group[sorted_group["turn"] < t_n]
                 for _, prior_row in prior_rows.iterrows():
                     msg: dict[str, Any] = {}
-                    for key in ("role", "content", "tool_calls"):
+                    for key in ("role", "content", "tool_calls", "tool_results"):
                         val = prior_row.get(key)
                         if val is not None and not (
                             isinstance(val, float) and pd.isna(val)
                         ):
                             msg[key] = val
+                    if (
+                        msg.get("role") == "assistant"
+                        and "tool_calls" in msg
+                        and "content" not in msg
+                    ):
+                        msg["content"] = None
                     if msg.get("role"):
                         # Expand merged parallel tool results: a single row with
                         # tool_results: [{tool_call_id, content}, ...] expands into
@@ -239,9 +248,10 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
                 # Append the current client turn message.
                 # A merged parallel-tool row carries tool_results instead of a
                 # single tool_call_id/content pair; expand to one message per result.
+                current_turn_msgs: list[dict] = []
                 expanded = _expand_tool_results(row)
                 if expanded:
-                    messages.extend(expanded)
+                    current_turn_msgs = expanded
                 else:
                     cur: dict[str, Any] = {}
                     for key in ("role", "content"):
@@ -250,9 +260,11 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
                             isinstance(val, float) and pd.isna(val)
                         ):
                             cur[key] = val
-                    messages.append(cur)
+                    current_turn_msgs = [cur]
+                messages.extend(current_turn_msgs)
 
                 pre_built_messages_by_key[(conv_id, t_n)] = messages
+                current_turn_messages_by_key[(conv_id, t_n)] = current_turn_msgs
 
                 samples.append(
                     {
@@ -270,6 +282,8 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
             .max(),
             "client_turns_per_conversation": client_turns_per_conv,
             "pre_built_messages_by_key": pre_built_messages_by_key,
+            "current_turn_messages_by_key": current_turn_messages_by_key,
+            "system_prompts_by_conv": system_prompts_by_conv,
         }
 
     def load(
@@ -287,8 +301,8 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
         per-row dataset overrides are preserved.
 
         After transforms, only client turns (user + tool) are stored in self.data as
-        fully assembled sample dicts (with messages, current_turn_message, system_content
-        attached). load_sample() and num_samples() are inherited from the base class.
+        fully assembled sample dicts (with messages attached).
+        load_sample() and num_samples() are inherited from the base class.
         """
         if not force and self.data is not None:
             return
@@ -325,6 +339,26 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
         pre_built = self.conversation_metadata.get("pre_built_messages_by_key", {})
         client_turn_samples: list[dict[str, Any]] = []
 
+        # Collect per-conversation defaults from the first user row so that
+        # fields like model/max_completion_tokens propagate to tool rows.
+        _PROPAGATED_KEYS = {
+            "model",
+            "max_completion_tokens",
+            "max_new_tokens",
+            "stream",
+        }
+        conv_defaults: dict[str, dict[str, Any]] = {}
+        for row in all_rows:
+            cid = row.get("conversation_id")
+            if cid not in conv_defaults and row.get("role") == "user":
+                conv_defaults[cid] = {
+                    k: row[k]
+                    for k in _PROPAGATED_KEYS
+                    if k in row
+                    and row[k] is not None
+                    and not (isinstance(row[k], float) and pd.isna(row[k]))
+                }
+
         for row in all_rows:
             if row.get("role") not in ("user", "tool"):
                 continue
@@ -336,6 +370,14 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
                 for k, v in row.items()
                 if v is not None and not (isinstance(v, float) and pd.isna(v))
             }
+            # Strip dataset-internal fields that must not reach the endpoint.
+            sample.pop("tool_results", None)
+            sample.pop("tool_calls", None)
+
+            # Fill missing propagated fields from the first user row of this conversation.
+            for k, v in conv_defaults.get(row.get("conversation_id"), {}).items():
+                if k not in sample:
+                    sample[k] = v
 
             # max_new_tokens → max_completion_tokens alias
             if "max_completion_tokens" not in sample and "max_new_tokens" in sample:
@@ -349,13 +391,6 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
             key = (row["conversation_id"], int(row["turn"]))
             messages = pre_built.get(key, [])
             sample["messages"] = messages
-
-            # Fields for use_dataset_history=False path (live history accumulation).
-            sample["current_turn_message"] = messages[-1] if messages else {}
-            first = messages[0] if messages else {}
-            sample["system_content"] = (
-                first.get("content") if first.get("role") == "system" else None
-            )
 
             client_turn_samples.append(sample)
 

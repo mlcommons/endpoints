@@ -450,3 +450,123 @@ class TestClientAPITypePropagation:
         client = HTTPClientConfig(api_type=APIType.OPENAI, adapter=OpenAIAdapter)
         assert client.adapter is OpenAIAdapter
         assert client.adapter is not OpenAIMsgspecAdapter
+
+
+class TestMultiTurnValidation:
+    """Tests for multi-turn config validation and cross-validation."""
+
+    def _make_online_multi_turn(self, concurrency: int | None = 4, **ds_kwargs):
+        lp: dict = {"type": "multi_turn"}
+        if concurrency is not None:
+            lp["target_concurrency"] = concurrency
+        return {
+            "type": TestType.ONLINE,
+            "model_params": {"name": "M"},
+            "endpoint_config": {"endpoints": ["http://x"]},
+            "datasets": [{"path": "D", "multi_turn": {}, **ds_kwargs}],
+            "settings": {"load_pattern": lp},
+        }
+
+    @pytest.mark.unit
+    def test_multi_turn_valid_config(self):
+        config = BenchmarkConfig(**self._make_online_multi_turn(concurrency=16))
+        from inference_endpoint.config.schema import LoadPatternType
+
+        assert config.settings.load_pattern.type == LoadPatternType.MULTI_TURN
+        assert config.settings.load_pattern.target_concurrency == 16
+
+    @pytest.mark.unit
+    def test_multi_turn_requires_target_concurrency(self):
+        with pytest.raises(ValueError, match="Multi-turn requires --concurrency"):
+            BenchmarkConfig(**self._make_online_multi_turn(concurrency=None))
+
+    @pytest.mark.unit
+    def test_multi_turn_without_multi_turn_dataset_rejected(self):
+        with pytest.raises(ValueError, match="requires at least one dataset"):
+            BenchmarkConfig(
+                type=TestType.ONLINE,
+                model_params={"name": "M"},
+                endpoint_config={"endpoints": ["http://x"]},
+                datasets=[{"path": "D"}],
+                settings={
+                    "load_pattern": {"type": "multi_turn", "target_concurrency": 4}
+                },
+            )
+
+    @pytest.mark.unit
+    def test_multi_turn_dataset_without_multi_turn_load_pattern_rejected(self):
+        with pytest.raises(ValueError, match="require load_pattern.type=multi_turn"):
+            BenchmarkConfig(
+                type=TestType.ONLINE,
+                model_params={"name": "M"},
+                endpoint_config={"endpoints": ["http://x"]},
+                datasets=[{"path": "D", "multi_turn": {}}],
+                settings={"load_pattern": {"type": "poisson", "target_qps": 10}},
+            )
+
+
+class TestMultiTurnTotalSamples:
+    """Tests for total_samples_to_issue() with multi_turn load pattern."""
+
+    @pytest.mark.unit
+    def test_multi_turn_uses_dataset_size_ignoring_duration(self):
+        from inference_endpoint.config.runtime_settings import RuntimeSettings
+
+        config = BenchmarkConfig(
+            type=TestType.ONLINE,
+            model_params={"name": "M"},
+            endpoint_config={"endpoints": ["http://x"]},
+            datasets=[{"path": "D", "multi_turn": {}}],
+            settings={
+                "load_pattern": {"type": "multi_turn", "target_concurrency": 4},
+                "runtime": {"min_duration_ms": 600000},
+            },
+        )
+        rt = RuntimeSettings.from_config(config, dataloader_num_samples=4316)
+        assert rt.total_samples_to_issue() == 4316
+
+    @pytest.mark.unit
+    def test_multi_turn_respects_min_sample_count(self):
+        import random
+
+        from inference_endpoint import metrics
+        from inference_endpoint.config.runtime_settings import RuntimeSettings
+        from inference_endpoint.config.schema import LoadPattern, LoadPatternType
+
+        lp = LoadPattern(type=LoadPatternType.MULTI_TURN, target_concurrency=4)
+        rt = RuntimeSettings(
+            metric_target=metrics.Throughput(10.0),
+            reported_metrics=[metrics.Throughput(10.0)],
+            min_duration_ms=600000,
+            max_duration_ms=None,
+            n_samples_from_dataset=5,
+            n_samples_to_issue=None,
+            min_sample_count=100,
+            rng_sched=random.Random(0),
+            rng_sample_index=random.Random(0),
+            load_pattern=lp,
+        )
+        assert rt.total_samples_to_issue() == 100
+
+    @pytest.mark.unit
+    def test_multi_turn_explicit_n_samples_takes_precedence(self):
+        import random
+
+        from inference_endpoint import metrics
+        from inference_endpoint.config.runtime_settings import RuntimeSettings
+        from inference_endpoint.config.schema import LoadPattern, LoadPatternType
+
+        lp = LoadPattern(type=LoadPatternType.MULTI_TURN, target_concurrency=4)
+        rt = RuntimeSettings(
+            metric_target=metrics.Throughput(10.0),
+            reported_metrics=[metrics.Throughput(10.0)],
+            min_duration_ms=600000,
+            max_duration_ms=None,
+            n_samples_from_dataset=4316,
+            n_samples_to_issue=200,
+            min_sample_count=1,
+            rng_sched=random.Random(0),
+            rng_sample_index=random.Random(0),
+            load_pattern=lp,
+        )
+        assert rt.total_samples_to_issue() == 200

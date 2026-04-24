@@ -29,13 +29,6 @@ settings:
   client:
     warmup_connections: 0
 
-metrics:
-  collect:
-    - throughput
-    - latency
-    - ttft
-    - tpot
-
 endpoint_config:
   endpoints:
     - "http://localhost:8868"

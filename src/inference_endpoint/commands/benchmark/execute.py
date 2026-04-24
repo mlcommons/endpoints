@@ -542,6 +542,7 @@ async def _run_benchmark_async(
                 conversation_manager=ConversationManager(),
                 dataset_metadata=ctx.dataloader.conversation_metadata,
                 multi_turn_config=mt_cfg,
+                target_concurrency=ctx.config.settings.load_pattern.target_concurrency,
             )
 
         def _on_sample_complete(result: QueryResult) -> None:

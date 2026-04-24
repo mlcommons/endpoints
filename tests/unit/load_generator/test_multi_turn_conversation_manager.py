@@ -14,7 +14,7 @@
 # limitations under the License.
 
 import asyncio
-import logging
+import inspect
 
 import pytest
 from inference_endpoint.load_generator.conversation_manager import (
@@ -25,334 +25,253 @@ from inference_endpoint.load_generator.conversation_manager import (
 
 @pytest.mark.unit
 def test_conversation_state_initialization():
-    """Test ConversationState initializes with correct default values."""
+    """ConversationState initializes with correct defaults."""
     state = ConversationState(conversation_id="conv_001")
 
     assert state.conversation_id == "conv_001"
-    assert state.current_turn == 0
-    assert state.pending_client_turn is None
+    assert not state.turn_done.is_set()
+    assert state.message_history == []
+    assert state.completed_turns == 0
+    assert state.failed_turns == 0
+    assert state.expected_client_turns is None
 
 
 @pytest.mark.unit
-def test_conversation_state_add_client_turn():
-    """Test adding a client turn updates sequencing state."""
+def test_conversation_state_is_complete_without_expected():
+    """is_complete() returns False when expected_client_turns is None."""
     state = ConversationState(conversation_id="conv_001")
-
-    state.add_client_turn(1)
-
-    assert state.pending_client_turn == 1
-    assert state.issued_client_turns == 1
-    assert state.current_turn == 0  # Not incremented until assistant response
+    assert not state.is_complete()
+    state.completed_turns = 5
+    assert not state.is_complete()
 
 
 @pytest.mark.unit
-def test_conversation_state_add_assistant_turn():
-    """Test adding assistant turn completes turn cycle."""
-    state = ConversationState(conversation_id="conv_001")
-
-    state.add_client_turn(1)
-    state.add_assistant_turn()
-
-    assert state.current_turn == 2
-    assert state.pending_client_turn is None
-    assert state.completed_client_turns == 1
-
-
-@pytest.mark.unit
-def test_conversation_state_late_response_after_complete_is_silently_ignored(caplog):
-    """Late response for a conversation that already completed is silently dropped."""
-    state = ConversationState(conversation_id="conv_001", expected_client_turns=1)
-
-    state.add_client_turn(1)
-    state.add_assistant_turn()
+def test_conversation_state_is_complete_with_expected():
+    """is_complete() returns True once completed_turns >= expected."""
+    state = ConversationState(conversation_id="conv_001", expected_client_turns=2)
+    assert not state.is_complete()
+    state.completed_turns = 1
+    assert not state.is_complete()
+    state.completed_turns = 2
     assert state.is_complete()
 
-    completed_before = state.completed_client_turns
-    current_turn_before = state.current_turn
 
-    with caplog.at_level(logging.WARNING):
-        state.add_assistant_turn()
-
-    assert state.completed_client_turns == completed_before
-    assert state.current_turn == current_turn_before
-    assert "no pending client turn" not in caplog.text
+@pytest.mark.unit
+def test_create_is_synchronous():
+    """get_or_create() must be a plain function, not a coroutine."""
+    manager = ConversationManager()
+    result = manager.get_or_create("conv_001")
+    assert not inspect.iscoroutine(result), "get_or_create returned a coroutine"
+    assert isinstance(result, ConversationState)
 
 
 @pytest.mark.unit
-def test_conversation_state_is_ready_for_turn():
-    """Test turn readiness checks using completion counts."""
-    state = ConversationState(conversation_id="conv_001")
-
-    assert not state.is_ready_for_turn()
-
-    state.add_client_turn(1)
-    assert not state.is_ready_for_turn()
-
-    state.add_assistant_turn()
-    assert state.is_ready_for_turn()
-
-    state.add_client_turn(2)
-    assert not state.is_ready_for_turn()
-
-    state.add_assistant_turn()
-    assert state.is_ready_for_turn()
-
-
-@pytest.mark.unit
-def test_conversation_state_multi_turn_sequence():
-    """Test multi-turn conversation flow updates current_turn correctly."""
-    state = ConversationState(conversation_id="conv_001")
-
-    state.add_client_turn(1)
-    state.add_assistant_turn()
-    assert state.current_turn == 2
-
-    state.add_client_turn(3)
-    state.add_assistant_turn()
-    assert state.current_turn == 4
-
-    state.add_client_turn(5)
-    state.add_assistant_turn()
-    assert state.current_turn == 6
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_conversation_manager_get_or_create():
-    """Test get_or_create returns same state for same conversation_id."""
+def test_conversation_manager_get_or_create():
+    """get_or_create returns the same state for the same conversation_id."""
     manager = ConversationManager()
 
-    state1 = await manager.get_or_create("conv_001")
-    state2 = await manager.get_or_create("conv_001")
+    state1 = manager.get_or_create("conv_001")
+    state2 = manager.get_or_create("conv_001")
 
     assert state1 is state2
     assert state1.conversation_id == "conv_001"
 
 
 @pytest.mark.unit
-@pytest.mark.asyncio
-async def test_conversation_manager_multiple_conversations():
-    """Test manager can track multiple conversations independently."""
+def test_conversation_manager_multiple_conversations():
+    """Manager tracks multiple conversations independently."""
     manager = ConversationManager()
 
-    state1 = await manager.get_or_create("conv_001")
-    state2 = await manager.get_or_create("conv_002")
+    state1 = manager.get_or_create("conv_001")
+    state2 = manager.get_or_create("conv_002")
 
     assert state1 is not state2
 
-    await manager.mark_turn_issued("conv_001", 1)
-    await manager.mark_turn_complete("conv_001", "Response to conv_001")
+    manager.mark_turn_complete("conv_001", "Response to conv_001")
 
-    assert state1.current_turn == 2
-    assert state2.current_turn == 0
+    assert state1.completed_turns == 1
+    assert state2.completed_turns == 0
+
+
+@pytest.mark.unit
+def test_conversation_manager_mark_turn_complete():
+    """mark_turn_complete increments counter, appends history, sets event."""
+    manager = ConversationManager()
+    state = manager.get_or_create("conv_001")
+
+    manager.mark_turn_complete("conv_001", "Assistant response")
+
+    assert state.completed_turns == 1
+    assert state.failed_turns == 0
+    assert state.turn_done.is_set()
+    assert state.message_history == []  # store_in_history=False by default
+
+
+@pytest.mark.unit
+def test_conversation_manager_mark_turn_complete_stores_history():
+    """mark_turn_complete appends to history when store_in_history=True."""
+    manager = ConversationManager()
+    state = manager.get_or_create("conv_001")
+
+    manager.mark_turn_complete("conv_001", "Hello", store_in_history=True)
+
+    assert state.message_history == [{"role": "assistant", "content": "Hello"}]
+
+
+@pytest.mark.unit
+def test_conversation_manager_mark_turn_failed():
+    """mark_turn_failed increments both counters and sets event."""
+    manager = ConversationManager()
+    state = manager.get_or_create("conv_001", expected_client_turns=2)
+
+    manager.mark_turn_failed("conv_001")
+
+    assert state.completed_turns == 1
+    assert state.failed_turns == 1
+    assert state.turn_done.is_set()
+
+
+@pytest.mark.unit
+def test_conversation_completion_tracking():
+    """is_complete() returns True after all expected turns receive responses."""
+    manager = ConversationManager()
+    state = manager.get_or_create("conv_001", expected_client_turns=2)
+
+    assert not state.is_complete()
+    manager.mark_turn_complete("conv_001", "r1")
+    assert not state.is_complete()
+    manager.mark_turn_complete("conv_001", "r2")
+    assert state.is_complete()
+
+
+@pytest.mark.unit
+def test_conversation_completion_without_expected_turns():
+    """Completion is never True when expected_client_turns is None."""
+    manager = ConversationManager()
+    state = manager.get_or_create("conv_001", expected_client_turns=None)
+
+    manager.mark_turn_complete("conv_001", "r1")
+
+    assert not state.is_complete()
+
+
+@pytest.mark.unit
+def test_conversation_completion_with_failures():
+    """Conversations complete even when some turns fail."""
+    manager = ConversationManager()
+    state = manager.get_or_create("conv1", expected_client_turns=3)
+
+    manager.mark_turn_complete("conv1", "Hi")
+    assert not state.is_complete()
+
+    manager.mark_turn_failed("conv1")
+    assert not state.is_complete()
+
+    manager.mark_turn_complete("conv1", "Bye")
+    assert state.is_complete()
+    assert state.failed_turns == 1
+    assert state.completed_turns == 3
+
+
+@pytest.mark.unit
+def test_all_turns_fail():
+    """Conversation completes when all turns fail."""
+    manager = ConversationManager()
+    state = manager.get_or_create("conv1", expected_client_turns=2)
+
+    manager.mark_turn_failed("conv1")
+    manager.mark_turn_failed("conv1")
+
+    assert state.is_complete()
+    assert state.completed_turns == 2
+    assert state.failed_turns == 2
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_conversation_manager_mark_turn_issued():
-    """Test mark_turn_issued updates sequencing state."""
+async def test_event_set_wakes_waiter():
+    """mark_turn_complete sets turn_done so a blocked await returns."""
     manager = ConversationManager()
-    state = await manager.get_or_create("conv_001")
+    state = manager.get_or_create("conv_001")
 
-    await manager.mark_turn_issued("conv_001", 1)
-
-    assert state.pending_client_turn == 1
-    assert state.issued_client_turns == 1
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_conversation_manager_mark_turn_complete():
-    """Test mark_turn_complete updates sequencing state."""
-    manager = ConversationManager()
-    state = await manager.get_or_create("conv_001")
-
-    await manager.mark_turn_issued("conv_001", 1)
-    await manager.mark_turn_complete("conv_001", "Assistant response")
-
-    assert state.current_turn == 2
-    assert state.pending_client_turn is None
-    assert state.completed_client_turns == 1
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_conversation_manager_wait_for_turn_ready_immediate():
-    """Test wait_for_turn_ready returns immediately when previous turn is complete."""
-    manager = ConversationManager()
-    await manager.get_or_create("conv_001")
-
-    await manager.mark_turn_issued("conv_001", 1)
-    await manager.mark_turn_complete("conv_001", "First response")
-
-    result = await manager.wait_for_turn_ready("conv_001", 9, timeout=1.0)
-
-    assert result is True
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_conversation_manager_wait_for_turn_ready_blocking():
-    """Test wait_for_turn_ready blocks until previous turn completes."""
-    manager = ConversationManager()
-    await manager.get_or_create("conv_001")
-
-    await manager.mark_turn_issued("conv_001", 1)
-
-    ready_flag = []
+    woke_up: list[bool] = []
 
     async def waiter():
-        result = await manager.wait_for_turn_ready("conv_001", 3, timeout=2.0)
-        if result:
-            ready_flag.append(True)
+        await state.turn_done.wait()
+        woke_up.append(True)
 
-    waiter_task = asyncio.create_task(waiter())
-    await asyncio.sleep(0.05)
-    assert not ready_flag
+    task = asyncio.create_task(waiter())
+    await asyncio.sleep(0.01)
+    assert not woke_up
 
-    await manager.mark_turn_complete("conv_001", "Assistant response")
-    await asyncio.sleep(0.05)
-    await waiter_task
+    manager.mark_turn_complete("conv_001", "response")
+    await asyncio.sleep(0.01)
+    await task
 
-    assert ready_flag == [True]
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_conversation_manager_wait_for_turn_ready_timeout():
-    """Test wait_for_turn_ready respects timeout."""
-    manager = ConversationManager()
-    await manager.get_or_create("conv_001")
-
-    await manager.mark_turn_issued("conv_001", 1)
-
-    result = await manager.wait_for_turn_ready("conv_001", 3, timeout=0.1)
-
-    assert result is False
+    assert woke_up == [True]
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_conversation_completion_tracking():
-    """Test conversation completion detection."""
+async def test_failed_sets_event():
+    """mark_turn_failed sets turn_done so the pipeline can unblock."""
     manager = ConversationManager()
+    state = manager.get_or_create("conv_001")
 
-    state = await manager.get_or_create("conv_001", expected_client_turns=2)
+    woke_up: list[bool] = []
 
-    assert not state.is_complete()
+    async def waiter():
+        await state.turn_done.wait()
+        woke_up.append(True)
 
-    await manager.mark_turn_issued("conv_001", 1)
-    assert not state.is_complete()
+    task = asyncio.create_task(waiter())
+    await asyncio.sleep(0.01)
 
-    await manager.mark_turn_complete("conv_001", "response 1")
-    assert not state.is_complete()
+    manager.mark_turn_failed("conv_001")
+    await asyncio.sleep(0.01)
+    await task
 
-    await manager.mark_turn_issued("conv_001", 3)
-    await manager.mark_turn_complete("conv_001", "response 2")
-
-    assert state.is_complete()
+    assert woke_up == [True]
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_conversation_completion_without_expected_turns():
-    """Test that completion tracking works when expected_client_turns is None."""
+async def test_event_clear_resets_for_next_turn():
+    """Clearing turn_done after wait() properly gates the next turn."""
     manager = ConversationManager()
+    state = manager.get_or_create("conv_001")
 
-    state = await manager.get_or_create("conv_001", expected_client_turns=None)
+    # First turn: set then clear
+    manager.mark_turn_complete("conv_001", "r1")
+    await state.turn_done.wait()
+    state.turn_done.clear()
+    assert not state.turn_done.is_set()
 
-    assert not state.is_complete()
-
-    await manager.mark_turn_issued("conv_001", 1)
-    await manager.mark_turn_complete("conv_001", "response 1")
-
-    assert not state.is_complete()
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_conversation_completion_with_failures():
-    """Test that conversations complete even when turns fail."""
-    manager = ConversationManager()
-    state = await manager.get_or_create("conv1", expected_client_turns=3)
-
-    await manager.mark_turn_issued("conv1", 1)
-    await manager.mark_turn_complete("conv1", "Hi there")
-    assert state.completed_client_turns == 1
-    assert not state.is_complete()
-
-    await manager.mark_turn_issued("conv1", 2)
-    await manager.mark_turn_failed("conv1")
-    assert state.completed_client_turns == 2
-    assert state.failed_client_turns == 1
-    assert not state.is_complete()
-
-    await manager.mark_turn_issued("conv1", 3)
-    await manager.mark_turn_complete("conv1", "Bye!")
-    assert state.completed_client_turns == 3
-    assert state.is_complete()
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_mark_turn_failed_with_no_pending():
-    """Test that marking failed turn without pending turn logs warning."""
-    manager = ConversationManager()
-    state = await manager.get_or_create("conv1", expected_client_turns=1)
-
-    await manager.mark_turn_failed("conv1")
-
-    assert state.completed_client_turns == 0
-    assert state.failed_client_turns == 0
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_all_turns_fail():
-    """Test conversation completion when all turns fail."""
-    manager = ConversationManager()
-    state = await manager.get_or_create("conv1", expected_client_turns=2)
-
-    await manager.mark_turn_issued("conv1", 1)
-    await manager.mark_turn_failed("conv1")
-
-    await manager.mark_turn_issued("conv1", 2)
-    await manager.mark_turn_failed("conv1")
-
-    assert state.is_complete()
-    assert state.completed_client_turns == 2
-    assert state.failed_client_turns == 2
+    # Second turn: set again
+    manager.mark_turn_complete("conv_001", "r2")
+    assert state.turn_done.is_set()
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_conversation_manager_concurrent_access():
-    """Test async concurrent access to multiple conversations."""
+    """Concurrent pipeline tasks on independent conversations complete without errors."""
     manager = ConversationManager()
     num_conversations = 10
-    user_turns_per_conv = 5
+    turns_per_conv = 5
 
     for i in range(num_conversations):
-        await manager.get_or_create(f"conv_{i:03d}")
+        manager.get_or_create(f"conv_{i:03d}", expected_client_turns=turns_per_conv)
 
     errors = []
 
     async def process_conversation(conv_id: str):
         try:
-            for user_turn_idx in range(user_turns_per_conv):
-                turn = user_turn_idx * 2 + 1
-
-                if user_turn_idx > 0:
-                    ready = await manager.wait_for_turn_ready(
-                        conv_id, turn, timeout=5.0
-                    )
-                    if not ready:
-                        errors.append(f"{conv_id} turn {turn} timeout")
-                        return
-
-                await manager.mark_turn_issued(conv_id, turn)
+            state = manager.get_state(conv_id)
+            assert state is not None
+            for _ in range(turns_per_conv):
+                manager.mark_turn_complete(conv_id, "response")
                 await asyncio.sleep(0.001)
-                await manager.mark_turn_complete(conv_id, f"Response {turn}")
         except Exception as e:
             errors.append(f"{conv_id} error: {e}")
 
@@ -362,35 +281,8 @@ async def test_conversation_manager_concurrent_access():
     ]
     await asyncio.gather(*tasks)
 
-    assert not errors, f"Errors occurred: {errors}"
-
+    assert not errors
     for i in range(num_conversations):
-        conv_id = f"conv_{i:03d}"
-        state = manager._conversations[conv_id]
-        assert state.current_turn == user_turns_per_conv * 2
-        assert state.completed_client_turns == user_turns_per_conv
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_conversation_manager_wait_for_turn_ready_reliably_wakes_on_completion():
-    """Test completion wakeups do not depend on timing windows."""
-
-    async def run_one_iteration():
-        mgr = ConversationManager()
-        await mgr.get_or_create("conv_001")
-        await mgr.mark_turn_issued("conv_001", 1)
-
-        ready: list[bool] = []
-
-        async def waiter(m: ConversationManager, r: list) -> None:
-            r.append(await m.wait_for_turn_ready("conv_001", 3, timeout=0.5))
-
-        waiter_task = asyncio.create_task(waiter(mgr, ready))
-        await asyncio.sleep(0.005)
-        await mgr.mark_turn_complete("conv_001", "Assistant response")
-        await asyncio.wait_for(waiter_task, timeout=0.5)
-        assert ready == [True]
-
-    for _ in range(10):
-        await run_one_iteration()
+        state = manager._conversations[f"conv_{i:03d}"]
+        assert state.completed_turns == turns_per_conv
+        assert state.is_complete()

@@ -419,6 +419,12 @@ class LoadPattern(BaseModel):
             raise ValueError(
                 "Concurrency requires --concurrency (e.g., --concurrency 10)"
             )
+        if self.type == LoadPatternType.MULTI_TURN and (
+            not self.target_concurrency or self.target_concurrency <= 0
+        ):
+            raise ValueError(
+                "Multi-turn requires --concurrency (e.g., --concurrency 96)"
+            )
         return self
 
 
@@ -622,6 +628,19 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
                 raise ValueError(
                     "Online mode requires --load-pattern (poisson, concurrency, or multi_turn)"
                 )
+
+        # Cross-validate load_pattern.type=multi_turn ↔ dataset.multi_turn config
+        has_multi_turn_dataset = any(
+            d.multi_turn is not None for d in (self.datasets or [])
+        )
+        if lp.type == LoadPatternType.MULTI_TURN and not has_multi_turn_dataset:
+            raise ValueError(
+                "load_pattern.type=multi_turn requires at least one dataset with multi_turn config"
+            )
+        if has_multi_turn_dataset and lp.type != LoadPatternType.MULTI_TURN:
+            raise ValueError(
+                f"Datasets with multi_turn config require load_pattern.type=multi_turn, got '{lp.type}'"
+            )
 
         return self
 

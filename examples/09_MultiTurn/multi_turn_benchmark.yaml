@@ -24,17 +24,10 @@ settings:
 
   load_pattern:
     type: multi_turn
-    # target_concurrency: 32  # Optional: limit concurrent requests across all conversations
+    target_concurrency: 32
 
   client:
     warmup_connections: 0
-
-metrics:
-  collect:
-    - throughput
-    - latency
-    - ttft
-    - tpot
 
 endpoint_config:
   endpoints:

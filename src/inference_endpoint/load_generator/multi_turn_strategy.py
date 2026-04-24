@@ -22,7 +22,7 @@ from typing import Any
 
 from ..config.schema import MultiTurnConfig
 from ..core.types import QueryResult
-from .conversation_manager import ConversationManager
+from .conversation_manager import ConversationManager, ConversationState
 from .strategy import PhaseIssuerProtocol
 
 logger = logging.getLogger(__name__)
@@ -48,11 +48,12 @@ class MultiTurnStrategy:
 
     The response routing path:
     1. _conv_pipeline issues turn N via phase_issuer.issue(idx) → query_id
-    2. _conv_pipeline stores (conv_id, turn) in _inflight[query_id]
+    2. _conv_pipeline stores conv_id in _inflight[query_id]
     3. BenchmarkSession calls on_sample_complete(result) with the QueryResult
     4. on_sample_complete looks up conv_id from _inflight, calls mark_turn_complete
-    5. mark_turn_complete notifies the pipeline task waiting on wait_for_turn_ready
-    6. _conv_pipeline proceeds to issue turn N+1
+    5. mark_turn_complete sets state.turn_done synchronously
+    6. _conv_pipeline's await asyncio.wait_for(state.turn_done.wait()) returns
+    7. Pipeline clears the event and issues turn N+1
     """
 
     def __init__(
@@ -91,8 +92,9 @@ class MultiTurnStrategy:
         )
 
         # Maps query_id -> conversation_id for routing completions.
-        # Populated by _conv_pipeline after issue() returns query_id.
         self._inflight: dict[str, str] = {}
+        # Cached ConversationState refs for O(1) lookup in on_sample_complete.
+        self._conv_states: dict[str, ConversationState] = {}
 
     async def execute(self, phase_issuer: PhaseIssuerProtocol) -> int:
         """Drive multi-turn sample issuance.
@@ -108,11 +110,21 @@ class MultiTurnStrategy:
             conv_id = sample_meta["conversation_id"]
             conv_samples[conv_id].append((sample_index, sample_meta["turn"]))
 
-        # Pre-create all conversation states before spawning tasks.
+        # Pre-create all conversation states before spawning tasks (no locking needed).
+        sys_prompts = self._dataset_metadata.get("system_prompts_by_conv", {})
         for conv_id, turns in conv_samples.items():
-            await self._conv_manager.get_or_create(
-                conv_id, expected_client_turns=len(turns)
+            sys_content = sys_prompts.get(conv_id) if self._store_in_history else None
+            system_message = (
+                {"role": "system", "content": sys_content}
+                if sys_content is not None
+                else None
             )
+            state = self._conv_manager.get_or_create(
+                conv_id,
+                expected_client_turns=len(turns),
+                system_message=system_message,
+            )
+            self._conv_states[conv_id] = state
 
         tasks = [
             asyncio.create_task(
@@ -133,59 +145,53 @@ class MultiTurnStrategy:
     ) -> None:
         """Process all turns for a single conversation sequentially.
 
-        For each turn after the first, waits for the previous turn to complete
-        (via wait_for_turn_ready) before issuing the next. This enforces strict
-        sequential ordering: turn N+1 is not issued until turn N's response arrives.
+        For each turn after the first, waits for state.turn_done before issuing
+        the next. This enforces strict sequential ordering within the conversation.
         """
+        state = self._conv_states[conv_id]
         sorted_turns = sorted(turns, key=lambda x: x[1])
 
         for i, (idx, turn) in enumerate(sorted_turns):
             if i > 0:
-                # Wait for the previous turn to complete before issuing the next.
-                ready = await self._conv_manager.wait_for_turn_ready(
-                    conv_id, turn, timeout=self._turn_timeout_s
-                )
-                if not ready:
+                try:
+                    await asyncio.wait_for(
+                        state.turn_done.wait(), timeout=self._turn_timeout_s
+                    )
+                except TimeoutError:
                     logger.warning(
                         f"Turn {turn} of {conv_id} timed out waiting for previous turn"
                     )
-                    await self._conv_manager.mark_turn_failed(conv_id)
+                    state.failed_turns += 1
                     break
+                state.turn_done.clear()
 
-            # Acquire concurrency slot before issuing
+            # Acquire concurrency slot before issuing.
             if self._sem is not None:
                 await self._sem.acquire()
 
-            # For live-history mode: build messages from accumulated history + current turn,
-            # and pass as data_override so the pre-built messages from the dataset are replaced.
+            # Live-history mode: build messages from accumulated history + current turn.
             data_override: dict[str, Any] | None = None
-            current_turn_message: dict[str, Any] | None = None
+            current_turn_messages: list[dict[str, Any]] | None = None
             if self._store_in_history:
-                pre_built = self._dataset_metadata.get(
-                    "pre_built_messages_by_key", {}
-                ).get((conv_id, turn), [])
-                current_turn_message = pre_built[-1] if pre_built else None
-                state = self._conv_manager.get_state(conv_id)
-                if state is not None and current_turn_message is not None:
-                    live_messages = state.message_history.copy() + [
-                        current_turn_message
-                    ]
+                current_turn_messages = self._dataset_metadata.get(
+                    "current_turn_messages_by_key", {}
+                ).get((conv_id, turn))
+                if current_turn_messages:
+                    live_messages = state.message_history.copy() + current_turn_messages
                     data_override = {"messages": live_messages}
 
             query_id = phase_issuer.issue(idx, data_override=data_override)
             if query_id is None:
-                # Session stopping — release slot and exit
+                # Session stopping — release slot and exit.
                 if self._sem is not None:
                     self._sem.release()
                 break
 
-            # Register this query_id -> conv_id mapping for response routing.
             self._inflight[query_id] = conv_id
 
-            # Mark the turn as issued so wait_for_turn_ready can gate the next turn.
-            await self._conv_manager.mark_turn_issued(
-                conv_id, turn, message=current_turn_message
-            )
+            # Append current-turn messages to history so the next turn sees them.
+            if self._store_in_history and current_turn_messages:
+                state.message_history.extend(current_turn_messages)
 
     def on_query_complete(self, query_id: str) -> None:
         """Called by BenchmarkSession when a QueryResult arrives.
@@ -203,27 +209,23 @@ class MultiTurnStrategy:
         """Route completed QueryResult to ConversationManager.
 
         Called by execute.py on_sample_complete hook after each response.
-        Looks up the conversation_id from _inflight and calls mark_turn_complete.
+        Event.set() is synchronous — the pipeline task is woken immediately
+        without needing asyncio.ensure_future.
 
         Args:
             result: Completed QueryResult from the endpoint.
         """
-        query_id = result.id
-        conv_id = self._inflight.pop(query_id, None)
+        conv_id = self._inflight.pop(result.id, None)
         if conv_id is None:
             return
 
         response_text = result.get_response_output_string()
 
         if result.error is not None:
-            asyncio.ensure_future(
-                self._conv_manager.mark_turn_failed(
-                    conv_id, store_in_history=self._store_in_history
-                )
+            self._conv_manager.mark_turn_failed(
+                conv_id, store_in_history=self._store_in_history
             )
         else:
-            asyncio.ensure_future(
-                self._conv_manager.mark_turn_complete(
-                    conv_id, response_text, store_in_history=self._store_in_history
-                )
+            self._conv_manager.mark_turn_complete(
+                conv_id, response_text, store_in_history=self._store_in_history
             )

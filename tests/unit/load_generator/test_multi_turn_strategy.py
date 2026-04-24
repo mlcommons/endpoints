@@ -75,7 +75,7 @@ async def test_single_conversation_single_turn():
         # Mark turn 1 complete
         state = conv_manager.get_state("conv1")
         if state:
-            await conv_manager.mark_turn_complete("conv1", "response 1")
+            conv_manager.mark_turn_complete("conv1", "response 1")
 
     asyncio.create_task(complete_turns())
     count = await strategy.execute(issuer)
@@ -231,24 +231,20 @@ async def test_on_query_complete_releases_semaphore():
 async def test_on_sample_complete_routes_to_manager():
     """on_sample_complete marks the turn complete in the ConversationManager."""
     conv_manager = ConversationManager()
-    await conv_manager.get_or_create("conv1", expected_client_turns=1)
+    conv_manager.get_or_create("conv1", expected_client_turns=1)
     metadata = _make_dataset_metadata({"conv1": [1]})
     strategy = MultiTurnStrategy(conv_manager, metadata)
 
     # Simulate issuer registering conv_id in _inflight
     strategy._inflight["q0001"] = "conv1"
-    # Pre-issue a turn so the state has pending_client_turn
-    await conv_manager.mark_turn_issued("conv1", 1)
 
     result = QueryResult(id="q0001", response_output=TextModelOutput(output="hello"))
     strategy.on_sample_complete(result)
 
-    # Allow the ensure_future coroutine to run
-    await asyncio.sleep(0.01)
-
     state = conv_manager.get_state("conv1")
     assert state is not None
-    assert state.completed_client_turns == 1
+    assert state.completed_turns == 1
+    assert state.turn_done.is_set()
     assert state.is_complete()
 
 
@@ -259,12 +255,11 @@ async def test_error_response_marks_turn_failed():
     from inference_endpoint.core.types import ErrorData
 
     conv_manager = ConversationManager()
-    await conv_manager.get_or_create("conv1", expected_client_turns=1)
+    conv_manager.get_or_create("conv1", expected_client_turns=1)
     metadata = _make_dataset_metadata({"conv1": [1]})
     strategy = MultiTurnStrategy(conv_manager, metadata)
 
     strategy._inflight["q0001"] = "conv1"
-    await conv_manager.mark_turn_issued("conv1", 1)
 
     result = QueryResult(
         id="q0001",
@@ -272,8 +267,114 @@ async def test_error_response_marks_turn_failed():
         error=ErrorData(error_type="timeout", error_message="timed out"),
     )
     strategy.on_sample_complete(result)
-    await asyncio.sleep(0.01)
 
     state = conv_manager.get_state("conv1")
     assert state is not None
-    assert state.failed_client_turns == 1
+    assert state.failed_turns == 1
+
+
+def _make_metadata_with_system(
+    conversations: dict[str, list[int]],
+    system_prompts: dict[str, str | None] | None = None,
+) -> dict:
+    """Build metadata dict including system_prompts_by_conv."""
+    samples = []
+    sample_index = 0
+    for conv_id, turns in conversations.items():
+        for turn in turns:
+            samples.append(
+                {
+                    "conversation_id": conv_id,
+                    "turn": turn,
+                    "sample_index": sample_index,
+                }
+            )
+            sample_index += 1
+    return {
+        "samples": samples,
+        "system_prompts_by_conv": system_prompts or {},
+    }
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_live_history_initializes_system_prompt():
+    """In live-history mode, ConversationManager.message_history starts with system message."""
+    from inference_endpoint.config.schema import MultiTurnConfig
+
+    conv_manager = ConversationManager()
+    metadata = _make_metadata_with_system(
+        {"conv1": [1]},
+        system_prompts={"conv1": "Be helpful"},
+    )
+    mt_cfg = MultiTurnConfig(use_dataset_history=False, turn_timeout_s=10.0)
+    strategy = MultiTurnStrategy(conv_manager, metadata, multi_turn_config=mt_cfg)
+    issuer = FakePhaseIssuer()
+
+    async def complete_turn():
+        await asyncio.sleep(0.01)
+        await conv_manager.mark_turn_complete("conv1", "response")
+
+    asyncio.create_task(complete_turn())
+    await strategy.execute(issuer)
+
+    state = conv_manager.get_state("conv1")
+    assert state is not None
+    # message_history[0] must be the system message
+    assert len(state.message_history) >= 1
+    assert state.message_history[0] == {"role": "system", "content": "Be helpful"}
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_live_history_no_system_prompt_when_none():
+    """In live-history mode, no system message is prepended when system_prompt is None."""
+    from inference_endpoint.config.schema import MultiTurnConfig
+
+    conv_manager = ConversationManager()
+    metadata = _make_metadata_with_system(
+        {"conv1": [1]},
+        system_prompts={"conv1": None},
+    )
+    mt_cfg = MultiTurnConfig(use_dataset_history=False, turn_timeout_s=10.0)
+    strategy = MultiTurnStrategy(conv_manager, metadata, multi_turn_config=mt_cfg)
+    issuer = FakePhaseIssuer()
+
+    async def complete_turn():
+        await asyncio.sleep(0.01)
+        await conv_manager.mark_turn_complete("conv1", "response")
+
+    asyncio.create_task(complete_turn())
+    await strategy.execute(issuer)
+
+    state = conv_manager.get_state("conv1")
+    assert state is not None
+    # No system message should be in history
+    system_msgs = [m for m in state.message_history if m.get("role") == "system"]
+    assert len(system_msgs) == 0
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_dataset_history_mode_does_not_inject_system_prompt():
+    """In dataset-history mode (use_dataset_history=True), system_message is not passed."""
+    conv_manager = ConversationManager()
+    metadata = _make_metadata_with_system(
+        {"conv1": [1]},
+        system_prompts={"conv1": "Some system"},
+    )
+    # Default: use_dataset_history=True → _store_in_history=False
+    strategy = MultiTurnStrategy(conv_manager, metadata)
+    issuer = FakePhaseIssuer()
+
+    async def complete_turn():
+        await asyncio.sleep(0.01)
+        await conv_manager.mark_turn_complete("conv1", "response")
+
+    asyncio.create_task(complete_turn())
+    await strategy.execute(issuer)
+
+    state = conv_manager.get_state("conv1")
+    assert state is not None
+    # message_history should be empty (dataset-history mode doesn't accumulate)
+    assert len(state.message_history) == 0

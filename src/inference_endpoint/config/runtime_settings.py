@@ -194,6 +194,17 @@ class RuntimeSettings:
             )
             return self.n_samples_to_issue
 
+        # Multi-turn must issue exactly all client turns — QPS-based formulas are meaningless.
+        if (
+            self.load_pattern is not None
+            and self.load_pattern.type.value == "multi_turn"
+        ):
+            result = max(self.min_sample_count, self.n_samples_from_dataset)
+            logger.debug(
+                f"Sample count: {result} (multi-turn: issuing all {self.n_samples_from_dataset} client turns)"
+            )
+            return result
+
         # If min_duration is 0, use all dataset samples (new CLI default behavior)
         if self.min_duration_ms == 0:
             result = max(self.min_sample_count, self.n_samples_from_dataset)

@@ -111,6 +111,7 @@ class OpenAIAdapter(HttpRequestAdapter):
             stream=query.data.get("stream", False),
             max_completion_tokens=query.data.get("max_completion_tokens", 100),
             temperature=query.data.get("temperature", 0.7),
+            tools=query.data.get("tools"),
         )
         return request
 
