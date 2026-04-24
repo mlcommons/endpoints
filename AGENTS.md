@@ -46,16 +46,17 @@ Dataset Manager --> Load Generator --> Endpoint Client --> External Endpoint
 
 ### Key Components
 
-| Component           | Location                                                      | Purpose                                                                                                                                     |
-| ------------------- | ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Load Generator**  | `src/inference_endpoint/load_generator/`                      | Central orchestrator: `BenchmarkSession` owns the lifecycle, `Scheduler` controls timing, `LoadGenerator` issues queries                    |
-| **Endpoint Client** | `src/inference_endpoint/endpoint_client/`                     | Multi-process HTTP workers communicating via ZMQ IPC. `HTTPEndpointClient` is the main entry point                                          |
-| **Dataset Manager** | `src/inference_endpoint/dataset_manager/`                     | Loads JSONL, HuggingFace, CSV, JSON, Parquet datasets. `Dataset` base class with `load_sample()`/`num_samples()` interface                  |
-| **Metrics**         | `src/inference_endpoint/metrics/`                             | `EventRecorder` writes to SQLite, `MetricsReporter` reads and aggregates (QPS, latency, TTFT, TPOT)                                         |
-| **Config**          | `src/inference_endpoint/config/`, `endpoint_client/config.py` | Pydantic-based YAML schema (`schema.py`), `HTTPClientConfig` (single Pydantic model for CLI/YAML/runtime), `RuntimeSettings`                |
-| **CLI**             | `src/inference_endpoint/main.py`, `commands/benchmark/cli.py` | cyclopts-based, auto-generated from `schema.py` and `HTTPClientConfig` Pydantic models. Flat shorthands via `cyclopts.Parameter(alias=...)` |
-| **Async Utils**     | `src/inference_endpoint/async_utils/`                         | `LoopManager` (uvloop + eager_task_factory), ZMQ transport layer, event publisher                                                           |
-| **OpenAI/SGLang**   | `src/inference_endpoint/openai/`, `sglang/`                   | Protocol adapters and response accumulators for different API formats                                                                       |
+| Component           | Location                                                      | Purpose                                                                                                                                                                                                                          |
+| ------------------- | ------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Load Generator**  | `src/inference_endpoint/load_generator/`                      | Central orchestrator: `BenchmarkSession` owns the lifecycle, `Scheduler` controls timing, `LoadGenerator` issues queries                                                                                                         |
+| **Endpoint Client** | `src/inference_endpoint/endpoint_client/`                     | Multi-process HTTP workers communicating via ZMQ IPC. `HTTPEndpointClient` is the main entry point                                                                                                                               |
+| **Dataset Manager** | `src/inference_endpoint/dataset_manager/`                     | Loads JSONL, HuggingFace, CSV, JSON, Parquet datasets. `Dataset` base class with `load_sample()`/`num_samples()` interface                                                                                                       |
+| **Metrics**         | `src/inference_endpoint/metrics/`                             | `EventRecorder` writes to SQLite, `MetricsReporter` reads and aggregates (QPS, latency, TTFT, TPOT)                                                                                                                              |
+| **Config**          | `src/inference_endpoint/config/`, `endpoint_client/config.py` | Pydantic-based YAML schema (`schema.py`), `HTTPClientConfig` (single Pydantic model for CLI/YAML/runtime), `RuntimeSettings`                                                                                                     |
+| **CLI**             | `src/inference_endpoint/main.py`, `commands/benchmark/cli.py` | cyclopts-based, auto-generated from `schema.py` and `HTTPClientConfig` Pydantic models. Flat shorthands via `cyclopts.Parameter(alias=...)`                                                                                      |
+| **Async Utils**     | `src/inference_endpoint/async_utils/`                         | `LoopManager` (uvloop + eager_task_factory), ZMQ transport layer, event publisher                                                                                                                                                |
+| **OpenAI/SGLang**   | `src/inference_endpoint/openai/`, `sglang/`                   | Protocol adapters and response accumulators for different API formats                                                                                                                                                            |
+| **VideoGen**           | `src/inference_endpoint/videogen/`                               | Client adapter and dataset loader for MLPerf WAN2.2-T2V-A14B. `VideoGenAdapter` POSTs `VideoPathRequest` directly to trtllm-serve's `/v1/videos/generations` with `response_format=video_path`; server saves video to Lustre and returns path, avoiding large byte payloads. |
 
 ### Hot-Path Architecture
 
@@ -170,6 +171,11 @@ src/inference_endpoint/
 │   ├── accumulator.py         # Streaming response accumulator
 │   └── harmony.py             # openai_harmony integration
 ├── sglang/                    # SGLang API adapter
+├── videogen/                  # WAN2.2 text-to-video MLPerf workload
+│   ├── __init__.py
+│   ├── types.py               # Pydantic: VideoPathRequest, VideoPathResponse, HealthResponse
+│   ├── adapter.py             # VideoGenAdapter (HttpRequestAdapter) + VideoGenAccumulator (no-op)
+│   └── dataset.py             # VideoGenDataset — loads MLPerf prompt text files
 ├── evaluation/                # Accuracy evaluation (extractor, scoring, livecodebench)
 ├── plugins/                   # Plugin system
 ├── profiling/                 # line_profiler integration, pytest plugin
@@ -269,16 +275,16 @@ These apply especially to code in the hot path (load generator, endpoint client,
 
 ### Key Dependencies
 
-| Package        | Purpose                                             |
-| -------------- | --------------------------------------------------- |
-| `uvloop`       | Performance-optimized event loop                    |
-| `httptools`    | Fast HTTP parser for custom connection pool         |
-| `msgspec`      | Fast serialization for core types and ZMQ transport |
-| `pyzmq`        | ZMQ IPC between main process and workers            |
-| `pydantic`     | Configuration validation                            |
-| `cyclopts`     | CLI framework — auto-generates flags from Pydantic  |
-| `duckdb`       | Data aggregation                                    |
-| `transformers` | Tokenization for OSL reporting                      |
+| Package               | Purpose                                                                                |
+| --------------------- | -------------------------------------------------------------------------------------- |
+| `uvloop`              | Performance-optimized event loop                                                       |
+| `httptools`           | Fast HTTP parser for custom connection pool                                            |
+| `msgspec`             | Fast serialization for core types and ZMQ transport                                    |
+| `pyzmq`               | ZMQ IPC between main process and workers                                               |
+| `pydantic`            | Configuration validation                                                               |
+| `cyclopts`            | CLI framework — auto-generates flags from Pydantic                                     |
+| `duckdb`              | Data aggregation                                                                       |
+| `transformers`        | Tokenization for OSL reporting                                                         |
 
 ### Files to NOT Modify
 
