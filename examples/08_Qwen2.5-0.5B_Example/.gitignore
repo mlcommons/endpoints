@@ -1,0 +1,14 @@
+# Benchmark results
+results/
+
+# Generated data
+data/*.pkl
+
+# Logs
+*.log
+benchmark_output.log
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
