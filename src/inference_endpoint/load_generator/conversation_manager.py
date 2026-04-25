@@ -101,11 +101,29 @@ class ConversationManager:
             )
         return self._conversations[conversation_id]
 
+    def _log_if_complete(self, state: ConversationState, conversation_id: str) -> None:
+        """Log completion status once all expected turns have a response."""
+        if not state.is_complete():
+            return
+        if state.failed_turns > 0:
+            logger.info(
+                f"Conversation {conversation_id} completed with failures: "
+                f"{state.completed_turns - state.failed_turns}/"
+                f"{state.expected_client_turns} successful, "
+                f"{state.failed_turns} failed"
+            )
+        else:
+            logger.debug(
+                f"Conversation {conversation_id} completed: "
+                f"{state.completed_turns}/{state.expected_client_turns} turns"
+            )
+
     def mark_turn_complete(
         self,
         conversation_id: str,
         response: str,
         store_in_history: bool = False,
+        metadata: dict[str, Any] | None = None,
     ) -> None:
         """Record a successful response and wake the pipeline task.
 
@@ -113,6 +131,8 @@ class ConversationManager:
             conversation_id: Conversation ID.
             response: Model output (appended to history when store_in_history=True).
             store_in_history: When True, append response to message_history.
+            metadata: Optional response metadata; tool_calls are preserved in history
+                when present (only used when store_in_history=True).
 
         Raises:
             KeyError: If conversation_id not found.
@@ -120,22 +140,15 @@ class ConversationManager:
         state = self._conversations.get(conversation_id)
         if state is None:
             raise KeyError(f"Conversation {conversation_id} not initialized")
-        if store_in_history and response:
-            state.message_history.append({"role": "assistant", "content": response})
+        if store_in_history:
+            tool_calls = metadata.get("tool_calls") if metadata else None
+            if response or tool_calls:
+                msg: dict[str, Any] = {"role": "assistant", "content": response or None}
+                if tool_calls:
+                    msg["tool_calls"] = tool_calls
+                state.message_history.append(msg)
         state.completed_turns += 1
-        if state.is_complete():
-            if state.failed_turns > 0:
-                logger.info(
-                    f"Conversation {conversation_id} completed with failures: "
-                    f"{state.completed_turns - state.failed_turns}/"
-                    f"{state.expected_client_turns} successful, "
-                    f"{state.failed_turns} failed"
-                )
-            else:
-                logger.debug(
-                    f"Conversation {conversation_id} completed: "
-                    f"{state.completed_turns}/{state.expected_client_turns} turns"
-                )
+        self._log_if_complete(state, conversation_id)
         state.turn_done.set()
 
     def mark_turn_failed(
@@ -164,11 +177,5 @@ class ConversationManager:
         state.completed_turns += 1
         state.failed_turns += 1
         logger.warning(f"Turn failed for conversation {conversation_id}")
-        if state.is_complete():
-            logger.info(
-                f"Conversation {conversation_id} completed with failures: "
-                f"{state.completed_turns - state.failed_turns}/"
-                f"{state.expected_client_turns} successful, "
-                f"{state.failed_turns} failed"
-            )
+        self._log_if_complete(state, conversation_id)
         state.turn_done.set()

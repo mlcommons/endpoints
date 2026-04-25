@@ -10,8 +10,8 @@ datasets:
   - name: agentic_workflow
     type: performance
     # Run: python scripts/convert_agentic_snapshot.py <input.jsonl> examples/09_MultiTurn/datasets/agentic_workflow_flat.jsonl --verify
+    # The datasets/ directory is a placeholder; populate it with the conversion script above.
     path: examples/09_MultiTurn/datasets/agentic_workflow_flat.jsonl
-    format: ".jsonl"
     multi_turn:
       mode: independent
       turn_timeout_s: 600.0

@@ -78,16 +78,20 @@ The following commands convert each source snapshot file to the flat-row format 
 Run from the repo root:
 
 ```bash
+# First argument: input snapshot JSONL; second argument: output flat-row JSONL
 python scripts/convert_agentic_snapshot.py \
-    /path/to/agentic_coding_dataset.jsonl \        # input snapshot JSONL
-    examples/09_MultiTurn/datasets/agentic_coding_flat.jsonl \  # output flat-row JSONL
+    /path/to/agentic_coding_dataset.jsonl \
+    examples/09_MultiTurn/datasets/agentic_coding_flat.jsonl \
     --verify
 
 python scripts/convert_agentic_snapshot.py \
-    /path/to/agentic_workflow_dataset.jsonl \       # input snapshot JSONL
-    examples/09_MultiTurn/datasets/agentic_workflow_flat.jsonl \ # output flat-row JSONL
+    /path/to/agentic_workflow_dataset.jsonl \
+    examples/09_MultiTurn/datasets/agentic_workflow_flat.jsonl \
     --verify
 ```
+
+The `datasets/` directory under `examples/09_MultiTurn/` is a placeholder; run the conversion
+commands above to populate it before benchmarking.
 
 The `--verify` flag cross-checks every client turn's message history against the source snapshot
 and exits with code 1 if any mismatch is found. The script also:
@@ -138,8 +142,7 @@ inference-endpoint benchmark from-config \
 datasets:
   - name: customer_support
     type: performance
-    path: examples/multi_turn/customer_support_conversations.jsonl
-    format: ".jsonl"
+    path: examples/09_MultiTurn/customer_support_conversations.jsonl
     multi_turn:
       mode: independent
       turn_timeout_s: 300.0
@@ -147,11 +150,12 @@ datasets:
 settings:
   load_pattern:
     type: multi_turn
+    target_concurrency: 32 # ← Required for multi_turn load pattern
 ```
 
-### Concurrency Control (Optional)
+### Concurrency Control
 
-The multi-turn scheduler supports **optional concurrency limiting** to control the maximum number of in-flight requests across all conversations:
+The `target_concurrency` field is **required** for the `multi_turn` load pattern and controls the maximum number of in-flight requests across all conversations:
 
 ```yaml
 settings:
@@ -162,15 +166,14 @@ settings:
 
 **Behavior**:
 
-- Without `target_concurrency`: Unlimited concurrency (all turn-1s issue at t=0 in INDEPENDENT mode)
 - With `target_concurrency`: Limits total in-flight requests across all conversations
 - Combines with turn sequencing: Turn N+1 still waits for turn N, AND waits for available slot
 
 **Use cases**:
 
-- 🎯 **Prevent endpoint overload**: Control request rate to busy endpoints
-- 🎯 **Large-scale testing**: Benchmark 1000+ conversations without overwhelming system
-- 🎯 **Resource management**: Stay within port limits, memory constraints
+- **Prevent endpoint overload**: Control request rate to busy endpoints
+- **Large-scale testing**: Benchmark 1000+ conversations without overwhelming system
+- **Resource management**: Stay within port limits, memory constraints
 
 **Example**: 100 conversations with `target_concurrency: 32`
 
@@ -221,7 +224,7 @@ If a turn times out waiting for the previous turn, it will be skipped and logged
 
 ```bash
 inference-endpoint benchmark from-config \
-  --config examples/multi_turn/multi_turn_benchmark.yaml
+  --config examples/09_MultiTurn/multi_turn_benchmark.yaml
 ```
 
 ### Viewing Results
@@ -231,7 +234,7 @@ Multi-turn benchmarks produce both per-turn and per-conversation metrics:
 - **Per-turn metrics**: Latency, TTFT, TPOT for each individual turn
 - **Per-conversation metrics**: Total conversation latency, conversations per second
 
-Results are stored in the configured `report_dir` with conversation metadata included in the events database.
+Results are stored in the configured `report_dir` with conversation metadata included in the events log (`events.jsonl`).
 
 ## Example Datasets
 
@@ -248,8 +251,7 @@ Simple customer support conversations demonstrating basic multi-turn interaction
 ### Key Components
 
 - **ConversationManager**: Tracks conversation state and message history
-- **MultiTurnScheduler**: Enforces turn sequencing within conversations
-- **ConversationSample**: Sample with conversation metadata
+- **MultiTurnStrategy**: Enforces turn sequencing within conversations
 - **MultiTurnDataset**: Validates and structures multi-turn data
 
 ### Turn Sequencing
@@ -307,5 +309,4 @@ Planned features:
 - [ ] Poisson conversation arrival mode implementation
 - [ ] Per-conversation metrics in reporting
 - [ ] Conversation-level latency percentiles
-- [ ] Support for tool/function calls in conversations
 - [ ] Dynamic conversation branching

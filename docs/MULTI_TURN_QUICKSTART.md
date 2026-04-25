@@ -1,6 +1,6 @@
 # Multi-Turn Conversation Benchmarking - Quick Start Guide
 
-## 🚀 Quick Start in 5 Minutes
+## Quick Start in 5 Minutes
 
 ### 1. Prepare Your Dataset
 
@@ -40,7 +40,6 @@ datasets:
   - name: my_conversations
     type: performance
     path: path/to/your/conversations.jsonl
-    format: ".jsonl"
     multi_turn: # ← Presence of this block enables multi-turn mode
       mode: independent # ← Per-conv pipelines; no cross-conv turn barrier
       turn_timeout_s: 300 # ← Max wait for prev turn
@@ -48,7 +47,7 @@ datasets:
 settings:
   load_pattern:
     type: multi_turn # ← Use multi-turn scheduler
-    target_concurrency: 32 # ← OPTIONAL: limit concurrent requests
+    target_concurrency: 32 # ← Required: max concurrent requests
 
   client:
     workers: 4
@@ -78,24 +77,26 @@ That's it! Your benchmark will now:
 
 ---
 
-## 📊 Understanding Results
+## Understanding Results
 
 After the benchmark completes, check the directory configured via `report_dir`:
 
-### Events Database
+### Events Log
 
-The `events.db` SQLite database includes:
+The `events.jsonl` file contains one JSON record per line:
 
-- Standard fields: sample_uuid, event_type, timestamp_ns
-- **New fields**: conversation_id, turn_number
+- Standard fields: `sample_uuid`, `event_type`, `timestamp_ns`
+- **New fields**: `conversation_id`, `turn_number`
 
-Query example:
+Query examples:
 
-```sql
-SELECT conversation_id, turn_number, event_type, timestamp_ns
-FROM events
-WHERE conversation_id = 'c1'
-ORDER BY turn_number;
+```bash
+# All events for a specific conversation
+grep '"conversation_id": "c1"' logs/my_multi_turn_benchmark/events.jsonl
+
+# With jq for structured output
+jq 'select(.conversation_id == "c1") | {conversation_id, turn_number, event_type, timestamp_ns}' \
+  logs/my_multi_turn_benchmark/events.jsonl
 ```
 
 ### Metrics
@@ -109,7 +110,7 @@ _Note: Per-conversation aggregation (e.g., "conversations/sec") is coming in a f
 
 ---
 
-## 🎯 Conversation Modes Explained
+## Conversation Modes Explained
 
 ### Independent Mode (Default)
 
@@ -140,9 +141,9 @@ t=0.8:  conv1-turn3 (after conv1-turn2 completes)
 
 ---
 
-## 🎛️ Concurrency Control (NEW!)
+## Concurrency Control
 
-For benchmarks with **> 50 conversations**, use `target_concurrency` to prevent endpoint overload:
+`target_concurrency` is **required** for the `multi_turn` load pattern. It limits the maximum number of in-flight requests across all conversations and prevents endpoint overload when many conversations run simultaneously.
 
 ```yaml
 settings:
@@ -151,17 +152,15 @@ settings:
     target_concurrency: 32 # ← Limit to 32 concurrent requests
 ```
 
-**Why?** Without this, independent mode issues ALL turn-1s at once (could be 100+), overwhelming your endpoint.
+**Sizing guide**:
 
-**Rule of thumb**:
-
-- Small (< 50 convs): No limit needed
-- Medium (50-500 convs): `target_concurrency: 32`
-- Large (500+ convs): `target_concurrency: 64`
+- Small (< 50 convs): `target_concurrency: 32`
+- Medium (50-500 convs): `target_concurrency: 64`
+- Large (500+ convs): `target_concurrency: 96` or higher
 
 ---
 
-## 🔧 Common Configurations
+## Common Configurations
 
 ### Recommended: With Concurrency Control
 
@@ -188,6 +187,9 @@ multi_turn:
   turn_timeout_s: 600
 
 settings:
+  load_pattern:
+    type: multi_turn
+    target_concurrency: 96
   client:
     workers: 16 # More workers for parallel conversations
 ```
@@ -198,17 +200,27 @@ settings:
 multi_turn:
   mode: independent
   turn_timeout_s: 1800 # 30 minutes for slow responses
+
+settings:
+  load_pattern:
+    type: multi_turn
+    target_concurrency: 32
 ```
 
 ---
 
-## ❓ Troubleshooting
+## Troubleshooting
 
 ### "Conversation has invalid role sequence"
 
-**Problem**: Your dataset doesn't alternate between user/assistant.
+**Problem**: Your dataset doesn't follow a valid role sequence.
 
-**Fix**: Check your JSONL - must be: user, assistant, user, assistant, ...
+**Fix**: Check your JSONL. Valid sequences:
+
+- Plain chat: `user → assistant → user → assistant → ...`
+- Agentic (tool-use): `user → assistant → tool → assistant → tool → ... → user`
+
+Conversations may also end with a `tool` row (the model's response to the final tool call is the benchmark target).
 
 ### "Rows for conversation X are not consecutive"
 
@@ -230,17 +242,19 @@ multi_turn:
 
 **Problem**: MultiTurnDataset not recognized.
 
-**Fix**: Ensure `format: ".jsonl"` is specified in config:
+**Fix**: Ensure `multi_turn:` block is present in the dataset config. The file format
+is auto-detected from the `.jsonl` extension — no `format` field is needed:
 
 ```yaml
 datasets:
   - path: your_file.jsonl
-    format: ".jsonl" # ← Required for JSONL
+    multi_turn:
+      mode: independent
 ```
 
 ---
 
-## 📝 Example Datasets
+## Example Datasets
 
 ### Simple 2-Turn Conversation
 
@@ -274,12 +288,12 @@ datasets:
 
 ---
 
-## 🧪 Testing Your Setup
+## Testing Your Setup
 
 ### 1. Use the Example Dataset
 
 ```bash
-cd examples/multi_turn
+cd examples/09_MultiTurn
 inference-endpoint benchmark from-config --config multi_turn_benchmark.yaml
 ```
 
@@ -293,14 +307,14 @@ cat logs/multi_turn_test/benchmark.log
 ### 3. Verify Event Recording
 
 ```bash
-sqlite3 logs/multi_turn_test/events.db
-sqlite> SELECT DISTINCT conversation_id FROM events;
+# List all unique conversation IDs in the events log
+jq -r '.conversation_id' logs/multi_turn_test/events.jsonl | sort -u
 # Should show your conversation IDs
 ```
 
 ---
 
-## 💡 Tips & Best Practices
+## Tips & Best Practices
 
 ### Dataset Design
 
@@ -318,28 +332,28 @@ sqlite> SELECT DISTINCT conversation_id FROM events;
 
 - **Start small**: Test with 1-2 conversations first
 - **Single conversation**: Use `mode: independent` with `target_concurrency: 1`
-- **Check events.db**: Verify turn ordering in database
+- **Check events.jsonl**: Verify turn ordering with `jq`
 
 ---
 
-## 🔗 More Information
+## More Information
 
 - **Full Documentation**: See `examples/09_MultiTurn/README.md`
 - **Architecture**: See `AGENTS.md` (Multi-Turn section)
 
 ---
 
-## ✅ Checklist
+## Checklist
 
 Before running your first multi-turn benchmark:
 
-- [ ] Dataset follows format (alternating user/assistant roles)
+- [ ] Dataset follows format (user/assistant alternation, or agentic user→assistant→tool sequences)
 - [ ] All rows for each conversation_id are grouped together
 - [ ] Config has `multi_turn:` block in the dataset section
 - [ ] Config has `load_pattern.type: multi_turn`
 - [ ] Endpoint is running and reachable
-- [ ] `format: ".jsonl"` specified for JSONL datasets
+- [ ] File uses `.jsonl` extension (format is auto-detected)
 - [ ] Conversation IDs are unique per conversation
 - [ ] Turn numbers are sequential (1, 2, 3, ...)
 
-Happy benchmarking! 🚀
+Happy benchmarking!
