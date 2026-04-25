@@ -227,5 +227,8 @@ class MultiTurnStrategy:
             )
         else:
             self._conv_manager.mark_turn_complete(
-                conv_id, response_text, store_in_history=self._store_in_history
+                conv_id,
+                response_text,
+                store_in_history=self._store_in_history,
+                metadata=result.metadata,
             )

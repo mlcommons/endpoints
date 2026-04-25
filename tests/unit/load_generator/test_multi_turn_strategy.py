@@ -313,7 +313,7 @@ async def test_live_history_initializes_system_prompt():
 
     async def complete_turn():
         await asyncio.sleep(0.01)
-        await conv_manager.mark_turn_complete("conv1", "response")
+        conv_manager.mark_turn_complete("conv1", "response")
 
     asyncio.create_task(complete_turn())
     await strategy.execute(issuer)
@@ -342,7 +342,7 @@ async def test_live_history_no_system_prompt_when_none():
 
     async def complete_turn():
         await asyncio.sleep(0.01)
-        await conv_manager.mark_turn_complete("conv1", "response")
+        conv_manager.mark_turn_complete("conv1", "response")
 
     asyncio.create_task(complete_turn())
     await strategy.execute(issuer)
@@ -369,7 +369,7 @@ async def test_dataset_history_mode_does_not_inject_system_prompt():
 
     async def complete_turn():
         await asyncio.sleep(0.01)
-        await conv_manager.mark_turn_complete("conv1", "response")
+        conv_manager.mark_turn_complete("conv1", "response")
 
     asyncio.create_task(complete_turn())
     await strategy.execute(issuer)
@@ -378,3 +378,108 @@ async def test_dataset_history_mode_does_not_inject_system_prompt():
     assert state is not None
     # message_history should be empty (dataset-history mode doesn't accumulate)
     assert len(state.message_history) == 0
+
+
+@pytest.mark.unit
+def test_mark_turn_complete_preserves_tool_calls():
+    """mark_turn_complete stores tool_calls in history when metadata contains them."""
+    conv_manager = ConversationManager()
+    conv_manager.get_or_create("conv1", expected_client_turns=1)
+
+    tool_calls = [
+        {
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "bash", "arguments": '{"cmd": "ls"}'},
+        }
+    ]
+    conv_manager.mark_turn_complete(
+        "conv1",
+        response="",
+        store_in_history=True,
+        metadata={"tool_calls": tool_calls},
+    )
+
+    state = conv_manager.get_state("conv1")
+    assert state is not None
+    assert len(state.message_history) == 1
+    msg = state.message_history[0]
+    assert msg["role"] == "assistant"
+    assert msg["content"] is None
+    assert msg["tool_calls"] == tool_calls
+
+
+@pytest.mark.unit
+def test_mark_turn_complete_with_response_and_tool_calls():
+    """mark_turn_complete stores both content and tool_calls when both are present."""
+    conv_manager = ConversationManager()
+    conv_manager.get_or_create("conv1", expected_client_turns=1)
+
+    tool_calls = [
+        {
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "search", "arguments": "{}"},
+        }
+    ]
+    conv_manager.mark_turn_complete(
+        "conv1",
+        response="Calling search...",
+        store_in_history=True,
+        metadata={"tool_calls": tool_calls},
+    )
+
+    state = conv_manager.get_state("conv1")
+    assert state is not None
+    msg = state.message_history[0]
+    assert msg["content"] == "Calling search..."
+    assert msg["tool_calls"] == tool_calls
+
+
+@pytest.mark.unit
+def test_mark_turn_complete_no_history_when_empty():
+    """mark_turn_complete does not append when response is empty and no tool_calls."""
+    conv_manager = ConversationManager()
+    conv_manager.get_or_create("conv1", expected_client_turns=1)
+
+    conv_manager.mark_turn_complete("conv1", response="", store_in_history=True)
+
+    state = conv_manager.get_state("conv1")
+    assert state is not None
+    assert len(state.message_history) == 0
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_on_sample_complete_passes_metadata():
+    """on_sample_complete forwards result.metadata (including tool_calls) to ConversationManager."""
+    from inference_endpoint.config.schema import MultiTurnConfig
+
+    conv_manager = ConversationManager()
+    metadata_dict = _make_metadata_with_system({"conv1": [1]})
+    mt_cfg = MultiTurnConfig(use_dataset_history=False, turn_timeout_s=10.0)
+    strategy = MultiTurnStrategy(conv_manager, metadata_dict, multi_turn_config=mt_cfg)
+
+    conv_manager.get_or_create("conv1", expected_client_turns=1)
+    strategy._inflight["q0001"] = "conv1"
+
+    tool_calls = [
+        {
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "bash", "arguments": "{}"},
+        }
+    ]
+    result = QueryResult(
+        id="q0001",
+        response_output=TextModelOutput(output=""),
+        metadata={"tool_calls": tool_calls},
+    )
+    strategy.on_sample_complete(result)
+
+    state = conv_manager.get_state("conv1")
+    assert state is not None
+    assert state.completed_turns == 1
+    assert len(state.message_history) == 1
+    assert state.message_history[0]["tool_calls"] == tool_calls
+    assert state.message_history[0]["content"] is None
