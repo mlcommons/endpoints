@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Validate multi-turn JSONL dataset files against multi_turn_dataset_schema.json.
+"""Validate multi-turn JSONL dataset files against scripts/multi_turn_dataset_schema.json.
 
 Checks each row's structure against the JSON schema (field types, required fields,
 tool_results shape, etc.). Does NOT check cross-row invariants such as turn
@@ -88,14 +88,14 @@ def validate_file(path: Path, schema: dict, max_errors: int = 50) -> int:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Validate multi-turn JSONL files against multi_turn_dataset_schema.json."
+        description="Validate multi-turn JSONL files against scripts/multi_turn_dataset_schema.json."
     )
     parser.add_argument("files", nargs="+", type=Path, help="JSONL files to validate")
     parser.add_argument(
         "--schema",
         type=Path,
-        default=Path(__file__).parent.parent / "multi_turn_dataset_schema.json",
-        help="Path to the JSON schema file (default: multi_turn_dataset_schema.json)",
+        default=Path(__file__).parent / "multi_turn_dataset_schema.json",
+        help="Path to the JSON schema file (default: scripts/multi_turn_dataset_schema.json)",
     )
     parser.add_argument(
         "--max-errors",
