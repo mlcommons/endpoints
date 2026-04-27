@@ -8,13 +8,13 @@ Enable profiling with the `ENABLE_LINE_PROFILER` environment variable:
 
 ```bash
 # Profile integration tests
-ENABLE_LINE_PROFILER=1 pytest tests/integration/endpoint_client/
+ENABLE_LINE_PROFILER=1 uv run pytest tests/integration/endpoint_client/
 
 # Profile performance tests
-ENABLE_LINE_PROFILER=1 pytest tests/performance/
+ENABLE_LINE_PROFILER=1 uv run pytest tests/performance/
 
 # Profile specific test
-ENABLE_LINE_PROFILER=1 pytest tests/integration/endpoint_client/test_http_client_core.py::test_basic_future_handling
+ENABLE_LINE_PROFILER=1 uv run pytest tests/integration/endpoint_client/test_http_client_core.py::test_basic_future_handling
 ```
 
 Profiling statistics are automatically displayed after tests complete.
@@ -30,13 +30,13 @@ Profiling statistics are automatically displayed after tests complete.
 
 ```bash
 # Use defaults (main to stderr, workers to /tmp/mlperf_client_profiles/)
-ENABLE_LINE_PROFILER=1 pytest tests/integration/
+ENABLE_LINE_PROFILER=1 uv run pytest tests/integration/
 
 # Custom worker profile location
-ENABLE_LINE_PROFILER=1 LINE_PROFILER_LOGFILE=/custom/path/profile pytest tests/
+ENABLE_LINE_PROFILER=1 LINE_PROFILER_LOGFILE=/custom/path/profile uv run pytest tests/
 
 # Profile your own script
-ENABLE_LINE_PROFILER=1 python my_script.py
+ENABLE_LINE_PROFILER=1 uv run python my_script.py
 ```
 
 ## How It Works

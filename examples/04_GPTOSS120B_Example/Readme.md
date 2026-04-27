@@ -40,7 +40,7 @@ docker run --runtime nvidia --gpus all \
 The config [`vllm_gptoss_120b_example.yaml`](vllm_gptoss_120b_example.yaml) runs performance + AIME25 + GPQA accuracy at concurrency 512:
 
 ```bash
-inference-endpoint benchmark from-config \
+uv run inference-endpoint benchmark from-config \
   -c examples/04_GPTOSS120B_Example/vllm_gptoss_120b_example.yaml \
   --timeout 60
 ```
@@ -107,7 +107,7 @@ docker run --runtime nvidia --gpus all --net host \
 The config [`sglang_gptoss_120b_example.yaml`](sglang_gptoss_120b_example.yaml) runs performance + AIME25 + GPQA + LiveCodeBench accuracy at concurrency 512:
 
 ```bash
-inference-endpoint benchmark from-config \
+uv run inference-endpoint benchmark from-config \
   -c examples/04_GPTOSS120B_Example/sglang_gptoss_120b_example.yaml \
   --timeout 60
 ```

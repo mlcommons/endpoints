@@ -13,24 +13,37 @@ A high-performance benchmarking tool for LLM inference endpoints, targeting 50k+
 ```bash
 git clone https://github.com/mlcommons/endpoints.git
 cd endpoints
+uv sync
+```
+
+<details>
+<summary>Using pip + venv instead (backward-compatible)</summary>
+
+> **Note:** Does not use `uv.lock` — dependency versions may differ from the lockfile.
+
+```bash
 python3.12 -m venv venv && source venv/bin/activate
 pip install .
 ```
 
+After activating the venv, commands work without the `uv run` prefix.
+
+</details>
+
 ```bash
 # Test endpoint connectivity
-inference-endpoint probe \
+uv run inference-endpoint probe \
   --endpoints http://your-endpoint:8000 \
   --model Qwen/Qwen3-8B
 
 # Run offline benchmark (max throughput)
-inference-endpoint benchmark offline \
+uv run inference-endpoint benchmark offline \
   --endpoints http://your-endpoint:8000 \
   --model Qwen/Qwen3-8B \
   --dataset tests/datasets/dummy_1k.jsonl
 
 # Run online benchmark (sustained QPS)
-inference-endpoint benchmark online \
+uv run inference-endpoint benchmark online \
   --endpoints http://your-endpoint:8000 \
   --model Qwen/Qwen3-8B \
   --dataset tests/datasets/dummy_1k.jsonl \
@@ -42,8 +55,8 @@ inference-endpoint benchmark online \
 
 ```bash
 # Start local echo server and run a benchmark against it
-python -m inference_endpoint.testing.echo_server --port 8765 &
-inference-endpoint benchmark offline \
+uv run python -m inference_endpoint.testing.echo_server --port 8765 &
+uv run inference-endpoint benchmark offline \
   --endpoints http://localhost:8765 \
   --model test-model \
   --dataset tests/datasets/dummy_1k.jsonl

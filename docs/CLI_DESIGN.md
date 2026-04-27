@@ -7,7 +7,7 @@ For usage examples and flag reference, see [CLI_QUICK_REFERENCE.md](CLI_QUICK_RE
 ## Command Structure
 
 ```
-$ inference-endpoint -h
+$ uv run inference-endpoint -h
 Usage: inference-endpoint COMMAND
 
 ╭─ Commands ───────────────────────────────────────────────────────────────────╮
@@ -149,12 +149,12 @@ Sub-models self-validate their own constraints. `BenchmarkConfig` only handles c
 Errors from cyclopts (missing args, unknown flags, Pydantic validation) go through `cli_error_formatter` in `config/utils.py`:
 
 ```
-$ inference-endpoint benchmark offline
+$ uv run inference-endpoint benchmark offline
 ╭── Error ─────────────────────────────────────────────────────────────────────╮
 │ Required: --dataset                                                          │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 
-$ inference-endpoint benchmark offline --endpoints x --model M --dataset D --workers abc
+$ uv run inference-endpoint benchmark offline --endpoints x --model M --dataset D --workers abc
 ╭── Error ─────────────────────────────────────────────────────────────────────╮
 │   settings.client.num_workers: Input should be a valid integer, unable to    │
 │ string as an integer                                                         │

@@ -10,7 +10,7 @@ For post-training quantization, users can use the [cnn-dailymail-calibration-lis
 
 ```
 curl -OL https://raw.githubusercontent.com/mlcommons/inference/v4.0/calibration/CNNDailyMail/calibration-list.txt
-python download_cnndm.py --save-dir data --calibration-ids-file calibration-list.txt --split train
+uv run python download_cnndm.py --save-dir data --calibration-ids-file calibration-list.txt --split train
 ```
 
 ## Launch the server
@@ -48,7 +48,7 @@ docker run --runtime nvidia --gpus all -v ${HF_HOME}:/root/.cache/huggingface --
 - Launch the benchmark with config yaml
 
 ```
-inference-endpoint benchmark from-config -c offline_llama3_8b_cnn.yaml --timeout 600
+uv run inference-endpoint benchmark from-config -c offline_llama3_8b_cnn.yaml --timeout 600
 ```
 
 ### To run Online mode
@@ -58,5 +58,5 @@ inference-endpoint benchmark from-config -c offline_llama3_8b_cnn.yaml --timeout
 - Launch the benchmark with config yaml (For performance only, remove the accuracy dataset entry in the `online_llama3_8b_cnn.yaml`)
 
 ```
-inference-endpoint benchmark from-config -c online_llama3_8b_cnn.yaml --timeout 600
+uv run inference-endpoint benchmark from-config -c online_llama3_8b_cnn.yaml --timeout 600
 ```

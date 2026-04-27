@@ -20,20 +20,31 @@ cd endpoints
 # 2. Add the upstream repo as a remote
 git remote add upstream https://github.com/mlcommons/endpoints.git
 
-# 3. Create virtual environment (Python 3.12+ required)
-python3.12 -m venv venv
-source venv/bin/activate
+# 3. Install development dependencies
+uv sync --extra dev --extra test
 
-# 4. Install development dependencies
-pip install -e ".[dev,test]"
+# 4. Install pre-commit hooks
+uv run pre-commit install
 
-# 5. Install pre-commit hooks
-pre-commit install
-
-# 6. Verify installation
-inference-endpoint --version
-pytest --version
+# 5. Verify installation
+uv run inference-endpoint --version
+uv run pytest --version
 ```
+
+<details>
+<summary>Using pip + venv instead (backward-compatible)</summary>
+
+> **Note:** Does not use `uv.lock` — dependency versions may differ from the lockfile.
+
+```bash
+python3.12 -m venv venv && source venv/bin/activate
+pip install -e ".[dev,test]"
+pre-commit install
+```
+
+After activating the venv, commands work without the `uv run` prefix.
+
+</details>
 
 ## Project Structure
 
@@ -73,19 +84,19 @@ endpoints/
 
 ```bash
 # All tests (excludes slow/performance)
-pytest
+uv run pytest
 
 # Unit tests only
-pytest -m unit
+uv run pytest -m unit
 
 # Integration tests
-pytest -m integration
+uv run pytest -m integration
 
 # Single file with verbose output
-pytest -xvs tests/unit/path/to/test_file.py
+uv run pytest -xvs tests/unit/path/to/test_file.py
 
 # With coverage
-pytest --cov=src --cov-report=html
+uv run pytest --cov=src --cov-report=html
 ```
 
 ### Test Markers
@@ -137,10 +148,10 @@ All of these run automatically on commit:
 
 ```bash
 # Run all hooks
-pre-commit run --all-files
+uv run pre-commit run --all-files
 
 # Install hooks (done during setup)
-pre-commit install
+uv run pre-commit install
 ```
 
 ### Code Style
@@ -166,8 +177,8 @@ git merge upstream/main
 git checkout -b feat/your-feature-name
 
 # Make changes and test
-pytest
-pre-commit run --all-files
+uv run pytest
+uv run pre-commit run --all-files
 
 # Commit changes
 git add <specific files>
@@ -190,7 +201,7 @@ docs/short-description
 Config templates in `src/inference_endpoint/config/templates/` are auto-generated from schema defaults. When you change `config/schema.py`, regenerate them:
 
 ```bash
-python scripts/regenerate_templates.py
+uv run python scripts/regenerate_templates.py
 ```
 
 The pre-commit hook auto-regenerates templates when `schema.py`, `config.py`, or `regenerate_templates.py` change. CI validates templates are up to date via `--check` mode.
@@ -204,15 +215,15 @@ Two variants are generated per mode (offline, online, concurrency):
 
 ### Adding Dependencies
 
-Add dependencies to `pyproject.toml` (always pin to exact versions with `==`):
+Use `uv add <package>==<version>` to update both `pyproject.toml` and `uv.lock` atomically (always pin to exact versions with `==`):
 
 - **Runtime dependencies**: `[project.dependencies]`
 - **Optional groups** (dev, test, etc.): `[project.optional-dependencies]`
 
-After adding a dependency, run `pip-audit` (included in `dev` extras) to verify it has no known vulnerabilities.
+After adding a dependency, run `pip-audit` to verify it has no known vulnerabilities:
 
 ```bash
-pip install -e ".[dev,test]"
+uv run pip-audit
 ```
 
 ## Performance Considerations
@@ -229,13 +240,13 @@ Code in `load_generator/`, `endpoint_client/worker.py`, and `async_utils/transpo
 
 ```bash
 # Run with verbose logging
-inference-endpoint -v benchmark offline ...
+uv run inference-endpoint -v benchmark offline ...
 
 # Run tests with stdout visible
-pytest -xvs tests/unit/path/to/test.py
+uv run pytest -xvs tests/unit/path/to/test.py
 
 # Use Python debugger
-python -m pdb -m pytest tests/unit/path/to/test.py
+uv run python -m pdb -m pytest tests/unit/path/to/test.py
 ```
 
 ## Getting Help

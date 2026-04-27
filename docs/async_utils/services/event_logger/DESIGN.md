@@ -110,7 +110,7 @@ CLI currently only supports the default sqlite path.
 ### Startup
 
 ```
-python -m inference_endpoint.async_utils.services.event_logger \
+uv run python -m inference_endpoint.async_utils.services.event_logger \
     --log-dir /path/to/logs \
     --socket-dir /path/to/socket_dir \
     --socket-name ev_pub_abc123 \
@@ -198,7 +198,7 @@ flowchart TB
 ## CLI Interface
 
 ```
-usage: python -m inference_endpoint.async_utils.services.event_logger
+usage: uv run python -m inference_endpoint.async_utils.services.event_logger
     --log-dir LOG_DIR
     --socket-dir SOCKET_DIR
     --socket-name SOCKET_NAME

@@ -10,11 +10,39 @@ High-performance benchmarking tool for LLM inference endpoints targeting 50k+ QP
 
 ```bash
 # Development setup
+uv sync --extra dev --extra test
+uv run pre-commit install
+
+# Testing
+uv run pytest                                        # All tests (excludes slow/performance)
+uv run pytest -m unit                                # Unit tests only
+uv run pytest -m integration                         # Integration tests only
+uv run pytest --cov=src --cov-report=html            # With coverage
+uv run pytest -xvs tests/unit/path/to/test_file.py  # Single test file
+
+# Code quality (run before commits)
+uv run pre-commit run --all-files
+
+# Local testing with echo server
+uv run python -m inference_endpoint.testing.echo_server --port 8765
+uv run inference-endpoint probe --endpoints http://localhost:8765 --model test-model
+
+# CLI usage
+uv run inference-endpoint benchmark offline --endpoints URL --model NAME --dataset PATH
+uv run inference-endpoint benchmark online --endpoints URL --model NAME --dataset PATH --load-pattern poisson --target-qps 100
+uv run inference-endpoint benchmark from-config --config config.yaml
+```
+
+### Backward-compatible setup (pip + venv)
+
+Does not use `uv.lock` — dependency versions may differ from the lockfile.
+
+```bash
 python3.12 -m venv venv && source venv/bin/activate
 pip install -e ".[dev,test]"
 pre-commit install
 
-# Testing
+# After activating the venv, commands run without the `uv run` prefix:
 pytest                                        # All tests (excludes slow/performance)
 pytest -m unit                                # Unit tests only
 pytest -m integration                         # Integration tests only
@@ -356,5 +384,5 @@ Known failure modes when AI tools generate code for this project. Reference thes
 
 ### Dependency & Environment
 
-- **Adding new dependencies without justification**: AI may `pip install` or add imports for packages not in `pyproject.toml`. Any new dependency must be justified, added to the correct optional group, and pinned to an exact version (`==`). After adding a dependency, run `pip-audit` (included in `dev` extras) to verify it has no known vulnerabilities.
+- **Adding new dependencies without justification**: AI may `pip install` or add imports for packages not in `pyproject.toml`. Any new runtime, dev, or test dependency must be justified, added to the correct optional group, and pinned to an exact version (`==`). After adding a dependency, run `pip-audit` (included in `dev` extras) to verify it has no known vulnerabilities. When adding dependencies, use `uv add <package>==<version>` to update both `pyproject.toml` and `uv.lock` atomically, then run `uv run pip-audit` to check for vulnerabilities. Note: `[build-system] requires` is also pinned to exact versions for reproducibility.
 - **Using `requests`/`aiohttp` for HTTP**: This project has its own HTTP client (`endpoint_client/http.py`) using `httptools`. AI defaults to `requests` or `aiohttp` — these should not appear in production code (test dependencies are fine).
