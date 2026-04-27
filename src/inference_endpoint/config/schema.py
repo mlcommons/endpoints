@@ -591,6 +591,27 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
 
         return self
 
+    @model_validator(mode="after")
+    def _propagate_client_api_type(self) -> Self:
+        """Sync client.api_type from endpoint_config.api_type at construction.
+
+        ``endpoint_config.api_type`` is the user-facing source of truth.
+        ``HTTPClientConfig.api_type`` is internal and only exists so the
+        adapter/accumulator can be resolved by ``_resolve_defaults``. Without
+        this propagation, a YAML/CLI that selects SGLang on ``endpoint_config``
+        would leave the client with the OpenAI adapter until ``execute.py``
+        patched it at runtime.
+        """
+        target = self.endpoint_config.api_type
+        if self.settings.client.api_type != target:
+            new_client = self.settings.client.with_updates(
+                api_type=target,
+                adapter=None,
+                accumulator=None,
+            )
+            object.__setattr__(self.settings, "client", new_client)
+        return self
+
     @classmethod
     def from_yaml_file(cls, path: Path) -> BenchmarkConfig:
         """Load BenchmarkConfig from YAML file.

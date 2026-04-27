@@ -497,9 +497,10 @@ async def _run_benchmark_async(
         http_client: HTTPEndpointClient | None = None
         try:
             api_type: APIType = config.endpoint_config.api_type
+            # client.api_type is propagated from endpoint_config.api_type by
+            # BenchmarkConfig._propagate_client_api_type — no override needed here.
             http_config = config.settings.client.with_updates(
                 endpoint_urls=[urljoin(e, api_type.default_route()) for e in endpoints],
-                api_type=api_type,
                 api_key=config.endpoint_config.api_key,
                 event_logs_dir=ctx.report_dir,
                 cpu_affinity=ctx.affinity_plan,
