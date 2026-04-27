@@ -57,10 +57,6 @@ settings:
       recv_buffer_size: 16777216
       send_buffer_size: 8388608
 
-metrics:
-  collect:
-    - "throughput"
-
 endpoint_config:
   endpoints:
     - "http://localhost:8000"

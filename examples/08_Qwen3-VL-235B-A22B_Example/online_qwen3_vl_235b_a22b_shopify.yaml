@@ -36,11 +36,6 @@ settings:
     # Increase timeout for slow worker startup (spawn, imports). Default 40s may be too short.
     worker_initialization_timeout: 120
 
-metrics:
-  collect:
-    - "latency"
-    - "ttft"
-
 endpoint_config:
   endpoints:
     - "http://localhost:8000"

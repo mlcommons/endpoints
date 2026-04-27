@@ -8,13 +8,13 @@ Enable profiling with the `ENABLE_LINE_PROFILER` environment variable:
 
 ```bash
 # Profile integration tests
-ENABLE_LINE_PROFILER=1 pytest tests/integration/endpoint_client/
+ENABLE_LINE_PROFILER=1 uv run pytest tests/integration/endpoint_client/
 
 # Profile performance tests
-ENABLE_LINE_PROFILER=1 pytest tests/performance/
+ENABLE_LINE_PROFILER=1 uv run pytest tests/performance/
 
 # Profile specific test
-ENABLE_LINE_PROFILER=1 pytest tests/integration/endpoint_client/test_http_client_core.py::test_basic_future_handling
+ENABLE_LINE_PROFILER=1 uv run pytest tests/integration/endpoint_client/test_http_client_core.py::test_basic_future_handling
 ```
 
 Profiling statistics are automatically displayed after tests complete.
@@ -30,13 +30,13 @@ Profiling statistics are automatically displayed after tests complete.
 
 ```bash
 # Use defaults (main to stderr, workers to /tmp/mlperf_client_profiles/)
-ENABLE_LINE_PROFILER=1 pytest tests/integration/
+ENABLE_LINE_PROFILER=1 uv run pytest tests/integration/
 
 # Custom worker profile location
-ENABLE_LINE_PROFILER=1 LINE_PROFILER_LOGFILE=/custom/path/profile pytest tests/
+ENABLE_LINE_PROFILER=1 LINE_PROFILER_LOGFILE=/custom/path/profile uv run pytest tests/
 
 # Profile your own script
-ENABLE_LINE_PROFILER=1 python my_script.py
+ENABLE_LINE_PROFILER=1 uv run python my_script.py
 ```
 
 ## How It Works
@@ -89,19 +89,19 @@ def cleanup():
 
 Shows execution for the coordinating process:
 
-- `HTTPEndpointClient.issue_query` - Query submission
-- `HTTPEndpointClient._send_to_worker` - ZMQ message passing
-- `FuturesHttpClient._handle_responses` - Response processing
+- `HTTPEndpointClient.issue` - Query submission (fire-and-forget to worker via ZMQ)
+- `HTTPEndpointClient.poll` / `recv` / `drain` - Response retrieval
 
 ### Worker Process Profiles
 
 Shows execution for worker processes making HTTP requests:
 
-- `Worker._main_loop` - Main worker loop
-- `Worker._make_http_request` - HTTP request execution
-- `Worker._handle_streaming_request` - Streaming responses
-- `Worker._handle_non_streaming_request` - Non-streaming responses
-- `Worker._parse_sse_line` - SSE parsing logic
+- `Worker._run_main_loop` - Main worker event loop (request dispatch)
+- `Worker._prepare_request` - Build `InFlightRequest` from `Query`
+- `Worker._fire_request` - Send HTTP request and schedule response handling
+- `Worker._handle_streaming_body` - SSE streaming response processing
+- `Worker._handle_non_streaming_body` - Non-streaming response processing
+- `Worker._iter_sse_lines` - SSE line parser / generator
 
 ### Known Issues
 

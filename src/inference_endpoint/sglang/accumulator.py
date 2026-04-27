@@ -65,7 +65,6 @@ class SGLangSSEAccumulator(SSEAccumulatorProtocol):
             chunk = StreamChunk(
                 id=self.query_id,
                 response_chunk=content_diff,
-                is_complete=False,
                 metadata=metadata,
             )
             self.first_chunk_sent = True

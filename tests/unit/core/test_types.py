@@ -479,7 +479,6 @@ class TestStreamChunkSerialization:
 
         assert decoded.id == ""
         assert decoded.response_chunk == ""
-        assert decoded.is_complete is False
         assert decoded.metadata == {}
 
     def test_stream_chunk_with_basic_content(self):
@@ -493,14 +492,12 @@ class TestStreamChunkSerialization:
 
         assert decoded.id == "query-123"
         assert decoded.response_chunk == "Hello, this is a chunk of text."
-        assert decoded.is_complete is False
 
     def test_stream_chunk_first_chunk(self):
         """Test StreamChunk representing first chunk with metadata."""
         chunk = StreamChunk(
             id="query-456",
             response_chunk="First token",
-            is_complete=False,
             metadata={"first_chunk": True, "latency_ns": 1234567},
         )
 
@@ -510,24 +507,11 @@ class TestStreamChunkSerialization:
         assert decoded.metadata["first_chunk"] is True
         assert decoded.metadata["latency_ns"] == 1234567
 
-    def test_stream_chunk_final_chunk(self):
-        """Test StreamChunk representing final chunk."""
-        chunk = StreamChunk(
-            id="query-789", response_chunk="Final text.", is_complete=True
-        )
-
-        encoded = msgspec.msgpack.encode(chunk)
-        decoded = msgspec.msgpack.decode(encoded, type=StreamChunk)
-
-        assert decoded.is_complete is True
-        assert decoded.response_chunk == "Final text."
-
     def test_stream_chunk_with_comprehensive_metadata(self):
         """Test StreamChunk with detailed metadata."""
         chunk = StreamChunk(
             id="query-meta",
             response_chunk=" next token",
-            is_complete=False,
             metadata={
                 "model": "llama-2-70b",
                 "chunk_index": 5,
@@ -569,7 +553,6 @@ class TestStreamChunkSerialization:
         chunk = StreamChunk(
             id="query-full-chunk",
             response_chunk="Complete chunk text",
-            is_complete=True,
             metadata={
                 "model": "gpt-4",
                 "finish_reason": "stop",
@@ -582,7 +565,6 @@ class TestStreamChunkSerialization:
 
         assert decoded.id == "query-full-chunk"
         assert decoded.response_chunk == "Complete chunk text"
-        assert decoded.is_complete is True
         assert decoded.metadata["finish_reason"] == "stop"
 
     def test_stream_chunk_multiple_roundtrips(self):
@@ -590,7 +572,6 @@ class TestStreamChunkSerialization:
         original = StreamChunk(
             id="query-roundtrip",
             response_chunk="Test chunk",
-            is_complete=False,
             metadata={"index": 1},
         )
 
@@ -605,7 +586,6 @@ class TestStreamChunkSerialization:
         # Verify all fields remain consistent
         assert decoded2.id == original.id
         assert decoded2.response_chunk == original.response_chunk
-        assert decoded2.is_complete == original.is_complete
         assert decoded2.metadata == original.metadata
 
 
@@ -811,7 +791,7 @@ class TestMixedTypeSerialization:
                 id="q1", response_chunk="First", metadata={"first_chunk": True}
             ),
             StreamChunk(id="q1", response_chunk=" second"),
-            StreamChunk(id="q1", response_chunk=" final", is_complete=True),
+            StreamChunk(id="q1", response_chunk=" final"),
         ]
 
         encoded = msgspec.msgpack.encode(chunks)
@@ -819,7 +799,6 @@ class TestMixedTypeSerialization:
 
         assert len(decoded) == 3
         assert decoded[0].metadata.get("first_chunk") is True
-        assert decoded[2].is_complete is True
 
     def test_query_result_with_nested_metadata(self):
         """Test QueryResult with deeply nested metadata and TextModelOutput."""

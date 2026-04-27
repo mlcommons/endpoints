@@ -1,191 +1,142 @@
-# MLPerf® Inference Endpoint Benchmarking System
+# MLPerf Inference Endpoint Benchmarking System
 
-A high-performance benchmarking tool for LLM endpoints.
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
+[![Pre-commit](https://img.shields.io/badge/pre--commit-enabled-brightgreen.svg)](https://pre-commit.com/)
+
+A high-performance benchmarking tool for LLM inference endpoints, targeting 50k+ QPS. Part of [MLCommons](https://mlcommons.org/).
 
 ## Quick Start
 
-### Installation
-
-**Requirements**: Python 3.12+ (Python 3.12 is recommended for optimal performance. GIL-less mode in higher Python versions is not yet supported.)
+**Requirements:** Python 3.12+ (3.12 recommended)
 
 ```bash
-# Clone the repository
-# Note: This repo will be migrated to https://github.com/mlcommons/endpoints
 git clone https://github.com/mlcommons/endpoints.git
 cd endpoints
-
-# Create virtual environment
-python3.12 -m venv venv
-source venv/bin/activate
-
-# As a user
-pip install .
-
-# As a developer (with development and test extras)
-pip install -e ".[dev,test]"
-pre-commit install
+uv sync
 ```
 
-### Basic Usage
+<details>
+<summary>Using pip + venv instead (backward-compatible)</summary>
+
+> **Note:** Does not use `uv.lock` — dependency versions may differ from the lockfile.
 
 ```bash
-# Show help
-inference-endpoint --help
+python3.12 -m venv venv && source venv/bin/activate
+pip install .
+```
 
-# Show system information
-inference-endpoint -v info
+After activating the venv, commands work without the `uv run` prefix.
 
+</details>
+
+```bash
 # Test endpoint connectivity
-inference-endpoint probe \
+uv run inference-endpoint probe \
   --endpoints http://your-endpoint:8000 \
   --model Qwen/Qwen3-8B
 
-# Run offline benchmark (max throughput - uses all dataset samples)
-inference-endpoint benchmark offline \
+# Run offline benchmark (max throughput)
+uv run inference-endpoint benchmark offline \
   --endpoints http://your-endpoint:8000 \
   --model Qwen/Qwen3-8B \
   --dataset tests/datasets/dummy_1k.jsonl
 
-# Run online benchmark (sustained QPS - requires --target-qps, --load-pattern)
-inference-endpoint benchmark online \
+# Run online benchmark (sustained QPS)
+uv run inference-endpoint benchmark online \
   --endpoints http://your-endpoint:8000 \
   --model Qwen/Qwen3-8B \
   --dataset tests/datasets/dummy_1k.jsonl \
   --load-pattern poisson \
   --target-qps 100
-
-# With explicit sample count
-inference-endpoint benchmark offline \
-  --endpoints http://your-endpoint:8000 \
-  --model Qwen/Qwen3-8B \
-  --dataset tests/datasets/dummy_1k.jsonl \
-  --num-samples 5000
 ```
 
-### Running Locally
+### Local Testing
 
 ```bash
-# Start local echo server
-python -m inference_endpoint.testing.echo_server --port 8765 &
-
-# Test with dummy dataset (included in repo)
-inference-endpoint benchmark offline \
+# Start local echo server and run a benchmark against it
+uv run python -m inference_endpoint.testing.echo_server --port 8765 &
+uv run inference-endpoint benchmark offline \
   --endpoints http://localhost:8765 \
-  --model Qwen/Qwen3-8B \
+  --model test-model \
   --dataset tests/datasets/dummy_1k.jsonl
-
-# Stop echo server
 pkill -f echo_server
 ```
 
-See [Local Testing Guide](docs/LOCAL_TESTING.md) for detailed instructions.
+See [Local Testing Guide](docs/LOCAL_TESTING.md) for more details.
 
-### Running Tests and Examples
-
-```bash
-# Install test dependencies
-pip install ".[test]"
-
-# Run tests (excluding performance and explicit-run tests)
-pytest -m "not performance and not run_explicitly"
-
-# Run examples: follow instructions in examples/*/README.md
-```
-
-## 📚 Documentation
-
-- [CLI Quick Reference](docs/CLI_QUICK_REFERENCE.md) - Command-line interface guide
-- [Local Testing Guide](docs/LOCAL_TESTING.md) - Test with echo server
-- [Development Guide](docs/DEVELOPMENT.md) - How to contribute and develop
-- [GitHub Setup Guide](docs/GITHUB_SETUP.md) - GitHub authentication and setup
-
-## 🎯 Architecture
-
-The system follows a modular, event-driven architecture:
+## Architecture
 
 ```
-┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   Dataset       │    │   Load          │    │   Endpoint      │
-│   Manager       │───▶│   Generator     │───▶│   Client        │
-└─────────────────┘    └─────────────────┘    └─────────────────┘
-         │                       │                       │
-         ▼                       ▼                       ▼
-┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   Metrics       │    │   Configuration │    │   Endpoint      │
-│   Collector     │◄───│   Manager       │    │   (External)    │
-└─────────────────┘    └─────────────────┘    └─────────────────┘
+Dataset Manager ──> Load Generator ──> Endpoint Client ──> External Endpoint
+                         |
+                    Metrics Collector (EventRecorder + MetricsReporter)
 ```
 
-- **Load Generator**: Central orchestrator managing query lifecycle
-- **Dataset Manager**: Handles benchmark datasets and preprocessing
-- **Endpoint Client**: Abstract interface for endpoint communication
-- **Metrics Collector**: Performance measurement and analysis
-- **Configuration Manager**: System configuration (TBD)
+| Component           | Purpose                                                                              |
+| ------------------- | ------------------------------------------------------------------------------------ |
+| **Load Generator**  | Central orchestrator: `BenchmarkSession` owns lifecycle, `Scheduler` controls timing |
+| **Endpoint Client** | Multi-process HTTP workers communicating via ZMQ IPC                                 |
+| **Dataset Manager** | Loads JSONL, HuggingFace, CSV, JSON, Parquet datasets                                |
+| **Metrics**         | SQLite-backed event recording, aggregation (QPS, latency, TTFT, TPOT)                |
+| **Config**          | Pydantic-based YAML schema, CLI auto-generated via cyclopts                          |
+
+### Benchmark Modes
+
+- **Offline** (`max_throughput`): Burst all queries at once for peak throughput measurement
+- **Online** (`poisson`): Fixed QPS with Poisson arrival distribution for latency profiling
+- **Concurrency**: Fixed concurrent request count
+
+### Performance Design
+
+The hot path is optimized for minimal overhead:
+
+- Multi-process workers with ZMQ IPC (not threads)
+- `uvloop` + `eager_task_factory` for async performance
+- `msgspec` for zero-copy serialization on the data path
+- Custom HTTP connection pooling with `httptools` parser
+- CPU affinity support for performance tuning
 
 ## Accuracy Evaluation
 
-You can run accuracy evaluation with Pass@1 scoring by specifying accuracy datasets in the benchmark
-configuration. Currently, Inference Endpoints provides the following pre-defined accuracy benchmarks:
+Run accuracy evaluation with Pass@1 scoring using pre-defined benchmarks:
 
-- GPQA (default: GPQA Diamond)
-- AIME (default: AIME 2025)
-- LiveCodeBench (default: lite, release_v6)
+- **GPQA** (default: GPQA Diamond)
+- **AIME** (default: AIME 2025)
+- **LiveCodeBench** (default: lite, release_v6) — requires [additional setup](src/inference_endpoint/dataset_manager/predefined/livecodebench/README.md)
 
-However, LiveCodeBench will not work out-of-the-box and requires some additional setup. See the
-[LiveCodeBench](src/inference_endpoint/dataset_manager/predefined/livecodebench/README.md) documentation
-for details and explanations.
+## Documentation
 
-## 🚧 Pending Features
+| Guide                                                          | Description                           |
+| -------------------------------------------------------------- | ------------------------------------- |
+| [CLI Quick Reference](docs/CLI_QUICK_REFERENCE.md)             | Command-line interface guide          |
+| [CLI Design](docs/CLI_DESIGN.md)                               | CLI architecture and design decisions |
+| [Local Testing](docs/LOCAL_TESTING.md)                         | Test with the echo server             |
+| [Client Performance Tuning](docs/CLIENT_PERFORMANCE_TUNING.md) | Endpoint client optimization          |
+| [Performance Architecture](docs/PERF_ARCHITECTURE.md)          | Performance architecture deep dive    |
+| [Development Guide](docs/DEVELOPMENT.md)                       | Development setup and workflow        |
+| [CONTRIBUTING.md](CONTRIBUTING.md)                             | How to contribute                     |
 
-The following features are planned for future releases:
+## Contributing
 
-- [ ] **Performance Tuning** - Advanced performance optimization features
-- [ ] **Submission Ruleset Integration** - Full MLPerf submission workflow support
-- [ ] **Documentation Generation and Hosting** - Sphinx-based API documentation with GitHub Pages
+We welcome contributions from the community. See [CONTRIBUTING.md](CONTRIBUTING.md) for:
 
-## 🤝 Contributing
+- Development setup and prerequisites
+- Code style (ruff, mypy, conventional commits)
+- Testing requirements (>90% coverage, pytest markers)
+- Pull request process and review expectations
 
-We welcome contributions! Please see our [Development Guide](docs/DEVELOPMENT.md) for details on:
+Issues are tracked on our [project board](https://github.com/orgs/mlcommons/projects/57). Look for [`good first issue`](https://github.com/mlcommons/endpoints/labels/good%20first%20issue) or [`help wanted`](https://github.com/mlcommons/endpoints/labels/help%20wanted) to get started.
 
-- Setting up your development environment
-- Code style and quality standards
-- Testing requirements
-- Pull request process
+## Acknowledgements
 
-## 🙏 Acknowledgements
+This project draws inspiration from:
 
-This project draws inspiration from and learns from the following excellent projects:
+- [MLCommons Inference](https://github.com/mlcommons/inference) — MLPerf Inference benchmark suite
+- [AIPerf](https://github.com/ai-dynamo/aiperf) — AI model performance profiling
+- [SGLang GenAI-Bench](https://github.com/sgl-project/genai-bench) — Token-level performance evaluation
+- [vLLM Benchmarks](https://github.com/vllm-project/vllm/tree/main/benchmarks) — Performance benchmarking for vLLM
 
-- [MLCommons Inference](https://github.com/mlcommons/inference) - MLPerf Inference benchmark suite
-- [AIPerf](https://github.com/ai-dynamo/aiperf) - AI model performance profiling framework
-- [SGLang GenAI-Bench](https://github.com/sgl-project/genai-bench) - Token-level performance evaluation tool
-- [vLLM Benchmarks](https://github.com/vllm-project/vllm/tree/main/benchmarks) - Performance benchmarking tools for vLLM
-- [InferenceMAX](https://github.com/InferenceMAX/InferenceMAX) - LLM inference optimization toolkit
+## License
 
-We are grateful to these communities for their contributions to LLM benchmarking and performance analysis.
-
-## 📄 License
-
-This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
-
-## 🔗 Links
-
-- [MLCommons](https://mlcommons.org/) - Machine Learning Performance Standards
-- [Project Repository](https://github.com/mlcommons/endpoints)
-- [MLPerf Inference](https://mlcommons.org/benchmarks/inference/)
-
-## 👥 Contributors
-
-Credits to core contributors of the project:
-
-- MLCommons Committee
-- NVIDIA: Zhihan Jiang, Rashid Kaleem, Viraat Chandra, Alice Cheng
-- ...
-
-See [ATTRIBUTION](ATTRIBUTION) for detailed attribution information.
-
-## 📞 Support
-
-- **Issues**: [GitHub Issues](https://github.com/mlcommons/endpoints/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/mlcommons/endpoints/discussions)
-- **Documentation**: See [docs/](docs/) directory for guides
+Apache License 2.0 — see [LICENSE](LICENSE) for details.

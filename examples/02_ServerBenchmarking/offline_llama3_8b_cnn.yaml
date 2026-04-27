@@ -30,13 +30,6 @@ settings:
   client:
     num_workers: 4
 
-metrics:
-  collect:
-    - "throughput"
-    - "latency"
-    - "ttft"
-    - "tpot"
-
 endpoint_config:
   endpoints:
     - "http://localhost:8000"

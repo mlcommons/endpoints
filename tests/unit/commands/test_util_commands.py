@@ -15,6 +15,7 @@
 
 """Tests for utility commands (info, validate, init, probe) and main.py dispatch."""
 
+import asyncio
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -22,7 +23,7 @@ import pytest
 from inference_endpoint import __version__
 from inference_endpoint.commands.info import execute_info
 from inference_endpoint.commands.init import execute_init
-from inference_endpoint.commands.probe import ProbeConfig, execute_probe
+from inference_endpoint.commands.probe import ProbeConfig, _probe_async, execute_probe
 from inference_endpoint.commands.validate import execute_validate
 from inference_endpoint.config.schema import APIType
 from inference_endpoint.exceptions import (
@@ -31,6 +32,7 @@ from inference_endpoint.exceptions import (
     InputValidationError,
     SetupError,
 )
+from inference_endpoint.main import run
 
 
 class TestInfoCommand:
@@ -101,7 +103,9 @@ class TestInitCommand:
             execute_init("unknown")
 
     @pytest.mark.unit
-    @pytest.mark.parametrize("template", ["offline", "online", "eval", "submission"])
+    @pytest.mark.parametrize(
+        "template", ["offline", "online", "concurrency", "eval", "submission"]
+    )
     def test_generates_template(self, template):
         output_file = Path(f"{template}_template.yaml")
         try:
@@ -122,31 +126,13 @@ class TestInitCommand:
             output_file.unlink(missing_ok=True)
 
     @pytest.mark.unit
-    def test_fallback_when_template_missing(self, tmp_path, monkeypatch):
-        """When template file doesn't exist, falls back to create_default_config."""
+    def test_missing_template_raises_setup_error(self, tmp_path, monkeypatch):
         monkeypatch.setattr(
             "inference_endpoint.commands.init.TEMPLATES_DIR",
             tmp_path / "nonexistent",
         )
-        output_file = Path("offline_template.yaml")
-        try:
-            execute_init("offline")
-            assert output_file.exists()
-        finally:
-            output_file.unlink(missing_ok=True)
-
-    @pytest.mark.unit
-    def test_os_error_raises_setup_error(self, monkeypatch):
-        monkeypatch.setattr(
-            "inference_endpoint.commands.init.TEMPLATES_DIR",
-            Path("/nonexistent"),
-        )
-        monkeypatch.setattr(
-            "inference_endpoint.commands.init.BenchmarkConfig.create_default_config",
-            MagicMock(side_effect=OSError("permission denied")),
-        )
-        with pytest.raises(SetupError, match="Failed to create"):
-            execute_init("offline")
+        with pytest.raises(SetupError, match="Template file not found"):
+            execute_init("eval")
 
 
 class TestProbeConfig:
@@ -176,10 +162,6 @@ class TestProbeExecution:
     def test_empty_model_raises(self):
         config = ProbeConfig(endpoints="http://localhost:8000", model="")
         with pytest.raises(InputValidationError, match="Model required"):
-            import asyncio
-
-            from inference_endpoint.commands.probe import _probe_async
-
             asyncio.run(_probe_async(config))
 
     @pytest.mark.unit
@@ -189,10 +171,6 @@ class TestProbeExecution:
 
         config = ProbeConfig(endpoints="http://localhost:8000", model="test")
         with pytest.raises(SetupError, match="Probe setup failed"):
-            import asyncio
-
-            from inference_endpoint.commands.probe import _probe_async
-
             asyncio.run(_probe_async(config))
 
     @pytest.mark.unit
@@ -206,10 +184,6 @@ class TestProbeExecution:
             endpoints="http://localhost:8000", model="test", requests=2
         )
         with pytest.raises(ExecutionError, match="no queries could be issued"):
-            import asyncio
-
-            from inference_endpoint.commands.probe import _probe_async
-
             asyncio.run(_probe_async(config))
 
 
@@ -229,8 +203,6 @@ class TestMainRunExceptionHandling:
         ],
     )
     def test_exception_exit_codes(self, exc, code):
-        from inference_endpoint.main import run
-
         with patch("inference_endpoint.main.app") as mock_app:
             mock_app.meta.side_effect = exc
             with pytest.raises(SystemExit) as exc_info:

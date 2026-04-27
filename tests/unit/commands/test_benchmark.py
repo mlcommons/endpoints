@@ -45,6 +45,7 @@ from inference_endpoint.config.schema import (
 from inference_endpoint.config.schema import (
     OnlineBenchmarkConfig as OnlineConfig,
 )
+from inference_endpoint.config.utils import cli_error_formatter as _error_formatter
 from inference_endpoint.core.types import QueryResult
 from inference_endpoint.endpoint_client.config import HTTPClientConfig
 from inference_endpoint.exceptions import InputValidationError
@@ -367,18 +368,38 @@ class TestYAMLTemplateValidation:
     @pytest.mark.unit
     @pytest.mark.parametrize(
         "template",
-        [
-            "concurrency_template.yaml",
-            "eval_template.yaml",
-            "offline_template.yaml",
-            "online_template.yaml",
-            "submission_template.yaml",
-        ],
+        sorted(
+            p.name
+            for p in (
+                Path(__file__).parent.parent.parent.parent
+                / "src"
+                / "inference_endpoint"
+                / "config"
+                / "templates"
+            ).glob("*_template*.yaml")
+        ),
     )
     def test_valid_templates_parse(self, template):
         config = BenchmarkConfig.from_yaml_file(TEMPLATE_DIR / template)
         assert config.model_params.name
         assert config.endpoint_config.endpoints
+
+
+class TestScorerMethodSync:
+    """Ensure ScorerMethod enum stays in sync with the scorer registry."""
+
+    @pytest.mark.unit
+    def test_scorer_enum_matches_registry(self):
+        from inference_endpoint.config.schema import ScorerMethod
+        from inference_endpoint.evaluation.scoring import Scorer
+
+        enum_values = {m.value for m in ScorerMethod}
+        registry_keys = set(Scorer.PREDEFINED.keys())
+        assert enum_values == registry_keys, (
+            f"ScorerMethod enum out of sync with Scorer registry.\n"
+            f"  In enum only: {enum_values - registry_keys}\n"
+            f"  In registry only: {registry_keys - enum_values}"
+        )
 
 
 class TestResponseCollector:
@@ -414,10 +435,6 @@ class TestErrorFormatter:
 
     @pytest.mark.unit
     def test_cyclopts_arg_with_children(self):
-        from inference_endpoint.config.utils import (
-            cli_error_formatter as _error_formatter,
-        )
-
         child = SimpleNamespace(
             name="--endpoints", names=("--endpoints",), required=True, has_tokens=False
         )
@@ -429,10 +446,6 @@ class TestErrorFormatter:
 
     @pytest.mark.unit
     def test_cyclopts_leaf_arg(self):
-        from inference_endpoint.config.utils import (
-            cli_error_formatter as _error_formatter,
-        )
-
         arg = SimpleNamespace(
             name="--model", names=("--model-params.name", "--model"), children=[]
         )
@@ -443,10 +456,6 @@ class TestErrorFormatter:
 
     @pytest.mark.unit
     def test_pydantic_validation_error(self):
-        from inference_endpoint.config.utils import (
-            cli_error_formatter as _error_formatter,
-        )
-
         try:
             BenchmarkConfig(
                 type=TestType.OFFLINE,
@@ -461,10 +470,6 @@ class TestErrorFormatter:
 
     @pytest.mark.unit
     def test_generic_error_fallback(self):
-        from inference_endpoint.config.utils import (
-            cli_error_formatter as _error_formatter,
-        )
-
         class FakeError:
             argument = None
             __cause__ = None

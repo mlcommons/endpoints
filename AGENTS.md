@@ -10,18 +10,46 @@ High-performance benchmarking tool for LLM inference endpoints targeting 50k+ QP
 
 ```bash
 # Development setup
+uv sync --extra dev --extra test
+uv run pre-commit install
+
+# Testing
+uv run pytest                                        # All tests (excludes slow/performance)
+uv run pytest -m unit                                # Unit tests only
+uv run pytest -m integration                         # Integration tests only
+uv run pytest --cov=src --cov-report=html            # With coverage
+uv run pytest -xvs tests/unit/path/to/test_file.py  # Single test file
+
+# Code quality (run before commits)
+uv run pre-commit run --all-files
+
+# Local testing with echo server
+uv run python -m inference_endpoint.testing.echo_server --port 8765
+uv run inference-endpoint probe --endpoints http://localhost:8765 --model test-model
+
+# CLI usage
+uv run inference-endpoint benchmark offline --endpoints URL --model NAME --dataset PATH
+uv run inference-endpoint benchmark online --endpoints URL --model NAME --dataset PATH --load-pattern poisson --target-qps 100
+uv run inference-endpoint benchmark from-config --config config.yaml
+```
+
+### Backward-compatible setup (pip + venv)
+
+Does not use `uv.lock` — dependency versions may differ from the lockfile.
+
+```bash
 python3.12 -m venv venv && source venv/bin/activate
 pip install -e ".[dev,test]"
 pre-commit install
 
-# Testing
+# After activating the venv, commands run without the `uv run` prefix:
 pytest                                        # All tests (excludes slow/performance)
 pytest -m unit                                # Unit tests only
 pytest -m integration                         # Integration tests only
 pytest --cov=src --cov-report=html            # With coverage
 pytest -xvs tests/unit/path/to/test_file.py  # Single test file
 
-# Code quality (run before commits)
+# Code quality — MUST run before every commit, no exceptions
 pre-commit run --all-files
 
 # Local testing with echo server
@@ -73,7 +101,7 @@ CLI is auto-generated from `config/schema.py` Pydantic models via cyclopts. Fiel
 
 - **CLI mode** (`offline`/`online`): cyclopts constructs `OfflineBenchmarkConfig`/`OnlineBenchmarkConfig` (subclasses in `config/schema.py`) directly from CLI args. Type locked via `Literal`. `--dataset` is repeatable with TOML-style format `[perf|acc:]<path>[,key=value...]` (e.g. `--dataset data.csv,samples=500,parser.prompt=article`). Full accuracy support via `accuracy_config.eval_method=pass_at_1` etc.
 - **YAML mode** (`from-config`): `BenchmarkConfig.from_yaml_file()` loads YAML, resolves env vars, and auto-selects the right subclass via Pydantic discriminated union. Optional `--timeout`/`--mode` overrides via `config.with_updates()`.
-- **eval**: Not yet implemented (raises `NotImplementedError`)
+- **eval**: Not yet implemented (raises `CLIError` with a tracking issue link)
 
 ### Config Construction & Validation
 
@@ -117,7 +145,9 @@ src/inference_endpoint/
 │   ├── info.py                # execute_info()
 │   ├── validate.py            # execute_validate()
 │   └── init.py                # execute_init()
-├── core/types.py              # APIType, Query, QueryResult, StreamChunk, QueryStatus (msgspec Structs)
+├── core/
+│   ├── types.py               # APIType, Query, QueryResult, StreamChunk, QueryStatus (msgspec Structs)
+│   └── record.py              # EventRecord — transport record used by event logger and ZMQ transport
 ├── load_generator/
 │   ├── session.py             # BenchmarkSession - top-level orchestrator
 │   ├── load_generator.py      # LoadGenerator, SchedulerBasedLoadGenerator
@@ -137,10 +167,13 @@ src/inference_endpoint/
 │   └── utils.py               # Port range helpers
 ├── async_utils/
 │   ├── loop_manager.py        # LoopManager (uvloop + eager_task_factory)
+│   ├── runner.py              # run_async() — uvloop + eager_task_factory entry point for CLI commands
 │   ├── event_publisher.py     # Async event pub/sub
+│   ├── services/
+│   │   ├── event_logger/      # EventLoggerService: writes EventRecords to JSONL/SQLite
+│   │   └── metrics_aggregator/ # MetricsAggregatorService: real-time metrics (TTFT, TPOT, ISL, OSL)
 │   └── transport/             # ZMQ-based IPC transport layer
 │       ├── protocol.py        # Transport protocols + TransportConfig base
-│       ├── record.py          # Transport records
 │       └── zmq/               # ZMQ implementation (context, pubsub, transport, ZMQTransportConfig)
 ├── dataset_manager/
 │   ├── dataset.py             # Dataset base class, DatasetFormat enum
@@ -158,7 +191,7 @@ src/inference_endpoint/
 │   ├── ruleset_registry.py    # Ruleset registry
 │   ├── user_config.py         # UserConfig dataclass for ruleset user overrides
 │   ├── rulesets/mlcommons/    # MLCommons-specific rules, datasets, models
-│   └── templates/             # YAML config templates (offline, online, eval, etc.)
+│   └── templates/             # YAML config templates (_template.yaml minimal, _template_full.yaml all defaults)
 ├── openai/                    # OpenAI-compatible API types and adapters
 │   ├── types.py               # OpenAI response types
 │   ├── openai_adapter.py      # Request/response adapter
@@ -192,7 +225,7 @@ tests/
 
 ## Development Standards
 
-### Code Style
+### Code Style and Pre-commit Hooks
 
 - **Formatter/Linter**: `ruff` (line-length 88, target Python 3.12)
 - **Type checking**: `mypy` (via pre-commit)
@@ -209,8 +242,11 @@ All of these run automatically on commit:
 - `mypy` type checking
 - `prettier` for YAML/JSON/Markdown
 - License header enforcement
+- `regenerate-templates`: auto-regenerates YAML config templates from schema defaults when `schema.py`, `config.py`, or `regenerate_templates.py` change
 
-**Always run `pre-commit run --all-files` before committing.**
+**IMPORTANT: Always run `pre-commit run --all-files` before every commit.** Hooks may modify files (prettier, ruff-format, license headers). If files are modified, stage the changes and commit once. Never commit without running pre-commit first.
+
+See [Development Guide](docs/DEVELOPMENT.md) for full setup and workflow details.
 
 ### Data Types & Serialization
 
@@ -233,7 +269,7 @@ All of these run automatically on commit:
 @pytest.mark.run_explicitly # Only run when explicitly selected
 ```
 
-**Async tests**: Use `@pytest.mark.asyncio(mode="strict")` — the project uses strict asyncio mode.
+**Async tests**: Use `@pytest.mark.asyncio` — strict mode is configured globally in `pyproject.toml` (`asyncio_mode = "strict"`). Do NOT pass `mode="strict"` to the marker — it's not a valid argument.
 
 **Key fixtures** (defined in `tests/conftest.py`):
 
@@ -291,7 +327,7 @@ Update AGENTS.md as part of any PR that includes a **significant refactor**, mea
 - **Added or removed CLI commands/subcommands** — update CLI Modes and Common Commands
 - **Changed test infrastructure** (new fixtures, changed markers, new test directories) — update Testing section
 - **Added or removed key dependencies** — update Key Dependencies table
-- **Changed build/tooling** (new pre-commit hooks, changed ruff config, new CI steps) — update Code Style and Pre-commit Hooks
+- **Changed build/tooling** (new pre-commit hooks, changed ruff config, new CI steps) — update [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)
 - **Changed hot-path patterns** (new transport, changed serialization, new performance constraints) — update Performance Guidelines
 
 ### How to Update
@@ -335,7 +371,7 @@ Known failure modes when AI tools generate code for this project. Reference thes
 
 - **Generating mock-heavy tests for integration scenarios**: This project has real echo/oracle server fixtures. AI tends to mock HTTP calls even when `mock_http_echo_server` or `mock_http_oracle_server` fixtures exist and should be used.
 - **Missing test markers**: Every test function needs `@pytest.mark.unit`, `@pytest.mark.integration`, or another marker. AI-generated tests almost always omit markers, which breaks CI filtering.
-- **Wrong asyncio mode**: Tests must use `@pytest.mark.asyncio(mode="strict")` — AI often writes bare `@pytest.mark.asyncio` or forgets it entirely, causing silent test skips or failures.
+- **Wrong asyncio marker**: Tests must use bare `@pytest.mark.asyncio` — strict mode is configured globally in `pyproject.toml`. Do NOT pass `mode="strict"` to the marker (it's not a valid argument and will cause errors). AI sometimes hallucinates this parameter.
 - **Fabricating fixture names**: AI may invent fixtures that don't exist in `conftest.py`. Always check that referenced fixtures actually exist before using them.
 
 ### Code Style & Repo Conventions
@@ -344,8 +380,10 @@ Known failure modes when AI tools generate code for this project. Reference thes
 - **Importing removed or renamed modules**: After refactors, AI (working from stale context) may import old module paths. Always verify imports resolve to actual files.
 - **Over-documenting**: AI generates verbose docstrings, inline comments explaining obvious code, and type annotations on trivial variables. This project prefers minimal comments — only where the _why_ isn't obvious from the code.
 - **Adding backwards-compatibility shims**: If something was renamed or removed, AI may add re-exports, aliases, or deprecation wrappers. In this project, just delete the old thing and update all call sites.
+- **Empty except blocks**: Every `except` block must contain either a comment explaining why the exception is ignored, or a logging statement. Bare `except: pass` without explanation is disallowed. AI often generates empty handlers — always add the reason.
+- **No lazy imports**: All imports must be at the top of the file. Imports inside functions, methods, or conditional blocks (other than `TYPE_CHECKING`) are disallowed. The only exceptions are: (1) circular import avoidance with a documenting comment, (2) optional dependencies with a top-level try/except that sets the import to `None`, (3) security sandboxing code that intentionally restricts imports.
 
 ### Dependency & Environment
 
-- **Adding new dependencies without justification**: AI may `pip install` or add imports for packages not in `pyproject.toml`. Any new dependency must be justified, added to the correct optional group, and pinned to an exact version (`==`). After adding a dependency, run `pip-audit` (included in `dev` extras) to verify it has no known vulnerabilities.
+- **Adding new dependencies without justification**: AI may `pip install` or add imports for packages not in `pyproject.toml`. Any new runtime, dev, or test dependency must be justified, added to the correct optional group, and pinned to an exact version (`==`). After adding a dependency, run `pip-audit` (included in `dev` extras) to verify it has no known vulnerabilities. When adding dependencies, use `uv add <package>==<version>` to update both `pyproject.toml` and `uv.lock` atomically, then run `uv run pip-audit` to check for vulnerabilities. Note: `[build-system] requires` is also pinned to exact versions for reproducibility.
 - **Using `requests`/`aiohttp` for HTTP**: This project has its own HTTP client (`endpoint_client/http.py`) using `httptools`. AI defaults to `requests` or `aiohttp` — these should not appear in production code (test dependencies are fine).

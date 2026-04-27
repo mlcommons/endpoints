@@ -32,6 +32,9 @@ The fixed sized is chosen to be the smallest multiple of 8 bytes that is greater
 equal to the length of the longest topic string.
 """
 
+BATCH_TOPIC: Final[bytes] = b"batch".ljust(TOPIC_FRAME_SIZE, b"\0")
+"""Reserved topic prefix for batched messages containing multiple records."""
+
 
 class EventTypeMeta(enum.EnumMeta):
     """Metaclass for event kind enums classes.
@@ -142,10 +145,6 @@ class SampleEventType(EventType):
     COMPLETE = "complete"
     RECV_FIRST = "recv_first"
     RECV_NON_FIRST = "recv_non_first"
-    CLIENT_SEND = "client_send"
-    CLIENT_RESP_DONE = "client_resp_done"
-    TRANSPORT_SENT = "transport_sent"
-    TRANSPORT_RECV = "transport_recv"
 
 
 class EventRecord(msgspec.Struct, kw_only=True, frozen=True, gc=False):  # type: ignore[call-arg]

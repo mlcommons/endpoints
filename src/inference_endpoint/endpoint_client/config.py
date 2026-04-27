@@ -37,7 +37,12 @@ from inference_endpoint.utils import WithUpdatesMixin
 
 from .accumulator_protocol import SSEAccumulatorProtocol
 from .adapter_protocol import HttpRequestAdapter
-from .cpu_affinity import AffinityPlan, get_cpus_in_numa_node, get_current_numa_node
+from .cpu_affinity import (
+    AffinityPlan,
+    UnsupportedPlatformError,
+    get_cpus_in_numa_node,
+    get_current_numa_node,
+)
 from .utils import get_ephemeral_port_limit, get_ephemeral_port_range
 
 ADAPTER_MAP = {
@@ -72,7 +77,6 @@ class HTTPClientConfig(WithUpdatesMixin, BaseModel):
         ),
     ] = Field(-1, ge=-1)
 
-    record_worker_events: bool = Field(False, description="Record per-worker events")
     log_level: str = Field("INFO", description="Worker log level")
 
     # Pre-establish TCP connections during init for reuse at runtime.
@@ -113,19 +117,29 @@ class HTTPClientConfig(WithUpdatesMixin, BaseModel):
     # NOTE:
     #   - StreamChunk.metadata['first_chunk'] is set for first chunk of every response
     #   - At end of stream, QueryResult is returned with the entire response content
-    stream_all_chunks: bool = False
+    stream_all_chunks: bool = Field(
+        False, description="Stream all chunks to main thread (caution: perf overhead)"
+    )
 
     # Worker lifecycle timeouts
-    worker_initialization_timeout: float = 60.0  # init
-    worker_graceful_shutdown_wait: float = 0.5  # post-run
-    worker_force_kill_timeout: float = 0.5  # post-run
+    worker_initialization_timeout: float = Field(
+        60.0, description="Worker init timeout (seconds)"
+    )
+    worker_graceful_shutdown_wait: float = Field(
+        0.5, description="Post-run graceful shutdown wait (seconds)"
+    )
+    worker_force_kill_timeout: float = Field(
+        0.5, description="Force kill timeout after graceful wait (seconds)"
+    )
 
     # Connection idle timeout - discard connections idle longer than this.
     # Two fold benefits:
     # 1. Prevents keep-alive race condition where server closes idle connection
     #    at the exact moment client sends a new request (half-closed TCP).
     # 2. Early discard connections which are likely disconnected by the server already
-    max_idle_time: float = 4.0  # seconds
+    max_idle_time: float = Field(
+        4.0, description="Discard connections idle longer than this (seconds)"
+    )
 
     # Minimum required connections for http-client to initialize.
     # Will log warning if not enough ephemeral ports are available during warmup.
@@ -134,7 +148,9 @@ class HTTPClientConfig(WithUpdatesMixin, BaseModel):
     #   - >0 = explicit minimum required connections
     #   - 0 = disable check (no warning if ports unavailable)
     #   - -1 = auto (defaults to 12.5% of system ephemeral port range)
-    min_required_connections: int = -1
+    min_required_connections: int = Field(
+        -1, description="Min connections to initialize (-1=auto, 0=disabled)"
+    )
 
     # GC strategy for worker processes to reduce latency spikes from collection pauses
     #
@@ -142,7 +158,9 @@ class HTTPClientConfig(WithUpdatesMixin, BaseModel):
     #   - "disabled": GC completely disabled (risky for long-running benchmarks)
     #   - "relaxed": GC enabled with 50x higher threshold (less aggressive)
     #   - "system": Standard Python GC with default thresholds
-    worker_gc_mode: Literal["disabled", "relaxed", "system"] = "relaxed"
+    worker_gc_mode: Literal["disabled", "relaxed", "system"] = Field(
+        "relaxed", description="Worker GC strategy"
+    )
 
     # =========================================================================
     # Internal fields (parse=False — set programmatically, not via CLI/YAML)
@@ -238,6 +256,17 @@ class HTTPClientConfig(WithUpdatesMixin, BaseModel):
 
         return self
 
+    def with_updates(self, **updates: object) -> HTTPClientConfig:
+        """Reconstruct with updates; clear stale auto-resolved fields.
+
+        When ``api_type`` changes, drop ``adapter`` / ``accumulator`` so they
+        re-resolve against the new type. Explicit overrides in ``updates`` win.
+        """
+        if "api_type" in updates and updates["api_type"] != self.api_type:
+            updates.setdefault("adapter", None)
+            updates.setdefault("accumulator", None)
+        return super().with_updates(**updates)
+
 
 @functools.lru_cache(maxsize=1)
 def _get_auto_num_workers() -> int:
@@ -248,17 +277,24 @@ def _get_auto_num_workers() -> int:
     Users can override with explicit num_workers to use more cores (workers
     will be pinned to additional cores outside NUMA domain if needed).
 
+    On non-Linux platforms (NUMA probing is Linux-only) falls back to
+    ``min_workers`` so the config can still be constructed for local
+    development, template regeneration, and tests.
+
     Returns:
         Number of workers to use when num_workers is -1 (auto).
     """
     min_workers = 10
     max_workers = 24
 
-    numa_node = get_current_numa_node()
-    if numa_node is None:
+    try:
+        numa_node = get_current_numa_node()
+        if numa_node is None:
+            return min_workers
+        numa_cpus = get_cpus_in_numa_node(numa_node)
+    except UnsupportedPlatformError:
         return min_workers
 
-    numa_cpus = get_cpus_in_numa_node(numa_node)
     if not numa_cpus:
         return min_workers
 

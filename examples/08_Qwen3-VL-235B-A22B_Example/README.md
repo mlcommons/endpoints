@@ -73,11 +73,11 @@ Two benchmark scenarios are provided as examples: **offline** (maximum throughpu
 Run the **offline** benchmark:
 
 ```
-inference-endpoint benchmark from-config -c examples/08_Qwen3-VL-235B-A22B_Example/offline_qwen3_vl_235b_a22b_shopify.yaml
+uv run inference-endpoint benchmark from-config -c examples/08_Qwen3-VL-235B-A22B_Example/offline_qwen3_vl_235b_a22b_shopify.yaml
 ```
 
 Run the **online** benchmark:
 
 ```
-inference-endpoint benchmark from-config -c examples/08_Qwen3-VL-235B-A22B_Example/online_qwen3_vl_235b_a22b_shopify.yaml
+uv run inference-endpoint benchmark from-config -c examples/08_Qwen3-VL-235B-A22B_Example/online_qwen3_vl_235b_a22b_shopify.yaml
 ```

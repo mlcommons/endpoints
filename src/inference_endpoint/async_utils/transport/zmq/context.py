@@ -185,7 +185,13 @@ class ManagedZMQContext(SingletonMixin):
         """
         if scheme == "ipc":
             if self.socket_dir is None:
-                self._tmp_dir = tempfile.TemporaryDirectory(prefix="zmq_")
+                # Prefer /dev/shm for IPC sockets — overlayfs (common in
+                # containers for /tmp) does not support Unix sockets.
+                shm = Path("/dev/shm")
+                self._tmp_dir = tempfile.TemporaryDirectory(
+                    prefix="zmq_",
+                    dir=str(shm) if shm.is_dir() else None,
+                )
                 self.socket_dir = self._tmp_dir.name
             else:
                 Path(self.socket_dir).mkdir(parents=True, exist_ok=True)

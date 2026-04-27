@@ -66,6 +66,7 @@ from ..protocol import (
     WorkerPoolTransport,
 )
 from .context import ManagedZMQContext
+from .ready_check import ReadyCheckReceiver, send_ready_signal
 
 logger = logging.getLogger(__name__)
 
@@ -552,16 +553,8 @@ class _ZmqWorkerConnector(WorkerConnector):
                 loop, self.response_path, zmq_context, self.config, bind=False
             )
 
-            # Signal readiness using an async socket for proper async send.
-            readiness_sock = zmq_context.async_socket(zmq.PUSH)
-            readiness_sock.setsockopt(zmq.LINGER, -1)  # Wait indefinitely for delivery
-            zmq_context.connect(readiness_sock, self.readiness_path)
-
             try:
-                encoder = msgspec.msgpack.Encoder()
-                await readiness_sock.send(encoder.encode(worker_id))  # Async send
-                readiness_sock.close()  # LINGER ensures message is sent
-                logger.debug("Worker %d signaled readiness", worker_id)
+                await send_ready_signal(zmq_context, self.readiness_path, worker_id)
 
                 yield requests, responses
             finally:
@@ -627,9 +620,7 @@ class ZmqWorkerPoolTransport(WorkerPoolTransport):
             QueryResult | StreamChunk,  # type: ignore[arg-type]
             bind=True,
         )
-        self._readiness_receiver = _create_receiver(
-            loop, readiness_path, zmq_context, config, bind=True
-        )
+        self._ready_check = ReadyCheckReceiver(readiness_path, zmq_context, num_workers)
 
         # socket_dir is now guaranteed set (bind() created it if needed).
         # Store resolved addresses for debugging and tests.
@@ -701,30 +692,7 @@ class ZmqWorkerPoolTransport(WorkerPoolTransport):
         Raises:
             TimeoutError: If workers don't signal in time (only if timeout is set).
         """
-        ready_count = 0
-        while ready_count < self._num_workers:
-            try:
-                if timeout is None:
-                    worker_id = await self._readiness_receiver.recv()
-                else:
-                    worker_id = await asyncio.wait_for(
-                        self._readiness_receiver.recv(),
-                        timeout=timeout,
-                    )
-                if worker_id is not None:
-                    ready_count += 1
-                    logger.debug(
-                        f"Worker {worker_id} ready ({ready_count}/{self._num_workers})"
-                    )
-            except TimeoutError:
-                raise TimeoutError(
-                    f"Workers failed to initialize: {ready_count}/{self._num_workers} ready"
-                ) from None
-
-        logger.debug(f"All {self._num_workers} workers ready")
-
-        # Close readiness receiver - no longer needed
-        self._readiness_receiver.close()
+        await self._ready_check.wait(timeout=timeout)
 
     def cleanup(self) -> None:
         """Close all transports and release resources. Idempotent."""
@@ -736,7 +704,7 @@ class ZmqWorkerPoolTransport(WorkerPoolTransport):
         for sender in self._request_senders:
             sender.close()
         self._response_receiver.close()
-        self._readiness_receiver.close()
+        self._ready_check.close()
 
         # Only clean up the ZMQ context if we created it (singleton may be shared)
         if self._owns_context:

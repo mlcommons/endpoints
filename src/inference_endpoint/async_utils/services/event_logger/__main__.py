@@ -30,10 +30,12 @@ from pathlib import Path
 from inference_endpoint.async_utils.loop_manager import LoopManager
 from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
 from inference_endpoint.async_utils.transport.zmq.pubsub import ZmqEventRecordSubscriber
+from inference_endpoint.async_utils.transport.zmq.ready_check import send_ready_signal
 from inference_endpoint.core.record import (
     EventRecord,
     SessionEventType,
 )
+from inference_endpoint.utils.logging import setup_logging
 
 from .file_writer import JSONLWriter
 from .writer import RecordWriter
@@ -156,13 +158,26 @@ async def main() -> None:
             else " Install sqlalchemy for SQL support: pip install inference-endpoint[sql]"
         ),
     )
+    parser.add_argument(
+        "--readiness-path",
+        type=str,
+        default=None,
+        help="ZMQ socket path to signal readiness (optional)",
+    )
+    parser.add_argument(
+        "--readiness-id",
+        type=int,
+        default=0,
+        help="Identity to send in the readiness signal",
+    )
     args = parser.parse_args()
+    setup_logging(level="INFO")
 
     writer_classes = tuple(_WRITER_REGISTRY[name] for name in args.writers)
     shutdown_event = asyncio.Event()
     loop = LoopManager().default_loop
     with ManagedZMQContext.scoped(socket_dir=args.socket_dir) as zmq_ctx:
-        logger = EventLoggerService(
+        service = EventLoggerService(
             args.log_dir,
             args.socket_name,
             zmq_ctx,
@@ -172,7 +187,11 @@ async def main() -> None:
             shutdown_event=shutdown_event,
         )
 
-        loop.call_soon(logger.start)
+        service.start()
+
+        if args.readiness_path:
+            await send_ready_signal(zmq_ctx, args.readiness_path, args.readiness_id)
+
         await shutdown_event.wait()
 
 

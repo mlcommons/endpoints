@@ -35,7 +35,7 @@ repos:
     hooks:
       - id: prettier
         types_or: [yaml, json, markdown]
-        exclude: ^(src/inference_endpoint/openai/openai_types_gen.py|src/inference_endpoint/openai/openapi.yaml)$
+        exclude: ^(src/inference_endpoint/openai/openai_types_gen.py|src/inference_endpoint/openai/openapi.yaml|src/inference_endpoint/config/templates/)
 
   - repo: local
     hooks:
@@ -48,12 +48,12 @@ repos:
         args: ["--tb=short", "--strict-markers"]
         stages: [manual]
 
-      - id: validate-templates
-        name: Validate YAML templates against schema
-        entry: python -c "from pathlib import Path; from inference_endpoint.config.schema import BenchmarkConfig; [BenchmarkConfig.from_yaml_file(f) for f in sorted(Path('src/inference_endpoint/config/templates').glob('*.yaml'))]"
+      - id: regenerate-templates
+        name: Regenerate YAML templates from schema defaults
+        entry: python scripts/regenerate_templates.py
         language: system
         pass_filenames: false
-        files: ^src/inference_endpoint/config/(schema\.py|templates/)
+        files: ^(src/inference_endpoint/config/(schema\.py|templates/.*)|src/inference_endpoint/endpoint_client/config\.py|scripts/regenerate_templates\.py)$
 
       - id: add-license-header
         name: Add license headers
@@ -62,3 +62,10 @@ repos:
         types: [python]
         pass_filenames: true
         exclude: ^(src/inference_endpoint/openai/openai_types_gen.py)$
+
+      - id: uv-lock-check
+        name: Check uv.lock is up-to-date
+        entry: uv lock --check
+        language: system
+        pass_filenames: false
+        files: ^(pyproject\.toml|uv\.lock)$

@@ -18,20 +18,18 @@ The CPU affinity system partitions physical cores between LoadGen (main process)
 
 ## Configuration
 
-| Setting        | Location  | Default | Purpose                                       |
-| -------------- | --------- | ------- | --------------------------------------------- |
-| `cpu_affinity` | Top-level | `-1`    | Pin loadgen and worker processes to CPU cores |
+| Setting               | Location  | Default | Purpose                                       |
+| --------------------- | --------- | ------- | --------------------------------------------- |
+| `enable_cpu_affinity` | Top-level | `true`  | Pin loadgen and worker processes to CPU cores |
 
 **Values:**
 
-- `-1` (auto): Physical core isolation with SMT siblings, fastest cores to loadgen
-- `list[int]`: Use specific cores (shared by loadgen and workers)
-- `null`: Disabled
+- `true` (default): Auto-compute NUMA-aware plan — physical core isolation with SMT siblings, fastest cores assigned to loadgen
+- `false`: Disabled — no CPU pinning (use `--no-cpu-affinity` on the CLI)
 
 ```yaml
-cpu_affinity: -1 # Auto: physical core isolation with SMT siblings
-# cpu_affinity: [4, 5, 6, 7, 8, 9, 10, 11]  # Explicit cores
-# cpu_affinity: null  # Disabled
+enable_cpu_affinity: true # Auto-compute NUMA-aware plan (default)
+# enable_cpu_affinity: false  # Disabled
 ```
 
 **Auto mode allocation** (default 6 physical cores for loadgen):
@@ -54,8 +52,8 @@ Optimal worker count depends on your workload — prompt size, streaming mode, a
 ### Full sweep
 
 ```bash
-python -m inference_endpoint.utils.benchmark_httpclient --full -d 5
-python -m inference_endpoint.utils.benchmark_httpclient --full -d 5 --stream
+uv run python -m inference_endpoint.utils.benchmark_httpclient --full -d 5
+uv run python -m inference_endpoint.utils.benchmark_httpclient --full -d 5 --stream
 ```
 
 Runs all common worker counts against a range of prompt lengths (CPU pinning is on by default). Produces a plot at `/tmp/sweep_*.png` showing send/recv rate per configuration, with shaded variation bands and a stall% overlay.
@@ -66,19 +64,19 @@ With `--stream`, the full sweep also varies stream interval (0%, 50%, 100% of pr
 
 ```bash
 # Sweep workers for a specific prompt length
-python -m inference_endpoint.utils.benchmark_httpclient -w 1:16 -l 4096 -d 10
+uv run python -m inference_endpoint.utils.benchmark_httpclient -w 1:16 -l 4096 -d 10
 
 # Sweep workers with explicit values
-python -m inference_endpoint.utils.benchmark_httpclient -w 1,2,4,8,12,16 -l 4096 -d 10
+uv run python -m inference_endpoint.utils.benchmark_httpclient -w 1,2,4,8,12,16 -l 4096 -d 10
 
 # Cartesian product: workers x prompt lengths
-python -m inference_endpoint.utils.benchmark_httpclient -w 1:16::8 -l 128,1024,8192 -d 5
+uv run python -m inference_endpoint.utils.benchmark_httpclient -w 1:16::8 -l 128,1024,8192 -d 5
 
 # Streaming: sweep workers with a fixed stream interval (chars per SSE event)
-python -m inference_endpoint.utils.benchmark_httpclient -w 1:16 -l 4096 --stream --stream-interval 100 -d 5
+uv run python -m inference_endpoint.utils.benchmark_httpclient -w 1:16 -l 4096 --stream --stream-interval 100 -d 5
 
 # Streaming: sweep stream intervals (total events = ceil(output_length / interval))
-python -m inference_endpoint.utils.benchmark_httpclient -w 8 --stream --stream-interval 1,50,500 -d 5
+uv run python -m inference_endpoint.utils.benchmark_httpclient -w 8 --stream --stream-interval 1,50,500 -d 5
 ```
 
 ### Reading the results
@@ -134,8 +132,8 @@ Two built-in servers for benchmarking without a real GPU endpoint.
 Returns identical pre-compiled responses instantly — zero compute, pure client roofline.
 
 ```bash
-python -m inference_endpoint.testing.max_throughput_server --port 12345 --stats
-python -m inference_endpoint.testing.max_throughput_server --stream --stream-interval 50 --stats
+uv run python -m inference_endpoint.testing.max_throughput_server --port 12345 --stats
+uv run python -m inference_endpoint.testing.max_throughput_server --stream --stream-interval 50 --stats
 ```
 
 | Flag                | Default | Description              |
@@ -156,15 +154,15 @@ Two mutually exclusive timing modes:
 
 ```bash
 # Non-streaming with response-rate control
-python -m inference_endpoint.testing.variable_throughput_server --stats \
+uv run python -m inference_endpoint.testing.variable_throughput_server --stats \
     --response-rate-mean 1000
 
 # Streaming with TPOT + TTFT
-python -m inference_endpoint.testing.variable_throughput_server --stream --stats \
+uv run python -m inference_endpoint.testing.variable_throughput_server --stream --stats \
     --inter-token-latency 15 --first-chunk-latency 1.5 --stream-interval 10
 
 # With jitter
-python -m inference_endpoint.testing.variable_throughput_server --stream --stats \
+uv run python -m inference_endpoint.testing.variable_throughput_server --stream --stats \
     --response-rate-mean 50 --response-rate-spread 0.2 \
     --first-chunk-latency 0.5 --first-chunk-spread 0.2
 ```

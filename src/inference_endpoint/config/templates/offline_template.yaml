@@ -1,44 +1,18 @@
-# Offline Throughput Benchmark
-name: "offline-benchmark"
-version: "1.0"
-type: "offline"
-
+name: offline_benchmark
+type: offline  # Test type: offline, online, eval, submission | options: offline, online, eval, submission
 model_params:
-  name: "meta-llama/Llama-3.1-8B-Instruct"
-  temperature: 0.7
-  top_p: 0.9
-  max_new_tokens: 1024
-
-datasets:
-  - name: "perf-test"
-    type: "performance"
-    path: "tests/datasets/dummy_1k.jsonl"
-    samples: 1000
-    parser:
-      prompt: "text_input"
-
+  name: '<MODEL_NAME eg: meta-llama/Llama-3.1-8B-Instruct>'
+datasets:  # Dataset configs
+- name: perf
+  type: performance  # Dataset purpose: performance or accuracy | options: performance, accuracy
+  path: '<DATASET_PATH eg: tests/datasets/dummy_1k.jsonl>'  # Dataset file path
+  parser:  # Column remapping: {prompt: <col>, system: <col>}
+    prompt: text_input
 settings:
   runtime:
-    min_duration_ms: 60000 # 1 minutes
-    max_duration_ms: 180000 # 3 minutes
-    scheduler_random_seed: 42 # For Poisson/distribution sampling
-    dataloader_random_seed: 42 # For dataset shuffling
-
-  load_pattern:
-    type: "max_throughput"
-
-  client:
-    num_workers: 4
-
-metrics:
-  collect:
-    - "throughput"
-    - "latency"
-    - "ttft"
-    - "tpot"
-
+    min_duration_ms: 600000  # Min duration (ms, or with suffix: 600s, 10m)
+    max_duration_ms: 0  # Maximum test duration in ms (0 for no limit)
+    n_samples_to_issue: null  # Sample count override
 endpoint_config:
-  endpoints:
-    - "http://localhost:8000"
-  api_key: null
-  api_type: "openai" # Options: openai or sglang
+  endpoints:  # Endpoint URL(s). Must include scheme, e.g. 'http://host:port'.
+  - http://localhost:8000

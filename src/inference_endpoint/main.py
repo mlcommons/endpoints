@@ -102,7 +102,11 @@ def validate_yaml(
 
 @app.command(name="init")
 def init_cmd(template: str):
-    """Generate config template."""
+    """Generate config template.
+
+    Args:
+        template: Template type (offline, online, concurrency, eval, submission).
+    """
     execute_init(template)
 
 

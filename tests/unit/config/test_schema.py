@@ -22,7 +22,6 @@ from inference_endpoint.config.schema import (
     Dataset,
     DatasetType,
     EvalMethod,
-    Metrics,
     ModelParams,
     OSLDistribution,
     OSLDistributionType,
@@ -107,20 +106,6 @@ class TestDataset:
     def test_auto_derive_name(self):
         ds = Dataset(path="datasets/my_data.jsonl")
         assert ds.name == "my_data"
-
-
-class TestMetrics:
-    @pytest.mark.unit
-    def test_get_metric_types(self):
-        m = Metrics(collect=["throughput", "latency", "ttft", "tpot"])
-        types = m.get_metric_types()
-        assert len(types) == 4
-
-    @pytest.mark.unit
-    def test_unknown_metric_raises(self):
-        m = Metrics(collect=["nonexistent"])
-        with pytest.raises(ValueError, match="Unknown metric"):
-            m.get_metric_types()
 
 
 class TestBenchmarkConfig:
@@ -375,3 +360,93 @@ class TestBenchmarkConfigMethods:
 
         with pytest.raises(FileNotFoundError):
             BenchmarkConfig.from_yaml_file(Path("/nonexistent.yaml"))
+
+
+class TestClientAPITypePropagation:
+    """endpoint_config.api_type must reach client.adapter/accumulator at construction.
+
+    Regression coverage for the SGLang gpt-oss-120b path: prior code left the
+    client with the OpenAI adapter unless execute.py patched it via
+    ``with_updates(api_type=...)`` at runtime, which silently broke when the
+    auto-resolved adapter was already populated.
+    """
+
+    @staticmethod
+    def _common(api_type: APIType) -> dict:
+        return {
+            "type": TestType.OFFLINE,
+            "model_params": {"name": "M"},
+            "datasets": [{"path": "D"}],
+            "endpoint_config": {
+                "endpoints": ["http://x:8000"],
+                "api_type": api_type,
+            },
+        }
+
+    @pytest.mark.unit
+    def test_sglang_endpoint_resolves_sglang_adapter(self):
+        from inference_endpoint.sglang.accumulator import SGLangSSEAccumulator
+        from inference_endpoint.sglang.adapter import SGLangGenerateAdapter
+
+        config = BenchmarkConfig(**self._common(APIType.SGLANG))
+        assert config.settings.client.api_type is APIType.SGLANG
+        assert config.settings.client.adapter is SGLangGenerateAdapter
+        assert config.settings.client.accumulator is SGLangSSEAccumulator
+
+    @pytest.mark.unit
+    def test_openai_endpoint_resolves_openai_adapter(self):
+        from inference_endpoint.openai.accumulator import OpenAISSEAccumulator
+        from inference_endpoint.openai.openai_msgspec_adapter import (
+            OpenAIMsgspecAdapter,
+        )
+
+        config = BenchmarkConfig(**self._common(APIType.OPENAI))
+        assert config.settings.client.api_type is APIType.OPENAI
+        assert config.settings.client.adapter is OpenAIMsgspecAdapter
+        assert config.settings.client.accumulator is OpenAISSEAccumulator
+
+    @pytest.mark.unit
+    def test_with_updates_runtime_fields_preserves_sglang_adapter(self):
+        """execute.py-style hand-off (no api_type kwarg) must not regress adapter."""
+        from inference_endpoint.sglang.adapter import SGLangGenerateAdapter
+
+        config = BenchmarkConfig(**self._common(APIType.SGLANG))
+        updated = config.settings.client.with_updates(
+            endpoint_urls=["http://x:8000/generate"],
+            api_key=None,
+        )
+        assert updated.adapter is SGLangGenerateAdapter
+
+    @pytest.mark.unit
+    def test_with_updates_changing_api_type_reresolves_adapter(self):
+        """Defensive: direct api_type swap on the client clears stale adapter."""
+        from inference_endpoint.openai.openai_msgspec_adapter import (
+            OpenAIMsgspecAdapter,
+        )
+        from inference_endpoint.sglang.adapter import SGLangGenerateAdapter
+
+        config = BenchmarkConfig(**self._common(APIType.SGLANG))
+        assert config.settings.client.adapter is SGLangGenerateAdapter
+
+        rebound = config.settings.client.with_updates(api_type=APIType.OPENAI)
+        assert rebound.api_type is APIType.OPENAI
+        assert rebound.adapter is OpenAIMsgspecAdapter
+
+    @pytest.mark.unit
+    def test_explicit_adapter_override_at_construction_survives(self):
+        """parse=False contract: callers can inject a custom adapter.
+
+        Pick a concrete adapter that is *not* the auto-resolved default for
+        ``api_type`` so we can detect a silent overwrite. ``OpenAIAdapter`` is
+        a sibling of the default ``OpenAIMsgspecAdapter`` — both subclass
+        ``HttpRequestAdapter`` so Pydantic accepts it.
+        """
+        from inference_endpoint.endpoint_client.config import HTTPClientConfig
+        from inference_endpoint.openai.openai_adapter import OpenAIAdapter
+        from inference_endpoint.openai.openai_msgspec_adapter import (
+            OpenAIMsgspecAdapter,
+        )
+
+        client = HTTPClientConfig(api_type=APIType.OPENAI, adapter=OpenAIAdapter)
+        assert client.adapter is OpenAIAdapter
+        assert client.adapter is not OpenAIMsgspecAdapter

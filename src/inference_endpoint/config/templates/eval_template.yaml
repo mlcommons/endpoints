@@ -26,10 +26,6 @@ settings:
   client:
     num_workers: 4
 
-metrics:
-  collect:
-    - "accuracy"
-
 endpoint_config:
   endpoints:
     - "http://localhost:8000"

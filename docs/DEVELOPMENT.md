@@ -1,379 +1,256 @@
 # Development Guide
 
-This guide provides everything you need to contribute to the MLPerf Inference Endpoint Benchmarking System.
+This guide covers the development setup and workflow for the MLPerf Inference Endpoint Benchmarking System. For contribution guidelines, see [CONTRIBUTING.md](../CONTRIBUTING.md).
 
-## 🚀 Getting Started
+## Getting Started
 
 ### Prerequisites
 
-- **Python**: 3.12+ (Python 3.12 is recommended for optimal performance)
+- **Python**: 3.12+ (3.12 recommended)
 - **Git**: Latest version
-- **Virtual Environment**: Python venv or conda
-- **IDE**: VS Code, PyCharm, or your preferred editor
+- **OS**: Linux or macOS (Windows is not supported)
 
 ### Development Environment Setup
 
 ```bash
-# 1. Clone the repository
-git clone https://github.com/mlperf/inference-endpoint.git
-cd inference-endpoint
+# 1. Fork https://github.com/mlcommons/endpoints on GitHub, then clone your fork
+git clone https://github.com/YOUR_USERNAME/endpoints.git
+cd endpoints
 
-# 2. Create virtual environment (Python 3.12+ required)
-python3.12 -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+# 2. Add the upstream repo as a remote
+git remote add upstream https://github.com/mlcommons/endpoints.git
 
 # 3. Install development dependencies
-pip install -e ".[dev,test]"
+uv sync --extra dev --extra test
 
 # 4. Install pre-commit hooks
-pre-commit install
+uv run pre-commit install
 
 # 5. Verify installation
-inference-endpoint --version
-pytest --version
+uv run inference-endpoint --version
+uv run pytest --version
 ```
 
-## 🏗️ Project Structure
+<details>
+<summary>Using pip + venv instead (backward-compatible)</summary>
+
+> **Note:** Does not use `uv.lock` — dependency versions may differ from the lockfile.
+
+```bash
+python3.12 -m venv venv && source venv/bin/activate
+pip install -e ".[dev,test]"
+pre-commit install
+```
+
+After activating the venv, commands work without the `uv run` prefix.
+
+</details>
+
+## Project Structure
 
 ```
-inference-endpoint/
+endpoints/
 ├── src/inference_endpoint/     # Main package source
-│   ├── cli.py                  # Command-line interface
+│   ├── main.py                 # Entry point and CLI app
+│   ├── exceptions.py           # Project-wide exception types
+│   ├── async_utils/            # Event loop, ZMQ transport, pub/sub
 │   ├── commands/               # CLI command implementations
 │   ├── config/                 # Configuration and schema management
 │   ├── core/                   # Core types and orchestration
 │   ├── dataset_manager/        # Dataset handling and loading
 │   ├── endpoint_client/        # HTTP/ZMQ endpoint communication
+│   ├── evaluation/             # Accuracy evaluation and scoring
 │   ├── load_generator/         # Load generation and scheduling
 │   ├── metrics/                # Performance measurement and reporting
 │   ├── openai/                 # OpenAI API compatibility
+│   ├── plugins/                # Plugin system
 │   ├── profiling/              # Performance profiling tools
+│   ├── sglang/                 # SGLang API adapter
 │   ├── testing/                # Test utilities (echo server, etc.)
 │   └── utils/                  # Common utilities
 ├── tests/                      # Test suite
 │   ├── unit/                   # Unit tests
 │   ├── integration/            # Integration tests
-│   ├── performance/            # Performance tests
-│   └── datasets/               # Test datasets
+│   ├── performance/            # Performance benchmarks
+│   └── datasets/               # Test data (dummy_1k.jsonl, squad_pruned/)
 ├── docs/                       # Documentation
 ├── examples/                   # Usage examples
 └── scripts/                    # Utility scripts
 ```
 
-## 🧪 Testing
+## Testing
 
 ### Running Tests
 
 ```bash
-# Run all tests
-pytest
+# All tests (excludes slow/performance)
+uv run pytest
 
-# Run with coverage
-pytest --cov=src --cov-report=html
+# Unit tests only
+uv run pytest -m unit
 
-# Run specific test categories
-pytest -m unit          # Unit tests only
-pytest -m integration   # Integration tests only
-pytest -m performance   # Performance tests only (no timeout)
+# Integration tests
+uv run pytest -m integration
 
-# Run tests in parallel
-pytest -n auto
+# Single file with verbose output
+uv run pytest -xvs tests/unit/path/to/test_file.py
 
-# Run tests with verbose output
-pytest -v
-
-# Run specific test file
-pytest tests/unit/test_core_types.py
-
-# Run with output to file (recommended)
-pytest -v 2>&1 | tee test_results.log
+# With coverage
+uv run pytest --cov=src --cov-report=html
 ```
 
-### Test Structure
+### Test Markers
 
-- **Unit Tests** (`tests/unit/`): Test individual components in isolation
-- **Integration Tests** (`tests/integration/`): Test component interactions with real servers
-- **Performance Tests** (`tests/performance/`): Test performance characteristics (marked with @pytest.mark.performance, no timeout)
-- **Test Datasets** (`tests/datasets/`): Sample datasets for testing (dummy_1k.jsonl, squad_pruned/)
-
-### Writing Tests
+Every test function **must** have a marker:
 
 ```python
 import pytest
-from inference_endpoint.core.types import Query
 
-class TestQuery:
-    def test_query_creation(self):
-        """Test creating a basic query."""
-        query = Query(prompt="Test", model="test-model")
-        assert query.prompt == "Test"
-        assert query.model == "test-model"
+@pytest.mark.unit
+def test_something():
+    ...
 
-    @pytest.mark.asyncio(mode="strict")
-    async def test_async_operation(self):
-        """Test async operations."""
-        # Your async test here
-        pass
+@pytest.mark.unit
+@pytest.mark.asyncio  # strict mode is configured globally in pyproject.toml
+async def test_async_something():
+    ...
 ```
 
-## 📝 Code Quality
+Available markers: `unit`, `integration`, `slow`, `performance`, `run_explicitly`
+
+### Key Fixtures
+
+Defined in `tests/conftest.py` — use these instead of mocking:
+
+- `mock_http_echo_server` — real HTTP echo server on dynamic port
+- `mock_http_oracle_server` — dataset-driven response server
+- `dummy_dataset` — in-memory test dataset
+- `events_db` — pre-populated SQLite events database
+
+### Coverage
+
+Target **>90% coverage** for all new code.
+
+## Code Quality
 
 ### Pre-commit Hooks
 
-The project uses pre-commit hooks to ensure code quality:
+All of these run automatically on commit:
+
+- trailing-whitespace, end-of-file-fixer, check-yaml, check-merge-conflict, debug-statements
+- `ruff` (lint + autofix) and `ruff-format`
+- `mypy` type checking
+- `prettier` for YAML/JSON/Markdown
+- License header enforcement
+- YAML template validation and regeneration
+
+**IMPORTANT: Always run `pre-commit run --all-files` before every commit.** Hooks may modify files. If files are modified, stage the changes and commit once.
 
 ```bash
+# Run all hooks
+uv run pre-commit run --all-files
+
 # Install hooks (done during setup)
-pre-commit install
-
-# Run all hooks on staged files
-pre-commit run
-
-# Run all hooks on all files
-pre-commit run --all-files
-
-# Skip hooks (use sparingly)
-git commit --no-verify
+uv run pre-commit install
 ```
 
-### Code Formatting
+### Code Style
+
+- **Formatter/Linter**: `ruff` (line-length 88, target Python 3.12)
+- **Type checking**: `mypy`
+- **Formatting**: `ruff-format` (double quotes, space indent)
+- **License headers**: Required on all Python files (auto-added by pre-commit)
+- **Commit messages**: [Conventional commits](https://www.conventionalcommits.org/) — `feat:`, `fix:`, `docs:`, `test:`, `chore:`, `perf:`
+- **Comments**: Only where the _why_ isn't obvious from the code
+
+## Development Workflow
+
+### Feature Development
 
 ```bash
-# Format code with ruff
-ruff format src/ tests/
+# Sync your fork with upstream before starting
+git fetch upstream
+git checkout main
+git merge upstream/main
 
-# Check formatting without changing files
-ruff format --check src/ tests/
-```
-
-### Linting
-
-```bash
-# Run ruff linter
-ruff check src/ tests/
-
-# Run mypy for type checking
-mypy src/
-
-# Run all quality checks
-pre-commit run --all-files
-```
-
-## 🔧 Development Workflow
-
-### 1. Feature Development
-
-```bash
-# Create feature branch
-git checkout -b feature/your-feature-name
+# Create a feature branch on your fork
+git checkout -b feat/your-feature-name
 
 # Make changes and test
-pytest
-pre-commit run --all-files
+uv run pytest
+uv run pre-commit run --all-files
 
 # Commit changes
-git add .
+git add <specific files>
 git commit -m "feat: add your feature description"
 
-# Push and create PR
-git push origin feature/your-feature-name
+# Push to your fork and open a PR against mlcommons/endpoints
+git push origin feat/your-feature-name
 ```
 
-### 2. Component Development
+### Branch Naming
 
-When developing a new component:
-
-1. **Create the component directory** in `src/inference_endpoint/`
-2. **Add `__init__.py`** with component description
-3. **Implement the component** following the established patterns
-4. **Add tests** in the corresponding `tests/unit/` directory
-5. **Update main package** `__init__.py` if needed
-6. **Add dependencies** to `pyproject.toml` under `[project.dependencies]` or `[project.optional-dependencies]`
-
-### 3. Testing Strategy
-
-- **Unit Tests**: >90% coverage required
-- **Integration Tests**: Test component interactions
-- **Performance Tests**: Ensure no performance regressions
-- **Documentation**: Update docs for new features
-
-## 📚 Documentation
-
-### Writing Documentation
-
-- **Code Comments**: Use docstrings for all public APIs
-- **README Updates**: Update README.md for user-facing changes
-- **API Documentation**: Document new interfaces and changes
-- **Examples**: Provide usage examples for new features
-
-### Documentation Standards
-
-```python
-def process_query(query: Query) -> QueryResult:
-    """
-    Process a query and return the result.
-
-    Args:
-        query: The query to process
-
-    Returns:
-        QueryResult containing the processed response
-
-    Raises:
-        QueryError: If the query cannot be processed
-
-    Example:
-        >>> query = Query(prompt="Hello")
-        >>> result = process_query(query)
-        >>> print(result.content)
-        'Hello there!'
-    """
-    # Implementation here
-    pass
+```
+feat/short-description
+fix/short-description
+docs/short-description
 ```
 
-## 🚀 Performance Considerations
+## YAML Config Templates
 
-### Development Guidelines
-
-- **Async First**: Use async/await for I/O operations
-- **Memory Efficiency**: Minimize object creation in hot paths
-- **Profiling**: Use pytest-benchmark for performance testing
-- **Monitoring**: Add performance metrics for critical operations
-
-### Performance Testing
+Config templates in `src/inference_endpoint/config/templates/` are auto-generated from schema defaults. When you change `config/schema.py`, regenerate them:
 
 ```bash
-# Run performance tests
-pytest -m performance
-
-# Run benchmarks
-pytest --benchmark-only
-
-# Compare with previous runs
-pytest --benchmark-compare
+uv run python scripts/regenerate_templates.py
 ```
 
-## 🔍 Debugging
+The pre-commit hook auto-regenerates templates when `schema.py`, `config.py`, or `regenerate_templates.py` change. CI validates templates are up to date via `--check` mode.
 
-### Common Issues
+Two variants are generated per mode (offline, online, concurrency):
 
-1. **Import Errors**: Ensure `src/` is in Python path
-2. **Test Failures**: Check test data and mock objects
-3. **Performance Issues**: Use profiling tools to identify bottlenecks
-4. **Async Issues**: Ensure proper event loop handling
+- `_template.yaml` — minimal: only required fields + placeholders
+- `_template_full.yaml` — all fields with schema defaults + inline `# options:` comments
 
-### Debug Tools
-
-```bash
-# Run with debug logging
-inference-endpoint --verbose
-
-# Run tests with debug output
-pytest -s -v
-
-# Use Python debugger
-python -m pdb -m pytest test_file.py
-```
-
-## 📦 Package Management
+## Package Management
 
 ### Adding Dependencies
 
-Add dependencies to `pyproject.toml` (always pin to exact versions with `==`):
+Use `uv add <package>==<version>` to update both `pyproject.toml` and `uv.lock` atomically (always pin to exact versions with `==`):
 
 - **Runtime dependencies**: `[project.dependencies]`
 - **Optional groups** (dev, test, etc.): `[project.optional-dependencies]`
 
-Install after updating:
+After adding a dependency, run `pip-audit` to verify it has no known vulnerabilities:
 
 ```bash
-pip install -e ".[dev,test]"
+uv run pip-audit
 ```
 
-## 🚨 Troubleshooting
+## Performance Considerations
 
-### Common Problems
+Code in `load_generator/`, `endpoint_client/worker.py`, and `async_utils/transport/` is latency-critical. In these paths:
 
-**Pre-commit hooks failing:**
+- No `match` statements — use dict dispatch
+- Use `dataclass(slots=True)` or `msgspec.Struct` for frequently instantiated classes
+- Minimize async suspends
+- Use `msgspec` over `json`/`pydantic` for serialization
+- The HTTP client uses custom `ConnectionPool` with `httptools` parser — not `aiohttp`/`requests`
+
+## Debugging
 
 ```bash
-# Update pre-commit
-pre-commit autoupdate
+# Run with verbose logging
+uv run inference-endpoint -v benchmark offline ...
 
-# Skip hooks temporarily
-git commit --no-verify
+# Run tests with stdout visible
+uv run pytest -xvs tests/unit/path/to/test.py
+
+# Use Python debugger
+uv run python -m pdb -m pytest tests/unit/path/to/test.py
 ```
 
-**Tests failing:**
+## Getting Help
 
-```bash
-# Clear Python cache
-find . -type d -name "__pycache__" -delete
-find . -type f -name "*.pyc" -delete
-
-# Reinstall package
-pip install -e .
-```
-
-**Import errors:**
-
-```bash
-# Check Python path
-python -c "import sys; print(sys.path)"
-
-# Ensure src is in path
-export PYTHONPATH="${PYTHONPATH}:$(pwd)/src"
-```
-
-## 🤝 Contributing Guidelines
-
-### Pull Request Process
-
-1. **Fork the repository** and create a feature branch
-2. **Make your changes** following the coding standards
-3. **Add tests** for new functionality
-4. **Update documentation** as needed
-5. **Run all checks** locally before submitting
-6. **Create a PR** with clear description and tests
-7. **Address review comments** promptly
-
-### Commit Message Format
-
-Use conventional commit format:
-
-```
-type(scope): description
-
-feat(core): add query lifecycle management
-fix(api): resolve endpoint connection issue
-docs(readme): update installation instructions
-test(loadgen): add performance benchmarks
-```
-
-### Code Review Checklist
-
-- [ ] Code follows style guidelines
-- [ ] Tests pass and coverage is adequate
-- [ ] Documentation is updated
-- [ ] Performance impact is considered
-- [ ] Security implications are reviewed
-- [ ] Error handling is appropriate
-
-## 📞 Getting Help
-
-- **Issues**: [GitHub Issues](https://github.com/mlperf/inference-endpoint/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/mlperf/inference-endpoint/discussions)
-- **Documentation**: Check this guide and project docs
-- **Team**: Reach out to the development team
-
-## 🎯 Next Steps
-
-1. **Set up your environment** using this guide
-2. **Explore the codebase** to understand the architecture
-3. **Pick a component** to work on from the project board
-4. **Start with tests** to understand the expected behavior
-5. **Implement incrementally** with regular testing
-6. **Ask questions** when you need help
-
-Happy coding! 🚀
+- **Issues**: [GitHub Issues](https://github.com/mlcommons/endpoints/issues)
+- **Project Board**: [Q2 Board](https://github.com/orgs/mlcommons/projects/57)
+- **Documentation**: See [docs/](.) directory for guides

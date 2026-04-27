@@ -21,56 +21,79 @@ from pathlib import Path
 
 import yaml
 
-from ..config.schema import TEMPLATE_TYPE_MAP, BenchmarkConfig
+from ..config.schema import (
+    BenchmarkConfig,
+    LoadPattern,
+    LoadPatternType,
+    OnlineSettings,
+    TestType,
+)
 from ..exceptions import InputValidationError, SetupError
 
 logger = logging.getLogger(__name__)
 
 TEMPLATES_DIR = Path(__file__).parent.parent / "config" / "templates"
 
-TEMPLATE_FILES = {
-    "offline": "offline_template.yaml",
-    "online": "online_template.yaml",
+VALID_TYPES = {"offline", "online", "concurrency", "eval", "submission"}
+
+# eval/submission not yet supported in create_default_config — copy handwritten templates
+_HANDWRITTEN = {
     "eval": "eval_template.yaml",
     "submission": "submission_template.yaml",
 }
 
+_TYPE_MAP = {
+    "offline": TestType.OFFLINE,
+    "online": TestType.ONLINE,
+    "concurrency": TestType.ONLINE,
+}
+
 
 def execute_init(template_type: str) -> None:
-    """Generate example YAML configuration template."""
-    output_path = f"{template_type}_template.yaml"
+    """Generate YAML config template.
 
-    if template_type not in TEMPLATE_FILES:
+    For offline/online/concurrency: generates via model_dump(exclude_none=True).
+    For eval/submission: copies handwritten template files.
+
+    Args:
+        template_type: One of "offline", "online", "concurrency", "eval", "submission".
+    """
+    if template_type not in VALID_TYPES:
         raise InputValidationError(
             f"Unknown template type: {template_type}. "
-            f"Available: {', '.join(TEMPLATE_FILES.keys())}"
+            f"Available: {', '.join(sorted(VALID_TYPES))}"
         )
 
-    template_file = TEMPLATES_DIR / TEMPLATE_FILES[template_type]
+    output_path = f"{template_type}_template.yaml"
     output_file = Path(output_path)
+
     if output_file.exists():
         logger.warning(f"File exists: {output_path} (will be overwritten)")
 
     try:
-        if not template_file.exists():
-            logger.info("Generating from BenchmarkConfig.create_default_config...")
-            config = BenchmarkConfig.create_default_config(
-                TEMPLATE_TYPE_MAP[template_type]
-            )
-            config_dict = config.model_dump(exclude_none=True)
+        # TODO(vir):
+        # generate these automatically when support is added
+        # for now just copy over hand-written templates
+        if template_type in _HANDWRITTEN:
+            template_file = TEMPLATES_DIR / _HANDWRITTEN[template_type]
+            if not template_file.exists():
+                raise SetupError(f"Template file not found: {template_file}")
+            shutil.copy(template_file, output_path)
+        else:
+            config = BenchmarkConfig.create_default_config(_TYPE_MAP[template_type])
+            if template_type == "concurrency":
+                config = config.with_updates(
+                    name="concurrency_benchmark",
+                    settings=OnlineSettings(
+                        load_pattern=LoadPattern(
+                            type=LoadPatternType.CONCURRENCY,
+                            target_concurrency=32,
+                        ),
+                    ),
+                )
+            data = config.model_dump(mode="json", exclude_none=True)
             with open(output_path, "w") as f:
-                yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
-            logger.info(f"Generated: {output_path}")
-        else:
-            shutil.copy(template_file, output_path)
-            logger.info(f"Created from template: {output_path}")
-
-    except NotImplementedError as e:
-        logger.error(str(e))
-        if template_file.exists():
-            shutil.copy(template_file, output_path)
-            logger.info(f"Created from template: {output_path}")
-        else:
-            raise SetupError(f"Template file not found: {template_file}") from e
+                yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+        logger.info(f"Created: {output_path}")
     except (OSError, PermissionError) as e:
         raise SetupError(f"Failed to create template: {e}") from e

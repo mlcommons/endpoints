@@ -37,7 +37,7 @@ The pruned version holds 50 samples from each slice (training and validation)
 **Generation:**
 
 ```bash
-python scripts/create_dummy_dataset.py
+uv run python scripts/create_dummy_dataset.py
 ```
 
 **Example Prompts:**
@@ -60,13 +60,13 @@ Describe space exploration (case 3) in detail
 
 ```bash
 # Test offline benchmark
-inference-endpoint benchmark offline \
+uv run inference-endpoint benchmark offline \
   --endpoints http://localhost:8765 \
   --model Qwen/Qwen3-8B \
   --dataset tests/datasets/dummy_1k.jsonl
 
 # Test probe
-inference-endpoint probe \
+uv run inference-endpoint probe \
   --endpoints http://localhost:8765 \
   --model Qwen/Qwen3-8B \
   --requests 10

@@ -1,50 +1,21 @@
-# Online Concurrency-Based Benchmark (NOT YET IMPLEMENTED)
-# This template shows the future concurrency-based online mode
-name: "concurrency-benchmark"
-version: "1.0"
-type: "online"
-
+name: concurrency_benchmark
+type: online  # Test type: offline, online, eval, submission | options: offline, online, eval, submission
 model_params:
-  name: "meta-llama/Llama-3.1-8B-Instruct"
-  temperature: 0.7
-  top_p: 0.9
-  max_new_tokens: 1024
-
-datasets:
-  - name: "concurrency-test"
-    type: "performance"
-    path: "datasets/queries.jsonl"
-    samples: 500
-
+  name: '<MODEL_NAME eg: meta-llama/Llama-3.1-8B-Instruct>'
+datasets:  # Dataset configs
+- name: perf
+  type: performance  # Dataset purpose: performance or accuracy | options: performance, accuracy
+  path: '<DATASET_PATH eg: tests/datasets/dummy_1k.jsonl>'  # Dataset file path
+  parser:  # Column remapping: {prompt: <col>, system: <col>}
+    prompt: text_input
 settings:
   runtime:
-    min_duration_ms: 600000 # 10 minutes
-    max_duration_ms: 1800000 # 30 minutes
-    scheduler_random_seed: 42 # For Poisson/distribution sampling
-    dataloader_random_seed: 42 # For dataset shuffling
-
+    min_duration_ms: 600000  # Min duration (ms, or with suffix: 600s, 10m)
+    max_duration_ms: 0  # Maximum test duration in ms (0 for no limit)
+    n_samples_to_issue: null  # Sample count override
   load_pattern:
-    type: "concurrency" # NOT YET IMPLEMENTED
-    target_concurrency: 32 # Maintain 32 concurrent requests
-    # Note: target_qps is not used in this mode
-    # QPS will be determined by: concurrency / avg_latency
-
-  client:
-    num_workers: 4
-
-metrics:
-  collect:
-    - "throughput" # Will be concurrency / avg_latency
-    - "latency" # p50, p90, p95, p99, p999 at this concurrency level
-    - "ttft"
-    - "tpot"
-
+    type: concurrency  # Load pattern type | options: max_throughput, poisson, concurrency, burst, step
+    target_concurrency: 32  # Concurrent requests
 endpoint_config:
-  endpoints:
-    - "http://localhost:8000"
-  api_key: null
-  api_type: "openai" # Options: openai or sglang
-# How this differs from Poisson mode:
-# - Poisson: Fixed QPS target, concurrency varies based on latency
-# - Concurrency: Fixed N requests in-flight, QPS varies based on latency
-# - Useful for: Measuring latency at specific concurrency levels
+  endpoints:  # Endpoint URL(s). Must include scheme, e.g. 'http://host:port'.
+  - http://localhost:8000

@@ -1,4 +1,13 @@
-# MLPerf Inference Endpoints: HttpClient Design Document
+# Endpoint Client Implementation Deep Dive
+
+> Primary component spec: [docs/endpoint_client/DESIGN.md](endpoint_client/DESIGN.md)
+>
+> This document is the detailed companion reference for the endpoint client implementation. Use
+> it for deeper material on connection pool architecture, worker internals, SSE handling, and
+> performance analysis. Treat `docs/endpoint_client/DESIGN.md` as the canonical high-level design
+> spec.
+
+Detailed design for the `HTTPEndpointClient`: functional requirements, performance constraints, connection pool architecture, and worker process integration.
 
 ## Table of Contents
 
@@ -231,9 +240,9 @@ class QueryStatus(Enum):
 
 **Classes:**
 
-| Class              | Source      | Description                                              |
-| ------------------ | ----------- | -------------------------------------------------------- |
-| `HTTPClientConfig` | `config.py` | `@dataclass`: client, worker pool, and connection config |
+| Class              | Source      | Description                                             |
+| ------------------ | ----------- | ------------------------------------------------------- |
+| `HTTPClientConfig` | `config.py` | `BaseModel`: client, worker pool, and connection config |
 
 ```python
 class APIType(str, Enum):
@@ -252,8 +261,6 @@ class HTTPClientConfig(BaseModel):
     # -1 = auto: min(max(8, numa_domain_size), 24)
     num_workers: int = -1
 
-    record_worker_events: bool = False
-    event_logs_dir: Path | None = None
     log_level: str = "INFO"
 
     # When True, all SSE chunks emitted via IPC (high main-thread overhead).

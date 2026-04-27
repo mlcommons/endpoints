@@ -57,10 +57,8 @@ class OpenAISSEAccumulator(SSEAccumulatorProtocol):
             chunk = StreamChunk(
                 id=self.query_id,
                 response_chunk=content,
-                is_complete=False,
                 metadata={
                     "first_chunk": not self.first_chunk_sent,
-                    "final_chunk": False,
                 },
             )
             self.first_chunk_sent = True

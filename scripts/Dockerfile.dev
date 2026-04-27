@@ -5,21 +5,26 @@
 
 FROM python:3.12.11-slim
 
+# Copy uv binary from official image
+COPY --from=ghcr.io/astral-sh/uv:0.7.6 /uv /uvx /bin/
+
 # Set environment variables
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PROJECT_ENVIRONMENT=/opt/venv
 
 # Install system dependencies
 RUN apt-get update && \
-    apt-get install -y  --no-install-recommends build-essential procps \
+    apt-get install -y --no-install-recommends build-essential procps \
     && rm -rf /var/lib/apt/lists/*
 
 RUN mkdir /mnt/inference-endpoint
 WORKDIR /mnt/inference-endpoint
-COPY pyproject.toml .
-COPY src/ ./src/
+
+# Copy lockfile + project metadata for dependency layer caching
+COPY pyproject.toml uv.lock .python-version README.md ./
 
 # Create a non-root user for security
 # Accept UID and GID as build arguments to match host user
@@ -29,8 +34,14 @@ RUN if ! getent group ${GROUP_ID}; then \
         groupadd -g ${GROUP_ID} appuser; \
     fi && \
     useradd -u ${USER_ID} -g ${GROUP_ID} --create-home --shell /bin/bash appuser --no-log-init && \
-    chown -R ${USER_ID}:${GROUP_ID} /mnt/inference-endpoint
+    chown -R ${USER_ID}:${GROUP_ID} /mnt/inference-endpoint && \
+    mkdir -p /opt/venv && chown ${USER_ID}:${GROUP_ID} /opt/venv
 USER appuser
-ENV PATH="/home/appuser/.local/bin:$PATH"
+ENV PATH="/opt/venv/bin:/home/appuser/.local/bin:$PATH"
 
-RUN pip install -e .[dev,test]
+# Install dependencies first (cached unless pyproject.toml/uv.lock change)
+RUN uv sync --frozen --no-install-project --extra dev --extra test
+
+# Copy source and install project
+COPY --chown=${USER_ID}:${GROUP_ID} src/ ./src/
+RUN uv sync --frozen --extra dev --extra test

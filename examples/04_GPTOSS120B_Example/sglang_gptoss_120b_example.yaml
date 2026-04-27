@@ -50,14 +50,6 @@ settings:
 
   client:
     num_workers: 8
-    record_worker_events: false
-
-metrics:
-  collect:
-    - "throughput"
-    - "latency"
-    - "ttft"
-    - "tpot"
 
 endpoint_config:
   endpoints:

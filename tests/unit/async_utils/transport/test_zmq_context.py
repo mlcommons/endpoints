@@ -18,6 +18,7 @@
 import os
 import tempfile
 import time
+from pathlib import Path
 
 import pytest
 import zmq
@@ -46,7 +47,10 @@ class TestManagedZMQContextCreation:
             assert isinstance(ctx.socket_dir, str)
             assert os.path.isdir(ctx.socket_dir)
             assert "zmq_" in ctx.socket_dir
-            assert ctx.socket_dir.startswith(tempfile.gettempdir())
+            # Socket dir is on /dev/shm if available, otherwise tempdir
+            shm = Path("/dev/shm")
+            expected_parent = str(shm) if shm.is_dir() else tempfile.gettempdir()
+            assert ctx.socket_dir.startswith(expected_parent)
 
     def test_scoped_accepts_io_threads(self):
         """scoped(io_threads=N) creates context without error."""

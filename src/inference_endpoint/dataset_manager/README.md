@@ -142,7 +142,8 @@ The adapter-specific transforms are automatically applied based on the `api_type
 For custom datasets not in the predefined registry, use `Dataset.load_from_file()`:
 
 ```python
-from inference_endpoint.dataset_manager import Dataset, DatasetFormat
+from inference_endpoint.dataset_manager import Dataset
+from inference_endpoint.dataset_manager.dataset import DatasetFormat
 from inference_endpoint.dataset_manager.transforms import UserPromptFormatter
 
 # Load with transforms
@@ -358,7 +359,8 @@ This applies:
 ### Example 2: Custom Dataset with Transforms
 
 ```python
-from inference_endpoint.dataset_manager import Dataset, DatasetFormat
+from inference_endpoint.dataset_manager import Dataset
+from inference_endpoint.dataset_manager.dataset import DatasetFormat
 from inference_endpoint.dataset_manager.transforms import (
     UserPromptFormatter,
     AddStaticColumns,

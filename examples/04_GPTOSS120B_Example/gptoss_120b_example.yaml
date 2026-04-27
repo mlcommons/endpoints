@@ -28,18 +28,11 @@ settings:
 
   client:
     num_workers: 4
-    record_worker_events: false
-
-metrics:
-  collect:
-    - "throughput"
-    - "latency"
-    - "ttft"
-    - "tpot"
 
 endpoint_config:
   endpoints:
-    - "http://localhost:3000"
+    - "http://localhost:30000"
   api_key: null
+  api_type: "sglang"
 
 report_dir: "results/gptoss_120b_benchmark_mlperf/"

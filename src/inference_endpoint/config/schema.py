@@ -88,6 +88,16 @@ class EvalMethod(str, Enum):
     JUDGE = "judge"
 
 
+class ScorerMethod(str, Enum):
+    """Registered scorer methods for accuracy evaluation."""
+
+    PASS_AT_1 = "pass_at_1"
+    STRING_MATCH = "string_match"
+    ROUGE = "rouge"
+    CODE_BENCH = "code_bench_scorer"
+    SHOPIFY_CATEGORY_F1 = "shopify_category_f1"
+
+
 class TestMode(str, Enum):
     """Test mode determining what to collect.
 
@@ -244,7 +254,9 @@ class Dataset(BaseModel):
     eval_method: EvalMethod | None = Field(
         None, description="Accuracy evaluation method"
     )
-    parser: dict[str, str] | None = Field(None, description="Column remapping")
+    parser: dict[str, str] | None = Field(
+        None, description="Column remapping: {prompt: <col>, system: <col>}"
+    )
     accuracy_config: AccuracyConfig | None = Field(
         None, description="Accuracy evaluation settings"
     )
@@ -260,14 +272,11 @@ class Dataset(BaseModel):
 class AccuracyConfig(BaseModel):
     """Accuracy configuration.
 
-    The eval_method is the method to use to evaluate the accuracy of the model.
-    Currently only "pass_at_1" is supported.
-    The ground_truth is the column in the dataset that contains the ground truth.
-    Defaults to "ground_truth" if not specified.
-    The extractor is the extractor to use to extract the ground truth from the output.
-    Currently "boxed_math_extractor" and "abcd_extractor" are supported.
-    The num_repeats is the number of times to repeat the dataset for evaluation.
-    Defaults to 1 if not specified.
+    eval_method: Scorer to use (see ScorerMethod enum for options).
+    ground_truth: Column in the dataset containing ground truth. Defaults to "ground_truth".
+    extractor: Post-processor to extract answers from model output
+        (abcd_extractor, boxed_math_extractor, identity_extractor, python_code_extractor).
+    num_repeats: Number of times to repeat the dataset for evaluation. Defaults to 1.
 
     Example:
         accuracy_config:
@@ -279,10 +288,15 @@ class AccuracyConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    eval_method: str | None = None
-    ground_truth: str | None = None
-    extractor: str | None = None
-    num_repeats: int = Field(1, ge=1)
+    eval_method: ScorerMethod | None = Field(None, description="Scorer method")
+    ground_truth: str | None = Field(None, description="Ground truth column name")
+    extractor: str | None = Field(
+        None,
+        description="Answer extractor (abcd_extractor, boxed_math_extractor, identity_extractor, python_code_extractor)",
+    )
+    num_repeats: int = Field(
+        1, ge=1, description="Repeat dataset N times for evaluation"
+    )
 
 
 class RuntimeConfig(BaseModel):
@@ -339,6 +353,7 @@ class RuntimeConfig(BaseModel):
         return self
 
 
+@cyclopts.Parameter(name="*")
 class LoadPattern(BaseModel):
     """Load pattern configuration.
 
@@ -352,7 +367,7 @@ class LoadPattern(BaseModel):
 
     type: Annotated[
         LoadPatternType,
-        cyclopts.Parameter(alias="--load-pattern", help="Load pattern type"),
+        cyclopts.Parameter(name="--load-pattern", help="Load pattern type"),
     ] = LoadPatternType.MAX_THROUGHPUT
     target_qps: Annotated[
         float | None, cyclopts.Parameter(alias="--target-qps", help="Target QPS")
@@ -402,51 +417,6 @@ class OnlineSettings(Settings):
     pass
 
 
-def _default_metrics() -> list[str]:
-    """
-    TODO: PoC only, subject to change!
-    Default metrics to collect."""
-    return ["throughput", "latency", "ttft", "tpot"]
-
-
-class Metrics(BaseModel):
-    """Metrics collection configuration.
-
-    Note: Currently uses string-based metric names for YAML simplicity.
-    Use get_metric_types() to convert to actual Metric type classes.
-    """
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    collect: list[str] = Field(default_factory=_default_metrics)
-
-    def get_metric_types(self) -> list[type[metrics.Metric]]:
-        """Convert string metric names to Metric type classes.
-
-        Returns:
-            List of Metric type classes corresponding to collect list
-
-        Raises:
-            ValueError: If metric name is not recognized
-        """
-        metric_map = {
-            "throughput": metrics.Throughput,
-            "latency": metrics.QueryLatency,
-            "ttft": metrics.TTFT,
-            "tpot": metrics.TPOT,
-        }
-
-        result = []
-        for name in self.collect:
-            if name not in metric_map:
-                raise ValueError(
-                    f"Unknown metric name: {name}. Available: {list(metric_map.keys())}"
-                )
-            result.append(metric_map[name])
-
-        return result
-
-
 class EndpointConfig(BaseModel):
     """Endpoint connection configuration.
 
@@ -460,7 +430,10 @@ class EndpointConfig(BaseModel):
     endpoints: Annotated[
         list[str],
         cyclopts.Parameter(alias="--endpoints", help="Endpoint URL(s)", negative=""),
-    ] = Field(min_length=1)
+    ] = Field(
+        min_length=1,
+        description="Endpoint URL(s). Must include scheme, e.g. 'http://host:port'.",
+    )
     api_key: Annotated[
         str | None, cyclopts.Parameter(alias="--api-key", help="API key")
     ] = None
@@ -468,6 +441,16 @@ class EndpointConfig(BaseModel):
         APIType,
         cyclopts.Parameter(alias="--api-type", help="API type: openai or sglang"),
     ] = APIType.OPENAI
+
+    @field_validator("endpoints", mode="after")
+    @classmethod
+    def _validate_endpoint_scheme(cls, v: list[str]) -> list[str]:
+        for url in v:
+            if not url.startswith(("http://", "https://")):
+                raise ValueError(
+                    f"Endpoint URL must include scheme (http:// or https://), got: {url!r}"
+                )
+        return v
 
 
 class BenchmarkConfig(WithUpdatesMixin, BaseModel):
@@ -501,9 +484,6 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
         default_factory=list, description="Dataset configs"
     )
     settings: Settings = Field(default_factory=Settings)
-    metrics: Annotated[Metrics, cyclopts.Parameter(show=False)] = Field(
-        default_factory=Metrics
-    )
     endpoint_config: EndpointConfig
     report_dir: Annotated[
         Path | None,
@@ -514,7 +494,9 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
         cyclopts.Parameter(alias="--timeout", help="Global timeout in seconds"),
     ] = None
     # verbose is handled by cyclopts meta app (-v flag), not here
-    verbose: Annotated[bool, cyclopts.Parameter(show=False)] = False
+    verbose: Annotated[bool, cyclopts.Parameter(show=False)] = Field(
+        False, description="Enable verbose logging"
+    )
     enable_cpu_affinity: Annotated[
         bool,
         cyclopts.Parameter(
@@ -607,6 +589,27 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
                     "Online mode requires --load-pattern (poisson or concurrency)"
                 )
 
+        return self
+
+    @model_validator(mode="after")
+    def _propagate_client_api_type(self) -> Self:
+        """Sync client.api_type from endpoint_config.api_type at construction.
+
+        ``endpoint_config.api_type`` is the user-facing source of truth.
+        ``HTTPClientConfig.api_type`` is internal and only exists so the
+        adapter/accumulator can be resolved by ``_resolve_defaults``. Without
+        this propagation, a YAML/CLI that selects SGLang on ``endpoint_config``
+        would leave the client with the OpenAI adapter until ``execute.py``
+        patched it at runtime.
+        """
+        target = self.endpoint_config.api_type
+        if self.settings.client.api_type != target:
+            new_client = self.settings.client.with_updates(
+                api_type=target,
+                adapter=None,
+                accumulator=None,
+            )
+            object.__setattr__(self.settings, "client", new_client)
         return self
 
     @classmethod
@@ -721,7 +724,7 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
         _common = {
             "model_params": ModelParams(name="<MODEL_NAME>"),
             "datasets": [Dataset(path="<DATASET_PATH>")],
-            "endpoint_config": EndpointConfig(endpoints=["<ENDPOINT_URL>"]),
+            "endpoint_config": EndpointConfig(endpoints=["http://localhost:8000"]),
         }
         if test_type == TestType.OFFLINE:
             return OfflineBenchmarkConfig(**_common)
