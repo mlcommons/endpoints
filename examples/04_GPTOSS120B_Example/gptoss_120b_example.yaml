@@ -33,5 +33,6 @@ endpoint_config:
   endpoints:
     - "http://localhost:30000"
   api_key: null
+  api_type: "sglang"
 
 report_dir: "results/gptoss_120b_benchmark_mlperf/"

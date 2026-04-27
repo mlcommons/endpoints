@@ -142,9 +142,11 @@ uv run inference-endpoint benchmark from-config \
   --timeout 60
 ```
 
-For a performance-only run, use [`gptoss_120b_example.yaml`](gptoss_120b_example.yaml). Update
-`endpoint_config.endpoints` to match your server port (e.g. `http://localhost:8000` for vLLM,
-`http://localhost:30000` for SGLang).
+For a performance-only run, use [`gptoss_120b_example.yaml`](gptoss_120b_example.yaml). It is
+configured for SGLang on `http://localhost:30000` by default. To target vLLM instead, update
+`endpoint_config.endpoints` to your server (e.g. `http://localhost:8000`) **and** change
+`endpoint_config.api_type` to `"openai"` so requests route to `/v1/chat/completions` rather than
+`/generate`.
 
 ### LiveCodeBench Setup
 
