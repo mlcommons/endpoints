@@ -18,9 +18,8 @@ import os
 import warnings
 from argparse import ArgumentParser
 
-from tqdm import tqdm
-
 from datasets import load_dataset
+from tqdm import tqdm
 
 PROMPT = "Summarize the following news article in 128 tokens. Please output the summary only, without any other text.\n\nArticle:\n{input}\n\nSummary:"
 
