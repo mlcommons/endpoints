@@ -15,6 +15,7 @@
 
 """Multi-turn conversation dataset for conversational AI benchmarking."""
 
+import logging
 from typing import Any
 
 import pandas as pd
@@ -29,6 +30,8 @@ from .transforms import (
     get_transforms_for_api_type,
 )
 
+logger = logging.getLogger(__name__)
+
 
 def _expand_tool_results(row: dict) -> list[dict]:
     """Expand a tool row into one OpenAI tool message per result.
@@ -40,6 +43,13 @@ def _expand_tool_results(row: dict) -> list[dict]:
     """
     tool_results = row.get("tool_results")
     if not isinstance(tool_results, list):
+        return []
+    if not tool_results:
+        logger.warning(
+            "Row has empty tool_results list (conversation_id=%s, turn=%s)",
+            row.get("conversation_id"),
+            row.get("turn"),
+        )
         return []
     return [
         {
@@ -94,6 +104,8 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
             ValueError: If conversation structure is invalid.
         """
         super().__init__(dataframe, **kwargs)
+        assert self.dataframe is not None, "Dataframe must be initialized"
+        self._conv_groups = dict(list(self.dataframe.groupby("conversation_id")))
         self._validate_conversation_grouping()
         self._validate_conversation_structure()
         self._validate_turn_numbering()
@@ -128,10 +140,6 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
         Raises:
             ValueError: If any conversation has invalid role sequence.
         """
-        assert self.dataframe is not None, "Dataframe must be initialized"
-
-        # Valid state transitions (flat 4-state machine — no assistant_tc node,
-        # no tool→tool; converter always merges consecutive tool rows into tool_results)
         VALID_NEXT: dict[str, set[str]] = {
             "start": {"user"},
             "user": {"assistant"},
@@ -139,7 +147,7 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
             "tool": {"assistant", "user"},
         }
 
-        for conv_id, group in self.dataframe.groupby("conversation_id"):
+        for conv_id, group in self._conv_groups.items():
             sorted_group = group.sort_values("turn")
             state = "start"
 
@@ -159,9 +167,7 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
         Raises:
             ValueError: If turn numbers are not exactly 1, 2, 3, …, N.
         """
-        assert self.dataframe is not None, "Dataframe must be initialized"
-
-        for conv_id, group in self.dataframe.groupby("conversation_id"):
+        for conv_id, group in self._conv_groups.items():
             turns = sorted(group["turn"].tolist())
             expected = list(range(1, len(turns) + 1))
             if turns != expected:
@@ -180,14 +186,13 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
             Metadata dict with samples list, num_conversations, max_turns_per_conv,
             client_turns_per_conversation, and pre_built_messages_by_key.
         """
-        assert self.dataframe is not None, "Dataframe must be initialized"
         samples = []
-        client_turns_df = self.dataframe[self.dataframe["role"].isin(["user", "tool"])]
 
         # Count client turns (user + tool) per conversation for completion tracking
-        client_turns_per_conv = (
-            client_turns_df.groupby("conversation_id").size().to_dict()
-        )
+        client_turns_per_conv = {
+            str(conv_id): int(group["role"].isin(["user", "tool"]).sum())
+            for conv_id, group in self._conv_groups.items()
+        }
 
         # Map (conversation_id, turn) → complete message list ready to send to endpoint.
         # Each entry is: [system (optional)] + all prior rows formatted as messages
@@ -198,7 +203,7 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
         current_turn_messages_by_key: dict[tuple, list[dict]] = {}
         system_prompts_by_conv: dict[str, str | None] = {}
 
-        for conv_id, group in self.dataframe.groupby("conversation_id"):
+        for conv_id, group in self._conv_groups.items():
             sorted_group = group.sort_values("turn")
             client_rows = sorted_group[sorted_group["role"].isin(["user", "tool"])]
 
@@ -263,23 +268,24 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
                     current_turn_msgs = [cur]
                 messages.extend(current_turn_msgs)
 
-                pre_built_messages_by_key[(conv_id, t_n)] = messages
-                current_turn_messages_by_key[(conv_id, t_n)] = current_turn_msgs
+                str_conv_id = str(conv_id)
+                pre_built_messages_by_key[(str_conv_id, t_n)] = messages
+                current_turn_messages_by_key[(str_conv_id, t_n)] = current_turn_msgs
 
                 samples.append(
                     {
                         "index": idx,
-                        "conversation_id": conv_id,
+                        "conversation_id": str_conv_id,
                         "turn": t_n,
                     }
                 )
 
         return {
             "samples": samples,
-            "num_conversations": self.dataframe["conversation_id"].nunique(),
-            "max_turns_per_conv": self.dataframe.groupby("conversation_id")["turn"]
-            .max()
-            .max(),
+            "num_conversations": len(self._conv_groups),
+            "max_turns_per_conv": max(
+                g["turn"].max() for g in self._conv_groups.values()
+            ),
             "client_turns_per_conversation": client_turns_per_conv,
             "pre_built_messages_by_key": pre_built_messages_by_key,
             "current_turn_messages_by_key": current_turn_messages_by_key,
@@ -388,7 +394,7 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
                 sample["stream"] = False
 
             # Attach pre-built message list (system + history + current turn).
-            key = (row["conversation_id"], int(row["turn"]))
+            key = (str(row["conversation_id"]), int(row["turn"]))
             messages = pre_built.get(key, [])
             sample["messages"] = messages
 

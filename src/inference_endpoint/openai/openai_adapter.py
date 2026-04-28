@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import time
+from typing import Any
 
 import msgspec
 from inference_endpoint.core.types import Query, QueryResult, TextModelOutput
@@ -128,9 +129,19 @@ class OpenAIAdapter(HttpRequestAdapter):
         if result_id is None:
             result_id = response.id
 
+        choice = response.choices[0]
+        metadata: dict[str, Any] = {}
+        if choice.finish_reason:
+            metadata["finish_reason"] = choice.finish_reason.value
+        if choice.message.tool_calls:
+            metadata["tool_calls"] = [
+                tc.model_dump(mode="json") for tc in choice.message.tool_calls
+            ]
+
         return QueryResult(
             id=result_id,
-            response_output=TextModelOutput(output=response.choices[0].message.content),
+            response_output=TextModelOutput(output=choice.message.content),
+            metadata=metadata,
         )
 
     @classmethod

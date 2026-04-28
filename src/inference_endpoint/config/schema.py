@@ -250,7 +250,7 @@ class MultiTurnConfig(BaseModel):
         use_dataset_history: If True, use pre-built message history from dataset.
     """
 
-    model_config = {"extra": "forbid"}
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     mode: ConversationMode = ConversationMode.INDEPENDENT
     turn_timeout_s: float = 300.0

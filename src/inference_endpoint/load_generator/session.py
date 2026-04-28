@@ -208,9 +208,15 @@ class PhaseIssuer:
             # meaningful for ISL reporting on text-only prompts.
             # Therefore, setting `text=None` for non-string prompts
             # means that ISL reporting will be unavailable for multimodal samples.
-            prompt = data.get("prompt")
+            prompt_text = data.get("prompt")
+            if prompt_text is None and "messages" in data:
+                prompt_text = " ".join(
+                    m.get("content", "")
+                    for m in data["messages"]
+                    if isinstance(m, dict) and m.get("content")
+                )
             prompt_data = PromptData(
-                text=prompt if isinstance(prompt, str) else None,
+                text=prompt_text if isinstance(prompt_text, str) else None,
                 token_ids=tuple(token_ids) if token_ids is not None else None,
             )
         else:

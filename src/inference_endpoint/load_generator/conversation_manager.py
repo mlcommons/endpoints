@@ -42,6 +42,7 @@ class ConversationState:
     """
 
     conversation_id: str
+    # Python 3.12+: asyncio.Event no longer requires a running loop at construction.
     turn_done: asyncio.Event = field(default_factory=asyncio.Event)
     message_history: list[dict[str, Any]] = field(default_factory=list)
     completed_turns: int = 0

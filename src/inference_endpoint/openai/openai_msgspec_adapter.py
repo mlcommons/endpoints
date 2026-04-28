@@ -219,7 +219,7 @@ class OpenAIMsgspecAdapter(HttpRequestAdapter):
         return QueryResult(
             id=result_id or response.id,
             response_output=TextModelOutput(output=choice.message.content or ""),
-            metadata=metadata if metadata else None,
+            metadata=metadata,
         )
 
     @classmethod

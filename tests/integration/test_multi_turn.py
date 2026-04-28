@@ -557,7 +557,11 @@ async def test_conversation_ending_with_tool_row(echo_server):
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_tools_field_forwarded_to_endpoint(echo_server):
-    """The 'tools' array from the dataset reaches the endpoint in every request payload."""
+    """The 'tools' array from the dataset reaches the endpoint in every request payload.
+
+    TODO: Add a tool-call-aware server that returns dynamic tool_call_ids to
+    validate live-history mode with real tool_call_id round-tripping.
+    """
     received_payloads: list[dict] = []
 
     class CapturingEchoServer(EchoServer):
