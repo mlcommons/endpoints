@@ -204,11 +204,12 @@ class PhaseIssuer:
             token_ids = data.get("input_tokens") or data.get("token_ids")
             prompt_text = data.get("prompt")
             if prompt_text is None and "messages" in data:
-                prompt_text = " ".join(
-                    m.get("content", "")
+                parts: list[str] = [
+                    m["content"]
                     for m in data["messages"]
                     if isinstance(m, dict) and m.get("content")
-                )
+                ]
+                prompt_text = "\n".join(parts) if parts else None
             prompt_data = PromptData(
                 text=prompt_text,
                 token_ids=tuple(token_ids) if token_ids is not None else None,

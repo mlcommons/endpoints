@@ -556,6 +556,52 @@ async def test_conversation_ending_with_tool_row(echo_server):
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+async def test_concurrent_conversations_stress(echo_server):
+    """12 conversations × 3 turns each complete with correct counts."""
+    num_convs = 12
+    turns_per_conv = 3  # 2 user turns + 1 assistant turn each
+    rows = []
+    for i in range(num_convs):
+        conv_id = f"stress_conv_{i}"
+        rows.append(
+            {
+                "conversation_id": conv_id,
+                "turn": 1,
+                "role": "user",
+                "content": f"Q1-{i}",
+            }
+        )
+        rows.append(
+            {
+                "conversation_id": conv_id,
+                "turn": 2,
+                "role": "assistant",
+                "content": f"A1-{i}",
+            }
+        )
+        rows.append(
+            {
+                "conversation_id": conv_id,
+                "turn": 3,
+                "role": "user",
+                "content": f"Q2-{i}",
+            }
+        )
+
+    ds = _make_dataset(rows)
+    strategy = _make_strategy(ds)
+    responses: dict = {}
+
+    count = await _run_session(echo_server.url, ds, strategy, responses)
+
+    # 12 conversations × 2 client turns each = 24
+    expected_client_turns = num_convs * (turns_per_conv - 1)  # 24
+    assert count == expected_client_turns
+    assert len(responses) == expected_client_turns
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_tools_field_forwarded_to_endpoint(echo_server):
     """The 'tools' array from the dataset reaches the endpoint in every request payload.
 
