@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from .. import metrics
+from .schema import LoadPatternType
 
 logger = logging.getLogger(__name__)
 
@@ -197,7 +198,7 @@ class RuntimeSettings:
         # Multi-turn must issue exactly all client turns — QPS-based formulas are meaningless.
         if (
             self.load_pattern is not None
-            and self.load_pattern.type.value == "multi_turn"
+            and self.load_pattern.type == LoadPatternType.MULTI_TURN
         ):
             result = max(self.min_sample_count, self.n_samples_from_dataset)
             logger.debug(

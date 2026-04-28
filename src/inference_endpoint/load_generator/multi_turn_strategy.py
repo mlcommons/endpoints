@@ -134,7 +134,12 @@ class MultiTurnStrategy:
             for conv_id, turns in conv_samples.items()
         ]
 
-        await asyncio.gather(*tasks, return_exceptions=True)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        errors = [r for r in results if isinstance(r, BaseException)]
+        for err in errors:
+            logger.error(f"Conversation pipeline failed: {err}")
+        if errors:
+            raise errors[0]
         return phase_issuer.issued_count
 
     async def _conv_pipeline(
@@ -150,6 +155,7 @@ class MultiTurnStrategy:
         """
         state = self._conv_states[conv_id]
         sorted_turns = sorted(turns, key=lambda x: x[1])
+        last_query_id: str | None = None
 
         for i, (idx, turn) in enumerate(sorted_turns):
             if i > 0:
@@ -161,7 +167,13 @@ class MultiTurnStrategy:
                     logger.warning(
                         f"Turn {turn} of {conv_id} timed out waiting for previous turn"
                     )
-                    state.failed_turns += 1
+                    if last_query_id is not None:
+                        self._inflight.pop(last_query_id, None)
+                    remaining = len(sorted_turns) - i
+                    for _ in range(remaining):
+                        self._conv_manager.mark_turn_failed(
+                            conv_id, store_in_history=self._store_in_history
+                        )
                     break
                 state.turn_done.clear()
 
@@ -177,6 +189,17 @@ class MultiTurnStrategy:
                     "current_turn_messages_by_key", {}
                 ).get((conv_id, turn))
                 if current_turn_messages:
+                    has_tool_msg = any(
+                        m.get("role") == "tool" for m in current_turn_messages
+                    )
+                    if has_tool_msg:
+                        logger.warning(
+                            "Live-history mode with tool messages uses dataset "
+                            "tool_call_ids; real endpoint IDs will differ "
+                            "(conv=%s, turn=%d)",
+                            conv_id,
+                            turn,
+                        )
                     live_messages = state.message_history.copy() + current_turn_messages
                     data_override = {"messages": live_messages}
 
@@ -188,6 +211,7 @@ class MultiTurnStrategy:
                 break
 
             self._inflight[query_id] = conv_id
+            last_query_id = query_id
 
             # Append current-turn messages to history so the next turn sees them.
             if self._store_in_history and current_turn_messages:
@@ -217,6 +241,10 @@ class MultiTurnStrategy:
         """
         conv_id = self._inflight.pop(result.id, None)
         if conv_id is None:
+            return
+
+        if self._conv_manager.get_state(conv_id) is None:
+            logger.warning(f"on_sample_complete: unknown conversation {conv_id}")
             return
 
         response_text = result.get_response_output_string()
