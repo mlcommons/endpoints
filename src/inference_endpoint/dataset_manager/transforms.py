@@ -127,6 +127,30 @@ class AddStaticColumns(Transform):
         return df
 
 
+class AddDefaultColumns(Transform):
+    """Add columns only where values are missing (NaN or absent).
+
+    Unlike AddStaticColumns which unconditionally overwrites, this preserves
+    existing non-null values — dataset per-row overrides take precedence over
+    the supplied defaults.
+    """
+
+    def __init__(self, data: dict[str, Any]):
+        """Initialize the AddDefaultColumns transform."""
+        self.data = data
+
+    def __call__(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Fill missing columns with defaults without overwriting existing values."""
+        for key, value in self.data.items():
+            if value is None:
+                continue
+            if key in df.columns:
+                df[key] = df[key].where(pd.notna(df[key]), value)
+            else:
+                df[key] = value
+        return df
+
+
 class Harmonize(RowProcessor):
     """Transform to convert a user prompt to an OpenAI Harmony-compatible format."""
 

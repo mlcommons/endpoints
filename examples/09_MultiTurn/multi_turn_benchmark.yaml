@@ -1,0 +1,36 @@
+name: "multi-turn-customer-support"
+version: "1.0"
+type: "online"
+
+model_params:
+  name: "meta-llama/Llama-3.2-1B-Instruct"
+  temperature: 0.7
+  max_new_tokens: 256
+
+datasets:
+  - name: customer_support_conversations
+    type: performance
+    path: examples/09_MultiTurn/customer_support_conversations.jsonl
+    samples: 10
+    multi_turn:
+      mode: independent
+      turn_timeout_s: 300.0
+
+settings:
+  runtime:
+    min_duration_ms: 60000
+    max_duration_ms: 300000
+
+  load_pattern:
+    type: multi_turn
+    target_concurrency: 32
+
+  client:
+    warmup_connections: 0
+
+endpoint_config:
+  endpoints:
+    - "http://localhost:8868"
+  api_type: openai
+
+report_dir: logs/multi_turn_test

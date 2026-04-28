@@ -72,6 +72,7 @@ from inference_endpoint.config.schema import (
 from inference_endpoint.core.types import QueryResult
 from inference_endpoint.dataset_manager.dataset import Dataset
 from inference_endpoint.dataset_manager.factory import DataLoaderFactory
+from inference_endpoint.dataset_manager.multi_turn_dataset import MultiTurnDataset
 from inference_endpoint.endpoint_client.cpu_affinity import AffinityPlan, pin_loadgen
 from inference_endpoint.endpoint_client.http_client import HTTPEndpointClient
 from inference_endpoint.endpoint_client.http_sample_issuer import HttpClientSampleIssuer
@@ -82,6 +83,8 @@ from inference_endpoint.exceptions import (
     InputValidationError,
     SetupError,
 )
+from inference_endpoint.load_generator.conversation_manager import ConversationManager
+from inference_endpoint.load_generator.multi_turn_strategy import MultiTurnStrategy
 from inference_endpoint.load_generator.session import (
     BenchmarkSession,
     PhaseConfig,
@@ -343,14 +346,21 @@ def setup_benchmark(config: BenchmarkConfig, test_mode: TestMode) -> BenchmarkCo
     )
 
 
-def _build_phases(ctx: BenchmarkContext) -> list[PhaseConfig]:
+def _build_phases(
+    ctx: BenchmarkContext,
+    perf_strategy: MultiTurnStrategy | None = None,
+) -> list[PhaseConfig]:
     """Build the phase list from BenchmarkContext."""
     phases: list[PhaseConfig] = []
 
     # Performance phase
     phases.append(
         PhaseConfig(
-            "performance", ctx.rt_settings, ctx.dataloader, PhaseType.PERFORMANCE
+            "performance",
+            ctx.rt_settings,
+            ctx.dataloader,
+            PhaseType.PERFORMANCE,
+            strategy=perf_strategy,
         )
     )
 
@@ -513,16 +523,43 @@ async def _run_benchmark_async(
             launcher.kill_all()
             raise SetupError(f"Failed to connect to endpoint: {e}") from e
 
+        # Build multi-turn strategy if the performance dataset is a MultiTurnDataset.
+        multi_turn_strategy: MultiTurnStrategy | None = None
+        if isinstance(ctx.dataloader, MultiTurnDataset):
+            mt_cfg = None
+            if ctx.config.datasets:
+                perf_ds_cfg = next(
+                    (
+                        d
+                        for d in ctx.config.datasets
+                        if d.type == DatasetType.PERFORMANCE
+                    ),
+                    None,
+                )
+                if perf_ds_cfg is not None:
+                    mt_cfg = perf_ds_cfg.multi_turn
+            multi_turn_strategy = MultiTurnStrategy(
+                conversation_manager=ConversationManager(),
+                dataset_metadata=ctx.dataloader.conversation_metadata,
+                multi_turn_config=mt_cfg,
+                target_concurrency=ctx.config.settings.load_pattern.target_concurrency,
+            )
+
+        def _on_sample_complete(result: QueryResult) -> None:
+            if multi_turn_strategy is not None:
+                multi_turn_strategy.on_sample_complete(result)
+            collector.on_complete_hook(result)
+
         # Create session
         session = BenchmarkSession(
             issuer=issuer,
             event_publisher=publisher,
             loop=loop,
-            on_sample_complete=collector.on_complete_hook,
+            on_sample_complete=_on_sample_complete,
             session_id=session_id,
         )
 
-        phases = _build_phases(ctx)
+        phases = _build_phases(ctx, perf_strategy=multi_turn_strategy)
         report: Report | None = None
 
         loop.add_signal_handler(signal.SIGINT, session.stop)

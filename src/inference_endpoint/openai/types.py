@@ -46,6 +46,7 @@ class SSEDelta(msgspec.Struct, frozen=True, kw_only=True, omit_defaults=True, gc
 
     content: str = ""
     reasoning: str = ""
+    tool_calls: list[dict[str, Any]] | None = None
 
 
 class SSEChoice(
@@ -75,12 +76,17 @@ class ChatMessage(
 ):  # type: ignore[call-arg]
     """Chat message in OpenAI format.
 
-    content: str for text-only messages; list[dict] for multimodal (vision).
+    content: str for text-only messages; list[dict] for multimodal (vision);
+             None for tool-dispatching assistant messages.
+    tool_calls: list of tool call objects for assistant messages that invoke tools.
+    tool_call_id: correlates a tool result message to its tool call.
     """
 
     role: str
-    content: ChatMessageContent
+    content: ChatMessageContent | None = None
     name: str | None = None
+    tool_calls: list[dict[str, Any]] | None = None
+    tool_call_id: str | None = None
 
 
 class ChatCompletionRequest(
@@ -103,6 +109,7 @@ class ChatCompletionRequest(
     logit_bias: dict[str, float] | None = None
     user: str | None = None
     chat_template: str | None = None
+    tools: list[dict[str, Any]] | None = None
 
 
 class ChatCompletionResponseMessage(
@@ -113,6 +120,8 @@ class ChatCompletionResponseMessage(
     role: str
     content: str | None
     refusal: str | None
+    tool_calls: list[dict[str, Any]] | None = None
+    reasoning_content: str | None = None
 
 
 class ChatCompletionChoice(
