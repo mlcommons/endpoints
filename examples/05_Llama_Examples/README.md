@@ -13,10 +13,9 @@ This example covers benchmarking two Llama models:
 
 The Llama3.1-8B benchmark uses the [cnn/dailymail](https://huggingface.co/datasets/abisee/cnn_dailymail) dataset. When using the provided config files, the validation split is downloaded automatically by specifying the dataset name as `- name: cnn_dailymail::llama3_8b`.
 
-For post-training quantization calibration, use the [cnn-dailymail-calibration-list](https://github.com/mlcommons/inference/blob/v4.0/calibration/CNNDailyMail/calibration-list.txt):
+For post-training quantization calibration, use the repository-provided [`calibration-list.txt`](./calibration-list.txt), which corresponds to the [cnn-dailymail-calibration-list](https://github.com/mlcommons/inference/blob/v4.0/calibration/CNNDailyMail/calibration-list.txt):
 
 ```bash
-curl -OL https://raw.githubusercontent.com/mlcommons/inference/v4.0/calibration/CNNDailyMail/calibration-list.txt
 uv run python download_cnndm.py --save-dir data --calibration-ids-file calibration-list.txt --split train
 ```
 
@@ -54,6 +53,8 @@ uv run inference-endpoint benchmark from-config -c offline_llama3_8b_cnn.yaml --
 uv run inference-endpoint benchmark from-config -c online_llama3_8b_cnn.yaml --timeout 600
 ```
 
+These configs run in performance-only mode by default. To also evaluate summarization quality, add `--mode both` and install the accuracy dependencies listed in the [Llama-2-70b accuracy setup](#accuracy-evaluation-setup-optional) section below.
+
 ---
 
 ## Llama-2-70b-chat-hf
@@ -67,7 +68,7 @@ bash <(curl -s https://raw.githubusercontent.com/mlcommons/r2-downloader/refs/he
     https://inference.mlcommons-storage.org/metadata/llama-2-70b-open-orca-dataset.uri
 ```
 
-The dataset will be downloaded automatically to `./open_orca`. Additional instructions for downloading the model and dataset are in the [Reference Implementation for llama2-70b](https://github.com/mlcommons/inference/tree/master/language/llama2-70b).
+Running the script above will download the dataset to the `./open_orca` directory. Additional instructions for downloading the model and dataset are in the [Reference Implementation for llama2-70b](https://github.com/mlcommons/inference/tree/master/language/llama2-70b).
 
 ### Environment
 
