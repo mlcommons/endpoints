@@ -488,7 +488,7 @@ async def _run_benchmark_async(
                     args=event_logger_args,
                 ),
             ],
-            timeout=30.0,
+            timeout=300.0,
         )
 
         # Create endpoint client on the shared loop
