@@ -22,11 +22,12 @@ import logging
 from enum import Enum
 
 from inference_endpoint.async_utils.transport.zmq.pubsub import (
-    ZmqEventRecordSubscriber,
+    ZmqMessageSubscriber,
 )
 from inference_endpoint.core.record import (
     ErrorEventType,
     EventRecord,
+    EventRecordCodec,
     SampleEventType,
     SessionEventType,
 )
@@ -81,7 +82,7 @@ _TRACKED_SAMPLE_EVENTS = frozenset(
 )
 
 
-class MetricsAggregatorService(ZmqEventRecordSubscriber):
+class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
     """Subscribes to EventRecords and computes per-sample metrics in real time.
 
     The aggregator is a thin event router. All state management, trigger
@@ -99,7 +100,7 @@ class MetricsAggregatorService(ZmqEventRecordSubscriber):
         shutdown_event: asyncio.Event | None = None,
         **kwargs,
     ):
-        super().__init__(*args, **kwargs)
+        super().__init__(EventRecordCodec(), *args, **kwargs)
         self._kv_store = kv_store
         self._tokenize_pool = tokenize_pool
         self._shutdown_event = shutdown_event

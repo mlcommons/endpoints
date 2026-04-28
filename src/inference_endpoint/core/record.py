@@ -156,22 +156,39 @@ class EventRecord(msgspec.Struct, kw_only=True, frozen=True, gc=False):  # type:
     data: OUTPUT_TYPE | PromptData | ErrorData | None = None
 
 
-_ENCODER = msgspec.msgpack.Encoder(enc_hook=EventType.encode_hook)
-_DECODER = msgspec.msgpack.Decoder(type=EventRecord, dec_hook=EventType.decode_hook)
+class EventRecordCodec:
+    """MessageCodec[EventRecord] — binds the pub/sub layer to EventRecord wire format.
 
+    Implements the structural ``MessageCodec`` Protocol from
+    ``inference_endpoint.async_utils.transport.protocol`` without importing it
+    (avoids a transport→core back-import). Decode failures are wrapped in
+    ``ErrorEventType.GENERIC`` so downstream consumers see a recognizable
+    record rather than a silently dropped payload.
 
-def encode_event_record(event_record: EventRecord) -> tuple[bytes, bytes]:
-    """Encodes an EventRecord into a tuple of (topic_bytes_padded, payload_bytes).
-
-    Args:
-        event_record: The EventRecord to encode.
-
-    Returns:
-        A tuple of (topic_bytes_padded, payload_bytes).
+    The encoder and decoder are class-level singletons: msgspec's dispatch
+    tables are stateless after construction, so one instance per process
+    suffices.
     """
-    # MyPy doesn't recognize custom attributes defined by __new__ in the metaclass.
-    return event_record.event_type.topic_bytes_padded, _ENCODER.encode(event_record)  # type: ignore[attr-defined]
 
+    __slots__ = ()
 
-def decode_event_record(payload: bytes) -> EventRecord:
-    return _DECODER.decode(payload)
+    _ENCODER: ClassVar = msgspec.msgpack.Encoder(enc_hook=EventType.encode_hook)
+    _DECODER: ClassVar = msgspec.msgpack.Decoder(
+        type=EventRecord, dec_hook=EventType.decode_hook
+    )
+
+    def encode(self, item: EventRecord) -> tuple[bytes, bytes]:
+        # MyPy doesn't recognize custom attributes defined by __new__ in the metaclass.
+        return item.event_type.topic_bytes_padded, self._ENCODER.encode(item)  # type: ignore[attr-defined]
+
+    def decode(self, payload: bytes) -> EventRecord:
+        return self._DECODER.decode(payload)
+
+    def on_decode_error(self, payload: bytes, exc: Exception) -> EventRecord:
+        return EventRecord(
+            event_type=ErrorEventType.GENERIC,
+            data=ErrorData(
+                error_type=type(exc).__name__,
+                error_message=str(exc),
+            ),
+        )
