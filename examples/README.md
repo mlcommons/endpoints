@@ -21,13 +21,9 @@ Compare `inference-endpoint` with [vLLM's](https://github.com/vllm-project/vllm)
 End-to-end example for benchmarking `openai/gpt-oss-120b` with vLLM or SGLang, including YAML configs
 and Python scripts for AIME25, GPQA, and LiveCodeBench accuracy evaluation.
 
-### [05_Llama3.1-8B_Example](05_Llama3.1-8B_Example/)
+### [05_Llama_Examples](05_Llama_Examples/)
 
-Sample yaml configuration to benchmark `meta-llama/Llama-3.1-8B-Instruct`.
-
-### [06_Llama2-70B_Example](06_Llama2-70B_Example/)
-
-Sample yaml configuration for online benchmarking of `meta-llama/Llama-2-70b-chat-hf`.
+Sample yaml configurations for benchmarking `meta-llama/Llama-3.1-8B-Instruct` (offline + online) and `meta-llama/Llama-2-70b-chat-hf` (online).
 
 ### [08_Qwen3-VL-235B-A22B_Example](08_Qwen3-VL-235B-A22B_Example/)
 
