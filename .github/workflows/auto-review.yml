@@ -7,6 +7,7 @@ on:
 jobs:
   auto-review:
     runs-on: ubuntu-latest
+    if: github.actor != 'dependabot[bot]'
     steps:
       - name: Auto request review
         uses: actions/github-script@v7
