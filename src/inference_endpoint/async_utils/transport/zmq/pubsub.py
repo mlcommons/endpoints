@@ -17,14 +17,17 @@ import asyncio
 import logging
 import os
 from collections import deque
+from typing import TypeVar
 from urllib.parse import urlparse
 
+import msgspec
 import msgspec.msgpack
 import zmq
 
 from inference_endpoint.async_utils.transport.protocol import (
-    EventRecordPublisher,
-    EventRecordSubscriber,
+    MessageCodec,
+    MessagePublisher,
+    MessageSubscriber,
 )
 from inference_endpoint.core.record import BATCH_TOPIC, TOPIC_FRAME_SIZE
 
@@ -32,12 +35,14 @@ from .context import ManagedZMQContext
 
 logger = logging.getLogger(__name__)
 
+T = TypeVar("T")
+
 _batch_encoder = msgspec.msgpack.Encoder()
 _batch_decoder = msgspec.msgpack.Decoder(type=list[bytes])
 
 
-class ZmqEventRecordPublisher(EventRecordPublisher):
-    """ZMQ PUB socket publisher with batched sending.
+class ZmqMessagePublisher(MessagePublisher[T]):
+    """ZMQ PUB socket publisher generic over message type T.
 
     Records are buffered in memory and flushed as a single msgpack-encoded
     batch when the buffer reaches ``send_threshold``. This reduces syscalls
@@ -46,36 +51,67 @@ class ZmqEventRecordPublisher(EventRecordPublisher):
     The ``send_threshold`` is the *minimum* number of records in the buffer
     before an automatic flush is triggered. There is no maximum — records
     accumulate until the threshold is reached or ``flush()``/``close()``
-    is called explicitly. Callers that need immediate delivery (e.g.,
+    is called explicitly. Callers that need immediate delivery (e.g.
     session control events) should call ``flush()`` after publishing.
+    Setting ``send_threshold=1`` effectively disables batching: every
+    publish is sent immediately as a single record without batch overhead
+    via the ``len(buf) == 1`` fast path in ``_flush_batch``.
 
     Batching protocol:
       - Batched messages use ``BATCH_TOPIC`` as the ZMQ routing prefix.
       - The payload is ``msgpack(list[bytes])`` where each element is a
         pre-encoded record payload (no per-record topic prefix).
       - Subscribers unpack the list and yield payloads in insertion order.
-      - Per-record topics are omitted because EventRecord already contains
-        event_type for dispatching.
+      - Per-record topics are omitted because the codec-decoded item
+        already carries any dispatch information.
       - Single-record flushes use the record's own topic (no batch overhead).
     """
 
     def __init__(
         self,
+        codec: MessageCodec[T],
         path: str,
         zmq_context: ManagedZMQContext,
         loop: asyncio.AbstractEventLoop | None = None,
         scheme: str = "ipc",
         send_threshold: int = 1000,
+        sndhwm: int = 0,
+        linger: int = -1,
     ):
-        self._socket = zmq_context.socket(zmq.PUB)
+        """Creates a new ZmqMessagePublisher.
 
-        # Guarantee delivery: unlimited send buffer, wait on close.
-        self._socket.setsockopt(zmq.SNDHWM, 0)
-        self._socket.setsockopt(zmq.LINGER, -1)
+        Args:
+            codec: Encode policy for T. Required — the only type-specific
+                surface in this class.
+            path: IPC path / socket name. Bind-side identity. Required —
+                each publisher in the system has a distinct path.
+            zmq_context: ManagedZMQContext owning socket lifetime and IPC
+                file cleanup. Required — sharing one context across
+                publishers is the existing pattern.
+            loop: Event loop for async writer registration. None means
+                eager/blocking send (used by callers that publish before a
+                loop is running).
+            scheme: ipc:// vs tcp://. Default ipc matches all current
+                callers; tcp is an escape hatch.
+            send_threshold: Minimum buffered records before automatic batch
+                flush. Set to 1 to disable batching (e.g. one snapshot per
+                tick, where batching adds latency).
+            sndhwm: ZMQ SNDHWM. 0 (default, unlimited) for delivery
+                guarantees. A small value (e.g. 4) makes the writer drop
+                instead of stall when subscribers are slow — appropriate
+                for telemetry-style senders.
+            linger: ZMQ LINGER on close. -1 (default, wait forever)
+                guarantees buffered records are sent. 0 drops in-flight on
+                close — appropriate when the caller flushes synchronously
+                before close.
+        """
+        self._socket = zmq_context.socket(zmq.PUB)
+        self._socket.setsockopt(zmq.SNDHWM, sndhwm)
+        self._socket.setsockopt(zmq.LINGER, linger)
         self._socket.setsockopt(zmq.IMMEDIATE, 1)
 
         bind_address = zmq_context.bind(self._socket, path, scheme)
-        super().__init__(bind_address, loop)
+        super().__init__(codec, bind_address, loop)
         self.bind_path = path
         logger.info(f"Publisher bound to {self.bind_address}")
 
@@ -97,10 +133,10 @@ class ZmqEventRecordPublisher(EventRecordPublisher):
         return len(self._pending)
 
     def send(self, topic: bytes, payload: bytes) -> None:
-        """Buffer a record for batched sending.
+        """Buffer a payload for batched sending.
 
         Only the payload is buffered — topics are not stored per-record
-        since the EventRecord already contains event_type for dispatching.
+        since the codec-decoded item already carries any dispatch info.
         When the buffer reaches ``send_threshold``, payloads are encoded
         as a single msgpack list and sent with BATCH_TOPIC. For a single
         record, a direct send with the record's own topic is used instead.
@@ -136,8 +172,7 @@ class ZmqEventRecordPublisher(EventRecordPublisher):
         else:
             # Multiple records: encode payloads as msgpack list[bytes],
             # prefix with BATCH_TOPIC for routing. Individual topics are
-            # not included — subscribers decode EventRecord.event_type
-            # from the payload for dispatching.
+            # not included — codec-decoded items carry their own dispatch.
             frame = BATCH_TOPIC + _batch_encoder.encode(buf)
 
         try:
@@ -228,31 +263,54 @@ class ZmqEventRecordPublisher(EventRecordPublisher):
                 pass
 
 
-class ZmqEventRecordSubscriber(EventRecordSubscriber):
-    """ZMQ SUB socket subscriber that handles both single and batched messages.
+class ZmqMessageSubscriber(MessageSubscriber[T]):
+    """ZMQ SUB socket subscriber generic over message type T.
 
     Automatically subscribes to BATCH_TOPIC in addition to any explicit
     topic subscriptions. Batched messages are unpacked into individual
-    records and yielded in order via ``receive()``.
+    payloads and yielded in order via ``receive()``; the codec then
+    decodes each payload to T.
 
-    Note on topic filtering with batches: batched messages contain records
-    of mixed event types. Subscribers with specific topic filters will
-    receive ALL event types from batches, not just their filtered topics.
-    Per-record filtering must be done in application code (e.g., checking
-    ``EventRecord.event_type`` after decode). This is acceptable because
-    the decode cost (~0.6us/record) is negligible compared to processing.
+    Note on topic filtering with batches: batched messages contain
+    payloads of mixed types. Subscribers with specific topic filters will
+    receive ALL types from batches, not just their filtered topics.
+    Per-payload filtering must be done in application code (e.g. by
+    inspecting the decoded item). This is acceptable because the decode
+    cost is negligible compared to processing.
     """
 
     def __init__(
         self,
+        codec: MessageCodec[T],
         path: str,
         zmq_context: ManagedZMQContext,
         loop: asyncio.AbstractEventLoop,
         topics: list[str] | None = None,
         scheme: str = "ipc",
+        conflate: bool = False,
+        rcvhwm: int = 0,
     ):
+        """Creates a new ZmqMessageSubscriber.
+
+        Args:
+            codec: Decode policy for T. Required.
+            path: IPC path / socket name to connect to.
+            zmq_context: Managed context. Reusing one context across
+                multiple subscribers is fine.
+            loop: Dedicated loop for this subscriber.
+            topics: Topics to subscribe to. None means subscribe to all.
+            scheme: ipc:// vs tcp://.
+            conflate: ZMQ_CONFLATE. False (default) keeps every message;
+                appropriate for EventRecord and for the final-snapshot
+                consumer. True keeps only the latest message; appropriate
+                for a TUI rendering live snapshots, where stale ticks have
+                no value.
+            rcvhwm: ZMQ RCVHWM. 0 (default) is unlimited.
+        """
         self._socket = zmq_context.socket(zmq.SUB)
-        self._socket.setsockopt(zmq.RCVHWM, 0)
+        self._socket.setsockopt(zmq.RCVHWM, rcvhwm)
+        if conflate:
+            self._socket.setsockopt(zmq.CONFLATE, 1)
 
         if not topics:
             self._socket.setsockopt(zmq.SUBSCRIBE, b"")
@@ -263,7 +321,7 @@ class ZmqEventRecordSubscriber(EventRecordSubscriber):
             self._socket.setsockopt(zmq.SUBSCRIBE, BATCH_TOPIC)
 
         connect_address = zmq_context.connect(self._socket, path, scheme)
-        super().__init__(connect_address, loop, topics)
+        super().__init__(codec, connect_address, loop, topics)
         self.connect_path = path
         logger.info(f"Subscriber connected to {self.connect_address}")
 
@@ -273,7 +331,7 @@ class ZmqEventRecordSubscriber(EventRecordSubscriber):
         # Reader is added in .start(); do not add here.
 
     def receive(self) -> bytes | None:
-        """Receive a single record payload.
+        """Receive a single payload.
 
         If a batched message was received, individual payloads are buffered
         and returned one at a time in insertion order.
@@ -291,8 +349,6 @@ class ZmqEventRecordSubscriber(EventRecordSubscriber):
             raise StopIteration from e
 
         # Batch message: BATCH_TOPIC prefix + msgpack list[bytes] of payloads.
-        # Individual payloads do not have topic prefixes — EventRecord.event_type
-        # is used for dispatching instead.
         if raw[:TOPIC_FRAME_SIZE] == BATCH_TOPIC:
             batch_data = raw[TOPIC_FRAME_SIZE:]
             try:

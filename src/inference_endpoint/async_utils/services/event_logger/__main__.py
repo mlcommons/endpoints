@@ -29,10 +29,11 @@ from pathlib import Path
 
 from inference_endpoint.async_utils.loop_manager import LoopManager
 from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
-from inference_endpoint.async_utils.transport.zmq.pubsub import ZmqEventRecordSubscriber
+from inference_endpoint.async_utils.transport.zmq.pubsub import ZmqMessageSubscriber
 from inference_endpoint.async_utils.transport.zmq.ready_check import send_ready_signal
 from inference_endpoint.core.record import (
     EventRecord,
+    EventRecordCodec,
     SessionEventType,
 )
 from inference_endpoint.utils.logging import setup_logging
@@ -52,7 +53,7 @@ if _HAS_SQLALCHEMY:
     _WRITER_REGISTRY["sql"] = SQLWriter
 
 
-class EventLoggerService(ZmqEventRecordSubscriber):
+class EventLoggerService(ZmqMessageSubscriber[EventRecord]):
     """Event logger service for logging event records.
 
     When SessionEventType.ENDED is received (topic 'session.ended'), the service writes
@@ -69,7 +70,7 @@ class EventLoggerService(ZmqEventRecordSubscriber):
         shutdown_event: asyncio.Event | None = None,
         **kwargs,
     ):
-        super().__init__(*args, **kwargs)
+        super().__init__(EventRecordCodec(), *args, **kwargs)
         self._shutdown_received = False
         self._shutdown_event = shutdown_event
 
