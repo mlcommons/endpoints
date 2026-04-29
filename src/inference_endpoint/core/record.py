@@ -185,6 +185,11 @@ class EventRecordCodec:
         return self._DECODER.decode(payload)
 
     def on_decode_error(self, payload: bytes, exc: Exception) -> EventRecord:
+        # Only wrap genuine wire-format failures (malformed payload). Other
+        # exceptions indicate a bug somewhere in the decode path and should
+        # propagate so they aren't silently swallowed into an EventRecord.
+        if not isinstance(exc, msgspec.DecodeError):
+            raise exc
         return EventRecord(
             event_type=ErrorEventType.GENERIC,
             data=ErrorData(

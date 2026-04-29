@@ -28,7 +28,6 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any, Generic, Protocol, TypeVar, runtime_checkable
 
-import msgspec
 from pydantic import BaseModel, ConfigDict, Field
 
 from inference_endpoint.core.types import Query, QueryResult, StreamChunk
@@ -387,7 +386,12 @@ class MessageSubscriber(ABC, Generic[T]):
                     continue
                 try:
                     items.append(self._codec.decode(payload))
-                except msgspec.DecodeError as e:
+                except Exception as e:  # noqa: BLE001 — codec decides handling
+                    # The base class is codec-agnostic: different codec
+                    # implementations raise different exception types
+                    # (msgspec.DecodeError, json.JSONDecodeError, ValueError,
+                    # etc.). The codec's on_decode_error decides whether to
+                    # return a fallback item, drop the message, or re-raise.
                     fallback = self._codec.on_decode_error(payload, e)
                     if fallback is not None:
                         items.append(fallback)
