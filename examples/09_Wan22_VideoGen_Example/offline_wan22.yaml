@@ -1,4 +1,4 @@
-# Offline Video Generation Benchmark for WAN 2.2 on Lyris (GB200/GB300)
+# Offline Video Generation Benchmark for WAN 2.2 (GB200/GB300)
 #
 # Targets trtllm-serve POST /v1/videos/generations directly (no proxy).
 # Uses response_format=video_path: server saves video to Lustre and returns
