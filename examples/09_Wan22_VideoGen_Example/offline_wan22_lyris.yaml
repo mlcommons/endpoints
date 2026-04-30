@@ -1,0 +1,63 @@
+# Offline Video Generation Benchmark for WAN 2.2 on Lyris (GB200/GB300)
+#
+# Targets trtllm-serve POST /v1/videos/generations directly (no proxy).
+# Uses response_format=video_path: server saves video to Lustre and returns
+# the file path, avoiding large video byte payloads over HTTP/ZMQ.
+#
+# MLPerf inference parameters (text_to_video task):
+#   Resolution:  720x1280 (portrait)
+#   Duration:    81 frames = 5 s
+#   Steps:       20 denoising steps
+#   Guidance:    4.0 (primary CFG) / 3.0 (null-text secondary)
+#   Seed:        42 (fixed for reproducibility; combine with fixed_latent.pt)
+#   Dataset:     248 prompts from shopify_product_catalogue::q3vl
+#
+# These params are baked into Wan22Adapter defaults so only `prompt` is
+# required from the dataset. Override via AddStaticColumns transform if needed.
+
+name: "offline-wan22-video-generation-benchmark"
+version: "1.0"
+type: "offline"
+
+model_params:
+  name: "wan22"
+  max_new_tokens: 0      # Video generation does not produce tokens
+  streaming: "off"       # WAN 2.2 uses non-streaming HTTP POST/response
+
+datasets:
+  - name: wan22_prompts
+    path: datasets/wan22_prompts.jsonl
+    format: jsonl
+    type: "performance"
+    samples: 248
+
+settings:
+  runtime:
+    min_duration_ms: 60000    # 1 minute warm-up
+    max_duration_ms: 600000   # 10 minute cap
+    scheduler_random_seed: 42
+    dataloader_random_seed: 42
+    n_samples_to_issue: 248
+
+  load_pattern:
+    type: "max_throughput"
+
+  client:
+    num_workers: 4
+
+metrics:
+  collect:
+    - "throughput"
+    - "latency"
+
+endpoint_config:
+  endpoints:
+    - "http://localhost:8000"
+  api_type: "wan22"
+  api_key: null
+
+# Fixed latent path is injected into every request via Wan22Dataset.
+# Set latent_path in dataset config or pass it when constructing Wan22Dataset.
+# latent_path: /lustre/share/coreai_mlperf_inference/mlperf_inference_storage_clone/preprocessed_data/wan22-a14b/fixed_latent.pt
+
+report_dir: logs/wan22_video_generation_benchmark
