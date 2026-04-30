@@ -58,6 +58,5 @@ endpoint_config:
 
 # Fixed latent path is injected into every request via VideoGenDataset.
 # Set latent_path in dataset config or pass it when constructing VideoGenDataset.
-# latent_path: /lustre/share/coreai_mlperf_inference/mlperf_inference_storage_clone/preprocessed_data/wan22-a14b/fixed_latent.pt
 
 report_dir: logs/wan22_video_generation_benchmark
