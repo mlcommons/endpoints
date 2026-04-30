@@ -30,14 +30,13 @@ if [[ "$SKIP_SETUP" == false ]]; then
     echo "==> Creating virtual environment at ${VENV_DIR}"
     python3.12 -m venv "${VENV_DIR}"
 
-    echo "==> Installing package with [wan22,test] extras"
+    echo "==> Installing package with [videogen,test] extras"
     "${VENV_DIR}/bin/pip" install --upgrade pip --quiet
-    "${VENV_DIR}/bin/pip" install -e ".[wan22,test]" --quiet
+    "${VENV_DIR}/bin/pip" install -e ".[videogen,test]" --quiet
 else
     echo "==> Skipping setup (--skip-setup)"
 fi
 
-PYTHON="${VENV_DIR}/bin/python"
 PYTEST="${VENV_DIR}/bin/pytest"
 
 if [[ ! -x "$PYTEST" ]]; then
@@ -46,37 +45,17 @@ if [[ ! -x "$PYTEST" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 2. Generate JSONL dataset from prompts.txt (idempotent)
+# 2. Locate bundled prompts dataset
 # ---------------------------------------------------------------------------
-PROMPTS_TXT="/lustre/share/coreai_mlperf_inference/mlperf_inference_storage_clone/preprocessed_data/wan22-a14b/prompts.txt"
-PROMPTS_JSONL="${REPO_ROOT}/datasets/wan22_prompts.jsonl"
-
-if [[ -f "$PROMPTS_TXT" && ! -f "$PROMPTS_JSONL" ]]; then
-    echo "==> Converting prompts.txt -> wan22_prompts.jsonl"
-    mkdir -p "$(dirname "$PROMPTS_JSONL")"
-    PROMPTS_TXT="$PROMPTS_TXT" PROMPTS_JSONL="$PROMPTS_JSONL" "$PYTHON" - <<'EOF'
-import json, pathlib, os
-src = pathlib.Path(os.environ["PROMPTS_TXT"])
-dst = pathlib.Path(os.environ["PROMPTS_JSONL"])
-lines = [l.strip() for l in src.read_text().splitlines() if l.strip()]
-with dst.open("w") as f:
-    for i, p in enumerate(lines):
-        f.write(json.dumps({"prompt": p, "sample_id": str(i), "sample_index": i,
-                            "negative_prompt": "", "mode": "perf"}) + "\n")
-print(f"Written {len(lines)} prompts to {dst}")
-EOF
-elif [[ -f "$PROMPTS_JSONL" ]]; then
-    echo "==> wan22_prompts.jsonl already exists, skipping conversion"
-else
-    echo "WARNING: prompts.txt not found at ${PROMPTS_TXT}, skipping JSONL generation"
-fi
+PROMPTS_JSONL="${SCRIPT_DIR}/wan22_prompts.jsonl"
+echo "==> Using bundled prompts dataset: ${PROMPTS_JSONL}"
 
 # ---------------------------------------------------------------------------
 # 3. Run WAN2.2 unit tests
 # ---------------------------------------------------------------------------
 echo ""
 echo "==> Running WAN2.2 unit tests"
-"$PYTEST" tests/unit/wan22/ \
+"$PYTEST" tests/unit/videogen/ \
     -v \
     --tb=short \
     --no-cov \
@@ -84,7 +63,7 @@ echo "==> Running WAN2.2 unit tests"
 
 echo ""
 echo "==> Running WAN2.2 integration tests"
-"$PYTEST" tests/integration/wan22/ \
+"$PYTEST" tests/integration/videogen/ \
     -v \
     --tb=short \
     --no-cov \

@@ -114,7 +114,7 @@ dataset_transforms(params)  →  []  (no token-level transforms needed)
 
 ### `dataset.py` — VideoGenDataset
 
-Loads a prompt text file (one prompt per non-blank line; the MLPerf dataset bundled at `datasets/wan22_prompts.jsonl` has 248 prompts). Injects up to two extra fields into every sample:
+Loads a prompt text file (one prompt per non-blank line; the MLPerf dataset bundled at `examples/09_Wan22_VideoGen_Example/wan22_prompts.jsonl` has 248 prompts). Injects up to two extra fields into every sample:
 
 - `prompt` — from file
 - `negative_prompt` — MLPerf canonical string by default; pass `negative_prompt=None` to omit
