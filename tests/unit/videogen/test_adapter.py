@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for Wan22Adapter and Wan22Accumulator (trtllm-native API)."""
+"""Unit tests for VideoGenAdapter and VideoGenAccumulator (trtllm-native API)."""
 
 import json
 
@@ -23,26 +23,26 @@ from inference_endpoint.core.types import APIType, Query, QueryResult
 from inference_endpoint.endpoint_client.accumulator_protocol import (
     SSEAccumulatorProtocol,
 )
-from inference_endpoint.wan22.adapter import Wan22Accumulator, Wan22Adapter
-from inference_endpoint.wan22.types import VideoPayloadResponse
+from inference_endpoint.videogen.adapter import VideoGenAccumulator, VideoGenAdapter
+from inference_endpoint.videogen.types import VideoPayloadResponse
 
 
 @pytest.mark.unit
-class TestWan22Adapter:
+class TestVideoGenAdapter:
     def test_encode_query_produces_valid_json(self):
         query = Query(id="q1", data={"prompt": "a golden retriever running"})
-        payload = json.loads(Wan22Adapter.encode_query(query))
+        payload = json.loads(VideoGenAdapter.encode_query(query))
         assert payload["prompt"] == "a golden retriever running"
 
     def test_encode_query_always_requests_video_bytes(self):
         """MLPerf runs perf+accuracy in one pass — always request video_bytes."""
         query = Query(id="q1", data={"prompt": "ocean waves"})
-        payload = json.loads(Wan22Adapter.encode_query(query))
+        payload = json.loads(VideoGenAdapter.encode_query(query))
         assert payload["response_format"] == "video_bytes"
 
     def test_encode_query_uses_mlperf_defaults(self):
         query = Query(id="q1", data={"prompt": "ocean waves"})
-        payload = json.loads(Wan22Adapter.encode_query(query))
+        payload = json.loads(VideoGenAdapter.encode_query(query))
         assert payload["fps"] == 16
         assert payload["seconds"] == pytest.approx(5.0)
         assert payload["size"] == "720x1280"
@@ -56,27 +56,27 @@ class TestWan22Adapter:
             id="q1",
             data={"prompt": "test", "seed": 99, "fps": 24, "guidance_scale": 6.0},
         )
-        payload = json.loads(Wan22Adapter.encode_query(query))
+        payload = json.loads(VideoGenAdapter.encode_query(query))
         assert payload["seed"] == 99
         assert payload["fps"] == 24
         assert payload["guidance_scale"] == pytest.approx(6.0)
 
     def test_encode_query_includes_negative_prompt(self):
         query = Query(id="q1", data={"prompt": "test", "negative_prompt": "blurry"})
-        payload = json.loads(Wan22Adapter.encode_query(query))
+        payload = json.loads(VideoGenAdapter.encode_query(query))
         assert payload["negative_prompt"] == "blurry"
 
     def test_encode_query_missing_prompt_raises(self):
         query = Query(id="q1", data={"seed": 42})
         with pytest.raises(KeyError):
-            Wan22Adapter.encode_query(query)
+            VideoGenAdapter.encode_query(query)
 
     def test_decode_response_returns_video_bytes_in_metadata(self):
         resp = VideoPayloadResponse(
             video_id="video_abc123",
             video_bytes="dGVzdCB2aWRlbyBjb250ZW50",
         )
-        result = Wan22Adapter.decode_response(resp.model_dump_json().encode(), "q1")
+        result = VideoGenAdapter.decode_response(resp.model_dump_json().encode(), "q1")
         assert isinstance(result, QueryResult)
         assert result.id == "q1"
         assert result.error is None
@@ -84,33 +84,33 @@ class TestWan22Adapter:
 
     def test_decode_response_video_id_in_output(self):
         resp = VideoPayloadResponse(video_id="vid_xyz", video_bytes="AAEC")
-        result = Wan22Adapter.decode_response(resp.model_dump_json().encode(), "q1")
+        result = VideoGenAdapter.decode_response(resp.model_dump_json().encode(), "q1")
         assert result.response_output.output == "vid_xyz"
 
     def test_decode_sse_message_raises_not_implemented(self):
         with pytest.raises(NotImplementedError):
-            Wan22Adapter.decode_sse_message(b"{}")
+            VideoGenAdapter.decode_sse_message(b"{}")
 
     def test_dataset_transforms_returns_empty_list(self):
         params = ModelParams()
-        assert Wan22Adapter.dataset_transforms(params) == []
+        assert VideoGenAdapter.dataset_transforms(params) == []
 
     def test_default_route_is_trtllm_native(self):
-        assert APIType.WAN22.default_route() == "/v1/videos/generations"
+        assert APIType.VIDEOGEN.default_route() == "/v1/videos/generations"
 
 
 @pytest.mark.unit
-class TestWan22Accumulator:
+class TestVideoGenAccumulator:
     def test_add_chunk_always_returns_none(self):
-        acc = Wan22Accumulator(query_id="q1", stream_all_chunks=True)
+        acc = VideoGenAccumulator(query_id="q1", stream_all_chunks=True)
         assert acc.add_chunk("anything") is None
         assert acc.add_chunk(None) is None
 
     def test_get_final_output_returns_query_result_with_id(self):
-        acc = Wan22Accumulator(query_id="q1", stream_all_chunks=False)
+        acc = VideoGenAccumulator(query_id="q1", stream_all_chunks=False)
         result = acc.get_final_output()
         assert isinstance(result, QueryResult)
         assert result.id == "q1"
 
     def test_satisfies_sse_accumulator_protocol(self):
-        assert isinstance(Wan22Accumulator("q1", False), SSEAccumulatorProtocol)
+        assert isinstance(VideoGenAccumulator("q1", False), SSEAccumulatorProtocol)

@@ -26,7 +26,7 @@ class VideoPathRequest(BaseModel):
     Matches trtllm-serve's VideoGenerationRequest. All fields have MLPerf defaults
     so that only `prompt` is required from the dataset.
 
-    `response_format` is set by Wan22Adapter based on benchmark mode:
+    `response_format` is set by VideoGenAdapter based on benchmark mode:
     - "video_path" (perf mode): server saves video to shared storage, returns path only.
     - "video_bytes" (accuracy mode): server returns base64-encoded video content.
     """

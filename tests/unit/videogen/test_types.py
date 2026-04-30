@@ -13,12 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for wan22 Pydantic wire models (trtllm-serve native API)."""
+"""Unit tests for videogen Pydantic wire models (trtllm-serve native API)."""
 
 import pytest
 from pydantic import ValidationError
 
-from inference_endpoint.wan22.types import (
+from inference_endpoint.videogen.types import (
     VideoPathRequest,
     VideoPathResponse,
     VideoPayloadResponse,

@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests: DataLoaderFactory creates Wan22Dataset from --dataset path."""
+"""Unit tests: DataLoaderFactory creates VideoGenDataset from --dataset path."""
 
 from pathlib import Path
 
@@ -21,7 +21,7 @@ import pytest
 
 from inference_endpoint.config.schema import Dataset as DatasetConfig
 from inference_endpoint.dataset_manager.factory import DataLoaderFactory
-from inference_endpoint.wan22.dataset import Wan22Dataset
+from inference_endpoint.videogen.dataset import VideoGenDataset
 
 
 @pytest.fixture
@@ -35,12 +35,12 @@ def prompts_file(tmp_path: Path) -> Path:
 
 
 @pytest.mark.unit
-class TestFactoryWan22Dataset:
+class TestFactoryVideoGenDataset:
     def test_factory_creates_wan22_dataset_from_name_and_path(self, prompts_file: Path):
         config = DatasetConfig(name="wan22_mlperf", path=str(prompts_file))
         ds = DataLoaderFactory.create_loader(config)
         ds.load()
-        assert isinstance(ds, Wan22Dataset)
+        assert isinstance(ds, VideoGenDataset)
         assert ds.num_samples() == 2
 
     def test_factory_wan22_sample_has_prompt(self, prompts_file: Path):

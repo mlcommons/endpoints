@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     from inference_endpoint.dataset_manager.transforms import Transform
 
 
-class Wan22Adapter(HttpRequestAdapter):
+class VideoGenAdapter(HttpRequestAdapter):
     """Adapter for trtllm-serve POST /v1/videos/generations.
 
     Uses response_format='video_path': the server saves the encoded video to
@@ -94,7 +94,7 @@ class Wan22Adapter(HttpRequestAdapter):
         raise NotImplementedError("WAN 2.2 does not use SSE streaming")
 
 
-class Wan22Accumulator:
+class VideoGenAccumulator:
     """No-op SSE accumulator satisfying SSEAccumulatorProtocol.
 
     WAN 2.2 uses non-streaming HTTP. This class exists only to satisfy
