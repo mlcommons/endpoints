@@ -15,6 +15,7 @@
 
 """Adapter for the WAN 2.2 trtllm-serve POST /v1/videos/generations endpoint."""
 
+import json
 from typing import TYPE_CHECKING, Any
 
 from inference_endpoint.core.types import (
@@ -25,7 +26,7 @@ from inference_endpoint.core.types import (
 )
 from inference_endpoint.endpoint_client.adapter_protocol import HttpRequestAdapter
 
-from .types import VideoPathRequest, VideoPathResponse
+from .types import VideoPathRequest, VideoPathResponse, VideoPayloadResponse
 
 if TYPE_CHECKING:
     from inference_endpoint.config.schema import ModelParams
@@ -35,11 +36,11 @@ if TYPE_CHECKING:
 class VideoGenAdapter(HttpRequestAdapter):
     """Adapter for trtllm-serve POST /v1/videos/generations.
 
-    Uses response_format='video_path': the server saves the encoded video to
-    shared storage (Lustre) and returns only the file path. This avoids
-    transferring 3-5 MB of base64 video bytes over HTTP and ZMQ per request.
-    MLPerf defines query completion as server finishing generation (spec option 2),
-    so latency measurement ends when the response is received regardless of format.
+    Supports both server response formats via query.data["response_format"]:
+    - "video_bytes" (default): server returns base64-encoded video content.
+      Suitable for accuracy evaluation in a single pass.
+    - "video_path": server saves video to shared storage (Lustre) and returns
+      only the file path. Avoids 3-5 MB payloads over HTTP + ZMQ per request.
     """
 
     @classmethod
@@ -52,8 +53,8 @@ class VideoGenAdapter(HttpRequestAdapter):
 
         Only `prompt` is required. All other fields fall back to MLPerf defaults
         defined in VideoPathRequest but can be overridden via query.data.
-        response_format is always 'video_path': avoids large byte payloads over
-        the HTTP + ZMQ transport path.
+        Pass response_format="video_path" in query.data to request a Lustre path
+        instead of inline video bytes.
         """
         data = query.data
         if "prompt" not in data:
@@ -71,18 +72,27 @@ class VideoGenAdapter(HttpRequestAdapter):
             guidance_scale_2=data.get("guidance_scale_2", 3.0),
             seed=data.get("seed", 42),
             output_format=data.get("output_format", "auto"),
-            response_format="video_path",
+            response_format=data.get("response_format", "video_bytes"),
         )
         return req.model_dump_json().encode()
 
     @classmethod
     def decode_response(cls, response_bytes: bytes, query_id: str) -> QueryResult:
-        """Deserialise trtllm-serve VideoPathResponse JSON bytes to QueryResult.
+        """Deserialise trtllm-serve response JSON bytes to QueryResult.
 
-        metadata["video_path"] carries the Lustre path to the encoded video for
-        the accuracy evaluator.
+        Dispatches on the response shape:
+        - "video_bytes" response: metadata["video_bytes"] holds the base64 payload.
+        - "video_path" response: metadata["video_path"] holds the Lustre file path.
         """
-        resp = VideoPathResponse.model_validate_json(response_bytes)
+        raw = json.loads(response_bytes)
+        if "video_bytes" in raw:
+            resp = VideoPayloadResponse.model_validate(raw)
+            return QueryResult(
+                id=query_id,
+                response_output=TextModelOutput(output=resp.video_id),
+                metadata={"video_bytes": resp.video_bytes},
+            )
+        resp = VideoPathResponse.model_validate(raw)
         return QueryResult(
             id=query_id,
             response_output=TextModelOutput(output=resp.video_id),
