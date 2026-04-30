@@ -32,7 +32,14 @@ class VideoPathRequest(BaseModel):
     """
 
     prompt: str
-    negative_prompt: str = ""
+    negative_prompt: str | None = Field(
+        default=None,
+        description=(
+            "Text describing what to avoid. None means the field is omitted "
+            "from the JSON payload so trtllm-serve can apply its model default. "
+            "VideoGenDataset injects the MLPerf canonical negative prompt by default."
+        ),
+    )
     size: str = Field(default="720x1280", description="Frame size in 'WxH' format.")
     seconds: float = Field(
         default=5.0,
@@ -50,6 +57,15 @@ class VideoPathRequest(BaseModel):
         description="Secondary guidance scale for null-text CFG (MLPerf: 3.0).",
     )
     seed: int = Field(default=42, description="Random seed (MLPerf: 42).")
+    latent_path: str | None = Field(
+        default=None,
+        description=(
+            "Absolute path to a pre-computed latent tensor (.pt file) on shared "
+            "storage accessible to the server (e.g. Lustre). When provided, the "
+            "server uses this tensor as the initial denoising noise instead of "
+            "sampling random noise. MLPerf uses a fixed latent for reproducibility."
+        ),
+    )
     output_format: Literal["mp4", "avi", "auto"] = "auto"
     response_format: Literal["video_bytes", "video_path"] = "video_path"
 

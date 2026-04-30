@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 from inference_endpoint.dataset_manager.dataset import Dataset
-from inference_endpoint.videogen.dataset import VideoGenDataset
+from inference_endpoint.videogen.dataset import _MLPERF_NEGATIVE_PROMPT, VideoGenDataset
 
 
 @pytest.mark.unit
@@ -40,7 +40,9 @@ class TestVideoGenDataset:
         ds.load()
         assert ds.num_samples() == 3
 
-    def test_load_sample_returns_expected_keys(self, prompts_file: Path):
+    def test_load_sample_default_includes_mlperf_negative_prompt(
+        self, prompts_file: Path
+    ):
         ds = VideoGenDataset(prompts_path=prompts_file)
         ds.load()
         sample = ds.load_sample(0)
@@ -50,6 +52,7 @@ class TestVideoGenDataset:
             "sample_id",
             "sample_index",
         }
+        assert sample["negative_prompt"] == _MLPERF_NEGATIVE_PROMPT
 
     def test_load_sample_correct_values(self, prompts_file: Path):
         ds = VideoGenDataset(prompts_path=prompts_file)
@@ -58,12 +61,28 @@ class TestVideoGenDataset:
         assert sample["prompt"] == "a red sports car on a mountain road"
         assert sample["sample_index"] == 1
         assert sample["sample_id"] == "1"
-        assert sample["negative_prompt"] == ""
+        assert sample["negative_prompt"] == _MLPERF_NEGATIVE_PROMPT
 
-    def test_negative_prompt_propagated(self, prompts_file: Path):
+    def test_negative_prompt_override(self, prompts_file: Path):
         ds = VideoGenDataset(prompts_path=prompts_file, negative_prompt="blurry")
         ds.load()
         assert ds.load_sample(0)["negative_prompt"] == "blurry"
+
+    def test_negative_prompt_none_omits_field(self, prompts_file: Path):
+        ds = VideoGenDataset(prompts_path=prompts_file, negative_prompt=None)
+        ds.load()
+        assert "negative_prompt" not in ds.load_sample(0)
+
+    def test_latent_path_propagated(self, prompts_file: Path, tmp_path: Path):
+        latent = tmp_path / "fixed_latent.pt"
+        ds = VideoGenDataset(prompts_path=prompts_file, latent_path=latent)
+        ds.load()
+        assert ds.load_sample(0)["latent_path"] == str(latent)
+
+    def test_latent_path_default_omitted(self, prompts_file: Path):
+        ds = VideoGenDataset(prompts_path=prompts_file)
+        ds.load()
+        assert "latent_path" not in ds.load_sample(0)
 
     def test_index_wrapping(self, prompts_file: Path):
         ds = VideoGenDataset(prompts_path=prompts_file)

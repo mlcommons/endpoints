@@ -28,7 +28,8 @@ class TestVideoPathRequest:
     @pytest.mark.unit
     def test_defaults(self):
         req = VideoPathRequest(prompt="a cat")
-        assert req.negative_prompt == ""
+        assert req.negative_prompt is None
+        assert req.latent_path is None
         assert req.size == "720x1280"
         assert req.seconds == pytest.approx(5.0)
         assert req.fps == 16

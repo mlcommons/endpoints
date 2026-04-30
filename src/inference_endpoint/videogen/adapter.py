@@ -63,7 +63,7 @@ class VideoGenAdapter(HttpRequestAdapter):
             )
         req = VideoPathRequest(
             prompt=data["prompt"],
-            negative_prompt=data.get("negative_prompt", ""),
+            negative_prompt=data.get("negative_prompt"),
             size=data.get("size", "720x1280"),
             seconds=data.get("seconds", 5.0),
             fps=data.get("fps", 16),
@@ -71,10 +71,13 @@ class VideoGenAdapter(HttpRequestAdapter):
             guidance_scale=data.get("guidance_scale", 4.0),
             guidance_scale_2=data.get("guidance_scale_2", 3.0),
             seed=data.get("seed", 42),
+            latent_path=data.get("latent_path"),
             output_format=data.get("output_format", "auto"),
             response_format=data.get("response_format", "video_bytes"),
         )
-        return req.model_dump_json().encode()
+        # exclude_none so optional fields fall back to server-side defaults
+        # (MLPerf: omit negative_prompt and latent_path unless explicitly set).
+        return req.model_dump_json(exclude_none=True).encode()
 
     @classmethod
     def decode_response(cls, response_bytes: bytes, query_id: str) -> QueryResult:

@@ -66,6 +66,24 @@ class TestVideoGenAdapter:
         payload = json.loads(VideoGenAdapter.encode_query(query))
         assert payload["negative_prompt"] == "blurry"
 
+    def test_encode_query_omits_negative_prompt_when_absent(self):
+        """exclude_none=True so server can apply its own default."""
+        query = Query(id="q1", data={"prompt": "test"})
+        payload = json.loads(VideoGenAdapter.encode_query(query))
+        assert "negative_prompt" not in payload
+
+    def test_encode_query_includes_latent_path(self):
+        query = Query(
+            id="q1", data={"prompt": "test", "latent_path": "/lustre/fixed_latent.pt"}
+        )
+        payload = json.loads(VideoGenAdapter.encode_query(query))
+        assert payload["latent_path"] == "/lustre/fixed_latent.pt"
+
+    def test_encode_query_omits_latent_path_when_absent(self):
+        query = Query(id="q1", data={"prompt": "test"})
+        payload = json.loads(VideoGenAdapter.encode_query(query))
+        assert "latent_path" not in payload
+
     def test_encode_query_missing_prompt_raises(self):
         query = Query(id="q1", data={"seed": 42})
         with pytest.raises(KeyError):

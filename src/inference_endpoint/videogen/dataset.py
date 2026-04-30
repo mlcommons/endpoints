@@ -22,12 +22,29 @@ import pandas as pd
 
 from inference_endpoint.dataset_manager.dataset import Dataset
 
+# MLPerf canonical negative prompt for WAN2.2-T2V-A14B.
+# Injected into every sample's query.data so the server receives the exact
+# string MLPerf expects, rather than relying on the server's internal default.
+_MLPERF_NEGATIVE_PROMPT = (
+    "vivid colors, overexposed, static, blurry details, subtitles, style, "
+    "work of art, painting, picture, still, overall grayish, worst quality, "
+    "low quality, JPEG artifacts, ugly, deformed, extra fingers, poorly drawn hands, "
+    "poorly drawn face, deformed, disfigured, deformed limbs, fused fingers, "
+    "static image, cluttered background, three legs, many people in the background, "
+    "walking backwards"
+)
+
 
 class VideoGenDataset(Dataset, dataset_id="wan22_mlperf"):
     """Dataset that loads MLPerf WAN2.2 prompt text files.
 
     Each non-blank line in the file is one prompt. MLPerf endpoints run perf
     and accuracy in a single pass, so VideoGenAdapter always requests video_bytes.
+
+    By default, the MLPerf canonical negative prompt is injected into every sample.
+    Pass ``negative_prompt=None`` to omit the field and let the server apply its
+    own default. Pass ``latent_path=<path>`` to use a fixed pre-computed latent
+    tensor for reproducibility.
     """
 
     COLUMN_NAMES = ["prompt"]
@@ -36,7 +53,8 @@ class VideoGenDataset(Dataset, dataset_id="wan22_mlperf"):
     def get_dataloader(  # type: ignore[override]
         cls,
         path: Path | str | None = None,
-        negative_prompt: str = "",
+        negative_prompt: str | None = _MLPERF_NEGATIVE_PROMPT,
+        latent_path: Path | str | None = None,
         **kwargs: Any,
     ) -> "VideoGenDataset":
         """Create a VideoGenDataset from a prompts file path.
@@ -50,12 +68,17 @@ class VideoGenDataset(Dataset, dataset_id="wan22_mlperf"):
                 "VideoGenDataset requires a prompts file path. "
                 "Pass --dataset <path/to/prompts.txt> or set path= in the dataset config."
             )
-        return cls(prompts_path=path, negative_prompt=negative_prompt)
+        return cls(
+            prompts_path=path,
+            negative_prompt=negative_prompt,
+            latent_path=latent_path,
+        )
 
     def __init__(
         self,
         prompts_path: Path | str,
-        negative_prompt: str = "",
+        negative_prompt: str | None = _MLPERF_NEGATIVE_PROMPT,
+        latent_path: Path | str | None = None,
     ) -> None:
         prompts = [
             line.strip()
@@ -64,14 +87,30 @@ class VideoGenDataset(Dataset, dataset_id="wan22_mlperf"):
         ]
         super().__init__(dataframe=pd.DataFrame({"prompt": prompts}))
         self.negative_prompt = negative_prompt
+        self.latent_path = str(latent_path) if latent_path is not None else None
 
     def load(self, **kwargs: Any) -> None:  # type: ignore[override]
-        """Build self.data from the loaded dataframe. No transforms needed."""
+        """Build self.data from the loaded dataframe. No transforms needed.
+
+        Optional fields (``negative_prompt``, ``latent_path``) are omitted from
+        each sample dict when their dataset-level value is ``None``, so the
+        adapter's ``exclude_none=True`` serialisation falls back to server-side
+        defaults.
+        """
         assert self.dataframe is not None
         self.data = [
             {
                 "prompt": row["prompt"],
-                "negative_prompt": self.negative_prompt,
+                **(
+                    {"negative_prompt": self.negative_prompt}
+                    if self.negative_prompt is not None
+                    else {}
+                ),
+                **(
+                    {"latent_path": self.latent_path}
+                    if self.latent_path is not None
+                    else {}
+                ),
                 "sample_id": str(i),
                 "sample_index": i,
             }
