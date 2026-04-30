@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# setup_and_test.sh — Set up the WAN2.2 environment on Lyris and run unit tests.
+# setup_and_test.sh — Set up the WAN2.2 environment and run unit tests.
 #
 # Usage:
 #   bash setup_and_test.sh [--skip-setup]
 #
 #   --skip-setup   Skip venv creation and pip install (use existing venv).
 #
-# Prerequisites on Lyris:
+# Prerequisites:
 #   - Python 3.12 available as python3.12
 #   - Access to the repo root (this script lives in examples/09_Wan22_VideoGen_Example/)
 
