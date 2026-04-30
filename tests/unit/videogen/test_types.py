@@ -16,13 +16,12 @@
 """Unit tests for videogen Pydantic wire models (trtllm-serve native API)."""
 
 import pytest
-from pydantic import ValidationError
-
 from inference_endpoint.videogen.types import (
     VideoPathRequest,
     VideoPathResponse,
     VideoPayloadResponse,
 )
+from pydantic import ValidationError
 
 
 class TestVideoPathRequest:

@@ -21,10 +21,9 @@ import urllib.request
 from urllib.error import HTTPError
 
 import pytest
-from pydantic import ValidationError
-
 from inference_endpoint.core.types import Query
 from inference_endpoint.videogen.adapter import VideoGenAdapter
+from pydantic import ValidationError
 
 from .conftest import DUMMY_VIDEO_BYTES, MockTrtllmServe, MockTrtllmServeError
 
@@ -97,11 +96,11 @@ class TestVideoGenAdapterErrorHandling:
             VideoGenAdapter.encode_query(query),
         )
         assert status == 500
-        with pytest.raises(Exception):
+        with pytest.raises((ValidationError, json.JSONDecodeError)):
             VideoGenAdapter.decode_response(content, query.id)
 
     def test_malformed_json_response_raises(self) -> None:
-        with pytest.raises(Exception):
+        with pytest.raises(json.JSONDecodeError):
             VideoGenAdapter.decode_response(b"not json at all", "q5")
 
     def test_missing_video_bytes_field_raises_validation_error(self) -> None:

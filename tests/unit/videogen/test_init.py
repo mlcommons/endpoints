@@ -17,11 +17,11 @@
 
 import pytest
 from inference_endpoint.videogen import (
+    VideoGenAccumulator,
+    VideoGenAdapter,
     VideoPathRequest,
     VideoPathResponse,
     VideoPayloadResponse,
-    VideoGenAccumulator,
-    VideoGenAdapter,
 )
 
 

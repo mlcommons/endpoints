@@ -46,7 +46,8 @@ class VideoPathRequest(BaseModel):
         default=4.0, description="CFG guidance scale (MLPerf: 4.0)."
     )
     guidance_scale_2: float = Field(
-        default=3.0, description="Secondary guidance scale for null-text CFG (MLPerf: 3.0)."
+        default=3.0,
+        description="Secondary guidance scale for null-text CFG (MLPerf: 3.0).",
     )
     seed: int = Field(default=42, description="Random seed (MLPerf: 42).")
     output_format: Literal["mp4", "avi", "auto"] = "auto"

@@ -18,7 +18,6 @@
 from pathlib import Path
 
 import pytest
-
 from inference_endpoint.config.schema import Dataset as DatasetConfig
 from inference_endpoint.dataset_manager.factory import DataLoaderFactory
 from inference_endpoint.videogen.dataset import VideoGenDataset
@@ -27,10 +26,7 @@ from inference_endpoint.videogen.dataset import VideoGenDataset
 @pytest.fixture
 def prompts_file(tmp_path: Path) -> Path:
     p = tmp_path / "prompts.txt"
-    p.write_text(
-        "a golden retriever running in a field\n"
-        "ocean waves at sunset\n"
-    )
+    p.write_text("a golden retriever running in a field\n" "ocean waves at sunset\n")
     return p
 
 

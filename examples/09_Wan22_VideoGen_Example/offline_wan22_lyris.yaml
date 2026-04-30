@@ -21,8 +21,8 @@ type: "offline"
 
 model_params:
   name: "wan22"
-  max_new_tokens: 0      # Video generation does not produce tokens
-  streaming: "off"       # WAN 2.2 uses non-streaming HTTP POST/response
+  max_new_tokens: 0 # Video generation does not produce tokens
+  streaming: "off" # WAN 2.2 uses non-streaming HTTP POST/response
 
 datasets:
   - name: wan22_prompts
@@ -33,8 +33,8 @@ datasets:
 
 settings:
   runtime:
-    min_duration_ms: 60000    # 1 minute warm-up
-    max_duration_ms: 600000   # 10 minute cap
+    min_duration_ms: 60000 # 1 minute warm-up
+    max_duration_ms: 600000 # 10 minute cap
     scheduler_random_seed: 42
     dataloader_random_seed: 42
     n_samples_to_issue: 248

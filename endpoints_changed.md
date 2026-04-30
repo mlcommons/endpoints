@@ -64,20 +64,20 @@ wan22/
 
 `VideoPathRequest` mirrors trtllm-serve's `VideoGenerationRequest`. All fields carry MLPerf defaults so only `prompt` is required from the dataset.
 
-| Field | MLPerf value | Notes |
-|---|---|---|
-| `prompt` | from dataset | Required |
-| `negative_prompt` | `None` | Omitted from JSON when absent; server uses its own default |
-| `size` | `"720x1280"` | Portrait orientation |
-| `seconds` | `5.0` | 81 frames ÷ ~16.2 fps |
-| `fps` | `16` | |
-| `num_inference_steps` | `20` | |
-| `guidance_scale` | `4.0` | Primary CFG scale |
-| `guidance_scale_2` | `3.0` | Null-text secondary CFG (two-stage denoising) |
-| `seed` | `42` | Fixed for reproducibility |
-| `output_format` | `"auto"` | H.264 if ffmpeg available, MJPEG otherwise |
-| `response_format` | `"video_path"` | Always; avoid byte payload |
-| `latent_path` | `None` | Optional path to `fixed_latent.pt` on shared storage |
+| Field                 | MLPerf value   | Notes                                                      |
+| --------------------- | -------------- | ---------------------------------------------------------- |
+| `prompt`              | from dataset   | Required                                                   |
+| `negative_prompt`     | `None`         | Omitted from JSON when absent; server uses its own default |
+| `size`                | `"720x1280"`   | Portrait orientation                                       |
+| `seconds`             | `5.0`          | 81 frames ÷ ~16.2 fps                                      |
+| `fps`                 | `16`           |                                                            |
+| `num_inference_steps` | `20`           |                                                            |
+| `guidance_scale`      | `4.0`          | Primary CFG scale                                          |
+| `guidance_scale_2`    | `3.0`          | Null-text secondary CFG (two-stage denoising)              |
+| `seed`                | `42`           | Fixed for reproducibility                                  |
+| `output_format`       | `"auto"`       | H.264 if ffmpeg available, MJPEG otherwise                 |
+| `response_format`     | `"video_path"` | Always; avoid byte payload                                 |
+| `latent_path`         | `None`         | Optional path to `fixed_latent.pt` on shared storage       |
 
 `VideoPathResponse` carries `video_id` and `video_path` returned by the server.
 
@@ -120,6 +120,7 @@ JSONL file  ──►  VideoGenDataset.load()  ──►  sample dict
 ```
 
 The MLPerf canonical negative prompt:
+
 ```
 vivid colors, overexposed, static, blurry details, subtitles, style,
 work of art, painting, picture, still, overall grayish, worst quality,
@@ -138,7 +139,7 @@ The wan22 module plugs into the existing pipeline at the `api_type` config field
 ```yaml
 # offline_wan22.yaml
 endpoint_config:
-  api_type: wan22          # → selects VideoGenAdapter
+  api_type: wan22 # → selects VideoGenAdapter
   endpoints:
     - http://localhost:8000
 ```
@@ -149,12 +150,12 @@ endpoint_config:
 
 ## What Is NOT In This Module
 
-| Concern | Where it lives |
-|---|---|
-| trtllm-serve startup / model loading | trtllm-serve (separate process) |
+| Concern                                  | Where it lives                                                                                       |
+| ---------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| trtllm-serve startup / model loading     | trtllm-serve (separate process)                                                                      |
 | Fixed latent loading (`fixed_latent.pt`) | trtllm-serve `pipeline_wan.py` at startup, or per-request via `latent_path` (pending Task 2 in plan) |
-| Video storage path on Lustre | trtllm-serve config |
-| `guidance_scale_2` wiring on server side | Pending — see `wan22-trtllm-plan.md` Task 1 |
+| Video storage path on Lustre             | trtllm-serve config                                                                                  |
+| `guidance_scale_2` wiring on server side | Pending — see `wan22-trtllm-plan.md` Task 1                                                          |
 
 ---
 

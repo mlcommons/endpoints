@@ -19,6 +19,9 @@ Dataset Manager for the MLPerf Inference Endpoint Benchmarking System.
 This module handles dataset loading, preprocessing, and management.
 """
 
+# Import workload-specific datasets so they register in Dataset.PREDEFINED
+from inference_endpoint.videogen.dataset import VideoGenDataset  # noqa: E402
+
 from .dataset import Dataset, EmptyDataset
 from .factory import DataLoaderFactory
 from .predefined.aime25 import AIME25
@@ -28,10 +31,6 @@ from .predefined.livecodebench import LiveCodeBench
 from .predefined.open_orca import OpenOrca
 from .predefined.random import RandomDataset
 from .predefined.shopify_product_catalogue import ShopifyProductCatalogue
-
-# Import workload-specific datasets so they register in Dataset.PREDEFINED
-from inference_endpoint.videogen.dataset import VideoGenDataset  # noqa: E402
-
 from .transforms import (
     AddStaticColumns,
     ColumnFilter,

@@ -23,9 +23,8 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
-from tqdm import tqdm
-
 from datasets import load_dataset  # type: ignore[attr-defined]
+from tqdm import tqdm
 
 from ...dataset import Dataset
 from . import presets
