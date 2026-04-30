@@ -34,9 +34,17 @@ class TestVideoGenAdapter:
         payload = json.loads(VideoGenAdapter.encode_query(query))
         assert payload["prompt"] == "a golden retriever running"
 
-    def test_encode_query_always_requests_video_bytes(self):
-        """MLPerf runs perf+accuracy in one pass — always request video_bytes."""
+    def test_encode_query_default_response_format_is_video_path(self):
+        """Perf mode default — server saves to Lustre, returns path only."""
         query = Query(id="q1", data={"prompt": "ocean waves"})
+        payload = json.loads(VideoGenAdapter.encode_query(query))
+        assert payload["response_format"] == "video_path"
+
+    def test_encode_query_accuracy_mode_requests_video_bytes(self):
+        """Accuracy mode override — query.data opts in to inline bytes."""
+        query = Query(
+            id="q1", data={"prompt": "ocean waves", "response_format": "video_bytes"}
+        )
         payload = json.loads(VideoGenAdapter.encode_query(query))
         assert payload["response_format"] == "video_bytes"
 

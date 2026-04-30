@@ -65,10 +65,20 @@ class TestVideoGenAdapterRoundTrip:
         decoded = base64.b64decode(result.metadata["video_bytes"])
         assert decoded == DUMMY_VIDEO_BYTES
 
-    def test_request_always_asks_for_video_bytes(
+    def test_request_default_response_format_is_video_path(
         self, mock_trtllm_serve: MockTrtllmServe
     ) -> None:
         query = Query(id="q2", data={"prompt": "ocean waves at sunset"})
+        payload = json.loads(VideoGenAdapter.encode_query(query))
+        assert payload["response_format"] == "video_path"
+
+    def test_request_accuracy_mode_asks_for_video_bytes(
+        self, mock_trtllm_serve: MockTrtllmServe
+    ) -> None:
+        query = Query(
+            id="q2b",
+            data={"prompt": "ocean waves at sunset", "response_format": "video_bytes"},
+        )
         payload = json.loads(VideoGenAdapter.encode_query(query))
         assert payload["response_format"] == "video_bytes"
 

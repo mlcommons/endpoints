@@ -37,10 +37,11 @@ class VideoGenAdapter(HttpRequestAdapter):
     """Adapter for trtllm-serve POST /v1/videos/generations.
 
     Supports both server response formats via query.data["response_format"]:
-    - "video_bytes" (default): server returns base64-encoded video content.
-      Suitable for accuracy evaluation in a single pass.
-    - "video_path": server saves video to shared storage (Lustre) and returns
-      only the file path. Avoids 3-5 MB payloads over HTTP + ZMQ per request.
+    - "video_path" (default): server saves video to shared storage (Lustre)
+      and returns only the file path. Used in perf mode — avoids 3-5 MB
+      payloads over HTTP + ZMQ per request.
+    - "video_bytes": server returns base64-encoded video content. Used in
+      accuracy mode where the evaluator needs the video content directly.
     """
 
     @classmethod
@@ -53,8 +54,8 @@ class VideoGenAdapter(HttpRequestAdapter):
 
         Only `prompt` is required. All other fields fall back to MLPerf defaults
         defined in VideoPathRequest but can be overridden via query.data.
-        Pass response_format="video_path" in query.data to request a Lustre path
-        instead of inline video bytes.
+        Pass response_format="video_bytes" in query.data to request inline video
+        bytes (accuracy mode) instead of the default Lustre path (perf mode).
         """
         data = query.data
         if "prompt" not in data:
@@ -73,7 +74,7 @@ class VideoGenAdapter(HttpRequestAdapter):
             seed=data.get("seed", 42),
             latent_path=data.get("latent_path"),
             output_format=data.get("output_format", "auto"),
-            response_format=data.get("response_format", "video_bytes"),
+            response_format=data.get("response_format", "video_path"),
         )
         # exclude_none so optional fields fall back to server-side defaults
         # (MLPerf: omit negative_prompt and latent_path unless explicitly set).

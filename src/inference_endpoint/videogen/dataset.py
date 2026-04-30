@@ -38,8 +38,7 @@ _MLPERF_NEGATIVE_PROMPT = (
 class VideoGenDataset(Dataset, dataset_id="wan22_mlperf"):
     """Dataset that loads MLPerf WAN2.2 prompt text files.
 
-    Each non-blank line in the file is one prompt. MLPerf endpoints run perf
-    and accuracy in a single pass, so VideoGenAdapter always requests video_bytes.
+    Each non-blank line in the file is one prompt.
 
     By default, the MLPerf canonical negative prompt is injected into every sample.
     Pass ``negative_prompt=None`` to omit the field and let the server apply its
