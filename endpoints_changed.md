@@ -58,10 +58,14 @@ videogen/
 ├── __init__.py     Public exports
 ├── types.py        Pydantic wire models: VideoPathRequest,
 │                   VideoPathResponse, VideoPayloadResponse, HealthResponse
-├── adapter.py      VideoGenAdapter (HttpRequestAdapter) + VideoGenAccumulator (no-op SSE)
-└── dataset.py      VideoGenDataset — loads MLPerf prompt JSONL, injects negative
-                    prompt and optional latent path
+└── adapter.py      VideoGenAdapter (HttpRequestAdapter) + VideoGenAccumulator (no-op SSE)
 ```
+
+The MLPerf prompts dataset is shipped as plain JSONL at
+`examples/09_Wan22_VideoGen_Example/wan22_prompts.jsonl` (248 rows, each row
+carries `prompt`, `negative_prompt` (MLPerf canonical), `sample_id`,
+`sample_index`). The generic `JsonlLoader` ingests it directly — no
+workload-specific dataset class is needed.
 
 ---
 
@@ -112,37 +116,27 @@ dataset_transforms(params)  →  []  (no token-level transforms needed)
 
 `APIType.WAN22` is registered in `core/types.py` with `default_route() = "/v1/videos/generations"`.
 
-### `dataset.py` — VideoGenDataset
+### Dataset ingest — generic `JsonlLoader`
 
-Loads a prompt text file (one prompt per non-blank line; the MLPerf dataset bundled at `examples/09_Wan22_VideoGen_Example/wan22_prompts.jsonl` has 248 prompts). Injects up to two extra fields into every sample:
+The bundled `examples/09_Wan22_VideoGen_Example/wan22_prompts.jsonl` (248 rows) is consumed by the generic JSONL loader registered in `dataset_manager`. Each row carries everything the adapter needs:
 
-- `prompt` — from file
-- `negative_prompt` — MLPerf canonical string by default; pass `negative_prompt=None` to omit
-- `latent_path` — optional absolute path to a pre-computed latent tensor (`fixed_latent.pt`); omitted when not configured
+- `prompt` — the MLPerf prompt string
+- `negative_prompt` — the MLPerf canonical negative prompt, baked into every row
+- `sample_id`, `sample_index` — used by the load generator for tracking
 
-```
-JSONL file  ──►  VideoGenDataset.load()  ──►  sample dict
-                                              ├── prompt
-                                              ├── negative_prompt  (MLPerf canonical, optional)
-                                              └── latent_path      (optional)
-                                                        │
-                                                        ▼
-                                             VideoGenAdapter.encode_query()
-                                                        │
-                                                        ▼
-                                             VideoPathRequest JSON
-                                             (response_format=video_path by default)
-```
-
-The MLPerf canonical negative prompt:
+`latent_path` is optional and not present in the bundled dataset. To inject a fixed latent into every request, add it via `AddStaticColumns` (in `dataset_manager.transforms`) or extend the JSONL.
 
 ```
-vivid colors, overexposed, static, blurry details, subtitles, style,
-work of art, painting, picture, still, overall grayish, worst quality,
-low quality, JPEG artifacts, ugly, deformed, extra fingers, poorly drawn
-hands, poorly drawn face, deformed, disfigured, deformed limbs, fused
-fingers, static image, cluttered background, three legs, many people in
-the background, walking backwards
+wan22_prompts.jsonl  ──►  JsonlLoader  ──►  Dataset.load()  ──►  sample dict
+                                                                  ├── prompt
+                                                                  └── negative_prompt
+                                                                            │
+                                                                            ▼
+                                                              VideoGenAdapter.encode_query()
+                                                                            │
+                                                                            ▼
+                                                              VideoPathRequest JSON
+                                                              (response_format=video_path by default)
 ```
 
 ---

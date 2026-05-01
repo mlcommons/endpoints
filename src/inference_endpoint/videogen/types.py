@@ -37,7 +37,8 @@ class VideoPathRequest(BaseModel):
         description=(
             "Text describing what to avoid. None means the field is omitted "
             "from the JSON payload so trtllm-serve can apply its model default. "
-            "VideoGenDataset injects the MLPerf canonical negative prompt by default."
+            "The bundled MLPerf prompts dataset carries the canonical negative "
+            "prompt per row."
         ),
     )
     size: str = Field(default="720x1280", description="Frame size in 'WxH' format.")

@@ -19,9 +19,6 @@ Dataset Manager for the MLPerf Inference Endpoint Benchmarking System.
 This module handles dataset loading, preprocessing, and management.
 """
 
-# Import workload-specific datasets so they register in Dataset.PREDEFINED
-from inference_endpoint.videogen.dataset import VideoGenDataset  # noqa: E402
-
 from .dataset import Dataset, EmptyDataset
 from .factory import DataLoaderFactory
 from .predefined.aime25 import AIME25
@@ -61,5 +58,4 @@ __all__ = [
     "CNNDailyMail",
     "RandomDataset",
     "ShopifyProductCatalogue",
-    "VideoGenDataset",
 ]
