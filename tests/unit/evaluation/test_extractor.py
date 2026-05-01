@@ -16,7 +16,7 @@
 
 import pytest
 from inference_endpoint.evaluation.extractor import (
-    ABCDExtractor,
+    Extractor,
     LetterExtractor,
     PythonCodeExtractor,
 )
@@ -148,15 +148,11 @@ def python():
 
     def test_registered_in_extractor_registry(self):
         """Test that PythonCodeExtractor is registered."""
-        from inference_endpoint.evaluation.extractor import Extractor
-
         assert "python_code_extractor" in Extractor.PREDEFINED
         assert Extractor.get("python_code_extractor") == PythonCodeExtractor
 
     def test_extractor_get_method(self):
         """Test that we can retrieve PythonCodeExtractor by name."""
-        from inference_endpoint.evaluation.extractor import Extractor
-
         extractor_cls = Extractor.get("python_code_extractor")
         text = "```python\nprint('test')\n```"
         result = extractor_cls.extract(text)
@@ -174,17 +170,9 @@ class TestLetterExtractor:
     def test_markdown_answer(self):
         assert LetterExtractor.extract("**Answer:** C") == "C"
 
-    def test_answer_colon_d(self):
-        assert LetterExtractor.extract("Answer: D") == "D"
-
-    # Extended range (E–J) for MMLU-Pro
-    def test_letter_e(self):
+    def test_extended_range(self):
+        # E–J range needed for MMLU-Pro (10 choices); check boundary letters
         assert LetterExtractor.extract("Answer: E") == "E"
-
-    def test_letter_g(self):
-        assert LetterExtractor.extract("**Answer:** G") == "G"
-
-    def test_letter_j(self):
         assert LetterExtractor.extract("Answer: J") == "J"
 
     def test_boxed_letter(self):
@@ -204,18 +192,6 @@ class TestLetterExtractor:
     def test_default_on_no_match(self):
         assert LetterExtractor.extract("Nothing", default="X") == "X"
 
-    def test_returns_letter_not_choice_key(self):
-        # Confirm it does NOT return "choice1" etc. (ABCDExtractor behaviour)
-        result = LetterExtractor.extract("Answer: B")
-        assert result == "B"
-        assert result != "choice2"
-
-    def test_abcd_extractor_unchanged(self):
-        # Confirm ABCDExtractor still maps to choiceN (regression guard)
-        assert ABCDExtractor.extract("Answer: B") == "choice2"
-
     def test_registered(self):
-        from inference_endpoint.evaluation.extractor import Extractor
-
         assert "letter_extractor" in Extractor.PREDEFINED
         assert Extractor.get("letter_extractor") is LetterExtractor

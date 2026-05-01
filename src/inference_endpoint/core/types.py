@@ -133,13 +133,9 @@ class TextModelOutput(
         """
         parts: list[str] = []
         if self.reasoning:
-            if isinstance(self.reasoning, str):
-                # str reasoning is the fully joined streaming trace — include it
-                # in the TPOT denominator. Over-counts by one token (the first
-                # token is not excluded), but the error is negligible in practice.
-                parts.append(self.reasoning)
-            elif isinstance(self.reasoning, tuple) and len(self.reasoning) > 1:
+            if isinstance(self.reasoning, tuple) and len(self.reasoning) > 1:
                 parts.extend(self.reasoning[1:])
+            # str reasoning: single chunk, skip entirely (it IS the first chunk)
         if self.output:
             if isinstance(self.output, str):
                 # Non-streaming: if reasoning was present and was the first chunk,
