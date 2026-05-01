@@ -53,29 +53,18 @@ class VideoGenAdapter(HttpRequestAdapter):
         """Serialise query.data to VideoPathRequest JSON bytes.
 
         Only `prompt` is required. All other fields fall back to MLPerf defaults
-        defined in VideoPathRequest but can be overridden via query.data.
+        declared on VideoPathRequest but can be overridden via query.data.
         Pass response_format="video_bytes" in query.data to request inline video
         bytes (accuracy mode) instead of the default Lustre path (perf mode).
+        Extra keys in query.data (e.g. sample_id, sample_index) are ignored.
         """
         data = query.data
         if "prompt" not in data:
             raise KeyError(
                 f"'prompt' not found in query.data keys: {list(data.keys())}"
             )
-        req = VideoPathRequest(
-            prompt=data["prompt"],
-            negative_prompt=data.get("negative_prompt"),
-            size=data.get("size", "720x1280"),
-            seconds=data.get("seconds", 5.0),
-            fps=data.get("fps", 16),
-            num_inference_steps=data.get("num_inference_steps", 20),
-            guidance_scale=data.get("guidance_scale", 4.0),
-            guidance_scale_2=data.get("guidance_scale_2", 3.0),
-            seed=data.get("seed", 42),
-            latent_path=data.get("latent_path"),
-            output_format=data.get("output_format", "auto"),
-            response_format=data.get("response_format", "video_path"),
-        )
+        known = VideoPathRequest.model_fields.keys()
+        req = VideoPathRequest.model_validate({k: data[k] for k in known if k in data})
         # exclude_none so optional fields fall back to server-side defaults
         # (MLPerf: omit negative_prompt and latent_path unless explicitly set).
         return req.model_dump_json(exclude_none=True).encode()

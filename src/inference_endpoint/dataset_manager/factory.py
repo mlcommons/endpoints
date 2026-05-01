@@ -83,7 +83,6 @@ class DataLoaderFactory:
             return ds_cls.get_dataloader(
                 transforms=preset_transforms,
                 num_repeats=num_repeats,
-                path=dataset_path,
                 **kwargs,
             )
 

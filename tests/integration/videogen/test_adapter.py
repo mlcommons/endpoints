@@ -25,7 +25,12 @@ from inference_endpoint.core.types import Query
 from inference_endpoint.videogen.adapter import VideoGenAdapter
 from pydantic import ValidationError
 
-from .conftest import DUMMY_VIDEO_BYTES, MockTrtllmServe, MockTrtllmServeError
+from .conftest import (
+    DUMMY_VIDEO_BYTES,
+    DUMMY_VIDEO_PATH,
+    MockTrtllmServe,
+    MockTrtllmServeError,
+)
 
 
 def _post(url: str, body: bytes) -> tuple[int, bytes]:
@@ -47,9 +52,10 @@ def _post(url: str, body: bytes) -> tuple[int, bytes]:
 class TestVideoGenAdapterRoundTrip:
     """Verify encode_query → HTTP POST → decode_response against mock trtllm-serve."""
 
-    def test_successful_generation_returns_video_bytes(
+    def test_perf_mode_round_trip_returns_video_path(
         self, mock_trtllm_serve: MockTrtllmServe
     ) -> None:
+        """Default response_format=video_path → server returns Lustre path."""
         query = Query(id="q1", data={"prompt": "a golden retriever running on a beach"})
         request_bytes = VideoGenAdapter.encode_query(query)
 
@@ -60,6 +66,29 @@ class TestVideoGenAdapterRoundTrip:
 
         result = VideoGenAdapter.decode_response(content, query.id)
         assert result.id == "q1"
+        assert result.error is None
+        assert result.metadata == {"video_path": DUMMY_VIDEO_PATH}
+
+    def test_accuracy_mode_round_trip_returns_video_bytes(
+        self, mock_trtllm_serve: MockTrtllmServe
+    ) -> None:
+        """response_format=video_bytes → server returns base64 payload inline."""
+        query = Query(
+            id="q1b",
+            data={
+                "prompt": "a golden retriever running on a beach",
+                "response_format": "video_bytes",
+            },
+        )
+        request_bytes = VideoGenAdapter.encode_query(query)
+
+        status, content = _post(
+            f"{mock_trtllm_serve.url}/v1/videos/generations", request_bytes
+        )
+        assert status == 200
+
+        result = VideoGenAdapter.decode_response(content, query.id)
+        assert result.id == "q1b"
         assert result.error is None
         assert "video_bytes" in result.metadata
         decoded = base64.b64decode(result.metadata["video_bytes"])
@@ -113,12 +142,14 @@ class TestVideoGenAdapterErrorHandling:
         with pytest.raises(json.JSONDecodeError):
             VideoGenAdapter.decode_response(b"not json at all", "q5")
 
-    def test_missing_video_bytes_field_raises_validation_error(self) -> None:
-        bad_body = b'{"video_id": "vid_001"}'  # missing video_bytes
+    def test_video_path_branch_missing_video_path_raises(self) -> None:
+        """No video_bytes key → dispatch to VideoPathResponse → video_path required."""
+        bad_body = b'{"video_id": "vid_001"}'
         with pytest.raises(ValidationError):
             VideoGenAdapter.decode_response(bad_body, "q6")
 
-    def test_missing_video_id_field_raises_validation_error(self) -> None:
-        bad_body = b'{"video_bytes": "AAEC"}'  # missing video_id
+    def test_video_bytes_branch_missing_video_id_raises(self) -> None:
+        """video_bytes key present → dispatch to VideoPayloadResponse → video_id required."""
+        bad_body = b'{"video_bytes": "AAEC"}'
         with pytest.raises(ValidationError):
             VideoGenAdapter.decode_response(bad_body, "q7")

@@ -1,175 +1,84 @@
 # WAN 2.2 Endpoint Client — Design Summary
 
-This document describes the changes made to the `inference-endpoint` library to support the MLPerf WAN 2.2 text-to-video benchmark workload.
-
----
+Client-side changes that add an `inference-endpoint` adapter for the MLPerf WAN 2.2 text-to-video benchmark.
 
 ## Overview
 
-WAN 2.2 (T2V-A14B) generates 720×1280 portrait videos at 81 frames / 5 s using 20 denoising steps. The inference server is **trtllm-serve**, which exposes a video generation endpoint at `POST /v1/videos/generations`.
-
-The client-side changes add a new `videogen` module that plugs into the existing `HTTPEndpointClient` pipeline without touching any hot-path code.
-
----
-
-## Architecture
+WAN 2.2 (T2V-A14B) generates 720×1280 portrait videos at 81 frames / 5 s using 20 denoising steps. The inference server is **trtllm-serve**, exposing `POST /v1/videos/generations`. The new `videogen` module plugs into the existing `HTTPEndpointClient` pipeline via the `api_type` config field — no hot-path code is touched.
 
 ```
-MLPerf Harness / Benchmark CLI
-          │
-          │  YAML config  (api_type: videogen)
-          ▼
-  HTTPEndpointClient
-          │
-          │  selects adapter via APIType.WAN22
-          ▼
-     VideoGenAdapter  ──────────────────────────────────────────────┐
-          │  encode_query()                                       │
-          │  VideoPathRequest JSON                                │
-          ▼                                                       │
-  HTTP Worker (ZMQ)                                              │
-          │                                                       │
-          │  POST /v1/videos/generations                          │
-          ▼                                                       │
-     trtllm-serve                                                 │
-          │  perf mode:     saves video to Lustre, returns path   │
-          │  accuracy mode: returns base64 video bytes inline     │
-          ▼                                                       │
-     VideoGenAdapter  ◄──────────────────────────────────────────────┘
-          │  decode_response()  (dispatches on response shape)
-          │  QueryResult(metadata={video_path | video_bytes: ...})
-          ▼
-  MetricsReporter / MLPerf harness
+YAML  ──►  HTTPEndpointClient  ──►  VideoGenAdapter ──►  HTTP Worker (ZMQ)
+                                          │                    │
+                                          │       POST /v1/videos/generations
+                                          ▼                    ▼
+                                   QueryResult       trtllm-serve
+                                   (metadata holds   (perf: saves to Lustre, returns path
+                                    video_path or     accuracy: returns base64 bytes inline)
+                                    video_bytes)
 ```
 
-**Key design decision:** the adapter supports two `response_format` values selected per-request via `query.data["response_format"]`:
-
-- **`video_path` (default, perf mode)** — server writes the encoded video to Lustre and returns only the file path. Avoids 3–5 MB payloads over HTTP + ZMQ per request.
-- **`video_bytes` (accuracy mode)** — server returns the base64-encoded H.264/MJPEG payload inline so the accuracy evaluator can score the video content directly.
-
-`VideoGenAdapter.decode_response` dispatches on the response shape: if `video_bytes` is present the body is parsed as `VideoPayloadResponse`; otherwise it is parsed as `VideoPathResponse`.
-
----
-
-## New Files
+## `videogen/` module layout
 
 ```
 videogen/
 ├── __init__.py     Public exports
-├── types.py        Pydantic wire models: VideoPathRequest,
-│                   VideoPathResponse, VideoPayloadResponse, HealthResponse
-└── adapter.py      VideoGenAdapter (HttpRequestAdapter) + VideoGenAccumulator (no-op SSE)
+├── types.py        Pydantic wire models (VideoPathRequest, VideoPathResponse, VideoPayloadResponse)
+└── adapter.py      VideoGenAdapter + VideoGenAccumulator (no-op SSE)
 ```
 
-The MLPerf prompts dataset is shipped as plain JSONL at
-`examples/09_Wan22_VideoGen_Example/wan22_prompts.jsonl` (248 rows, each row
-carries `prompt`, `negative_prompt` (MLPerf canonical), `sample_id`,
-`sample_index`). The generic `JsonlLoader` ingests it directly — no
-workload-specific dataset class is needed.
+The MLPerf prompts dataset ships as plain JSONL at `examples/09_Wan22_VideoGen_Example/wan22_prompts.jsonl` (248 rows; each row carries `prompt`, `negative_prompt` (MLPerf canonical), `sample_id`, `sample_index`). The generic `JsonlLoader` ingests it directly — no workload-specific dataset class is needed.
 
----
+## Two response formats
 
-## Components
+The adapter supports both server response formats, selected per-request via `query.data["response_format"]`:
 
-### `types.py` — Wire Models
+- **`video_path`** (default, perf mode) — server saves the encoded video to Lustre and returns only the path. Avoids 3–5 MB payloads over HTTP + ZMQ per request.
+- **`video_bytes`** (accuracy mode) — server returns the base64-encoded H.264/MJPEG payload inline so the accuracy evaluator can score directly.
+
+`decode_response` dispatches on the response body shape: `video_bytes` key present → `VideoPayloadResponse`; otherwise → `VideoPathResponse`. To run accuracy mode, set `response_format: video_bytes` in the per-row dataset data so it is injected into every `query.data`.
+
+## Wire model defaults (`types.py`)
 
 `VideoPathRequest` mirrors trtllm-serve's `VideoGenerationRequest`. All fields carry MLPerf defaults so only `prompt` is required from the dataset.
 
-| Field                 | MLPerf value   | Notes                                                                  |
-| --------------------- | -------------- | ---------------------------------------------------------------------- |
-| `prompt`              | from dataset   | Required                                                               |
-| `negative_prompt`     | `None`         | Omitted from JSON when absent; server uses its own default             |
-| `size`                | `"720x1280"`   | Portrait orientation                                                   |
-| `seconds`             | `5.0`          | 81 frames ÷ ~16.2 fps                                                  |
-| `fps`                 | `16`           |                                                                        |
-| `num_inference_steps` | `20`           |                                                                        |
-| `guidance_scale`      | `4.0`          | Primary CFG scale                                                      |
-| `guidance_scale_2`    | `3.0`          | Null-text secondary CFG (two-stage denoising)                          |
-| `seed`                | `42`           | Fixed for reproducibility                                              |
-| `latent_path`         | `None`         | Optional path to a fixed latent tensor on shared storage               |
-| `output_format`       | `"auto"`       | H.264 if ffmpeg available, MJPEG otherwise                             |
-| `response_format`     | `"video_path"` | Default = perf mode (Lustre path); set to `"video_bytes"` for accuracy |
+| Field                 | MLPerf default | Notes                                                                   |
+| --------------------- | -------------- | ----------------------------------------------------------------------- |
+| `prompt`              | from dataset   | Required                                                                |
+| `negative_prompt`     | `None`         | Omitted from JSON when `None`; bundled JSONL carries the canonical text |
+| `size`                | `"720x1280"`   | Portrait                                                                |
+| `seconds`             | `5.0`          | 81 frames ÷ ~16.2 fps                                                   |
+| `fps`                 | `16`           |                                                                         |
+| `num_inference_steps` | `20`           |                                                                         |
+| `guidance_scale`      | `4.0`          | Primary CFG                                                             |
+| `guidance_scale_2`    | `3.0`          | Null-text secondary CFG (two-stage denoising)                           |
+| `seed`                | `42`           | Fixed for reproducibility                                               |
+| `latent_path`         | `None`         | Optional path to a fixed latent tensor on shared storage                |
+| `output_format`       | `"auto"`       | H.264 if ffmpeg available, MJPEG otherwise                              |
+| `response_format`     | `"video_path"` | See "Two response formats" above                                        |
 
-Two response models cover the two `response_format` values:
+Serialization uses `model_dump_json(exclude_none=True)` so `None` fields fall back to server-side defaults.
 
-- `VideoPathResponse` — `video_id`, `video_path` (perf mode).
-- `VideoPayloadResponse` — `video_id`, `video_bytes` (accuracy mode; base64-encoded).
-
-Serialization uses `model_dump_json(exclude_none=True)` so `None` fields are omitted from the request body.
-
-### `adapter.py` — Request/Response Adapter
+## Adapter contract (`adapter.py`)
 
 `VideoGenAdapter` implements `HttpRequestAdapter`:
 
 ```
 encode_query(query)         →  VideoPathRequest JSON bytes
-                                (response_format defaults to "video_path";
-                                 override via query.data["response_format"])
-decode_response(bytes, id)  →  QueryResult with metadata={video_path: ...}
-                                or metadata={video_bytes: ...} depending on
-                                the response shape
+decode_response(bytes, id)  →  QueryResult with metadata={video_path: ...} or {video_bytes: ...}
 decode_sse_message(bytes)   →  NotImplementedError (WAN 2.2 is non-streaming)
 dataset_transforms(params)  →  []  (no token-level transforms needed)
 ```
 
-`VideoGenAccumulator` is a no-op `SSEAccumulatorProtocol` implementation required by `HTTPClientConfig`. WAN 2.2 uses synchronous HTTP POST/response — there is no SSE stream to accumulate.
+`VideoGenAccumulator` is a no-op `SSEAccumulatorProtocol` to satisfy `HTTPClientConfig`'s type contract. `APIType.VIDEOGEN` is registered in `core/types.py` with `default_route() = "/v1/videos/generations"`.
 
-`APIType.WAN22` is registered in `core/types.py` with `default_route() = "/v1/videos/generations"`.
-
-### Dataset ingest — generic `JsonlLoader`
-
-The bundled `examples/09_Wan22_VideoGen_Example/wan22_prompts.jsonl` (248 rows) is consumed by the generic JSONL loader registered in `dataset_manager`. Each row carries everything the adapter needs:
-
-- `prompt` — the MLPerf prompt string
-- `negative_prompt` — the MLPerf canonical negative prompt, baked into every row
-- `sample_id`, `sample_index` — used by the load generator for tracking
-
-`latent_path` is optional and not present in the bundled dataset. To inject a fixed latent into every request, add it via `AddStaticColumns` (in `dataset_manager.transforms`) or extend the JSONL.
-
-```
-wan22_prompts.jsonl  ──►  JsonlLoader  ──►  Dataset.load()  ──►  sample dict
-                                                                  ├── prompt
-                                                                  └── negative_prompt
-                                                                            │
-                                                                            ▼
-                                                              VideoGenAdapter.encode_query()
-                                                                            │
-                                                                            ▼
-                                                              VideoPathRequest JSON
-                                                              (response_format=video_path by default)
-```
-
----
-
-## Integration Point
-
-The videogen module plugs into the existing pipeline at the `api_type` config field. No hot-path code was modified.
-
-```yaml
-# offline_wan22.yaml
-endpoint_config:
-  api_type: videogen # → selects VideoGenAdapter
-  endpoints:
-    - http://localhost:8000
-```
-
-`HTTPEndpointClient` resolves `api_type: videogen` → `VideoGenAdapter` + `VideoGenAccumulator` via the existing adapter registry.
-
-To run accuracy mode (server returns video bytes inline), set `response_format: video_bytes` in the dataset config so it is injected into every `query.data`.
-
----
-
-## What Is NOT In This Module
+## Out of scope
 
 | Concern                                  | Where it lives                                         |
 | ---------------------------------------- | ------------------------------------------------------ |
 | trtllm-serve startup / model loading     | trtllm-serve (separate process)                        |
 | Fixed latent loading (`fixed_latent.pt`) | trtllm-serve, optionally per-request via `latent_path` |
 | Video storage path on Lustre             | trtllm-serve config                                    |
-| `guidance_scale_2` wiring on server side | Pending — see "Pending" below                          |
-
----
 
 ## Pending
 
-- **`guidance_scale_2` server-side wiring** — the client already serializes `guidance_scale_2` (MLPerf default 3.0); trtllm-serve currently ignores the field and uses a single CFG scale. Tracking on the server side.
+- **`guidance_scale_2` server-side wiring** — the client serializes the field (MLPerf default 3.0); trtllm-serve currently ignores it and uses a single CFG scale.

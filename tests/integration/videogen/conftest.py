@@ -83,12 +83,14 @@ class MockTrtllmServe:
     async def _handle_sync(self, request: web.Request) -> web.Response:
         body = await request.json()
         video_id = f"mock_video_{hash(body.get('prompt', '')) & 0xFFFF:04x}"
-        return web.json_response(
-            {
-                "video_id": video_id,
-                "video_bytes": base64.b64encode(DUMMY_VIDEO_BYTES).decode(),
-            }
-        )
+        if body.get("response_format") == "video_bytes":
+            return web.json_response(
+                {
+                    "video_id": video_id,
+                    "video_bytes": base64.b64encode(DUMMY_VIDEO_BYTES).decode(),
+                }
+            )
+        return web.json_response({"video_id": video_id, "video_path": DUMMY_VIDEO_PATH})
 
 
 @pytest.fixture(scope="module")
