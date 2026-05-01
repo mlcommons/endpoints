@@ -43,7 +43,9 @@ def gptoss_budget() -> list[Transform]:
         # Same as gptoss but caps thinking at 8192 tokens via budget_tokens so the model
         # is forced to emit a final answer rather than consuming all max_new_tokens in
         # the reasoning phase (observed issue: 85% of responses had empty answer text).
-        AddStaticColumns({"chat_template_kwargs": {"thinking": True, "budget_tokens": 8192}}),
+        AddStaticColumns(
+            {"chat_template_kwargs": {"thinking": True, "budget_tokens": 8192}}
+        ),
     ]
 
 
@@ -52,7 +54,9 @@ def gptoss_budget_20k() -> list[Transform]:
         UserPromptFormatter(
             user_prompt_format="{question}\nPlease reason step by step, and put your final answer within \\boxed{{}}.",
         ),
-        AddStaticColumns({"chat_template_kwargs": {"thinking": True, "budget_tokens": 20000}}),
+        AddStaticColumns(
+            {"chat_template_kwargs": {"thinking": True, "budget_tokens": 20000}}
+        ),
     ]
 
 
@@ -61,5 +65,7 @@ def gptoss_budget_20k_pre() -> list[Transform]:
         UserPromptFormatter(
             user_prompt_format="Please reason step by step, and put your final answer within \\boxed{{}}.\n\n{question}",
         ),
-        AddStaticColumns({"chat_template_kwargs": {"thinking": True, "budget_tokens": 20000}}),
+        AddStaticColumns(
+            {"chat_template_kwargs": {"thinking": True, "budget_tokens": 20000}}
+        ),
     ]

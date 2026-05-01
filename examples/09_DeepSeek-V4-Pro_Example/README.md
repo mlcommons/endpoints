@@ -4,11 +4,11 @@ End-to-end example for benchmarking `deepseek-ai/DeepSeek-V4-Pro` with vLLM on 8
 
 ## Hardware
 
-| Requirement | Details |
-|-------------|---------|
-| GPUs | 8× NVIDIA B200 or B300 |
-| System RAM | ≥ 256 GB |
-| Docker image | `vllm/vllm-openai:deepseekv4-cu130` |
+| Requirement  | Details                                                    |
+| ------------ | ---------------------------------------------------------- |
+| GPUs         | 8× NVIDIA B200 or B300                                     |
+| System RAM   | ≥ 256 GB                                                   |
+| Docker image | `vllm/vllm-openai:deepseekv4-cu130`                        |
 | Startup time | ~22 minutes (weight loading + TileLang kernel compilation) |
 
 The recipe is taken from the [vLLM DeepSeek V4 blog post](https://github.com/vllm-project/vllm-project.github.io/blob/main/_posts/2026-04-24-deepseek-v4.md).
@@ -40,17 +40,17 @@ crash. Setting the timeout to 3600 s avoids this entirely.
 
 ### Key launch flags
 
-| Flag | Purpose |
-|------|---------|
-| `--data-parallel-size 8` | Expert parallelism across 8 GPUs (no TP needed for MoE) |
-| `--enable-expert-parallel` | Required alongside `--data-parallel-size` |
-| `--kv-cache-dtype fp8` | Matches DeepSeek V4's hybrid c4a / c128a KV cache design |
-| `--block-size 256` | Unified 256-token logical block across all compression layers |
-| `--attention_config.use_fp4_indexer_cache=True` | FP4 indexer for ~2x additional KV savings |
-| `--tokenizer-mode deepseek_v4` | Required for the V4 chat template |
-| `--reasoning-parser deepseek_v4` | Strips `<think>…</think>` into `reasoning_content` |
-| `--compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE","custom_ops":["all"]}'` | Enables TileLang kernel fusions |
-| `VLLM_ENGINE_READY_TIMEOUT_S=3600` | Prevents premature `ApiServer_0` timeout during startup |
+| Flag                                                                                  | Purpose                                                       |
+| ------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| `--data-parallel-size 8`                                                              | Expert parallelism across 8 GPUs (no TP needed for MoE)       |
+| `--enable-expert-parallel`                                                            | Required alongside `--data-parallel-size`                     |
+| `--kv-cache-dtype fp8`                                                                | Matches DeepSeek V4's hybrid c4a / c128a KV cache design      |
+| `--block-size 256`                                                                    | Unified 256-token logical block across all compression layers |
+| `--attention_config.use_fp4_indexer_cache=True`                                       | FP4 indexer for ~2x additional KV savings                     |
+| `--tokenizer-mode deepseek_v4`                                                        | Required for the V4 chat template                             |
+| `--reasoning-parser deepseek_v4`                                                      | Strips `<think>…</think>` into `reasoning_content`            |
+| `--compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE","custom_ops":["all"]}'` | Enables TileLang kernel fusions                               |
+| `VLLM_ENGINE_READY_TIMEOUT_S=3600`                                                    | Prevents premature `ApiServer_0` timeout during startup       |
 
 ## Performance Benchmark
 
@@ -60,6 +60,7 @@ uv run inference-endpoint benchmark from-config \
 ```
 
 Config: [`vllm_dsv4pro_perf.yaml`](vllm_dsv4pro_perf.yaml)
+
 - 2-minute minimum run at concurrency 32
 - Metrics: throughput, latency, TTFT, TPOT
 
@@ -72,10 +73,10 @@ uv run inference-endpoint benchmark from-config \
 
 Config: [`vllm_dsv4pro_accuracy.yaml`](vllm_dsv4pro_accuracy.yaml)
 
-| Dataset | Samples | Repeats | Extractor | Scorer |
-|---------|---------|---------|-----------|--------|
-| AIME 2025 | 30 | 8 | `boxed_math_extractor` | `pass_at_1` |
-| GPQA Diamond | 198 | 5 | `abcd_extractor` | `pass_at_1` |
+| Dataset      | Samples | Repeats | Extractor              | Scorer      |
+| ------------ | ------- | ------- | ---------------------- | ----------- |
+| AIME 2025    | 30      | 8       | `boxed_math_extractor` | `pass_at_1` |
+| GPQA Diamond | 198     | 5       | `abcd_extractor`       | `pass_at_1` |
 
 ### Concurrency note
 
@@ -93,21 +94,21 @@ reasoning phase and forces a final answer.
 
 ### Measured results (8×B200, `deepseekv4-cu130`)
 
-| Dataset | Score |
-|---------|-------|
+| Dataset          | Score                                      |
+| ---------------- | ------------------------------------------ |
 | AIME 2025 pass@1 | **55.4%** (8 repeats, budget_tokens=20000) |
 
 ## MLPerf Inference Accuracy Suite
 
 The MLPerf DeepSeek-R1 accuracy check uses 5 sub-datasets (4388 total samples):
 
-| Sub-dataset | Samples | Metric | File |
-|-------------|---------|--------|------|
-| AIME 1983 | 932 | exact_match | `mlperf_deepseek_r1_math_accuracy.parquet` |
-| MATH-500 | 499 | exact_match | `mlperf_deepseek_r1_math_accuracy.parquet` |
-| GPQA | 198 | exact_match | `mlperf_deepseek_r1_mcq_accuracy.parquet` |
-| MMLU-Pro | 2410 | exact_match | extracted by `extract_mlperf_subsets.py` |
-| LiveCodeBench | 349 | code_execute_verify | extracted by `extract_mlperf_subsets.py` |
+| Sub-dataset   | Samples | Metric              | File                                       |
+| ------------- | ------- | ------------------- | ------------------------------------------ |
+| AIME 1983     | 932     | exact_match         | `mlperf_deepseek_r1_math_accuracy.parquet` |
+| MATH-500      | 499     | exact_match         | `mlperf_deepseek_r1_math_accuracy.parquet` |
+| GPQA          | 198     | exact_match         | `mlperf_deepseek_r1_mcq_accuracy.parquet`  |
+| MMLU-Pro      | 2410    | exact_match         | extracted by `extract_mlperf_subsets.py`   |
+| LiveCodeBench | 349     | code_execute_verify | extracted by `extract_mlperf_subsets.py`   |
 
 **Golden accuracy (fp32):** `exact_match = 81.3582%`, `TOKENS_PER_SAMPLE = 3886.2`
 **MLPerf pass threshold:** ≥ 80.52% exact_match (99% of golden), tokens within ±10%
@@ -119,6 +120,7 @@ uv run python examples/09_DeepSeek-V4-Pro_Example/extract_mlperf_subsets.py
 ```
 
 This writes:
+
 - `datasets/deepseek/mlperf_deepseek_r1_mmlu_pro_accuracy.parquet`
 - `datasets/deepseek/mlperf_deepseek_r1_livecodebench_accuracy.parquet`
 
@@ -148,6 +150,7 @@ docker logs <container_id> | tail -40
 ```
 
 Common causes:
+
 - `TimeoutError: Timed out waiting for engine core processes to start` — set `VLLM_ENGINE_READY_TIMEOUT_S=3600` (already set in `launch_server.sh`)
 - OOM during weight loading — verify `--max-model-len` is not too large for available GPU memory
 - `MODEL_PATH` not mounted correctly — check that `/model/config.json` exists inside the container
@@ -162,7 +165,7 @@ accuracy-only runs. Use the perf-warmup entry with `n_samples_to_issue: 1`.
 The model exhausted `max_new_tokens` in the thinking phase. Add `budget_tokens` to the preset:
 
 ```yaml
-- name: aime25::gptoss_budget_20k   # uses budget_tokens=20000
+- name: aime25::gptoss_budget_20k # uses budget_tokens=20000
 ```
 
 **`uv: cannot execute binary file: Exec format error`**

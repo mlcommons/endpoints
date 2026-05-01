@@ -30,7 +30,9 @@ from pathlib import Path
 
 import pandas as pd
 
-SRC = Path("datasets/deepseek/mlperf_deepseek_r1_dataset_4388_fp8_eval_accuracy.parquet")
+SRC = Path(
+    "datasets/deepseek/mlperf_deepseek_r1_dataset_4388_fp8_eval_accuracy.parquet"
+)
 OUT_DIR = Path("datasets/deepseek")
 
 SUBSETS = {
