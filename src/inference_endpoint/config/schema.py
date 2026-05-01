@@ -196,6 +196,12 @@ class ModelParams(BaseModel):
         StreamingMode,
         cyclopts.Parameter(alias="--streaming", help="Streaming mode: auto/on/off"),
     ] = StreamingMode.AUTO
+    tokenizer_name: str | None = Field(
+        None,
+        description="Local tokenizer path override. Use when AutoTokenizer.from_pretrained "
+        "fails for the HF model name (e.g. transformers ≥5.4 rope_theta regression "
+        "for DeepSeek-V4). Defaults to the model name if unset.",
+    )
 
 
 class SubmissionReference(BaseModel):

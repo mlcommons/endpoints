@@ -14,9 +14,15 @@
 # limitations under the License.
 
 
-from inference_endpoint.evaluation.extractor import PythonCodeExtractor
+import pytest
+from inference_endpoint.evaluation.extractor import (
+    ABCDExtractor,
+    LetterExtractor,
+    PythonCodeExtractor,
+)
 
 
+@pytest.mark.unit
 class TestPythonCodeExtractor:
     """Test cases for PythonCodeExtractor."""
 
@@ -155,3 +161,61 @@ def python():
         text = "```python\nprint('test')\n```"
         result = extractor_cls.extract(text)
         assert result == "print('test')"
+
+
+@pytest.mark.unit
+class TestLetterExtractor:
+    """Tests for LetterExtractor — returns raw letter (A–J) for MCQ datasets
+    where ground truth is stored as a letter (e.g. MLPerf GPQA/MMLU-Pro)."""
+
+    def test_answer_colon(self):
+        assert LetterExtractor.extract("Answer: B") == "B"
+
+    def test_markdown_answer(self):
+        assert LetterExtractor.extract("**Answer:** C") == "C"
+
+    def test_answer_colon_d(self):
+        assert LetterExtractor.extract("Answer: D") == "D"
+
+    # Extended range (E–J) for MMLU-Pro
+    def test_letter_e(self):
+        assert LetterExtractor.extract("Answer: E") == "E"
+
+    def test_letter_g(self):
+        assert LetterExtractor.extract("**Answer:** G") == "G"
+
+    def test_letter_j(self):
+        assert LetterExtractor.extract("Answer: J") == "J"
+
+    def test_boxed_letter(self):
+        assert LetterExtractor.extract(r"\boxed{F}") == "F"
+
+    def test_parenthesised_singleton(self):
+        assert LetterExtractor.extract("The correct choice is (H)") == "H"
+
+    def test_mlperf_style_output(self):
+        # Mirrors the few-shot prompt format: model outputs "Answer: X"
+        text = "Let me think... the ring characteristic is 0.\nAnswer: A"
+        assert LetterExtractor.extract(text) == "A"
+
+    def test_no_match_returns_empty_string(self):
+        assert LetterExtractor.extract("No answer here.") == ""
+
+    def test_default_on_no_match(self):
+        assert LetterExtractor.extract("Nothing", default="X") == "X"
+
+    def test_returns_letter_not_choice_key(self):
+        # Confirm it does NOT return "choice1" etc. (ABCDExtractor behaviour)
+        result = LetterExtractor.extract("Answer: B")
+        assert result == "B"
+        assert result != "choice2"
+
+    def test_abcd_extractor_unchanged(self):
+        # Confirm ABCDExtractor still maps to choiceN (regression guard)
+        assert ABCDExtractor.extract("Answer: B") == "choice2"
+
+    def test_registered(self):
+        from inference_endpoint.evaluation.extractor import Extractor
+
+        assert "letter_extractor" in Extractor.PREDEFINED
+        assert Extractor.get("letter_extractor") is LetterExtractor

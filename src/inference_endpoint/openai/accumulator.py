@@ -68,15 +68,14 @@ class OpenAISSEAccumulator(SSEAccumulatorProtocol):
 
     def get_final_output(self) -> QueryResult:
         if self.reasoning_chunks:
-            # If there are reasoning chunks, then the first chunk received
-            # is the first reasoning chunk. The rest of the reasoning chunks,
-            # as well as the output chunks can be joined together.
-            resp_reasoning: list[str] = [self.reasoning_chunks[0]]
-            if len(self.reasoning_chunks) > 1:
-                resp_reasoning.append("".join(self.reasoning_chunks[1:]))
+            # All reasoning chunks are joined into a single string so the full
+            # thinking trace is captured as-is in events.jsonl. TPOT still uses
+            # text_after_first_chunk(), which includes string reasoning in the
+            # denominator (off by one token vs. the true "after first chunk"
+            # count, which is negligible).
             text_output = TextModelOutput(
                 output="".join(self.output_chunks),
-                reasoning=resp_reasoning,
+                reasoning="".join(self.reasoning_chunks),
             )
         elif self.output_chunks:
             # If there are only output chunks, the first chunk is used for
