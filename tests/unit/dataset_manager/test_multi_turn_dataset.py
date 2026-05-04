@@ -211,7 +211,6 @@ def test_multi_turn_dataset_conversation_metadata(valid_multi_turn_jsonl):
 
     # Check sample metadata structure
     sample_meta = metadata["samples"][0]
-    assert "index" in sample_meta
     assert "conversation_id" in sample_meta
     assert "turn" in sample_meta
 

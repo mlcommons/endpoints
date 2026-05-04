@@ -144,6 +144,15 @@ class MultiTurnStrategy:
         errors = [r for r in results if isinstance(r, BaseException)]
         for err in errors:
             logger.error(f"Conversation pipeline failed: {err}")
+
+        if self._inflight:
+            logger.warning(
+                "%d query(ies) never received a response (session stop or transport failure): %s",
+                len(self._inflight),
+                list(self._inflight.keys()),
+            )
+            self._inflight.clear()
+
         if errors:
             raise errors[0]
         return phase_issuer.issued_count
@@ -254,14 +263,21 @@ class MultiTurnStrategy:
 
         response_text = result.get_response_output_string()
 
-        if result.error is not None:
-            self._conv_manager.mark_turn_failed(
-                conv_id, store_in_history=self._store_in_history
-            )
-        else:
-            self._conv_manager.mark_turn_complete(
+        try:
+            if result.error is not None:
+                self._conv_manager.mark_turn_failed(
+                    conv_id, store_in_history=self._store_in_history
+                )
+            else:
+                self._conv_manager.mark_turn_complete(
+                    conv_id,
+                    response_text,
+                    store_in_history=self._store_in_history,
+                    metadata=result.metadata,
+                )
+        except KeyError:
+            logger.warning(
+                "on_sample_complete: conversation %s not found in manager (result=%s)",
                 conv_id,
-                response_text,
-                store_in_history=self._store_in_history,
-                metadata=result.metadata,
+                result.id,
             )
