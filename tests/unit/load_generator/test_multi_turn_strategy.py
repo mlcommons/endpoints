@@ -211,23 +211,6 @@ async def test_turn_timeout_triggers_failure():
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_on_query_complete_releases_semaphore():
-    """on_query_complete releases the concurrency semaphore."""
-    conv_manager = ConversationManager()
-    metadata = _make_dataset_metadata({"conv1": [1]})
-    strategy = MultiTurnStrategy(conv_manager, metadata, target_concurrency=1)
-    assert strategy._sem is not None
-
-    # Acquire the semaphore manually
-    await strategy._sem.acquire()
-    assert strategy._sem._value == 0  # type: ignore[attr-defined]
-
-    strategy.on_query_complete("some-query")
-    assert strategy._sem._value == 1  # type: ignore[attr-defined]
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
 async def test_on_sample_complete_routes_to_manager():
     """on_sample_complete marks the turn complete in the ConversationManager."""
     conv_manager = ConversationManager()
@@ -483,3 +466,82 @@ async def test_on_sample_complete_passes_metadata():
     assert len(state.message_history) == 1
     assert state.message_history[0]["tool_calls"] == tool_calls
     assert state.message_history[0]["content"] is None
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_concurrency_limits_active_conversations():
+    """target_concurrency=2 starts at most 2 conversation pipelines simultaneously.
+
+    Uses 2-turn conversations so each pipeline has an await point (turn_done.wait
+    between turns). With 4 conversations and 2 workers, the 3rd and 4th conversations
+    cannot start until a worker finishes its current conversation.
+    """
+    conv_manager = ConversationManager()
+    # 4 two-turn conversations; pipeline awaits turn-1 response before issuing turn-2
+    metadata = _make_dataset_metadata(
+        {"conv1": [1, 2], "conv2": [1, 2], "conv3": [1, 2], "conv4": [1, 2]}
+    )
+    strategy = MultiTurnStrategy(conv_manager, metadata, target_concurrency=2)
+    issuer = FakePhaseIssuer()
+
+    async def auto_respond():
+        already_done = 0
+        while True:
+            while already_done < len(issuer.issued):
+                idx = issuer.issued[already_done]
+                q = f"q{idx:04d}"
+                strategy.on_sample_complete(
+                    QueryResult(id=q, response_output=TextModelOutput(output="r"))
+                )
+                already_done += 1
+            await asyncio.sleep(0.02)
+
+    responder_task = asyncio.create_task(auto_respond())
+    execute_task = asyncio.create_task(strategy.execute(issuer))
+
+    # Let both workers start and block on turn_done.wait before auto_respond fires
+    await asyncio.sleep(0.01)
+
+    # Only 2 workers → exactly 2 turn-1 queries issued (conv3/conv4 not started yet)
+    assert issuer.issued_count == 2
+
+    await asyncio.wait_for(execute_task, timeout=5.0)
+    responder_task.cancel()
+
+    assert issuer.issued_count == 8  # 4 conversations × 2 turns
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_conversation_slot_reuse():
+    """With target_concurrency=1, worker completes conv1 before starting conv2.
+
+    Uses 2-turn conversations so the pipeline has an await between turns.
+    The single worker must process both turns of conv1 before conv2's turn 1 is issued.
+    """
+    conv_manager = ConversationManager()
+    # 2 two-turn conversations; sample indices: conv1→[0,1], conv2→[2,3]
+    metadata = _make_dataset_metadata({"conv1": [1, 2], "conv2": [1, 2]})
+    strategy = MultiTurnStrategy(conv_manager, metadata, target_concurrency=1)
+    issuer = FakePhaseIssuer()
+
+    async def auto_respond():
+        already_done = 0
+        while True:
+            while already_done < len(issuer.issued):
+                idx = issuer.issued[already_done]
+                q = f"q{idx:04d}"
+                strategy.on_sample_complete(
+                    QueryResult(id=q, response_output=TextModelOutput(output="r"))
+                )
+                already_done += 1
+            await asyncio.sleep(0.02)
+
+    responder_task = asyncio.create_task(auto_respond())
+    await strategy.execute(issuer)
+    responder_task.cancel()
+
+    # Single worker: conv1 turns (samples 0,1) must be issued before conv2 turns (2,3)
+    assert issuer.issued[:2] == [0, 1], "Conv1 turns should be issued before conv2"
+    assert issuer.issued[2:] == [2, 3], "Conv2 turns should follow conv1"

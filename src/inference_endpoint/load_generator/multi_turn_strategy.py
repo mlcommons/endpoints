@@ -32,18 +32,16 @@ _DEFAULT_TURN_TIMEOUT_S = 300.0
 
 
 class MultiTurnStrategy:
-    """Async multi-turn strategy. Spawns per-conversation asyncio.Tasks.
+    """Async multi-turn strategy. Uses a worker-pool to limit active conversations.
 
-    Each conversation runs as an independent asyncio.Task that enforces
-    sequential turn ordering: turn N+1 cannot be issued until turn N completes.
-    Conversations run concurrently — no cross-conversation synchronization.
-
-    Optional target_concurrency limits total in-flight requests across all
-    conversations using asyncio.Semaphore.
+    N worker tasks pull from a queue of conversations. Each worker processes all
+    turns of one conversation before moving to the next, so at most N conversations
+    are active simultaneously. When target_concurrency is None, all conversations
+    run concurrently (one worker per conversation).
 
     Integration with BenchmarkSession:
-    - execute(): spawns conversation tasks, awaits all to complete
-    - on_query_complete(): releases semaphore slot (concurrency control only)
+    - execute(): populates queue, spawns workers, awaits all to complete
+    - on_query_complete(): no-op (required by LoadStrategy protocol)
     - on_sample_complete(): routes completed QueryResult to ConversationManager
 
     The response routing path:
@@ -69,7 +67,8 @@ class MultiTurnStrategy:
             conversation_manager: Manages conversation sequencing state.
             dataset_metadata: Metadata from MultiTurnDataset (samples list).
             multi_turn_config: Multi-turn conversation configuration.
-            target_concurrency: Optional maximum concurrent in-flight requests.
+            target_concurrency: Maximum number of simultaneously active conversations.
+                None means all conversations run concurrently.
         """
         self._conv_manager = conversation_manager
         self._dataset_metadata = dataset_metadata
@@ -80,11 +79,6 @@ class MultiTurnStrategy:
             else _DEFAULT_TURN_TIMEOUT_S
         )
         self._target_concurrency = target_concurrency
-        self._sem: asyncio.Semaphore | None = (
-            asyncio.Semaphore(target_concurrency)
-            if target_concurrency is not None and target_concurrency > 0
-            else None
-        )
         self._store_in_history = (
             not multi_turn_config.use_dataset_history
             if multi_turn_config is not None
@@ -110,7 +104,7 @@ class MultiTurnStrategy:
             conv_id = sample_meta["conversation_id"]
             conv_samples[conv_id].append((sample_index, sample_meta["turn"]))
 
-        # Pre-create all conversation states before spawning tasks (no locking needed).
+        # Pre-create all conversation states before spawning workers (no locking needed).
         sys_prompts = self._dataset_metadata.get("system_prompts_by_conv", {})
         for conv_id, turns in conv_samples.items():
             sys_content = sys_prompts.get(conv_id) if self._store_in_history else None
@@ -126,21 +120,46 @@ class MultiTurnStrategy:
             )
             self._conv_states[conv_id] = state
 
-        tasks = [
+        # Build queue of (conv_id, turns) pairs for workers to pull from.
+        conv_queue: asyncio.Queue[tuple[str, list[tuple[int, int]]]] = asyncio.Queue()
+        for conv_id, turns in conv_samples.items():
+            await conv_queue.put((conv_id, turns))
+
+        n_conversations = len(conv_samples)
+        n_workers = (
+            min(self._target_concurrency, n_conversations)
+            if self._target_concurrency is not None and self._target_concurrency > 0
+            else n_conversations
+        )
+
+        worker_tasks = [
             asyncio.create_task(
-                self._conv_pipeline(conv_id, turns, phase_issuer),
-                name=f"mt-pipeline-{conv_id}",
+                self._worker(conv_queue, phase_issuer),
+                name=f"mt-worker-{i}",
             )
-            for conv_id, turns in conv_samples.items()
+            for i in range(n_workers)
         ]
 
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        results = await asyncio.gather(*worker_tasks, return_exceptions=True)
         errors = [r for r in results if isinstance(r, BaseException)]
         for err in errors:
             logger.error(f"Conversation pipeline failed: {err}")
         if errors:
             raise errors[0]
         return phase_issuer.issued_count
+
+    async def _worker(
+        self,
+        conv_queue: asyncio.Queue[tuple[str, list[tuple[int, int]]]],
+        phase_issuer: PhaseIssuerProtocol,
+    ) -> None:
+        """Pull conversations from queue and process each one fully before taking the next."""
+        while True:
+            try:
+                conv_id, turns = conv_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            await self._conv_pipeline(conv_id, turns, phase_issuer)
 
     async def _conv_pipeline(
         self,
@@ -177,10 +196,6 @@ class MultiTurnStrategy:
                     break
                 state.turn_done.clear()
 
-            # Acquire concurrency slot before issuing.
-            if self._sem is not None:
-                await self._sem.acquire()
-
             # Live-history mode: build messages from accumulated history + current turn.
             data_override: dict[str, Any] | None = None
             current_turn_messages: list[dict[str, Any]] | None = None
@@ -205,9 +220,7 @@ class MultiTurnStrategy:
 
             query_id = phase_issuer.issue(idx, data_override=data_override)
             if query_id is None:
-                # Session stopping — release slot and exit.
-                if self._sem is not None:
-                    self._sem.release()
+                # Session stopping — exit pipeline.
                 break
 
             self._inflight[query_id] = conv_id
@@ -218,16 +231,8 @@ class MultiTurnStrategy:
                 state.message_history.extend(current_turn_messages)
 
     def on_query_complete(self, query_id: str) -> None:
-        """Called by BenchmarkSession when a QueryResult arrives.
-
-        Releases the concurrency semaphore slot. Response routing is done
-        via on_sample_complete (which receives the full QueryResult).
-
-        Args:
-            query_id: ID of the completed query.
-        """
-        if self._sem is not None:
-            self._sem.release()
+        """No-op. Required by LoadStrategy protocol; called by BenchmarkSession."""
+        pass
 
     def on_sample_complete(self, result: QueryResult) -> None:
         """Route completed QueryResult to ConversationManager.
