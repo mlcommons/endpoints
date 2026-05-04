@@ -15,7 +15,6 @@
 
 """Conversation state management for multi-turn benchmarking."""
 
-import asyncio
 import logging
 from dataclasses import dataclass, field
 from typing import Any
@@ -27,13 +26,8 @@ logger = logging.getLogger(__name__)
 class ConversationState:
     """Per-conversation state for multi-turn benchmarking.
 
-    The pipeline task awaits ``turn_done`` between turns; ``mark_turn_complete``
-    and ``mark_turn_failed`` set it synchronously from ``on_sample_complete``.
-
     Attributes:
         conversation_id: Unique identifier for this conversation.
-        turn_done: Event set when a response arrives. Pipeline waits, then clears
-            it before issuing the next turn.
         message_history: Accumulated message list (populated only when
             use_dataset_history=False; empty otherwise).
         completed_turns: Turns with responses (success or failure) — observability only.
@@ -42,8 +36,6 @@ class ConversationState:
     """
 
     conversation_id: str
-    # Python 3.12+: asyncio.Event no longer requires a running loop at construction.
-    turn_done: asyncio.Event = field(default_factory=asyncio.Event)
     message_history: list[dict[str, Any]] = field(default_factory=list)
     completed_turns: int = 0
     failed_turns: int = 0
@@ -59,11 +51,11 @@ class ConversationState:
 class ConversationManager:
     """Manages per-conversation state for multi-turn benchmarking.
 
-    All methods are synchronous. The pipeline task uses ``ConversationState.turn_done``
-    directly for turn-done notification — no locks or condition variables needed.
+    All methods are synchronous. Turn sequencing is driven by MultiTurnStrategy
+    which calls on_sample_complete() → _issue_next_turn() directly.
 
-    All states are pre-created by ``MultiTurnStrategy.execute()`` before any pipeline
-    task starts, so ``get_or_create()`` requires no locking.
+    All states are pre-created by MultiTurnStrategy.execute() before any turns
+    are issued, so get_or_create() requires no locking.
     """
 
     def __init__(self):
@@ -126,7 +118,7 @@ class ConversationManager:
         store_in_history: bool = False,
         metadata: dict[str, Any] | None = None,
     ) -> None:
-        """Record a successful response and wake the pipeline task.
+        """Record a successful response.
 
         Args:
             conversation_id: Conversation ID.
@@ -150,14 +142,13 @@ class ConversationManager:
                 state.message_history.append(msg)
         state.completed_turns += 1
         self._log_if_complete(state, conversation_id)
-        state.turn_done.set()
 
     def mark_turn_failed(
         self,
         conversation_id: str,
         store_in_history: bool = False,
     ) -> None:
-        """Record a failed response and wake the pipeline task.
+        """Record a failed response.
 
         Failed turns count toward completion so sequencing progresses under errors.
 
@@ -179,4 +170,3 @@ class ConversationManager:
         state.failed_turns += 1
         logger.warning(f"Turn failed for conversation {conversation_id}")
         self._log_if_complete(state, conversation_id)
-        state.turn_done.set()

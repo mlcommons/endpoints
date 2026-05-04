@@ -68,14 +68,12 @@ async def test_single_conversation_single_turn():
     strategy = MultiTurnStrategy(conv_manager, metadata)
     issuer = FakePhaseIssuer()
 
-    # Simulate response completion (turn 1 is issued, then completes)
     async def complete_turns():
-        # Wait a tick for the strategy to issue the first turn
         await asyncio.sleep(0.01)
-        # Mark turn 1 complete
-        state = conv_manager.get_state("conv1")
-        if state:
-            conv_manager.mark_turn_complete("conv1", "response 1")
+        result = QueryResult(
+            id="q0000", response_output=TextModelOutput(output="response 1")
+        )
+        strategy.on_sample_complete(result)
 
     asyncio.create_task(complete_turns())
     count = await strategy.execute(issuer)
@@ -107,7 +105,6 @@ async def test_single_conversation_multi_turn():
     async def simulate_responses():
         await asyncio.sleep(0.01)
         for turn_q, resp in [("q0000", "r1"), ("q0001", "r2"), ("q0002", "r3")]:
-            # Signal turn complete via on_sample_complete
             result = QueryResult(
                 id=turn_q, response_output=TextModelOutput(output=resp)
             )
@@ -132,7 +129,6 @@ async def test_multiple_conversations_concurrent():
 
     async def simulate_responses():
         await asyncio.sleep(0.02)
-        # Complete all turns for both conversations
         for q_prefix in range(4):
             q = f"q{q_prefix:04d}"
             result = QueryResult(id=q, response_output=TextModelOutput(output="resp"))
@@ -174,12 +170,10 @@ async def test_turn_ordering_enforced():
         import time
 
         await asyncio.sleep(0.02)
-        # Complete turn 1 (sample 0) after a delay
         complete_timestamps[0] = time.monotonic()
         result = QueryResult(id="q0000", response_output=TextModelOutput(output="r1"))
         strategy.on_sample_complete(result)
         await asyncio.sleep(0.05)
-        # Complete turn 2 (sample 1)
         complete_timestamps[1] = time.monotonic()
         result = QueryResult(id="q0001", response_output=TextModelOutput(output="r2"))
         strategy.on_sample_complete(result)
@@ -227,7 +221,6 @@ async def test_on_sample_complete_routes_to_manager():
     state = conv_manager.get_state("conv1")
     assert state is not None
     assert state.completed_turns == 1
-    assert state.turn_done.is_set()
     assert state.is_complete()
 
 
@@ -296,7 +289,10 @@ async def test_live_history_initializes_system_prompt():
 
     async def complete_turn():
         await asyncio.sleep(0.01)
-        conv_manager.mark_turn_complete("conv1", "response")
+        result = QueryResult(
+            id="q0000", response_output=TextModelOutput(output="response")
+        )
+        strategy.on_sample_complete(result)
 
     asyncio.create_task(complete_turn())
     await strategy.execute(issuer)
@@ -325,7 +321,10 @@ async def test_live_history_no_system_prompt_when_none():
 
     async def complete_turn():
         await asyncio.sleep(0.01)
-        conv_manager.mark_turn_complete("conv1", "response")
+        result = QueryResult(
+            id="q0000", response_output=TextModelOutput(output="response")
+        )
+        strategy.on_sample_complete(result)
 
     asyncio.create_task(complete_turn())
     await strategy.execute(issuer)
@@ -352,7 +351,10 @@ async def test_dataset_history_mode_does_not_inject_system_prompt():
 
     async def complete_turn():
         await asyncio.sleep(0.01)
-        conv_manager.mark_turn_complete("conv1", "response")
+        result = QueryResult(
+            id="q0000", response_output=TextModelOutput(output="response")
+        )
+        strategy.on_sample_complete(result)
 
     asyncio.create_task(complete_turn())
     await strategy.execute(issuer)
@@ -366,7 +368,7 @@ async def test_dataset_history_mode_does_not_inject_system_prompt():
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_pipeline_error_propagated():
-    """execute() re-raises when a conversation pipeline raises an exception."""
+    """execute() re-raises when _issue_next_turn raises an exception."""
     conv_manager = ConversationManager()
     metadata = _make_dataset_metadata({"conv1": [1]})
     strategy = MultiTurnStrategy(conv_manager, metadata)
@@ -492,9 +494,9 @@ async def test_on_sample_complete_passes_metadata():
 async def test_concurrency_limits_active_conversations():
     """target_concurrency=2 starts at most 2 conversation pipelines simultaneously.
 
-    Uses 2-turn conversations so each pipeline has an await point (turn_done.wait
-    between turns). With 4 conversations and 2 workers, the 3rd and 4th conversations
-    cannot start until a worker finishes its current conversation.
+    Uses 2-turn conversations so each pipeline has an await point between turns.
+    With 4 conversations and 2 workers, the 3rd and 4th conversations cannot start
+    until a worker finishes its current conversation.
     """
     conv_manager = ConversationManager()
     # 4 two-turn conversations; pipeline awaits turn-1 response before issuing turn-2
@@ -519,7 +521,7 @@ async def test_concurrency_limits_active_conversations():
     responder_task = asyncio.create_task(auto_respond())
     execute_task = asyncio.create_task(strategy.execute(issuer))
 
-    # Let both workers start and block on turn_done.wait before auto_respond fires
+    # Let both seed turns get issued before auto_respond fires
     await asyncio.sleep(0.01)
 
     # Only 2 workers → exactly 2 turn-1 queries issued (conv3/conv4 not started yet)
@@ -536,8 +538,7 @@ async def test_concurrency_limits_active_conversations():
 async def test_conversation_slot_reuse():
     """With target_concurrency=1, worker completes conv1 before starting conv2.
 
-    Uses 2-turn conversations so the pipeline has an await between turns.
-    The single worker must process both turns of conv1 before conv2's turn 1 is issued.
+    The single slot must process both turns of conv1 before conv2's turn 1 is issued.
     """
     conv_manager = ConversationManager()
     # 2 two-turn conversations; sample indices: conv1→[0,1], conv2→[2,3]
@@ -561,6 +562,6 @@ async def test_conversation_slot_reuse():
     await strategy.execute(issuer)
     responder_task.cancel()
 
-    # Single worker: conv1 turns (samples 0,1) must be issued before conv2 turns (2,3)
+    # Single slot: conv1 turns (samples 0,1) must be issued before conv2 turns (2,3)
     assert issuer.issued[:2] == [0, 1], "Conv1 turns should be issued before conv2"
     assert issuer.issued[2:] == [2, 3], "Conv2 turns should follow conv1"

@@ -29,7 +29,6 @@ def test_conversation_state_initialization():
     state = ConversationState(conversation_id="conv_001")
 
     assert state.conversation_id == "conv_001"
-    assert not state.turn_done.is_set()
     assert state.message_history == []
     assert state.completed_turns == 0
     assert state.failed_turns == 0
@@ -95,7 +94,7 @@ def test_conversation_manager_multiple_conversations():
 
 @pytest.mark.unit
 def test_conversation_manager_mark_turn_complete():
-    """mark_turn_complete increments counter, appends history, sets event."""
+    """mark_turn_complete increments counter and appends history."""
     manager = ConversationManager()
     state = manager.get_or_create("conv_001")
 
@@ -103,7 +102,6 @@ def test_conversation_manager_mark_turn_complete():
 
     assert state.completed_turns == 1
     assert state.failed_turns == 0
-    assert state.turn_done.is_set()
     assert state.message_history == []  # store_in_history=False by default
 
 
@@ -120,7 +118,7 @@ def test_conversation_manager_mark_turn_complete_stores_history():
 
 @pytest.mark.unit
 def test_conversation_manager_mark_turn_failed():
-    """mark_turn_failed increments both counters and sets event."""
+    """mark_turn_failed increments both counters."""
     manager = ConversationManager()
     state = manager.get_or_create("conv_001", expected_client_turns=2)
 
@@ -128,7 +126,6 @@ def test_conversation_manager_mark_turn_failed():
 
     assert state.completed_turns == 1
     assert state.failed_turns == 1
-    assert state.turn_done.is_set()
 
 
 @pytest.mark.unit
@@ -185,71 +182,6 @@ def test_all_turns_fail():
     assert state.is_complete()
     assert state.completed_turns == 2
     assert state.failed_turns == 2
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_event_set_wakes_waiter():
-    """mark_turn_complete sets turn_done so a blocked await returns."""
-    manager = ConversationManager()
-    state = manager.get_or_create("conv_001")
-
-    woke_up: list[bool] = []
-
-    async def waiter():
-        await state.turn_done.wait()
-        woke_up.append(True)
-
-    task = asyncio.create_task(waiter())
-    await asyncio.sleep(0.01)
-    assert not woke_up
-
-    manager.mark_turn_complete("conv_001", "response")
-    await asyncio.sleep(0.01)
-    await task
-
-    assert woke_up == [True]
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_failed_sets_event():
-    """mark_turn_failed sets turn_done so the pipeline can unblock."""
-    manager = ConversationManager()
-    state = manager.get_or_create("conv_001")
-
-    woke_up: list[bool] = []
-
-    async def waiter():
-        await state.turn_done.wait()
-        woke_up.append(True)
-
-    task = asyncio.create_task(waiter())
-    await asyncio.sleep(0.01)
-
-    manager.mark_turn_failed("conv_001")
-    await asyncio.sleep(0.01)
-    await task
-
-    assert woke_up == [True]
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_event_clear_resets_for_next_turn():
-    """Clearing turn_done after wait() properly gates the next turn."""
-    manager = ConversationManager()
-    state = manager.get_or_create("conv_001")
-
-    # First turn: set then clear
-    manager.mark_turn_complete("conv_001", "r1")
-    await state.turn_done.wait()
-    state.turn_done.clear()
-    assert not state.turn_done.is_set()
-
-    # Second turn: set again
-    manager.mark_turn_complete("conv_001", "r2")
-    assert state.turn_done.is_set()
 
 
 @pytest.mark.unit
