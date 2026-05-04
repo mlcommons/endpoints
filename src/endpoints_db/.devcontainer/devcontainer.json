@@ -1,0 +1,22 @@
+{
+  "name": "MLPerf Submission API",
+  "dockerComposeFile": "docker-compose.yml",
+  "service": "app",
+  "workspaceFolder": "/workspace",
+  "forwardPorts": [8000, 5432],
+  "postStartCommand": "curl -LsSf https://astral.sh/uv/install.sh | sh && cd /workspace && uv sync --group dev",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/workspace/.venv/bin/python"
+      }
+    }
+  },
+  "remoteEnv": {
+    "DATABASE_URL": "postgresql+asyncpg://postgres:postgres@db:5432/mlperf"
+  }
+}

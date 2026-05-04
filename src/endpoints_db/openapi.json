@@ -1,0 +1,1691 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "MLPerf Submission API",
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/runs": {
+      "post": {
+        "tags": [
+          "runs"
+        ],
+        "summary": "Create Run",
+        "operationId": "create_run_runs_post",
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "PRISM user ID of the submitter",
+              "title": "User Id"
+            },
+            "description": "PRISM user ID of the submitter"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RunCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "runs"
+        ],
+        "summary": "List Runs",
+        "operationId": "list_runs_runs_get",
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "PRISM user ID",
+              "title": "User Id"
+            },
+            "description": "PRISM user ID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/RunSummary"
+                  },
+                  "title": "Response List Runs Runs Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/runs/{run_id}": {
+      "get": {
+        "tags": [
+          "runs"
+        ],
+        "summary": "Get Run",
+        "operationId": "get_run_runs__run_id__get",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Run Id"
+            }
+          },
+          {
+            "name": "X-User-Id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "X-User-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "runs"
+        ],
+        "summary": "Delete Run",
+        "operationId": "delete_run_runs__run_id__delete",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Run Id"
+            }
+          },
+          {
+            "name": "X-User-Id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "X-User-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/runs/{run_id}/pin": {
+      "patch": {
+        "tags": [
+          "runs"
+        ],
+        "summary": "Pin Run",
+        "operationId": "pin_run_runs__run_id__pin_patch",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Run Id"
+            }
+          },
+          {
+            "name": "X-User-Id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "X-User-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/runs/{run_id}/unpin": {
+      "patch": {
+        "tags": [
+          "runs"
+        ],
+        "summary": "Unpin Run",
+        "operationId": "unpin_run_runs__run_id__unpin_patch",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Run Id"
+            }
+          },
+          {
+            "name": "X-User-Id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "X-User-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/submissions": {
+      "post": {
+        "tags": [
+          "submissions"
+        ],
+        "summary": "Create Submission",
+        "operationId": "create_submission_submissions_post",
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "PRISM user ID of the submitter",
+              "title": "User Id"
+            },
+            "description": "PRISM user ID of the submitter"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SubmissionCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SubmissionOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "submissions"
+        ],
+        "summary": "List Submissions",
+        "operationId": "list_submissions_submissions_get",
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "PRISM user ID",
+              "title": "User Id"
+            },
+            "description": "PRISM user ID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SubmissionOut"
+                  },
+                  "title": "Response List Submissions Submissions Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/submissions/{submission_id}": {
+      "get": {
+        "tags": [
+          "submissions"
+        ],
+        "summary": "Get Submission",
+        "operationId": "get_submission_submissions__submission_id__get",
+        "parameters": [
+          {
+            "name": "submission_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Submission Id"
+            }
+          },
+          {
+            "name": "user_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "PRISM user ID",
+              "title": "User Id"
+            },
+            "description": "PRISM user ID"
+          },
+          {
+            "name": "include_runs",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": true,
+              "title": "Include Runs"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SubmissionWithRuns"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "submissions"
+        ],
+        "summary": "Update Submission",
+        "operationId": "update_submission_submissions__submission_id__patch",
+        "parameters": [
+          {
+            "name": "submission_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Submission Id"
+            }
+          },
+          {
+            "name": "user_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "PRISM user ID",
+              "title": "User Id"
+            },
+            "description": "PRISM user ID"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SubmissionUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SubmissionOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "submissions"
+        ],
+        "summary": "Withdraw Submission",
+        "operationId": "withdraw_submission_submissions__submission_id__delete",
+        "parameters": [
+          {
+            "name": "submission_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Submission Id"
+            }
+          },
+          {
+            "name": "user_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "PRISM user ID",
+              "title": "User Id"
+            },
+            "description": "PRISM user ID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SubmissionOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "tags": [
+          "meta"
+        ],
+        "summary": "Health",
+        "operationId": "health_health_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "RunCreate": {
+        "properties": {
+          "started_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Started At"
+          },
+          "finished_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Finished At"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "pinned": {
+            "type": "boolean",
+            "title": "Pinned",
+            "default": false
+          },
+          "system_info": {
+            "type": "object",
+            "title": "System Info"
+          },
+          "config": {
+            "type": "object",
+            "title": "Config"
+          },
+          "result_summary": {
+            "type": "object",
+            "title": "Result Summary"
+          },
+          "archive_uri": {
+            "type": "string",
+            "title": "Archive Uri"
+          }
+        },
+        "type": "object",
+        "required": [
+          "started_at",
+          "finished_at",
+          "system_info",
+          "config",
+          "result_summary",
+          "archive_uri"
+        ],
+        "title": "RunCreate",
+        "example": {
+          "archive_uri": "s3://mlperf-submissions/runs/2025-04/u_prism_7f3a9b/llama-3.1-8b_vllm_perf_concurrency4.tar.gz",
+          "config": {
+            "concurrency": 4,
+            "dataset": "cnn_dailymail",
+            "max_output_tokens": 128,
+            "model": "meta-llama/Llama-3.1-8B-Instruct",
+            "n_samples": 2000,
+            "scenario": "llama-3.1-8b_vllm_perf",
+            "target_qps": 4.2,
+            "temperature": 0.0
+          },
+          "finished_at": "2025-04-28T11:42:17",
+          "result_summary": {
+            "accuracy_scores": {
+              "rouge1": 38.83,
+              "rouge2": 15.96,
+              "rougeL": 24.55,
+              "rougeLsum": 35.88
+            },
+            "completed": 2000,
+            "elapsed_time_secs": 475.7,
+            "failed": 0,
+            "latency_ms": {
+              "max": 11470.3,
+              "mean": 944.7,
+              "median": 927.3,
+              "min": 870.1,
+              "p90": 1283.1,
+              "p99": 2134.5,
+              "std_dev": 400.6
+            },
+            "qps": 4.2,
+            "tpot_ms": {
+              "mean": 8.7,
+              "median": 8.3
+            },
+            "ttft_ms": {
+              "max": 335.8,
+              "mean": 80.9,
+              "median": 80.5,
+              "min": 31.2
+            }
+          },
+          "started_at": "2025-04-28T09:15:00",
+          "system_info": {
+            "cpu": "Intel Xeon W9-3595X",
+            "framework": "vllm==0.4.2",
+            "gpu": "8x NVIDIA H100 SXM5 80GB",
+            "memory_gb": 512,
+            "os": "Ubuntu 22.04.4 LTS"
+          }
+        }
+      },
+      "RunOut": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "user_id": {
+            "type": "string",
+            "title": "User Id"
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Started At"
+          },
+          "finished_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Finished At"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "pinned": {
+            "type": "boolean",
+            "title": "Pinned"
+          },
+          "system_info": {
+            "type": "object",
+            "title": "System Info"
+          },
+          "config": {
+            "type": "object",
+            "title": "Config"
+          },
+          "result_summary": {
+            "type": "object",
+            "title": "Result Summary"
+          },
+          "archive_uri": {
+            "type": "string",
+            "title": "Archive Uri"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "user_id",
+          "started_at",
+          "finished_at",
+          "expires_at",
+          "pinned",
+          "system_info",
+          "config",
+          "result_summary",
+          "archive_uri"
+        ],
+        "title": "RunOut",
+        "example": {
+          "archive_uri": "s3://mlperf-submissions/runs/2025-04/u_prism_7f3a9b/llama-3.1-8b_vllm_perf_concurrency4.tar.gz",
+          "config": {
+            "concurrency": 4,
+            "dataset": "cnn_dailymail",
+            "max_output_tokens": 128,
+            "model": "meta-llama/Llama-3.1-8B-Instruct",
+            "n_samples": 2000,
+            "scenario": "llama-3.1-8b_vllm_perf",
+            "target_qps": 4.2,
+            "temperature": 0.0
+          },
+          "expires_at": "2026-04-28T09:15:00",
+          "finished_at": "2025-04-28T11:42:17",
+          "id": "d5d9873e-5eca-4f8d-a487-4be1cb8b440c",
+          "pinned": false,
+          "result_summary": {
+            "accuracy_scores": {
+              "rouge1": 38.83,
+              "rouge2": 15.96,
+              "rougeL": 24.55,
+              "rougeLsum": 35.88
+            },
+            "completed": 2000,
+            "elapsed_time_secs": 475.7,
+            "failed": 0,
+            "latency_ms": {
+              "max": 11470.3,
+              "mean": 944.7,
+              "median": 927.3,
+              "min": 870.1,
+              "p90": 1283.1,
+              "p99": 2134.5,
+              "std_dev": 400.6
+            },
+            "qps": 4.2,
+            "tpot_ms": {
+              "mean": 8.7,
+              "median": 8.3
+            },
+            "ttft_ms": {
+              "max": 335.8,
+              "mean": 80.9,
+              "median": 80.5,
+              "min": 31.2
+            }
+          },
+          "started_at": "2025-04-28T09:15:00",
+          "system_info": {
+            "cpu": "Intel Xeon W9-3595X",
+            "framework": "vllm==0.4.2",
+            "gpu": "8x NVIDIA H100 SXM5 80GB",
+            "memory_gb": 512,
+            "os": "Ubuntu 22.04.4 LTS"
+          },
+          "user_id": "u_prism_7f3a9b"
+        }
+      },
+      "RunSummary": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "concurrency": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Concurrency"
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Started At"
+          },
+          "finished_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Finished At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "model",
+          "concurrency",
+          "started_at",
+          "finished_at"
+        ],
+        "title": "RunSummary",
+        "example": {
+          "concurrency": 4,
+          "finished_at": "2025-04-28T11:42:17",
+          "id": "d5d9873e-5eca-4f8d-a487-4be1cb8b440c",
+          "model": "meta-llama/Llama-3.1-8B-Instruct",
+          "started_at": "2025-04-28T09:15:00"
+        }
+      },
+      "SubmissionCreate": {
+        "properties": {
+          "benchmark_version": {
+            "type": "integer",
+            "title": "Benchmark Version",
+            "default": 1
+          },
+          "division": {
+            "type": "string",
+            "title": "Division"
+          },
+          "availability": {
+            "type": "string",
+            "title": "Availability"
+          },
+          "early_publish": {
+            "type": "boolean",
+            "title": "Early Publish",
+            "default": false
+          },
+          "publication_cycle": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Publication Cycle"
+          },
+          "target_availability_date": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Availability Date"
+          },
+          "run_ids": {
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "type": "array",
+            "title": "Run Ids"
+          }
+        },
+        "type": "object",
+        "required": [
+          "division",
+          "availability",
+          "run_ids"
+        ],
+        "title": "SubmissionCreate",
+        "example": {
+          "availability": "available",
+          "benchmark_version": 1,
+          "division": "standardized",
+          "early_publish": false,
+          "publication_cycle": "2025-04-C1",
+          "run_ids": [
+            "d5d9873e-5eca-4f8d-a487-4be1cb8b440c"
+          ]
+        }
+      },
+      "SubmissionOut": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "user_id": {
+            "type": "string",
+            "title": "User Id"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "benchmark_version": {
+            "type": "integer",
+            "title": "Benchmark Version"
+          },
+          "division": {
+            "type": "string",
+            "title": "Division"
+          },
+          "availability": {
+            "type": "string",
+            "title": "Availability"
+          },
+          "early_publish": {
+            "type": "boolean",
+            "title": "Early Publish"
+          },
+          "publication_cycle": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Publication Cycle"
+          },
+          "target_availability_date": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Availability Date"
+          },
+          "availability_qualified_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Availability Qualified At"
+          },
+          "compliance_passed_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Compliance Passed At"
+          },
+          "first_published_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First Published At"
+          },
+          "peer_review_started_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Peer Review Started At"
+          },
+          "objection_resolution_started_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Objection Resolution Started At"
+          },
+          "finalized_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finalized At"
+          },
+          "withdrawn_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Withdrawn At"
+          },
+          "run_ids": {
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "type": "array",
+            "title": "Run Ids"
+          },
+          "archive_uri": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Archive Uri"
+          },
+          "pr_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pr Url"
+          },
+          "pr_number": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pr Number"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "user_id",
+          "created_at",
+          "status",
+          "benchmark_version",
+          "division",
+          "availability",
+          "early_publish",
+          "publication_cycle",
+          "target_availability_date",
+          "availability_qualified_at",
+          "compliance_passed_at",
+          "first_published_at",
+          "peer_review_started_at",
+          "objection_resolution_started_at",
+          "finalized_at",
+          "withdrawn_at",
+          "run_ids",
+          "archive_uri",
+          "pr_url",
+          "pr_number"
+        ],
+        "title": "SubmissionOut",
+        "example": {
+          "availability": "available",
+          "benchmark_version": 1,
+          "created_at": "2025-04-28T12:00:00",
+          "division": "standardized",
+          "early_publish": false,
+          "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+          "publication_cycle": "2025-04-C1",
+          "run_ids": [
+            "d5d9873e-5eca-4f8d-a487-4be1cb8b440c"
+          ],
+          "status": "COMPLIANCE_CHECKING",
+          "user_id": "u_prism_7f3a9b"
+        }
+      },
+      "SubmissionUpdate": {
+        "properties": {
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          },
+          "availability_qualified_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Availability Qualified At"
+          },
+          "compliance_passed_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Compliance Passed At"
+          },
+          "first_published_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First Published At"
+          },
+          "peer_review_started_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Peer Review Started At"
+          },
+          "objection_resolution_started_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Objection Resolution Started At"
+          },
+          "finalized_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finalized At"
+          },
+          "pr_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pr Url"
+          },
+          "pr_number": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pr Number"
+          },
+          "archive_uri": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Archive Uri"
+          },
+          "publication_cycle": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Publication Cycle"
+          },
+          "target_availability_date": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Availability Date"
+          }
+        },
+        "type": "object",
+        "title": "SubmissionUpdate",
+        "example": {
+          "compliance_passed_at": "2025-05-01T14:30:00",
+          "pr_number": 42,
+          "pr_url": "https://github.com/mlcommons/submissions/pull/42",
+          "status": "PEER_REVIEW_PENDING"
+        }
+      },
+      "SubmissionWithRuns": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "user_id": {
+            "type": "string",
+            "title": "User Id"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "benchmark_version": {
+            "type": "integer",
+            "title": "Benchmark Version"
+          },
+          "division": {
+            "type": "string",
+            "title": "Division"
+          },
+          "availability": {
+            "type": "string",
+            "title": "Availability"
+          },
+          "early_publish": {
+            "type": "boolean",
+            "title": "Early Publish"
+          },
+          "publication_cycle": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Publication Cycle"
+          },
+          "target_availability_date": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Availability Date"
+          },
+          "availability_qualified_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Availability Qualified At"
+          },
+          "compliance_passed_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Compliance Passed At"
+          },
+          "first_published_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First Published At"
+          },
+          "peer_review_started_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Peer Review Started At"
+          },
+          "objection_resolution_started_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Objection Resolution Started At"
+          },
+          "finalized_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finalized At"
+          },
+          "withdrawn_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Withdrawn At"
+          },
+          "run_ids": {
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "type": "array",
+            "title": "Run Ids"
+          },
+          "archive_uri": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Archive Uri"
+          },
+          "pr_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pr Url"
+          },
+          "pr_number": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pr Number"
+          },
+          "runs": {
+            "items": {
+              "$ref": "#/components/schemas/RunOut"
+            },
+            "type": "array",
+            "title": "Runs",
+            "default": []
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "user_id",
+          "created_at",
+          "status",
+          "benchmark_version",
+          "division",
+          "availability",
+          "early_publish",
+          "publication_cycle",
+          "target_availability_date",
+          "availability_qualified_at",
+          "compliance_passed_at",
+          "first_published_at",
+          "peer_review_started_at",
+          "objection_resolution_started_at",
+          "finalized_at",
+          "withdrawn_at",
+          "run_ids",
+          "archive_uri",
+          "pr_url",
+          "pr_number"
+        ],
+        "title": "SubmissionWithRuns",
+        "example": {
+          "availability": "available",
+          "benchmark_version": 1,
+          "created_at": "2025-04-28T12:00:00",
+          "division": "standardized",
+          "early_publish": false,
+          "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+          "publication_cycle": "2025-04-C1",
+          "run_ids": [
+            "d5d9873e-5eca-4f8d-a487-4be1cb8b440c"
+          ],
+          "runs": [
+            {
+              "archive_uri": "s3://mlperf-submissions/runs/2025-04/u_prism_7f3a9b/llama-3.1-8b_vllm_perf_concurrency4.tar.gz",
+              "config": {
+                "concurrency": 4,
+                "dataset": "cnn_dailymail",
+                "max_output_tokens": 128,
+                "model": "meta-llama/Llama-3.1-8B-Instruct",
+                "n_samples": 2000,
+                "scenario": "llama-3.1-8b_vllm_perf",
+                "target_qps": 4.2,
+                "temperature": 0.0
+              },
+              "expires_at": "2026-04-28T09:15:00",
+              "finished_at": "2025-04-28T11:42:17",
+              "id": "d5d9873e-5eca-4f8d-a487-4be1cb8b440c",
+              "pinned": false,
+              "result_summary": {
+                "accuracy_scores": {
+                  "rouge1": 38.83,
+                  "rouge2": 15.96,
+                  "rougeL": 24.55,
+                  "rougeLsum": 35.88
+                },
+                "completed": 2000,
+                "elapsed_time_secs": 475.7,
+                "failed": 0,
+                "latency_ms": {
+                  "max": 11470.3,
+                  "mean": 944.7,
+                  "median": 927.3,
+                  "min": 870.1,
+                  "p90": 1283.1,
+                  "p99": 2134.5,
+                  "std_dev": 400.6
+                },
+                "qps": 4.2,
+                "tpot_ms": {
+                  "mean": 8.7,
+                  "median": 8.3
+                },
+                "ttft_ms": {
+                  "max": 335.8,
+                  "mean": 80.9,
+                  "median": 80.5,
+                  "min": 31.2
+                }
+              },
+              "started_at": "2025-04-28T09:15:00",
+              "system_info": {
+                "cpu": "Intel Xeon W9-3595X",
+                "framework": "vllm==0.4.2",
+                "gpu": "8x NVIDIA H100 SXM5 80GB",
+                "memory_gb": 512,
+                "os": "Ubuntu 22.04.4 LTS"
+              },
+              "user_id": "u_prism_7f3a9b"
+            }
+          ],
+          "status": "COMPLIANCE_CHECKING",
+          "user_id": "u_prism_7f3a9b"
+        }
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      }
+    }
+  }
+}
