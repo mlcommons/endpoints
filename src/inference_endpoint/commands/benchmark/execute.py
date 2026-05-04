@@ -63,8 +63,6 @@ from inference_endpoint.config.schema import (
     APIType,
     BenchmarkConfig,
     DatasetType,
-    LoadPattern,
-    LoadPatternType,
     StreamingMode,
     TestMode,
     TestType,
@@ -302,7 +300,15 @@ def setup_benchmark(config: BenchmarkConfig, test_mode: TestMode) -> BenchmarkCo
 
     # Tokenizer check (light API call, no download)
     model_name = config.model_params.name
-    tokenizer_name = model_name if _check_tokenizer_exists(model_name) else None
+    tokenizer_override = config.model_params.tokenizer_name
+    tokenizer_name: str | None
+    if tokenizer_override:
+        tokenizer_name = tokenizer_override
+        logger.info(
+            f"Tokenizer available for model: {model_name} (override: {tokenizer_override})"
+        )
+    else:
+        tokenizer_name = model_name if _check_tokenizer_exists(model_name) else None
 
     # Streaming
     logger.info(
@@ -368,7 +374,7 @@ def _build_phases(ctx: BenchmarkContext) -> list[PhaseConfig]:
             min_sample_count=acc_ds.num_samples() * acc_ds.repeats,
             rng_sched=ctx.rt_settings.rng_sched,
             rng_sample_index=ctx.rt_settings.rng_sample_index,
-            load_pattern=LoadPattern(type=LoadPatternType.MAX_THROUGHPUT),
+            load_pattern=ctx.rt_settings.load_pattern,
         )
         phases.append(
             PhaseConfig(eval_cfg.dataset_name, acc_settings, acc_ds, PhaseType.ACCURACY)
@@ -649,27 +655,48 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
     # Write scoring artifacts + copy event log from tmpfs to disk
     _write_scoring_artifacts(ctx, result, bench.tmpfs_dir)
 
-    # Accuracy scoring
+    # Accuracy scoring — continue past per-scorer failures so partial results are saved
     accuracy_scores: dict[str, Any] = {}
+    scoring_failed = False
     for eval_cfg in ctx.eval_configs:
-        scorer_instance = eval_cfg.scorer(
-            eval_cfg.dataset_name,
-            eval_cfg.dataset,
-            eval_cfg.report_dir,
-            extractor=eval_cfg.extractor,
-            ground_truth_column=eval_cfg.ground_truth_column,
+        try:
+            scorer_instance = eval_cfg.scorer(
+                eval_cfg.dataset_name,
+                eval_cfg.dataset,
+                eval_cfg.report_dir,
+                extractor=eval_cfg.extractor,
+                ground_truth_column=eval_cfg.ground_truth_column,
+            )
+            score, n_repeats = scorer_instance.score()
+            assert eval_cfg.dataset.data is not None
+            accuracy_scores[eval_cfg.dataset_name] = {
+                "dataset_name": eval_cfg.dataset_name,
+                "num_samples": len(eval_cfg.dataset.data),
+                "extractor": eval_cfg.extractor.__name__,
+                "ground_truth_column": eval_cfg.ground_truth_column,
+                "score": score,
+                "n_repeats": n_repeats,
+            }
+            logger.info(
+                f"Score for {eval_cfg.dataset_name}: {score} ({n_repeats} repeats)"
+            )
+        except Exception as e:
+            scoring_failed = True
+            logger.error(f"Scoring failed for {eval_cfg.dataset_name}: {e}")
+            assert eval_cfg.dataset.data is not None
+            accuracy_scores[eval_cfg.dataset_name] = {
+                "dataset_name": eval_cfg.dataset_name,
+                "num_samples": len(eval_cfg.dataset.data),
+                "extractor": eval_cfg.extractor.__name__,
+                "ground_truth_column": eval_cfg.ground_truth_column,
+                "score": None,
+                "error": str(e),
+            }
+
+    if scoring_failed:
+        logger.warning(
+            "One or more accuracy scorers failed — partial accuracy results saved"
         )
-        score, n_repeats = scorer_instance.score()
-        assert eval_cfg.dataset.data is not None
-        accuracy_scores[eval_cfg.dataset_name] = {
-            "dataset_name": eval_cfg.dataset_name,
-            "num_samples": len(eval_cfg.dataset.data),
-            "extractor": eval_cfg.extractor.__name__,
-            "ground_truth_column": eval_cfg.ground_truth_column,
-            "score": score,
-            "n_repeats": n_repeats,
-        }
-        logger.info(f"Score for {eval_cfg.dataset_name}: {score} ({n_repeats} repeats)")
 
     # Report metrics: prefer Report from KVStore, fall back to SessionResult
     if report is not None and report.duration_ns is not None:

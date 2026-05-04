@@ -103,7 +103,7 @@ class ABCDExtractor(Extractor, extractor_id="abcd_extractor"):
     Returns:
         "choice" key (see GQPA dataset columns) or empty string if no answer is found.
     Examples:
-        >>> ABCDExtractor.extract("The answer is B")
+        >>> ABCDExtractor.extract("Answer: B")
         'choice2'
         >>> ABCDExtractor.extract("**Answer:** C")
         'choice3'
@@ -216,6 +216,121 @@ class ABCDExtractor(Extractor, extractor_id="abcd_extractor"):
         if stripped and stripped[0].upper() in "ABCD":
             abcd_choice = stripped[0].upper()
             return choice_map[abcd_choice]
+
+        return default if default is not None else ""
+
+
+class LetterExtractor(Extractor, extractor_id="letter_extractor"):
+    """Extract MCQ answer letter (A–J) from response text, returning the letter directly.
+
+    Like ABCDExtractor but returns the raw letter ("A", "B", … "J") instead of
+    mapping to "choice1"–"choice4".  Supports datasets with up to ten answer
+    options (e.g. MMLU-Pro A–J) where ground-truth labels are stored as the
+    letter itself.
+
+    Examples:
+        >>> LetterExtractor.extract("Answer: B")
+        'B'
+        >>> LetterExtractor.extract("**Answer:** G")
+        'G'
+        >>> LetterExtractor.extract("\\\\boxed{E}")
+        'E'
+    """
+
+    LETTERS = frozenset("ABCDEFGHIJ")
+
+    PATTERNS = [
+        # 0) **Answer:** A  or  *Answers* – B
+        re.compile(
+            r"""(?ix)
+            (?:\*{1,2}|_{1,2})
+            Answer[s]?
+            \s*[:\-–]?
+            (?:\*{1,2}|_{1,2})
+            \s*
+            ([A-J])\b
+            """,
+            re.X,
+        ),
+        # 0.1) Answer: A  (with optional markdown)
+        re.compile(
+            r"""(?ix)
+            ^\s*
+            (?:\*{1,2}|_{1,2})?
+            Answer:?
+            (?:\*{1,2}|_{1,2})?
+            \s*:?\s*
+            (?:\*{1,2}|_{1,2})?
+            ([A-J])
+            (?:\*{1,2}|_{1,2})?
+            \s*
+            """,
+            re.MULTILINE,
+        ),
+        # 1) Answer: (C)
+        re.compile(r"(?ix)\bAnswer[s]?\b\s*[:\-–]?\s*\(\s*([A-J])\s*\)"),
+        # 2) Answer: C
+        re.compile(r"(?ix)\bAnswer[s]?\b\s*[:\-–]?\s*([A-J])\b"),
+        # 3) Option B  or  Choice: C
+        re.compile(r"(?ix)\b(?:Option|Choice)\b\s*[:\-–]?\s*([A-J])\b"),
+        # 7) \boxed{A}
+        re.compile(r"(?x)\\boxed\{[^}]*?([A-J])[^}]*\}", re.MULTILINE),
+        # 7.5) \boxed{\textbf{C}}
+        re.compile(
+            r"(?x)\\boxed\{[^}]*?\\textbf\{[^}]*?([A-J])[^}]*\}[^}]*\}", re.MULTILINE
+        ),
+        # 7.51) \boxed{\text{C}}
+        re.compile(
+            r"(?x)\\boxed\{[^}]*?\\text\{[^}]*?([A-J])[^}]*\}[^}]*\}", re.MULTILINE
+        ),
+        # 4) bare singletons: (A)  [B]
+        re.compile(r"(?x)(?<![A-Za-z0-9])[\(\[]\s*([A-J])\s*[\)\]](?![A-Za-z0-9])"),
+        # 5) Markdown-wrapped: *A*  **B**
+        re.compile(
+            r"(?x)(?<![A-Za-z0-9])(?:\*{1,2}|_{1,2})([A-J])(?:\*{1,2}|_{1,2})(?![A-Za-z0-9])"
+        ),
+        # 6) \textbf{C}
+        re.compile(r"(?x)\\textbf\{[^}]*?([A-J])[^}]*\}"),
+        # 8) **D) description**
+        re.compile(r"""(?x)
+            (?<![A-Za-z0-9])
+            (?:\*{1,2}|_{1,2})
+            \s*([A-J])\)
+            [^*_\n]+?
+            (?:\*{1,2}|_{1,2})
+            (?![A-Za-z0-9])
+        """),
+        # 9) final fallback: line starting with a single letter
+        re.compile(
+            r"""(?x)^\s*
+            (?:\*{1,2}|_{1,2})?
+            ([A-J])
+            (?:\*{1,2}|_{1,2})?
+            \s*[\.\)\-–:]?
+            \s*.*$
+            """,
+            re.MULTILINE,
+        ),
+    ]
+
+    @classmethod
+    def extract(cls, text: str, default: str | None = None) -> str | None:
+        matches = []
+        for prio, pat in enumerate(cls.PATTERNS):
+            m = pat.search(text)
+            if m:
+                letter = m.group(1).upper()
+                if letter in cls.LETTERS:
+                    matches.append((prio, m, letter))
+
+        matches.sort(key=lambda triple: (triple[0], len(triple[1].group(0))))
+
+        for _, _, letter in matches:
+            return letter
+
+        stripped = text.removeprefix("**")
+        if stripped and stripped[0].upper() in cls.LETTERS:
+            return stripped[0].upper()
 
         return default if default is not None else ""
 
