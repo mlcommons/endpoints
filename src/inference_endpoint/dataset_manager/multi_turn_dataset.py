@@ -51,14 +51,24 @@ def _expand_tool_results(row: dict) -> list[dict]:
             row.get("turn"),
         )
         return []
-    return [
-        {
-            "role": "tool",
-            "tool_call_id": result.get("tool_call_id"),
-            "content": result.get("content"),
-        }
-        for result in tool_results
-    ]
+    messages = []
+    for i, result in enumerate(tool_results):
+        tool_call_id = result.get("tool_call_id")
+        content = result.get("content")
+        if tool_call_id is None:
+            raise InputValidationError(
+                f"tool_results[{i}] in conversation {row.get('conversation_id')!r} "
+                f"turn {row.get('turn')} is missing required field 'tool_call_id'"
+            )
+        if content is None:
+            raise InputValidationError(
+                f"tool_results[{i}] in conversation {row.get('conversation_id')!r} "
+                f"turn {row.get('turn')} is missing required field 'content'"
+            )
+        messages.append(
+            {"role": "tool", "tool_call_id": tool_call_id, "content": content}
+        )
+    return messages
 
 
 class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
@@ -205,6 +215,7 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
         current_turn_messages_by_key: dict[tuple, list[dict]] = {}
         system_prompts_by_conv: dict[str, str | None] = {}
 
+        assert self.dataframe is not None, "Dataframe must be initialized"
         for conv_id, group in self._conv_groups.items():
             sorted_group = group.sort_values("turn")
             client_rows = sorted_group[sorted_group["role"].isin(["user", "tool"])]
@@ -218,7 +229,7 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
                     break
             system_prompts_by_conv[str(conv_id)] = system_content
 
-            for idx, row in client_rows.iterrows():
+            for _, row in client_rows.iterrows():
                 t_n = int(row["turn"])
 
                 messages: list[dict] = []
@@ -276,7 +287,6 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
 
                 samples.append(
                     {
-                        "index": idx,
                         "conversation_id": str_conv_id,
                         "turn": t_n,
                     }

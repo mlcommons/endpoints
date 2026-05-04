@@ -152,12 +152,6 @@ settings:
     target_concurrency: 32 # ← Limit to 32 concurrent requests
 ```
 
-**Sizing guide**:
-
-- Small (< 50 convs): `target_concurrency: 32`
-- Medium (50-500 convs): `target_concurrency: 64`
-- Large (500+ convs): `target_concurrency: 96` or higher
-
 ---
 
 ## Common Configurations
@@ -194,7 +188,7 @@ settings:
     workers: 16 # More workers for parallel conversations
 ```
 
-### Long Conversations
+### Conversations with Many Turns
 
 ```yaml
 multi_turn:
@@ -210,6 +204,17 @@ settings:
 ---
 
 ## Troubleshooting
+
+### Validate Your Dataset Before Running
+
+Use the bundled validation script to check your JSONL file for schema errors before benchmarking:
+
+```bash
+python scripts/validate_jsonl_schema.py path/to/your/conversations.jsonl
+```
+
+This catches missing required fields, invalid role sequences, non-consecutive turn numbers, and
+interleaved conversations — all errors that would otherwise surface at benchmark startup.
 
 ### "Conversation has invalid role sequence"
 

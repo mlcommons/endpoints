@@ -186,5 +186,5 @@ class OpenAIAdapter(HttpRequestAdapter):
             "content" not in response_dict["choices"][0]["message"]
             or response_dict["choices"][0]["message"]["content"] is None
         ):
-            response_dict["choices"][0]["message"]["content"] = "None"
+            response_dict["choices"][0]["message"]["content"] = ""
         return CreateChatCompletionResponse(**response_dict, ignore_extra=True)
