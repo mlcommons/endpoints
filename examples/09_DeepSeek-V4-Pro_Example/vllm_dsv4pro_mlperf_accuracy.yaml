@@ -1,6 +1,6 @@
 name: dsv4pro-vllm-b200x8-mlperf-accuracy
 version: "1.0"
-type: online
+type: offline
 timeout: 600.0
 
 # MLPerf Inference accuracy evaluation for DeepSeek-R1 / DeepSeek-V4-Pro.
@@ -95,8 +95,7 @@ settings:
     dataloader_random_seed: 42
 
   load_pattern:
-    type: concurrency
-    target_concurrency: 1024
+    type: max_throughput
 
   client:
     num_workers: -1
