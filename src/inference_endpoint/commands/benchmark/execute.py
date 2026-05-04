@@ -300,9 +300,16 @@ def setup_benchmark(config: BenchmarkConfig, test_mode: TestMode) -> BenchmarkCo
     report_dir.mkdir(parents=True, exist_ok=True)
     config.to_yaml_file(report_dir / "config.yaml")
 
-    # Tokenizer check (light API call, no download)
+    # Tokenizer check (light API call, no download).
+    # When the serving model name is a local/container path (e.g. an NVFP4
+    # checkpoint cached under /root/.cache/huggingface/hub/...) it is not a
+    # valid HF repo ID and the probe will fail. Allow model_params.tokenizer_name
+    # to override the source so the upstream HF tokenizer can still be used.
     model_name = config.model_params.name
-    tokenizer_name = model_name if _check_tokenizer_exists(model_name) else None
+    tokenizer_source = config.model_params.tokenizer_name or model_name
+    tokenizer_name = (
+        tokenizer_source if _check_tokenizer_exists(tokenizer_source) else None
+    )
 
     # Streaming
     logger.info(

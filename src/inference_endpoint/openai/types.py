@@ -108,21 +108,30 @@ class ChatCompletionRequest(
 class ChatCompletionResponseMessage(
     msgspec.Struct, frozen=True, kw_only=True, omit_defaults=True, gc=False
 ):  # type: ignore[call-arg]
-    """Response message from OpenAI."""
+    """Response message from OpenAI.
+
+    ``content`` and ``refusal`` are nullable per the OpenAI spec and vLLM
+    routinely omits them (e.g. when the model returns no text or no refusal
+    block), so they default to ``None`` to allow successful decoding.
+    """
 
     role: str
-    content: str | None
-    refusal: str | None
+    content: str | None = None
+    refusal: str | None = None
 
 
 class ChatCompletionChoice(
     msgspec.Struct, frozen=True, kw_only=True, omit_defaults=True, gc=False
 ):  # type: ignore[call-arg]
-    """A single choice in the completion response."""
+    """A single choice in the completion response.
+
+    ``finish_reason`` may be omitted in non-final SSE chunks; default to
+    ``None`` so decoding intermediate frames does not fail.
+    """
 
     index: int
     message: ChatCompletionResponseMessage
-    finish_reason: str | None
+    finish_reason: str | None = None
 
 
 class CompletionUsage(
@@ -142,12 +151,19 @@ class ChatCompletionResponse(
     omit_defaults=False,
     gc=False,
 ):  # type: ignore[call-arg]
-    """OpenAI chat completion response."""
+    """OpenAI chat completion response.
+
+    Most servers (vLLM, Dynamo, etc.) legitimately omit a number of these
+    fields — e.g. ``usage`` is only emitted on the final SSE chunk,
+    ``system_fingerprint`` is rarely populated, and ``created``/``model``
+    can be missing in some response variants. All of these get safe
+    defaults so the decoder accepts whatever the server sends.
+    """
 
     id: str
     object: str = "chat.completion"
-    created: int
-    model: str
+    created: int = 0
+    model: str = ""
     choices: list[ChatCompletionChoice]
-    usage: CompletionUsage | None
-    system_fingerprint: str | None
+    usage: CompletionUsage | None = None
+    system_fingerprint: str | None = None
