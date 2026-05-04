@@ -47,7 +47,7 @@ datasets:
 settings:
   load_pattern:
     type: multi_turn # ← Use multi-turn scheduler
-    target_concurrency: 32 # ← Required: max concurrent requests
+    target_concurrency: 32 # ← Required: max simultaneous conversations
 
   client:
     workers: 4
@@ -120,21 +120,18 @@ mode: independent
 
 **Behavior**:
 
-- Issues turn-1 of ALL conversations at t=0
-- Then sequences turns within each conversation independently
-- Maximum parallelism and throughput
+- Up to `target_concurrency` conversations are active simultaneously
+- Turns within each conversation are strictly sequenced (turn N+1 waits for turn N)
+- Conversations run independently of each other — a short conversation can finish while a long one is still on turn 2
 
-**Use for**: Realistic production load where short conversations finish while long ones are still running.
-For single-conversation debugging, use `mode: independent` with `target_concurrency: 1`.
-Note: unlike the plain `ConcurrencyScheduler`, multi-turn + `target_concurrency: 1` still enforces
-per-conversation turn ordering — turn N+1 waits for turn N even at concurrency 1.
+**Use for**: Realistic production load simulation. For single-conversation debugging, set `target_concurrency: 1`.
 
-**Example timeline**:
+**Example timeline** (target_concurrency: 3, 4 conversations total):
 
 ```
-t=0:    conv1-turn1, conv2-turn1, conv3-turn1 (all at once)
+t=0:    conv1-turn1, conv2-turn1, conv3-turn1  ← 3 conversations start
 t=0.5:  conv1-turn2 (after conv1-turn1 completes)
-t=0.7:  conv2-turn2 (after conv2-turn1 completes)
+t=0.7:  conv2 finishes → worker picks up conv4-turn1
 t=0.8:  conv1-turn3 (after conv1-turn2 completes)
 ...
 ```
@@ -143,62 +140,16 @@ t=0.8:  conv1-turn3 (after conv1-turn2 completes)
 
 ## Concurrency Control
 
-`target_concurrency` is **required** for the `multi_turn` load pattern. It limits the maximum number of in-flight requests across all conversations and prevents endpoint overload when many conversations run simultaneously.
+`target_concurrency` is **required** for the `multi_turn` load pattern. It controls how many
+conversations are active simultaneously. Each active conversation has exactly one in-flight turn
+at a time — a worker issues turn N, waits for the response, then issues turn N+1. A new
+conversation starts only after a worker finishes all turns of its current one.
 
 ```yaml
 settings:
   load_pattern:
     type: multi_turn
-    target_concurrency: 32 # ← Limit to 32 concurrent requests
-```
-
----
-
-## Common Configurations
-
-### Recommended: With Concurrency Control
-
-```yaml
-multi_turn:
-  mode: independent
-
-settings:
-  load_pattern:
-    type: multi_turn
-    target_concurrency: 32 # ← Prevents overload
-  client:
-    workers: 8
-
-datasets:
-  - samples: 100
-```
-
-### High Throughput Testing
-
-```yaml
-multi_turn:
-  mode: independent
-  turn_timeout_s: 600
-
-settings:
-  load_pattern:
-    type: multi_turn
-    target_concurrency: 96
-  client:
-    workers: 16 # More workers for parallel conversations
-```
-
-### Conversations with Many Turns
-
-```yaml
-multi_turn:
-  mode: independent
-  turn_timeout_s: 1800 # 30 minutes for slow responses
-
-settings:
-  load_pattern:
-    type: multi_turn
-    target_concurrency: 32
+    target_concurrency: 32 # ← 32 conversations active simultaneously
 ```
 
 ---
@@ -329,7 +280,7 @@ jq -r '.conversation_id' logs/multi_turn_test/events.jsonl | sort -u
 
 ### Performance
 
-- **Workers**: Set `workers` = number of concurrent conversations
+- **Workers**: `client.workers` controls HTTP worker processes, independent of `target_concurrency`. The default (`-1`) auto-tunes based on NUMA topology.
 - **Timeout**: Set `turn_timeout_s` = 2x your longest expected turn latency
 - **Memory**: ~1KB per turn, plan accordingly for large datasets
 

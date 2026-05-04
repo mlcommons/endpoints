@@ -35,9 +35,12 @@ class MultiTurnStrategy:
     """Async multi-turn strategy. Uses a worker-pool to limit active conversations.
 
     N worker tasks pull from a queue of conversations. Each worker processes all
-    turns of one conversation before moving to the next, so at most N conversations
-    are active simultaneously. When target_concurrency is None, all conversations
-    run concurrently (one worker per conversation).
+    turns of one conversation before moving to the next. At most N conversations
+    are active simultaneously, each with exactly 1 in-flight turn — a worker
+    issues turn N, waits for the response, then issues turn N+1. A new conversation
+    starts only after the worker finishes all turns of its current one. When
+    target_concurrency is None, all conversations run concurrently (one worker per
+    conversation).
 
     Integration with BenchmarkSession:
     - execute(): populates queue, spawns workers, awaits all to complete

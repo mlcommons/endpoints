@@ -180,7 +180,7 @@ class OpenAIAdapter(HttpRequestAdapter):
         response_dict = msgspec.json.decode(response_bytes)
 
         # Set default values for optional fields if missing
-        response_dict["choices"][0]["message"]["refusal"] = "None"
+        response_dict["choices"][0]["message"]["refusal"] = ""
         response_dict["choices"][0]["logprobs"] = {"content": [], "refusal": []}
         if (
             "content" not in response_dict["choices"][0]["message"]

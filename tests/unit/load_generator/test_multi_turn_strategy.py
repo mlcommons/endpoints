@@ -364,6 +364,25 @@ async def test_dataset_history_mode_does_not_inject_system_prompt():
 
 
 @pytest.mark.unit
+@pytest.mark.asyncio
+async def test_pipeline_error_propagated():
+    """execute() re-raises when a conversation pipeline raises an exception."""
+    conv_manager = ConversationManager()
+    metadata = _make_dataset_metadata({"conv1": [1]})
+    strategy = MultiTurnStrategy(conv_manager, metadata)
+
+    class ErrorIssuer:
+        issued_count = 0
+        issued: list[int] = []
+
+        def issue(self, idx: int, data_override: dict | None = None) -> str | None:
+            raise RuntimeError("simulated pipeline error")
+
+    with pytest.raises(RuntimeError, match="simulated pipeline error"):
+        await strategy.execute(ErrorIssuer())
+
+
+@pytest.mark.unit
 def test_mark_turn_complete_preserves_tool_calls():
     """mark_turn_complete stores tool_calls in history when metadata contains them."""
     conv_manager = ConversationManager()
