@@ -60,7 +60,7 @@ class PhaseType(str, Enum):
     WARMUP = "warmup"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class PhaseConfig:
     """Configuration for a single benchmark phase."""
 

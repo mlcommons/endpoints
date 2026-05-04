@@ -105,7 +105,9 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
         """
         super().__init__(dataframe, **kwargs)
         assert self.dataframe is not None, "Dataframe must be initialized"
-        self._conv_groups = dict(list(self.dataframe.groupby("conversation_id")))
+        self._conv_groups = dict(
+            list(self.dataframe.groupby("conversation_id", sort=False))
+        )
         self._validate_conversation_grouping()
         self._validate_conversation_structure()
         self._validate_turn_numbering()
