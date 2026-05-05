@@ -15,18 +15,33 @@
 
 """Shared test doubles and factories for metrics aggregator tests.
 
-NOTE: this conftest is in the process of being migrated to the
-registry-based aggregator (metrics_pubsub_design_v5.md). The legacy
-``InMemoryKVStore`` factories that previously lived here have been
-removed; tests that depended on them are skipped pending rewrite. New
-tests for ``snapshot.py``, ``registry.py``, and ``publisher.py`` are
-self-contained and do not need helpers from this module.
+Migrated for the registry/publisher refactor (metrics_pubsub_design_v5):
+no more ``InMemoryKVStore``. Tests that need to inspect emitted values
+build them directly off a ``MetricsRegistry`` and a ``MetricsSnapshot``.
+
+The helpers here are intentionally small — most reused-across-tests
+construction lives in ``_make_aggregator`` style fixtures local to each
+test file (the aggregator's wire surface is small enough that a single
+shared fixture would mostly hide it).
 """
 
 from __future__ import annotations
 
 import asyncio
+from unittest.mock import AsyncMock, MagicMock
 
+from inference_endpoint.async_utils.services.metrics_aggregator.aggregator import (
+    MetricsAggregatorService,
+)
+from inference_endpoint.async_utils.services.metrics_aggregator.registry import (
+    MetricsRegistry,
+)
+from inference_endpoint.async_utils.services.metrics_aggregator.snapshot import (
+    CounterStat,
+    SeriesStat,
+    SessionState,
+)
+from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
 from inference_endpoint.core.record import (
     EventRecord,
     SampleEventType,
@@ -35,8 +50,7 @@ from inference_endpoint.core.record import (
 from inference_endpoint.core.types import TextModelOutput
 
 # ---------------------------------------------------------------------------
-# Mock TokenizePool — still useful for tests that exercise async triggers
-# directly.
+# Mock TokenizePool — used by tests that exercise async triggers directly.
 # ---------------------------------------------------------------------------
 
 
@@ -86,3 +100,86 @@ def text_output(s: str) -> TextModelOutput:
 
 def streaming_text(*chunks: str) -> TextModelOutput:
     return TextModelOutput(output=tuple(chunks))
+
+
+# ---------------------------------------------------------------------------
+# Registry / snapshot inspection helpers
+# ---------------------------------------------------------------------------
+
+
+def snapshot_counters(registry: MetricsRegistry) -> dict[str, int | float]:
+    """Return all counter values from a fresh snapshot.
+
+    State/n_pending values don't matter for counter inspection — they
+    bypass the exact-vs-HDR fork. Tests that need series inspection
+    should call ``snapshot_series_values`` instead.
+    """
+    snap = registry.build_snapshot(state=SessionState.LIVE, n_pending_tasks=0)
+    return {m.name: m.value for m in snap.metrics if isinstance(m, CounterStat)}
+
+
+def snapshot_series_count(registry: MetricsRegistry, name: str) -> int:
+    """Return ``count`` of a named series from a fresh snapshot.
+
+    Returns 0 if the series is unregistered or has no recordings.
+    """
+    snap = registry.build_snapshot(state=SessionState.LIVE, n_pending_tasks=0)
+    for m in snap.metrics:
+        if isinstance(m, SeriesStat) and m.name == name:
+            return m.count
+    return 0
+
+
+def snapshot_series_total(registry: MetricsRegistry, name: str) -> int | float:
+    """Return ``total`` of a named series from a fresh snapshot."""
+    snap = registry.build_snapshot(state=SessionState.LIVE, n_pending_tasks=0)
+    for m in snap.metrics:
+        if isinstance(m, SeriesStat) and m.name == name:
+            return m.total
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Aggregator factory
+# ---------------------------------------------------------------------------
+
+
+def make_aggregator(
+    zmq_ctx: ManagedZMQContext,
+    loop: asyncio.AbstractEventLoop,
+    socket_name: str,
+    *,
+    tokenize_pool=None,
+    streaming: bool = True,
+    shutdown_event: asyncio.Event | None = None,
+) -> tuple[MetricsAggregatorService, MetricsRegistry, MagicMock]:
+    """Construct an aggregator wired to a real SUB socket and a mocked publisher.
+
+    The aggregator's ``start()`` is intentionally not called: tests inject
+    events directly via ``await agg.process([...])``. The publisher is a
+    ``MagicMock`` so the aggregator's STARTED branch (which calls
+    ``publisher.start(...)``) and ENDED branch (which calls ``publish_final``
+    + ``close``) don't touch real I/O.
+
+    Returns ``(agg, registry, publisher_mock)``.
+    """
+    registry = MetricsRegistry()
+    # ``publish_final`` is awaited by the aggregator's ENDED handler, so it
+    # must be an AsyncMock. The remaining surface (``start``, ``close``) is
+    # synchronous and falls back to MagicMock's default attribute behavior.
+    publisher = MagicMock()
+    publisher.publish_final = AsyncMock()
+    agg = MetricsAggregatorService(
+        socket_name,
+        zmq_ctx,
+        loop,
+        registry=registry,
+        publisher=publisher,
+        refresh_hz=4.0,
+        sig_figs=3,
+        n_histogram_buckets=10,
+        tokenize_pool=tokenize_pool,
+        streaming=streaming,
+        shutdown_event=shutdown_event,
+    )
+    return agg, registry, publisher
