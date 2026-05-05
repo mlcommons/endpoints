@@ -400,6 +400,20 @@ class BenchmarkSession:
 
         if isinstance(resp, QueryResult):
             query_id = resp.id
+            # Emit ERROR before COMPLETE for failed queries so downstream
+            # consumers (notably the metrics aggregator) see the ERROR
+            # while the in-flight tracked row still exists. COMPLETE
+            # removes the row, so any state lookup at ERROR time after
+            # COMPLETE would silently miss tracked failures.
+            if resp.error is not None:
+                self._publisher.publish(
+                    EventRecord(
+                        event_type=ErrorEventType.GENERIC,
+                        timestamp_ns=time.monotonic_ns(),
+                        sample_uuid=query_id,
+                        data=resp.error,
+                    )
+                )
             self._publisher.publish(
                 EventRecord(
                     event_type=SampleEventType.COMPLETE,
@@ -410,15 +424,6 @@ class BenchmarkSession:
                     data=resp.response_output,
                 )
             )
-            if resp.error is not None:
-                self._publisher.publish(
-                    EventRecord(
-                        event_type=ErrorEventType.GENERIC,
-                        timestamp_ns=time.monotonic_ns(),
-                        sample_uuid=query_id,
-                        data=resp.error,
-                    )
-                )
             if phase_issuer is not None and query_id in phase_issuer.uuid_to_index:
                 phase_issuer.inflight -= 1
                 if phase_issuer.inflight <= 0:
