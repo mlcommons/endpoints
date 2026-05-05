@@ -27,11 +27,13 @@ import asyncio
 import json
 import logging
 import platform
+import random
 import shutil
 import signal
 import tempfile
 import uuid
 from dataclasses import dataclass, field
+from dataclasses import replace as dataclass_replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -70,7 +72,7 @@ from inference_endpoint.config.schema import (
     TestType,
 )
 from inference_endpoint.core.types import QueryResult
-from inference_endpoint.dataset_manager.dataset import Dataset
+from inference_endpoint.dataset_manager.dataset import Dataset, SaltedDataset
 from inference_endpoint.dataset_manager.factory import DataLoaderFactory
 from inference_endpoint.endpoint_client.cpu_affinity import AffinityPlan, pin_loadgen
 from inference_endpoint.endpoint_client.http_client import HTTPEndpointClient
@@ -347,6 +349,33 @@ def _build_phases(ctx: BenchmarkContext) -> list[PhaseConfig]:
     """Build the phase list from BenchmarkContext."""
     phases: list[PhaseConfig] = []
 
+    # Warmup phase (optional, before performance)
+    warmup_cfg = ctx.config.settings.warmup
+    if warmup_cfg.enabled:
+        warmup_dataset: Dataset = (
+            SaltedDataset(ctx.dataloader) if warmup_cfg.salt else ctx.dataloader
+        )
+        warmup_rt = dataclass_replace(
+            ctx.rt_settings,
+            min_duration_ms=0,
+            max_duration_ms=None,
+            n_samples_from_dataset=ctx.dataloader.num_samples(),
+            n_samples_to_issue=warmup_cfg.n_requests,
+            min_sample_count=1,
+            rng_sched=random.Random(warmup_cfg.warmup_random_seed),
+            rng_sample_index=random.Random(warmup_cfg.warmup_random_seed + 1),
+            load_pattern=LoadPattern(type=LoadPatternType.MAX_THROUGHPUT),
+        )
+        phases.append(
+            PhaseConfig(
+                "warmup",
+                warmup_rt,
+                warmup_dataset,
+                PhaseType.WARMUP,
+                drain_after=warmup_cfg.drain,
+            )
+        )
+
     # Performance phase
     phases.append(
         PhaseConfig(
@@ -525,12 +554,31 @@ async def _run_benchmark_async(
         phases = _build_phases(ctx)
         report: Report | None = None
 
+        # Global wall-clock timeout covers warmup + performance + accuracy phases
+        # combined, and bounds the warmup drain so a dropped request can't hang forever.
+        global_timeout_handle = None
+        max_duration_ms = ctx.rt_settings.max_duration_ms
+        if max_duration_ms is not None:
+
+            def _on_global_timeout() -> None:
+                logger.warning(
+                    "Global experiment timeout reached (%d ms); stopping session.",
+                    max_duration_ms,
+                )
+                session.stop()
+
+            global_timeout_handle = loop.call_later(
+                max_duration_ms / 1000.0, _on_global_timeout
+            )
+
         loop.add_signal_handler(signal.SIGINT, session.stop)
         try:
             result = await session.run(phases)
         except Exception as e:
             raise ExecutionError(f"Benchmark execution failed: {e}") from e
         finally:
+            if global_timeout_handle is not None:
+                global_timeout_handle.cancel()
             loop.remove_signal_handler(signal.SIGINT)
             logger.info("Cleaning up...")
             try:

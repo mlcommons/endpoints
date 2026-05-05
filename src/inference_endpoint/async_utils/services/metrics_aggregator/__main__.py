@@ -17,6 +17,7 @@
 
 import argparse
 import asyncio
+import logging
 from contextlib import AbstractContextManager, nullcontext
 from pathlib import Path
 
@@ -91,10 +92,16 @@ async def main() -> None:
 
     # Using ternary operator causes errors in MyPy object type coalescing
     # (coalesces to 'object' not 'AbstractContextManager[TokenizePool | None]')
+    pool_cm: AbstractContextManager[TokenizePool | None]
     if args.tokenizer:
-        pool_cm: AbstractContextManager[TokenizePool | None] = TokenizePool(
-            args.tokenizer, n_workers=args.tokenizer_workers
-        )
+        try:
+            pool_cm = TokenizePool(args.tokenizer, n_workers=args.tokenizer_workers)
+        except Exception as e:
+            logging.warning(
+                f"Failed to load tokenizer '{args.tokenizer}': {e}. "
+                "ISL/OSL/TPOT token metrics will be unavailable."
+            )
+            pool_cm = nullcontext()
     else:
         pool_cm = nullcontext()
 

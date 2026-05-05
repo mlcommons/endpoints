@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import time
 import uuid
 from collections.abc import Callable
@@ -43,8 +42,6 @@ from .sample_order import create_sample_order
 from .strategy import LoadStrategy, create_load_strategy
 
 logger = logging.getLogger(__name__)
-
-_WARMUP_ENABLED = os.environ.get("ENABLE_WARMUP") == "1"
 
 
 # ---------------------------------------------------------------------------
@@ -68,6 +65,7 @@ class PhaseConfig:
     runtime_settings: RuntimeSettings
     dataset: Dataset
     phase_type: PhaseType = PhaseType.PERFORMANCE
+    drain_after: bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -242,6 +240,7 @@ class BenchmarkSession:
         self._stop_requested = False
         self._done = False
         self._current_phase_issuer: PhaseIssuer | None = None
+        self._current_phase_type: PhaseType | None = None
         self._current_strategy: LoadStrategy | None = None
         self._recv_task: asyncio.Task | None = None
         self._strategy_task: asyncio.Task | None = None
@@ -274,12 +273,6 @@ class BenchmarkSession:
             for phase in phases:
                 if self._stop_requested:
                     break
-                if phase.phase_type == PhaseType.WARMUP and not _WARMUP_ENABLED:
-                    logger.info(
-                        "Skipping warmup phase %s (set ENABLE_WARMUP=1 to enable)",
-                        phase.name,
-                    )
-                    continue
                 result = await self._run_phase(phase)
                 if result is not None:
                     phase_results.append(result)
@@ -318,6 +311,7 @@ class BenchmarkSession:
         )
 
         self._current_phase_issuer = phase_issuer
+        self._current_phase_type = phase.phase_type
         self._current_strategy = strategy
 
         # Performance phases get tracking events
@@ -333,8 +327,7 @@ class BenchmarkSession:
         finally:
             self._strategy_task = None
 
-        # Drain in-flight (skip for warmup — keep concurrency hot)
-        if phase.phase_type != PhaseType.WARMUP:
+        if phase.drain_after:
             await self._drain_inflight(phase_issuer)
 
         if phase.phase_type == PhaseType.PERFORMANCE:
@@ -363,9 +356,9 @@ class BenchmarkSession:
     async def _drain_inflight(self, phase_issuer: PhaseIssuer) -> None:
         """Wait for all in-flight responses from this phase to complete.
 
-        Currently, there is no timeout for the drain step. In the future,
-        we can possibly add a dynamic timeout based on the rate of completion
-        throughout the current phase."""
+        Bounded by the global experiment timeout: if the caller schedules a
+        loop.call_later that calls stop(), stop() sets _drain_event, unblocking
+        this wait without leaving it hung indefinitely."""
         if phase_issuer.inflight <= 0 or self._stop_requested:
             return
         logger.info("Draining %d in-flight responses...", phase_issuer.inflight)
@@ -425,7 +418,10 @@ class BenchmarkSession:
                     self._drain_event.set()
                 if self._current_strategy:
                     self._current_strategy.on_query_complete(query_id)
-                if self._on_sample_complete:
+                if (
+                    self._on_sample_complete
+                    and self._current_phase_type != PhaseType.WARMUP
+                ):
                     self._on_sample_complete(resp)
 
         elif isinstance(resp, StreamChunk):

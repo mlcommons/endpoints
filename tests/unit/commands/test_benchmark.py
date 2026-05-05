@@ -15,18 +15,25 @@
 
 """Tests for benchmark CLI models, config building, and command handlers."""
 
+import random
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pandas as pd
 import pytest
 from inference_endpoint.commands.benchmark.cli import (
     from_config,
     offline,
     online,
 )
-from inference_endpoint.commands.benchmark.execute import ResponseCollector
+from inference_endpoint.commands.benchmark.execute import (
+    BenchmarkContext,
+    ResponseCollector,
+    _build_phases,
+)
+from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import (
     BenchmarkConfig,
     DatasetType,
@@ -35,9 +42,11 @@ from inference_endpoint.config.schema import (
     OfflineSettings,
     OnlineSettings,
     RuntimeConfig,
+    ScorerMethod,
     StreamingMode,
     TestMode,
     TestType,
+    WarmupConfig,
 )
 from inference_endpoint.config.schema import (
     OfflineBenchmarkConfig as OfflineConfig,
@@ -47,8 +56,13 @@ from inference_endpoint.config.schema import (
 )
 from inference_endpoint.config.utils import cli_error_formatter as _error_formatter
 from inference_endpoint.core.types import QueryResult
+from inference_endpoint.dataset_manager.dataset import Dataset, SaltedDataset
 from inference_endpoint.endpoint_client.config import HTTPClientConfig
+from inference_endpoint.evaluation.scoring import Scorer
 from inference_endpoint.exceptions import InputValidationError
+from inference_endpoint.load_generator.sample_order import create_sample_order
+from inference_endpoint.load_generator.session import PhaseType
+from inference_endpoint.metrics.metric import Throughput
 from pydantic import ValidationError
 
 TEMPLATE_DIR = (
@@ -385,14 +399,390 @@ class TestYAMLTemplateValidation:
         assert config.endpoint_config.endpoints
 
 
+class TestWarmupConfig:
+    """Tests for WarmupConfig schema model."""
+
+    @pytest.mark.unit
+    def test_defaults(self):
+        cfg = WarmupConfig()
+        assert cfg.enabled is False
+        assert cfg.n_requests is None
+        assert cfg.salt is False
+        assert cfg.drain is False
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("n", [1, 10, 1000])
+    def test_n_requests_valid(self, n):
+        cfg = WarmupConfig(n_requests=n)
+        assert cfg.n_requests == n
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("n", [0, -1, -100])
+    def test_n_requests_must_be_positive(self, n):
+        with pytest.raises(ValidationError):
+            WarmupConfig(n_requests=n)
+
+    @pytest.mark.unit
+    def test_extra_fields_rejected(self):
+        with pytest.raises(ValidationError):
+            WarmupConfig(unknown_field=True)
+
+    @pytest.mark.unit
+    def test_immutable(self):
+        cfg = WarmupConfig()
+        with pytest.raises(ValidationError):
+            cfg.enabled = True  # type: ignore[misc]
+
+    @pytest.mark.unit
+    def test_all_flags_enabled(self):
+        cfg = WarmupConfig(enabled=True, n_requests=50, salt=True, drain=True)
+        assert cfg.enabled is True
+        assert cfg.n_requests == 50
+        assert cfg.salt is True
+        assert cfg.drain is True
+
+    @pytest.mark.unit
+    def test_yaml_roundtrip(self, tmp_path):
+        yaml_content = """
+type: "offline"
+model_params:
+  name: "test-model"
+endpoint_config:
+  endpoints: ["http://test:8000"]
+datasets:
+  - path: "test.jsonl"
+settings:
+  warmup:
+    enabled: true
+    n_requests: 20
+    salt: true
+    drain: true
+"""
+        config_file = tmp_path / "warmup.yaml"
+        config_file.write_text(yaml_content)
+        config = BenchmarkConfig.from_yaml_file(config_file)
+        warmup = config.settings.warmup
+        assert warmup.enabled is True
+        assert warmup.n_requests == 20
+        assert warmup.salt is True
+        assert warmup.drain is True
+
+    @pytest.mark.unit
+    def test_warmup_default_in_settings(self):
+        config = OfflineConfig(**_OFFLINE_KWARGS)
+        warmup = config.settings.warmup
+        assert warmup.enabled is False
+        assert warmup.n_requests is None
+
+
+class TestBuildPhases:
+    """Tests for _build_phases() in execute.py."""
+
+    @pytest.fixture
+    def base_rt_settings(self):
+        return RuntimeSettings(
+            metric_target=Throughput(10.0),
+            reported_metrics=[Throughput(10.0)],
+            min_duration_ms=600000,
+            max_duration_ms=None,
+            n_samples_from_dataset=5,
+            n_samples_to_issue=None,
+            min_sample_count=1,
+            rng_sched=random.Random(42),
+            rng_sample_index=random.Random(42),
+            load_pattern=LoadPattern(type=LoadPatternType.MAX_THROUGHPUT),
+        )
+
+    @pytest.fixture
+    def simple_dataset(self):
+        df = pd.DataFrame({"prompt": [f"q{i}" for i in range(5)]})
+        ds = Dataset(df)
+        ds.load()
+        return ds
+
+    def _make_ctx(self, config, rt_settings, dataloader):
+        return BenchmarkContext(
+            config=config,
+            test_mode=TestMode.PERF,
+            report_dir=Path("/tmp"),
+            tokenizer_name=None,
+            dataloader=dataloader,
+            rt_settings=rt_settings,
+            total_samples=dataloader.num_samples(),
+            accuracy_datasets=[],
+            eval_configs=[],
+        )
+
+    @pytest.mark.unit
+    def test_warmup_disabled_produces_only_perf_phase(
+        self, base_rt_settings, simple_dataset
+    ):
+        config = OfflineConfig(**_OFFLINE_KWARGS)
+        ctx = self._make_ctx(config, base_rt_settings, simple_dataset)
+        phases = _build_phases(ctx)
+
+        assert len(phases) == 1
+        assert phases[0].phase_type == PhaseType.PERFORMANCE
+
+    @pytest.mark.unit
+    def test_warmup_enabled_produces_two_phases(self, base_rt_settings, simple_dataset):
+        config = OfflineConfig(
+            **_OFFLINE_KWARGS,
+            settings=OfflineSettings(warmup=WarmupConfig(enabled=True)),
+        )
+        ctx = self._make_ctx(config, base_rt_settings, simple_dataset)
+        phases = _build_phases(ctx)
+
+        assert len(phases) == 2
+        assert phases[0].phase_type == PhaseType.WARMUP
+        assert phases[1].phase_type == PhaseType.PERFORMANCE
+
+    @pytest.mark.unit
+    def test_warmup_phase_named_warmup(self, base_rt_settings, simple_dataset):
+        config = OfflineConfig(
+            **_OFFLINE_KWARGS,
+            settings=OfflineSettings(warmup=WarmupConfig(enabled=True)),
+        )
+        ctx = self._make_ctx(config, base_rt_settings, simple_dataset)
+        phases = _build_phases(ctx)
+
+        assert phases[0].name == "warmup"
+
+    @pytest.mark.unit
+    def test_warmup_phase_uses_max_throughput(self, base_rt_settings, simple_dataset):
+        config = OfflineConfig(
+            **_OFFLINE_KWARGS,
+            settings=OfflineSettings(warmup=WarmupConfig(enabled=True)),
+        )
+        ctx = self._make_ctx(config, base_rt_settings, simple_dataset)
+        phases = _build_phases(ctx)
+
+        warmup_rt = phases[0].runtime_settings
+        assert warmup_rt.load_pattern is not None
+        assert warmup_rt.load_pattern.type == LoadPatternType.MAX_THROUGHPUT
+
+    @pytest.mark.unit
+    def test_warmup_phase_min_duration_is_zero(self, base_rt_settings, simple_dataset):
+        config = OfflineConfig(
+            **_OFFLINE_KWARGS,
+            settings=OfflineSettings(warmup=WarmupConfig(enabled=True)),
+        )
+        ctx = self._make_ctx(config, base_rt_settings, simple_dataset)
+        phases = _build_phases(ctx)
+
+        assert phases[0].runtime_settings.min_duration_ms == 0
+
+    @pytest.mark.unit
+    def test_warmup_phase_no_max_duration(self, base_rt_settings, simple_dataset):
+        config = OfflineConfig(
+            **_OFFLINE_KWARGS,
+            settings=OfflineSettings(warmup=WarmupConfig(enabled=True)),
+        )
+        ctx = self._make_ctx(config, base_rt_settings, simple_dataset)
+        phases = _build_phases(ctx)
+
+        assert phases[0].runtime_settings.max_duration_ms is None
+
+    @pytest.mark.unit
+    def test_warmup_n_requests_propagated(self, base_rt_settings, simple_dataset):
+        config = OfflineConfig(
+            **_OFFLINE_KWARGS,
+            settings=OfflineSettings(warmup=WarmupConfig(enabled=True, n_requests=7)),
+        )
+        ctx = self._make_ctx(config, base_rt_settings, simple_dataset)
+        phases = _build_phases(ctx)
+
+        assert phases[0].runtime_settings.n_samples_to_issue == 7
+
+    @pytest.mark.unit
+    def test_warmup_n_requests_none_when_unset(self, base_rt_settings, simple_dataset):
+        config = OfflineConfig(
+            **_OFFLINE_KWARGS,
+            settings=OfflineSettings(
+                warmup=WarmupConfig(enabled=True, n_requests=None)
+            ),
+        )
+        ctx = self._make_ctx(config, base_rt_settings, simple_dataset)
+        phases = _build_phases(ctx)
+
+        assert phases[0].runtime_settings.n_samples_to_issue is None
+
+    @pytest.mark.unit
+    def test_warmup_without_salt_uses_raw_dataloader(
+        self, base_rt_settings, simple_dataset
+    ):
+        config = OfflineConfig(
+            **_OFFLINE_KWARGS,
+            settings=OfflineSettings(warmup=WarmupConfig(enabled=True, salt=False)),
+        )
+        ctx = self._make_ctx(config, base_rt_settings, simple_dataset)
+        phases = _build_phases(ctx)
+
+        assert not isinstance(phases[0].dataset, SaltedDataset)
+        assert phases[0].dataset is simple_dataset
+
+    @pytest.mark.unit
+    def test_warmup_with_salt_uses_salted_dataset(
+        self, base_rt_settings, simple_dataset
+    ):
+        config = OfflineConfig(
+            **_OFFLINE_KWARGS,
+            settings=OfflineSettings(warmup=WarmupConfig(enabled=True, salt=True)),
+        )
+        ctx = self._make_ctx(config, base_rt_settings, simple_dataset)
+        phases = _build_phases(ctx)
+
+        assert isinstance(phases[0].dataset, SaltedDataset)
+
+    @pytest.mark.unit
+    def test_warmup_drain_false_by_default(self, base_rt_settings, simple_dataset):
+        config = OfflineConfig(
+            **_OFFLINE_KWARGS,
+            settings=OfflineSettings(warmup=WarmupConfig(enabled=True, drain=False)),
+        )
+        ctx = self._make_ctx(config, base_rt_settings, simple_dataset)
+        phases = _build_phases(ctx)
+
+        assert phases[0].drain_after is False
+
+    @pytest.mark.unit
+    def test_warmup_drain_true_propagated(self, base_rt_settings, simple_dataset):
+        config = OfflineConfig(
+            **_OFFLINE_KWARGS,
+            settings=OfflineSettings(warmup=WarmupConfig(enabled=True, drain=True)),
+        )
+        ctx = self._make_ctx(config, base_rt_settings, simple_dataset)
+        phases = _build_phases(ctx)
+
+        assert phases[0].drain_after is True
+
+    @pytest.mark.unit
+    def test_warmup_n_samples_from_dataset_matches_dataloader(
+        self, base_rt_settings, simple_dataset
+    ):
+        config = OfflineConfig(
+            **_OFFLINE_KWARGS,
+            settings=OfflineSettings(warmup=WarmupConfig(enabled=True)),
+        )
+        ctx = self._make_ctx(config, base_rt_settings, simple_dataset)
+        phases = _build_phases(ctx)
+
+        assert (
+            phases[0].runtime_settings.n_samples_from_dataset
+            == simple_dataset.num_samples()
+        )
+
+    @pytest.mark.unit
+    def test_performance_phase_dataset_is_always_raw_dataloader(
+        self, base_rt_settings, simple_dataset
+    ):
+        config = OfflineConfig(
+            **_OFFLINE_KWARGS,
+            settings=OfflineSettings(warmup=WarmupConfig(enabled=True, salt=True)),
+        )
+        ctx = self._make_ctx(config, base_rt_settings, simple_dataset)
+        phases = _build_phases(ctx)
+
+        perf_phase = phases[1]
+        assert perf_phase.dataset is simple_dataset
+
+    @pytest.mark.unit
+    def test_performance_phase_uses_original_rt_settings(
+        self, base_rt_settings, simple_dataset
+    ):
+        config = OfflineConfig(
+            **_OFFLINE_KWARGS,
+            settings=OfflineSettings(warmup=WarmupConfig(enabled=True)),
+        )
+        ctx = self._make_ctx(config, base_rt_settings, simple_dataset)
+        phases = _build_phases(ctx)
+
+        assert phases[1].runtime_settings is base_rt_settings
+
+    @pytest.mark.unit
+    def test_warmup_uses_independent_rng_instances(
+        self, base_rt_settings, simple_dataset
+    ):
+        """Warmup RuntimeSettings must not share RNG instances with the perf phase.
+
+        Sharing would cause warmup sample-ordering to consume state from the
+        perf phase's deterministic random sequence, breaking reproducibility.
+        """
+        config = OfflineConfig(
+            **_OFFLINE_KWARGS,
+            settings=OfflineSettings(warmup=WarmupConfig(enabled=True)),
+        )
+        ctx = self._make_ctx(config, base_rt_settings, simple_dataset)
+        phases = _build_phases(ctx)
+
+        warmup_rt = phases[0].runtime_settings
+        perf_rt = phases[1].runtime_settings
+        assert warmup_rt.rng_sched is not perf_rt.rng_sched
+        assert warmup_rt.rng_sample_index is not perf_rt.rng_sample_index
+
+    @pytest.mark.unit
+    def test_performance_sample_order_identical_with_and_without_warmup(
+        self, simple_dataset
+    ):
+        """Warmup must not perturb the performance phase's sample ordering.
+
+        Both runs use separate RuntimeSettings instances seeded identically so
+        the comparison is valid. If warmup ever accidentally shared or advanced
+        the perf-phase RNG, the two sequences would diverge.
+        """
+        n_draw = 20
+
+        def make_rt():
+            return RuntimeSettings(
+                metric_target=Throughput(10.0),
+                reported_metrics=[Throughput(10.0)],
+                min_duration_ms=0,
+                max_duration_ms=None,
+                n_samples_from_dataset=simple_dataset.num_samples(),
+                n_samples_to_issue=None,
+                min_sample_count=1,
+                rng_sched=random.Random(99),
+                rng_sample_index=random.Random(99),
+                load_pattern=LoadPattern(type=LoadPatternType.MAX_THROUGHPUT),
+            )
+
+        config_with = OfflineConfig(
+            **_OFFLINE_KWARGS,
+            settings=OfflineSettings(warmup=WarmupConfig(enabled=True, n_requests=5)),
+        )
+        config_without = OfflineConfig(**_OFFLINE_KWARGS)
+
+        ctx_with = self._make_ctx(config_with, make_rt(), simple_dataset)
+        ctx_without = self._make_ctx(config_without, make_rt(), simple_dataset)
+
+        perf_with = next(
+            p for p in _build_phases(ctx_with) if p.phase_type == PhaseType.PERFORMANCE
+        )
+        perf_without = next(
+            p
+            for p in _build_phases(ctx_without)
+            if p.phase_type == PhaseType.PERFORMANCE
+        )
+
+        order_with = [
+            next(create_sample_order(perf_with.runtime_settings)) for _ in range(n_draw)
+        ]
+        order_without = [
+            next(create_sample_order(perf_without.runtime_settings))
+            for _ in range(n_draw)
+        ]
+
+        assert order_with == order_without, (
+            "Performance sample order changed when warmup is enabled — "
+            "warmup may be sharing or advancing the perf-phase RNG."
+        )
+
+
 class TestScorerMethodSync:
     """Ensure ScorerMethod enum stays in sync with the scorer registry."""
 
     @pytest.mark.unit
     def test_scorer_enum_matches_registry(self):
-        from inference_endpoint.config.schema import ScorerMethod
-        from inference_endpoint.evaluation.scoring import Scorer
-
         enum_values = {m.value for m in ScorerMethod}
         registry_keys = set(Scorer.PREDEFINED.keys())
         assert enum_values == registry_keys, (

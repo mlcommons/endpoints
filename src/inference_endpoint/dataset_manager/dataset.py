@@ -276,11 +276,12 @@ class Dataset:
     def __init_subclass__(
         cls,
         dataset_id: str | None = None,
+        register: bool = True,
         **kwargs,
     ):
         super().__init_subclass__(**kwargs)
 
-        if not inspect.isabstract(cls):
+        if register and not inspect.isabstract(cls):
             if dataset_id is None:
                 dataset_id = cls.__name__
             cls.DATASET_ID = dataset_id
@@ -411,7 +412,7 @@ class Dataset:
     @classmethod
     def get_dataloader(
         cls,
-        datasets_dir: Path = Path("datasets"),
+        datasets_dir: Path = Path("dataset_cache"),
         num_repeats: int = 1,
         transforms: list[Transform] | None = None,
         force_regenerate: bool = False,
@@ -429,6 +430,74 @@ class Dataset:
 
         df = cls.generate(datasets_dir=datasets_dir, force=force_regenerate, **kwargs)
         return cls(df, transforms=transforms, repeats=num_repeats)
+
+
+class SaltedDataset(Dataset, register=False):
+    """Wraps a loaded Dataset, prepending a unique random salt to each prompt on load_sample().
+
+    Each call to load_sample() generates a fresh salt, so reused samples (when
+    n_requests > dataset size) each receive a distinct salt.
+    """
+
+    def __init__(self, inner: Dataset) -> None:
+        # Skip Dataset.__init__ — all state is delegated to inner
+        self._inner = inner
+        self.dataframe = None
+        self.transforms = None
+        self.repeats = inner.repeats
+        self.logger = getLogger(__name__)
+
+    @property  # type: ignore[override]
+    def data(self) -> list[Any] | None:
+        return self._inner.data
+
+    @data.setter
+    def data(self, value: list[Any] | None) -> None:
+        self._inner.data = value
+
+    def load(
+        self,
+        adapter: "HttpRequestAdapter | None" = None,
+        api_type: APIType | None = None,
+        model_params: ModelParams | None = None,
+        force: bool = False,
+    ) -> None:
+        pass  # Inner dataset already loaded
+
+    def load_sample(self, index: int) -> Any:
+        data = self._inner.load_sample(index)
+        if not isinstance(data, dict):
+            return data
+        if "input_tokens" in data and "prompt" not in data:
+            self.logger.warning(
+                "SaltedDataset: sample has 'input_tokens' but no 'prompt' — "
+                "salt cannot be applied to pre-tokenized input; KV-cache reuse may not be prevented"
+            )
+            return data
+        if "prompt" not in data:
+            return data
+        prompt = data["prompt"]
+        salt = os.urandom(8).hex()
+        if isinstance(prompt, str):
+            return {**data, "prompt": f"[{salt}] {prompt}"}
+        if isinstance(prompt, list) and prompt:
+            # Find the first text part at any index (image-first prompts place text at index 1+)
+            for i, part in enumerate(prompt):
+                if isinstance(part, dict) and part.get("type") == "text":
+                    salted_parts = [
+                        *prompt[:i],
+                        {**part, "text": f"[{salt}] {part['text']}"},
+                        *prompt[i + 1 :],
+                    ]
+                    return {**data, "prompt": salted_parts}
+            self.logger.warning(
+                "SaltedDataset: multimodal prompt has no text part — "
+                "salt cannot be applied; KV-cache reuse may not be prevented"
+            )
+        return data  # unsupported prompt type — skip salting
+
+    def num_samples(self) -> int:
+        return self._inner.num_samples()
 
 
 class EmptyDataset(Dataset):
