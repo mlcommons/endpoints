@@ -33,6 +33,7 @@ import signal
 import tempfile
 import uuid
 from dataclasses import dataclass, field
+from dataclasses import replace as dataclass_replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -354,16 +355,15 @@ def _build_phases(ctx: BenchmarkContext) -> list[PhaseConfig]:
         warmup_dataset: Dataset = (
             SaltedDataset(ctx.dataloader) if warmup_cfg.salt else ctx.dataloader
         )
-        warmup_rt = RuntimeSettings(
-            metric_target=ctx.rt_settings.metric_target,
-            reported_metrics=ctx.rt_settings.reported_metrics,
+        warmup_rt = dataclass_replace(
+            ctx.rt_settings,
             min_duration_ms=0,
             max_duration_ms=None,
             n_samples_from_dataset=ctx.dataloader.num_samples(),
             n_samples_to_issue=warmup_cfg.n_requests,
             min_sample_count=1,
-            rng_sched=random.Random(),
-            rng_sample_index=random.Random(),
+            rng_sched=random.Random(warmup_cfg.random_seed),
+            rng_sample_index=random.Random(warmup_cfg.random_seed),
             load_pattern=LoadPattern(type=LoadPatternType.MAX_THROUGHPUT),
         )
         phases.append(

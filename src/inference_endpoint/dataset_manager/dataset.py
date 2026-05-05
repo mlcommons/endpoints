@@ -441,11 +441,18 @@ class SaltedDataset(Dataset):
     def __init__(self, inner: Dataset) -> None:
         # Skip Dataset.__init__ — all state is delegated to inner
         self._inner = inner
-        self.data = inner.data
         self.dataframe = None
         self.transforms = None
         self.repeats = inner.repeats
         self.logger = getLogger(__name__)
+
+    @property  # type: ignore[override]
+    def data(self) -> list[Any] | None:
+        return self._inner.data
+
+    @data.setter
+    def data(self, value: list[Any] | None) -> None:
+        self._inner.data = value
 
     def load(
         self,
@@ -458,23 +465,30 @@ class SaltedDataset(Dataset):
 
     def load_sample(self, index: int) -> Any:
         data = self._inner.load_sample(index)
-        if not (isinstance(data, dict) and "prompt" in data):
+        if not isinstance(data, dict):
+            return data
+        if "input_tokens" in data and "prompt" not in data:
+            self.logger.warning(
+                "SaltedDataset: sample has 'input_tokens' but no 'prompt' — "
+                "salt cannot be applied to pre-tokenized input; KV-cache reuse may not be prevented"
+            )
+            return data
+        if "prompt" not in data:
             return data
         prompt = data["prompt"]
         salt = os.urandom(8).hex()
         if isinstance(prompt, str):
             return {**data, "prompt": f"[{salt}] {prompt}"}
-        if (
-            isinstance(prompt, list)
-            and prompt
-            and isinstance(prompt[0], dict)
-            and prompt[0].get("type") == "text"
-        ):
-            salted_parts = [
-                {**prompt[0], "text": f"[{salt}] {prompt[0]['text']}"},
-                *prompt[1:],
-            ]
-            return {**data, "prompt": salted_parts}
+        if isinstance(prompt, list) and prompt:
+            # Find the first text part at any index (image-first prompts place text at index 1+)
+            for i, part in enumerate(prompt):
+                if isinstance(part, dict) and part.get("type") == "text":
+                    salted_parts = [
+                        *prompt[:i],
+                        {**part, "text": f"[{salt}] {part['text']}"},
+                        *prompt[i + 1 :],
+                    ]
+                    return {**data, "prompt": salted_parts}
         return data  # unsupported prompt type — skip salting
 
     def num_samples(self) -> int:

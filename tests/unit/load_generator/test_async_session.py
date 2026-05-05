@@ -818,7 +818,9 @@ class TestBenchmarkSessionStaleStreamChunk:
         )
 
         phases = [
-            PhaseConfig("sat", sat_settings, FakeDataset(2), PhaseType.WARMUP, drain_after=False),
+            PhaseConfig(
+                "sat", sat_settings, FakeDataset(2), PhaseType.WARMUP, drain_after=False
+            ),
             PhaseConfig("perf", perf_settings, FakeDataset(2), PhaseType.PERFORMANCE),
         ]
 
