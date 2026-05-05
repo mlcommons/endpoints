@@ -13,15 +13,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Integration test fixtures for the videogen adapter."""
+"""Integration test fixtures for the videogen adapter.
 
-import asyncio
+The two mocks subclass `EchoServer` to reuse its background-thread
+aiohttp lifecycle (port discovery, start/stop, ready event). Only the
+route registration differs — videogen serves `/v1/videos/generations`
+instead of OpenAI's `/v1/chat/completions`.
+"""
+
 import base64
-import threading
 from collections.abc import Generator
 
 import pytest
 from aiohttp import web
+from inference_endpoint.testing.echo_server import EchoServer
 
 # Minimal dummy video bytes returned in accuracy mode (base64-encoded in responses).
 DUMMY_VIDEO_BYTES = b"\x00\x00\x00\x20ftypmp42" + b"\x00" * 24
@@ -38,60 +43,24 @@ def mock_video_path(tmp_path_factory: pytest.TempPathFactory) -> str:
     return str(tmp_path_factory.mktemp("videogen") / "mock_video_001.mp4")
 
 
-class MockTrtllmServe:
-    """Lightweight aiohttp server mimicking trtllm-serve's video generation API.
+class MockTrtllmServe(EchoServer):
+    """trtllm-serve-shaped mock for `/v1/videos/generations`.
 
-    Supports both response formats:
-    - response_format='video_path': returns VideoPathResponse JSON.
-    - response_format='video_bytes': returns VideoPayloadResponse JSON with
-      base64-encoded DUMMY_VIDEO_BYTES.
+    Branches on the request body's `response_format` field:
+    - "video_bytes": returns VideoPayloadResponse JSON with base64-encoded
+      DUMMY_VIDEO_BYTES.
+    - anything else (default): returns VideoPathResponse JSON pointing at
+      the configured `video_path`.
     """
 
     def __init__(self, video_path: str) -> None:
-        self.host = "127.0.0.1"
-        self.port = 0
+        super().__init__(port=0)
         self.video_path = video_path
-        self._actual_port: int | None = None
-        self._runner: web.AppRunner | None = None
-        self._thread: threading.Thread | None = None
-        self._loop: asyncio.AbstractEventLoop | None = None
-        self._ready = threading.Event()
 
-    @property
-    def url(self) -> str:
-        return f"http://{self.host}:{self._actual_port}"
+    def _register_routes(self, app: web.Application) -> None:
+        app.router.add_post("/v1/videos/generations", self._handle_videogen)
 
-    def start(self) -> None:
-        self._thread = threading.Thread(target=self._run, daemon=True)
-        self._thread.start()
-        self._ready.wait(timeout=5)
-
-    def stop(self) -> None:
-        if self._loop:
-            asyncio.run_coroutine_threadsafe(self._shutdown(), self._loop).result(
-                timeout=5
-            )
-
-    def _run(self) -> None:
-        self._loop = asyncio.new_event_loop()
-        self._loop.run_until_complete(self._serve())
-
-    async def _serve(self) -> None:
-        app = web.Application()
-        app.router.add_post("/v1/videos/generations", self._handle_sync)
-        self._runner = web.AppRunner(app)
-        await self._runner.setup()
-        site = web.TCPSite(self._runner, self.host, self.port)
-        await site.start()
-        self._actual_port = self._runner.addresses[0][1]
-        self._ready.set()
-        await asyncio.Event().wait()
-
-    async def _shutdown(self) -> None:
-        if self._runner:
-            await self._runner.cleanup()
-
-    async def _handle_sync(self, request: web.Request) -> web.Response:
+    async def _handle_videogen(self, request: web.Request) -> web.Response:
         body = await request.json()
         video_id = f"mock_video_{hash(body.get('prompt', '')) & 0xFFFF:04x}"
         if body.get("response_format") == "video_bytes":
@@ -112,51 +81,14 @@ def mock_trtllm_serve(mock_video_path: str) -> Generator[MockTrtllmServe, None, 
     server.stop()
 
 
-class MockTrtllmServeError:
-    """Mock trtllm-serve that returns HTTP 500 for all requests."""
+class MockTrtllmServeError(EchoServer):
+    """Mock trtllm-serve that returns HTTP 500 for `/v1/videos/generations`."""
 
     def __init__(self) -> None:
-        self.host = "127.0.0.1"
-        self.port = 0
-        self._actual_port: int | None = None
-        self._runner: web.AppRunner | None = None
-        self._thread: threading.Thread | None = None
-        self._loop: asyncio.AbstractEventLoop | None = None
-        self._ready = threading.Event()
+        super().__init__(port=0)
 
-    @property
-    def url(self) -> str:
-        return f"http://{self.host}:{self._actual_port}"
-
-    def start(self) -> None:
-        self._thread = threading.Thread(target=self._run, daemon=True)
-        self._thread.start()
-        self._ready.wait(timeout=5)
-
-    def stop(self) -> None:
-        if self._loop:
-            asyncio.run_coroutine_threadsafe(self._shutdown(), self._loop).result(
-                timeout=5
-            )
-
-    def _run(self) -> None:
-        self._loop = asyncio.new_event_loop()
-        self._loop.run_until_complete(self._serve())
-
-    async def _serve(self) -> None:
-        app = web.Application()
+    def _register_routes(self, app: web.Application) -> None:
         app.router.add_post("/v1/videos/generations", self._handle_error)
-        self._runner = web.AppRunner(app)
-        await self._runner.setup()
-        site = web.TCPSite(self._runner, self.host, self.port)
-        await site.start()
-        self._actual_port = self._runner.addresses[0][1]
-        self._ready.set()
-        await asyncio.Event().wait()
-
-    async def _shutdown(self) -> None:
-        if self._runner:
-            await self._runner.cleanup()
 
     async def _handle_error(self, request: web.Request) -> web.Response:
         return web.Response(status=500, text="Internal Server Error")
