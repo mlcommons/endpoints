@@ -69,21 +69,33 @@ inference-endpoint benchmark from-config --config config.yaml
 ```
 Dataset Manager --> Load Generator --> Endpoint Client --> External Endpoint
                         |
-                   Metrics Collector (EventRecorder + MetricsReporter)
+                   EventPublisher (events PUB)
+                        |
+        +---------------+---------------+
+        |                               |
+   EventLoggerService            MetricsAggregatorService
+   (events.jsonl)                (registry → publisher)
+                                        |
+                                  metrics PUB
+                                        |
+                                Main process SUB
+                                        |
+                                Report.from_snapshot
 ```
 
 ### Key Components
 
-| Component           | Location                                                      | Purpose                                                                                                                                     |
-| ------------------- | ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Load Generator**  | `src/inference_endpoint/load_generator/`                      | Central orchestrator: `BenchmarkSession` owns the lifecycle, `Scheduler` controls timing, `LoadGenerator` issues queries                    |
-| **Endpoint Client** | `src/inference_endpoint/endpoint_client/`                     | Multi-process HTTP workers communicating via ZMQ IPC. `HTTPEndpointClient` is the main entry point                                          |
-| **Dataset Manager** | `src/inference_endpoint/dataset_manager/`                     | Loads JSONL, HuggingFace, CSV, JSON, Parquet datasets. `Dataset` base class with `load_sample()`/`num_samples()` interface                  |
-| **Metrics**         | `src/inference_endpoint/metrics/`                             | `EventRecorder` writes to SQLite, `MetricsReporter` reads and aggregates (QPS, latency, TTFT, TPOT)                                         |
-| **Config**          | `src/inference_endpoint/config/`, `endpoint_client/config.py` | Pydantic-based YAML schema (`schema.py`), `HTTPClientConfig` (single Pydantic model for CLI/YAML/runtime), `RuntimeSettings`                |
-| **CLI**             | `src/inference_endpoint/main.py`, `commands/benchmark/cli.py` | cyclopts-based, auto-generated from `schema.py` and `HTTPClientConfig` Pydantic models. Flat shorthands via `cyclopts.Parameter(alias=...)` |
-| **Async Utils**     | `src/inference_endpoint/async_utils/`                         | `LoopManager` (uvloop + eager_task_factory), ZMQ transport layer, event publisher                                                           |
-| **OpenAI/SGLang**   | `src/inference_endpoint/openai/`, `sglang/`                   | Protocol adapters and response accumulators for different API formats                                                                       |
+| Component              | Location                                                          | Purpose                                                                                                                                                                                                                                                                                                                                                          |
+| ---------------------- | ----------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Load Generator**     | `src/inference_endpoint/load_generator/`                          | Central orchestrator: `BenchmarkSession` owns the lifecycle, `Scheduler` controls timing, `LoadGenerator` issues queries. Emits `ERROR` before `COMPLETE` for failed queries (metrics aggregator depends on this order).                                                                                                                                         |
+| **Endpoint Client**    | `src/inference_endpoint/endpoint_client/`                         | Multi-process HTTP workers communicating via ZMQ IPC. `HTTPEndpointClient` is the main entry point                                                                                                                                                                                                                                                               |
+| **Dataset Manager**    | `src/inference_endpoint/dataset_manager/`                         | Loads JSONL, HuggingFace, CSV, JSON, Parquet datasets. `Dataset` base class with `load_sample()`/`num_samples()` interface                                                                                                                                                                                                                                       |
+| **Metrics Aggregator** | `src/inference_endpoint/async_utils/services/metrics_aggregator/` | Subprocess. Subscribes to events, aggregates per-sample metrics into a `MetricsRegistry` (counters + HDR-histogram series + raw values), and publishes `MetricsSnapshot` over IPC PUB at a configurable cadence (`SessionState`: `LIVE` → `DRAINING` → `COMPLETE`). Final snapshot is dual-delivered: pub/sub + atomic disk fallback (`final_snapshot.msgpack`). |
+| **Report**             | `src/inference_endpoint/metrics/report.py`                        | `Report.from_snapshot(MetricsSnapshot)` — pure-function builder. Plumbs `complete = (state == COMPLETE and n_pending_tasks == 0)`. Renders summary + per-series percentiles/histograms.                                                                                                                                                                          |
+| **Config**             | `src/inference_endpoint/config/`, `endpoint_client/config.py`     | Pydantic-based YAML schema (`schema.py`), `HTTPClientConfig` (single Pydantic model for CLI/YAML/runtime), `RuntimeSettings`                                                                                                                                                                                                                                     |
+| **CLI**                | `src/inference_endpoint/main.py`, `commands/benchmark/cli.py`     | cyclopts-based, auto-generated from `schema.py` and `HTTPClientConfig` Pydantic models. Flat shorthands via `cyclopts.Parameter(alias=...)`                                                                                                                                                                                                                      |
+| **Async Utils**        | `src/inference_endpoint/async_utils/`                             | `LoopManager` (uvloop + eager_task_factory), ZMQ transport layer, generic `MessageCodec[T]`-parametrized pub/sub, event publisher                                                                                                                                                                                                                                |
+| **OpenAI/SGLang**      | `src/inference_endpoint/openai/`, `sglang/`                       | Protocol adapters and response accumulators for different API formats                                                                                                                                                                                                                                                                                            |
 
 ### Hot-Path Architecture
 
@@ -94,6 +106,16 @@ Multi-process, event-loop design optimized for throughput:
 - Uses `eager_task_factory` and `uvloop` for minimal async overhead
 - CPU affinity support (`cpu_affinity.py`) for performance tuning
 - Custom HTTP connection pooling (`http.py`) with `httptools` parser
+
+### Metrics Aggregator subprocess (pub/sub)
+
+The aggregator is a separate process (`python -m inference_endpoint.async_utils.services.metrics_aggregator`) that subscribes to events and publishes `MetricsSnapshot` messages. State machine and wire contract are documented in `.cursor_artifacts/metrics_pubsub_design_v5.md` §1; key facts for working in this layer:
+
+- **Series storage**: each `SeriesSampler` keeps three parallel views: O(1) cheap rollups (count/total/min/max/sum_sq, exact), an HDR Histogram (cheap live percentiles), and an in-memory `array.array` of raw values (for exact percentiles in the `COMPLETE` snapshot). Hot path is `registry.record(name, value)` — no allocation, no I/O.
+- **Counter API**: `registry.increment(name, delta=1)` for sample-event counters. `registry.set_counter(name, value)` only for the two duration counters (`total_duration_ns` max-of-elapsed, `tracked_duration_ns` sum-of-blocks).
+- **Lifecycle**: `LIVE` (run in progress, ticking at `--refresh-hz`) → `DRAINING` (set on `ENDED`; tick continues; bounded by 30 s `drain_tasks` timeout) → `COMPLETE` (sole snapshot from `publish_final`, exact stats). Drain timeout detected by consumers as `state == COMPLETE and n_pending_tasks > 0`.
+- **Final delivery is dual-path**: pub/sub publish AND atomic disk write (`tmp + fsync(file) + rename + fsync(parent_dir)`); each path is wrapped in its own try/except so one failure cannot suppress the other. Main process consumer prefers pub/sub `COMPLETE`, falls back to disk file, then to `latest` live snapshot (forced incomplete).
+- **Histogram bucket edges are dynamic per snapshot**: log-spaced over the observed `[min, max]`. Bucket count is fixed at construction; consumers MUST re-render from the snapshot's `(lo, hi, count)` triples each frame and MUST NOT track bucket-by-index across snapshots.
 
 ### CLI Modes
 
@@ -171,9 +193,17 @@ src/inference_endpoint/
 │   ├── event_publisher.py     # Async event pub/sub
 │   ├── services/
 │   │   ├── event_logger/      # EventLoggerService: writes EventRecords to JSONL/SQLite
-│   │   └── metrics_aggregator/ # MetricsAggregatorService: real-time metrics (TTFT, TPOT, ISL, OSL)
+│   │   └── metrics_aggregator/  # MetricsAggregatorService: subscribes to events, publishes MetricsSnapshot
+│   │       ├── __main__.py     # Subprocess entry: --metrics-socket, --metrics-output-dir, --refresh-hz, --hdr-sig-figs, --n-histogram-buckets
+│   │       ├── aggregator.py   # MetricsAggregatorService (event router); SessionState lifecycle; tracked_samples_failed
+│   │       ├── snapshot.py     # MetricsSnapshot wire schema + SessionState enum + msgpack codec
+│   │       ├── registry.py     # MetricsRegistry, CounterSampler, SeriesSampler (HDR + raw array.array + cheap rollups)
+│   │       ├── publisher.py    # MetricsPublisher (tick task + atomic disk fallback)
+│   │       ├── subscriber.py   # MetricsSnapshotSubscriber (latest + COMPLETE snapshot capture)
+│   │       ├── metrics_table.py # In-flight sample rows + trigger dispatch (TTFT/TPOT/ISL/OSL)
+│   │       └── token_metrics.py # TokenizePool (HF tokenizer thread pool for ISL/OSL/TPOT)
 │   └── transport/             # ZMQ-based IPC transport layer
-│       ├── protocol.py        # Transport protocols + TransportConfig base
+│       ├── protocol.py        # Transport protocols + TransportConfig + MessageCodec[T]
 │       └── zmq/               # ZMQ implementation (context, pubsub, transport, ZMQTransportConfig)
 ├── dataset_manager/
 │   ├── dataset.py             # Dataset base class, DatasetFormat enum
@@ -181,8 +211,7 @@ src/inference_endpoint/
 │   ├── transforms.py          # ColumnRemap and other transforms
 │   └── predefined/            # Built-in datasets (aime25, cnndailymail, gpqa, etc.)
 ├── metrics/
-│   ├── recorder.py            # EventRecorder (SQLite-backed)
-│   ├── reporter.py            # MetricsReporter (aggregation)
+│   ├── report.py              # Report.from_snapshot(MetricsSnapshot); display + JSON serialization
 │   └── metric.py              # Metric types (Throughput, etc.)
 ├── config/
 │   ├── schema.py              # Single source of truth: Pydantic models + cyclopts annotations
@@ -277,7 +306,6 @@ See [Development Guide](docs/DEVELOPMENT.md) for full setup and workflow details
 - `mock_http_oracle_server` — dataset-driven response server
 - `dummy_dataset` — in-memory test dataset
 - `hf_squad_dataset` — HuggingFace squad dataset
-- `events_db` — pre-populated SQLite events database
 - `max_throughput_runtime_settings`, `poisson_runtime_settings`, `concurrency_runtime_settings` — preset configs
 - `clean_sample_event_hooks` — ensures event hooks are cleared between tests
 
@@ -298,16 +326,17 @@ These apply especially to code in the hot path (load generator, endpoint client,
 
 ### Key Dependencies
 
-| Package        | Purpose                                             |
-| -------------- | --------------------------------------------------- |
-| `uvloop`       | Performance-optimized event loop                    |
-| `httptools`    | Fast HTTP parser for custom connection pool         |
-| `msgspec`      | Fast serialization for core types and ZMQ transport |
-| `pyzmq`        | ZMQ IPC between main process and workers            |
-| `pydantic`     | Configuration validation                            |
-| `cyclopts`     | CLI framework — auto-generates flags from Pydantic  |
-| `duckdb`       | Data aggregation                                    |
-| `transformers` | Tokenization for OSL reporting                      |
+| Package        | Purpose                                                                |
+| -------------- | ---------------------------------------------------------------------- |
+| `uvloop`       | Performance-optimized event loop                                       |
+| `httptools`    | Fast HTTP parser for custom connection pool                            |
+| `msgspec`      | Fast serialization for core types, ZMQ transport, MetricsSnapshot wire |
+| `pyzmq`        | ZMQ IPC between main process and workers / metrics aggregator          |
+| `hdrhistogram` | HDR Histogram for live percentiles in metrics aggregator (C-backed)    |
+| `pydantic`     | Configuration validation                                               |
+| `cyclopts`     | CLI framework — auto-generates flags from Pydantic                     |
+| `duckdb`       | Data aggregation                                                       |
+| `transformers` | Tokenization for OSL reporting                                         |
 
 ### Files to NOT Modify
 
