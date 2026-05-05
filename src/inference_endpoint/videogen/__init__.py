@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Public API for the WAN 2.2 video generation inference module."""
+"""Public API for the video generation inference module."""
 
 from .adapter import VideoGenAccumulator, VideoGenAdapter
 from .types import VideoPathRequest, VideoPathResponse, VideoPayloadResponse

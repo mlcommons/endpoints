@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Wire models for trtllm-serve POST /v1/videos/generations (WAN 2.2)."""
+"""Wire models for trtllm-serve POST /v1/videos/generations."""
 
 from typing import Literal
 
