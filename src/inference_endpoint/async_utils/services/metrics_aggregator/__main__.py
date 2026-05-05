@@ -26,7 +26,9 @@ from inference_endpoint.async_utils.transport.zmq.ready_check import send_ready_
 from inference_endpoint.utils.logging import setup_logging
 
 from .aggregator import MetricsAggregatorService
-from .kv_store import BasicKVStore
+from .publisher import MetricsPublisher
+from .registry import MetricsRegistry
+from .snapshot import MetricsSnapshotCodec
 from .token_metrics import TokenizePool
 
 
@@ -44,13 +46,37 @@ async def main() -> None:
         "--socket-name",
         type=str,
         required=True,
-        help="Socket name within socket-dir",
+        help="EventRecord PUB socket name within socket-dir to subscribe to",
     )
     parser.add_argument(
-        "--metrics-dir",
+        "--metrics-socket",
         type=str,
         required=True,
-        help="Directory for mmap-backed metric files (created by the parent process)",
+        help="IPC socket name (within socket-dir) for the metrics PUB output",
+    )
+    parser.add_argument(
+        "--metrics-output-dir",
+        type=Path,
+        required=True,
+        help="Directory for the final-snapshot disk fallback (created if missing)",
+    )
+    parser.add_argument(
+        "--refresh-hz",
+        type=float,
+        default=4.0,
+        help="Live snapshot publish rate (default: 4.0)",
+    )
+    parser.add_argument(
+        "--hdr-sig-figs",
+        type=int,
+        default=3,
+        help="HDR Histogram significant figures (default: 3)",
+    )
+    parser.add_argument(
+        "--n-histogram-buckets",
+        type=int,
+        default=30,
+        help="Number of dense histogram buckets per series (default: 30)",
     )
     parser.add_argument(
         "--tokenizer",
@@ -85,7 +111,9 @@ async def main() -> None:
     args = parser.parse_args()
     setup_logging(level="INFO")
 
-    metrics_dir = Path(args.metrics_dir)
+    metrics_output_dir: Path = args.metrics_output_dir
+    metrics_output_dir.mkdir(parents=True, exist_ok=True)
+
     shutdown_event = asyncio.Event()
     loop = LoopManager().default_loop
 
@@ -102,14 +130,25 @@ async def main() -> None:
         pool_cm as pool,
         ManagedZMQContext.scoped(socket_dir=args.socket_dir) as zmq_ctx,
     ):
-        kv_store = BasicKVStore(metrics_dir)
+        registry = MetricsRegistry()
+        publisher = MetricsPublisher(
+            MetricsSnapshotCodec(),
+            zmq_ctx,
+            args.metrics_socket,
+            loop,
+            fallback_path=metrics_output_dir / "final_snapshot.msgpack",
+        )
         try:
             aggregator = MetricsAggregatorService(
                 args.socket_name,
                 zmq_ctx,
                 loop,
                 topics=None,
-                kv_store=kv_store,
+                registry=registry,
+                publisher=publisher,
+                refresh_hz=args.refresh_hz,
+                sig_figs=args.hdr_sig_figs,
+                n_histogram_buckets=args.n_histogram_buckets,
                 tokenize_pool=pool,
                 streaming=args.streaming,
                 shutdown_event=shutdown_event,
@@ -121,7 +160,7 @@ async def main() -> None:
 
             await shutdown_event.wait()
         finally:
-            kv_store.close()
+            publisher.close()
 
 
 if __name__ == "__main__":

@@ -13,21 +13,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Shared test doubles and factories for metrics aggregator tests."""
+"""Shared test doubles and factories for metrics aggregator tests.
+
+NOTE: this conftest is in the process of being migrated to the
+registry-based aggregator (metrics_pubsub_design_v5.md). The legacy
+``InMemoryKVStore`` factories that previously lived here have been
+removed; tests that depended on them are skipped pending rewrite. New
+tests for ``snapshot.py``, ``registry.py``, and ``publisher.py`` are
+self-contained and do not need helpers from this module.
+"""
 
 from __future__ import annotations
 
 import asyncio
-from typing import Literal
-from unittest.mock import MagicMock
 
-from inference_endpoint.async_utils.services.metrics_aggregator.aggregator import (
-    MetricsAggregatorService,
-)
-from inference_endpoint.async_utils.services.metrics_aggregator.kv_store import (
-    KVStore,
-    SeriesStats,
-)
 from inference_endpoint.core.record import (
     EventRecord,
     SampleEventType,
@@ -36,71 +35,8 @@ from inference_endpoint.core.record import (
 from inference_endpoint.core.types import TextModelOutput
 
 # ---------------------------------------------------------------------------
-# In-memory KVStore for tests
-# ---------------------------------------------------------------------------
-
-
-class InMemoryKVStore(KVStore):
-    """In-memory KVStore for unit tests. No /dev/shm files needed."""
-
-    def __init__(self) -> None:
-        self._counters: dict[str, int] = {}
-        self._series: dict[str, list] = {}
-        self._series_dtype: dict[str, type] = {}
-        self.closed: bool = False
-
-    def create_key(
-        self, key: str, key_type: Literal["series", "counter"], dtype: type = int
-    ) -> None:
-        if key_type == "counter" and key not in self._counters:
-            self._counters[key] = 0
-        elif key_type == "series" and key not in self._series:
-            self._series[key] = []
-            self._series_dtype[key] = dtype
-
-    def update(self, key: str, value: int | float) -> None:
-        if key in self._counters:
-            self._counters[key] = int(value)
-        elif key in self._series:
-            self._series[key].append(value)
-        else:
-            raise KeyError(f"Key not created: {key}")
-
-    def get(self, key: str) -> int | SeriesStats:
-        if key in self._counters:
-            return self._counters[key]
-        if key in self._series:
-            dtype = self._series_dtype[key]
-            return SeriesStats(list(self._series[key]), dtype=dtype)
-        raise KeyError(f"Key not created: {key}")
-
-    def snapshot(self) -> dict[str, int | SeriesStats]:
-        result: dict[str, int | SeriesStats] = {}
-        for k, v in self._counters.items():
-            result[k] = v
-        for k, vals in self._series.items():
-            dtype = self._series_dtype[k]
-            result[k] = SeriesStats(list(vals), dtype=dtype)
-        return result
-
-    def close(self) -> None:
-        self.closed = True
-
-    # --- Test helpers ---
-
-    def get_series_values(self, key: str) -> list:
-        return list(self._series.get(key, []))
-
-    def get_counter(self, key: str) -> int:
-        return self._counters.get(key, 0)
-
-    def get_all_series(self) -> dict[str, list[float]]:
-        """All series as {metric_name: [values]}."""
-        return {k: list(v) for k, v in self._series.items()}
-
-
-# ---------------------------------------------------------------------------
-# Mock TokenizePool
+# Mock TokenizePool — still useful for tests that exercise async triggers
+# directly.
 # ---------------------------------------------------------------------------
 
 
@@ -127,52 +63,6 @@ class MockTokenizePool:
 
     def __exit__(self, *args):
         self.close()
-
-
-# ---------------------------------------------------------------------------
-# Aggregator factories
-# ---------------------------------------------------------------------------
-
-
-def mock_zmq_context() -> MagicMock:
-    """Create a mock ManagedZMQContext that no-ops all ZMQ operations."""
-    ctx = MagicMock()
-    ctx.socket.return_value = MagicMock()
-    ctx.connect.return_value = "ipc:///mock/socket"
-    return ctx
-
-
-def make_stub_aggregator(
-    kv_store: KVStore,
-    tokenize_pool=None,
-    streaming: bool = True,
-) -> MetricsAggregatorService:
-    """Create a MetricsAggregatorService with ZMQ mocked out."""
-    return MetricsAggregatorService(
-        "mock_path",
-        mock_zmq_context(),
-        MagicMock(spec=asyncio.AbstractEventLoop),
-        kv_store=kv_store,
-        tokenize_pool=tokenize_pool,
-        streaming=streaming,
-    )
-
-
-def make_async_stub_aggregator(
-    kv_store: KVStore,
-    tokenize_pool,
-    loop: asyncio.AbstractEventLoop,
-    streaming: bool = True,
-) -> MetricsAggregatorService:
-    """Create a MetricsAggregatorService with a real loop and mock ZMQ."""
-    return MetricsAggregatorService(
-        "mock_path",
-        mock_zmq_context(),
-        loop,
-        kv_store=kv_store,
-        tokenize_pool=tokenize_pool,
-        streaming=streaming,
-    )
 
 
 # ---------------------------------------------------------------------------
