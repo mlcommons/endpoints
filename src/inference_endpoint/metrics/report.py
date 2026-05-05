@@ -24,90 +24,58 @@ from pathlib import Path
 from typing import Any
 
 import msgspec.json
-import numpy as np
 
-from inference_endpoint.async_utils.services.metrics_aggregator.kv_store import (
-    BasicKVStoreReader,
-    SeriesStats,
+from inference_endpoint.async_utils.services.metrics_aggregator.snapshot import (
+    CounterStat,
+    MetricsSnapshot,
+    SeriesStat,
+    SessionState,
 )
 from inference_endpoint.utils.version import get_version_info
 
 from ..utils import monotime_to_datetime
 
-# ---------------------------------------------------------------------------
-# Summary computation
-# ---------------------------------------------------------------------------
 
-_DEFAULT_PERCENTILES = (99.9, 99, 97, 95, 90, 80, 75, 50, 25, 10, 5, 1)
+def _series_to_metric_dict(stat: SeriesStat) -> dict[str, Any]:
+    """Convert a wire ``SeriesStat`` into the dict shape ``display()`` expects.
 
-
-def compute_summary(
-    stats: SeriesStats,
-    percentiles: tuple[float, ...] = _DEFAULT_PERCENTILES,
-    n_histogram_buckets: int = 10,
-) -> dict[str, Any]:
-    """Compute rollup statistics from pre-computed SeriesStats.
-
-    Scalar stats (total, min, max, avg, std_dev) are derived from the
-    incrementally maintained rollups in SeriesStats. Numpy is only used
-    for percentiles and histograms, which require the raw values.
-
-    Returns a dict with: total, min, max, avg, std_dev, median,
-    percentiles (dict), and histogram (buckets + counts).
+    Derives ``avg``, ``std_dev``, and ``median`` from the rollups +
+    percentiles. ``median`` falls back to the bucket-midpoint search if
+    the producer didn't emit p50.
     """
-    if stats.count == 0:
-        return {
-            "total": 0,
-            "min": 0,
-            "max": 0,
-            "median": 0.0,
-            "avg": 0.0,
-            "std_dev": 0.0,
-            "percentiles": {str(p): 0.0 for p in percentiles},
-            "histogram": {"buckets": [], "counts": []},
-        }
+    if stat.count == 0:
+        return {}
 
-    # Scalar stats from pre-computed rollups (no numpy needed)
-    avg = stats.total / stats.count
-    # Bessel's correction (ddof=1) for sample standard deviation
-    if stats.count > 1:
-        n = stats.count
-        std_dev = math.sqrt((stats.sum_sq - stats.total**2 / n) / (n - 1))
+    avg = stat.total / stat.count if stat.count > 0 else 0.0
+    if stat.count > 1:
+        n = stat.count
+        var_num = stat.sum_sq - stat.total * stat.total / n
+        std_dev = math.sqrt(var_num / (n - 1)) if var_num > 0 else 0.0
     else:
         std_dev = 0.0
 
-    # Percentiles and histogram require raw values
-    # Don't force float64 — numpy preserves int for uint64 series,
-    # so percentile(method="lower") returns actual observed values
-    # in their original type.
-    arr = np.array(stats.values)
-    arr.sort()
-
-    # Inject 50th percentile for median if not already requested
-    need_median = 50 not in percentiles
-    all_percentiles = (*percentiles, 50) if need_median else percentiles
-
-    perc_values = np.percentile(arr, all_percentiles, method="lower")
-    perc_dict = {
-        str(p): v.item() for p, v in zip(all_percentiles, perc_values, strict=True)
-    }
-    median = perc_dict.pop("50") if need_median else perc_dict["50"]
-
-    bounds = np.histogram_bin_edges(arr, bins=n_histogram_buckets)
-    counts, _ = np.histogram(arr, bins=bounds)
-    hist_buckets = [
-        (float(bounds[i]), float(bounds[i + 1])) for i in range(len(bounds) - 1)
-    ]
+    # Median: prefer p50 from the producer, fall back to (min+max)/2 so
+    # ``display()`` still has a numeric value to format.
+    perc = stat.percentiles
+    if "50" in perc:
+        median: float = perc["50"]
+    elif "50.0" in perc:
+        median = perc["50.0"]
+    else:
+        median = (stat.min + stat.max) / 2
 
     return {
-        "total": stats.total,
-        "min": stats.min_val,
-        "max": stats.max_val,
+        "total": stat.total,
+        "min": stat.min,
+        "max": stat.max,
         "median": median,
         "avg": avg,
         "std_dev": std_dev,
-        "percentiles": perc_dict,
-        "histogram": {"buckets": hist_buckets, "counts": counts.tolist()},
+        "percentiles": dict(stat.percentiles),
+        "histogram": {
+            "buckets": [(lo, hi) for (lo, hi), _ in stat.histogram],
+            "counts": [c for _, c in stat.histogram],
+        },
     }
 
 
@@ -126,8 +94,13 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
     n_samples_completed: int
     n_samples_failed: int
     duration_ns: int | None
+    # True iff the snapshot was state=COMPLETE AND n_pending_tasks==0.
+    # False signals partial async metrics — either drain timed out
+    # (state=COMPLETE, n_pending_tasks>0) or no COMPLETE snapshot was
+    # received and we fell back to a live/draining snapshot.
+    complete: bool
 
-    # Per-metric rollup dicts (output of compute_summary)
+    # Per-metric rollup dicts (output of _series_to_metric_dict)
     ttft: dict[str, Any]
     tpot: dict[str, Any]
     latency: dict[str, Any]
@@ -147,26 +120,30 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
         return total / (self.duration_ns / 1e9)
 
     @classmethod
-    def from_kv_reader(cls, reader: BasicKVStoreReader) -> Report:
-        """Build a Report from the current KVStore state.
+    def from_snapshot(cls, snap: MetricsSnapshot) -> Report:
+        """Build a Report from a MetricsSnapshot.
 
-        Reads counters and series from the reader, computes rollup summaries
-        (percentiles, histograms) for each series metric, and returns a Report.
-
-        Works identically for live metrics (mid-test) and final reports
-        (post-drain). The caller decides when to call.
+        Counters are looked up by name; series are converted to the
+        dict shape that ``display()`` expects. Percentiles / histograms
+        are passed straight through from the snapshot.
         """
-        snap = reader.snapshot()
+        counters: dict[str, int | float] = {}
+        series: dict[str, SeriesStat] = {}
+        for stat in snap.metrics:
+            if isinstance(stat, CounterStat):
+                counters[stat.name] = stat.value
+            elif isinstance(stat, SeriesStat):
+                series[stat.name] = stat
 
         def _counter(key: str) -> int:
-            val = snap.get(key)
-            return int(val) if isinstance(val, int) else 0
+            val = counters.get(key, 0)
+            return int(val)
 
-        def _summarize(key: str) -> dict:
-            val = snap.get(key)
-            if isinstance(val, SeriesStats) and val.count > 0:
-                return compute_summary(val)
-            return {}
+        def _series_dict(key: str) -> dict[str, Any]:
+            stat = series.get(key)
+            if stat is None or stat.count == 0:
+                return {}
+            return _series_to_metric_dict(stat)
 
         version_info = get_version_info()
         duration_ns = _counter("tracked_duration_ns")
@@ -174,17 +151,18 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
         return cls(
             version=str(version_info.get("version", "unknown")),
             git_sha=version_info.get("git_sha"),
-            test_started_at=0,  # TODO: add test_started_at counter to aggregator
+            test_started_at=0,  # TODO: surface session_started_ns via snapshot
             n_samples_issued=_counter("tracked_samples_issued"),
             n_samples_completed=_counter("tracked_samples_completed"),
-            # TODO: Add tracked_samples_failed to MetricCounterKey.
-            # For now, total_samples_failed is the best available.
-            n_samples_failed=_counter("total_samples_failed"),
+            n_samples_failed=_counter("tracked_samples_failed"),
             duration_ns=duration_ns if duration_ns > 0 else None,
-            ttft=_summarize("ttft_ns"),
-            tpot=_summarize("tpot_ns"),
-            latency=_summarize("sample_latency_ns"),
-            output_sequence_lengths=_summarize("osl"),
+            complete=(
+                snap.state == SessionState.COMPLETE and snap.n_pending_tasks == 0
+            ),
+            ttft=_series_dict("ttft_ns"),
+            tpot=_series_dict("tpot_ns"),
+            latency=_series_dict("sample_latency_ns"),
+            output_sequence_lengths=_series_dict("osl"),
         )
 
     def to_json(self, save_to: os.PathLike | None = None) -> bytes:
@@ -222,6 +200,12 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
 
         if (tps := self.tps()) is not None:
             fn(f"TPS: {tps:.2f}{newline}")
+
+        if not self.complete:
+            fn(
+                f"WARNING: Some async metrics may be incomplete "
+                f"(drain timeout){newline}"
+            )
 
         if summary_only:
             fn(f"----------------- End of Summary -----------------{newline}")

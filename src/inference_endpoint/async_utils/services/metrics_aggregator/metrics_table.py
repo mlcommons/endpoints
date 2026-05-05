@@ -29,8 +29,8 @@ from inference_endpoint.core.record import SampleEventType, SessionEventType
 from inference_endpoint.core.types import PromptData, TextModelOutput
 
 if TYPE_CHECKING:
-    from inference_endpoint.async_utils.services.metrics_aggregator.kv_store import (
-        KVStore,
+    from inference_endpoint.async_utils.services.metrics_aggregator.registry import (
+        MetricsRegistry,
     )
     from inference_endpoint.async_utils.services.metrics_aggregator.token_metrics import (
         TokenizePool,
@@ -55,7 +55,7 @@ class SampleField(str, Enum):
 
 
 class MetricSeriesKey(str, Enum):
-    """Series metric keys written by triggers to the KV store."""
+    """Series metric keys written by triggers to the registry."""
 
     ISL = "isl"
     OSL = "osl"
@@ -117,24 +117,26 @@ class TrackedBlock:
 class EmitTrigger(ABC):
     """A metric computation that fires when a SampleRow field is set.
 
-    Each trigger has a ``metric_name`` and a ``kv_store`` reference.
-    When ``fire()`` computes a value, it writes directly to
-    ``self.kv_store.update(self.metric_name, value)``.
+    Each trigger has a ``metric_name`` and a ``registry`` reference. When
+    ``fire()`` computes a value, it writes directly via
+    ``self.registry.record(self.metric_name, value)``. Series registration
+    (with HDR bounds, dtype, etc.) is the aggregator's responsibility —
+    the trigger itself never registers metrics.
     """
 
     def __init__(
         self,
         metric_name: str,
-        kv_store: KVStore,
+        registry: MetricsRegistry,
         requires: tuple[str, ...] = (),
         dtype: type = int,
     ):
-        # Resolve enum to its value string so KVStore filenames match
-        # what the reader expects (e.g. "ttft_ns" not "MetricSeriesKey.TTFT_NS").
+        # Resolve enum to its value string so registry names match the
+        # registered series names (e.g. "ttft_ns" not "MetricSeriesKey.TTFT_NS").
         self.metric_name = (
             metric_name.value if isinstance(metric_name, Enum) else metric_name
         )
-        self.kv_store = kv_store
+        self.registry = registry
         self.requires = requires
         self.dtype = dtype
 
@@ -158,14 +160,19 @@ class TimeDeltaTrigger(EmitTrigger):
     not yet opened for this sample).
     """
 
-    def __init__(self, metric_name: str, kv_store: KVStore, delta_start_fieldname: str):
-        super().__init__(metric_name, kv_store, requires=(delta_start_fieldname,))
+    def __init__(
+        self,
+        metric_name: str,
+        registry: MetricsRegistry,
+        delta_start_fieldname: str,
+    ):
+        super().__init__(metric_name, registry, requires=(delta_start_fieldname,))
         self._delta_start_fieldname = delta_start_fieldname
 
     def fire(self, ev_rec, row, pre_change):
         baseline = pre_change.get(self._delta_start_fieldname)
         if baseline is not None:
-            self.kv_store.update(self.metric_name, ev_rec.timestamp_ns - baseline)
+            self.registry.record(self.metric_name, ev_rec.timestamp_ns - baseline)
         return None
 
 
@@ -181,13 +188,13 @@ class AsyncTokenTrigger(EmitTrigger):
     def __init__(
         self,
         metric_name: str,
-        kv_store: KVStore,
+        registry: MetricsRegistry,
         tokenize_pool: TokenizePool | None,
         loop: asyncio.AbstractEventLoop | None,
         requires: tuple[str, ...] = (),
         dtype: type = int,
     ):
-        super().__init__(metric_name, kv_store, requires=requires, dtype=dtype)
+        super().__init__(metric_name, registry, requires=requires, dtype=dtype)
         self._pool = tokenize_pool
         self._loop = loop
 
@@ -212,7 +219,7 @@ class AsyncTokenTrigger(EmitTrigger):
             return None
 
         pool, loop = self._pool, self._loop
-        store, name = self.kv_store, self.metric_name
+        registry, name = self.registry, self.metric_name
         uuid = row.sample_uuid
 
         async def _tokenize_and_emit() -> None:
@@ -220,7 +227,7 @@ class AsyncTokenTrigger(EmitTrigger):
                 count = await pool.token_count_async(text, loop)
                 value = self._compute_value(count, ev_rec, pre_change)
                 if value is not None:
-                    store.update(name, value)
+                    registry.record(name, value)
             except Exception:
                 logger.exception("%s tokenization failed for %s", name, uuid)
 
@@ -235,10 +242,10 @@ class AsyncTokenTrigger(EmitTrigger):
 class TtftTrigger(TimeDeltaTrigger):
     """TTFT = recv_first_ns (new) - issued_ns."""
 
-    def __init__(self, kv_store: KVStore):
+    def __init__(self, registry: MetricsRegistry):
         super().__init__(
             MetricSeriesKey.TTFT_NS,
-            kv_store,
+            registry,
             delta_start_fieldname=SampleField.ISSUED_NS,
         )
 
@@ -249,10 +256,10 @@ class ChunkDeltaTrigger(TimeDeltaTrigger):
     Skips when pre-change last_recv_ns is None (first recv via RECV_FIRST).
     """
 
-    def __init__(self, kv_store: KVStore):
+    def __init__(self, registry: MetricsRegistry):
         super().__init__(
             MetricSeriesKey.CHUNK_DELTA_NS,
-            kv_store,
+            registry,
             delta_start_fieldname=SampleField.LAST_RECV_NS,
         )
 
@@ -260,10 +267,10 @@ class ChunkDeltaTrigger(TimeDeltaTrigger):
 class SampleLatencyTrigger(TimeDeltaTrigger):
     """sample_latency_ns = complete_ns (new) - issued_ns."""
 
-    def __init__(self, kv_store: KVStore):
+    def __init__(self, registry: MetricsRegistry):
         super().__init__(
             MetricSeriesKey.SAMPLE_LATENCY_NS,
-            kv_store,
+            registry,
             delta_start_fieldname=SampleField.ISSUED_NS,
         )
 
@@ -278,16 +285,16 @@ class IslTrigger(AsyncTokenTrigger):
 
     def __init__(
         self,
-        kv_store: KVStore,
+        registry: MetricsRegistry,
         tokenize_pool: TokenizePool | None,
         loop: asyncio.AbstractEventLoop | None,
     ):
-        super().__init__(MetricSeriesKey.ISL, kv_store, tokenize_pool, loop)
+        super().__init__(MetricSeriesKey.ISL, registry, tokenize_pool, loop)
 
     def fire(self, ev_rec, row, pre_change):
         # Sync fast path: any backend that pre-populates token_ids (e.g. SGLang).
         if isinstance(ev_rec.data, PromptData) and ev_rec.data.token_ids is not None:
-            self.kv_store.update(self.metric_name, len(ev_rec.data.token_ids))
+            self.registry.record(self.metric_name, len(ev_rec.data.token_ids))
             return None
         # Async path: tokenize raw text — used when token_ids are unavailable
         # (e.g. OpenAI-compatible endpoints). Handled by the base class.
@@ -304,11 +311,11 @@ class OslTrigger(AsyncTokenTrigger):
 
     def __init__(
         self,
-        kv_store: KVStore,
+        registry: MetricsRegistry,
         tokenize_pool: TokenizePool | None,
         loop: asyncio.AbstractEventLoop | None,
     ):
-        super().__init__(MetricSeriesKey.OSL, kv_store, tokenize_pool, loop)
+        super().__init__(MetricSeriesKey.OSL, registry, tokenize_pool, loop)
 
     def _extract_text(self, ev_rec, row, pre_change):
         if isinstance(ev_rec.data, TextModelOutput):
@@ -334,13 +341,13 @@ class TpotTrigger(AsyncTokenTrigger):
 
     def __init__(
         self,
-        kv_store: KVStore,
+        registry: MetricsRegistry,
         tokenize_pool: TokenizePool | None,
         loop: asyncio.AbstractEventLoop | None,
     ):
         super().__init__(
             MetricSeriesKey.TPOT_NS,
-            kv_store,
+            registry,
             tokenize_pool,
             loop,
             requires=(SampleField.RECV_FIRST_NS,),
@@ -369,9 +376,10 @@ class TpotTrigger(AsyncTokenTrigger):
 class MetricsTable:
     """Stores in-flight sample rows, session state, and dispatches triggers.
 
-    Takes a KVStore for metric storage. When triggers are registered via
-    add_trigger(), the table creates the key in the store and wires the
-    store onto the trigger.
+    Takes a ``MetricsRegistry`` for metric storage. Triggers are passed to
+    ``add_trigger`` already wired against the registry. The table does NOT
+    register the underlying series — the aggregator pre-registers all
+    series with explicit HDR bounds before constructing triggers.
 
     Row lifecycle is managed internally via ``set_field``:
     - ISSUED: creates the row if tracking is on, assigns block index.
@@ -381,8 +389,8 @@ class MetricsTable:
     Session state is updated via ``handle_session_event``.
     """
 
-    def __init__(self, kv_store: KVStore) -> None:
-        self._kv_store = kv_store
+    def __init__(self, registry: MetricsRegistry) -> None:
+        self._registry = registry
         self._in_flight: dict[str, SampleRow] = {}
         self._triggers: dict[str, list[EmitTrigger]] = {}
         self._in_flight_tasks: set[asyncio.Task] = set()
@@ -397,10 +405,10 @@ class MetricsTable:
     def add_trigger(self, field_name: str, trigger: EmitTrigger) -> None:
         """Register a trigger for a SampleRow field.
 
-        Creates the trigger's metric key in the KV store as a series,
-        using the trigger's declared dtype.
+        The trigger's underlying series MUST already be registered on the
+        registry by the aggregator (which knows the right HDR bounds and
+        dtype). The table only stores the trigger reference.
         """
-        self._kv_store.create_key(trigger.metric_name, "series", dtype=trigger.dtype)
         self._triggers.setdefault(field_name, []).append(trigger)
 
     # --- Session event handling ---
