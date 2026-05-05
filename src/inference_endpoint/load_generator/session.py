@@ -240,6 +240,7 @@ class BenchmarkSession:
         self._stop_requested = False
         self._done = False
         self._current_phase_issuer: PhaseIssuer | None = None
+        self._current_phase_type: PhaseType | None = None
         self._current_strategy: LoadStrategy | None = None
         self._recv_task: asyncio.Task | None = None
         self._strategy_task: asyncio.Task | None = None
@@ -310,6 +311,7 @@ class BenchmarkSession:
         )
 
         self._current_phase_issuer = phase_issuer
+        self._current_phase_type = phase.phase_type
         self._current_strategy = strategy
 
         # Performance phases get tracking events
@@ -416,7 +418,10 @@ class BenchmarkSession:
                     self._drain_event.set()
                 if self._current_strategy:
                     self._current_strategy.on_query_complete(query_id)
-                if self._on_sample_complete:
+                if (
+                    self._on_sample_complete
+                    and self._current_phase_type != PhaseType.WARMUP
+                ):
                     self._on_sample_complete(resp)
 
         elif isinstance(resp, StreamChunk):

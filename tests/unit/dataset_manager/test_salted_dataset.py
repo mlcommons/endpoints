@@ -147,6 +147,38 @@ class TestSaltedDatasetPassthrough:
         sd.data = inner.data
         assert sd.load_sample(0) == "raw string sample"
 
+    def test_multimodal_list_prompt_first_text_part_is_salted(self):
+        """Salt is injected into the 'text' field of the first content part."""
+        content_parts = [
+            {"type": "text", "text": "describe this image"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}},
+        ]
+        inner = _make_loaded_dataset([{"prompt": content_parts}])
+        sd = SaltedDataset(inner)
+        result = sd.load_sample(0)
+        parts = result["prompt"]
+        assert isinstance(parts, list)
+        assert len(parts) == 2
+        # First text part must carry a salt prefix
+        assert re.match(r"^\[([0-9a-f]{16})\] describe this image$", parts[0]["text"])
+        # Image part must be unchanged
+        assert parts[1] == content_parts[1]
+
+    def test_multimodal_list_prompt_original_not_mutated(self):
+        """Salting a multimodal prompt must not modify the original list or dicts."""
+        content_parts = [{"type": "text", "text": "original text"}]
+        inner = _make_loaded_dataset([{"prompt": content_parts}])
+        sd = SaltedDataset(inner)
+        sd.load_sample(0)
+        assert inner.data[0]["prompt"][0]["text"] == "original text"
+
+    def test_unknown_prompt_type_is_not_salted(self):
+        """A prompt that is neither str nor a recognised list-of-parts is returned unchanged."""
+        inner = _make_loaded_dataset([{"prompt": 42}])
+        sd = SaltedDataset(inner)
+        result = sd.load_sample(0)
+        assert result == {"prompt": 42}
+
 
 @pytest.mark.unit
 class TestSaltedDatasetWithRealDataset:

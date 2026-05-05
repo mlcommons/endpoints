@@ -24,7 +24,6 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 import numpy as np
 import pandas as pd
-
 from datasets import load_dataset, load_from_disk
 
 from ..config.schema import APIType, ModelParams
@@ -459,10 +458,24 @@ class SaltedDataset(Dataset):
 
     def load_sample(self, index: int) -> Any:
         data = self._inner.load_sample(index)
-        if isinstance(data, dict) and "prompt" in data:
-            salt = os.urandom(8).hex()
-            return {**data, "prompt": f"[{salt}] {data['prompt']}"}
-        return data
+        if not (isinstance(data, dict) and "prompt" in data):
+            return data
+        prompt = data["prompt"]
+        salt = os.urandom(8).hex()
+        if isinstance(prompt, str):
+            return {**data, "prompt": f"[{salt}] {prompt}"}
+        if (
+            isinstance(prompt, list)
+            and prompt
+            and isinstance(prompt[0], dict)
+            and prompt[0].get("type") == "text"
+        ):
+            salted_parts = [
+                {**prompt[0], "text": f"[{salt}] {prompt[0]['text']}"},
+                *prompt[1:],
+            ]
+            return {**data, "prompt": salted_parts}
+        return data  # unsupported prompt type — skip salting
 
     def num_samples(self) -> int:
         return self._inner.num_samples()

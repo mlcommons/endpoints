@@ -735,6 +735,29 @@ class TestBuildPhases:
 
         assert phases[1].runtime_settings is base_rt_settings
 
+    @pytest.mark.unit
+    def test_warmup_uses_independent_rng_instances(
+        self, base_rt_settings, simple_dataset
+    ):
+        """Warmup RuntimeSettings must not share RNG instances with the perf phase.
+
+        Sharing would cause warmup sample-ordering to consume state from the
+        perf phase's deterministic random sequence, breaking reproducibility.
+        """
+        from inference_endpoint.commands.benchmark.execute import _build_phases
+
+        config = OfflineConfig(
+            **_OFFLINE_KWARGS,
+            settings=OfflineSettings(warmup=WarmupConfig(enabled=True)),
+        )
+        ctx = self._make_ctx(config, base_rt_settings, simple_dataset)
+        phases = _build_phases(ctx)
+
+        warmup_rt = phases[0].runtime_settings
+        perf_rt = phases[1].runtime_settings
+        assert warmup_rt.rng_sched is not perf_rt.rng_sched
+        assert warmup_rt.rng_sample_index is not perf_rt.rng_sample_index
+
 
 class TestScorerMethodSync:
     """Ensure ScorerMethod enum stays in sync with the scorer registry."""

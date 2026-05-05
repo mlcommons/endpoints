@@ -27,6 +27,7 @@ import asyncio
 import json
 import logging
 import platform
+import random
 import shutil
 import signal
 import tempfile
@@ -361,8 +362,8 @@ def _build_phases(ctx: BenchmarkContext) -> list[PhaseConfig]:
             n_samples_from_dataset=ctx.dataloader.num_samples(),
             n_samples_to_issue=warmup_cfg.n_requests,
             min_sample_count=1,
-            rng_sched=ctx.rt_settings.rng_sched,
-            rng_sample_index=ctx.rt_settings.rng_sample_index,
+            rng_sched=random.Random(),
+            rng_sample_index=random.Random(),
             load_pattern=LoadPattern(type=LoadPatternType.MAX_THROUGHPUT),
         )
         phases.append(
