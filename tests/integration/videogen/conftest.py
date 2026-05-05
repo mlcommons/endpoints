@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Integration test fixtures for WAN2.2 adapter tests."""
+"""Integration test fixtures for the videogen adapter."""
 
 import asyncio
 import base64
@@ -23,9 +23,19 @@ from collections.abc import Generator
 import pytest
 from aiohttp import web
 
-DUMMY_VIDEO_PATH = "/lustre/videos/mock_video_001.mp4"
 # Minimal dummy video bytes returned in accuracy mode (base64-encoded in responses).
 DUMMY_VIDEO_BYTES = b"\x00\x00\x00\x20ftypmp42" + b"\x00" * 24
+
+
+@pytest.fixture(scope="module")
+def mock_video_path(tmp_path_factory: pytest.TempPathFactory) -> str:
+    """Stable per-module path string the mock server returns for video_path mode.
+
+    The mock never writes a real file — the path only needs to be a unique
+    string the adapter and tests can assert against. Using tmp_path_factory
+    avoids hardcoding shared-storage locations like /lustre/....
+    """
+    return str(tmp_path_factory.mktemp("videogen") / "mock_video_001.mp4")
 
 
 class MockTrtllmServe:
@@ -37,9 +47,10 @@ class MockTrtllmServe:
       base64-encoded DUMMY_VIDEO_BYTES.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, video_path: str) -> None:
         self.host = "127.0.0.1"
         self.port = 0
+        self.video_path = video_path
         self._actual_port: int | None = None
         self._runner: web.AppRunner | None = None
         self._thread: threading.Thread | None = None
@@ -90,12 +101,12 @@ class MockTrtllmServe:
                     "video_bytes": base64.b64encode(DUMMY_VIDEO_BYTES).decode(),
                 }
             )
-        return web.json_response({"video_id": video_id, "video_path": DUMMY_VIDEO_PATH})
+        return web.json_response({"video_id": video_id, "video_path": self.video_path})
 
 
 @pytest.fixture(scope="module")
-def mock_trtllm_serve() -> Generator[MockTrtllmServe, None, None]:
-    server = MockTrtllmServe()
+def mock_trtllm_serve(mock_video_path: str) -> Generator[MockTrtllmServe, None, None]:
+    server = MockTrtllmServe(video_path=mock_video_path)
     server.start()
     yield server
     server.stop()

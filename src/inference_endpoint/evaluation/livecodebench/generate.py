@@ -40,7 +40,7 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
-from datasets import load_dataset  # type: ignore[attr-defined]
+from datasets import load_dataset
 
 logger = logging.getLogger(__name__)
 

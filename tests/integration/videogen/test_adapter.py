@@ -27,7 +27,6 @@ from pydantic import ValidationError
 
 from .conftest import (
     DUMMY_VIDEO_BYTES,
-    DUMMY_VIDEO_PATH,
     MockTrtllmServe,
     MockTrtllmServeError,
 )
@@ -55,7 +54,7 @@ class TestVideoGenAdapterRoundTrip:
     def test_perf_mode_round_trip_returns_video_path(
         self, mock_trtllm_serve: MockTrtllmServe
     ) -> None:
-        """Default response_format=video_path → server returns Lustre path."""
+        """Default response_format=video_path → server returns the saved-video path."""
         query = Query(id="q1", data={"prompt": "a golden retriever running on a beach"})
         request_bytes = VideoGenAdapter.encode_query(query)
 
@@ -67,7 +66,7 @@ class TestVideoGenAdapterRoundTrip:
         result = VideoGenAdapter.decode_response(content, query.id)
         assert result.id == "q1"
         assert result.error is None
-        assert result.metadata == {"video_path": DUMMY_VIDEO_PATH}
+        assert result.metadata == {"video_path": mock_trtllm_serve.video_path}
 
     def test_accuracy_mode_round_trip_returns_video_bytes(
         self, mock_trtllm_serve: MockTrtllmServe
