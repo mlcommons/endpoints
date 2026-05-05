@@ -50,7 +50,9 @@ class ProbeConfig(BaseModel):
     model: str
     api_type: Annotated[
         APIType,
-        cyclopts.Parameter(alias="--api-type", help="API type: openai or sglang"),
+        cyclopts.Parameter(
+            alias="--api-type", help="API type: openai, sglang, or videogen"
+        ),
     ] = APIType.OPENAI
     requests: int = Field(10, ge=1)
     prompt: str = Field(

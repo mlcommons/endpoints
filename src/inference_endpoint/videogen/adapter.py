@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Adapter for the WAN 2.2 trtllm-serve POST /v1/videos/generations endpoint."""
+"""Adapter for trtllm-serve's POST /v1/videos/generations endpoint."""
 
 import json
 from typing import TYPE_CHECKING, Any
@@ -65,8 +65,9 @@ class VideoGenAdapter(HttpRequestAdapter):
             )
         known = VideoPathRequest.model_fields.keys()
         req = VideoPathRequest.model_validate({k: data[k] for k in known if k in data})
-        # exclude_none so optional fields fall back to server-side defaults
-        # (MLPerf: omit negative_prompt and latent_path unless explicitly set).
+        # exclude_none so optional fields with value None fall back to
+        # server-side defaults; fields explicitly set in query.data
+        # (e.g. negative_prompt from the bundled JSONL) are forwarded.
         return req.model_dump_json(exclude_none=True).encode()
 
     @classmethod
@@ -94,19 +95,19 @@ class VideoGenAdapter(HttpRequestAdapter):
 
     @classmethod
     def decode_sse_message(cls, json_bytes: bytes) -> str:
-        raise NotImplementedError("WAN 2.2 does not use SSE streaming")
+        raise NotImplementedError("VideoGenAdapter does not use SSE streaming")
 
 
 class VideoGenAccumulator:
     """No-op SSE accumulator satisfying SSEAccumulatorProtocol.
 
-    WAN 2.2 uses non-streaming HTTP. This class exists only to satisfy
-    the HTTPClientConfig.accumulator type contract.
+    Video generation requests are non-streaming HTTP. This class exists
+    only to satisfy the HTTPClientConfig.accumulator type contract.
     """
 
     def __init__(self, query_id: str, stream_all_chunks: bool) -> None:
         self.query_id = query_id
-        # stream_all_chunks is intentionally ignored: WAN 2.2 is non-streaming.
+        # stream_all_chunks is intentionally ignored: non-streaming endpoint.
 
     def add_chunk(self, delta: Any) -> StreamChunk | None:
         return None

@@ -12,8 +12,10 @@
 #   Seed:        42 (fixed for reproducibility; combine with fixed_latent.pt)
 #   Dataset:     248 prompts from shopify_product_catalogue::q3vl
 #
-# These params are baked into VideoGenAdapter defaults so only `prompt` is
-# required from the dataset. Override via AddStaticColumns transform if needed.
+# Resolution / duration / steps / guidance / seed are defaulted on
+# `VideoPathRequest`. Each JSONL row carries `prompt` plus the canonical
+# MLPerf `negative_prompt`; both flow into `query.data` and serialise into
+# the request body, while unset fields fall back to the request defaults.
 
 name: "offline-wan22-video-generation-benchmark"
 version: "1.0"
@@ -32,7 +34,6 @@ datasets:
 
 settings:
   runtime:
-    min_duration_ms: 60000 # 1 minute warm-up
     max_duration_ms: 600000 # 10 minute cap
     scheduler_random_seed: 42
     dataloader_random_seed: 42
@@ -49,8 +50,5 @@ endpoint_config:
     - "http://localhost:8000"
   api_type: "videogen"
   api_key: null
-
-# Per-request fields (negative_prompt, optional latent_path) come from the
-# bundled JSONL — the canonical MLPerf negative prompt is baked into every row.
 
 report_dir: logs/wan22_video_generation_benchmark
