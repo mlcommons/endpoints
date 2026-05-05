@@ -182,6 +182,15 @@ class ModelParams(BaseModel):
         str,
         cyclopts.Parameter(alias="--model", help="Model name", required=True),
     ] = ""
+    tokenizer_name: Annotated[
+        str | None,
+        cyclopts.Parameter(
+            alias="--tokenizer",
+            help="Tokenizer name or path (overrides model name for tokenizer loading). "
+            "Useful when the serving model path differs from the tokenizer, e.g. "
+            "quantized checkpoints or container-local paths.",
+        ),
+    ] = Field(None, description="Tokenizer name/path override (HF repo ID or local path)")
     temperature: float | None = Field(None, description="Sampling temperature")
     top_k: int | None = Field(None, description="Top-K sampling")
     top_p: float | None = Field(None, description="Top-P (nucleus) sampling")

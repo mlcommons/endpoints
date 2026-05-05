@@ -7,6 +7,7 @@ timeout: 14400 # Perf + acc run takes over 3 hours, consider limit n_samples_to_
 
 model_params:
   name: "Qwen/Qwen3-VL-235B-A22B-Instruct"
+  # tokenizer_name: "Qwen/Qwen3-VL-235B-A22B-Instruct"  # Set this if model name is a local/container path
   temperature: 0
   top_p: 1
   max_new_tokens: 150
