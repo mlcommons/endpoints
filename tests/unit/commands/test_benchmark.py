@@ -60,6 +60,7 @@ from inference_endpoint.dataset_manager.dataset import Dataset, SaltedDataset
 from inference_endpoint.endpoint_client.config import HTTPClientConfig
 from inference_endpoint.evaluation.scoring import Scorer
 from inference_endpoint.exceptions import InputValidationError
+from inference_endpoint.load_generator.sample_order import create_sample_order
 from inference_endpoint.load_generator.session import PhaseType
 from inference_endpoint.metrics.metric import Throughput
 from pydantic import ValidationError
@@ -718,6 +719,63 @@ class TestBuildPhases:
         perf_rt = phases[1].runtime_settings
         assert warmup_rt.rng_sched is not perf_rt.rng_sched
         assert warmup_rt.rng_sample_index is not perf_rt.rng_sample_index
+
+    @pytest.mark.unit
+    def test_performance_sample_order_identical_with_and_without_warmup(
+        self, simple_dataset
+    ):
+        """Warmup must not perturb the performance phase's sample ordering.
+
+        Both runs use separate RuntimeSettings instances seeded identically so
+        the comparison is valid. If warmup ever accidentally shared or advanced
+        the perf-phase RNG, the two sequences would diverge.
+        """
+        n_draw = 20
+
+        def make_rt():
+            return RuntimeSettings(
+                metric_target=Throughput(10.0),
+                reported_metrics=[Throughput(10.0)],
+                min_duration_ms=0,
+                max_duration_ms=None,
+                n_samples_from_dataset=simple_dataset.num_samples(),
+                n_samples_to_issue=None,
+                min_sample_count=1,
+                rng_sched=random.Random(99),
+                rng_sample_index=random.Random(99),
+                load_pattern=LoadPattern(type=LoadPatternType.MAX_THROUGHPUT),
+            )
+
+        config_with = OfflineConfig(
+            **_OFFLINE_KWARGS,
+            settings=OfflineSettings(warmup=WarmupConfig(enabled=True, n_requests=5)),
+        )
+        config_without = OfflineConfig(**_OFFLINE_KWARGS)
+
+        ctx_with = self._make_ctx(config_with, make_rt(), simple_dataset)
+        ctx_without = self._make_ctx(config_without, make_rt(), simple_dataset)
+
+        perf_with = next(
+            p for p in _build_phases(ctx_with) if p.phase_type == PhaseType.PERFORMANCE
+        )
+        perf_without = next(
+            p
+            for p in _build_phases(ctx_without)
+            if p.phase_type == PhaseType.PERFORMANCE
+        )
+
+        order_with = [
+            next(create_sample_order(perf_with.runtime_settings)) for _ in range(n_draw)
+        ]
+        order_without = [
+            next(create_sample_order(perf_without.runtime_settings))
+            for _ in range(n_draw)
+        ]
+
+        assert order_with == order_without, (
+            "Performance sample order changed when warmup is enabled — "
+            "warmup may be sharing or advancing the perf-phase RNG."
+        )
 
 
 class TestScorerMethodSync:

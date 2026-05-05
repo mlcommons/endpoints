@@ -362,8 +362,8 @@ def _build_phases(ctx: BenchmarkContext) -> list[PhaseConfig]:
             n_samples_from_dataset=ctx.dataloader.num_samples(),
             n_samples_to_issue=warmup_cfg.n_requests,
             min_sample_count=1,
-            rng_sched=random.Random(warmup_cfg.random_seed),
-            rng_sample_index=random.Random(warmup_cfg.random_seed),
+            rng_sched=random.Random(warmup_cfg.warmup_random_seed),
+            rng_sample_index=random.Random(warmup_cfg.warmup_random_seed + 1),
             load_pattern=LoadPattern(type=LoadPatternType.MAX_THROUGHPUT),
         )
         phases.append(
@@ -554,12 +554,31 @@ async def _run_benchmark_async(
         phases = _build_phases(ctx)
         report: Report | None = None
 
+        # Global wall-clock timeout covers warmup + performance + accuracy phases
+        # combined, and bounds the warmup drain so a dropped request can't hang forever.
+        global_timeout_handle = None
+        max_duration_ms = ctx.rt_settings.max_duration_ms
+        if max_duration_ms is not None:
+
+            def _on_global_timeout() -> None:
+                logger.warning(
+                    "Global experiment timeout reached (%d ms); stopping session.",
+                    max_duration_ms,
+                )
+                session.stop()
+
+            global_timeout_handle = loop.call_later(
+                max_duration_ms / 1000.0, _on_global_timeout
+            )
+
         loop.add_signal_handler(signal.SIGINT, session.stop)
         try:
             result = await session.run(phases)
         except Exception as e:
             raise ExecutionError(f"Benchmark execution failed: {e}") from e
         finally:
+            if global_timeout_handle is not None:
+                global_timeout_handle.cancel()
             loop.remove_signal_handler(signal.SIGINT)
             logger.info("Cleaning up...")
             try:

@@ -276,11 +276,12 @@ class Dataset:
     def __init_subclass__(
         cls,
         dataset_id: str | None = None,
+        register: bool = True,
         **kwargs,
     ):
         super().__init_subclass__(**kwargs)
 
-        if not inspect.isabstract(cls):
+        if register and not inspect.isabstract(cls):
             if dataset_id is None:
                 dataset_id = cls.__name__
             cls.DATASET_ID = dataset_id
@@ -431,7 +432,7 @@ class Dataset:
         return cls(df, transforms=transforms, repeats=num_repeats)
 
 
-class SaltedDataset(Dataset):
+class SaltedDataset(Dataset, register=False):
     """Wraps a loaded Dataset, prepending a unique random salt to each prompt on load_sample().
 
     Each call to load_sample() generates a fresh salt, so reused samples (when
@@ -489,6 +490,10 @@ class SaltedDataset(Dataset):
                         *prompt[i + 1 :],
                     ]
                     return {**data, "prompt": salted_parts}
+            self.logger.warning(
+                "SaltedDataset: multimodal prompt has no text part — "
+                "salt cannot be applied; KV-cache reuse may not be prevented"
+            )
         return data  # unsupported prompt type — skip salting
 
     def num_samples(self) -> int:

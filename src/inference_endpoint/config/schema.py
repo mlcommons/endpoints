@@ -410,9 +410,9 @@ class WarmupConfig(BaseModel):
         False,
         description="Drain in-flight warmup requests before starting the performance phase",
     )
-    random_seed: int = Field(
-        0,
-        description="Random seed for warmup phase scheduling and sample ordering",
+    warmup_random_seed: int = Field(
+        42,
+        description="RNG seed for warmup scheduling and sample ordering",
     )
 
 

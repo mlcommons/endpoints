@@ -73,7 +73,7 @@ settings:
     n_requests: null  # Warmup request count (None = full dataset once)
     salt: false  # Prepend a unique random hex salt to each warmup prompt
     drain: false  # Drain in-flight warmup requests before starting the performance phase
-    random_seed: 0  # Random seed for warmup phase scheduling and sample ordering
+    warmup_random_seed: 42  # RNG seed for warmup scheduling and sample ordering
 endpoint_config:
   endpoints:  # Endpoint URL(s). Must include scheme, e.g. 'http://host:port'.
   - http://localhost:8000
