@@ -70,7 +70,7 @@ from inference_endpoint.config.schema import (
     TestType,
 )
 from inference_endpoint.core.types import QueryResult
-from inference_endpoint.dataset_manager.dataset import Dataset
+from inference_endpoint.dataset_manager.dataset import Dataset, SaltedDataset
 from inference_endpoint.dataset_manager.factory import DataLoaderFactory
 from inference_endpoint.endpoint_client.cpu_affinity import AffinityPlan, pin_loadgen
 from inference_endpoint.endpoint_client.http_client import HTTPEndpointClient
@@ -346,6 +346,34 @@ def setup_benchmark(config: BenchmarkConfig, test_mode: TestMode) -> BenchmarkCo
 def _build_phases(ctx: BenchmarkContext) -> list[PhaseConfig]:
     """Build the phase list from BenchmarkContext."""
     phases: list[PhaseConfig] = []
+
+    # Warmup phase (optional, before performance)
+    warmup_cfg = ctx.config.settings.warmup
+    if warmup_cfg.enabled:
+        warmup_dataset: Dataset = (
+            SaltedDataset(ctx.dataloader) if warmup_cfg.salt else ctx.dataloader
+        )
+        warmup_rt = RuntimeSettings(
+            metric_target=ctx.rt_settings.metric_target,
+            reported_metrics=ctx.rt_settings.reported_metrics,
+            min_duration_ms=0,
+            max_duration_ms=None,
+            n_samples_from_dataset=ctx.dataloader.num_samples(),
+            n_samples_to_issue=warmup_cfg.n_requests,
+            min_sample_count=1,
+            rng_sched=ctx.rt_settings.rng_sched,
+            rng_sample_index=ctx.rt_settings.rng_sample_index,
+            load_pattern=LoadPattern(type=LoadPatternType.MAX_THROUGHPUT),
+        )
+        phases.append(
+            PhaseConfig(
+                "warmup",
+                warmup_rt,
+                warmup_dataset,
+                PhaseType.WARMUP,
+                drain_after=warmup_cfg.drain,
+            )
+        )
 
     # Performance phase
     phases.append(

@@ -392,6 +392,26 @@ class LoadPattern(BaseModel):
         return self
 
 
+class WarmupConfig(BaseModel):
+    """Warmup phase configuration. Runs before the performance phase; results are not recorded."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    enabled: bool = Field(
+        False, description="Enable warmup phase before performance run"
+    )
+    n_requests: int | None = Field(
+        None, gt=0, description="Warmup request count (None = full dataset once)"
+    )
+    salt: bool = Field(
+        False, description="Prepend a unique random hex salt to each warmup prompt"
+    )
+    drain: bool = Field(
+        False,
+        description="Drain in-flight warmup requests before starting the performance phase",
+    )
+
+
 @cyclopts.Parameter(name="*")
 class Settings(BaseModel):
     """Test settings."""
@@ -401,6 +421,7 @@ class Settings(BaseModel):
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
     load_pattern: LoadPattern = Field(default_factory=LoadPattern)
     client: HTTPClientConfig = Field(default_factory=HTTPClientConfig)
+    warmup: WarmupConfig = Field(default_factory=WarmupConfig)
 
 
 class OfflineSettings(Settings):

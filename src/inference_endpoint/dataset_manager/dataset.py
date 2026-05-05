@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 import numpy as np
 import pandas as pd
+
 from datasets import load_dataset, load_from_disk
 
 from ..config.schema import APIType, ModelParams
@@ -411,7 +412,7 @@ class Dataset:
     @classmethod
     def get_dataloader(
         cls,
-        datasets_dir: Path = Path("datasets"),
+        datasets_dir: Path = Path("dataset_cache"),
         num_repeats: int = 1,
         transforms: list[Transform] | None = None,
         force_regenerate: bool = False,
@@ -429,6 +430,42 @@ class Dataset:
 
         df = cls.generate(datasets_dir=datasets_dir, force=force_regenerate, **kwargs)
         return cls(df, transforms=transforms, repeats=num_repeats)
+
+
+class SaltedDataset(Dataset):
+    """Wraps a loaded Dataset, prepending a unique random salt to each prompt on load_sample().
+
+    Each call to load_sample() generates a fresh salt, so reused samples (when
+    n_requests > dataset size) each receive a distinct salt.
+    """
+
+    def __init__(self, inner: Dataset) -> None:
+        # Skip Dataset.__init__ — all state is delegated to inner
+        self._inner = inner
+        self.data = inner.data
+        self.dataframe = None
+        self.transforms = None
+        self.repeats = inner.repeats
+        self.logger = getLogger(__name__)
+
+    def load(
+        self,
+        adapter: "HttpRequestAdapter | None" = None,
+        api_type: APIType | None = None,
+        model_params: ModelParams | None = None,
+        force: bool = False,
+    ) -> None:
+        pass  # Inner dataset already loaded
+
+    def load_sample(self, index: int) -> Any:
+        data = self._inner.load_sample(index)
+        if isinstance(data, dict) and "prompt" in data:
+            salt = os.urandom(8).hex()
+            return {**data, "prompt": f"[{salt}] {data['prompt']}"}
+        return data
+
+    def num_samples(self) -> int:
+        return self._inner.num_samples()
 
 
 class EmptyDataset(Dataset):

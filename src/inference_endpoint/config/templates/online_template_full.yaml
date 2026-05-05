@@ -68,6 +68,11 @@ settings:
     max_idle_time: 4.0  # Discard connections idle longer than this (seconds)
     min_required_connections: -1  # Min connections to initialize (-1=auto, 0=disabled)
     worker_gc_mode: relaxed  # Worker GC strategy | options: disabled, relaxed, system
+  warmup:
+    enabled: false  # Enable warmup phase before performance run
+    n_requests: null  # Warmup request count (None = full dataset once)
+    salt: false  # Prepend a unique random hex salt to each warmup prompt
+    drain: false  # Drain in-flight warmup requests before starting the performance phase
 endpoint_config:
   endpoints:  # Endpoint URL(s). Must include scheme, e.g. 'http://host:port'.
   - http://localhost:8000
