@@ -63,6 +63,9 @@ dependencies = [
     "sentencepiece==0.2.1",
     "protobuf==7.34.1",
     "openai_harmony==0.0.8",
+    # HDR Histogram for live percentile/histogram approximations in the
+    # metrics aggregator (PyPI: hdrhistogram, importable as hdrh.histogram).
+    "hdrhistogram==0.10.3",
     # Color support for cross-platform terminals
     "colorama==0.4.6",
     # Fix pytz-2024 import warning
