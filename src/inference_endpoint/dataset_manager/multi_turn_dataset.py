@@ -23,6 +23,7 @@ import pandas as pd
 
 from ..config.schema import APIType, ModelParams
 from ..exceptions import InputValidationError
+from .cache_salt import apply_salt, compute_salt
 from .dataset import Dataset
 from .transforms import (
     AddStaticColumns,
@@ -142,11 +143,20 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
 
     COLUMN_NAMES = ["conversation_id", "turn", "role", "content"]
 
-    def __init__(self, dataframe: pd.DataFrame, **kwargs):
+    def __init__(
+        self,
+        dataframe: pd.DataFrame,
+        *,
+        enable_salt: bool = False,
+        **kwargs,
+    ):
         """Initialize multi-turn dataset.
 
         Args:
             dataframe: DataFrame with conversation data.
+            enable_salt: If True, append a per-trajectory hash to the end of
+                each trajectory's system prompt (cache-bursting salt; see
+                ``examples/09_MultiTurn/docs/CACHE_BUSTING.md``).
             **kwargs: Additional arguments passed to Dataset.__init__.
 
         Raises:
@@ -154,6 +164,7 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
         """
         super().__init__(dataframe, **kwargs)
         assert self.dataframe is not None, "Dataframe must be initialized"
+        self._enable_salt = enable_salt
         self._conv_groups = dict(
             list(self.dataframe.groupby("conversation_id", sort=False, dropna=False))
         )
@@ -162,6 +173,11 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
         self._validate_turn_numbering()
         # Populated by load() after transforms; None until then.
         self.conversation_metadata: ConversationMetadata | None = None
+        if enable_salt:
+            logger.info(
+                "MultiTurnDataset cache-bursting salt enabled "
+                "(salt = blake2b(conversation_id) truncated to 16 hex chars)"
+            )
 
     def _validate_conversation_grouping(self) -> None:
         """Validate that all rows for each conversation_id appear consecutively in file order.
@@ -397,6 +413,15 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
                 if val and isinstance(val, str):
                     system_content = val
                     break
+            # Cache-bursting salt: append a per-trajectory hash to the end of
+            # the system prompt so the engine's prefix cache cannot extend
+            # past the system boundary across trajectories. Salt is computed
+            # once per trajectory and reused on every turn of that trajectory,
+            # so within-trajectory prefix caching is preserved.
+            if self._enable_salt and system_content:
+                system_content = apply_salt(
+                    system_content, compute_salt(str(conv_id))
+                )
             system_prompts_by_conv[str(conv_id)] = system_content
 
             for _, row in client_rows.iterrows():
@@ -408,6 +433,11 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
 
                 # All dataset rows strictly before this client turn (includes
                 # assistant rows and prior tool results).
+                # ``reasoning_content`` MUST be propagated so prior assistant
+                # turns send their thinking back into context — without it,
+                # the chat-template-rendered prompt diverges from what the
+                # original capture sent, and replay outputs differ from the
+                # captured trajectory even at temperature=0.
                 prior_rows = sorted_group[sorted_group["turn"] < t_n]
                 for _, prior_row in prior_rows.iterrows():
                     msg: dict[str, Any] = {}
@@ -417,6 +447,7 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
                         "name",
                         "tool_calls",
                         "tool_results",
+                        "reasoning_content",
                     ):
                         val = prior_row.get(key)
                         if val is not None and not (
@@ -550,6 +581,10 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
 
         # Collect per-conversation defaults from the first user row so that
         # fields like model/max_completion_tokens propagate to tool rows.
+        # ``tools`` MUST be propagated so every turn sends the tool definitions —
+        # SGLang's tool-call parser is gated on the request having a non-empty
+        # ``tools`` array, and without it the parser silently doesn't fire and
+        # the model's literal tool-call markup leaks into the ``content`` channel.
         _PROPAGATED_KEYS = {
             "model",
             "max_completion_tokens",

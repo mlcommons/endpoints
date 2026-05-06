@@ -247,12 +247,16 @@ class MultiTurnConfig(BaseModel):
             turns of the same conversation because subsequent turns depend
             on the timed-out response.
         use_dataset_history: If True, use pre-built message history from dataset.
+        enable_salt: If True, append a per-trajectory hash to the end of each
+            trajectory's system message to prevent KV cache reuse across
+            trajectories. See ``examples/09_MultiTurn/docs/CACHE_BUSTING.md``.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     turn_timeout_s: float = Field(default=300.0, gt=0)
     use_dataset_history: bool = True
+    enable_salt: bool = False
 
 
 class Dataset(BaseModel):

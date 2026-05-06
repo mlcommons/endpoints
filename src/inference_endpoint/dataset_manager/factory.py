@@ -97,8 +97,10 @@ class DataLoaderFactory:
             format_enum = DatasetFormat(file_format)
 
         dataset_id = None
+        enable_salt = False
         if config.multi_turn is not None:
             dataset_id = MultiTurnDataset.DATASET_ID
+            enable_salt = config.multi_turn.enable_salt
 
         transforms: list[Transform] = []
         if remap is not None and dataset_id != MultiTurnDataset.DATASET_ID:
@@ -110,10 +112,14 @@ class DataLoaderFactory:
             transforms.append(MakeAdapterCompatible())
 
         assert dataset_path is not None
+        extra: dict = {}
+        if enable_salt:
+            extra["enable_salt"] = True
         return Dataset.load_from_file(
             Path(dataset_path),
             transforms=transforms,
             format=format_enum,
             dataset_id=dataset_id,
             num_repeats=num_repeats,
+            **extra,
         )
