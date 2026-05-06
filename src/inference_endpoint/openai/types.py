@@ -48,12 +48,18 @@ class SSEDelta(msgspec.Struct, frozen=True, kw_only=True, omit_defaults=True, gc
     AT-RISK (gc=False): Has mutable container field `tool_calls`. Any change that
     mutates `tool_calls` after construction or stores cyclic references in it
     must be audited; if so, remove gc=False.
+
+    Thinking-mode payloads may arrive as ``reasoning_content`` (SGLang /
+    DeepSeek-style parsers) or ``reasoning`` (some vLLM parser variants).
+    All text-bearing fields are nullable: servers can send ``null`` (not an
+    empty string) for any field that has no payload in a given chunk — e.g. a
+    chunk emitting reasoning text has ``content: null, tool_calls: null``.
     """
 
     role: str | None = None
     content: str | None = None
-    reasoning_content: str | None = None  # SGLang / DeepSeek field name
-    reasoning: str | None = None  # vLLM field name
+    reasoning_content: str | None = None
+    reasoning: str | None = None
     tool_calls: list[dict[str, Any]] | None = None
 
 
@@ -93,6 +99,10 @@ class ChatMessage(
              None for tool-dispatching assistant messages.
     tool_calls: list of tool call objects for assistant messages that invoke tools.
     tool_call_id: correlates a tool result message to its tool call.
+    reasoning_content: thinking-mode trace from a prior assistant turn — must
+             be replayed as part of the message history for trajectories
+             captured under thinking-mode parsers (SGLang/vLLM); without it,
+             the rendered prompt drifts from the original capture.
     """
 
     role: str
@@ -100,6 +110,7 @@ class ChatMessage(
     name: str | None = None
     tool_calls: list[dict[str, Any]] | None = None
     tool_call_id: str | None = None
+    reasoning_content: str | None = None
 
 
 # gc=False: audit 2026-05: messages/tools set at construction; frozen=True blocks field reassignment.
@@ -137,9 +148,11 @@ class ChatCompletionResponseMessage(
 ):  # type: ignore[call-arg]
     """Response message from OpenAI.
 
-    ``content`` and ``refusal`` are nullable per the OpenAI spec and vLLM
-    routinely omits them (e.g. when the model returns no text or no refusal
-    block), so they default to ``None`` to allow successful decoding.
+    All non-role fields default to None — many OpenAI-compatible servers
+    (SGLang, vLLM) don't emit ``refusal`` and may omit ``content`` when the
+    response is purely a tool dispatch. msgspec requires defaults for fields
+    that may be absent from the wire payload (the type being optional is not
+    enough on its own).
     """
 
     role: str

@@ -85,32 +85,40 @@ class TextModelOutput(
     kw_only=True,
     frozen=True,
     omit_defaults=True,
-    array_like=True,
+    array_like=False,
     gc=False,
 ):  # type: ignore[call-arg]
     """Structured output from a text model.
 
     Supports main output, optional reasoning (e.g. chain-of-thought), and tool calls.
-    Each field may be a string (non-streaming) or tuple of strings (streaming chunks).
+    Each text field may be a string (non-streaming) or tuple of strings
+    (streaming chunks).
 
     AT-RISK (gc=False): Has mutable container field `tool_calls`. Any change that
     mutates `tool_calls` after construction or stores cyclic references in it
     must be audited; if so, remove gc=False.
 
     Attributes:
-        output: Main model output. Defaults to empty string.
-        reasoning: Optional reasoning trace. Defaults to None.
-        tool_calls: Optional structured tool calls. Defaults to None.
-                    Placed after reasoning so wire-format with array_like=True is
-                    backward compatible (missing trailing elements decode as default).
+        output: Main model output (assistant ``content``). Defaults to "".
+        reasoning: Optional reasoning trace (``reasoning_content``). Defaults to None.
+        tool_calls: Structured tool calls dispatched by the model, in OpenAI
+            format ``[{id, type, function: {name, arguments}}]``. None if the
+            response did not dispatch tools.
+        finish_reason: Why generation stopped — ``"stop"``, ``"length"``,
+            ``"tool_calls"``, ``"content_filter"``, or None when the server
+            did not emit one.
+        chunk_stats: Streaming chunk diagnostics from the accumulator.
     """
 
     output: OUTPUT_ELEM_TYPE = ""
     reasoning: OUTPUT_ELEM_TYPE | None = None
     tool_calls: tuple[dict[str, Any], ...] | None = None
+    finish_reason: str | None = None
+    # Diagnostic — chunk counts seen by the accumulator for streaming responses.
+    chunk_stats: dict[str, int] | None = None
 
     def __post_init__(self):
-        """Convert list to tuple for output, reasoning, and tool_calls to preserve immutability."""
+        """Convert list to tuple for output, reasoning, and tool_calls."""
         if isinstance(self.output, list):
             msgspec.structs.force_setattr(self, "output", tuple(self.output))
         if self.reasoning is not None and isinstance(self.reasoning, list):
@@ -233,7 +241,7 @@ class PromptData(
     kw_only=True,
     frozen=True,
     omit_defaults=True,
-    array_like=True,
+    array_like=False,
     gc=False,
 ):  # type: ignore[call-arg]
     """Prompt input data attached to ISSUED events for ISL computation.
@@ -257,7 +265,7 @@ class ErrorData(
     kw_only=True,
     frozen=True,
     omit_defaults=True,
-    array_like=True,
+    array_like=False,
     gc=False,
 ):  # type: ignore[call-arg]
     """Structured error information.

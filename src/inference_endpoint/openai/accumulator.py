@@ -32,6 +32,12 @@ class OpenAISSEAccumulator(SSEAccumulatorProtocol):
         self.reasoning_chunks: list[str] = []
         self._tool_calls: dict[int, dict[str, Any]] = {}
         self._finish_reason: str | None = None
+        # Diagnostic counters — surfaced in metadata for replay determinism debugging
+        self._n_chunks_seen = 0
+        self._n_chunks_with_content = 0
+        self._n_chunks_with_reasoning = 0
+        self._n_chunks_with_tool_calls = 0
+        self._n_chunks_no_payload = 0
 
         self.first_chunk_sent = False
         self.query_id = query_id
@@ -47,6 +53,17 @@ class OpenAISSEAccumulator(SSEAccumulatorProtocol):
         delta = choice.delta
         if delta is None:
             return None
+
+        reasoning_payload = delta.reasoning_content or delta.reasoning
+        self._n_chunks_seen += 1
+        if delta.content:
+            self._n_chunks_with_content += 1
+        if reasoning_payload:
+            self._n_chunks_with_reasoning += 1
+        if delta.tool_calls:
+            self._n_chunks_with_tool_calls += 1
+        if not (delta.content or reasoning_payload or delta.tool_calls):
+            self._n_chunks_no_payload += 1
 
         # Accumulate tool_calls partials (streamed as incremental JSON fragments)
         if delta.tool_calls:
@@ -69,10 +86,9 @@ class OpenAISSEAccumulator(SSEAccumulatorProtocol):
         if delta.content:
             self.output_chunks.append(delta.content)
             content = delta.content
-        elif delta.reasoning_content or delta.reasoning:
-            rc = delta.reasoning_content or delta.reasoning
-            self.reasoning_chunks.append(rc)  # type: ignore[arg-type]
-            content = rc
+        elif reasoning_payload:
+            self.reasoning_chunks.append(reasoning_payload)
+            content = reasoning_payload
         elif delta.tool_calls and not self.first_chunk_sent:
             # Pure tool-call delta with no text: emit a zero-length sentinel so
             # RECV_FIRST / TTFT fires for agentic responses that have no content.
@@ -107,6 +123,13 @@ class OpenAISSEAccumulator(SSEAccumulatorProtocol):
             if self._tool_calls
             else None
         )
+        chunk_stats = {
+            "n_seen": self._n_chunks_seen,
+            "n_content": self._n_chunks_with_content,
+            "n_reasoning": self._n_chunks_with_reasoning,
+            "n_tool_calls": self._n_chunks_with_tool_calls,
+            "n_no_payload": self._n_chunks_no_payload,
+        }
 
         if self.reasoning_chunks:
             resp_reasoning: list[str] = [self.reasoning_chunks[0]]
@@ -116,22 +139,40 @@ class OpenAISSEAccumulator(SSEAccumulatorProtocol):
                 output="".join(self.output_chunks),
                 reasoning=resp_reasoning,
                 tool_calls=tool_calls_tuple,
+                finish_reason=self._finish_reason,
+                chunk_stats=chunk_stats,
             )
         elif self.output_chunks:
             resp_output: list[str] = [self.output_chunks[0]]
             if len(self.output_chunks) > 1:
                 resp_output.append("".join(self.output_chunks[1:]))
             text_output = TextModelOutput(
-                output=resp_output, reasoning=None, tool_calls=tool_calls_tuple
+                output=resp_output,
+                reasoning=None,
+                tool_calls=tool_calls_tuple,
+                finish_reason=self._finish_reason,
+                chunk_stats=chunk_stats,
             )
         else:
             text_output = TextModelOutput(
-                output=[], reasoning=None, tool_calls=tool_calls_tuple
+                output=[],
+                reasoning=None,
+                tool_calls=tool_calls_tuple,
+                finish_reason=self._finish_reason,
+                chunk_stats=chunk_stats,
             )
 
+        # metadata is also kept in-sync for in-process consumers
+        # (e.g. the multi-turn strategy that reads metadata['tool_calls']
+        # when building live history).
         metadata: dict[str, Any] = {
             "first_chunk": not self.first_chunk_sent,
             "final_chunk": True,
+            "n_chunks_seen": self._n_chunks_seen,
+            "n_chunks_with_content": self._n_chunks_with_content,
+            "n_chunks_with_reasoning": self._n_chunks_with_reasoning,
+            "n_chunks_with_tool_calls": self._n_chunks_with_tool_calls,
+            "n_chunks_no_payload": self._n_chunks_no_payload,
         }
         if self._finish_reason:
             metadata["finish_reason"] = self._finish_reason

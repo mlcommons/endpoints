@@ -17,6 +17,7 @@
 Msgspec-based OpenAI adapter for fast serialization/deserialization.
 """
 
+import logging
 import time
 from typing import Any
 
@@ -31,6 +32,8 @@ from inference_endpoint.dataset_manager.transforms import (
 
 # Import base class and shared SSE types
 from inference_endpoint.endpoint_client.adapter_protocol import HttpRequestAdapter
+
+logger = logging.getLogger(__name__)
 
 from .types import (
     ChatCompletionChoice,
@@ -55,6 +58,7 @@ def _chat_message_from_dict(msg: dict) -> "ChatMessage":
         name=msg.get("name"),
         tool_calls=msg.get("tool_calls"),
         tool_call_id=msg.get("tool_call_id"),
+        reasoning_content=msg.get("reasoning_content"),
     )
 
 
@@ -120,8 +124,24 @@ class OpenAIMsgspecAdapter(HttpRequestAdapter):
 
     @classmethod
     def decode_sse_message(cls, json_bytes: bytes) -> SSEChoice | None:
-        """Decode SSE message and return the SSEChoice (delta + finish_reason)."""
-        msg = cls._sse_decoder.decode(json_bytes)
+        """Decode SSE message and return the SSEChoice (delta + finish_reason).
+
+        On decode failure (e.g. wire-shape drift in a server upgrade), logs the
+        raw chunk bytes at WARNING and returns None so the upstream stream
+        keeps draining. Without this guard, msgspec raises and the worker's
+        outer ``except Exception`` swallows the chunk silently — leading to
+        ``response_output`` being empty for every turn with no diagnostic.
+        """
+        try:
+            msg = cls._sse_decoder.decode(json_bytes)
+        except msgspec.ValidationError as e:
+            preview = json_bytes[:1024].decode("utf-8", errors="replace")
+            logger.warning(
+                "SSE chunk failed to decode: %s. Raw bytes (first 1024): %s",
+                e,
+                preview,
+            )
+            return None
         if not msg.choices:
             return None
         return msg.choices[0]
@@ -222,6 +242,7 @@ class OpenAIMsgspecAdapter(HttpRequestAdapter):
                 output=choice.message.content or "",
                 reasoning=choice.message.reasoning_content,
                 tool_calls=tool_calls_tuple,
+                finish_reason=choice.finish_reason,
             ),
             metadata=metadata,
         )
