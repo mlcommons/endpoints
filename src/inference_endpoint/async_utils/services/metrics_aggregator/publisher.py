@@ -160,8 +160,15 @@ class MetricsPublisher:
             logger.exception("metrics: pub/sub final publish failed")
 
         # Disk fallback — best-effort, must not affect pub/sub above.
+        # The atomic write does synchronous f.flush + fsync(file) +
+        # fsync(parent dir) + rename, which can block tens-to-hundreds of
+        # ms on a busy host. Run it on a worker thread so it doesn't
+        # back-pressure any in-flight event-record processing on the
+        # aggregator's event loop.
         try:
-            self._write_atomic_fallback(self._encoder.encode(snap))
+            await asyncio.to_thread(
+                self._write_atomic_fallback, self._encoder.encode(snap)
+            )
         except Exception:  # noqa: BLE001 — best-effort.
             logger.exception("metrics: disk fallback write failed")
 
