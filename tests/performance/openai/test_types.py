@@ -61,7 +61,7 @@ def make_sse_message(text: str) -> SSEMessage:
     return SSEMessage(
         choices=(
             SSEChoice(
-                delta=SSEDelta(content=text, reasoning=""),
+                delta=SSEDelta(content=text),
                 finish_reason=None,
             ),
         )

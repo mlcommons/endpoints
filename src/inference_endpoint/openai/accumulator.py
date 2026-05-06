@@ -69,9 +69,10 @@ class OpenAISSEAccumulator(SSEAccumulatorProtocol):
         if delta.content:
             self.output_chunks.append(delta.content)
             content = delta.content
-        elif delta.reasoning:
-            self.reasoning_chunks.append(delta.reasoning)
-            content = delta.reasoning
+        elif delta.reasoning_content or delta.reasoning:
+            rc = delta.reasoning_content or delta.reasoning
+            self.reasoning_chunks.append(rc)  # type: ignore[arg-type]
+            content = rc
         else:
             return None
 
