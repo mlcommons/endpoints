@@ -157,10 +157,11 @@ class TestSeriesSampler:
     def test_hdr_histogram_count_matches_total(self):
         """HDR-derived histogram bucket counts must sum to the recorded count.
 
-        Regression: an earlier implementation derived counts via
-        ``get_count_at_value(hi) - get_count_at_value(lo)`` which returns
-        single-bucket counts, not cumulative — total ended up far less than
-        the actual recorded count.
+        Without this invariant, deriving display-bucket counts via the
+        difference of two ``get_count_at_value`` queries would silently
+        under-count: ``get_count_at_value(v)`` returns the count of the
+        single sub-bucket containing ``v``, not a cumulative count, so
+        the subtraction is meaningless.
         """
         s = self._make()
         for v in range(1, 101):

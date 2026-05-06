@@ -15,12 +15,9 @@
 
 """Tests for ``MetricsTable``, ``SampleRow``, and ``TrackedBlock``.
 
-Migrated to the registry-backed table introduced in
-``metrics_pubsub_design_v5.md``: ``MetricsTable(registry)`` instead of
-``MetricsTable(kv_store)``. The table itself is registry-agnostic for
-most flows — these tests pass a fresh ``MetricsRegistry`` per test and
-do not register any triggers, so the registry is only used to satisfy
-the constructor signature.
+The table is registry-agnostic for most flows — these tests pass a
+fresh ``MetricsRegistry`` per test and do not register any triggers,
+so the registry is only used to satisfy the constructor signature.
 """
 
 from __future__ import annotations

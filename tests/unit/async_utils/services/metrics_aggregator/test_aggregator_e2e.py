@@ -15,11 +15,9 @@
 
 """End-to-end pub/sub round-trip tests for the metrics aggregator.
 
-The legacy E2E suite exercised the full ``EventPublisherService`` →
-``MetricsAggregatorService`` → ``InMemoryKVStore`` pipeline. With the
-registry/publisher refactor, the wire surface that matters at this layer
-is the snapshot pub/sub channel: aggregator → ``MetricsPublisher`` →
-ZMQ PUB → ``MetricsSnapshotSubscriber``.
+The wire surface that matters at this layer is the snapshot pub/sub
+channel: aggregator → ``MetricsPublisher`` → ZMQ PUB →
+``MetricsSnapshotSubscriber``.
 
 These tests stand up a real ``MetricsPublisher`` and
 ``MetricsSnapshotSubscriber`` against a single ``ManagedZMQContext.scoped``
@@ -104,11 +102,10 @@ class TestPubSubRoundtrip:
     ):
         """``publish_final`` produces a COMPLETE snapshot reachable over IPC.
 
-        This replaces the legacy single-sample pipeline assertion: the
-        aggregator's ``publish_final`` is what crosses the wire, and the
-        ``MetricsSnapshotSubscriber`` is what the main process uses to
-        observe the run's end. The exact metric values aren't the point
-        here — the round-trip + state field is.
+        The aggregator's ``publish_final`` is what crosses the wire, and
+        the ``MetricsSnapshotSubscriber`` is what the main process uses
+        to observe the run's end. The exact metric values aren't the
+        point here — the round-trip + state field is.
         """
         loop = asyncio.get_event_loop()
         publisher, subscriber = _make_pair(
@@ -143,7 +140,7 @@ class TestPubSubRoundtrip:
 
         Tracks the lifecycle the main process sees: subscriber's
         ``latest`` is updated by every live tick, and ``complete`` is
-        only set once. Mirrors the design v5 §1 state machine.
+        only set once (when the COMPLETE-state snapshot arrives).
         """
         loop = asyncio.get_event_loop()
         publisher, subscriber = _make_pair(

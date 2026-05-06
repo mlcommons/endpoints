@@ -26,8 +26,6 @@ Series samplers maintain three parallel views:
 1. Cheap exact rollups (count/total/min/max/sum_sq) — O(1), exact.
 2. HDR Histogram — supports cheap live percentiles/histogram.
 3. ``array.array`` of raw values — supports exact final percentiles.
-
-See ``metrics_pubsub_design_v5.md`` §2 for full design.
 """
 
 from __future__ import annotations

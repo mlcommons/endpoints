@@ -15,10 +15,8 @@
 
 """Tests for ``Report.from_snapshot`` and display helpers.
 
-Migrated from the ``Report.from_kv_reader`` / ``compute_summary``
-surfaces (both removed in metrics_pubsub_design_v5). Reports are now
-built from a ``MetricsSnapshot`` produced by a populated
-``MetricsRegistry`` — no on-disk KV store is involved.
+Reports are built from a ``MetricsSnapshot`` produced by a populated
+``MetricsRegistry``.
 """
 
 from __future__ import annotations

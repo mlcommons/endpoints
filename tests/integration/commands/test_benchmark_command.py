@@ -207,10 +207,9 @@ def _resolve_template(template_path: Path, server_url: str) -> dict:
     raw = re.sub(r"http://localhost:\d+", server_url, raw)
     data = yaml.safe_load(raw)
 
-    # Swap any gated default model name for a non-gated tokenizer. The
-    # generated templates' "eg: meta-llama/Llama-3.1-8B-Instruct" placeholder
-    # points at a gated repo; substituting gpt2 lets these tests run in CI
-    # without HF_TOKEN.
+    # Swap the placeholder-default model name for a non-gated tokenizer
+    # (see _TEST_MODEL_NAME above) so these tests can run in CI without
+    # HF_TOKEN.
     if "model_params" in data and isinstance(data["model_params"], dict):
         data["model_params"]["name"] = _TEST_MODEL_NAME
 

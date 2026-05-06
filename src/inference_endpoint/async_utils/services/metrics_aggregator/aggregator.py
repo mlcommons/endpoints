@@ -71,13 +71,10 @@ class MetricCounterKey(str, Enum):
     TRACKED_SAMPLES_FAILED = "tracked_samples_failed"
     TRACKED_DURATION_NS = "tracked_duration_ns"
     # Total wall-clock duration since session start. Updated on every event as
-    # max(current, event_timestamp - session_start) to be defensive against
-    # non-monotonic timestamps.
-    #
-    # An alternative design was considered: store session_start_ns once and
-    # compute duration as (now - start) on read. This is infeasible because
-    # time.monotonic_ns() has inconsistent epoch per process — a reader in
-    # another process would get a meaningless value.
+    # max(current, event_timestamp - session_start). Stored as a counter
+    # rather than computed from (now - start) at read time because
+    # time.monotonic_ns() has a process-local epoch — a reader in another
+    # process would get a meaningless value.
     TOTAL_DURATION_NS = "total_duration_ns"
 
 
@@ -91,7 +88,9 @@ _TRACKED_SAMPLE_EVENTS = frozenset(
 )
 
 
-# HDR bounds per series. See metrics_pubsub_design_v5.md §1 for rationale.
+# HDR bounds per series — chosen conservatively so realistic benchmark
+# values cannot fall outside [low, high]. Values outside the range are
+# clamped on insert and a warning is logged once per series.
 _NS_HDR_LOW: Final[int] = 1
 _NS_HDR_HIGH: Final[int] = 3_600_000_000_000  # 1 hour in ns
 _TOKEN_HDR_LOW: Final[int] = 1

@@ -20,9 +20,6 @@ cadence. Each snapshot carries a ``SessionState`` (``LIVE`` during the run,
 ``DRAINING`` between ``ENDED`` and the final publish, ``COMPLETE`` for the
 last snapshot). The snapshot is the only public wire format between the
 aggregator and any consumer (main process, future TUI).
-
-See ``metrics_pubsub_design_v5.md`` §1 for invariants, field reference,
-and HDR bounds.
 """
 
 from __future__ import annotations
@@ -137,9 +134,6 @@ class MetricsSnapshot(
         metrics:          Tagged union of ``CounterStat`` and ``SeriesStat``,
                           ordered counters-first then series, registration
                           order within each.
-
-    See ``metrics_pubsub_design_v5.md`` §1 for the full reference table and
-    the state-machine diagram.
     """
 
     counter: int

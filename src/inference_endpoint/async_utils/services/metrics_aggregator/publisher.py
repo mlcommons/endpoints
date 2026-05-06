@@ -13,10 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""``MetricsPublisher``: publish ``MetricsSnapshot`` over pub/sub + disk fallback.
-
-See ``metrics_pubsub_design_v5.md`` §5 for the design and failure mode table.
-"""
+"""``MetricsPublisher``: publish ``MetricsSnapshot`` over pub/sub + disk fallback."""
 
 from __future__ import annotations
 
