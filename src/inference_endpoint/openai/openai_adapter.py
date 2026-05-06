@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import time
+from typing import Any
 
 import msgspec
 from inference_endpoint.core.types import Query, QueryResult, TextModelOutput
@@ -36,7 +37,7 @@ from .openai_types_gen import (
     Role6,
     ServiceTier,
 )
-from .types import SSEMessage
+from .types import SSEChoice, SSEMessage
 
 
 class OpenAIAdapter(HttpRequestAdapter):
@@ -75,10 +76,12 @@ class OpenAIAdapter(HttpRequestAdapter):
         return cls.from_endpoint_response(openai_response, result_id=query_id)
 
     @classmethod
-    def decode_sse_message(cls, json_bytes: bytes) -> str:
-        """Decode SSE message and extract content string."""
+    def decode_sse_message(cls, json_bytes: bytes) -> SSEChoice | None:
+        """Decode SSE message and return SSEChoice (delta + finish_reason)."""
         msg = msgspec.json.decode(json_bytes, type=SSEMessage)
-        return msg.choices[0].delta
+        if not msg.choices:
+            return None
+        return msg.choices[0]
 
     # ========================================================================
     # Internal APIs
@@ -86,15 +89,21 @@ class OpenAIAdapter(HttpRequestAdapter):
 
     @classmethod
     def to_endpoint_request(cls, query: Query) -> CreateChatCompletionRequest:
-        """Convert a Query to an OpenAI request."""
-        if "prompt" not in query.data:
-            raise ValueError("prompt not found in query.data")
+        """Convert a Query to an OpenAI request.
 
-        messages = [{"role": Role5.user.value, "content": query.data["prompt"]}]
-        if "system" in query.data:
-            messages.insert(
-                0, {"role": Role3.system.value, "content": query.data["system"]}
-            )
+        Supports both single-turn (prompt/system) and multi-turn (messages array) formats.
+        """
+        if "messages" in query.data and isinstance(query.data["messages"], list):
+            messages = query.data["messages"]
+        else:
+            if "prompt" not in query.data:
+                raise ValueError("prompt not found in query.data")
+
+            messages = [{"role": Role5.user.value, "content": query.data["prompt"]}]
+            if "system" in query.data:
+                messages.insert(
+                    0, {"role": Role3.system.value, "content": query.data["system"]}
+                )
 
         request = CreateChatCompletionRequest(
             model=ModelIdsShared(query.data.get("model", "no-model-name")),
@@ -103,6 +112,7 @@ class OpenAIAdapter(HttpRequestAdapter):
             stream=query.data.get("stream", False),
             max_completion_tokens=query.data.get("max_completion_tokens", 100),
             temperature=query.data.get("temperature", 0.7),
+            tools=query.data.get("tools"),
         )
         return request
 
@@ -119,9 +129,19 @@ class OpenAIAdapter(HttpRequestAdapter):
         if result_id is None:
             result_id = response.id
 
+        choice = response.choices[0]
+        metadata: dict[str, Any] = {}
+        if choice.finish_reason:
+            metadata["finish_reason"] = choice.finish_reason.value
+        if choice.message.tool_calls:
+            metadata["tool_calls"] = [
+                tc.model_dump(mode="json") for tc in choice.message.tool_calls
+            ]
+
         return QueryResult(
             id=result_id,
-            response_output=TextModelOutput(output=response.choices[0].message.content),
+            response_output=TextModelOutput(output=choice.message.content or ""),
+            metadata=metadata,
         )
 
     @classmethod
@@ -160,11 +180,11 @@ class OpenAIAdapter(HttpRequestAdapter):
         response_dict = msgspec.json.decode(response_bytes)
 
         # Set default values for optional fields if missing
-        response_dict["choices"][0]["message"]["refusal"] = "None"
+        response_dict["choices"][0]["message"]["refusal"] = ""
         response_dict["choices"][0]["logprobs"] = {"content": [], "refusal": []}
         if (
             "content" not in response_dict["choices"][0]["message"]
             or response_dict["choices"][0]["message"]["content"] is None
         ):
-            response_dict["choices"][0]["message"]["content"] = "None"
+            response_dict["choices"][0]["message"]["content"] = ""
         return CreateChatCompletionResponse(**response_dict, ignore_extra=True)

@@ -29,7 +29,7 @@ import asyncio
 import logging
 from collections.abc import Callable, Iterator
 from time import monotonic_ns
-from typing import Protocol
+from typing import Any, Protocol
 
 from ..config.runtime_settings import RuntimeSettings
 from ..config.schema import LoadPatternType
@@ -47,8 +47,17 @@ logger = logging.getLogger(__name__)
 class PhaseIssuerProtocol(Protocol):
     """Minimal interface that strategies see for issuing samples."""
 
-    def issue(self, sample_index: int) -> str | None:
-        """Issue a sample. Returns query_id, or None if the session is stopping."""
+    def issue(
+        self, sample_index: int, data_override: dict[str, Any] | None = None
+    ) -> str | None:
+        """Issue a sample. Returns query_id, or None if the session is stopping.
+
+        Args:
+            sample_index: Index into the dataset.
+            data_override: If provided, use this as Query.data instead of
+                loading from the dataset. Used by MultiTurnStrategy for
+                live-history mode where the messages array is built at runtime.
+        """
         ...
 
     issued_count: int
@@ -296,6 +305,12 @@ def create_load_strategy(
                     "Concurrency load pattern requires target_concurrency > 0"
                 )
             return ConcurrencyStrategy(lp.target_concurrency, sample_order)
+
+        case LoadPatternType.MULTI_TURN:
+            raise ValueError(
+                "MULTI_TURN load pattern requires a MultiTurnDataset — "
+                "use 'inference-endpoint benchmark from-config' with a multi-turn dataset"
+            )
 
         case _:
             raise ValueError(f"Unsupported load pattern type: {lp.type}")

@@ -1,0 +1,10 @@
+{"conversation_id": "conv_001", "turn": 1, "role": "user", "content": "I need help resetting my password", "system": "You are a helpful customer support agent"}
+{"conversation_id": "conv_001", "turn": 2, "role": "assistant", "content": "I'd be happy to help you reset your password. Can you provide your email address?"}
+{"conversation_id": "conv_001", "turn": 3, "role": "user", "content": "It's user@example.com"}
+{"conversation_id": "conv_001", "turn": 4, "role": "assistant", "content": "Thank you. I've sent a password reset link to user@example.com. Please check your inbox and follow the instructions."}
+{"conversation_id": "conv_002", "turn": 1, "role": "user", "content": "What are your business hours?", "system": "You are a helpful customer support agent"}
+{"conversation_id": "conv_002", "turn": 2, "role": "assistant", "content": "We're open Monday-Friday, 9 AM to 5 PM EST. How can I assist you today?"}
+{"conversation_id": "conv_002", "turn": 3, "role": "user", "content": "Do you offer weekend support?"}
+{"conversation_id": "conv_002", "turn": 4, "role": "assistant", "content": "For urgent issues, we offer limited support on weekends from 10 AM to 2 PM EST. For non-urgent matters, please contact us during our regular business hours."}
+{"conversation_id": "conv_003", "turn": 1, "role": "user", "content": "Can I cancel my subscription?", "system": "You are a helpful customer support agent"}
+{"conversation_id": "conv_003", "turn": 2, "role": "assistant", "content": "Yes, you can cancel your subscription at any time. Would you like me to guide you through the cancellation process?"}

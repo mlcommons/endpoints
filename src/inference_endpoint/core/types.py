@@ -239,7 +239,7 @@ class Query(
         gc=False: Safe because data/headers are simple key-value pairs without cycles.
         Do NOT store self-referential or cyclic structures in data/headers fields.
 
-        array_like=True: Encodes as array instead of object (e.g., ["id", {...}, {...}, 0.0]
+        array_like=True: Encodes as array instead of object (e.g., ["id", {...}, 0.0]
         instead of {"id": ..., "data": ..., ...}). Provides ~6-50% size reduction and
         ~6-29% ser/des speedup for ZMQ transport depending on payload size.
 
