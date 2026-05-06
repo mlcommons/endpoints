@@ -439,7 +439,9 @@ class EndpointConfig(BaseModel):
     ] = None
     api_type: Annotated[
         APIType,
-        cyclopts.Parameter(alias="--api-type", help="API type: openai or sglang"),
+        cyclopts.Parameter(
+            alias="--api-type", help="API type: openai, sglang, or videogen"
+        ),
     ] = APIType.OPENAI
 
     @field_validator("endpoints", mode="after")
