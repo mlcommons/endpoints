@@ -156,7 +156,7 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
             dataframe: DataFrame with conversation data.
             enable_salt: If True, append a per-trajectory hash to the end of
                 each trajectory's system prompt (cache-bursting salt; see
-                ``examples/09_MultiTurn/docs/CACHE_BUSTING.md``).
+                ``examples/09_MultiTurn/docs/EVALUATION.md``).
             **kwargs: Additional arguments passed to Dataset.__init__.
 
         Raises:
@@ -164,6 +164,14 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
         """
         super().__init__(dataframe, **kwargs)
         assert self.dataframe is not None, "Dataframe must be initialized"
+        # Some upstream snapshots (e.g. Workato) ship a single ``dataset_metadata``
+        # sentinel record on line 1 carrying license/source attribution. It has
+        # no conversation_id and is not a real conversation; drop it before
+        # grouping. Real flat rows always have a conversation_id.
+        if self.dataframe["conversation_id"].isna().any():
+            self.dataframe = self.dataframe.dropna(
+                subset=["conversation_id"]
+            ).reset_index(drop=True)
         self._enable_salt = enable_salt
         self._conv_groups = dict(
             list(self.dataframe.groupby("conversation_id", sort=False, dropna=False))
@@ -419,9 +427,7 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
             # once per trajectory and reused on every turn of that trajectory,
             # so within-trajectory prefix caching is preserved.
             if self._enable_salt and system_content:
-                system_content = apply_salt(
-                    system_content, compute_salt(str(conv_id))
-                )
+                system_content = apply_salt(system_content, compute_salt(str(conv_id)))
             system_prompts_by_conv[str(conv_id)] = system_content
 
             for _, row in client_rows.iterrows():

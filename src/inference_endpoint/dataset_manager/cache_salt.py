@@ -18,7 +18,7 @@
 A short hash derived from ``conversation_id`` is appended to the end of
 each trajectory's system message so the engine's prefix cache cannot
 extend past the system boundary across trajectories. See
-``examples/09_MultiTurn/docs/CACHE_BUSTING.md`` for the methodology and
+``examples/09_MultiTurn/docs/EVALUATION.md`` for the methodology and
 Phase A measurements.
 """
 

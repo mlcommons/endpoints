@@ -249,7 +249,7 @@ class MultiTurnConfig(BaseModel):
         use_dataset_history: If True, use pre-built message history from dataset.
         enable_salt: If True, append a per-trajectory hash to the end of each
             trajectory's system message to prevent KV cache reuse across
-            trajectories. See ``examples/09_MultiTurn/docs/CACHE_BUSTING.md``.
+            trajectories. See ``examples/09_MultiTurn/docs/EVALUATION.md``.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
