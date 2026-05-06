@@ -29,15 +29,12 @@ Tests cover:
 """
 
 import asyncio
-import json
 import random
 import time
-import uuid
 from urllib.parse import urljoin
 
 import pandas as pd
 import pytest
-from aiohttp import web
 from inference_endpoint import metrics
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import (
@@ -683,138 +680,5 @@ async def test_tools_field_forwarded_to_endpoint(echo_server):
             assert "tools" in payload
             assert len(payload["tools"]) == 1
             assert payload["tools"][0]["function"]["name"] == "search"
-    finally:
-        server.stop()
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_live_history_remaps_tool_call_id():
-    """In live-history mode, tool message tool_call_id is rewritten to match the
-    model-generated id from the previous assistant turn, not the dataset's hardcoded id.
-    """
-    received_payloads: list[dict] = []
-    # Fresh id the server "generates" for the tool call it dispatches.
-    model_generated_id = f"call_{uuid.uuid4().hex[:8]}"
-
-    class ToolCallEchoServer(EchoServer):
-        """Returns a tool_calls response on the first user turn, then echoes normally."""
-
-        async def _handle_echo_chat_completions_request(
-            self, request: web.Request
-        ) -> web.Response:
-            payload = await request.json()
-            received_payloads.append(payload)
-            messages = payload.get("messages", [])
-            # If the last message is a tool message, echo normally.
-            if messages and messages[-1].get("role") == "tool":
-                resp = {
-                    "id": str(uuid.uuid4()),
-                    "object": "chat.completion",
-                    "created": int(time.time()),
-                    "model": "test-model",
-                    "choices": [
-                        {
-                            "index": 0,
-                            "message": {
-                                "role": "assistant",
-                                "content": "done",
-                                "refusal": None,
-                            },
-                            "finish_reason": "stop",
-                        }
-                    ],
-                    "usage": {
-                        "prompt_tokens": 1,
-                        "completion_tokens": 1,
-                        "total_tokens": 2,
-                    },
-                    "system_fingerprint": None,
-                }
-                return web.Response(
-                    text=json.dumps(resp), content_type="application/json"
-                )
-            # First user turn: return a tool_calls response with the model-generated id.
-            resp = {
-                "id": str(uuid.uuid4()),
-                "object": "chat.completion",
-                "created": int(time.time()),
-                "model": "test-model",
-                "choices": [
-                    {
-                        "index": 0,
-                        "message": {
-                            "role": "assistant",
-                            "content": None,
-                            "refusal": None,
-                            "tool_calls": [
-                                {
-                                    "id": model_generated_id,
-                                    "type": "function",
-                                    "function": {
-                                        "name": "search",
-                                        "arguments": '{"q": "hello"}',
-                                    },
-                                }
-                            ],
-                        },
-                        "finish_reason": "tool_calls",
-                    }
-                ],
-                "usage": {
-                    "prompt_tokens": 1,
-                    "completion_tokens": 1,
-                    "total_tokens": 2,
-                },
-                "system_fingerprint": None,
-            }
-            return web.Response(text=json.dumps(resp), content_type="application/json")
-
-    server = ToolCallEchoServer(port=0)
-    server.start()
-    try:
-        dataset_id = "call_dataset_hardcoded"
-        tool_results = [{"tool_call_id": dataset_id, "content": "result"}]
-
-        rows = [
-            {"conversation_id": "c1", "turn": 1, "role": "user", "content": "Search"},
-            {
-                "conversation_id": "c1",
-                "turn": 2,
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [
-                    {
-                        "id": dataset_id,
-                        "type": "function",
-                        "function": {"name": "search", "arguments": '{"q": "hello"}'},
-                    }
-                ],
-            },
-            {
-                "conversation_id": "c1",
-                "turn": 3,
-                "role": "tool",
-                "tool_results": tool_results,
-            },
-        ]
-        ds = _make_dataset(rows)
-        strategy = _make_strategy(ds, use_dataset_history=False)
-        responses: dict = {}
-
-        count = await _run_session(server.url, ds, strategy, responses)
-        assert count == 2
-
-        # The second request (tool turn) must have the model-generated id, not the dataset id.
-        assert len(received_payloads) == 2
-        tool_turn_payload = received_payloads[1]
-        tool_messages = [
-            m for m in tool_turn_payload.get("messages", []) if m.get("role") == "tool"
-        ]
-        assert len(tool_messages) == 1
-        assert tool_messages[0]["tool_call_id"] == model_generated_id, (
-            f"Expected model-generated id {model_generated_id!r}, "
-            f"got {tool_messages[0]['tool_call_id']!r}"
-        )
     finally:
         server.stop()

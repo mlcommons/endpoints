@@ -548,10 +548,9 @@ async def _run_benchmark_async(
 
         _on_sample_complete: Callable[[QueryResult], None]
         if multi_turn_strategy is not None:
-            _mt_strategy = multi_turn_strategy
 
             def _on_sample_complete(result: QueryResult) -> None:
-                _mt_strategy.on_sample_complete(result)
+                multi_turn_strategy.on_sample_complete(result)
                 collector.on_complete_hook(result)
 
         else:
