@@ -24,7 +24,7 @@ from inference_endpoint.endpoint_client.accumulator_protocol import (
     SSEAccumulatorProtocol,
 )
 from inference_endpoint.videogen.adapter import VideoGenAccumulator, VideoGenAdapter
-from inference_endpoint.videogen.types import VideoPayloadResponse
+from inference_endpoint.videogen.types import VideoPathResponse, VideoPayloadResponse
 
 
 @pytest.mark.unit
@@ -111,12 +111,27 @@ class TestVideoGenAdapter:
         assert isinstance(result, QueryResult)
         assert result.id == "q1"
         assert result.error is None
-        assert result.metadata["video_bytes"] == "dGVzdCB2aWRlbyBjb250ZW50"
+        assert result.response_output is None
+        assert result.metadata == {
+            "video_id": "video_abc123",
+            "video_bytes": "dGVzdCB2aWRlbyBjb250ZW50",
+        }
 
-    def test_decode_response_video_id_in_output(self):
-        resp = VideoPayloadResponse(video_id="vid_xyz", video_bytes="AAEC")
+    def test_decode_response_returns_video_path_in_metadata(self):
+        """Perf-mode decode branch — covered separately from integration."""
+        resp = VideoPathResponse(
+            video_id="vid_perf_001",
+            video_path="/lustre/videos/vid_perf_001.mp4",
+        )
         result = VideoGenAdapter.decode_response(resp.model_dump_json().encode(), "q1")
-        assert result.response_output.output == "vid_xyz"
+        assert isinstance(result, QueryResult)
+        assert result.id == "q1"
+        assert result.error is None
+        assert result.response_output is None
+        assert result.metadata == {
+            "video_id": "vid_perf_001",
+            "video_path": "/lustre/videos/vid_perf_001.mp4",
+        }
 
     def test_decode_sse_message_raises_not_implemented(self):
         with pytest.raises(NotImplementedError):

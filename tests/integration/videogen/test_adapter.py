@@ -66,7 +66,9 @@ class TestVideoGenAdapterRoundTrip:
         result = VideoGenAdapter.decode_response(content, query.id)
         assert result.id == "q1"
         assert result.error is None
-        assert result.metadata == {"video_path": mock_trtllm_serve.video_path}
+        assert result.response_output is None
+        assert result.metadata["video_path"] == mock_trtllm_serve.video_path
+        assert isinstance(result.metadata["video_id"], str)
 
     def test_accuracy_mode_round_trip_returns_video_bytes(
         self, mock_trtllm_serve: MockTrtllmServe
@@ -89,7 +91,8 @@ class TestVideoGenAdapterRoundTrip:
         result = VideoGenAdapter.decode_response(content, query.id)
         assert result.id == "q1b"
         assert result.error is None
-        assert "video_bytes" in result.metadata
+        assert result.response_output is None
+        assert isinstance(result.metadata["video_id"], str)
         decoded = base64.b64decode(result.metadata["video_bytes"])
         assert decoded == DUMMY_VIDEO_BYTES
 

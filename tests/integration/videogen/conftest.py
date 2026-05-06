@@ -22,6 +22,7 @@ instead of OpenAI's `/v1/chat/completions`.
 """
 
 import base64
+import hashlib
 from collections.abc import Generator
 
 import pytest
@@ -62,7 +63,11 @@ class MockTrtllmServe(EchoServer):
 
     async def _handle_videogen(self, request: web.Request) -> web.Response:
         body = await request.json()
-        video_id = f"mock_video_{hash(body.get('prompt', '')) & 0xFFFF:04x}"
+        # sha1 not hash() — Python's hash() is salted per-interpreter via
+        # PYTHONHASHSEED, which makes the mock id non-deterministic across runs.
+        prompt = body.get("prompt", "")
+        digest = hashlib.sha1(prompt.encode()).hexdigest()[:4]
+        video_id = f"mock_video_{digest}"
         if body.get("response_format") == "video_bytes":
             return web.json_response(
                 {

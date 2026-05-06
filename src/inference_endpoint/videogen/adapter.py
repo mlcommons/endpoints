@@ -22,7 +22,6 @@ from inference_endpoint.core.types import (
     Query,
     QueryResult,
     StreamChunk,
-    TextModelOutput,
 )
 from inference_endpoint.dataset_manager.transforms import ColumnFilter
 from inference_endpoint.endpoint_client.adapter_protocol import HttpRequestAdapter
@@ -92,17 +91,21 @@ class VideoGenAdapter(HttpRequestAdapter):
         # Truthiness check, not key presence: a server that returns
         # `"video_bytes": null` belongs in the video_path branch.
         if isinstance(raw.get("video_bytes"), str):
-            resp = VideoPayloadResponse.model_validate(raw)
+            resp_bytes = VideoPayloadResponse.model_validate(raw)
             return QueryResult(
                 id=query_id,
-                response_output=TextModelOutput(output=resp.video_id),
-                metadata={"video_bytes": resp.video_bytes},
+                metadata={
+                    "video_id": resp_bytes.video_id,
+                    "video_bytes": resp_bytes.video_bytes,
+                },
             )
-        resp = VideoPathResponse.model_validate(raw)
+        resp_path = VideoPathResponse.model_validate(raw)
         return QueryResult(
             id=query_id,
-            response_output=TextModelOutput(output=resp.video_id),
-            metadata={"video_path": resp.video_path},
+            metadata={
+                "video_id": resp_path.video_id,
+                "video_path": resp_path.video_path,
+            },
         )
 
     @classmethod
