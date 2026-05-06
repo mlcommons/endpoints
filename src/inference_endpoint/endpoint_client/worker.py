@@ -341,7 +341,6 @@ class Worker:
             query_id=query.id,
             http_bytes=http_bytes,
             is_streaming=is_streaming,
-            query_metadata=query.metadata,
         )
 
         return req
@@ -430,9 +429,7 @@ class Worker:
         self._pool.release(conn)
 
         # Send final complete back to main rank
-        self._responses.send(
-            accumulator.get_final_output().with_metadata(req.query_metadata)
-        )
+        self._responses.send(accumulator.get_final_output())
 
     @profile
     async def _handle_non_streaming_body(self, req: InFlightRequest) -> None:
@@ -450,7 +447,7 @@ class Worker:
         result = self._adapter.decode_response(response_bytes, query_id)
 
         # Send result back to main rank
-        self._responses.send(result.with_metadata(req.query_metadata))
+        self._responses.send(result)
 
     async def _handle_error(self, query_id: str, error: Exception | str) -> None:
         """Send error response for a query."""

@@ -31,6 +31,7 @@ import shutil
 import signal
 import tempfile
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -545,10 +546,16 @@ async def _run_benchmark_async(
                 target_concurrency=ctx.config.settings.load_pattern.target_concurrency,
             )
 
-        def _on_sample_complete(result: QueryResult) -> None:
-            if multi_turn_strategy is not None:
-                multi_turn_strategy.on_sample_complete(result)
-            collector.on_complete_hook(result)
+        _on_sample_complete: Callable[[QueryResult], None]
+        if multi_turn_strategy is not None:
+            _mt_strategy = multi_turn_strategy
+
+            def _on_sample_complete(result: QueryResult) -> None:
+                _mt_strategy.on_sample_complete(result)
+                collector.on_complete_hook(result)
+
+        else:
+            _on_sample_complete = collector.on_complete_hook
 
         # Create session
         session = BenchmarkSession(

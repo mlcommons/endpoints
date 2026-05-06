@@ -226,7 +226,6 @@ class Query(
     Attributes:
         id: Unique identifier for this query (auto-generated UUID).
         data: Request payload as a dictionary (typically contains prompt, model, etc.).
-        metadata: Internal metadata that round-trips through transport (e.g., conversation_id).
         headers: HTTP headers to include in the request (e.g., authorization).
         created_at: Timestamp when query was created (seconds since epoch).
 
@@ -240,7 +239,7 @@ class Query(
         gc=False: Safe because data/headers are simple key-value pairs without cycles.
         Do NOT store self-referential or cyclic structures in data/headers fields.
 
-        array_like=True: Encodes as array instead of object (e.g., ["id", {...}, {...}, 0.0]
+        array_like=True: Encodes as array instead of object (e.g., ["id", {...}, 0.0]
         instead of {"id": ..., "data": ..., ...}). Provides ~6-50% size reduction and
         ~6-29% ser/des speedup for ZMQ transport depending on payload size.
 
@@ -250,7 +249,6 @@ class Query(
 
     id: str = msgspec.field(default_factory=lambda: str(uuid.uuid4()))
     data: dict[str, Any] = msgspec.field(default_factory=dict)
-    metadata: dict[str, Any] = msgspec.field(default_factory=dict)
     headers: dict[str, str] = msgspec.field(default_factory=dict)
     created_at: float = msgspec.field(default_factory=time.time)
 
@@ -332,32 +330,6 @@ class QueryResult(
             return self.response_output
         else:
             return "<EMPTY>"
-
-    def with_metadata(
-        self, additional_metadata: dict[str, Any] | None
-    ) -> "QueryResult":
-        """Return a new QueryResult with merged metadata.
-
-        Args:
-            additional_metadata: Metadata to merge into existing metadata.
-                                Values in additional_metadata override existing keys.
-
-        Returns:
-            New QueryResult with merged metadata (existing + additional).
-            If additional_metadata is None or empty, returns self unchanged.
-        """
-        if not additional_metadata:
-            return self
-
-        merged = dict(self.metadata)
-        merged.update(additional_metadata)
-
-        return QueryResult(
-            id=self.id,
-            response_output=self.response_output,
-            metadata=merged,
-            error=self.error,
-        )
 
 
 class StreamChunk(

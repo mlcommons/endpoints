@@ -16,12 +16,14 @@
 """Tests for configuration schema models and validation."""
 
 import pytest
+from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import (
     APIType,
     BenchmarkConfig,
     Dataset,
     DatasetType,
     EvalMethod,
+    LoadPatternType,
     ModelParams,
     OSLDistribution,
     OSLDistributionType,
@@ -470,8 +472,6 @@ class TestMultiTurnValidation:
     @pytest.mark.unit
     def test_multi_turn_valid_config(self):
         config = BenchmarkConfig(**self._make_online_multi_turn(concurrency=16))
-        from inference_endpoint.config.schema import LoadPatternType
-
         assert config.settings.load_pattern.type == LoadPatternType.MULTI_TURN
         assert config.settings.load_pattern.target_concurrency == 16
 
@@ -510,8 +510,6 @@ class TestMultiTurnTotalSamples:
 
     @pytest.mark.unit
     def test_multi_turn_uses_dataset_size_ignoring_duration(self):
-        from inference_endpoint.config.runtime_settings import RuntimeSettings
-
         config = BenchmarkConfig(
             type=TestType.ONLINE,
             model_params={"name": "M"},

@@ -65,12 +65,6 @@ class LoadPatternType(str, Enum):
     STEP = "step"  # Step pattern (TODO)
 
 
-class ConversationMode(str, Enum):
-    """Multi-turn conversation scheduling modes."""
-
-    INDEPENDENT = "independent"  # Per-conv pipelines; no cross-conv turn barrier
-
-
 class OSLDistributionType(str, Enum):
     """Output Sequence Length distribution types."""
 
@@ -245,14 +239,12 @@ class MultiTurnConfig(BaseModel):
     Presence of this block in the dataset config enables multi-turn mode.
 
     Attributes:
-        mode: Conversation scheduling strategy (currently only independent).
         turn_timeout_s: Maximum seconds to wait for previous turn completion.
         use_dataset_history: If True, use pre-built message history from dataset.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    mode: ConversationMode = ConversationMode.INDEPENDENT
     turn_timeout_s: float = 300.0
     use_dataset_history: bool = True
 
