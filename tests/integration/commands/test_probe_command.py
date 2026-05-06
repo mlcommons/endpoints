@@ -25,7 +25,8 @@ validating:
 
 import pytest
 from inference_endpoint.commands.probe import ProbeConfig, execute_probe
-from inference_endpoint.exceptions import ExecutionError
+from inference_endpoint.config.schema import APIType
+from inference_endpoint.exceptions import ExecutionError, InputValidationError
 
 
 class TestProbeCommandIntegration:
@@ -83,6 +84,19 @@ class TestProbeCommandIntegration:
             assert "Sample responses (15 collected)" in caplog.text
             assert "[probe-0]" in caplog.text
             assert "Sample response text" in caplog.text
+
+    @pytest.mark.integration
+    def test_probe_rejects_videogen_api_type(self):
+        """Probe assumes second-scale latencies; videogen requests run for minutes."""
+        config = ProbeConfig(
+            endpoints="http://localhost:8000",
+            model="wan22",
+            api_type=APIType.VIDEOGEN,
+            requests=1,
+            prompt="a cat",
+        )
+        with pytest.raises(InputValidationError, match="videogen"):
+            execute_probe(config)
 
     @pytest.mark.integration
     def test_probe_with_invalid_endpoint(self):

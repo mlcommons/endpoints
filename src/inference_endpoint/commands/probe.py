@@ -79,6 +79,18 @@ async def _probe_async(config: ProbeConfig) -> None:
     test_prompt = config.prompt
     api_type = config.api_type
 
+    # Probe assumes second-scale latencies (probe_timeout=60s below) and
+    # text prompt/response semantics — neither holds for video generation,
+    # where each request takes minutes and there are no chat tokens to
+    # display. Reject upfront rather than emitting a misleading
+    # "0/N requests successful" failure after the timeout.
+    if api_type == APIType.VIDEOGEN:
+        raise InputValidationError(
+            "Probe does not support api_type=videogen "
+            "(per-request latencies exceed the probe timeout). "
+            "Use a dedicated health check or a benchmark from-config run instead."
+        )
+
     # Model: use provided or default to valid OpenAI model name
     model_name = config.model
     if not model_name:
