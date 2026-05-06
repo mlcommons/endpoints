@@ -109,7 +109,7 @@ Multi-process, event-loop design optimized for throughput:
 
 ### Metrics Aggregator subprocess (pub/sub)
 
-The aggregator is a separate process (`python -m inference_endpoint.async_utils.services.metrics_aggregator`) that subscribes to events and publishes `MetricsSnapshot` messages. State machine and wire contract are documented in `.cursor_artifacts/metrics_pubsub_design_v5.md` §1; key facts for working in this layer:
+The aggregator is a separate process (`python -m inference_endpoint.async_utils.services.metrics_aggregator`) that subscribes to events and publishes `MetricsSnapshot` messages. Key facts for working in this layer:
 
 - **Series storage**: each `SeriesSampler` keeps three parallel views: O(1) cheap rollups (count/total/min/max/sum_sq, exact), an HDR Histogram (cheap live percentiles), and an in-memory `array.array` of raw values (for exact percentiles in the `COMPLETE` snapshot). Hot path is `registry.record(name, value)` — no allocation, no I/O.
 - **Counter API**: `registry.increment(name, delta=1)` for sample-event counters. `registry.set_counter(name, value)` only for the two duration counters (`total_duration_ns` max-of-elapsed, `tracked_duration_ns` sum-of-blocks).
@@ -342,6 +342,49 @@ These apply especially to code in the hot path (load generator, endpoint client,
 
 - `src/inference_endpoint/openai/openai_types_gen.py` — auto-generated, excluded from ruff/pre-commit
 - `src/inference_endpoint/openai/openapi.yaml` — OpenAI API spec, excluded from pre-commit
+
+### Documentation references — no local-only artifacts
+
+**Code, comments, docstrings, tests, and committed Markdown MUST NOT reference paths that aren't in the repository.** This includes anything under `.gitignore`d directories (e.g. `.cursor_artifacts/`, design scratch dirs, untracked working notes), absolute paths to a contributor's workstation, build outputs, or unmerged branch artifacts. A reviewer fetching the PR should be able to follow every reference cited in the diff.
+
+**Why:** stale references compound — `See foo.md §3` is meaningless once `foo.md` is gone, renamed, or never existed in the merged tree, and rotting cross-references are how docs stop being trusted. AI agents reading the codebase later treat dangling pointers as ground truth and propagate confusion.
+
+**Allowed:**
+
+- Paths to files committed to the repo (`docs/...`, `src/...`, `tests/...`, `README.md`, etc.).
+- External URLs (issue trackers, PRs, RFCs, vendor docs).
+- Generic references to environment/setup that the reader is expected to create themselves (e.g. `source .venv/bin/activate` in a setup README, where `.venv` is the user's local venv).
+
+**Disallowed examples:**
+
+- `See .cursor_artifacts/foo_design.md §2` — `.cursor_artifacts/` is gitignored.
+- `See ~/work/notes/architecture.txt` — contributor-local.
+- `Tracked in metrics_pubsub_design_v5.md test impact section` — same gitignored doc.
+
+If a design doc is worth referencing from the source tree, commit it to `docs/` or inline the relevant content into the code comment / docstring. For one-off rationale that won't survive the conversation, prefer a self-contained explanation in the comment itself rather than a pointer to ephemera.
+
+### Comments and docstrings — describe current state, not development history
+
+**Don't write comments or docstrings that narrate iteration on the codebase.** Pointers to abandoned approaches, prior implementations, or design pivots belong in the PR description and `git log`, not in the source tree. They rot quickly: the prior implementation is gone, the reader has no way to evaluate the comparison, and the scaffolding accumulates with every iteration. Future readers — humans and AI agents alike — treat the comment as if it describes load-bearing context when it's actually historical clutter.
+
+This applies especially to AI-assisted development, where it's tempting to leave a paper trail of "we tried X first, then switched to Y" inside the source. That paper trail belongs in the PR description.
+
+**Disallowed patterns:**
+
+- `# Originally used X, but switched to Y for ...`
+- `# An earlier implementation did X — this version does Y`
+- `# Removed the foo parameter` / `# Replaced bar with baz`
+- `# Note: this used to be sync but is now async`
+- `# Regression: an earlier shape did X` — even in regression-test docstrings, drop the narrative framing.
+- `# An alternative design considered ... but was rejected because ...` (unless the rejected alternative is a _common_ path a future contributor might re-attempt — in that case, frame it as "**don't** do X because Y", not as developer history).
+
+**Allowed:**
+
+- **Current rationale**: `# Uses dict dispatch — hot path measured at sub-ms` (describes why the current design exists; no history).
+- **Regression context that doesn't narrate the prior bug's discovery**: `# Without this check, value > hdr_high silently corrupts the histogram total` (describes the bug being prevented, framed as a current invariant — not "we used to have a bug here").
+- **Inline TODO/FIXME** pointing at a tracking issue (URL or issue number, not "we plan to do X eventually").
+
+**Rule of thumb:** if removing the comment would leave the code's intent unchanged for someone seeing it for the first time, the comment is fine. If the comment only makes sense to someone who saw the prior version, delete it.
 
 ## Keeping AGENTS.md Up to Date
 

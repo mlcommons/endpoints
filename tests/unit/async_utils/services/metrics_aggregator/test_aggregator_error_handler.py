@@ -92,10 +92,10 @@ async def test_error_event_increments_tracked_failed_when_row_exists(tmp_path):
     """ERROR for a tracked, in-flight sample increments BOTH total and
     tracked failure counters.
 
-    Regression for design v5 §3: this only works because session.py emits
-    ERROR before COMPLETE — if the order regresses, the row is removed by
-    set_field(...COMPLETE...) before the ERROR handler runs and
-    ``TRACKED_SAMPLES_FAILED`` silently stays at 0.
+    This only works because session.py emits ERROR before COMPLETE — if
+    the order regresses, the row is removed by set_field(...COMPLETE...)
+    before the ERROR handler runs and ``TRACKED_SAMPLES_FAILED`` silently
+    stays at 0.
     """
     import asyncio
 

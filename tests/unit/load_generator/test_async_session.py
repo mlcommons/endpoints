@@ -561,7 +561,7 @@ class TestBenchmarkSession:
         # ERROR must be emitted BEFORE COMPLETE so the metrics aggregator can
         # observe the in-flight tracked row before set_field(...COMPLETE...)
         # removes it. Reverting this order would silently zero
-        # tracked_samples_failed. See metrics_pubsub_design_v5.md §3.
+        # tracked_samples_failed.
         error_idx = publisher.events.index(error_events[0])
         complete_idx = publisher.events.index(complete_events[0])
         assert error_idx < complete_idx, (

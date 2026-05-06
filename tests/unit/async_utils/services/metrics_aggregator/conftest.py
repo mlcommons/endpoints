@@ -15,9 +15,8 @@
 
 """Shared test doubles and factories for metrics aggregator tests.
 
-Migrated for the registry/publisher refactor (metrics_pubsub_design_v5):
-no more ``InMemoryKVStore``. Tests that need to inspect emitted values
-build them directly off a ``MetricsRegistry`` and a ``MetricsSnapshot``.
+Tests that need to inspect emitted values build them directly off a
+``MetricsRegistry`` and a ``MetricsSnapshot``.
 
 The helpers here are intentionally small — most reused-across-tests
 construction lives in ``_make_aggregator`` style fixtures local to each

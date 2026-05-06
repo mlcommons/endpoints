@@ -167,9 +167,11 @@ class TestMetricsPublisher:
     ):
         """publish_final MUST NOT return while the tick task could still emit.
 
-        Regression: an earlier shape called ``self._tick_task.cancel()`` but
-        did not await the task. With ``conflate=True`` on the SUB side, a late
-        live tick landing after the final frame would replace it in the queue.
+        ``self._tick_task.cancel()`` only schedules cancellation at the
+        next await point; without ``await``ing the task, a late live tick
+        landing after the COMPLETE frame would replace it in a
+        ``conflate=True`` SUB queue. publish_final must therefore await
+        cancellation before publishing COMPLETE.
         """
         loop = asyncio.get_event_loop()
         publisher = MetricsPublisher(

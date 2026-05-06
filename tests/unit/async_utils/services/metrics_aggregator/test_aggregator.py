@@ -15,8 +15,7 @@
 
 """Tests for ``MetricsAggregatorService.process()``.
 
-Migrated to the registry/publisher refactor (metrics_pubsub_design_v5):
-events are injected directly via ``await agg.process([...])``; emitted
+Events are injected directly via ``await agg.process([...])``; emitted
 metrics are inspected by reading the ``MetricsRegistry``'s snapshot
 output. The aggregator is constructed with a real SUB socket (so the
 ``ZmqMessageSubscriber`` base initializes cleanly) and a mocked
@@ -486,12 +485,7 @@ class TestEdgeCases:
 
     @pytest.mark.asyncio
     async def test_session_ended_calls_publish_final(self, tmp_path):
-        """ENDED triggers ``publish_final`` on the publisher.
-
-        The legacy assertion was on ``store.closed``; with the registry/
-        publisher refactor the ENDED handler invokes ``publish_final``
-        and ``close`` on the (mocked) publisher.
-        """
+        """ENDED triggers ``publish_final`` and ``close`` on the publisher."""
         loop = asyncio.get_event_loop()
         with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
             agg, _, publisher = make_aggregator(ctx, loop, "agg_ended_publish_final")
@@ -1023,5 +1017,4 @@ class TestAsyncTriggers:
     # NOTE(agents): Trigger exception handling (logger.exception paths) is not
     # exercised here. Adding a MockTokenizePool that raises on
     # token_count_async would let us assert no metric is emitted, the
-    # aggregator does not crash, and the task set is cleaned up. Tracked as
-    # follow-up; see the same TODO in the pre-refactor file.
+    # aggregator does not crash, and the task set is cleaned up.
