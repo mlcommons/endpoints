@@ -15,7 +15,10 @@
 
 """Tests for configuration schema models and validation."""
 
+import random
+
 import pytest
+from inference_endpoint import metrics
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import (
     APIType,
@@ -23,6 +26,7 @@ from inference_endpoint.config.schema import (
     Dataset,
     DatasetType,
     EvalMethod,
+    LoadPattern,
     LoadPatternType,
     ModelParams,
     OSLDistribution,
@@ -525,12 +529,6 @@ class TestMultiTurnTotalSamples:
 
     @pytest.mark.unit
     def test_multi_turn_respects_min_sample_count(self):
-        import random
-
-        from inference_endpoint import metrics
-        from inference_endpoint.config.runtime_settings import RuntimeSettings
-        from inference_endpoint.config.schema import LoadPattern, LoadPatternType
-
         lp = LoadPattern(type=LoadPatternType.MULTI_TURN, target_concurrency=4)
         rt = RuntimeSettings(
             metric_target=metrics.Throughput(10.0),
@@ -548,12 +546,6 @@ class TestMultiTurnTotalSamples:
 
     @pytest.mark.unit
     def test_multi_turn_explicit_n_samples_takes_precedence(self):
-        import random
-
-        from inference_endpoint import metrics
-        from inference_endpoint.config.runtime_settings import RuntimeSettings
-        from inference_endpoint.config.schema import LoadPattern, LoadPatternType
-
         lp = LoadPattern(type=LoadPatternType.MULTI_TURN, target_concurrency=4)
         rt = RuntimeSettings(
             metric_target=metrics.Throughput(10.0),
