@@ -23,7 +23,7 @@ type: "offline"
 
 model_params:
   name: "wan22"
-  max_new_tokens: 0 # Video generation does not produce tokens
+  max_new_tokens: 1 # Ignored by VideoGenAdapter; kept >0 so swapping api_type to openai/sglang for debugging doesn't yield a 400.
   streaming: "off" # WAN 2.2 uses non-streaming HTTP POST/response
 
 datasets:

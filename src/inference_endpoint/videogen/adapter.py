@@ -24,6 +24,7 @@ from inference_endpoint.core.types import (
     StreamChunk,
     TextModelOutput,
 )
+from inference_endpoint.dataset_manager.transforms import ColumnFilter
 from inference_endpoint.endpoint_client.adapter_protocol import HttpRequestAdapter
 
 from .types import VideoPathRequest, VideoPathResponse, VideoPayloadResponse
@@ -36,32 +37,41 @@ if TYPE_CHECKING:
 class VideoGenAdapter(HttpRequestAdapter):
     """Adapter for trtllm-serve POST /v1/videos/generations.
 
-    Supports both server response formats via query.data["response_format"]:
-    - "video_path" (default): server saves video to shared storage (Lustre)
-      and returns only the file path. Used in perf mode — avoids 3-5 MB
-      payloads over HTTP + ZMQ per request.
-    - "video_bytes": server returns base64-encoded video content. Used in
-      accuracy mode where the evaluator needs the video content directly.
+    `response_format` is read from `query.data` (default "video_path") and
+    is *not* derived from BenchmarkConfig.benchmark_mode. Callers that want
+    accuracy-mode bytes must inject `response_format="video_bytes"` into the
+    dataset rows — typically via an `AddStaticColumns` transform.
     """
 
     @classmethod
     def dataset_transforms(cls, model_params: "ModelParams") -> "list[Transform]":
-        return []
+        # ColumnFilter rejects unknown columns at dataset-load time so typos
+        # (e.g. "negitive_prompt") fail loud instead of silently falling back
+        # to server-side defaults.
+        request_fields = list(VideoPathRequest.model_fields.keys())
+        return [
+            ColumnFilter(
+                required_columns=["prompt"],
+                optional_columns=[f for f in request_fields if f != "prompt"],
+            ),
+        ]
 
     @classmethod
     def encode_query(cls, query: Query) -> bytes:
         """Serialise query.data to VideoPathRequest JSON bytes.
 
-        Only `prompt` is required. All other fields fall back to MLPerf defaults
-        declared on VideoPathRequest but can be overridden via query.data.
-        Pass response_format="video_bytes" in query.data to request inline video
-        bytes (accuracy mode) instead of the default Lustre path (perf mode).
-        Extra keys in query.data (e.g. sample_id, sample_index) are ignored.
+        Only `prompt` is required. All other fields fall back to defaults on
+        VideoPathRequest but can be overridden via query.data. Streaming is
+        not supported — `stream=True` raises.
         """
         data = query.data
         if "prompt" not in data:
             raise KeyError(
                 f"'prompt' not found in query.data keys: {list(data.keys())}"
+            )
+        if data.get("stream"):
+            raise ValueError(
+                "VideoGenAdapter is non-streaming; remove `stream` from query.data."
             )
         known = VideoPathRequest.model_fields.keys()
         req = VideoPathRequest.model_validate({k: data[k] for k in known if k in data})
@@ -75,11 +85,13 @@ class VideoGenAdapter(HttpRequestAdapter):
         """Deserialise trtllm-serve response JSON bytes to QueryResult.
 
         Dispatches on the response shape:
-        - "video_bytes" response: metadata["video_bytes"] holds the base64 payload.
-        - "video_path" response: metadata["video_path"] holds the Lustre file path.
+        - video_bytes response (str payload): metadata["video_bytes"].
+        - video_path response: metadata["video_path"].
         """
         raw = json.loads(response_bytes)
-        if "video_bytes" in raw:
+        # Truthiness check, not key presence: a server that returns
+        # `"video_bytes": null` belongs in the video_path branch.
+        if isinstance(raw.get("video_bytes"), str):
             resp = VideoPayloadResponse.model_validate(raw)
             return QueryResult(
                 id=query_id,
@@ -99,10 +111,13 @@ class VideoGenAdapter(HttpRequestAdapter):
 
 
 class VideoGenAccumulator:
-    """No-op SSE accumulator satisfying SSEAccumulatorProtocol.
+    """SSE accumulator stub for HTTPClientConfig contract.
 
-    Video generation requests are non-streaming HTTP. This class exists
-    only to satisfy the HTTPClientConfig.accumulator type contract.
+    Video generation requests are non-streaming HTTP, so this class should
+    never be exercised. `get_final_output` raises rather than returning an
+    empty `QueryResult`, because the worker's SSE path swallows the
+    `NotImplementedError` from `decode_sse_message` and would otherwise
+    surface zero-output queries as successful.
     """
 
     def __init__(self, query_id: str, stream_all_chunks: bool) -> None:
@@ -113,4 +128,7 @@ class VideoGenAccumulator:
         return None
 
     def get_final_output(self) -> QueryResult:
-        return QueryResult(id=self.query_id)
+        raise RuntimeError(
+            "VideoGenAccumulator.get_final_output called: video generation is "
+            "non-streaming — check HTTPClientConfig.streaming and query.data['stream']."
+        )

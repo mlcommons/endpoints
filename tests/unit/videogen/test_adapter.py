@@ -97,6 +97,11 @@ class TestVideoGenAdapter:
         with pytest.raises(KeyError):
             VideoGenAdapter.encode_query(query)
 
+    def test_encode_query_rejects_stream_true(self):
+        query = Query(id="q1", data={"prompt": "test", "stream": True})
+        with pytest.raises(ValueError, match="non-streaming"):
+            VideoGenAdapter.encode_query(query)
+
     def test_decode_response_returns_video_bytes_in_metadata(self):
         resp = VideoPayloadResponse(
             video_id="video_abc123",
@@ -117,9 +122,19 @@ class TestVideoGenAdapter:
         with pytest.raises(NotImplementedError):
             VideoGenAdapter.decode_sse_message(b"{}")
 
-    def test_dataset_transforms_returns_empty_list(self):
+    def test_dataset_transforms_returns_column_filter(self):
+        from inference_endpoint.dataset_manager.transforms import ColumnFilter
+        from inference_endpoint.videogen.types import VideoPathRequest
+
         params = ModelParams()
-        assert VideoGenAdapter.dataset_transforms(params) == []
+        transforms = VideoGenAdapter.dataset_transforms(params)
+        assert len(transforms) == 1
+        cf = transforms[0]
+        assert isinstance(cf, ColumnFilter)
+        assert cf.required_columns == ["prompt"]
+        # Optional columns mirror VideoPathRequest fields except prompt itself.
+        expected_optional = {f for f in VideoPathRequest.model_fields if f != "prompt"}
+        assert set(cf.optional_columns or []) == expected_optional
 
     def test_default_route_is_trtllm_native(self):
         assert APIType.VIDEOGEN.default_route() == "/v1/videos/generations"
@@ -132,11 +147,10 @@ class TestVideoGenAccumulator:
         assert acc.add_chunk("anything") is None
         assert acc.add_chunk(None) is None
 
-    def test_get_final_output_returns_query_result_with_id(self):
+    def test_get_final_output_raises_because_videogen_is_non_streaming(self):
         acc = VideoGenAccumulator(query_id="q1", stream_all_chunks=False)
-        result = acc.get_final_output()
-        assert isinstance(result, QueryResult)
-        assert result.id == "q1"
+        with pytest.raises(RuntimeError, match="non-streaming"):
+            acc.get_final_output()
 
     def test_satisfies_sse_accumulator_protocol(self):
         assert isinstance(VideoGenAccumulator("q1", False), SSEAccumulatorProtocol)

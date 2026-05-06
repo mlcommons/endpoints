@@ -17,7 +17,7 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class VideoPathRequest(BaseModel):
@@ -26,9 +26,9 @@ class VideoPathRequest(BaseModel):
     Matches trtllm-serve's VideoGenerationRequest. All fields have MLPerf defaults
     so that only `prompt` is required from the dataset.
 
-    `response_format` is set by VideoGenAdapter based on benchmark mode:
-    - "video_path" (perf mode): server saves video to shared storage, returns path only.
-    - "video_bytes" (accuracy mode): server returns base64-encoded video content.
+    `response_format` defaults to "video_path"; callers wanting accuracy-mode
+    behaviour must inject `response_format="video_bytes"` into `query.data`
+    via the dataset (the adapter does not derive it from `benchmark_mode`).
     """
 
     prompt: str
@@ -78,7 +78,12 @@ class VideoPathResponse(BaseModel):
     and returns the absolute path instead of video bytes.
     Used in perf mode: MLPerf defines query completion as server finishing
     generation, so bytes do not need to cross the wire.
+
+    `extra="forbid"` so a server returning unexpected fields (or both
+    video_path and video_bytes) fails loudly at deserialisation.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     video_id: str
     video_path: str
@@ -90,6 +95,8 @@ class VideoPayloadResponse(BaseModel):
     Used in accuracy mode. video_bytes is the base64-encoded video content,
     which the accuracy evaluator decodes to score quality (e.g. FVD).
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     video_id: str
     video_bytes: str  # base64-encoded video content
