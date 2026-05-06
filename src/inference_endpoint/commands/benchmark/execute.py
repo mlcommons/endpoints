@@ -423,18 +423,25 @@ async def _run_benchmark_async(
         metrics_output_dir = ctx.report_dir / "metrics"
         metrics_output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Subscribe to the metrics PUB socket BEFORE the aggregator binds it,
-        # so we never miss the STARTED-time first ticks. The aggregator's
-        # ManagedZMQContext is a separate process; we share socket_dir.
         metrics_socket_name = f"metrics_pub_{uuid.uuid4().hex[:8]}"
-        # The aggregator subprocess will bind metrics_socket_name; the main
-        # process just needs to know the path to connect to. Connect is
-        # deferred until after launcher.launch() so the IPC file exists.
+
+        # Connect the metrics-snapshot subscriber BEFORE launching the
+        # aggregator subprocess that binds the matching PUB socket. ZMQ
+        # tolerates connect-before-bind on IPC (the connect resolves once
+        # the binder appears), and starting the SUB reader early gives
+        # the subscription handshake time to complete during the
+        # ~1-2 second subprocess-launch window. This eliminates the
+        # slow-joiner risk of dropping early live ticks (or the worst
+        # case: missing COMPLETE if the SUB handshake never warms up).
+        if zmq_ctx.socket_dir is None:
+            raise RuntimeError("ZMQ socket_dir must be set after publisher bind")
+        metrics_subscriber = MetricsSnapshotSubscriber(
+            metrics_socket_name, zmq_ctx, loop
+        )
+        metrics_subscriber.start()
 
         # Launch service subprocesses
         launcher = ServiceLauncher(zmq_ctx)
-        if zmq_ctx.socket_dir is None:
-            raise RuntimeError("ZMQ socket_dir must be set after publisher bind")
         aggregator_args: list[str] = [
             "--socket-dir",
             zmq_ctx.socket_dir,
@@ -475,14 +482,6 @@ async def _run_benchmark_async(
             ],
             timeout=30.0,
         )
-
-        # Connect the metrics-snapshot subscriber AFTER aggregator readiness
-        # so the IPC bind is in place. We may still miss the very first tick;
-        # the disk fallback covers the missing-final case.
-        metrics_subscriber = MetricsSnapshotSubscriber(
-            metrics_socket_name, zmq_ctx, loop
-        )
-        metrics_subscriber.start()
 
         # Create endpoint client on the shared loop
         endpoints = config.endpoint_config.endpoints
