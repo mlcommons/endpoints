@@ -792,12 +792,10 @@ class InFlightRequest:
         query_id: Correlates response back to original Query.
         http_bytes: Serialized HTTP request for socket.write().
         is_streaming: Whether this is a streaming (SSE) request or not.
-        query_metadata: Internal metadata carried alongside the request.
         connection: PooledConnection assigned to this request (set once request is fired).
     """
 
     query_id: str
     http_bytes: bytes
     is_streaming: bool
-    query_metadata: dict[str, object] = field(default_factory=dict)
     connection: PooledConnection = field(default=None, repr=False)  # type: ignore[assignment]

@@ -24,7 +24,6 @@ from ..config.schema import APIType, ModelParams
 from ..exceptions import InputValidationError
 from .dataset import Dataset
 from .transforms import (
-    AddDefaultColumns,
     AddStaticColumns,
     apply_transforms,
     get_transforms_for_api_type,
@@ -171,6 +170,31 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
                         f"Conversation {conv_id} has invalid role sequence at turn "
                         f"{row['turn']}: got '{role}' after state '{state}'"
                     )
+
+                if role == "tool":
+                    tool_results = row.get("tool_results")
+                    if not isinstance(tool_results, list) or len(tool_results) == 0:
+                        raise InputValidationError(
+                            f"Conversation {conv_id} turn {row['turn']}: "
+                            "tool rows must have a non-empty 'tool_results' list"
+                        )
+                elif role == "assistant":
+                    content = row.get("content")
+                    is_empty_content = (
+                        content is None
+                        or (isinstance(content, float) and pd.isna(content))
+                        or content == ""
+                    )
+                    tool_calls = row.get("tool_calls")
+                    has_tool_calls = (
+                        isinstance(tool_calls, list) and len(tool_calls) > 0
+                    )
+                    if is_empty_content and not has_tool_calls:
+                        raise InputValidationError(
+                            f"Conversation {conv_id} turn {row['turn']}: "
+                            "assistant rows must have non-empty 'content' or non-empty 'tool_calls'"
+                        )
+
                 state = role
 
     def _validate_turn_numbering(self):
@@ -347,7 +371,7 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
                 if isinstance(t, AddStaticColumns):
                     defaults.update(t.data)
             if defaults:
-                df = AddDefaultColumns(defaults)(df)
+                df = AddStaticColumns(defaults, overwrite=False)(df)
 
         all_rows = df.to_dict(orient="records")
 
@@ -356,6 +380,8 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
         # value is float NaN was absent in the original dataset row.
         pre_built = self.conversation_metadata.get("pre_built_messages_by_key", {})
         client_turn_samples: list[dict[str, Any]] = []
+        # Maps (conv_id, turn) → dense sample_index for metadata backfill.
+        key_to_sample_index: dict[tuple[str, int], int] = {}
 
         # Collect per-conversation defaults from the first user row so that
         # fields like model/max_completion_tokens propagate to tool rows.
@@ -410,6 +436,17 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
             messages = pre_built.get(key, [])
             sample["messages"] = messages
 
+            # Record dense 0-based index before appending (matches load_sample() position).
+            key_to_sample_index[key] = len(client_turn_samples)
             client_turn_samples.append(sample)
+
+        # Backfill explicit sample_index into conversation_metadata["samples"].
+        # Drop entries whose key is absent (truncated turns not in client_turn_samples).
+        updated_samples = []
+        for s in self.conversation_metadata["samples"]:
+            skey: tuple[str, int] = (str(s["conversation_id"]), int(s["turn"]))
+            if skey in key_to_sample_index:
+                updated_samples.append({**s, "sample_index": key_to_sample_index[skey]})
+        self.conversation_metadata["samples"] = updated_samples
 
         self.data = client_turn_samples

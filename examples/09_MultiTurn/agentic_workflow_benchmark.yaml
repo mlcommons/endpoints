@@ -13,7 +13,6 @@ datasets:
     # The datasets/ directory is a placeholder; populate it with the conversion script above.
     path: examples/09_MultiTurn/datasets/agentic_workflow_flat.jsonl
     multi_turn:
-      mode: independent
       turn_timeout_s: 600.0
 
 settings:

@@ -33,6 +33,8 @@ class ConversationState:
         completed_turns: Turns with responses (success or failure) — observability only.
         failed_turns: Turns that failed — observability only.
         expected_client_turns: Expected total client turns (for completion detection).
+        last_assistant_tool_call_ids: Tool call ids from the most recent assistant response;
+            used to rewrite dataset tool_call_ids in live-history mode.
     """
 
     conversation_id: str
@@ -40,6 +42,7 @@ class ConversationState:
     completed_turns: int = 0
     failed_turns: int = 0
     expected_client_turns: int | None = None
+    last_assistant_tool_call_ids: list[str] = field(default_factory=list)
 
     def is_complete(self) -> bool:
         """Return True when all expected turns have a response."""
@@ -133,13 +136,18 @@ class ConversationManager:
         state = self._conversations.get(conversation_id)
         if state is None:
             raise KeyError(f"Conversation {conversation_id} not initialized")
+        tool_calls = metadata.get("tool_calls") if metadata else None
         if store_in_history:
-            tool_calls = metadata.get("tool_calls") if metadata else None
             if response or tool_calls:
                 msg: dict[str, Any] = {"role": "assistant", "content": response or None}
                 if tool_calls:
                     msg["tool_calls"] = tool_calls
                 state.message_history.append(msg)
+        state.last_assistant_tool_call_ids = (
+            [tc["id"] for tc in tool_calls if isinstance(tc, dict) and "id" in tc]
+            if tool_calls
+            else []
+        )
         state.completed_turns += 1
         self._log_if_complete(state, conversation_id)
 
@@ -166,6 +174,7 @@ class ConversationManager:
             state.message_history.append(
                 {"role": "assistant", "content": "[ERROR: Turn failed or timed out]"}
             )
+        state.last_assistant_tool_call_ids = []
         state.completed_turns += 1
         state.failed_turns += 1
         logger.warning(f"Turn failed for conversation {conversation_id}")

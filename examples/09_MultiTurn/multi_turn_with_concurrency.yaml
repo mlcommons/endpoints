@@ -13,7 +13,6 @@ datasets:
     path: examples/09_MultiTurn/customer_support_conversations.jsonl
     samples: 10
     multi_turn:
-      mode: independent # All conv turn-1 start together
       turn_timeout_s: 300.0
 
 settings:

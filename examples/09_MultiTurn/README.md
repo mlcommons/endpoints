@@ -144,7 +144,6 @@ datasets:
     type: performance
     path: examples/09_MultiTurn/customer_support_conversations.jsonl
     multi_turn:
-      mode: independent
       turn_timeout_s: 300.0
 
 settings:
@@ -183,29 +182,6 @@ t=0.5: Turn-1 completes → issue next turn-1 (slot filled)
 t=1.0: Turn-1 completes → issue turn-2 of completed conv (slot filled)
 ...    Maintains ~32 in-flight across all conversations
 ```
-
-### Conversation Modes
-
-The default mode is `independent`.
-
-#### Independent Mode (Default)
-
-Issues turns for each conversation independently — no cross-conversation turn barrier.
-
-```yaml
-multi_turn:
-  mode: independent
-
-settings:
-  load_pattern:
-    type: multi_turn
-    target_concurrency: 32
-```
-
-**Use case**: Realistic production load where short conversations finish while long ones are
-still running. Turn 1 of one conversation and turn 100 of another can be in-flight simultaneously.
-
-For single-conversation debugging, use `mode: independent` with `target_concurrency: 1`.
 
 ### Turn Timeout
 

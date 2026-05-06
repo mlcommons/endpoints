@@ -117,9 +117,11 @@ class MultiTurnStrategy:
         self._error = None
 
         conv_samples: dict[str, list[tuple[int, int]]] = defaultdict(list)
-        for sample_index, sample_meta in enumerate(self._dataset_metadata["samples"]):
+        for sample_meta in self._dataset_metadata["samples"]:
             conv_id = sample_meta["conversation_id"]
-            conv_samples[conv_id].append((sample_index, sample_meta["turn"]))
+            conv_samples[conv_id].append(
+                (sample_meta["sample_index"], sample_meta["turn"])
+            )
 
         # Pre-create all conversation states before issuing any turns (no locking needed).
         sys_prompts = self._dataset_metadata.get("system_prompts_by_conv", {})
@@ -198,17 +200,32 @@ class MultiTurnStrategy:
                 "current_turn_messages_by_key", {}
             ).get((conv_id, turn))
             if current_turn_messages:
-                has_tool_msg = any(
-                    m.get("role") == "tool" for m in current_turn_messages
-                )
-                if has_tool_msg:
-                    logger.warning(
-                        "Live-history mode with tool messages uses dataset "
-                        "tool_call_ids; real endpoint IDs will differ "
-                        "(conv=%s, turn=%d)",
-                        conv_id,
-                        turn,
-                    )
+                tool_msgs = [
+                    m for m in current_turn_messages if m.get("role") == "tool"
+                ]
+                if tool_msgs:
+                    model_ids = state.last_assistant_tool_call_ids
+                    if len(model_ids) == len(tool_msgs):
+                        # Rewrite dataset-hardcoded tool_call_ids with model-generated ids.
+                        ti = 0
+                        rewritten: list[dict[str, Any]] = []
+                        for m in current_turn_messages:
+                            if m.get("role") == "tool":
+                                rewritten.append({**m, "tool_call_id": model_ids[ti]})
+                                ti += 1
+                            else:
+                                rewritten.append(m)
+                        current_turn_messages = rewritten
+                    else:
+                        logger.warning(
+                            "Live-history tool_call_id count mismatch for conv=%s turn=%d: "
+                            "model returned %d tool_call(s), dataset expects %d. "
+                            "Using dataset ids.",
+                            conv_id,
+                            turn,
+                            len(model_ids),
+                            len(tool_msgs),
+                        )
                 live_messages = state.message_history.copy() + current_turn_messages
                 data_override = {"messages": live_messages}
 

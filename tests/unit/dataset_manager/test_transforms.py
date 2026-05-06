@@ -23,7 +23,6 @@ from typing import Any
 import pandas as pd
 import pytest
 from inference_endpoint.dataset_manager.transforms import (
-    AddDefaultColumns,
     AddStaticColumns,
     ColumnFilter,
     ColumnRemap,
@@ -827,14 +826,14 @@ class TestMakeAdapterCompatible:
         assert "prompt" not in result.columns
 
 
-class TestAddDefaultColumns:
-    """Unit tests for AddDefaultColumns transform."""
+class TestAddStaticColumnsNoOverwrite:
+    """Unit tests for AddStaticColumns(overwrite=False) behavior."""
 
     @pytest.mark.unit
     def test_fills_missing_columns(self):
         """New columns are added when absent."""
         df = pd.DataFrame({"a": [1, 2]})
-        result = AddDefaultColumns({"b": 10, "c": "x"})(df)
+        result = AddStaticColumns({"b": 10, "c": "x"}, overwrite=False)(df)
         assert list(result["b"]) == [10, 10]
         assert list(result["c"]) == ["x", "x"]
 
@@ -842,7 +841,7 @@ class TestAddDefaultColumns:
     def test_preserves_existing_non_null_values(self):
         """Existing non-null values are not overwritten."""
         df = pd.DataFrame({"a": [1, 2]})
-        result = AddDefaultColumns({"a": 99})(df)
+        result = AddStaticColumns({"a": 99}, overwrite=False)(df)
         assert list(result["a"]) == [1, 2]
 
     @pytest.mark.unit
@@ -850,7 +849,7 @@ class TestAddDefaultColumns:
         """NaN cells in an existing column are replaced with the default."""
 
         df = pd.DataFrame({"a": [1.0, float("nan"), 3.0]})
-        result = AddDefaultColumns({"a": 99})(df)
+        result = AddStaticColumns({"a": 99}, overwrite=False)(df)
         assert result["a"].tolist()[0] == 1.0
         assert result["a"].tolist()[1] == 99
         assert result["a"].tolist()[2] == 3.0
@@ -860,7 +859,7 @@ class TestAddDefaultColumns:
         """A None default value is ignored; the column is not modified."""
         df = pd.DataFrame({"a": [1]})
         original_a = df["a"].copy()
-        result = AddDefaultColumns({"a": None, "b": None})(df)
+        result = AddStaticColumns({"a": None, "b": None}, overwrite=False)(df)
         assert list(result["a"]) == list(original_a)
         assert "b" not in result.columns
 
@@ -869,7 +868,7 @@ class TestAddDefaultColumns:
         """Only NaN cells are filled; real values in the same column are preserved."""
 
         df = pd.DataFrame({"temp": [0.9, float("nan"), 0.5]})
-        result = AddDefaultColumns({"temp": 0.7})(df)
+        result = AddStaticColumns({"temp": 0.7}, overwrite=False)(df)
         assert result["temp"].tolist()[0] == pytest.approx(0.9)
         assert result["temp"].tolist()[1] == pytest.approx(0.7)
         assert result["temp"].tolist()[2] == pytest.approx(0.5)

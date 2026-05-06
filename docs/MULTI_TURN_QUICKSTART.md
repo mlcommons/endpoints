@@ -41,7 +41,6 @@ datasets:
     type: performance
     path: path/to/your/conversations.jsonl
     multi_turn: # ← Presence of this block enables multi-turn mode
-      mode: independent # ← Per-conv pipelines; no cross-conv turn barrier
       turn_timeout_s: 300 # ← Max wait for prev turn
 
 settings:
@@ -107,34 +106,6 @@ Currently available:
 - **Conversation tracking**: All events tagged with conversation_id
 
 _Note: Per-conversation aggregation (e.g., "conversations/sec") is coming in a future update._
-
----
-
-## Conversation Modes Explained
-
-### Independent Mode (Default)
-
-```yaml
-mode: independent
-```
-
-**Behavior**:
-
-- Up to `target_concurrency` conversations are active simultaneously
-- Turns within each conversation are strictly sequenced (turn N+1 waits for turn N)
-- Conversations run independently of each other — a short conversation can finish while a long one is still on turn 2
-
-**Use for**: Realistic production load simulation. For single-conversation debugging, set `target_concurrency: 1`.
-
-**Example timeline** (target_concurrency: 3, 4 conversations total):
-
-```
-t=0:    conv1-turn1, conv2-turn1, conv3-turn1  ← 3 conversations start
-t=0.5:  conv1-turn2 (after conv1-turn1 completes)
-t=0.7:  conv2 finishes → worker picks up conv4-turn1
-t=0.8:  conv1-turn3 (after conv1-turn2 completes)
-...
-```
 
 ---
 
@@ -204,8 +175,7 @@ is auto-detected from the `.jsonl` extension — no `format` field is needed:
 ```yaml
 datasets:
   - path: your_file.jsonl
-    multi_turn:
-      mode: independent
+    multi_turn: {}
 ```
 
 ---
@@ -287,7 +257,7 @@ jq -r '.conversation_id' logs/multi_turn_test/events.jsonl | sort -u
 ### Debugging
 
 - **Start small**: Test with 1-2 conversations first
-- **Single conversation**: Use `mode: independent` with `target_concurrency: 1`
+- **Single conversation**: Use `target_concurrency: 1`
 - **Check events.jsonl**: Verify turn ordering with `jq`
 
 ---

@@ -140,7 +140,7 @@ class OpenAIAdapter(HttpRequestAdapter):
 
         return QueryResult(
             id=result_id,
-            response_output=TextModelOutput(output=choice.message.content),
+            response_output=TextModelOutput(output=choice.message.content or ""),
             metadata=metadata,
         )
 
