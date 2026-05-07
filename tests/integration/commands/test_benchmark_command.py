@@ -16,7 +16,6 @@
 """Integration tests for benchmark commands against echo server."""
 
 import json
-import os
 import re
 from pathlib import Path
 
@@ -184,11 +183,22 @@ _GENERATED_TEMPLATES = sorted(
 )
 
 
+# Non-gated tokenizer model used in place of the templates' default
+# (which references gated meta-llama/Llama-3.1-*). The echo-server e2e
+# path doesn't care about the model identity, only that the tokenizer
+# exists for the metrics aggregator's ISL/OSL/TPOT triggers. TinyLlama's
+# tokenizer is ~1MB and matches the Llama-family tokenizer the templates
+# were written against.
+_TEST_MODEL_NAME = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+
+
 def _resolve_template(template_path: Path, server_url: str) -> dict:
     """Load a template YAML, strip <PLACEHOLDER> wrappers, and patch for testing.
 
-    Only replaces placeholders with working values and caps n_samples_to_issue.
-    Everything else stays as the template defines it.
+    Replaces placeholders with working values, swaps the gated default
+    model for a non-gated tokenizer (so tests run without ``HF_TOKEN``),
+    and caps ``n_samples_to_issue``. Everything else stays as the template
+    defines it.
     """
     raw = template_path.read_text()
     # Strip <PLACEHOLDER eg: value> → value (all templates use eg: form)
@@ -196,6 +206,12 @@ def _resolve_template(template_path: Path, server_url: str) -> dict:
     # Replace endpoint URLs with the test server
     raw = re.sub(r"http://localhost:\d+", server_url, raw)
     data = yaml.safe_load(raw)
+
+    # Swap the placeholder-default model name for a non-gated tokenizer
+    # (see _TEST_MODEL_NAME above) so these tests can run in CI without
+    # HF_TOKEN.
+    if "model_params" in data and isinstance(data["model_params"], dict):
+        data["model_params"]["name"] = _TEST_MODEL_NAME
 
     # Cap total samples so test finishes in seconds
     data.setdefault("settings", {})
@@ -213,10 +229,6 @@ class TestTemplateIntegration:
     """Verify generated templates run end-to-end against a local server."""
 
     @pytest.mark.integration
-    @pytest.mark.skipif(
-        not os.environ.get("HF_TOKEN"),
-        reason="Templates reference gated HF models; requires HF_TOKEN to fetch tokenizer",
-    )
     @pytest.mark.parametrize("template", _GENERATED_TEMPLATES)
     def test_template_runs(self, mock_http_echo_server, tmp_path, caplog, template):
         data = _resolve_template(TEMPLATE_DIR / template, mock_http_echo_server.url)

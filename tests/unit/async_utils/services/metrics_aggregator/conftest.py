@@ -13,21 +13,34 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Shared test doubles and factories for metrics aggregator tests."""
+"""Shared test doubles and factories for metrics aggregator tests.
+
+Tests that need to inspect emitted values build them directly off a
+``MetricsRegistry`` and a ``MetricsSnapshot``.
+
+The helpers here are intentionally small — most reused-across-tests
+construction lives in ``_make_aggregator`` style fixtures local to each
+test file (the aggregator's wire surface is small enough that a single
+shared fixture would mostly hide it).
+"""
 
 from __future__ import annotations
 
 import asyncio
-from typing import Literal
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 from inference_endpoint.async_utils.services.metrics_aggregator.aggregator import (
     MetricsAggregatorService,
 )
-from inference_endpoint.async_utils.services.metrics_aggregator.kv_store import (
-    KVStore,
-    SeriesStats,
+from inference_endpoint.async_utils.services.metrics_aggregator.registry import (
+    MetricsRegistry,
 )
+from inference_endpoint.async_utils.services.metrics_aggregator.snapshot import (
+    CounterStat,
+    SeriesStat,
+    SessionState,
+)
+from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
 from inference_endpoint.core.record import (
     EventRecord,
     SampleEventType,
@@ -36,71 +49,7 @@ from inference_endpoint.core.record import (
 from inference_endpoint.core.types import TextModelOutput
 
 # ---------------------------------------------------------------------------
-# In-memory KVStore for tests
-# ---------------------------------------------------------------------------
-
-
-class InMemoryKVStore(KVStore):
-    """In-memory KVStore for unit tests. No /dev/shm files needed."""
-
-    def __init__(self) -> None:
-        self._counters: dict[str, int] = {}
-        self._series: dict[str, list] = {}
-        self._series_dtype: dict[str, type] = {}
-        self.closed: bool = False
-
-    def create_key(
-        self, key: str, key_type: Literal["series", "counter"], dtype: type = int
-    ) -> None:
-        if key_type == "counter" and key not in self._counters:
-            self._counters[key] = 0
-        elif key_type == "series" and key not in self._series:
-            self._series[key] = []
-            self._series_dtype[key] = dtype
-
-    def update(self, key: str, value: int | float) -> None:
-        if key in self._counters:
-            self._counters[key] = int(value)
-        elif key in self._series:
-            self._series[key].append(value)
-        else:
-            raise KeyError(f"Key not created: {key}")
-
-    def get(self, key: str) -> int | SeriesStats:
-        if key in self._counters:
-            return self._counters[key]
-        if key in self._series:
-            dtype = self._series_dtype[key]
-            return SeriesStats(list(self._series[key]), dtype=dtype)
-        raise KeyError(f"Key not created: {key}")
-
-    def snapshot(self) -> dict[str, int | SeriesStats]:
-        result: dict[str, int | SeriesStats] = {}
-        for k, v in self._counters.items():
-            result[k] = v
-        for k, vals in self._series.items():
-            dtype = self._series_dtype[k]
-            result[k] = SeriesStats(list(vals), dtype=dtype)
-        return result
-
-    def close(self) -> None:
-        self.closed = True
-
-    # --- Test helpers ---
-
-    def get_series_values(self, key: str) -> list:
-        return list(self._series.get(key, []))
-
-    def get_counter(self, key: str) -> int:
-        return self._counters.get(key, 0)
-
-    def get_all_series(self) -> dict[str, list[float]]:
-        """All series as {metric_name: [values]}."""
-        return {k: list(v) for k, v in self._series.items()}
-
-
-# ---------------------------------------------------------------------------
-# Mock TokenizePool
+# Mock TokenizePool — used by tests that exercise async triggers directly.
 # ---------------------------------------------------------------------------
 
 
@@ -130,52 +79,6 @@ class MockTokenizePool:
 
 
 # ---------------------------------------------------------------------------
-# Aggregator factories
-# ---------------------------------------------------------------------------
-
-
-def mock_zmq_context() -> MagicMock:
-    """Create a mock ManagedZMQContext that no-ops all ZMQ operations."""
-    ctx = MagicMock()
-    ctx.socket.return_value = MagicMock()
-    ctx.connect.return_value = "ipc:///mock/socket"
-    return ctx
-
-
-def make_stub_aggregator(
-    kv_store: KVStore,
-    tokenize_pool=None,
-    streaming: bool = True,
-) -> MetricsAggregatorService:
-    """Create a MetricsAggregatorService with ZMQ mocked out."""
-    return MetricsAggregatorService(
-        "mock_path",
-        mock_zmq_context(),
-        MagicMock(spec=asyncio.AbstractEventLoop),
-        kv_store=kv_store,
-        tokenize_pool=tokenize_pool,
-        streaming=streaming,
-    )
-
-
-def make_async_stub_aggregator(
-    kv_store: KVStore,
-    tokenize_pool,
-    loop: asyncio.AbstractEventLoop,
-    streaming: bool = True,
-) -> MetricsAggregatorService:
-    """Create a MetricsAggregatorService with a real loop and mock ZMQ."""
-    return MetricsAggregatorService(
-        "mock_path",
-        mock_zmq_context(),
-        loop,
-        kv_store=kv_store,
-        tokenize_pool=tokenize_pool,
-        streaming=streaming,
-    )
-
-
-# ---------------------------------------------------------------------------
 # EventRecord factories
 # ---------------------------------------------------------------------------
 
@@ -196,3 +99,86 @@ def text_output(s: str) -> TextModelOutput:
 
 def streaming_text(*chunks: str) -> TextModelOutput:
     return TextModelOutput(output=tuple(chunks))
+
+
+# ---------------------------------------------------------------------------
+# Registry / snapshot inspection helpers
+# ---------------------------------------------------------------------------
+
+
+def snapshot_counters(registry: MetricsRegistry) -> dict[str, int | float]:
+    """Return all counter values from a fresh snapshot.
+
+    State/n_pending values don't matter for counter inspection — they
+    bypass the exact-vs-HDR fork. Tests that need series inspection
+    should call ``snapshot_series_values`` instead.
+    """
+    snap = registry.build_snapshot(state=SessionState.LIVE, n_pending_tasks=0)
+    return {m.name: m.value for m in snap.metrics if isinstance(m, CounterStat)}
+
+
+def snapshot_series_count(registry: MetricsRegistry, name: str) -> int:
+    """Return ``count`` of a named series from a fresh snapshot.
+
+    Returns 0 if the series is unregistered or has no recordings.
+    """
+    snap = registry.build_snapshot(state=SessionState.LIVE, n_pending_tasks=0)
+    for m in snap.metrics:
+        if isinstance(m, SeriesStat) and m.name == name:
+            return m.count
+    return 0
+
+
+def snapshot_series_total(registry: MetricsRegistry, name: str) -> int | float:
+    """Return ``total`` of a named series from a fresh snapshot."""
+    snap = registry.build_snapshot(state=SessionState.LIVE, n_pending_tasks=0)
+    for m in snap.metrics:
+        if isinstance(m, SeriesStat) and m.name == name:
+            return m.total
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Aggregator factory
+# ---------------------------------------------------------------------------
+
+
+def make_aggregator(
+    zmq_ctx: ManagedZMQContext,
+    loop: asyncio.AbstractEventLoop,
+    socket_name: str,
+    *,
+    tokenize_pool=None,
+    streaming: bool = True,
+    shutdown_event: asyncio.Event | None = None,
+) -> tuple[MetricsAggregatorService, MetricsRegistry, MagicMock]:
+    """Construct an aggregator wired to a real SUB socket and a mocked publisher.
+
+    The aggregator's ``start()`` is intentionally not called: tests inject
+    events directly via ``await agg.process([...])``. The publisher is a
+    ``MagicMock`` so the aggregator's STARTED branch (which calls
+    ``publisher.start(...)``) and ENDED branch (which calls ``publish_final``
+    + ``close``) don't touch real I/O.
+
+    Returns ``(agg, registry, publisher_mock)``.
+    """
+    registry = MetricsRegistry()
+    # ``publish_final`` is awaited by the aggregator's ENDED handler, so it
+    # must be an AsyncMock. The remaining surface (``start``, ``close``) is
+    # synchronous and falls back to MagicMock's default attribute behavior.
+    publisher = MagicMock()
+    publisher.publish_final = AsyncMock()
+    agg = MetricsAggregatorService(
+        socket_name,
+        zmq_ctx,
+        loop,
+        registry=registry,
+        publisher=publisher,
+        refresh_hz=4.0,
+        sig_figs=3,
+        n_histogram_buckets=10,
+        tokenize_pool=tokenize_pool,
+        streaming=streaming,
+        shutdown_event=shutdown_event,
+    )
+    return agg, registry, publisher
