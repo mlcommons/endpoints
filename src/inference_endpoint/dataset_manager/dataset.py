@@ -15,6 +15,7 @@
 
 import inspect
 import os
+import random
 from abc import ABC
 from enum import Enum
 from logging import getLogger
@@ -24,6 +25,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 import numpy as np
 import pandas as pd
+
 from datasets import load_dataset, load_from_disk
 
 from ..config.schema import APIType, ModelParams
@@ -439,9 +441,10 @@ class SaltedDataset(Dataset, register=False):
     n_requests > dataset size) each receive a distinct salt.
     """
 
-    def __init__(self, inner: Dataset) -> None:
+    def __init__(self, inner: Dataset, rng: random.Random | None = None) -> None:
         # Skip Dataset.__init__ — all state is delegated to inner
         self._inner = inner
+        self._rng = rng if rng is not None else random.Random()
         self.dataframe = None
         self.transforms = None
         self.repeats = inner.repeats
@@ -462,7 +465,12 @@ class SaltedDataset(Dataset, register=False):
         model_params: ModelParams | None = None,
         force: bool = False,
     ) -> None:
-        pass  # Inner dataset already loaded
+        if self._inner.data is None:
+            self.logger.warning(
+                "SaltedDataset.load() called but inner dataset is not loaded; "
+                "call load() on the inner dataset directly. load_sample() will fail."
+            )
+        # Inner dataset already loaded; SaltedDataset does not manage loading.
 
     def load_sample(self, index: int) -> Any:
         data = self._inner.load_sample(index)
@@ -474,10 +482,16 @@ class SaltedDataset(Dataset, register=False):
                 "salt cannot be applied to pre-tokenized input; KV-cache reuse may not be prevented"
             )
             return data
+        if "input_tokens" in data and "prompt" in data:
+            self.logger.warning(
+                "SaltedDataset: sample has both 'input_tokens' and 'prompt' — "
+                "salt applied to 'prompt' only; adapters that use 'input_tokens' "
+                "directly will still reuse the KV cache"
+            )
         if "prompt" not in data:
             return data
         prompt = data["prompt"]
-        salt = os.urandom(8).hex()
+        salt = self._rng.randbytes(8).hex()
         if isinstance(prompt, str):
             return {**data, "prompt": f"[{salt}] {prompt}"}
         if isinstance(prompt, list) and prompt:

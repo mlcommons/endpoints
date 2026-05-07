@@ -353,7 +353,11 @@ def _build_phases(ctx: BenchmarkContext) -> list[PhaseConfig]:
     warmup_cfg = ctx.config.settings.warmup
     if warmup_cfg.enabled:
         warmup_dataset: Dataset = (
-            SaltedDataset(ctx.dataloader) if warmup_cfg.salt else ctx.dataloader
+            SaltedDataset(
+                ctx.dataloader, rng=random.Random(warmup_cfg.warmup_random_seed + 2)
+            )
+            if warmup_cfg.salt
+            else ctx.dataloader
         )
         warmup_rt = dataclass_replace(
             ctx.rt_settings,
@@ -364,7 +368,7 @@ def _build_phases(ctx: BenchmarkContext) -> list[PhaseConfig]:
             min_sample_count=1,
             rng_sched=random.Random(warmup_cfg.warmup_random_seed),
             rng_sample_index=random.Random(warmup_cfg.warmup_random_seed + 1),
-            load_pattern=LoadPattern(type=LoadPatternType.MAX_THROUGHPUT),
+            load_pattern=ctx.rt_settings.load_pattern,
         )
         phases.append(
             PhaseConfig(
@@ -554,29 +558,37 @@ async def _run_benchmark_async(
         phases = _build_phases(ctx)
         report: Report | None = None
 
-        # Global wall-clock timeout covers warmup + performance + accuracy phases
-        # combined, and bounds the warmup drain so a dropped request can't hang forever.
+        # Timer starts when the performance phase begins (after warmup drains),
+        # so max_duration_ms applies only to the perf phase, not warmup.
         global_timeout_handle = None
+        _timeout_done = False
         max_duration_ms = ctx.rt_settings.max_duration_ms
-        if max_duration_ms is not None:
 
-            def _on_global_timeout() -> None:
+        def _on_global_timeout() -> None:
+            if not _timeout_done:
                 logger.warning(
                     "Global experiment timeout reached (%d ms); stopping session.",
                     max_duration_ms,
                 )
                 session.stop()
 
-            global_timeout_handle = loop.call_later(
-                max_duration_ms / 1000.0, _on_global_timeout
-            )
+        def _on_phase_start(phase: PhaseConfig) -> None:
+            nonlocal global_timeout_handle
+            if (
+                phase.phase_type == PhaseType.PERFORMANCE
+                and max_duration_ms is not None
+            ):
+                global_timeout_handle = loop.call_later(
+                    max_duration_ms / 1000.0, _on_global_timeout
+                )
 
         loop.add_signal_handler(signal.SIGINT, session.stop)
         try:
-            result = await session.run(phases)
+            result = await session.run(phases, on_phase_start=_on_phase_start)
         except Exception as e:
             raise ExecutionError(f"Benchmark execution failed: {e}") from e
         finally:
+            _timeout_done = True
             if global_timeout_handle is not None:
                 global_timeout_handle.cancel()
             loop.remove_signal_handler(signal.SIGINT)

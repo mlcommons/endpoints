@@ -258,7 +258,11 @@ class BenchmarkSession:
         if self._strategy_task and not self._strategy_task.done():
             self._strategy_task.cancel()
 
-    async def run(self, phases: list[PhaseConfig]) -> SessionResult:
+    async def run(
+        self,
+        phases: list[PhaseConfig],
+        on_phase_start: Callable[[PhaseConfig], None] | None = None,
+    ) -> SessionResult:
         """Run all benchmark phases sequentially.
 
         Returns SessionResult with per-phase results.
@@ -273,6 +277,8 @@ class BenchmarkSession:
             for phase in phases:
                 if self._stop_requested:
                     break
+                if on_phase_start is not None:
+                    on_phase_start(phase)
                 result = await self._run_phase(phase)
                 if result is not None:
                     phase_results.append(result)
@@ -356,9 +362,9 @@ class BenchmarkSession:
     async def _drain_inflight(self, phase_issuer: PhaseIssuer) -> None:
         """Wait for all in-flight responses from this phase to complete.
 
-        Bounded by the global experiment timeout: if the caller schedules a
-        loop.call_later that calls stop(), stop() sets _drain_event, unblocking
-        this wait without leaving it hung indefinitely."""
+        Only bounded if the caller has scheduled a loop.call_later that calls
+        stop() (e.g. the perf-phase global timeout); with no timer scheduled,
+        a hung request will stall here until SIGINT."""
         if phase_issuer.inflight <= 0 or self._stop_requested:
             return
         logger.info("Draining %d in-flight responses...", phase_issuer.inflight)
@@ -393,16 +399,17 @@ class BenchmarkSession:
 
         if isinstance(resp, QueryResult):
             query_id = resp.id
-            self._publisher.publish(
-                EventRecord(
-                    event_type=SampleEventType.COMPLETE,
-                    timestamp_ns=resp.completed_at
-                    if isinstance(resp.completed_at, int)
-                    else time.monotonic_ns(),
-                    sample_uuid=query_id,
-                    data=resp.response_output,
+            if self._current_phase_type != PhaseType.WARMUP:
+                self._publisher.publish(
+                    EventRecord(
+                        event_type=SampleEventType.COMPLETE,
+                        timestamp_ns=resp.completed_at
+                        if isinstance(resp.completed_at, int)
+                        else time.monotonic_ns(),
+                        sample_uuid=query_id,
+                        data=resp.response_output,
+                    )
                 )
-            )
             if resp.error is not None:
                 self._publisher.publish(
                     EventRecord(
