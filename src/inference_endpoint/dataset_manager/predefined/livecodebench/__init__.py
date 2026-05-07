@@ -58,7 +58,7 @@ class LiveCodeBench(
         """
         if not venv_path.exists():
             logger.info(f"Creating virtual environment at {venv_path}")
-            venv.create(venv_path, with_pip=True, clear=True)
+            venv.create(venv_path, with_pip=True, clear=True, symlinks=False)
 
         # Determine Python executable path based on platform
         if sys.platform == "win32":

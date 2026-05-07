@@ -21,7 +21,6 @@ message type (Query, QueryResult, StreamChunk) across payload sizes.
 """
 
 import asyncio
-import tempfile
 import time
 from dataclasses import dataclass
 
@@ -30,11 +29,16 @@ import pytest
 import uvloop
 from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
 from inference_endpoint.async_utils.transport.zmq.transport import (
+    ZMQTransportConfig,
     _create_receiver,
     _create_sender,
-    _ZMQSocketConfig,
 )
-from inference_endpoint.core.types import Query, QueryResult, StreamChunk
+from inference_endpoint.core.types import (
+    Query,
+    QueryResult,
+    StreamChunk,
+    TextModelOutput,
+)
 
 # =============================================================================
 # Config
@@ -65,7 +69,7 @@ def make_query(payload_chars: int, idx: int) -> Query:
 def make_query_result(payload_chars: int, idx: int) -> QueryResult:
     return QueryResult(
         id=str(idx),
-        response_output="x" * payload_chars,
+        response_output=TextModelOutput(output="x" * payload_chars),
     )
 
 
@@ -73,7 +77,6 @@ def make_stream_chunk(payload_chars: int, idx: int) -> StreamChunk:
     return StreamChunk(
         id=str(idx),
         response_chunk="x" * payload_chars,
-        is_complete=False,
     )
 
 
@@ -139,64 +142,61 @@ async def benchmark(
 
     loop = asyncio.get_running_loop()
 
-    config = _ZMQSocketConfig()
+    config = ZMQTransportConfig()
 
     with ManagedZMQContext.scoped(io_threads=config.io_threads) as zmq_ctx:
-        with tempfile.TemporaryDirectory(prefix="zmq_") as tmp:
-            addr = f"ipc://{tmp}/bench"
+        addr = "bench"
 
-            sender = _create_sender(loop, addr, zmq_ctx, config, bind=True)
-            receiver = _create_receiver(
-                loop, addr, zmq_ctx, config, msg_type, bind=False
-            )
+        sender = _create_sender(loop, addr, zmq_ctx, config, bind=True)
+        receiver = _create_receiver(loop, addr, zmq_ctx, config, msg_type, bind=False)
 
-            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.01)
 
-            # Pre-create message pool
-            pool_size = 10000
-            msg_pool = [make_msg(payload_chars, i) for i in range(pool_size)]
+        # Pre-create message pool
+        pool_size = 10000
+        msg_pool = [make_msg(payload_chars, i) for i in range(pool_size)]
 
-            # Measure serialized message size
-            encoder = msgspec.msgpack.Encoder()
-            msg_bytes = len(encoder.encode(msg_pool[0]))
+        # Measure serialized message size
+        encoder = msgspec.msgpack.Encoder()
+        msg_bytes = len(encoder.encode(msg_pool[0]))
 
-            issued = 0
-            received = 0
-            stop = False
+        issued = 0
+        received = 0
+        stop = False
 
-            try:
-                # Warmup
-                for i in range(warmup):
-                    sender.send(msg_pool[i % pool_size])
-                for _ in range(warmup):
-                    await receiver.recv()
+        try:
+            # Warmup
+            for i in range(warmup):
+                sender.send(msg_pool[i % pool_size])
+            for _ in range(warmup):
+                await receiver.recv()
 
-                # Benchmark
-                async def sender_loop():
-                    nonlocal issued, stop
-                    idx = 0
-                    while not stop:
-                        sender.send(msg_pool[idx % pool_size])
-                        idx += 1
-                        if idx % 1000 == 0:
-                            await asyncio.sleep(0)
-                    issued = idx
+            # Benchmark
+            async def sender_loop():
+                nonlocal issued, stop
+                idx = 0
+                while not stop:
+                    sender.send(msg_pool[idx % pool_size])
+                    idx += 1
+                    if idx % 1000 == 0:
+                        await asyncio.sleep(0)
+                issued = idx
 
-                async def receiver_loop():
-                    nonlocal received, stop
-                    start = time.perf_counter()
-                    count = 0
-                    while time.perf_counter() - start < duration_sec:
-                        if await receiver.recv() is not None:
-                            count += 1
-                    stop = True
-                    received = count
+            async def receiver_loop():
+                nonlocal received, stop
+                start = time.perf_counter()
+                count = 0
+                while time.perf_counter() - start < duration_sec:
+                    if await receiver.recv() is not None:
+                        count += 1
+                stop = True
+                received = count
 
-                await asyncio.gather(sender_loop(), receiver_loop())
+            await asyncio.gather(sender_loop(), receiver_loop())
 
-            finally:
-                sender.close()
-                receiver.close()
+        finally:
+            sender.close()
+            receiver.close()
 
     return PerfResult(
         msg_type=msg_type_name,

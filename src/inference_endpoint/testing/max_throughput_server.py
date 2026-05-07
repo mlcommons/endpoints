@@ -30,12 +30,14 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import gc
 import multiprocessing
 import multiprocessing.sharedctypes
 import multiprocessing.synchronize
 import os
 import signal
 import socket
+import sys
 import threading
 import time
 
@@ -301,8 +303,6 @@ def _worker(
     global _req_counter, _resp_counter, _byte_counter
     _req_counter, _resp_counter, _byte_counter = counters
 
-    import gc
-
     gc.disable()
     uvloop.install()
 
@@ -329,8 +329,6 @@ def _worker(
     try:
         asyncio.run(run())
     except Exception as exc:
-        import sys
-
         print(
             f"[MaxThroughputServer] Worker {wid} failed: {exc}",
             file=sys.stderr,
@@ -570,7 +568,11 @@ def main():
         stats=args.stats,
     )
 
+    _main_pid = os.getpid()
+
     def sig_handler(signum, frame):
+        if os.getpid() != _main_pid:
+            os._exit(0)
         server.stop()
         os._exit(0)
 

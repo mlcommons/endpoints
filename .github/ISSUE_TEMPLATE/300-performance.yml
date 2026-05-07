@@ -1,0 +1,59 @@
+name: Performance Issue
+description: Report a performance regression or improvement opportunity
+title: "[Perf]: "
+labels: ["type: performance", "status: needs-triage"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What performance issue did you observe?
+      placeholder: "QPS dropped from X to Y after upgrading to version Z"
+    validations:
+      required: true
+  - type: textarea
+    id: benchmark
+    attributes:
+      label: Benchmark Command
+      description: The exact command you ran
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: results
+    attributes:
+      label: Results
+      description: Expected vs actual numbers (QPS, latency, TTFT, TPOT, etc.)
+      placeholder: |
+        Expected: ~5000 QPS, p99 latency < 200ms
+        Actual: ~2000 QPS, p99 latency 800ms
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Hardware, OS, Python version, endpoint server details
+      placeholder: |
+        Hardware: 8x A100 80GB
+        OS: Ubuntu 22.04
+        Python: 3.12
+        Server: vLLM 0.6.0, Llama-3-70B
+        Workers: 4
+    validations:
+      required: true
+  - type: textarea
+    id: profiling
+    attributes:
+      label: Profiling Data (optional)
+      description: Any profiling output, flame graphs, or bottleneck analysis
+      render: shell
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues and found no duplicates
+          required: true
+        - label: I ran with default settings before tuning
+          required: false

@@ -19,6 +19,7 @@ TODO: Very simple factory for now. Will be expanded to support multiple formats 
 """
 
 import logging
+from pathlib import Path
 
 from inference_endpoint.config.schema import Dataset as DatasetConfig
 from inference_endpoint.dataset_manager.dataset import Dataset, DatasetFormat
@@ -32,10 +33,11 @@ class DataLoaderFactory:
     """Factory for creating dataset loaders based on format.
 
     Supports:
-    - pkl: Pickle format (PickleReader)
-    - parquet: Parquet format (ParquetReader)
-    - jsonl: JSON Lines format (JsonlReader)
-    - hf: HuggingFace datasets (HFDataLoader)
+    - csv: CSV format (CSVLoader)
+    - json: JSON format (JsonLoader)
+    - parquet: Parquet format (ParquetLoader)
+    - jsonl: JSON Lines format (JsonlLoader)
+    - huggingface: HuggingFace datasets (HuggingFaceLoader)
     """
 
     @staticmethod
@@ -95,12 +97,13 @@ class DataLoaderFactory:
 
         transforms: list[Transform] = []
         if remap is not None:
-            transforms.append(ColumnRemap(remap))  # type: ignore[arg-type]
+            # Parser convention is {target: source} (e.g. {prompt: article}).
+            # ColumnRemap expects {source: target} — flip it.
+            flipped = {src: dst for dst, src in remap.items()}
+            transforms.append(ColumnRemap(flipped))  # type: ignore[arg-type]
         transforms.append(MakeAdapterCompatible())
 
         assert dataset_path is not None
-        from pathlib import Path
-
         return Dataset.load_from_file(
             Path(dataset_path),
             transforms=transforms,

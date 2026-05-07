@@ -21,8 +21,6 @@ import uuid
 from itertools import cycle
 
 from inference_endpoint.async_utils.loop_manager import LoopManager
-from inference_endpoint.async_utils.transport import ZmqWorkerPoolTransport
-from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
 from inference_endpoint.core.types import Query, QueryResult, StreamChunk
 from inference_endpoint.endpoint_client.config import HTTPClientConfig
 from inference_endpoint.endpoint_client.worker_manager import WorkerManager
@@ -39,38 +37,22 @@ class HTTPEndpointClient:
     - Worker processes: Make actual HTTP requests to the endpoint
     - Requests are distributed to workers round-robin
 
-    When config uses ZmqWorkerPoolTransport, the caller must scope the client
-    lifetime within ManagedZMQContext.scoped() and pass the context in.
-    The client does not create or own the ZMQ context.
-
     Usage:
-        with ManagedZMQContext.scoped() as zmq_ctx:
-            client = HTTPEndpointClient(config, zmq_context=zmq_ctx)
-            client.issue(query)
-            response = client.poll()        # Non-blocking, returns None if nothing ready
-            responses = client.drain()      # Drain all available responses
-            # response = await client.recv()  # Blocking; only if caller provides its own loop
-            client.shutdown()               # Blocks until workers stop
+        client = HTTPEndpointClient(config)
+        client.issue(query)
+        response = client.poll()        # Non-blocking, returns None if nothing ready
+        responses = client.drain()      # Drain all available responses
+        client.shutdown()               # Blocks until workers stop
     """
 
     def __init__(
         self,
         config: HTTPClientConfig,
         loop: asyncio.AbstractEventLoop | None = None,
-        zmq_context: ManagedZMQContext | None = None,
     ):
         self.client_id = uuid.uuid4().hex[:8]
         self.config = config
         self._worker_cycle = cycle(range(self.config.num_workers))
-
-        # TODO(vir): make context setup/teardown part of transport protocol
-        if config.worker_pool_transport is ZmqWorkerPoolTransport:
-            if zmq_context is None:
-                raise ValueError(
-                    "zmq_context is required when using ZmqWorkerPoolTransport; "
-                    "use ManagedZMQContext.scoped() and pass the context in."
-                )
-        self._zmq_context = zmq_context
 
         # Use provided loop or create one via LoopManager (uvloop + eager task factory)
         self._owns_loop = loop is None
@@ -86,16 +68,49 @@ class HTTPEndpointClient:
             self.loop = loop
         assert self.loop is not None
 
-        # Initialize on event loop
+        # Initialize on event loop.
+        # NOTE: This uses run_coroutine_threadsafe().result() which DEADLOCKS
+        # if called from the same event loop thread. For shared-loop usage,
+        # use the async factory: await HTTPEndpointClient.create(config, loop)
         asyncio.run_coroutine_threadsafe(self._initialize(), self.loop).result()
 
         logger.info(
             f"EndpointClient initialized with num_workers={self.config.num_workers}, "
             f"endpoints={self.config.endpoint_urls}, "
-            f"adapter={self.config.adapter.__name__}, "
-            f"accumulator={self.config.accumulator.__name__}, "
-            f"pool_transport={self.config.worker_pool_transport.__name__}"
+            f"adapter={self.config.adapter.__name__ if self.config.adapter else 'none'}, "
+            f"accumulator={self.config.accumulator.__name__ if self.config.accumulator else 'none'}, "
+            f"transport={self.config.transport.type if self.config.transport else 'none'}"
         )
+
+    @classmethod
+    async def create(
+        cls,
+        config: HTTPClientConfig,
+        loop: asyncio.AbstractEventLoop,
+    ) -> "HTTPEndpointClient":
+        """Async factory for shared-loop usage.
+
+        Use this instead of __init__ when the caller is already running on
+        the target event loop (e.g., inside run_benchmark_async). The regular
+        constructor uses run_coroutine_threadsafe().result() which deadlocks
+        when called from the same loop.
+        """
+        self = cls.__new__(cls)
+        self.client_id = uuid.uuid4().hex[:8]
+        self.config = config
+        self._worker_cycle = cycle(range(config.num_workers))
+        self._owns_loop = False
+        self._loop_name = None
+        self.loop = loop
+        await self._initialize()
+        logger.info(
+            f"EndpointClient initialized with num_workers={config.num_workers}, "
+            f"endpoints={config.endpoint_urls}, "
+            f"adapter={config.adapter.__name__ if config.adapter else 'none'}, "
+            f"accumulator={config.accumulator.__name__ if config.accumulator else 'none'}, "
+            f"transport={config.transport.type if config.transport else 'none'}"
+        )
+        return self
 
     async def _initialize(self) -> None:
         """Initialize worker manager and transports."""
@@ -103,11 +118,7 @@ class HTTPEndpointClient:
         self._dropped_requests: int = 0
 
         assert self.loop is not None
-        additional_args = []
-        if self.config.worker_pool_transport is ZmqWorkerPoolTransport:
-            assert self._zmq_context is not None
-            additional_args.append(self._zmq_context)
-        self.worker_manager = WorkerManager(self.config, self.loop, *additional_args)
+        self.worker_manager = WorkerManager(self.config, self.loop)
         await self.worker_manager.initialize()
         self.pool = self.worker_manager.pool_transport
 
@@ -135,10 +146,21 @@ class HTTPEndpointClient:
         return list(iter(self.poll, None))
 
     def shutdown(self) -> None:
-        """Gracefully shutdown client. Synchronous — blocks the caller until complete."""
-        if self._shutdown:  # Already shutdown, no-op
+        """Gracefully shutdown client. Synchronous — blocks the caller until complete.
+
+        NOTE: This uses run_coroutine_threadsafe().result() which DEADLOCKS
+        if called from the same event loop thread. For shared-loop usage,
+        use: await client.shutdown_async()
+        """
+        if self._shutdown:
             return
         asyncio.run_coroutine_threadsafe(self._shutdown_async(), self.loop).result()
+
+    async def shutdown_async(self) -> None:
+        """Async shutdown for shared-loop usage. Must be called from the event loop."""
+        if self._shutdown:
+            return
+        await self._shutdown_async()
 
     async def _shutdown_async(self) -> None:
         """Async shutdown internals - must be called on the event loop."""

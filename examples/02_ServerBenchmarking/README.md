@@ -12,7 +12,7 @@ The following environment variables are used by the commands below to make the s
 
 ```
 export HF_TOKEN=<your Hugging Face token>
-export HF_HOME=<Path to your hf_home, usually /USERNAME/.cache/huggingface>
+export HF_HOME=<Path to your hf_home, e.g. ~/.cache/huggingface>
 export MODEL_NAME=<model to run, for instance meta-llama/Llama-3.1-8B-Instruct>
 ```
 
@@ -46,10 +46,10 @@ enroot start -e HF_TOKEN=$HF_TOKEN -m $HF_HOME:/root/.cache/huggingface vllm+vll
 
 ## Launching the client
 
-Once the server is up and running, we can send requests to the endpoint by passing in the endpoint address via `-e` as well as the model name
+Once the server is up and running, we can send requests to the endpoint by passing in the endpoint address and model name:
 
 ```
-inference-endpoint benchmark offline -e http://localhost:8000 -d tests/datasets/dummy_1k.pkl  --model ${MODEL_NAME}
+uv run inference-endpoint benchmark offline --endpoints http://localhost:8000 --dataset tests/datasets/dummy_1k.jsonl --model ${MODEL_NAME}
 ```
 
 # Using a config file
@@ -81,6 +81,6 @@ dataset["train"].to_json("cnn_dailymail_train.json")
 And then launch the example template.
 
 ```
-inference-endpoint benchmark from-config -c examples/02_ServerBenchmarking/online_llama2_70b_cnn.yaml --timeout 600
+uv run inference-endpoint benchmark from-config -c examples/02_ServerBenchmarking/online_llama2_70b_cnn.yaml --timeout 600
 
 ```

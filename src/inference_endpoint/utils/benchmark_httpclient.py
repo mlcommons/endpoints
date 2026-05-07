@@ -37,15 +37,36 @@ import threading
 import time
 from dataclasses import dataclass
 
-from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
+import uvloop
+
 from inference_endpoint.core.types import Query, QueryResult
 from inference_endpoint.endpoint_client.config import HTTPClientConfig
-from inference_endpoint.endpoint_client.cpu_affinity import compute_affinity_plan
-from inference_endpoint.endpoint_client.http_client import HTTPEndpointClient
+from inference_endpoint.endpoint_client.cpu_affinity import (
+    compute_affinity_plan,
+)
+from inference_endpoint.endpoint_client.http_client import (
+    HTTPEndpointClient,
+)
 from inference_endpoint.testing.max_throughput_server import (
     MaxThroughputServer,
     build_response,
 )
+
+try:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.colors as mcolors
+    import matplotlib.pyplot as plt
+    import matplotlib.ticker as ticker
+except ImportError:
+    matplotlib = None
+    mcolors = None
+    plt = None
+    ticker = None
+
+# Suppress transformers "no framework found" warning (only tokenizers used)
+os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 
 
 @dataclass(slots=True)
@@ -400,7 +421,6 @@ def _create_client(
     prompt: str,
     enable_affinity: bool,
     verbose: bool = True,
-    zmq_context: ManagedZMQContext | None = None,
 ) -> tuple:
     """Create an endpoint client and query data dict.
 
@@ -412,7 +432,7 @@ def _create_client(
         tmp = HTTPClientConfig(endpoint_urls=[endpoint_url], num_workers=effective)
         cpu_affinity_plan = compute_affinity_plan(tmp.num_workers)
         if cpu_affinity_plan.loadgen_cpus:
-            os.sched_setaffinity(os.getpid(), set(cpu_affinity_plan.loadgen_cpus))
+            os.sched_setaffinity(os.getpid(), set(cpu_affinity_plan.loadgen_cpus))  # type: ignore[attr-defined]
         if verbose:
             print(f"CPU Affinity Plan ({tmp.num_workers} workers):")
             for line in cpu_affinity_plan.summary().split("\n"):
@@ -432,11 +452,11 @@ def _create_client(
 
     if verbose:
         print(
-            f"Config: workers={config.num_workers}, "
+            f"Config: num_workers={config.num_workers}, "
             f"max_connections={config.max_connections}, stream={streaming}"
         )
 
-    client = HTTPEndpointClient(config, zmq_context=zmq_context)
+    client = HTTPEndpointClient(config)
     query_data = {
         "prompt": prompt,
         "model": "benchmark-model",
@@ -486,12 +506,9 @@ def run_benchmark(
     saved_affinity: set[int] | None = None
     if enable_affinity:
         try:
-            saved_affinity = os.sched_getaffinity(os.getpid())
+            saved_affinity = os.sched_getaffinity(os.getpid())  # type: ignore[attr-defined]
         except OSError:
             pass
-
-    zmq_ctx_manager = ManagedZMQContext.scoped()
-    zmq_ctx = zmq_ctx_manager.__enter__()
 
     client, query_data = _create_client(
         endpoint_url,
@@ -500,7 +517,6 @@ def run_benchmark(
         streaming,
         prompt,
         enable_affinity,
-        zmq_context=zmq_ctx,
     )
     loop = client.loop
     stats = BenchmarkStats(sse_events_per_response=sse_events_per_response)
@@ -522,6 +538,7 @@ def run_benchmark(
         nonlocal stats
 
         send_done = False
+        receiver_done = asyncio.Event()
         start_ns = time.monotonic_ns()
         send_deadline = time.monotonic() + duration
         overall_deadline = time.monotonic() + max_total_time
@@ -530,9 +547,18 @@ def run_benchmark(
 
         qid = 0
 
+        def _process_result(result):
+            nonlocal last_recv_time
+            last_recv_time = time.monotonic()
+            if isinstance(result, QueryResult):
+                if result.error:
+                    stats.errors += 1
+                else:
+                    stats.received += 1
+
         async def sender():
             nonlocal qid, send_done
-            while time.monotonic() < send_deadline:
+            while time.monotonic() < send_deadline and not receiver_done.is_set():
                 # Back-pressure: wait if too many in-flight
                 in_flight = stats.sent - stats.received - stats.errors
                 if in_flight > stats.peak_inflight:
@@ -558,38 +584,33 @@ def run_benchmark(
 
         async def receiver():
             nonlocal last_recv_time
-            while True:
-                result = client.poll()
-                if result is not None:
-                    last_recv_time = time.monotonic()
-                    if isinstance(result, QueryResult):
-                        if result.error:
-                            stats.errors += 1
-                        else:
-                            stats.received += 1
-                            # Periodic deadline check on receive path
-                            if (
-                                stats.received % 128 == 0
-                                and last_recv_time > overall_deadline
-                            ):
-                                outstanding = stats.sent - stats.received - stats.errors
-                                print(
-                                    f"\nTime limit ({max_total_time:.0f}s) reached, "
-                                    f"stopping ({outstanding:,} in-flight)"
-                                )
-                                return
-                else:
-                    # Check completion
+            try:
+                while True:
+                    # Fast drain: poll all available results synchronously
+                    result = client.poll()
+                    if result is not None:
+                        while result is not None:
+                            _process_result(result)
+                            result = client.poll()
+                        # Deadline check once per drain batch
+                        if last_recv_time > overall_deadline:
+                            outstanding = stats.sent - stats.received - stats.errors
+                            print(
+                                f"\nTime limit ({max_total_time:.0f}s) reached, "
+                                f"stopping ({outstanding:,} in-flight)"
+                            )
+                            return
+                        continue
+
+                    # Nothing queued — check termination before blocking
                     if send_done and (stats.received + stats.errors) >= stats.sent:
                         break
-                    # Check stall
                     if (
                         send_done
                         and (time.monotonic() - last_recv_time) > stall_timeout
                     ):
                         print(f"\nStalled for {stall_timeout}s, stopping")
                         break
-                    # Check overall time limit
                     if time.monotonic() > overall_deadline:
                         outstanding = stats.sent - stats.received - stats.errors
                         print(
@@ -597,8 +618,14 @@ def run_benchmark(
                             f"stopping ({outstanding:,} in-flight)"
                         )
                         break
-                    # Yield to sender
-                    await asyncio.sleep(0)
+
+                    # Block until next response (event-driven, no CPU spin)
+                    result = await client.recv()
+                    if result is None:
+                        break
+                    _process_result(result)
+            finally:
+                receiver_done.set()
 
         # Run sender and receiver concurrently
         await asyncio.gather(sender(), receiver())
@@ -619,12 +646,11 @@ def run_benchmark(
     gc.collect()
 
     client.shutdown()
-    zmq_ctx_manager.__exit__(None, None, None)
 
     # Restore original affinity so the next sweep iteration sees all CPUs
     if saved_affinity is not None:
         try:
-            os.sched_setaffinity(os.getpid(), saved_affinity)
+            os.sched_setaffinity(os.getpid(), saved_affinity)  # type: ignore[attr-defined]
         except OSError:
             pass
 
@@ -749,7 +775,7 @@ def run_single(
     stats = run_benchmark(
         endpoint_url=endpoint_url,
         duration=args.duration,
-        num_workers=args.num_workers[0],
+        num_workers=args.workers[0],
         max_connections=args.max_connections[0],
         prompt=prompt,
         track_memory=args.track_memory,
@@ -830,7 +856,7 @@ def run_sweep(
     sweep_values = [s[1] for s in sweeps]
     combinations = list(itertools.product(*sweep_values))
 
-    default_workers = args.num_workers[0]
+    default_workers = args.workers[0]
     default_connections = args.max_connections[0]
     default_prompt_length = args.prompt_length[0]
     default_stream_interval = args.stream_interval[0]
@@ -1043,14 +1069,7 @@ def generate_sweep_plot(
       4 params: MxNxK facet grid — rows=param3, columns=param4.
     Where N = 2 (non-streaming) or 3 (streaming, adds SSE Rate).
     """
-    try:
-        import matplotlib
-
-        matplotlib.use("Agg")
-        import matplotlib.colors as mcolors
-        import matplotlib.pyplot as plt
-        import matplotlib.ticker as ticker
-    except ImportError:
+    if plt is None:
         print("\nMatplotlib not installed. Skipping plot generation.")
         print("  Install with: pip install matplotlib")
         return
@@ -1360,6 +1379,7 @@ def main() -> None:
         "--num-workers",
         type=int_or_range,
         default=[-1],
+        dest="workers",
         help="Number of worker processes, or range (e.g. 4:12). -1 for auto. Default: -1",
     )
     parser.add_argument(
@@ -1412,8 +1432,8 @@ def main() -> None:
     args._stream_interval_pcts = None
 
     if args.full:
-        if args.num_workers == [-1]:
-            args.num_workers = _FULL_WORKERS
+        if args.workers == [-1]:
+            args.workers = _FULL_WORKERS
         if args.prompt_length == [-1]:
             args.prompt_length = _FULL_PROMPT_LENGTHS
         if args.streaming and args.stream_interval == [1]:
@@ -1423,7 +1443,7 @@ def main() -> None:
         args.prompt_length = [1000]
 
     sweeps = collect_sweep_params(
-        args.num_workers,
+        args.workers,
         args.max_connections,
         args.prompt_length,
         stream_intervals=(
@@ -1434,9 +1454,6 @@ def main() -> None:
     )
 
     gc.set_threshold(70000, 10, 100)
-
-    import uvloop
-
     uvloop.install()
 
     server: MaxThroughputServer | None = None

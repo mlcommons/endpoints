@@ -8,7 +8,7 @@ HTTP client for LLM inference with multiprocessing workers and ZMQ communication
 ┌─────────────────────────────────────────────────────────────────────────────────────────┐
 │                                   HTTPEndpointClient                                    │
 │  ┌─────────────────┐                                                                    │
-│  │  issue_query    │                                                                    │
+│  │     issue       │                                                                    │
 │  └────────┬────────┘                                                                    │
 │           │                                                         ┌────────────────┐  │
 │           ├─────ZMQ PUSH────▶ Worker 1 ───HTTP POST───────────────▶ │                │  │
@@ -27,7 +27,8 @@ HTTP client for LLM inference with multiprocessing workers and ZMQ communication
 ## Usage
 
 ```python
-from inference_endpoint.endpoint_client import HTTPEndpointClient, HTTPClientConfig
+from inference_endpoint.endpoint_client.config import HTTPClientConfig
+from inference_endpoint.endpoint_client.http_client import HTTPEndpointClient
 from inference_endpoint.core.types import Query
 
 client = HTTPEndpointClient(
@@ -35,7 +36,7 @@ client = HTTPEndpointClient(
 )
 
 # Sync issue (fire-and-forget)
-client.issue_query(Query(
+client.issue(Query(
     id="q-1",
     data={"prompt": "Hello", "stream": False},
     headers={"Content-Type": "application/json"},
@@ -61,7 +62,8 @@ The plan partitions physical cores between the main process (LoadGen) and worker
 assigning all hyperthreads of each core together.
 
 ```python
-from inference_endpoint.endpoint_client import HTTPEndpointClient, HTTPClientConfig
+from inference_endpoint.endpoint_client.config import HTTPClientConfig
+from inference_endpoint.endpoint_client.http_client import HTTPEndpointClient
 from inference_endpoint.endpoint_client.cpu_affinity import pin_loadgen
 
 # 1. Compute plan and pin LoadGen (main process)

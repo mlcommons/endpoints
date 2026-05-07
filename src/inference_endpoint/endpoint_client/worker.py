@@ -23,7 +23,6 @@ import os
 import signal
 import ssl
 import sys
-import time
 import traceback
 from collections.abc import AsyncGenerator
 from typing import Any
@@ -34,8 +33,10 @@ from inference_endpoint.async_utils.transport import (
     SenderTransport,
     WorkerConnector,
 )
-from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
-from inference_endpoint.core.types import Query, QueryResult
+from inference_endpoint.core.types import ErrorData, Query, QueryResult
+from inference_endpoint.endpoint_client.accumulator_protocol import (
+    SSEAccumulatorProtocol,
+)
 from inference_endpoint.endpoint_client.adapter_protocol import HttpRequestAdapter
 from inference_endpoint.endpoint_client.config import HTTPClientConfig
 from inference_endpoint.endpoint_client.http import (
@@ -44,9 +45,6 @@ from inference_endpoint.endpoint_client.http import (
     InFlightRequest,
     PooledConnection,
 )
-from inference_endpoint.load_generator.events import SampleEvent
-from inference_endpoint.metrics.recorder import EventRecorder
-from inference_endpoint.metrics.reporter import MetricsReporter
 from inference_endpoint.profiling import profile
 from inference_endpoint.utils.logging import setup_logging
 
@@ -78,6 +76,9 @@ def worker_main(
         connector: Transport connector for IPC (ZMQ, shared memory, etc.).
         http_config: HTTP client configuration.
     """
+    # Suppress transformers "no framework found" warning (only tokenizers used)
+    os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+
     worker_log_format = f"%(asctime)s - %(name)s[W{worker_id}/%(process)d] - %(funcName)s - %(levelname)s - %(message)s"
     setup_logging(level=http_config.log_level, format_string=worker_log_format)
 
@@ -171,8 +172,10 @@ class Worker:
         # Track active request tasks
         self._active_tasks: set[asyncio.Task] = set()
 
-        # Use adapter type from config
+        assert self.http_config.adapter is not None
+        assert self.http_config.accumulator is not None
         self._adapter: type[HttpRequestAdapter] = self.http_config.adapter
+        self._accumulator: type[SSEAccumulatorProtocol] = self.http_config.accumulator
 
     async def run(self) -> None:
         """Main worker loop - pull requests, execute, push responses."""
@@ -200,10 +203,16 @@ class Worker:
             )
 
             # Create connection pool
-            # Naively divide max connections among workers
-            connections_per_worker = (
-                self.http_config.max_connections // self.http_config.num_workers
+            # Divide max connections among workers
+            connections_per_worker = max(
+                1, self.http_config.max_connections // self.http_config.num_workers
             )
+            if self.http_config.max_connections < self.http_config.num_workers:
+                logger.warning(
+                    f"max_connections ({self.http_config.max_connections}) < "
+                    f"workers ({self.http_config.num_workers}): each worker gets 1 "
+                    f"connection, total={self.http_config.num_workers} exceeds the cap."
+                )
             self._pool = ConnectionPool(
                 host=self._host,
                 port=self._port,
@@ -228,58 +237,34 @@ class Worker:
                     warmup_count = warmup_cfg // self.http_config.num_workers
                 warmup_count = max(1, warmup_count)
                 warmed = await self._pool.warmup(count=warmup_count)
-                logger.debug(f"Warmed up {warmed} connections")
+                logger.debug(f"Warmed up {warmed}/{warmup_count} connections")
 
-                # Error if 0 connections warmed up
+                # Fatal: zero connections means endpoint is unreachable
                 if warmed == 0:
-                    msg = "Warmup: failed to establish connection to endpoint. Consider closing background TCP connections."
-                    if self.http_config.min_required_connections == 0:
-                        # log error but continue if disabled check
-                        logger.error(msg)
-                    else:
-                        # NOTE(vir):
-                        # 0 warmup connections is always fatal in practice,
-                        # user needs to explicitly disable check to proceed
-                        logger.error(
-                            f"{msg} [ skip-check with --min_required_connections=0 ]"
-                        )
-                        sys.exit(1)
+                    logger.error(
+                        f"Warmup failed: 0/{warmup_count} connections established. "
+                        f"Endpoint {self._host}:{self._port} is unreachable."
+                    )
+                    sys.exit(1)
 
-                # Warn if below min_required_connections threshold (skip if 0 = disabled)
-                elif self.http_config.min_required_connections > 0:
-                    min_required_per_worker = (
+                # Warn if warmup fell short of target
+                # min_required_connections=0 disables the check
+                if self.http_config.min_required_connections > 0:
+                    min_per_worker = (
                         self.http_config.min_required_connections
                         // self.http_config.num_workers
                     )
-                    if warmed < min_required_per_worker:
+                    threshold = (
+                        max(1, min_per_worker) if warmup_cfg == -1 else warmup_count
+                    )
+                    if warmed < threshold:
                         logger.warning(
-                            f"Warmup: this worker has {warmed} connections, need {min_required_per_worker}. "
-                            "Consider closing background TCP connections or adjusting --min_required_connections."
+                            f"Warmup: only established {warmed}/{warmup_count} connections "
+                            f"(need {threshold}). Consider closing background TCP connections."
                         )
 
-            # TODO(vir):
-            # record_worker_events has high overhead - slows down the worker 100x
-            # replace with fine-grained metrics, always captured/dumped per worker
-
             # Run main processing loop
-            if self.http_config.record_worker_events:
-                pid = os.getpid()
-                worker_db_name = f"worker_report_{self.worker_id}_{pid}"
-                assert (
-                    self.http_config.event_logs_dir is not None
-                ), "event_logs_dir must be set if record_worker_events is enabled"
-                report_path = self.http_config.event_logs_dir / f"{worker_db_name}.csv"
-
-                with EventRecorder(session_id=worker_db_name) as event_recorder:
-                    await self._run_main_loop()
-                    event_recorder.wait_for_writes(force_commit=True)
-
-                    with MetricsReporter(event_recorder.connection_name) as reporter:
-                        logger.debug(f"About to dump report to {report_path}")
-                        reporter.dump_all_to_csv(report_path)
-                        logger.debug(f"Report dumped to {report_path}")
-            else:
-                await self._run_main_loop()
+            await self._run_main_loop()
 
         except Exception as e:
             logger.error(f"Error: {type(e).__name__}: {str(e)}")
@@ -294,59 +279,48 @@ class Worker:
         # Reclaim any garbage before connecting/signaling readiness
         gc.collect(2)
 
-        # Connect and signal readiness as we enter recv() loop. Scope ZMQ context
-        # for this process so transports are cleaned up when the block exits.
-        with ManagedZMQContext.scoped() as zmq_ctx:
-            async with self._connector.connect(self.worker_id, zmq_ctx) as (
-                requests,
-                responses,
-            ):
-                self._requests = requests
-                self._responses = responses
-                logger.debug("Connected and ready")
+        # Connect and signal readiness. The connector manages its own
+        # transport context (e.g. ZMQ sockets) internally.
+        async with self._connector.connect(self.worker_id) as (
+            requests,
+            responses,
+        ):
+            self._requests = requests
+            self._responses = responses
+            logger.debug("Connected and ready")
 
-                # TODO(vir):
-                # batch-poll transport before await to reduce event loop yields under burst traffic.
-                # Use requests.poll() in a while loop to drain all available queries synchronously,
-                # only falling back to await requests.recv() when queue is empty.
-                # Similar pattern to iter_body() sync drain optimization.
-                while not self._shutdown:
-                    try:
-                        # Pull query from queue (blocks until message or transport closed)
-                        query = await requests.recv()
+            # TODO(vir):
+            # batch-poll transport before await to reduce event loop yields under burst traffic.
+            # Use requests.poll() in a while loop to drain all available queries synchronously,
+            # only falling back to await requests.recv() when queue is empty.
+            # Similar pattern to iter_body() sync drain optimization.
+            while not self._shutdown:
+                try:
+                    # Pull query from queue (blocks until message or transport closed)
+                    query = await requests.recv()
 
-                        # Transport closed (shutdown called)
-                        if query is None:
-                            break
-
-                        if self.http_config.record_worker_events:
-                            EventRecorder.record_event(
-                                SampleEvent.ZMQ_REQUEST_RECEIVED,
-                                time.monotonic_ns(),
-                                sample_uuid=query.id,
-                                assert_active=True,
-                            )
-
-                        # Prepare and fire request
-                        req = self._prepare_request(query)
-                        if not await self._fire_request(req):
-                            continue
-
-                        # Process response asynchronously
-                        task = self._loop.create_task(self._process_response(req))
-
-                        # Keep task alive to prevent GC
-                        # Cleaned up in _process_response finally block
-                        self._active_tasks.add(task)
-
-                    except asyncio.CancelledError:
+                    # Transport closed (shutdown called)
+                    if query is None:
                         break
 
-                    except Exception as e:
-                        # Don't exit on errors in the main loop, just log and continue
-                        logger.error(
-                            f"Error in main loop: {type(e).__name__}: {str(e)}"
-                        )
+                    # Prepare and fire request
+                    req = self._prepare_request(query)
+                    if not await self._fire_request(req):
+                        continue
+
+                    # Process response asynchronously
+                    task = self._loop.create_task(self._process_response(req))
+
+                    # Keep task alive to prevent GC
+                    # Cleaned up in _process_response finally block
+                    self._active_tasks.add(task)
+
+                except asyncio.CancelledError:
+                    break
+
+                except Exception as e:
+                    # Don't exit on errors in the main loop, just log and continue
+                    logger.error(f"Error in main loop: {type(e).__name__}: {str(e)}")
 
     @profile
     def _prepare_request(self, query: Query) -> InFlightRequest:
@@ -432,15 +406,6 @@ class Worker:
             # Release connection back to pool if not already
             self._pool.release(conn)
 
-            # Record completion event
-            if self.http_config.record_worker_events:
-                EventRecorder.record_event(
-                    SampleEvent.HTTP_RESPONSE_COMPLETED,
-                    time.monotonic_ns(),
-                    sample_uuid=req.query_id,
-                    assert_active=True,
-                )
-
             # Clean up task reference
             current_task = asyncio.current_task()
             if current_task is not None:
@@ -452,10 +417,7 @@ class Worker:
         query_id = req.query_id
         conn = req.connection
 
-        # Create accumulator for streaming response
-        accumulator = self.http_config.accumulator(
-            query_id, self.http_config.stream_all_chunks
-        )
+        accumulator = self._accumulator(query_id, self.http_config.stream_all_chunks)
 
         # Process SSE stream - yields batches of chunks
         async for chunk_batch in self._iter_sse_lines(conn):
@@ -463,26 +425,11 @@ class Worker:
                 if stream_chunk := accumulator.add_chunk(delta):
                     self._responses.send(stream_chunk)
 
-                    if self.http_config.record_worker_events:
-                        EventRecorder.record_event(
-                            SampleEvent.ZMQ_RESPONSE_SENT,
-                            time.monotonic_ns(),
-                            sample_uuid=query_id,
-                            assert_active=True,
-                        )
-
         # Release connection early - done with socket I/O (idempotent)
         self._pool.release(conn)
 
         # Send final complete back to main rank
         self._responses.send(accumulator.get_final_output())
-        if self.http_config.record_worker_events:
-            EventRecorder.record_event(
-                SampleEvent.ZMQ_RESPONSE_SENT,
-                time.monotonic_ns(),
-                sample_uuid=query_id,
-                assert_active=True,
-            )
 
     @profile
     async def _handle_non_streaming_body(self, req: InFlightRequest) -> None:
@@ -501,13 +448,6 @@ class Worker:
 
         # Send result back to main rank
         self._responses.send(result)
-        if self.http_config.record_worker_events:
-            EventRecorder.record_event(
-                SampleEvent.ZMQ_RESPONSE_SENT,
-                time.monotonic_ns(),
-                sample_uuid=query_id,
-                assert_active=True,
-            )
 
     async def _handle_error(self, query_id: str, error: Exception | str) -> None:
         """Send error response for a query."""
@@ -515,20 +455,19 @@ class Worker:
         if self._shutdown or not self._responses:
             return
 
-        error_message = repr(error) if isinstance(error, Exception) else error
+        if isinstance(error, Exception):
+            error_data = ErrorData(
+                error_type=type(error).__name__,
+                error_message=repr(error),
+            )
+        else:
+            error_data = ErrorData(error_type="error", error_message=error)
         error_response = QueryResult(
             id=query_id,
             response_output=None,
-            error=error_message,
+            error=error_data,
         )
         self._responses.send(error_response)
-        if self.http_config.record_worker_events:
-            EventRecorder.record_event(
-                SampleEvent.ZMQ_RESPONSE_SENT,
-                time.monotonic_ns(),
-                sample_uuid=query_id,
-                assert_active=True,
-            )
 
     @profile
     async def _iter_sse_lines(

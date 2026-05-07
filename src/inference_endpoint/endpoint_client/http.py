@@ -51,18 +51,27 @@ class _SocketConfig:
 
     # Connection keepalive-probe settings for long-lived connections
     # client kernel sends probe, server's kernel ACKs - no application overhead
-    SO_KEEPALIVE: int = 1  # Enable keepalive at socket level
-    TCP_KEEPIDLE: int = 1  # Probe after 1s idle
-    TCP_KEEPCNT: int = 1  # 1 failed probe = dead
-    TCP_KEEPINTVL: int = 1  # 1s between probes
+    #
+    # NOTE(vir):
+    # we hit lots of connection timed out errors in offline and high-concurrency modes,
+    # disabling since we handle dead-connections in http.py connection_lost/eof_received
+    SO_KEEPALIVE: int = 0  # Disabled
+    TCP_KEEPIDLE: int = (
+        1  # Probe after 1s idle (only used when SO_KEEPALIVE is enabled)
+    )
+    TCP_KEEPCNT: int = (
+        5  # 5 failed probes = dead (only used when SO_KEEPALIVE is enabled)
+    )
+    TCP_KEEPINTVL: int = 1  # 1s between probes (only used when SO_KEEPALIVE is enabled)
 
-    # Make sure socket buffers are never the bottle neck
-    # With HTTP/1.1, a TCP socket will only be used for a single request
-    # Largest message size would be server response in Offline Mode
-    # 4MB /4 bytes per token = 1M tokens in any given packet
-    # TODO(vir): analyze workloads to better tune buffer sizes
-    SO_RCVBUF: int = 1024 * 1024 * 4  # 4MB receive buffer
-    SO_SNDBUF: int = 1024 * 1024 * 4  # 4MB send buffer
+    # Socket buffer sizing: sliding windows, not full-message buffers.
+    # The event loop reads eagerly so the buffer only holds data between
+    # kernel delivery and application read — typically one RTT worth.
+    #
+    # 128KB ≈ 128K chars buffered in-flight at any instant.
+    # Responses larger than the buffer stream through fine (TCP sliding window).
+    SO_RCVBUF: int = 1024 * 128  # 128KB receive buffer
+    SO_SNDBUF: int = 1024 * 128  # 128KB send buffer
 
     # Linux-specific:
     # kernel closes socket if sent data not ACKed within timeout
@@ -75,11 +84,9 @@ class _SocketConfig:
         # Low-latency optimizations for streaming
         sock.setsockopt(socket.SOL_TCP, socket.TCP_NODELAY, cls.TCP_NODELAY)
 
-        # Connection keepalive settings for long-lived SSE connections
+        # Connection keepalive (disabled by default, tune via SO_KEEPALIVE)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, cls.SO_KEEPALIVE)
-
-        # Fine-tune keepalive timing
-        if hasattr(socket, "TCP_KEEPIDLE"):
+        if cls.SO_KEEPALIVE and hasattr(socket, "TCP_KEEPIDLE"):
             sock.setsockopt(socket.SOL_TCP, socket.TCP_KEEPIDLE, cls.TCP_KEEPIDLE)
             sock.setsockopt(socket.SOL_TCP, socket.TCP_KEEPINTVL, cls.TCP_KEEPINTVL)
             sock.setsockopt(socket.SOL_TCP, socket.TCP_KEEPCNT, cls.TCP_KEEPCNT)

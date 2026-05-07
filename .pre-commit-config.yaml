@@ -11,6 +11,7 @@ repos:
       - id: check-merge-conflict
       - id: debug-statements
 
+  # TODO: sync rev with ruff version in pyproject.toml (currently 0.15.8)
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.3.3
     hooks:
@@ -34,7 +35,7 @@ repos:
     hooks:
       - id: prettier
         types_or: [yaml, json, markdown]
-        exclude: ^(src/inference_endpoint/openai/openai_types_gen.py|src/inference_endpoint/openai/openapi.yaml)$
+        exclude: ^(src/inference_endpoint/openai/openai_types_gen.py|src/inference_endpoint/openai/openapi.yaml|src/inference_endpoint/config/templates/)
 
   - repo: local
     hooks:
@@ -47,6 +48,13 @@ repos:
         args: ["--tb=short", "--strict-markers"]
         stages: [manual]
 
+      - id: regenerate-templates
+        name: Regenerate YAML templates from schema defaults
+        entry: python scripts/regenerate_templates.py
+        language: system
+        pass_filenames: false
+        files: ^(src/inference_endpoint/config/(schema\.py|templates/.*)|src/inference_endpoint/endpoint_client/config\.py|scripts/regenerate_templates\.py)$
+
       - id: add-license-header
         name: Add license headers
         entry: python scripts/add_license_header.py
@@ -54,3 +62,10 @@ repos:
         types: [python]
         pass_filenames: true
         exclude: ^(src/inference_endpoint/openai/openai_types_gen.py)$
+
+      - id: uv-lock-check
+        name: Check uv.lock is up-to-date
+        entry: uv lock --check
+        language: system
+        pass_filenames: false
+        files: ^(pyproject\.toml|uv\.lock)$

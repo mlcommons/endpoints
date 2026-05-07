@@ -30,13 +30,15 @@ from typing import Literal
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from lib.lcb_serve import LCBServe
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 logger = logging.getLogger(__name__)
 
 
 class EvaluationRequest(BaseModel):
     """Schema for evaluation request."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     codes_dict: dict[str, list[str]] = Field(
         description="Dictionary mapping question IDs to lists of code samples"
@@ -78,6 +80,8 @@ class EvaluationRequest(BaseModel):
 
 class ProgressMessage(BaseModel):
     """Message format for progress updates."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     status: Literal["started", "progress", "completed", "error"]
     total_samples: int | None = None

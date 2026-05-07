@@ -1,11 +1,13 @@
 # Local Testing Guide
 
+How to run and test the CLI locally using the built-in echo server and the included dummy dataset, without a real inference endpoint.
+
 ## Quick Start: Testing CLI with Echo Server
 
 ### 1. Prepare Test Environment
 
-**Dataset:** The repo includes `tests/datasets/dummy_1k.pkl` (1000 samples, ~133 KB)
-**Format:** Automatically inferred (supports: pkl, HuggingFace; coming soon: jsonl)
+**Dataset:** The repo includes `tests/datasets/dummy_1k.jsonl` (1000 samples)
+**Format:** Automatically inferred from the file extension. Common local formats include `jsonl`, `json`, `csv`, `parquet`, and HuggingFace datasets.
 
 ### 2. Start the Echo Server
 
@@ -13,10 +15,10 @@ The echo server is included for local testing and mirrors requests back as respo
 
 ```bash
 # Terminal 1: Start echo server on port 8765
-python -m inference_endpoint.testing.echo_server --port 8765
+uv run python -m inference_endpoint.testing.echo_server --port 8765
 
 # Or use default port 12345
-python -m inference_endpoint.testing.echo_server
+uv run python -m inference_endpoint.testing.echo_server
 ```
 
 The server will log:
@@ -30,13 +32,13 @@ Server is running. Press Ctrl+C to stop...
 
 ```bash
 # Terminal 2: Test probe command
-inference-endpoint -v probe \
+uv run inference-endpoint -v probe \
   --endpoints http://localhost:8765 \
   --model Qwen/Qwen3-8B \
   --requests 5
 
 # With custom prompt and model
-inference-endpoint -v probe \
+uv run inference-endpoint -v probe \
   --endpoints http://localhost:8765 \
   --model Qwen/Qwen3-8B \
   --requests 10 \
@@ -69,20 +71,20 @@ Waiting for 5 responses...
 
 ```bash
 # Quick test (model is required)
-inference-endpoint -v benchmark offline \
+uv run inference-endpoint -v benchmark offline \
   --endpoints http://localhost:8765 \
   --model Qwen/Qwen3-8B \
-  --dataset tests/datasets/dummy_1k.pkl
+  --dataset tests/datasets/dummy_1k.jsonl \
+  --duration 0
 
 # Production test with custom params and report generation
-inference-endpoint -v benchmark offline \
+uv run inference-endpoint -v benchmark offline \
   --endpoints http://localhost:8765 \
   --model Qwen/Qwen3-8B \
-  --dataset tests/datasets/dummy_1k.pkl \
+  --dataset tests/datasets/dummy_1k.jsonl \
   --num-samples 5000 \
   --workers 4 \
-  --output benchmark_results.json \
-  --report-path benchmark_report
+  --report-dir benchmark_report
 
 # Note: Set HF_TOKEN environment variable if using non-public models
 # export HF_TOKEN=your_huggingface_token
@@ -91,7 +93,7 @@ inference-endpoint -v benchmark offline \
 **Expected Output:**
 
 ```
-Loading: dummy_1k.pkl
+Loading: dummy_1k.jsonl
 Loaded 1000 samples
 Mode: TestMode.PERF, QPS: 10.0, Responses: False
 Streaming: disabled (auto, offline mode)
@@ -109,19 +111,20 @@ Cleaning up...
 
 ```bash
 # Test sustained QPS with latency focus
-inference-endpoint -v benchmark online \
+uv run inference-endpoint -v benchmark online \
   --endpoints http://localhost:8765 \
   --model Qwen/Qwen3-8B \
-  --dataset tests/datasets/dummy_1k.pkl \
+  --dataset tests/datasets/dummy_1k.jsonl \
+  --duration 0 \
   --load-pattern poisson \
   --target-qps 100 \
-  --report-path online_benchmark_report
+  --report-dir online_benchmark_report
 ```
 
 **Expected Output:**
 
 ```
-Loading: dummy_1k.pkl
+Loading: dummy_1k.jsonl
 Loaded 1000 samples
 Mode: TestMode.PERF, QPS: 100.0, Responses: False
 Streaming: enabled (auto, online mode)
@@ -139,44 +142,27 @@ Cleaning up...
 
 ```bash
 # Show info
-inference-endpoint -v info
+uv run inference-endpoint -v info
 
 # Generate template
-inference-endpoint init --template offline
+uv run inference-endpoint init offline
 
 # Validate config
-inference-endpoint validate --config offline_template.yaml
+uv run inference-endpoint validate-yaml --config offline_template.yaml
 
 # Test with existing dataset
-inference-endpoint benchmark offline \
+uv run inference-endpoint benchmark offline \
   --endpoints http://localhost:8765 \
   --model Qwen/Qwen3-8B \
-  --dataset tests/datasets/ds_samples.pkl \
+  --dataset tests/datasets/ds_samples.jsonl \
   -v
 ```
 
 ### 6. View Results
 
-```bash
-# View benchmark results
-cat benchmark_results.json | jq
-
-# Example output:
-{
-  "config": {
-    "endpoint": "http://localhost:8765",
-    "mode": null,
-    "qps": 10
-  },
-  "results": {
-    "total": 1000,
-    "successful": 1000,
-    "failed": 0,
-    "elapsed_time": 1.8,
-    "qps": 555.6
-  }
-}
-```
+A report directory is always created (at `--report-dir` if specified, or at a default path
+otherwise), containing benchmark artifacts: `result_summary.json`, `runtime_settings.json`,
+`sample_idx_map.json`, `report.txt`, and `events.jsonl`.
 
 ### 7. Stop the Echo Server
 
@@ -190,10 +176,10 @@ pkill -f echo_server
 
 ```bash
 # Custom host and port
-python -m inference_endpoint.testing.echo_server --host 0.0.0.0 --port 9000
+uv run python -m inference_endpoint.testing.echo_server --host 0.0.0.0 --port 9000
 
 # Check help
-python -m inference_endpoint.testing.echo_server --help
+uv run python -m inference_endpoint.testing.echo_server --help
 ```
 
 ## Request Format
@@ -206,7 +192,7 @@ The echo server expects OpenAI-compatible format but simplifies it:
 {
   "prompt": "Your query text",
   "model": "model-name",
-  "max_tokens": 50,
+  "max_completion_tokens": 50,
   "stream": false
 }
 ```
@@ -226,7 +212,7 @@ Error: Connection failed
 ### Validation Errors
 
 ```
-Error: prompt not found in json_value
+Error: prompt not found in query.data
 ```
 
 **Solution:** Use `"prompt"` format in Query data, not `"messages"` (client converts it)
@@ -245,30 +231,26 @@ Error: Timeout (>60s)
 
 ```bash
 # 1. Start echo server
-python -m inference_endpoint.testing.echo_server --port 8000 &
+uv run python -m inference_endpoint.testing.echo_server --port 8000 &
 
 # 2. Generate fresh dataset if needed
-python scripts/create_dummy_dataset.py
+uv run python scripts/create_dummy_dataset.py
 
 # 3. Set HF_TOKEN if using non-public models (optional)
 export HF_TOKEN=your_huggingface_token
 
 # 4. Test probe first
-inference-endpoint probe --endpoints http://localhost:8000 --model Qwen/Qwen3-8B --requests 10
+uv run inference-endpoint probe --endpoints http://localhost:8000 --model Qwen/Qwen3-8B --requests 10
 
 # 5. Run benchmark with report generation
-inference-endpoint -v benchmark offline \
+uv run inference-endpoint -v benchmark offline \
   --endpoints http://localhost:8000 \
   --model Qwen/Qwen3-8B \
-  --dataset tests/datasets/dummy_1k.pkl \
+  --dataset tests/datasets/dummy_1k.jsonl \
   --workers 4 \
-  --output benchmark_results.json \
-  --report-path benchmark_report
+  --report-dir benchmark_report
 
-# 6. Check results
-cat benchmark_results.json | jq '.results'
-
-# 7. Stop server
+# 6. Stop server
 pkill -f echo_server
 ```
 
@@ -276,40 +258,40 @@ pkill -f echo_server
 
 ```bash
 # Offline (max throughput)
-inference-endpoint benchmark offline \
+uv run inference-endpoint benchmark offline \
   --endpoints http://localhost:8765 \
   --model Qwen/Qwen3-8B \
-  --dataset tests/datasets/dummy_1k.pkl \
-  --report-path offline_report
+  --dataset tests/datasets/dummy_1k.jsonl \
+  --report-dir offline_report
 
 # Online (Poisson distribution)
-inference-endpoint benchmark online \
+uv run inference-endpoint benchmark online \
   --endpoints http://localhost:8765 \
   --model Qwen/Qwen3-8B \
-  --dataset tests/datasets/dummy_1k.pkl \
+  --dataset tests/datasets/dummy_1k.jsonl \
   --load-pattern poisson \
   --target-qps 500 \
-  --report-path online_report
+  --report-dir online_report
 
 # With explicit sample count
-inference-endpoint benchmark offline \
+uv run inference-endpoint benchmark offline \
   --endpoints http://localhost:8765 \
   --model Qwen/Qwen3-8B \
-  --dataset tests/datasets/dummy_1k.pkl \
+  --dataset tests/datasets/dummy_1k.jsonl \
   --num-samples 500
 
 # Force streaming on for offline mode (to test TTFT metrics)
-inference-endpoint benchmark offline \
+uv run inference-endpoint benchmark offline \
   --endpoints http://localhost:8765 \
   --model Qwen/Qwen3-8B \
-  --dataset tests/datasets/dummy_1k.pkl \
+  --dataset tests/datasets/dummy_1k.jsonl \
   --streaming on
 
 # Concurrency mode (fixed concurrent requests)
-inference-endpoint benchmark online \
+uv run inference-endpoint benchmark online \
   --endpoints http://localhost:8765 \
   --model Qwen/Qwen3-8B \
-  --dataset tests/datasets/dummy_1k.pkl \
+  --dataset tests/datasets/dummy_1k.jsonl \
   --load-pattern concurrency \
   --concurrency 32
 ```
@@ -326,18 +308,19 @@ inference-endpoint benchmark online \
 
 **Sample Count Control:**
 
-- Sample priority: `--num-samples` > dataset size (duration=0) > calculated (target_qps × duration)
-- Default duration: 0 (runs until dataset exhausted or max_duration reached)
+- Use `--duration 0` when you want a local test to stop after exhausting the dataset instead of running for the default timed duration
+- Sample priority: `--num-samples` > dataset size (when `--duration 0`) > calculated (target_qps × duration)
+- Default duration: 600000ms (10 minutes)
 
 **Testing & Debugging:**
 
 - Use `-v` for INFO logging, `-vv` for DEBUG
 - Echo server mirrors prompts back - perfect for quick testing without real inference
 - Press `Ctrl+C` to gracefully interrupt benchmarks
-- Default test dataset: `tests/datasets/dummy_1k.pkl` (1000 samples, ~133 KB)
+- Default test dataset: `tests/datasets/dummy_1k.jsonl` (1000 samples)
 
 **Advanced:**
 
 - Streaming: `auto` (default), `on`, or `off` - auto enables for online, disables for offline
-- Use `--report-path` for detailed metrics reports with TTFT, TPOT, and token analysis
+- Use `--report-dir` for detailed metrics reports with TTFT, TPOT, and token analysis
 - Dataset format auto-inferred from file extension

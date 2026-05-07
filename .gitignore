@@ -189,5 +189,11 @@ outputs/
 # Example vLLM virtualenv
 examples/03_BenchmarkComparison/vllm_venv/
 
-# Cursor artifacts (local development only)
+# AI tool artifacts (local development only)
 .cursor_artifacts/
+.cursor/
+docs/superpowers/
+.claude/agent-memory/
+
+# User-specific local dev configs; do not commit
+CLAUDE.local.md

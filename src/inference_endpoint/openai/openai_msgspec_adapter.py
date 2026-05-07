@@ -21,7 +21,7 @@ import time
 
 import msgspec
 from inference_endpoint.config.schema import ModelParams, StreamingMode
-from inference_endpoint.core.types import Query, QueryResult
+from inference_endpoint.core.types import Query, QueryResult, TextModelOutput
 from inference_endpoint.dataset_manager.transforms import (
     AddStaticColumns,
     ColumnFilter,
@@ -119,6 +119,10 @@ class OpenAIMsgspecAdapter(HttpRequestAdapter):
         """
         Convert a Query to an OpenAI request struct.
 
+        Builds [system, user] from prompt and system. Both accept text (str) or
+        multimodal content (list of content parts, e.g. [{"type": "text", "text": "..."},
+        {"type": "image_url", "image_url": {"url": "data:image/...;base64,..."}}]).
+
         Args:
             query: Input query with prompt and parameters
 
@@ -182,7 +186,7 @@ class OpenAIMsgspecAdapter(HttpRequestAdapter):
 
         return QueryResult(
             id=result_id or response.id,
-            response_output=response.choices[0].message.content,
+            response_output=TextModelOutput(output=response.choices[0].message.content),
         )
 
     @classmethod
@@ -205,7 +209,7 @@ class OpenAIMsgspecAdapter(HttpRequestAdapter):
                     index=0,
                     message=ChatCompletionResponseMessage(
                         role="assistant",
-                        content=result.response_output,
+                        content=result.get_response_output_string(),
                     ),
                     finish_reason="stop",
                 )

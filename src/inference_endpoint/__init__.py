@@ -19,12 +19,19 @@ MLPerf Inference Endpoint Benchmarking System
 A high-performance benchmarking tool for LLM endpoints with 50k QPS capability.
 """
 
+import os as _os
+
+# Suppress transformers "None of PyTorch…" advisory — we only use tokenizers.
+# Must be set before any submodule triggers `import transformers`.
+_os.environ.setdefault("TRANSFORMERS_NO_ADVISORY_WARNINGS", "1")
+del _os
+
+# Core imports - public API types
+from .core.types import Query, QueryId, QueryResult  # noqa: E402
+
 __version__ = "0.1.0"
 __author__ = "MLPerf Inference Endpoint Team"
 __description__ = "High-performance LLM endpoint benchmarking system"
-
-# Core imports - public API types
-from .core.types import Query, QueryId, QueryResult
 
 __all__ = [
     "Query",

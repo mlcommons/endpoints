@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from inference_endpoint.core.types import Query, QueryResult
+from inference_endpoint.core.types import Query, QueryResult, TextModelOutput
 from inference_endpoint.openai.openai_adapter import OpenAIAdapter
 from inference_endpoint.openai.openai_types_gen import (
     ChatCompletionResponseMessage,
@@ -138,7 +138,9 @@ class TestOpenAIAPITypes:
     def test_create_chat_completion_response(self):
         message_content = "You are a helpful assistant."
         response = OpenAIAdapter.to_endpoint_response(
-            QueryResult(id="test-123", response_output=message_content)
+            QueryResult(
+                id="test-123", response_output=TextModelOutput(output=message_content)
+            )
         ).model_dump(mode="json")
         assert response["choices"][0]["message"]["content"] == message_content
         assert response["id"] == "test-123"

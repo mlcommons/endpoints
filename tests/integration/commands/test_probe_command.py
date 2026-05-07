@@ -23,109 +23,98 @@ validating:
 - Error handling with failing endpoints
 """
 
-from unittest.mock import MagicMock
-
 import pytest
-from inference_endpoint.commands.probe import run_probe_command
+from inference_endpoint.commands.probe import ProbeConfig, execute_probe
 from inference_endpoint.exceptions import ExecutionError
 
 
 class TestProbeCommandIntegration:
     """Integration tests for probe command with echo server."""
 
-    @pytest.mark.asyncio
-    async def test_probe_with_echo_server(self, mock_http_echo_server, caplog):
+    @pytest.mark.integration
+    def test_probe_with_echo_server(self, mock_http_echo_server, caplog):
         """Test successful probe against echo server."""
-        args = MagicMock()
-        args.endpoints = mock_http_echo_server.url
-        args.api_type = "openai"
-        args.requests = 5
-        args.prompt = "Test probe message"
-        args.model = "gpt-3.5-turbo"  # Required
-        args.verbose = 1
+        config = ProbeConfig(
+            endpoints=mock_http_echo_server.url,
+            model="gpt-3.5-turbo",
+            requests=5,
+            prompt="Test probe message",
+        )
 
         with caplog.at_level("INFO"):
-            # Should complete successfully
-            await run_probe_command(args)
+            execute_probe(config)
 
             log_text = caplog.text
-            # Verify success indicators
-            assert "✓ Completed: 5/5 successful" in log_text
-            assert "✓ Avg latency:" in log_text
-            assert "✓ Sample responses" in log_text
+            assert "Completed: 5/5 successful" in log_text
+            assert "Avg latency:" in log_text
+            assert "Sample responses" in log_text
             assert "Test probe message" in log_text
-            assert "✓ Probe successful" in log_text
+            assert "Probe successful" in log_text
 
-    @pytest.mark.asyncio
-    async def test_probe_with_default_prompt(self, mock_http_echo_server, caplog):
+    @pytest.mark.integration
+    def test_probe_with_default_prompt(self, mock_http_echo_server, caplog):
         """Test probe with default prompt."""
-        args = MagicMock()
-        args.endpoints = mock_http_echo_server.url
-        args.api_type = "openai"
-        args.requests = 3
-        args.prompt = "Please write me a joke in 30 words."  # Default
-        args.model = "gpt-3.5-turbo"  # Required
-        args.verbose = 1
+        config = ProbeConfig(
+            endpoints=mock_http_echo_server.url,
+            model="gpt-3.5-turbo",
+            requests=3,
+        )
 
         with caplog.at_level("INFO"):
-            await run_probe_command(args)
+            execute_probe(config)
 
             log_text = caplog.text
-            assert "✓ Completed: 3/3 successful" in log_text
+            assert "Completed: 3/3 successful" in log_text
             assert "joke in 30 words" in log_text
 
-    @pytest.mark.asyncio
-    async def test_probe_shows_multiple_responses(self, mock_http_echo_server, caplog):
+    @pytest.mark.integration
+    def test_probe_shows_multiple_responses(self, mock_http_echo_server, caplog):
         """Test that probe shows sample responses."""
-        args = MagicMock()
-        args.endpoints = mock_http_echo_server.url
-        args.api_type = "openai"
-        args.requests = 15  # More than 10 to test truncation
-        args.prompt = "Sample response text"
-        args.model = "gpt-3.5-turbo"  # Required
-        args.verbose = 1
+        config = ProbeConfig(
+            endpoints=mock_http_echo_server.url,
+            model="gpt-3.5-turbo",
+            requests=15,
+            prompt="Sample response text",
+        )
 
         with caplog.at_level("INFO"):
-            await run_probe_command(args)
+            execute_probe(config)
 
-            # Should show up to 10 responses
             assert "Sample responses (15 collected)" in caplog.text
             assert "[probe-0]" in caplog.text
             assert "Sample response text" in caplog.text
 
-    @pytest.mark.asyncio
-    async def test_probe_with_invalid_endpoint(self, caplog):
+    @pytest.mark.integration
+    def test_probe_with_invalid_endpoint(self):
         """Test probe fails gracefully with invalid endpoint."""
-        args = MagicMock()
-        args.endpoints = "http://invalid-host-does-not-exist:9999"
-        args.api_type = "openai"
-        args.requests = 3
-        args.prompt = "Test"
-        args.model = "gpt-3.5-turbo"  # Required
-        args.verbose = 0
+        config = ProbeConfig(
+            endpoints="http://invalid-host-does-not-exist:9999",
+            model="gpt-3.5-turbo",
+            requests=3,
+            prompt="Test",
+        )
 
         # With lazy connection pooling, client creation succeeds but requests fail
         # during execution when the worker can't resolve the hostname
         with pytest.raises(ExecutionError, match="Probe failed"):
-            await run_probe_command(args)
+            execute_probe(config)
 
-    @pytest.mark.asyncio
-    async def test_probe_with_custom_prompt(self, mock_http_echo_server, caplog):
+    @pytest.mark.integration
+    def test_probe_with_custom_prompt(self, mock_http_echo_server, caplog):
         """Test probe with custom prompt text."""
         custom_prompt = "This is my custom probe message with special chars: @#$%"
 
-        args = MagicMock()
-        args.endpoints = mock_http_echo_server.url
-        args.api_type = "openai"
-        args.requests = 2
-        args.prompt = custom_prompt
-        args.model = "gpt-3.5-turbo"  # Required
-        args.verbose = 1
+        config = ProbeConfig(
+            endpoints=mock_http_echo_server.url,
+            model="gpt-3.5-turbo",
+            requests=2,
+            prompt=custom_prompt,
+        )
 
         with caplog.at_level("INFO"):
-            await run_probe_command(args)
+            execute_probe(config)
 
             log_text = caplog.text
             # Echo server should return the prompt
             assert custom_prompt in log_text
-            assert "✓ Probe successful" in log_text
+            assert "Probe successful" in log_text

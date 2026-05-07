@@ -41,6 +41,7 @@ Notes:
 from __future__ import annotations
 
 import asyncio
+import builtins
 import errno
 import logging
 import os
@@ -49,51 +50,67 @@ from collections import deque
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 import msgspec
 import zmq
-import zmq.asyncio
+from pydantic import Field
 
 from inference_endpoint.core.types import Query, QueryResult, StreamChunk
 
 from ..protocol import (
     ReceiverTransport,
     SenderTransport,
+    TransportConfig,
     WorkerConnector,
     WorkerPoolTransport,
 )
 from .context import ManagedZMQContext
+from .ready_check import ReadyCheckReceiver, send_ready_signal
 
 logger = logging.getLogger(__name__)
 
 
 __all__ = [
+    "ZMQTransportConfig",
     "ZmqWorkerPoolTransport",
 ]
 
 
-@dataclass
-class _ZMQSocketConfig:
-    """Internal: ZMQ socket configuration with tuned defaults."""
+# =============================================================================
+# ZMQ Transport Config (user-facing, Pydantic — exposed to CLI/YAML)
+# =============================================================================
 
-    # NOTE(vir): ZMQ Background I/O Threads
-    # Controls the size of the ZMQ background I/O thread pool (in C++).
-    # These threads handle non-blocking I/O, message queuing, and transport
-    # operations off the main Python thread.
-    #
-    # Performance characteristics:
-    #   - only created in Main Process (owning WorkerPoolTransport)
-    #   - each requires separate physical core for peak-performance, not hyperthreads
-    #   - possibly effected by msg-size, messaging rate, NOT worker count (since 4-threads works fine with 100 workers)
-    #   - tested io_threads=4 for upto 100 worker processes (on 224xCore x86 System)
-    io_threads: int = 4
 
-    high_water_mark: int = 0  # 0 = unlimited
-    linger: int = -1  # Block indefinitely on close to send pending messages
-    immediate: int = 1  # Only enqueue on ready connections
-    recv_buffer_size: int = 4 * 1024 * 1024  # 4MB
-    send_buffer_size: int = 4 * 1024 * 1024  # 4MB
+class ZMQTransportConfig(TransportConfig):
+    """ZMQ transport configuration.
+
+    Inherits ``recv_buffer_size`` and ``send_buffer_size`` from TransportConfig base.
+    Adds ZMQ-specific socket options that compose up through CLI/YAML.
+    """
+
+    type: Literal["zmq"] = "zmq"  # noqa: A003
+
+    # ZMQ background I/O thread pool size (C++ threads).
+    # Each requires a separate physical core for peak performance.
+    # Tested io_threads=4 for up to 100 workers on 224-core x86.
+    io_threads: int = Field(
+        default=4, ge=1, description="ZMQ I/O thread pool size (main process)"
+    )
+    worker_io_threads: int = Field(
+        default=1, ge=1, description="ZMQ I/O thread pool size (worker processes)"
+    )
+    high_water_mark: int = Field(default=0, ge=0, description="ZMQ HWM (0=unlimited)")
+    linger: int = Field(
+        default=-1, description="ZMQ linger on close (-1=block until sent)"
+    )
+    immediate: int = Field(
+        default=1, ge=0, le=1, description="ZMQ IMMEDIATE (1=only enqueue on ready)"
+    )
+
+    @property
+    def transport_class(self) -> builtins.type[WorkerPoolTransport]:
+        return ZmqWorkerPoolTransport
 
     def apply_recv(self, sock: zmq.Socket) -> None:
         """Apply receiver socket options."""
@@ -201,7 +218,7 @@ class _ZmqReceiverTransport(ReceiverTransport):
                 if nbytes > buf_len:
                     raise RuntimeError(
                         f"ZMQ message truncated ({nbytes} > {buf_len} bytes). "
-                        f"Increase recv_buffer_size in _ZMQSocketConfig."
+                        f"Increase client.transport.recv_buffer_size in config."
                     )
                 self._deque.append(self._decoder.decode(recv_view[:nbytes]))
                 count += 1
@@ -412,9 +429,9 @@ class _ZmqSenderTransport(SenderTransport):
 
 def _create_receiver(
     loop: asyncio.AbstractEventLoop,
-    address: str,
+    path: str,
     zmq_context: ManagedZMQContext,
-    config: _ZMQSocketConfig,
+    config: ZMQTransportConfig,
     message_type: type | None = None,
     bind: bool = False,
 ) -> _ZmqReceiverTransport:
@@ -422,7 +439,7 @@ def _create_receiver(
 
     Args:
         loop: Event loop for transport registration.
-        address: ZMQ address (e.g., "ipc:///tmp/socket").
+        path: Socket path for IPC address construction (via zmq_context).
         zmq_context: Managed ZMQ context (use .socket() for tracked cleanup).
         config: Socket configuration.
         message_type: Type hint for msgspec decoder. Can be a single type, Union type, or None.
@@ -435,9 +452,9 @@ def _create_receiver(
     config.apply_recv(sock)
 
     if bind:
-        sock.bind(address)
+        zmq_context.bind(sock, path)
     else:
-        sock.connect(address)
+        zmq_context.connect(sock, path)
 
     decoder = (
         msgspec.msgpack.Decoder(type=message_type)  # type: ignore[arg-type]
@@ -450,9 +467,9 @@ def _create_receiver(
 
 def _create_sender(
     loop: asyncio.AbstractEventLoop,
-    address: str,
+    path: str,
     zmq_context: ManagedZMQContext,
-    config: _ZMQSocketConfig,
+    config: ZMQTransportConfig,
     bind: bool = False,
 ) -> _ZmqSenderTransport:
     """Create a ZMQ sender transport."""
@@ -460,9 +477,9 @@ def _create_sender(
     config.apply_send(sock)
 
     if bind:
-        sock.bind(address)
+        zmq_context.bind(sock, path)
     else:
-        sock.connect(address)
+        zmq_context.connect(sock, path)
 
     encoder = msgspec.msgpack.Encoder()
     return _ZmqSenderTransport(loop, sock, encoder)
@@ -477,19 +494,24 @@ def _create_sender(
 class _ZmqWorkerConnector(WorkerConnector):
     """Internal: Picklable connector for worker processes.
 
-    Contains pre-allocated addresses. Passed to workers via multiprocessing.
+    Contains socket_dir and path components for IPC address construction.
+    Passed to workers via multiprocessing.
     """
 
-    config: _ZMQSocketConfig
-    request_addrs: list[str]
-    response_addr: str
-    readiness_addr: str
+    config: ZMQTransportConfig
+    socket_dir: str
+    request_paths: list[str]
+    response_path: str
+    readiness_path: str
 
     @asynccontextmanager
     async def connect(
-        self, worker_id: int, zmq_context: ManagedZMQContext
+        self, worker_id: int
     ) -> AsyncIterator[tuple[_ZmqReceiverTransport, _ZmqSenderTransport]]:
         """Connect worker transports and signal readiness.
+
+        Creates its own ManagedZMQContext scoped to this worker process.
+        The context (and all sockets) are cleaned up when the block exits.
 
         Startup Sequence
         -------------------
@@ -509,43 +531,35 @@ class _ZmqWorkerConnector(WorkerConnector):
 
         Args:
             worker_id: Unique identifier for this worker.
-            zmq_context: Managed ZMQ context (e.g. from ManagedZMQContext.scoped() in this process).
 
         Yields:
             Tuple of (request_receiver, response_sender) transports.
         """
-        loop = asyncio.get_running_loop()
-        request_addr = self.request_addrs[worker_id]
+        with ManagedZMQContext.scoped(
+            socket_dir=self.socket_dir,
+            io_threads=self.config.worker_io_threads,
+        ) as zmq_context:
+            loop = asyncio.get_running_loop()
+            request_path = self.request_paths[worker_id]
 
-        logger.debug("Worker %d request addr: %s", worker_id, request_addr)
-        logger.debug("Worker %d response addr: %s", worker_id, self.response_addr)
+            logger.debug("Worker %d request path: %s", worker_id, request_path)
+            logger.debug("Worker %d response path: %s", worker_id, self.response_path)
 
-        # Worker CONNECTS (main process BINDS)
-        requests = _create_receiver(
-            loop, request_addr, zmq_context, self.config, Query, bind=False
-        )
-        responses = _create_sender(
-            loop, self.response_addr, zmq_context, self.config, bind=False
-        )
+            # Worker CONNECTS (main process BINDS)
+            requests = _create_receiver(
+                loop, request_path, zmq_context, self.config, Query, bind=False
+            )
+            responses = _create_sender(
+                loop, self.response_path, zmq_context, self.config, bind=False
+            )
 
-        # Signal readiness using zmq.asyncio for proper async send
-        async_ctx = zmq.asyncio.Context()
-        readiness_sock = async_ctx.socket(zmq.PUSH)
-        readiness_sock.setsockopt(zmq.LINGER, -1)  # Wait indefinitely for delivery
-        readiness_sock.connect(self.readiness_addr)
+            try:
+                await send_ready_signal(zmq_context, self.readiness_path, worker_id)
 
-        try:
-            encoder = msgspec.msgpack.Encoder()
-            await readiness_sock.send(encoder.encode(worker_id))  # Async send
-            readiness_sock.close()  # LINGER ensures message is sent
-            async_ctx.term()
-            logger.debug("Worker %d signaled readiness", worker_id)
-
-            yield requests, responses
-        finally:
-            requests.close()
-            responses.close()
-            # Context lifetime is managed by the caller via ManagedZMQContext.scoped().
+                yield requests, responses
+            finally:
+                requests.close()
+                responses.close()
 
 
 # =============================================================================
@@ -559,16 +573,15 @@ class ZmqWorkerPoolTransport(WorkerPoolTransport):
     Main process transport for worker pool communication.
     Provides fan-out (send to workers) and fan-in (receive from workers).
 
-    The caller must pass a ManagedZMQContext (e.g. from ManagedZMQContext.scoped())
-    and scope the transport lifetime within that context for proper cleanup.
+    Context is managed internally — ``create()`` creates its own
+    ``ManagedZMQContext`` and ``cleanup()`` destroys it.
 
     Usage:
-        with ManagedZMQContext.scoped(io_threads=4) as zmq_ctx:
-            pool = ZmqWorkerPoolTransport.create(loop, 4, zmq_ctx)
-            for i in range(4):
-                spawn_worker(i, pool.worker_connector, ...)
-            await pool.wait_for_workers_ready(timeout=30)
-            pool.send(worker_id, query)
+        pool = ZmqWorkerPoolTransport.create(loop, 4, config=zmq_config)
+        for i in range(4):
+            spawn_worker(i, pool.worker_connector, ...)
+        await pool.wait_for_workers_ready(timeout=30)
+        pool.send(worker_id, query)
             result = pool.poll()        # Non-blocking
             result = await pool.recv()  # Blocking
             pool.cleanup()
@@ -578,53 +591,48 @@ class ZmqWorkerPoolTransport(WorkerPoolTransport):
         self,
         loop: asyncio.AbstractEventLoop,
         zmq_context: ManagedZMQContext,
-        config: _ZMQSocketConfig,
+        config: ZMQTransportConfig,
         num_workers: int,
     ) -> None:
         self._loop = loop
+        self._zmq_context = zmq_context
+        self._owns_context = False  # set True by create() when it creates the context
         self._config = config
         self._num_workers = num_workers
         self._closed = False
         suffix = uuid.uuid4().hex[:8]
-        socket_dir = zmq_context.socket_dir
 
-        # Generate addresses
-        self._request_addrs = [
-            f"ipc://{socket_dir}/req_{suffix}_{i}" for i in range(num_workers)
-        ]
-        self._response_addr = f"ipc://{socket_dir}/resp_{suffix}"
-        self._readiness_addr = f"ipc://{socket_dir}/ready_{suffix}"
+        # Generate path components (address construction is handled by zmq_context)
+        request_paths = [f"req_{suffix}_{i}" for i in range(num_workers)]
+        response_path = f"resp_{suffix}"
+        readiness_path = f"ready_{suffix}"
 
-        # Validate path lengths
-        for addr in self._request_addrs + [self._response_addr, self._readiness_addr]:
-            if len(addr) > zmq.IPC_PATH_MAX_LEN:
-                raise ValueError(
-                    f"IPC path too long ({len(addr)} > {zmq.IPC_PATH_MAX_LEN}): {addr}"
-                )
-
-        # Create connector for workers
-        self._worker_connector = _ZmqWorkerConnector(
-            config=config,
-            request_addrs=self._request_addrs,
-            response_addr=self._response_addr,
-            readiness_addr=self._readiness_addr,
-        )
-
-        # Create transports (main process BINDS)
+        # Create transports (main process BINDS — this sets socket_dir if needed)
         self._request_senders = [
-            _create_sender(loop, addr, zmq_context, config, bind=True)
-            for addr in self._request_addrs
+            _create_sender(loop, path, zmq_context, config, bind=True)
+            for path in request_paths
         ]
         self._response_receiver = _create_receiver(
             loop,
-            self._response_addr,
+            response_path,
             zmq_context,
             config,
             QueryResult | StreamChunk,  # type: ignore[arg-type]
             bind=True,
         )
-        self._readiness_receiver = _create_receiver(
-            loop, self._readiness_addr, zmq_context, config, bind=True
+        self._ready_check = ReadyCheckReceiver(readiness_path, zmq_context, num_workers)
+
+        # socket_dir is now guaranteed set (bind() created it if needed).
+        # Store resolved addresses for debugging and tests.
+        assert zmq_context.socket_dir is not None
+        self._request_addrs = [zmq_context._make_address(p) for p in request_paths]
+        self._response_addr = zmq_context._make_address(response_path)
+        self._worker_connector = _ZmqWorkerConnector(
+            config=config,
+            socket_dir=zmq_context.socket_dir,
+            request_paths=request_paths,
+            response_path=response_path,
+            readiness_path=readiness_path,
         )
 
     @classmethod
@@ -632,21 +640,16 @@ class ZmqWorkerPoolTransport(WorkerPoolTransport):
         cls,
         loop: asyncio.AbstractEventLoop,
         num_workers: int,
-        zmq_context: ManagedZMQContext,
-        *args: Any,
-        **kwargs: Any,
+        config: ZMQTransportConfig | None = None,
     ) -> ZmqWorkerPoolTransport:
         """Factory to create ZmqWorkerPoolTransport.
 
-        Signature matches WorkerPoolTransport.create(loop, num_workers, *args, **kwargs).
-        Expects zmq_context as first extra positional arg.
+        Creates its own ManagedZMQContext internally. Cleaned up via cleanup().
 
         Args:
             loop: Event loop for transport registration.
             num_workers: Number of workers (required).
-            zmq_context: Managed ZMQ context (e.g. from ManagedZMQContext.scoped()).
-            *args: Ignored - prevents any errors with extraneous args and adheres with WorkerPoolTransport.create().
-            **kwargs: Optional _ZMQSocketConfig overrides.
+            config: ZMQ transport config. Defaults to ZMQTransportConfig().
 
         Returns:
             Configured ZmqWorkerPoolTransport instance.
@@ -654,8 +657,14 @@ class ZmqWorkerPoolTransport(WorkerPoolTransport):
         if os.name == "nt":
             raise RuntimeError("Windows not yet supported for ZMQ transport")
 
-        config = _ZMQSocketConfig(**kwargs)
-        return cls(loop, zmq_context, config, num_workers)
+        if config is None:
+            config = ZMQTransportConfig()
+
+        # Create ZMQ context — owned by this transport, cleaned up in cleanup()
+        context = ManagedZMQContext(io_threads=config.io_threads)
+        transport = cls(loop, context, config, num_workers)
+        transport._owns_context = True
+        return transport
 
     @property
     def worker_connector(self) -> WorkerConnector:
@@ -683,30 +692,7 @@ class ZmqWorkerPoolTransport(WorkerPoolTransport):
         Raises:
             TimeoutError: If workers don't signal in time (only if timeout is set).
         """
-        ready_count = 0
-        while ready_count < self._num_workers:
-            try:
-                if timeout is None:
-                    worker_id = await self._readiness_receiver.recv()
-                else:
-                    worker_id = await asyncio.wait_for(
-                        self._readiness_receiver.recv(),
-                        timeout=timeout,
-                    )
-                if worker_id is not None:
-                    ready_count += 1
-                    logger.debug(
-                        f"Worker {worker_id} ready ({ready_count}/{self._num_workers})"
-                    )
-            except TimeoutError:
-                raise TimeoutError(
-                    f"Workers failed to initialize: {ready_count}/{self._num_workers} ready"
-                ) from None
-
-        logger.debug(f"All {self._num_workers} workers ready")
-
-        # Close readiness receiver - no longer needed
-        self._readiness_receiver.close()
+        await self._ready_check.wait(timeout=timeout)
 
     def cleanup(self) -> None:
         """Close all transports and release resources. Idempotent."""
@@ -718,7 +704,11 @@ class ZmqWorkerPoolTransport(WorkerPoolTransport):
         for sender in self._request_senders:
             sender.close()
         self._response_receiver.close()
-        self._readiness_receiver.close()
+        self._ready_check.close()
+
+        # Only clean up the ZMQ context if we created it (singleton may be shared)
+        if self._owns_context:
+            self._zmq_context.cleanup()
 
     def __del__(self) -> None:
         """Best-effort cleanup on garbage collection."""

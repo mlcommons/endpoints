@@ -35,10 +35,9 @@ class FuturesHttpClient(HTTPEndpointClient):
     def __init__(
         self,
         config: HTTPClientConfig,
-        zmq_context=None,
     ):
         # Auto-starts with own event loop thread (loop=None)
-        super().__init__(config, zmq_context=zmq_context)
+        super().__init__(config)
 
         # Start response handler on client's loop
         self._pending: dict[str | int, concurrent.futures.Future] = {}
@@ -70,14 +69,14 @@ class FuturesHttpClient(HTTPEndpointClient):
                     break  # None signals transport closed - exit handler
 
                 match response:
-                    case StreamChunk(is_complete=False):
+                    case StreamChunk():
                         # Intermediate stream chunk - future stays pending
                         pass
 
                     case QueryResult(error=err) if err:
                         # Error response - pop and reject future
                         if future := self._pending.pop(response.id, None):
-                            future.set_exception(Exception(err))
+                            future.set_exception(Exception(str(err)))
                         else:
                             logger.debug(f"Error for unknown request ID: {response.id}")
 

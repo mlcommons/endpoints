@@ -46,19 +46,8 @@ class DatasetFormat(Enum):
     PARQUET = ".parquet"
     """Apache Parquet file."""
 
-    PANDAS_DF = ".pandas_pkl"
-    """Pandas DataFrame."""
-
-    NUMPY_ARRAY = ".npy"
-    """NumPy array. Assumed to be a 2D array using the datatype np.dtypes.StringDType supported in Numpy 2.x+.
-    The first row is assumed to denote the column names."""
-
-    PICKLE = ".pkl"
-    """Python list of rows. Each row is a dictionary with the keys being the column names. This format is
-    equivalent to PY_DICT where each row is dict(zip(py_dict["column_names"], py_dict["rows"][i]))."""
-
     JSON = ".json"
-    """JSON file in the same structure as the PY_DICT format, but saved as a JSON file instead of Pickle."""
+    """JSON file containing a list of records (dictionaries), where keys are column names."""
 
     JSONL = ".jsonl"
     """JSON Lines file. Each line is a JSON object where the keys are the column names. It is assumed that
@@ -191,20 +180,6 @@ class CSVLoader(DatafileLoader, format=DatasetFormat.CSV):
         self.dataframe = pd.read_csv(self.csv_path)
 
 
-class PickleListLoader(DatafileLoader, format=DatasetFormat.PICKLE):
-    def __init__(
-        self,
-        file_path: Path | str,
-        *args,
-        **kwargs,
-    ) -> None:
-        super().__init__(*args, **kwargs)
-        self.pickle_path = Path(file_path)
-
-    def read(self) -> None:
-        self.dataframe = pd.read_pickle(self.pickle_path)
-
-
 class JsonlLoader(DatafileLoader, format=DatasetFormat.JSONL):
     def __init__(
         self,
@@ -278,7 +253,7 @@ class Dataset:
     """Class for loading and managing benchmark datasets.
 
     DataLoaders handle:
-    - Loading datasets from various formats (pickle, HuggingFace, CSV, etc.)
+    - Loading datasets from various formats (JSONL, HuggingFace, CSV, etc.)
     - Memory management for large datasets
     - Random-access sample retrieval by index
     - Optional memory-constrained caching/unloading

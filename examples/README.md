@@ -18,11 +18,20 @@ Compare `inference-endpoint` with [vLLM's](https://github.com/vllm-project/vllm)
 
 ### [04_GPTOSS120B_Example](04_GPTOSS120B_Example/)
 
-Sample yaml configuration to benchmark `openai/gpt-oss-120b`.
+End-to-end example for benchmarking `openai/gpt-oss-120b` with vLLM or SGLang, including YAML configs
+and Python scripts for AIME25, GPQA, and LiveCodeBench accuracy evaluation.
 
 ### [05_Llama3.1-8B_Example](05_Llama3.1-8B_Example/)
 
 Sample yaml configuration to benchmark `meta-llama/Llama-3.1-8B-Instruct`.
+
+### [06_Llama2-70B_Example](06_Llama2-70B_Example/)
+
+Sample yaml configuration for online benchmarking of `meta-llama/Llama-2-70b-chat-hf`.
+
+### [08_Qwen3-VL-235B-A22B_Example](08_Qwen3-VL-235B-A22B_Example/)
+
+Sample yaml configuration to benchmark the multimodal `Qwen/Qwen3-VL-235B-A22B` model on a visual reasoning workload.
 
 ## Getting Help
 

@@ -19,7 +19,6 @@ import asyncio
 import logging
 import time
 from multiprocessing import Process
-from typing import Any
 
 from inference_endpoint.async_utils.transport import WorkerPoolTransport
 from inference_endpoint.endpoint_client.config import HTTPClientConfig
@@ -33,37 +32,30 @@ class WorkerManager:
     """Manages worker processes and IPC transports.
 
     Creates and owns:
-    - WorkerPoolTransport for IPC
+    - WorkerPoolTransport for IPC (created via transport_config.transport_class)
     - Worker processes
 
-    Transport-specific arguments (e.g. ManagedZMQContext for ZMQ) are forwarded
-    via *args and **kwargs to transport_cls.create(). The caller is responsible
-    for scoping the lifetime of any context (e.g. ManagedZMQContext.scoped()).
+    Transport context is managed internally by the transport implementation.
     """
 
     def __init__(
         self,
         http_config: HTTPClientConfig,
         loop: asyncio.AbstractEventLoop,
-        *args: Any,
-        **kwargs: Any,
     ):
         """Initialize worker manager.
 
         Args:
             http_config: HTTP client configuration.
             loop: Event loop for transport registration.
-            *args: Forwarded to transport_cls.create(loop, *args, ...).
-            **kwargs: Forwarded to transport_cls.create(..., **kwargs).
-                     num_workers is set from http_config if not provided.
         """
         self.http_config = http_config
 
-        # Create pool transport via factory
-        assert http_config.worker_pool_transport is not None
-        transport_cls = http_config.worker_pool_transport
+        # Transport creates its own context internally
+        assert http_config.transport is not None
+        transport_cls = http_config.transport.transport_class
         self.pool_transport: WorkerPoolTransport = transport_cls.create(
-            loop, http_config.num_workers, *args, **kwargs
+            loop, http_config.num_workers, config=http_config.transport
         )
 
         # Worker processes

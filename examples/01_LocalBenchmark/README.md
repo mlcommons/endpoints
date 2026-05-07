@@ -18,17 +18,17 @@ This example shows how to:
 bash install_torch.sh
 
 # Or manually
-pip install torch transformers
+uv pip install torch transformers
 ```
 
 ## Usage
 
 ```bash
 # Non-streaming mode (faster, no TTFT metrics)
-python run_tinyllm.py
+uv run python run_tinyllm.py
 
 # Streaming mode (enables TTFT metrics)
-python run_tinyllm.py --streaming
+uv run python run_tinyllm.py --streaming
 ```
 
 ## Output

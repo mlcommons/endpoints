@@ -36,6 +36,12 @@ class InputValidationError(CLIError):
     pass
 
 
+class DatasetValidationError(InputValidationError):
+    """Invalid --dataset string or dataset configuration."""
+
+    pass
+
+
 class SetupError(CLIError):
     """Error during initialization/setup.
 

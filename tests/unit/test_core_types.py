@@ -24,6 +24,7 @@ from inference_endpoint.core.types import (
     QueryResult,
     QueryStatus,
     StreamChunk,
+    TextModelOutput,
 )
 from inference_endpoint.openai.openai_adapter import OpenAIAdapter
 
@@ -81,10 +82,12 @@ class TestQueryResult:
 
     def test_query_result_creation(self) -> None:
         """Test creating a query result."""
-        result = QueryResult(id="test-123", response_output="Test response")
+        result = QueryResult(
+            id="test-123", response_output=TextModelOutput(output="Test response")
+        )
 
         assert result.id == "test-123"
-        assert result.response_output == "Test response"
+        assert result.response_output == TextModelOutput(output="Test response")
         assert result.error is None
         assert result.completed_at is not None
 
@@ -94,11 +97,10 @@ class TestStreamChunk:
 
     def test_stream_chunk_creation(self) -> None:
         """Test creating a stream chunk."""
-        chunk = StreamChunk(id="test-123", response_chunk="partial", is_complete=False)
+        chunk = StreamChunk(id="test-123", response_chunk="partial")
 
         assert chunk.id == "test-123"
         assert chunk.response_chunk == "partial"
-        assert chunk.is_complete is False
         assert chunk.metadata == {}
 
 

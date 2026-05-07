@@ -10,20 +10,26 @@ For post-training quantization, users can use the [cnn-dailymail-calibration-lis
 
 ```
 curl -OL https://raw.githubusercontent.com/mlcommons/inference/v4.0/calibration/CNNDailyMail/calibration-list.txt
-python download_cnndm.py --save-dir data --calibration-ids-file calibration-list.txt --split train
+uv run python download_cnndm.py --save-dir data --calibration-ids-file calibration-list.txt --split train
 ```
 
 ## Launch the server
 
-The following environment variables are used by the commands below to make the scripts easier to run
+The following environment variables are used by the commands below to make the scripts easier to run:
 
 ```
 export HF_TOKEN=<your Hugging Face token>
-export HF_HOME=<Path to your hf_home, usually /USERNAME/.cache/huggingface>
+export HF_HOME=<Path to your hf_home, e.g. ~/.cache/huggingface>
 export MODEL_NAME=<model to run, for instance meta-llama/Llama-3.1-8B-Instruct>
 ```
 
-It is convenient to download the model prior to launch so that the container can reuse the model instead of having to download it post-launch. This can be done via `hf download $MODEL_NAME`. The models downloaded can be verified via `hf cache scan`
+Download the model to the local HuggingFace cache before launching the container. This allows the container to reuse the already-downloaded weights via the volume mount rather than downloading them at startup:
+
+```
+hf download $MODEL_NAME
+```
+
+The cached models can be verified with `hf cache scan`.
 
 ### [vLLM](https://github.com/vllm-project/vllm)
 
@@ -42,7 +48,7 @@ docker run --runtime nvidia --gpus all -v ${HF_HOME}:/root/.cache/huggingface --
 - Launch the benchmark with config yaml
 
 ```
-inference-endpoint benchmark from-config -c offline_llama3_8b_cnn.yaml --timeout 600
+uv run inference-endpoint benchmark from-config -c offline_llama3_8b_cnn.yaml --timeout 600
 ```
 
 ### To run Online mode
@@ -52,5 +58,5 @@ inference-endpoint benchmark from-config -c offline_llama3_8b_cnn.yaml --timeout
 - Launch the benchmark with config yaml (For performance only, remove the accuracy dataset entry in the `online_llama3_8b_cnn.yaml`)
 
 ```
-inference-endpoint benchmark from-config -c online_llama3_8b_cnn.yaml --timeout 600
+uv run inference-endpoint benchmark from-config -c online_llama3_8b_cnn.yaml --timeout 600
 ```

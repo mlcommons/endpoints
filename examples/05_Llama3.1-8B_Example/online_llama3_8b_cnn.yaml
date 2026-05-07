@@ -39,14 +39,7 @@ settings:
     target_concurrency: 128
 
   client:
-    workers: 4 # Number of client workers
-
-metrics:
-  collect:
-    - "throughput"
-    - "latency"
-    - "ttft"
-    - "tpot"
+    num_workers: 4 # Number of client workers
 
 endpoint_config:
   endpoints:

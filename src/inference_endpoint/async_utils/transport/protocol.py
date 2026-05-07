@@ -15,30 +15,65 @@
 
 """Transport protocol definitions for worker IPC.
 
-Defines the protocols for transport abstraction, allowing the Worker to be
-completely agnostic of the transport backend (ZMQ, shared memory, etc.).
+Defines the protocols and base types for transport abstraction, allowing the
+Worker to be completely agnostic of the transport backend (ZMQ, shared memory, etc.).
 """
 
 from __future__ import annotations
 
 import asyncio
+import builtins
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 import msgspec
+from pydantic import BaseModel, ConfigDict, Field
 
-from inference_endpoint.async_utils.transport.record import (
+from inference_endpoint.core.record import (
     ErrorEventType,
     EventRecord,
     decode_event_record,
     encode_event_record,
 )
-from inference_endpoint.core.types import Query, QueryResult, StreamChunk
+from inference_endpoint.core.types import ErrorData, Query, QueryResult, StreamChunk
 
-if TYPE_CHECKING:
-    from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
+
+class TransportConfig(BaseModel, ABC):
+    """Base transport configuration. Subclassed per transport backend.
+
+    Each subclass must:
+    - Set ``type`` to a unique Literal string for discriminated union dispatch
+    - Implement the ``transport_class`` property to return the transport's
+      ``WorkerPoolTransport`` implementation class
+    """
+
+    type: str = Field(description="Transport backend (currently: zmq)")  # noqa: A003
+    recv_buffer_size: int = Field(
+        default=4 * 4 * 1024 * 1024,
+        ge=1,
+        description="IPC receive buffer size in bytes (default 16MB). Increase for multimodal payloads.",
+    )
+    send_buffer_size: int = Field(
+        default=4 * 4 * 1024 * 1024,
+        ge=1,
+        description="IPC send buffer size in bytes (default 16MB). Increase for multimodal payloads.",
+    )
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    @classmethod
+    def create_default(cls) -> TransportConfig:
+        """Create the default transport config."""
+        from .zmq import ZMQTransportConfig
+
+        return ZMQTransportConfig()  # type: ignore[return-value]
+
+    @property
+    @abstractmethod
+    def transport_class(self) -> builtins.type[WorkerPoolTransport]:
+        """The WorkerPoolTransport implementation for this backend."""
+        ...
 
 
 @runtime_checkable
@@ -94,16 +129,17 @@ class WorkerConnector(Protocol):
 
     @asynccontextmanager
     async def connect(
-        self, worker_id: int, zmq_context: ManagedZMQContext
+        self, worker_id: int
     ) -> AsyncIterator[tuple[ReceiverTransport, SenderTransport]]:
         """Connect worker transports and signal readiness.
 
         Creates request receiver and response sender, signals readiness
         to main process, then yields transports. Cleans up on exit.
+        Transport-specific context (e.g. ZMQ) is managed internally by
+        the connector implementation.
 
         Args:
             worker_id: Unique identifier for this worker.
-            zmq_context: Managed ZMQ context (e.g. from ManagedZMQContext.scoped() in this process).
 
         Yields:
             Tuple of (request_receiver, response_sender) transports.
@@ -119,23 +155,12 @@ class WorkerPoolTransport(Protocol):
     Transport for endpoint-child child-process (workers) pool communication.
     Provides fan-out (send to workers) and fan-in (receive from workers).
 
+    Context and pool creation are managed by WorkerManager from TransportConfig.
+
     Usage:
-        with ManagedZMQContext.scoped() as zmq_ctx:
-            pool = ZmqWorkerPoolTransport.create(loop, 4, zmq_ctx)
-
-        # Spawn workers with connector
-        for i in range(4):
-            spawn_worker(i, pool.worker_connector, ...)
-
-        # Wait for workers
-        await pool.wait_for_workers_ready(timeout=30)
-
-        # Use
         pool.send(worker_id, query)
         result = pool.poll()        # Non-blocking
         result = await pool.recv()  # Blocking
-
-        # Cleanup
         pool.cleanup()
     """
 
@@ -144,16 +169,16 @@ class WorkerPoolTransport(Protocol):
         cls,
         loop: asyncio.AbstractEventLoop,
         num_workers: int,
-        *args: Any,
-        **kwargs: Any,
+        config: TransportConfig | None = None,
     ) -> WorkerPoolTransport:
         """Factory to create a worker pool transport.
+
+        Transport implementations manage their own context internally.
 
         Args:
             loop: Event loop for transport registration.
             num_workers: Number of workers (required).
-            *args: Transport-specific positional arguments (e.g. ManagedZMQContext for ZMQ).
-            **kwargs: Transport-specific config overrides.
+            config: Transport configuration. Defaults per implementation.
 
         Returns:
             Configured WorkerPoolTransport instance.
@@ -253,9 +278,19 @@ class EventRecordPublisher(ABC):
         """
         raise NotImplementedError("Subclasses must implement this method.")
 
+    def flush(self) -> None:  # noqa: B027 — intentionally non-abstract
+        """Force-send any buffered records.
+
+        Unbuffered implementations need no override. Buffered subclasses
+        (e.g., ZmqEventRecordPublisher) override this to drain their buffer.
+        """
+
     @abstractmethod
     def close(self) -> None:
-        """Close the publisher and release resources."""
+        """Close the publisher and release resources.
+
+        Implementations must flush any buffered records before closing.
+        """
         raise NotImplementedError("Subclasses must implement this method.")
 
 
@@ -341,14 +376,12 @@ class EventRecordSubscriber(ABC):
                 try:
                     event_record = decode_event_record(payload)
                 except msgspec.DecodeError as e:
-                    # Record an error instead
-                    # TODO: Make `data` field more rigidly typed
                     event_record = EventRecord(
                         event_type=ErrorEventType.GENERIC,
-                        data={
-                            "error_type": "msgspec.DecodeError",
-                            "error_message": str(e),
-                        },
+                        data=ErrorData(
+                            error_type="msgspec.DecodeError",
+                            error_message=str(e),
+                        ),
                     )
                 records.append(event_record)
         except StopIteration:
@@ -372,6 +405,7 @@ class EventRecordSubscriber(ABC):
 
 
 __all__ = [
+    "TransportConfig",
     "ReceiverTransport",
     "SenderTransport",
     "WorkerConnector",

@@ -13,90 +13,42 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""LoadGenerator integration for HTTPEndpointClient."""
+"""SampleIssuer implementation wrapping HTTPEndpointClient.
 
-import asyncio
-import logging
+Thin adapter: delegates issue/recv/shutdown to the underlying HTTP client.
+The BenchmarkSession owns the response receive loop — this class does NOT
+run its own _handle_responses coroutine.
+"""
 
 from inference_endpoint.core.types import Query, QueryResult, StreamChunk
 from inference_endpoint.endpoint_client.http_client import HTTPEndpointClient
-from inference_endpoint.load_generator import SampleIssuer
-from inference_endpoint.load_generator.sample import Sample, SampleEventHandler
-from inference_endpoint.profiling import profile
-
-logger = logging.getLogger(__name__)
 
 
-class HttpClientSampleIssuer(SampleIssuer):
-    """
-    SampleIssuer interface for HTTPEndpointClient.
-    Routes completed responses to SampleEventHandler.
+class HttpClientSampleIssuer:
+    """SampleIssuer wrapping an HTTPEndpointClient.
+
+    Satisfies the SampleIssuer protocol from load_generator.session.
 
     Usage:
-        # Create HTTP client and sample issuer - auto-initializes
-        client = HTTPEndpointClient(config)
+        client = await HTTPEndpointClient.create(config, loop)
         issuer = HttpClientSampleIssuer(client)
 
-        # Issue samples
-        issuer.issue(sample)
-
-        # shutdown() is optional - only needed for early exit
+        issuer.issue(query)                    # sync ZMQ push
+        response = await issuer.recv()         # async ZMQ recv
+        issuer.shutdown()                      # no-op (client shutdown called separately)
     """
 
-    def __init__(
-        self,
-        http_client: HTTPEndpointClient,
-    ):
-        super().__init__()
+    def __init__(self, http_client: HTTPEndpointClient):
         self.http_client = http_client
 
-        # Start response handler task to route completed responses back to SampleEventHandler
-        self._response_task = asyncio.run_coroutine_threadsafe(
-            self._handle_responses(), self.http_client.loop
-        )
+    def issue(self, query: Query) -> None:
+        """Issue query to HTTP endpoint. Non-blocking (ZMQ push)."""
+        self.http_client.issue(query)
 
-    @profile
-    async def _handle_responses(self):
-        """Route completed responses to SampleEventHandler."""
-        while True:
-            try:
-                # TODO(vir): consider using recv() + drain
-                match response := await self.http_client.recv():
-                    case StreamChunk(is_complete=False):
-                        # NOTE(vir): is_complete=True should not be received, QueryResult is expected instead
-                        SampleEventHandler.stream_chunk_complete(response)
+    async def recv(self) -> QueryResult | StreamChunk | None:
+        """Wait for next response. Returns None when transport is closed."""
+        return await self.http_client.recv()
 
-                    case QueryResult(error=err):
-                        SampleEventHandler.query_result_complete(response)
-                        if err is not None:
-                            logger.error(f"Error in request {response.id}: {err}")
-
-                    case None:
-                        # Transport closed or shutdown
-                        break
-
-                    case _:
-                        raise ValueError(f"Unexpected response type: {type(response)}")
-
-            except asyncio.CancelledError:
-                # Handle shutdown signal
-                break
-            except Exception as e:
-                logger.error(f"Error in response handler: {e}", exc_info=True)
-                continue
-
-    @profile
-    def issue(self, sample: Sample):
-        """Issue sample to HTTP endpoint."""
-        # NOTE(vir):
-        # If using extra headers (e.g., Authorization), pre-cache them in
-        # worker.py request-template via HttpRequestTemplate.cache_headers()
-        # to avoid per-request encoding overhead at runtime.
-        self.http_client.issue(Query(id=sample.uuid, data=sample.data))
-
-    def shutdown(self):
-        """
-        Gracefully shutdown sample issuer.
-        Will cancel the response-handler task.
-        """
-        self._response_task.cancel()
+    def shutdown(self) -> None:
+        """No-op. HTTPEndpointClient.shutdown() is called separately by the caller."""
+        pass

@@ -15,17 +15,34 @@
 
 """Transport abstraction for worker IPC."""
 
+from typing import Annotated, TypeAlias
+
+from pydantic import Field
+
 from .protocol import (
     ReceiverTransport,
     SenderTransport,
+    TransportConfig,
     WorkerConnector,
     WorkerPoolTransport,
 )
 
 # ZMQ implementation
-from .zmq import ZmqWorkerPoolTransport
+from .zmq import ZMQTransportConfig, ZmqWorkerPoolTransport
+
+# Discriminated union of transport backends, dispatched on the ``type`` field.
+# To add a new transport: define a TransportConfig subclass with a Literal type
+# field and add it to this union.
+AnyTransportConfig: TypeAlias = Annotated[  # noqa: UP040
+    ZMQTransportConfig,  # extend with: ZMQTransportConfig | ShmTransportConfig
+    Field(discriminator="type"),
+]
 
 __all__ = [
+    # Config
+    "AnyTransportConfig",
+    "TransportConfig",
+    "ZMQTransportConfig",
     # Protocols
     "ReceiverTransport",
     "SenderTransport",

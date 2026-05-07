@@ -1,7 +1,7 @@
 name: "gpt-oss-120b-benchmark"
 version: "1.0"
 type: "online"
-timeout: 60000
+timeout: 60
 
 model_params:
   name: "openai/gpt-oss-120b"
@@ -49,15 +49,7 @@ settings:
     target_concurrency: 512
 
   client:
-    workers: 8
-    record_worker_events: false
-
-metrics:
-  collect:
-    - "throughput"
-    - "latency"
-    - "ttft"
-    - "tpot"
+    num_workers: 8
 
 endpoint_config:
   endpoints:

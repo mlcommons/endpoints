@@ -16,6 +16,7 @@
 """Tests for HTTP API implementation."""
 
 import asyncio
+import socket
 from urllib.parse import urlparse
 
 import httptools
@@ -25,6 +26,7 @@ from inference_endpoint.endpoint_client.http import (
     ConnectionPool,
     HttpRequestTemplate,
     HttpResponseProtocol,
+    _SocketConfig,
 )
 from inference_endpoint.testing.echo_server import EchoServer
 
@@ -420,6 +422,17 @@ class TestHttpResponseProtocol:
 
 class TestConnectionPool:
     """Tests for connection pooling."""
+
+    @pytest.mark.asyncio
+    async def test_socket_options_reflect_defaults(self, pool):
+        """Newly created connections have SO_KEEPALIVE disabled by default."""
+        conn = await pool.acquire()
+        try:
+            sock = conn.transport.get_extra_info("socket")
+            keepalive = sock.getsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE)
+            assert keepalive == _SocketConfig.SO_KEEPALIVE
+        finally:
+            pool.release(conn)
 
     @pytest.mark.asyncio
     async def test_acquire_creates_and_reuses(self, pool):

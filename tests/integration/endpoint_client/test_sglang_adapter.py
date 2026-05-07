@@ -88,7 +88,7 @@ class TestSGLangAdapterIntegration:
         assert result.id == "sglang-test-1"
         assert "response_output" in dir(result)
         assert result.response_output is not None
-        assert len(result.response_output) > 0
+        assert len(result.get_response_output_string()) > 0
 
         # Verify metadata
         assert result.metadata is not None

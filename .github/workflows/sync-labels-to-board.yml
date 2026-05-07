@@ -1,0 +1,150 @@
+name: Sync Labels to Project Board
+
+on:
+  issues:
+    types: [labeled, unlabeled]
+
+env:
+  PROJECT_ID: "PVT_kwDOBAnwDc4BTQvY"
+  # These IDs are populated from the board's GraphQL field configuration.
+  # To find them: query the board fields via GraphQL and extract option IDs.
+  PRIORITY_FIELD_ID: "PVTSSF_lADOBAnwDc4BTQvYzhBKk68"
+  AREA_FIELD_ID: "PVTSSF_lADOBAnwDc4BTQvYzhBKk7A"
+
+jobs:
+  sync-labels:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sync priority and area labels to board fields
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issue = context.payload.issue;
+            const labels = issue.labels.map(l => l.name);
+
+            // --- Field and option ID mappings ---
+            // Priority field
+            const PRIORITY_FIELD_ID = process.env.PRIORITY_FIELD_ID;
+            const PRIORITY_MAP = {
+              'priority: ShowStopper': process.env.SHOWSTOPPER_OPTION_ID,
+              'priority: P0': process.env.P0_OPTION_ID,
+              'priority: P1': process.env.P1_OPTION_ID,
+              'priority: P2': process.env.P2_OPTION_ID,
+              'priority: P3': process.env.P3_OPTION_ID,
+            };
+
+            // Area field
+            const AREA_FIELD_ID = process.env.AREA_FIELD_ID;
+            const AREA_MAP = {
+              'area: core-engine': process.env.CORE_ENGINE_OPTION_ID,
+              'area: client': process.env.CLIENT_OPTION_ID,
+              'area: metrics': process.env.METRICS_OPTION_ID,
+              'area: dataset': process.env.DATASET_OPTION_ID,
+              'area: config-cli': process.env.CONFIG_CLI_OPTION_ID,
+              'area: evaluation': process.env.EVALUATION_OPTION_ID,
+              'area: adapters': process.env.ADAPTERS_OPTION_ID,
+              'area: mlcommons': process.env.MLCOMMONS_OPTION_ID,
+            };
+
+            const PROJECT_ID = process.env.PROJECT_ID;
+
+            // Find the board item for this issue
+            const findItemQuery = `
+              query($projectId: ID!, $cursor: String) {
+                node(id: $projectId) {
+                  ... on ProjectV2 {
+                    items(first: 100, after: $cursor) {
+                      nodes {
+                        id
+                        content {
+                          ... on Issue { number }
+                        }
+                      }
+                      pageInfo { hasNextPage endCursor }
+                    }
+                  }
+                }
+              }
+            `;
+
+            let itemId = null;
+            let cursor = null;
+            while (!itemId) {
+              const result = await github.graphql(findItemQuery, {
+                projectId: PROJECT_ID,
+                cursor: cursor,
+              });
+              const items = result.node.items;
+              const match = items.nodes.find(
+                n => n.content && n.content.number === issue.number
+              );
+              if (match) {
+                itemId = match.id;
+                break;
+              }
+              if (!items.pageInfo.hasNextPage) break;
+              cursor = items.pageInfo.endCursor;
+            }
+
+            if (!itemId) {
+              core.info(`Issue #${issue.number} not found on board, skipping.`);
+              return;
+            }
+
+            // Helper to update a single-select field
+            async function setField(fieldId, optionId) {
+              if (!optionId) {
+                // Clear the field
+                await github.graphql(`
+                  mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!) {
+                    clearProjectV2ItemFieldValue(input: {
+                      projectId: $projectId, itemId: $itemId, fieldId: $fieldId
+                    }) { projectV2Item { id } }
+                  }
+                `, { projectId: PROJECT_ID, itemId, fieldId });
+              } else {
+                await github.graphql(`
+                  mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+                    updateProjectV2ItemFieldValue(input: {
+                      projectId: $projectId, itemId: $itemId, fieldId: $fieldId,
+                      value: { singleSelectOptionId: $optionId }
+                    }) { projectV2Item { id } }
+                  }
+                `, { projectId: PROJECT_ID, itemId, fieldId, optionId });
+              }
+            }
+
+            // Sync priority: find the highest-priority label on the issue
+            const priorityOrder = [
+              'priority: ShowStopper',
+              'priority: P0',
+              'priority: P1',
+              'priority: P2',
+              'priority: P3',
+            ];
+            const activePriority = priorityOrder.find(p => labels.includes(p));
+            const priorityOptionId = activePriority ? PRIORITY_MAP[activePriority] : null;
+            await setField(PRIORITY_FIELD_ID, priorityOptionId);
+            core.info(`Priority set to: ${activePriority || '(cleared)'}`);
+
+            // Sync area: use the first area label found
+            const activeArea = labels.find(l => l.startsWith('area: '));
+            const areaOptionId = activeArea ? AREA_MAP[activeArea] : null;
+            await setField(AREA_FIELD_ID, areaOptionId);
+            core.info(`Area set to: ${activeArea || '(cleared)'}`);
+        env:
+          PRIORITY_FIELD_ID: ${{ env.PRIORITY_FIELD_ID }}
+          AREA_FIELD_ID: ${{ env.AREA_FIELD_ID }}
+          SHOWSTOPPER_OPTION_ID: "26ab336c"
+          P0_OPTION_ID: "d3612dd9"
+          P1_OPTION_ID: "7ff45c96"
+          P2_OPTION_ID: "e41b2ee9"
+          P3_OPTION_ID: "d4d24170"
+          CORE_ENGINE_OPTION_ID: "db5c9511"
+          CLIENT_OPTION_ID: "ffeff676"
+          METRICS_OPTION_ID: "04637e5a"
+          DATASET_OPTION_ID: "b493fd0d"
+          CONFIG_CLI_OPTION_ID: "ae1f5588"
+          EVALUATION_OPTION_ID: "96e592b6"
+          ADAPTERS_OPTION_ID: "6c615274"
+          MLCOMMONS_OPTION_ID: "d5eff045"
