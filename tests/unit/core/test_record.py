@@ -17,6 +17,7 @@
 
 import time
 
+import msgspec
 import pytest
 from inference_endpoint.core.record import (
     TOPIC_FRAME_SIZE,
@@ -203,3 +204,39 @@ class TestEventRecordRoundTrip:
         _, payload = _codec.encode(record)
         decoded = _codec.decode(payload)
         assert decoded.timestamp_ns == ts
+
+
+class TestEventRecordCodecOnDecodeError:
+    """Tests for the two branches of EventRecordCodec.on_decode_error.
+
+    The wrap branch is what consumers see for malformed payloads. The
+    re-raise branch is the behavior MessageSubscriber._on_readable relies
+    on to surface decode-path bugs (otherwise a non-DecodeError would
+    propagate out of the asyncio reader callback and silently de-register
+    the subscriber).
+    """
+
+    def test_wraps_msgspec_decode_error_into_generic_error_record(self):
+        # Force a real DecodeError via the codec's own decoder so the test
+        # exercises the realistic flow, not a hand-constructed exception.
+        payload = b"\xc1\xc1\xc1\xc1"  # invalid msgpack
+        try:
+            _codec.decode(payload)
+        except msgspec.DecodeError as exc:
+            captured = exc
+        else:
+            pytest.fail("Expected msgspec.DecodeError on garbage payload")
+
+        rec = _codec.on_decode_error(payload, captured)
+        assert isinstance(rec, EventRecord)
+        assert rec.event_type == ErrorEventType.GENERIC
+        assert isinstance(rec.data, ErrorData)
+        assert rec.data.error_type == type(captured).__name__
+        assert rec.data.error_message == str(captured)
+
+    def test_reraises_non_decode_error(self):
+        # ValueError is the canonical "not a DecodeError" exception type:
+        # it must propagate so MessageSubscriber._on_readable does not
+        # silently swallow decode-path bugs.
+        with pytest.raises(ValueError, match="not a decode error"):
+            _codec.on_decode_error(b"", ValueError("not a decode error"))
