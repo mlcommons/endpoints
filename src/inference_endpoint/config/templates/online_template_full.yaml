@@ -72,7 +72,7 @@ endpoint_config:
   endpoints:  # Endpoint URL(s). Must include scheme, e.g. 'http://host:port'.
   - http://localhost:8000
   api_key: null  # API key
-  api_type: openai  # API type: openai or sglang | options: openai, sglang
+  api_type: openai  # API type: openai, sglang, or videogen | options: openai, sglang, videogen
 report_dir: null  # Report output directory
 timeout: null  # Global timeout in seconds
 verbose: false  # Enable verbose logging

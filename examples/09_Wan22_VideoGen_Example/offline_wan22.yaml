@@ -1,0 +1,54 @@
+# Offline Video Generation Benchmark for WAN 2.2 (GB200/GB300)
+#
+# Targets trtllm-serve POST /v1/videos/generations directly (no proxy).
+# Uses response_format=video_path: server saves video to Lustre and returns
+# the file path, avoiding large video byte payloads over HTTP/ZMQ.
+#
+# MLPerf inference parameters (text_to_video task):
+#   Resolution:  720x1280 (portrait)
+#   Duration:    81 frames = 5 s
+#   Steps:       20 denoising steps
+#   Guidance:    4.0 (primary CFG) / 3.0 (null-text secondary)
+#   Seed:        42 (fixed for reproducibility; combine with fixed_latent.pt)
+#   Dataset:     248 prompts from shopify_product_catalogue::q3vl
+#
+# Resolution / duration / steps / guidance / seed are defaulted on
+# `VideoPathRequest`. Each JSONL row carries `prompt` plus the canonical
+# MLPerf `negative_prompt`; both flow into `query.data` and serialise into
+# the request body, while unset fields fall back to the request defaults.
+
+name: "offline-wan22-video-generation-benchmark"
+version: "1.0"
+type: "offline"
+
+model_params:
+  name: "wan22"
+  max_new_tokens: 1 # Ignored by VideoGenAdapter; kept >0 so swapping api_type to openai/sglang for debugging doesn't yield a 400.
+  streaming: "off" # WAN 2.2 uses non-streaming HTTP POST/response
+
+datasets:
+  - name: wan22_prompts
+    path: examples/09_Wan22_VideoGen_Example/wan22_prompts.jsonl
+    type: "performance"
+    samples: 248
+
+settings:
+  runtime:
+    max_duration_ms: 600000 # 10 minute cap
+    scheduler_random_seed: 42
+    dataloader_random_seed: 42
+    n_samples_to_issue: 248
+
+  load_pattern:
+    type: "max_throughput"
+
+  client:
+    num_workers: 4
+
+endpoint_config:
+  endpoints:
+    - "http://localhost:8000"
+  api_type: "videogen"
+  api_key: null
+
+report_dir: logs/wan22_video_generation_benchmark

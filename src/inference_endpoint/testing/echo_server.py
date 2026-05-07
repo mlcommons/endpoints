@@ -311,16 +311,23 @@ class EchoServer(HTTPServer):
         asyncio.set_event_loop(self._loop)
         self._loop.run_until_complete(self._start_server())
 
+    def _register_routes(self, app: "web.Application") -> None:
+        """Register HTTP routes on the aiohttp app.
+
+        Subclasses can override to swap out the OpenAI-shaped routes for
+        a different wire contract while reusing the lifecycle plumbing.
+        """
+        app.router.add_post(
+            "/v1/chat/completions", self._handle_echo_chat_completions_request
+        )
+        app.router.add_post("/echo", self._handle_echo_request)
+
     async def _start_server(self):
         """Start the HTTP server."""
         try:
             # Create the web application
             self.app = web.Application()
-
-            self.app.router.add_post(
-                "/v1/chat/completions", self._handle_echo_chat_completions_request
-            )
-            self.app.router.add_post("/echo", self._handle_echo_request)
+            self._register_routes(self.app)
 
             # Start the server
             self.runner = web.AppRunner(self.app)
