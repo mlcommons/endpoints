@@ -891,3 +891,86 @@ class TestMixedTypeSerialization:
         assert decoded.metadata["large_int"] == 9999999999999999
         assert decoded.metadata["negative"] == -123.456
         assert decoded.metadata["zero"] == 0
+
+
+@pytest.mark.unit
+class TestTextModelOutputToolCalls:
+    """Test TextModelOutput.tool_calls field: coercion, __str__, text_after_first_chunk."""
+
+    _TC = [
+        {"id": "c1", "type": "function", "function": {"name": "f", "arguments": "{}"}}
+    ]
+
+    def test_list_coerced_to_tuple(self):
+        tmo = TextModelOutput(output="hi", tool_calls=self._TC)
+        assert isinstance(tmo.tool_calls, tuple)
+        assert len(tmo.tool_calls) == 1
+
+    def test_none_tool_calls(self):
+        tmo = TextModelOutput(output="hi", tool_calls=None)
+        assert tmo.tool_calls is None
+
+    def test_str_includes_tool_calls_json(self):
+        tmo = TextModelOutput(output="hello", tool_calls=self._TC)
+        s = str(tmo)
+        assert "hello" in s
+        assert '"name"' in s
+        assert '"function"' in s
+
+    def test_str_without_tool_calls(self):
+        tmo = TextModelOutput(output="hello")
+        assert str(tmo) == "hello"
+
+    def test_text_after_first_chunk_includes_tool_calls(self):
+        # streaming output with tool_calls: first chunk skipped, tool_calls appended
+        tmo = TextModelOutput(output=("a", "b"), tool_calls=self._TC)
+        after = tmo.text_after_first_chunk()
+        assert "b" in after
+        assert '"function"' in after
+
+    def test_text_after_first_chunk_tool_calls_only_no_content(self):
+        # tool_calls only (pure agentic response with no text content)
+        tmo = TextModelOutput(output=[], tool_calls=self._TC)
+        after = tmo.text_after_first_chunk()
+        assert '"function"' in after
+
+    def test_as_message_parts_str_output(self):
+        tmo = TextModelOutput(output="hello", tool_calls=self._TC)
+        content, reasoning, tc = tmo.as_message_parts()
+        assert content == "hello"
+        assert reasoning is None
+        assert tc == tmo.tool_calls
+
+    def test_as_message_parts_tuple_output(self):
+        tmo = TextModelOutput(
+            output=("a", "b"), reasoning=("r1", "r2"), tool_calls=self._TC
+        )
+        content, reasoning, tc = tmo.as_message_parts()
+        assert content == "ab"
+        assert reasoning == "r1r2"
+        assert tc == tmo.tool_calls
+
+    def test_as_message_parts_after_first_chunk_str_output(self):
+        tmo = TextModelOutput(output="hello", tool_calls=self._TC)
+        content, reasoning, tc = tmo.as_message_parts_after_first_chunk()
+        # non-streaming str output: no "after first chunk" for content
+        assert content == ""
+        assert reasoning is None
+        assert tc == tmo.tool_calls
+
+    def test_as_message_parts_after_first_chunk_tuple_output(self):
+        tmo = TextModelOutput(output=("a", "b", "c"), tool_calls=self._TC)
+        content, reasoning, tc = tmo.as_message_parts_after_first_chunk()
+        assert content == "bc"
+        assert reasoning is None
+        assert tc == tmo.tool_calls
+
+    def test_serialization_roundtrip_with_tool_calls(self):
+        import msgspec
+
+        tmo = TextModelOutput(output="hello", tool_calls=self._TC)
+        encoded = msgspec.msgpack.encode(tmo)
+        decoded = msgspec.msgpack.decode(encoded, type=TextModelOutput)
+        assert decoded.tool_calls is not None
+        assert len(decoded.tool_calls) == 1
+        assert decoded.tool_calls[0]["function"]["name"] == "f"

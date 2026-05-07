@@ -119,6 +119,22 @@ class MockTokenizePool:
         await asyncio.sleep(self._delay)
         return len(text.split())
 
+    async def token_count_message_async(
+        self,
+        content: str,
+        reasoning: str | None,
+        tool_calls,
+        _loop: asyncio.AbstractEventLoop,
+    ) -> int:
+        import msgspec
+
+        await asyncio.sleep(self._delay)
+        tool_calls_str = (
+            msgspec.json.encode(list(tool_calls)).decode() if tool_calls else ""
+        )
+        combined = (content or "") + " " + (reasoning or "") + " " + tool_calls_str
+        return len(combined.split())
+
     def close(self) -> None:
         pass
 

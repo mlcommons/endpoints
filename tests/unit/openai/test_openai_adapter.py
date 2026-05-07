@@ -145,3 +145,50 @@ def test_no_tools_key_when_absent():
 
     # Pydantic model_dump includes None fields; tools must be None when not supplied
     assert payload.get("tools") is None
+
+
+@pytest.mark.unit
+def test_from_endpoint_response_populates_tool_calls_in_text_output():
+    """Non-streaming response with tool_calls populates TextModelOutput.tool_calls."""
+    tool_calls_data = [
+        {
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "search", "arguments": '{"q": "test"}'},
+        }
+    ]
+    response_bytes = json.dumps(
+        {
+            "id": "chatcmpl-test",
+            "object": "chat.completion",
+            "created": 1234567890,
+            "model": "test-model",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "refusal": "",
+                        "tool_calls": tool_calls_data,
+                    },
+                    "finish_reason": "tool_calls",
+                    "logprobs": {"content": [], "refusal": []},
+                }
+            ],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30},
+            "system_fingerprint": None,
+        }
+    ).encode()
+
+    result = OpenAIAdapter.decode_response(response_bytes, "q1")
+
+    from inference_endpoint.core.types import TextModelOutput
+
+    assert isinstance(result.response_output, TextModelOutput)
+    assert result.response_output.tool_calls is not None
+    assert len(result.response_output.tool_calls) == 1
+    assert result.response_output.tool_calls[0]["function"]["name"] == "search"
+    # metadata path preserved
+    assert result.metadata.get("tool_calls") is not None
+    assert result.metadata["tool_calls"][0]["function"]["name"] == "search"

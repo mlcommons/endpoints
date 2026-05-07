@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
+
 import msgspec
 import pytest
 from inference_endpoint.async_utils.services.metrics_aggregator.metrics_table import (
@@ -262,3 +264,130 @@ class TestMetricsTable:
         assert table.tracked_blocks[1].duration_ns == 200  # 1000 - 800
         assert table.total_tracked_duration_ns == 800
         assert table.total_completed_tracked_samples == 2
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+class TestOslTriggerToolCalls:
+    """OslTrigger routes to message path when tool_calls are present."""
+
+    async def test_osl_with_tool_calls_uses_message_path(self):
+        """OslTrigger stores combined content+tool_calls word count."""
+        from inference_endpoint.async_utils.services.metrics_aggregator.metrics_table import (
+            OslTrigger,
+        )
+        from inference_endpoint.core.types import TextModelOutput
+
+        from .conftest import InMemoryKVStore, MockTokenizePool
+
+        kv = InMemoryKVStore()
+        loop = asyncio.get_running_loop()
+        pool = MockTokenizePool(delay=0)
+        trigger = OslTrigger(kv, pool, loop)
+        trigger.kv_store.create_key("osl", "series", dtype=int)
+
+        tool_calls = (
+            {
+                "id": "c1",
+                "type": "function",
+                "function": {"name": "f", "arguments": "{}"},
+            },
+        )
+        tmo = TextModelOutput(output="hello world", tool_calls=tool_calls)
+        ev = EventRecord(
+            event_type=SampleEventType.COMPLETE,
+            timestamp_ns=1000,
+            sample_uuid="s1",
+            data=tmo,
+        )
+        from inference_endpoint.async_utils.services.metrics_aggregator.metrics_table import (
+            SampleRow,
+        )
+
+        row = SampleRow(sample_uuid="s1")
+        task = trigger.fire(ev, row, {})
+        assert task is not None
+        await task
+
+        values = kv.get_series_values("osl")
+        assert len(values) == 1
+        assert values[0] > 0
+
+    async def test_osl_without_tool_calls_uses_text_path(self):
+        """OslTrigger uses text path for output with no tool_calls (regression guard)."""
+        from inference_endpoint.async_utils.services.metrics_aggregator.metrics_table import (
+            OslTrigger,
+            SampleRow,
+        )
+        from inference_endpoint.core.types import TextModelOutput
+
+        from .conftest import InMemoryKVStore, MockTokenizePool
+
+        kv = InMemoryKVStore()
+        loop = asyncio.get_running_loop()
+        pool = MockTokenizePool(delay=0)
+        trigger = OslTrigger(kv, pool, loop)
+        trigger.kv_store.create_key("osl", "series", dtype=int)
+
+        tmo = TextModelOutput(output="hello world")
+        ev = EventRecord(
+            event_type=SampleEventType.COMPLETE,
+            timestamp_ns=1000,
+            sample_uuid="s1",
+            data=tmo,
+        )
+        row = SampleRow(sample_uuid="s1")
+        task = trigger.fire(ev, row, {})
+        assert task is not None
+        await task
+
+        values = kv.get_series_values("osl")
+        assert values == [2]  # "hello world" -> 2 words
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+class TestTpotTriggerToolCalls:
+    """TpotTrigger routes to message path when tool_calls are present."""
+
+    async def test_tpot_tool_calls_only_response(self):
+        """TpotTrigger includes tool_calls in TPOT denominator for agentic responses."""
+        from inference_endpoint.async_utils.services.metrics_aggregator.metrics_table import (
+            SampleField,
+            SampleRow,
+            TpotTrigger,
+        )
+        from inference_endpoint.core.types import TextModelOutput
+
+        from .conftest import InMemoryKVStore, MockTokenizePool
+
+        kv = InMemoryKVStore()
+        loop = asyncio.get_running_loop()
+        pool = MockTokenizePool(delay=0)
+        trigger = TpotTrigger(kv, pool, loop)
+        trigger.kv_store.create_key("tpot_ns", "series", dtype=float)
+
+        tool_calls = (
+            {
+                "id": "c1",
+                "type": "function",
+                "function": {"name": "f", "arguments": "{}"},
+            },
+        )
+        tmo = TextModelOutput(output=[], tool_calls=tool_calls)
+        ev = EventRecord(
+            event_type=SampleEventType.COMPLETE,
+            timestamp_ns=2000,
+            sample_uuid="s1",
+            data=tmo,
+        )
+        row = SampleRow(sample_uuid="s1")
+        # RECV_FIRST_NS was set at t=1000
+        pre_change = {SampleField.RECV_FIRST_NS: 1000}
+        task = trigger.fire(ev, row, pre_change)
+        assert task is not None
+        await task
+
+        values = kv.get_series_values("tpot_ns")
+        assert len(values) == 1
+        assert values[0] > 0

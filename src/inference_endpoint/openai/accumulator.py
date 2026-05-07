@@ -73,6 +73,16 @@ class OpenAISSEAccumulator(SSEAccumulatorProtocol):
             rc = delta.reasoning_content or delta.reasoning
             self.reasoning_chunks.append(rc)  # type: ignore[arg-type]
             content = rc
+        elif delta.tool_calls and not self.first_chunk_sent:
+            # Pure tool-call delta with no text: emit a zero-length sentinel so
+            # RECV_FIRST / TTFT fires for agentic responses that have no content.
+            sentinel = StreamChunk(
+                id=self.query_id,
+                response_chunk="",
+                metadata={"first_chunk": True},
+            )
+            self.first_chunk_sent = True
+            return sentinel
         else:
             return None
 
@@ -92,6 +102,12 @@ class OpenAISSEAccumulator(SSEAccumulatorProtocol):
             return None
 
     def get_final_output(self) -> QueryResult:
+        tool_calls_tuple: tuple[dict[str, Any], ...] | None = (
+            tuple(self._tool_calls[i] for i in sorted(self._tool_calls))
+            if self._tool_calls
+            else None
+        )
+
         if self.reasoning_chunks:
             resp_reasoning: list[str] = [self.reasoning_chunks[0]]
             if len(self.reasoning_chunks) > 1:
@@ -99,14 +115,19 @@ class OpenAISSEAccumulator(SSEAccumulatorProtocol):
             text_output = TextModelOutput(
                 output="".join(self.output_chunks),
                 reasoning=resp_reasoning,
+                tool_calls=tool_calls_tuple,
             )
         elif self.output_chunks:
             resp_output: list[str] = [self.output_chunks[0]]
             if len(self.output_chunks) > 1:
                 resp_output.append("".join(self.output_chunks[1:]))
-            text_output = TextModelOutput(output=resp_output, reasoning=None)
+            text_output = TextModelOutput(
+                output=resp_output, reasoning=None, tool_calls=tool_calls_tuple
+            )
         else:
-            text_output = TextModelOutput(output=[], reasoning=None)
+            text_output = TextModelOutput(
+                output=[], reasoning=None, tool_calls=tool_calls_tuple
+            )
 
         metadata: dict[str, Any] = {
             "first_chunk": not self.first_chunk_sent,
@@ -114,10 +135,8 @@ class OpenAISSEAccumulator(SSEAccumulatorProtocol):
         }
         if self._finish_reason:
             metadata["finish_reason"] = self._finish_reason
-        if self._tool_calls:
-            metadata["tool_calls"] = [
-                self._tool_calls[i] for i in sorted(self._tool_calls)
-            ]
+        if tool_calls_tuple:
+            metadata["tool_calls"] = list(tool_calls_tuple)
 
         return QueryResult(
             id=self.query_id,

@@ -390,6 +390,7 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
             "max_completion_tokens",
             "max_new_tokens",
             "stream",
+            "tools",
         }
         conv_defaults: dict[str, dict[str, Any]] = {}
         for row in all_rows:

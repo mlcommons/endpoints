@@ -134,13 +134,20 @@ class OpenAIAdapter(HttpRequestAdapter):
         if choice.finish_reason:
             metadata["finish_reason"] = choice.finish_reason.value
         if choice.message.tool_calls:
-            metadata["tool_calls"] = [
-                tc.model_dump(mode="json") for tc in choice.message.tool_calls
+            raw_tool_calls = [
+                tc.model_dump(mode="json") for tc in choice.message.tool_calls.root
             ]
+            metadata["tool_calls"] = raw_tool_calls
+        else:
+            raw_tool_calls = None
 
+        tool_calls_tuple = tuple(raw_tool_calls) if raw_tool_calls else None
         return QueryResult(
             id=result_id,
-            response_output=TextModelOutput(output=choice.message.content or ""),
+            response_output=TextModelOutput(
+                output=choice.message.content or "",
+                tool_calls=tool_calls_tuple,
+            ),
             metadata=metadata,
         )
 

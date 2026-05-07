@@ -103,3 +103,80 @@ class TestTokenizePool:
                 assert pool.token_count("a b c") == 3
             with pytest.raises(RuntimeError, match="closed"):
                 pool.token_count("test")
+
+
+class _FakeTokenizerWithTemplate(_FakeTokenizer):
+    """Tokenizer that supports apply_chat_template for tool-call testing."""
+
+    def apply_chat_template(
+        self, messages, tokenize=True, add_generation_prompt=False
+    ) -> list[int]:
+        parts = []
+        for msg in messages:
+            parts.append(msg.get("content") or "")
+            if msg.get("reasoning_content"):
+                parts.append(msg["reasoning_content"])
+            if msg.get("tool_calls"):
+                import msgspec
+
+                parts.append(msgspec.json.encode(msg["tool_calls"]).decode())
+        combined = " ".join(p for p in parts if p)
+        # Add 2 wrapper tokens to simulate template overhead
+        return [0, 0] + list(range(len(combined.split())))
+
+
+@pytest.mark.unit
+class TestTokenizePoolMessageTokenization:
+    def test_token_count_message_subtracts_baseline(self):
+        """token_count_message returns full_tokens - baseline."""
+        with patch(_MOCK_TARGET, _FakeTokenizerWithTemplate):
+            with TokenizePool("fake", n_workers=1) as pool:
+                # "hello world" -> 2 content words + 2 wrapper = 4; baseline = 0 + 2 = 2; net = 2
+                count = pool.token_count_message("hello world", None, None)
+                assert count == 2
+
+    def test_token_count_message_includes_tool_calls(self):
+        """token_count_message includes tool-call JSON tokens."""
+        with patch(_MOCK_TARGET, _FakeTokenizerWithTemplate):
+            with TokenizePool("fake", n_workers=1) as pool:
+                tool_calls = (
+                    {
+                        "id": "c1",
+                        "type": "function",
+                        "function": {"name": "f", "arguments": "{}"},
+                    },
+                )
+                count_without = pool.token_count_message("hello", None, None)
+                count_with = pool.token_count_message("hello", None, tool_calls)
+                assert count_with > count_without
+
+    def test_token_count_message_fallback_on_exception(self):
+        """Falls back to whitespace split when apply_chat_template raises."""
+
+        class _BadTemplateTokenizer(_FakeTokenizer):
+            def apply_chat_template(self, *args, **kwargs):
+                raise ValueError("template does not support tool_calls")
+
+        with patch(_MOCK_TARGET, _BadTemplateTokenizer):
+            with TokenizePool("fake", n_workers=1) as pool:
+                tool_calls = (
+                    {
+                        "id": "c1",
+                        "type": "function",
+                        "function": {"name": "f", "arguments": "{}"},
+                    },
+                )
+                # Should not raise; falls back to whitespace tokenizer
+                count = pool.token_count_message("hello world", None, tool_calls)
+                assert count > 0
+
+    @pytest.mark.asyncio
+    async def test_token_count_message_async(self):
+        """token_count_message_async returns count without blocking event loop."""
+        with patch(_MOCK_TARGET, _FakeTokenizerWithTemplate):
+            loop = asyncio.get_running_loop()
+            with TokenizePool("fake", n_workers=1) as pool:
+                count = await pool.token_count_message_async(
+                    "hello world", None, None, loop
+                )
+                assert count == 2

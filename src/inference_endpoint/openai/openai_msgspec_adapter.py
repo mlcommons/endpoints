@@ -216,9 +216,15 @@ class OpenAIMsgspecAdapter(HttpRequestAdapter):
         if choice.message.reasoning_content:
             metadata["reasoning_content"] = choice.message.reasoning_content
 
+        tool_calls_tuple = (
+            tuple(choice.message.tool_calls) if choice.message.tool_calls else None
+        )
         return QueryResult(
             id=result_id or response.id,
-            response_output=TextModelOutput(output=choice.message.content or ""),
+            response_output=TextModelOutput(
+                output=choice.message.content or "",
+                tool_calls=tool_calls_tuple,
+            ),
             metadata=metadata,
         )
 

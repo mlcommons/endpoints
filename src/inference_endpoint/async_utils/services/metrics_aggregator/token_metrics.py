@@ -18,14 +18,18 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
+import msgspec
 from transformers import AutoTokenizer
 
 if TYPE_CHECKING:
     from transformers import PreTrainedTokenizerBase
+
+logger = logging.getLogger(__name__)
 
 
 class TokenizePool:
@@ -79,6 +83,19 @@ class TokenizePool:
             self._thread_local.tokenizer = AutoTokenizer.from_pretrained(
                 self._tokenizer_name
             )
+            try:
+                baseline_tokens = self._thread_local.tokenizer.apply_chat_template(
+                    [{"role": "assistant", "content": ""}],
+                    tokenize=True,
+                    add_generation_prompt=False,
+                )
+                self._thread_local.baseline = len(baseline_tokens)
+            except Exception:
+                self._thread_local.baseline = 0
+                logger.warning(
+                    "Failed to compute chat-template baseline for %s; tool-call token counts may be over-estimated",
+                    self._tokenizer_name,
+                )
         return self._thread_local.tokenizer
 
     def _token_count_worker(self, text: str) -> int:
@@ -86,11 +103,57 @@ class TokenizePool:
         tokenizer = self._get_thread_tokenizer()
         return len(tokenizer.tokenize(text))
 
+    def _token_count_message_worker(
+        self,
+        content: str,
+        reasoning: str | None,
+        tool_calls: tuple[dict[str, Any], ...] | None,
+    ) -> int:
+        """Worker entry: tokenize a full assistant message using apply_chat_template.
+
+        Falls back to whitespace-split tokenization if apply_chat_template raises
+        (e.g. the template does not support tool_calls or reasoning fields).
+        """
+        tokenizer = self._get_thread_tokenizer()
+        msg: dict[str, Any] = {"role": "assistant", "content": content or ""}
+        if reasoning:
+            msg["reasoning_content"] = reasoning
+        if tool_calls:
+            msg["tool_calls"] = list(tool_calls)
+        try:
+            full = len(
+                tokenizer.apply_chat_template(
+                    [msg], tokenize=True, add_generation_prompt=False
+                )
+            )
+            baseline = getattr(self._thread_local, "baseline", 0)
+            return max(0, full - baseline)
+        except Exception:
+            tool_calls_json = (
+                msgspec.json.encode(list(tool_calls)).decode() if tool_calls else ""
+            )
+            fallback_text = (content or "") + (reasoning or "") + tool_calls_json
+            return self._token_count_worker(fallback_text)
+
     def token_count(self, text: str) -> int:
         """Return the number of tokens in the input string (blocking)."""
         if self._executor is None:
             raise RuntimeError("TokenizePool is closed")
         future = self._executor.submit(self._token_count_worker, text)
+        return future.result()
+
+    def token_count_message(
+        self,
+        content: str,
+        reasoning: str | None,
+        tool_calls: tuple[dict[str, Any], ...] | None,
+    ) -> int:
+        """Return the token count for an assistant message (blocking)."""
+        if self._executor is None:
+            raise RuntimeError("TokenizePool is closed")
+        future = self._executor.submit(
+            self._token_count_message_worker, content, reasoning, tool_calls
+        )
         return future.result()
 
     async def token_count_async(
@@ -105,6 +168,24 @@ class TokenizePool:
             raise RuntimeError("TokenizePool is closed")
         return await loop.run_in_executor(
             self._executor, self._token_count_worker, text
+        )
+
+    async def token_count_message_async(
+        self,
+        content: str,
+        reasoning: str | None,
+        tool_calls: tuple[dict[str, Any], ...] | None,
+        loop: asyncio.AbstractEventLoop,
+    ) -> int:
+        """Return the token count for an assistant message without blocking the event loop."""
+        if self._executor is None:
+            raise RuntimeError("TokenizePool is closed")
+        return await loop.run_in_executor(
+            self._executor,
+            self._token_count_message_worker,
+            content,
+            reasoning,
+            tool_calls,
         )
 
     def close(self) -> None:

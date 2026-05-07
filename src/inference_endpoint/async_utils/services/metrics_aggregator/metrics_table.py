@@ -174,7 +174,9 @@ class AsyncTokenTrigger(EmitTrigger):
 
     Subclasses implement ``_extract_text()`` to pull the text to tokenize
     from the event record. If text is returned, an async task is created
-    to tokenize and emit. Subclasses can override ``_compute_value()`` to
+    to tokenize and emit. Subclasses can also override ``_extract_message()``
+    to return (content, reasoning, tool_calls) for chat-template–aware tokenization
+    when tool calls are present. Subclasses can override ``_compute_value()`` to
     transform the token count before storing.
     """
 
@@ -198,6 +200,16 @@ class AsyncTokenTrigger(EmitTrigger):
         """Return the text to tokenize, or None to skip."""
         raise NotImplementedError()
 
+    def _extract_message(
+        self, ev_rec: EventRecord, row: SampleRow, pre_change: dict[str, Any]
+    ) -> tuple[str, str | None, tuple[dict[str, Any], ...] | None] | None:
+        """Return (content, reasoning, tool_calls) for message-aware tokenization, or None.
+
+        When non-None is returned, ``token_count_message_async`` is used instead of
+        ``token_count_async``. Default returns None (use text path).
+        """
+        return None
+
     def _compute_value(
         self, token_count: int, ev_rec: EventRecord, pre_change: dict[str, Any]
     ) -> int | float | None:
@@ -207,6 +219,27 @@ class AsyncTokenTrigger(EmitTrigger):
     def fire(self, ev_rec, row, pre_change):
         if self._pool is None or self._loop is None:
             return None
+
+        message_parts = self._extract_message(ev_rec, row, pre_change)
+        if message_parts is not None:
+            content, reasoning, tool_calls = message_parts
+            pool, loop = self._pool, self._loop
+            store, name = self.kv_store, self.metric_name
+            uuid = row.sample_uuid
+
+            async def _tokenize_message_and_emit() -> None:
+                try:
+                    count = await pool.token_count_message_async(
+                        content, reasoning, tool_calls, loop
+                    )
+                    value = self._compute_value(count, ev_rec, pre_change)
+                    if value is not None:
+                        store.update(name, value)
+                except Exception:
+                    logger.exception("%s tokenization failed for %s", name, uuid)
+
+            return loop.create_task(_tokenize_message_and_emit())
+
         text = self._extract_text(ev_rec, row, pre_change)
         if not text:
             return None
@@ -312,8 +345,16 @@ class OslTrigger(AsyncTokenTrigger):
 
     def _extract_text(self, ev_rec, row, pre_change):
         if isinstance(ev_rec.data, TextModelOutput):
+            if ev_rec.data.tool_calls:
+                # Delegate to _extract_message for chat-template tokenization.
+                return None
             text = str(ev_rec.data)
             return text if text else None
+        return None
+
+    def _extract_message(self, ev_rec, row, pre_change):
+        if isinstance(ev_rec.data, TextModelOutput) and ev_rec.data.tool_calls:
+            return ev_rec.data.as_message_parts()
         return None
 
 
@@ -351,7 +392,17 @@ class TpotTrigger(AsyncTokenTrigger):
         if pre_change.get(SampleField.RECV_FIRST_NS) is None:
             return None
         if isinstance(ev_rec.data, TextModelOutput):
+            if ev_rec.data.tool_calls:
+                # Delegate to _extract_message for chat-template tokenization.
+                return None
             return ev_rec.data.text_after_first_chunk() or None
+        return None
+
+    def _extract_message(self, ev_rec, row, pre_change):
+        if pre_change.get(SampleField.RECV_FIRST_NS) is None:
+            return None
+        if isinstance(ev_rec.data, TextModelOutput) and ev_rec.data.tool_calls:
+            return ev_rec.data.as_message_parts_after_first_chunk()
         return None
 
     def _compute_value(self, token_count, ev_rec, pre_change):
