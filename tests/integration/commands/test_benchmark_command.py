@@ -16,6 +16,7 @@
 """Integration tests for benchmark commands against echo server."""
 
 import json
+import os
 import re
 from pathlib import Path
 
@@ -212,6 +213,10 @@ class TestTemplateIntegration:
     """Verify generated templates run end-to-end against a local server."""
 
     @pytest.mark.integration
+    @pytest.mark.skipif(
+        not os.environ.get("HF_TOKEN"),
+        reason="Templates reference gated HF models; requires HF_TOKEN to fetch tokenizer",
+    )
     @pytest.mark.parametrize("template", _GENERATED_TEMPLATES)
     def test_template_runs(self, mock_http_echo_server, tmp_path, caplog, template):
         data = _resolve_template(TEMPLATE_DIR / template, mock_http_echo_server.url)

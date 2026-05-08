@@ -93,7 +93,7 @@ ACC_DATASET = {
 }
 
 PLACEHOLDER_MODEL = "<MODEL_NAME eg: TinyLlama/TinyLlama-1.1B-Chat-v1.0>"
-PLACEHOLDER_ENDPOINT = "<ENDPOINT_URL eg: http://localhost:8000>"
+PLACEHOLDER_ENDPOINT = "http://localhost:8000"
 
 
 # ---------------------------------------------------------------------------
