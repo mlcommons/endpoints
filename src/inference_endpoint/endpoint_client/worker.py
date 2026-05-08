@@ -159,6 +159,9 @@ class Worker:
 
         if self._scheme == "https":
             self._ssl_context = ssl.create_default_context()
+            if http_config.insecure:
+                self._ssl_context.check_hostname = False
+                self._ssl_context.verify_mode = ssl.CERT_NONE
 
         # HTTP components (initialized in run())
         self._pool: ConnectionPool = None  # type: ignore[assignment]

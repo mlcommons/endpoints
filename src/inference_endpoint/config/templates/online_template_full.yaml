@@ -67,6 +67,7 @@ settings:
     worker_initialization_timeout: 60.0  # Worker init timeout (seconds)
     worker_graceful_shutdown_wait: 0.5  # Post-run graceful shutdown wait (seconds)
     worker_force_kill_timeout: 0.5  # Force kill timeout after graceful wait (seconds)
+    insecure: false  # Skip TLS certificate verification
     max_idle_time: 4.0  # Discard connections idle longer than this (seconds)
     min_required_connections: -1  # Min connections to initialize (-1=auto, 0=disabled)
     worker_gc_mode: relaxed  # Worker GC strategy | options: disabled, relaxed, system
