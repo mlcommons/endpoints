@@ -56,7 +56,7 @@ from inference_endpoint.config.schema import (
 )
 from inference_endpoint.config.utils import cli_error_formatter as _error_formatter
 from inference_endpoint.core.types import QueryResult
-from inference_endpoint.dataset_manager.dataset import Dataset, SaltedDataset
+from inference_endpoint.dataset_manager.dataset import Dataset
 from inference_endpoint.endpoint_client.config import HTTPClientConfig
 from inference_endpoint.evaluation.scoring import Scorer
 from inference_endpoint.exceptions import InputValidationError
@@ -618,7 +618,7 @@ class TestBuildPhases:
         ctx = self._make_ctx(config, base_rt_settings, simple_dataset)
         phases = _build_phases(ctx)
 
-        assert not isinstance(phases[0].dataset, SaltedDataset)
+        assert phases[0].dataset._salt_rng is None
         assert phases[0].dataset is simple_dataset
 
     @pytest.mark.unit
@@ -632,7 +632,7 @@ class TestBuildPhases:
         ctx = self._make_ctx(config, base_rt_settings, simple_dataset)
         phases = _build_phases(ctx)
 
-        assert isinstance(phases[0].dataset, SaltedDataset)
+        assert phases[0].dataset._salt_rng is not None
 
     @pytest.mark.unit
     def test_warmup_drain_false_by_default(self, base_rt_settings, simple_dataset):

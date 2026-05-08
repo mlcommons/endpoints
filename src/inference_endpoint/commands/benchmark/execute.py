@@ -72,7 +72,7 @@ from inference_endpoint.config.schema import (
     TestType,
 )
 from inference_endpoint.core.types import QueryResult
-from inference_endpoint.dataset_manager.dataset import Dataset, SaltedDataset
+from inference_endpoint.dataset_manager.dataset import Dataset
 from inference_endpoint.dataset_manager.factory import DataLoaderFactory
 from inference_endpoint.endpoint_client.cpu_affinity import AffinityPlan, pin_loadgen
 from inference_endpoint.endpoint_client.http_client import HTTPEndpointClient
@@ -353,9 +353,7 @@ def _build_phases(ctx: BenchmarkContext) -> list[PhaseConfig]:
     warmup_cfg = ctx.config.settings.warmup
     if warmup_cfg.enabled:
         warmup_dataset: Dataset = (
-            SaltedDataset(
-                ctx.dataloader, rng=random.Random(warmup_cfg.warmup_random_seed + 2)
-            )
+            ctx.dataloader.with_salt(random.Random(warmup_cfg.warmup_random_seed + 2))
             if warmup_cfg.salt
             else ctx.dataloader
         )

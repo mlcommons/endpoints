@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
 import inspect
 import os
 import random
@@ -25,7 +26,6 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 import numpy as np
 import pandas as pd
-
 from datasets import load_dataset, load_from_disk
 
 from ..config.schema import APIType, ModelParams
@@ -312,6 +312,7 @@ class Dataset:
         self.transforms = transforms
         self.repeats = repeats
         self.data: list[dict[str, Any]] | None = None
+        self._salt_rng: random.Random | None = None
 
     @classmethod
     def load_from_file(
@@ -405,7 +406,60 @@ class Dataset:
             IOError: If data cannot be loaded from disk.
         """
         assert self.data is not None, "Dataset not loaded. Call load() first."
-        return self.data[index]
+        data = self.data[index]
+        if self._salt_rng is not None:
+            data = self._apply_salt(data)
+        return data
+
+    def with_salt(self, rng: random.Random) -> "Dataset":
+        """Return a shallow copy of this dataset that salts each load_sample() call.
+
+        The returned dataset shares the same loaded data — no re-loading needed.
+        Each load_sample() call on the returned dataset prepends a unique hex salt
+        derived from rng to the prompt field, preventing KV-cache reuse.
+        """
+        clone = copy.copy(self)
+        clone._salt_rng = rng
+        return clone
+
+    def _apply_salt(self, data: Any) -> Any:
+        """Prepend a unique salt to the prompt field of a sample dict."""
+        assert self._salt_rng is not None
+        if not isinstance(data, dict):
+            return data
+        if "input_tokens" in data and "prompt" not in data:
+            self.logger.warning(
+                "salt=True: sample has 'input_tokens' but no 'prompt' — "
+                "salt cannot be applied to pre-tokenized input; KV-cache reuse may not be prevented"
+            )
+            return data
+        if "input_tokens" in data and "prompt" in data:
+            self.logger.warning(
+                "salt=True: sample has both 'input_tokens' and 'prompt' — "
+                "salt applied to 'prompt' only; adapters that use 'input_tokens' "
+                "directly will still reuse the KV cache"
+            )
+        if "prompt" not in data:
+            return data
+        prompt = data["prompt"]
+        salt = self._salt_rng.randbytes(8).hex()
+        if isinstance(prompt, str):
+            return {**data, "prompt": f"[{salt}] {prompt}"}
+        if isinstance(prompt, list) and prompt:
+            # Find the first text part at any index (image-first prompts place text at index 1+)
+            for i, part in enumerate(prompt):
+                if isinstance(part, dict) and part.get("type") == "text":
+                    salted_parts = [
+                        *prompt[:i],
+                        {**part, "text": f"[{salt}] {part['text']}"},
+                        *prompt[i + 1 :],
+                    ]
+                    return {**data, "prompt": salted_parts}
+            self.logger.warning(
+                "salt=True: multimodal prompt has no text part — "
+                "salt cannot be applied; KV-cache reuse may not be prevented"
+            )
+        return data  # unsupported prompt type — skip salting
 
     def num_samples(self) -> int:
         assert self.data is not None, "Dataset not loaded. Call load() first."
@@ -432,86 +486,6 @@ class Dataset:
 
         df = cls.generate(datasets_dir=datasets_dir, force=force_regenerate, **kwargs)
         return cls(df, transforms=transforms, repeats=num_repeats)
-
-
-class SaltedDataset(Dataset, register=False):
-    """Wraps a loaded Dataset, prepending a unique random salt to each prompt on load_sample().
-
-    Each call to load_sample() generates a fresh salt, so reused samples (when
-    n_requests > dataset size) each receive a distinct salt.
-    """
-
-    def __init__(self, inner: Dataset, rng: random.Random | None = None) -> None:
-        # Skip Dataset.__init__ — all state is delegated to inner
-        self._inner = inner
-        self._rng = rng if rng is not None else random.Random()
-        self.dataframe = None
-        self.transforms = None
-        self.repeats = inner.repeats
-        self.logger = getLogger(__name__)
-
-    @property  # type: ignore[override]
-    def data(self) -> list[Any] | None:
-        return self._inner.data
-
-    @data.setter
-    def data(self, value: list[Any] | None) -> None:
-        self._inner.data = value
-
-    def load(
-        self,
-        adapter: "HttpRequestAdapter | None" = None,
-        api_type: APIType | None = None,
-        model_params: ModelParams | None = None,
-        force: bool = False,
-    ) -> None:
-        if self._inner.data is None:
-            self.logger.warning(
-                "SaltedDataset.load() called but inner dataset is not loaded; "
-                "call load() on the inner dataset directly. load_sample() will fail."
-            )
-        # Inner dataset already loaded; SaltedDataset does not manage loading.
-
-    def load_sample(self, index: int) -> Any:
-        data = self._inner.load_sample(index)
-        if not isinstance(data, dict):
-            return data
-        if "input_tokens" in data and "prompt" not in data:
-            self.logger.warning(
-                "SaltedDataset: sample has 'input_tokens' but no 'prompt' — "
-                "salt cannot be applied to pre-tokenized input; KV-cache reuse may not be prevented"
-            )
-            return data
-        if "input_tokens" in data and "prompt" in data:
-            self.logger.warning(
-                "SaltedDataset: sample has both 'input_tokens' and 'prompt' — "
-                "salt applied to 'prompt' only; adapters that use 'input_tokens' "
-                "directly will still reuse the KV cache"
-            )
-        if "prompt" not in data:
-            return data
-        prompt = data["prompt"]
-        salt = self._rng.randbytes(8).hex()
-        if isinstance(prompt, str):
-            return {**data, "prompt": f"[{salt}] {prompt}"}
-        if isinstance(prompt, list) and prompt:
-            # Find the first text part at any index (image-first prompts place text at index 1+)
-            for i, part in enumerate(prompt):
-                if isinstance(part, dict) and part.get("type") == "text":
-                    salted_parts = [
-                        *prompt[:i],
-                        {**part, "text": f"[{salt}] {part['text']}"},
-                        *prompt[i + 1 :],
-                    ]
-                    return {**data, "prompt": salted_parts}
-            self.logger.warning(
-                "SaltedDataset: multimodal prompt has no text part — "
-                "salt cannot be applied; KV-cache reuse may not be prevented"
-            )
-        return data  # unsupported prompt type — skip salting
-
-    def num_samples(self) -> int:
-        return self._inner.num_samples()
 
 
 class EmptyDataset(Dataset):
