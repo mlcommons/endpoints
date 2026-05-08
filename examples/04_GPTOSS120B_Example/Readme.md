@@ -45,7 +45,7 @@ docker run --runtime nvidia --gpus all \
 
 ### Run Benchmark
 
-[`vllm_gptoss_120b_example.yaml`](vllm_gptoss_120b_example.yaml) runs performance + AIME25 + GPQA accuracy at concurrency 512:
+[`vllm_gptoss_120b_example.yaml`](vllm_gptoss_120b_example.yaml) runs performance + AIME25 + GPQA + LiveCodeBench accuracy at concurrency 512:
 
 ```bash
 uv run inference-endpoint benchmark from-config \
@@ -53,9 +53,9 @@ uv run inference-endpoint benchmark from-config \
   --timeout 60
 ```
 
-> **Note:** The dataset's `prompt` column is mapped to the benchmark's `prompt` field and sent through the
-> chat completions API. vLLM does not support pre-tokenized input via this endpoint, unlike SGLang's
-> `input_tokens` path.
+The config uses `api_type: openai_completions`, which routes to `/v1/completions` with pre-tokenized
+token IDs (`prompt: [id, id, ...]`). This applies the Harmony format client-side and bypasses vLLM's
+chat template, producing the same token sequence as the SGLang path and matching SGLang accuracy scores.
 
 ### vllm bench serve (Reference Comparison)
 
@@ -145,8 +145,8 @@ uv run inference-endpoint benchmark from-config \
 For a performance-only run, use [`gptoss_120b_example.yaml`](gptoss_120b_example.yaml). It is
 configured for SGLang on `http://localhost:30000` by default. To target vLLM instead, update
 `endpoint_config.endpoints` to your server (e.g. `http://localhost:8000`) **and** change
-`endpoint_config.api_type` to `"openai"` so requests route to `/v1/chat/completions` rather than
-`/generate`.
+`endpoint_config.api_type` to `"openai_completions"` so requests route to `/v1/completions`
+with pre-tokenized input rather than SGLang's `/generate`.
 
 ### LiveCodeBench Setup
 

@@ -21,10 +21,12 @@ from inference_endpoint.dataset_manager.transforms import (
     UserPromptFormatter,
 )
 
+_FORMAT = "{question}\nPlease reason step by step, and put your final answer within \\boxed{{}}."
 
-def gptoss() -> list[Transform]:
-    return [
-        UserPromptFormatter(
-            user_prompt_format="{question}\nPlease reason step by step, and put your final answer within \\boxed{{}}.",
-        ),
-    ]
+
+def gptoss_sglang() -> list[Transform]:
+    return [UserPromptFormatter(user_prompt_format=_FORMAT)]
+
+
+def gptoss_vllm() -> list[Transform]:
+    return [UserPromptFormatter(user_prompt_format=_FORMAT)]

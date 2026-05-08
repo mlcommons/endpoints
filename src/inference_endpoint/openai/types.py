@@ -151,3 +151,68 @@ class ChatCompletionResponse(
     choices: list[ChatCompletionChoice]
     usage: CompletionUsage | None
     system_fingerprint: str | None
+
+
+# ============================================================================
+# OpenAI Text Completion Types (POST /v1/completions)
+# Used by OpenAITextCompletionsAdapter for vLLM with pre-tokenized token IDs.
+# ============================================================================
+
+
+class TextCompletionRequest(
+    msgspec.Struct, frozen=True, kw_only=True, omit_defaults=True, gc=False
+):  # type: ignore[call-arg]
+    """OpenAI text completion request (/v1/completions)."""
+
+    model: str
+    prompt: str | list[int]
+    temperature: float | None = None
+    max_tokens: int | None = None
+    stream: bool | None = None
+    top_p: float | None = None
+    top_k: int | None = None
+    repetition_penalty: float | None = None
+    n: int | None = None
+    stop: str | list[str] | None = None
+    presence_penalty: float | None = None
+    frequency_penalty: float | None = None
+
+
+class TextCompletionChoice(
+    msgspec.Struct, frozen=True, kw_only=True, omit_defaults=True, gc=False
+):  # type: ignore[call-arg]
+    """A single choice in the text completion response."""
+
+    index: int
+    text: str
+    finish_reason: str | None = None
+
+
+class TextCompletionResponse(
+    msgspec.Struct, frozen=True, kw_only=True, omit_defaults=False, gc=False
+):  # type: ignore[call-arg]
+    """OpenAI text completion response."""
+
+    id: str
+    object: str = "text_completion"
+    created: int
+    model: str
+    choices: list[TextCompletionChoice]
+    usage: CompletionUsage | None
+
+
+class TextCompletionSSEChoice(
+    msgspec.Struct, frozen=True, kw_only=True, omit_defaults=True, gc=False
+):  # type: ignore[call-arg]
+    """SSE choice for text completions streaming (uses text, not delta.content)."""
+
+    text: str = ""
+    finish_reason: str | None = None
+
+
+class TextCompletionSSEMessage(
+    msgspec.Struct, frozen=True, kw_only=True, omit_defaults=True, gc=False
+):  # type: ignore[call-arg]
+    """SSE message structure for /v1/completions streaming responses."""
+
+    choices: tuple[TextCompletionSSEChoice, ...] = ()

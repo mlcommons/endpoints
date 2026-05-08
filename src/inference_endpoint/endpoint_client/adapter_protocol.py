@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import re
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from inference_endpoint.core.types import Query, QueryResult
 
@@ -93,15 +93,15 @@ class HttpRequestAdapter(ABC):
 
     @classmethod
     @abstractmethod
-    def decode_sse_message(cls, json_bytes: bytes) -> str:
+    def decode_sse_message(cls, json_bytes: bytes) -> Any:
         """
-        Decode SSE message and extract content string.
+        Decode SSE message and extract content.
 
         Args:
             json_bytes: Raw JSON bytes from SSE stream
 
         Returns:
-            Content string from the SSE message
+            Decoded SSE content (type depends on the adapter implementation)
         """
         raise NotImplementedError("decode_sse_message not implemented")
 
