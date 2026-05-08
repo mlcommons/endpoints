@@ -58,6 +58,13 @@ class ProbeConfig(BaseModel):
     prompt: str = Field(
         "Please write me a joke in 30 words.", description="Test prompt"
     )
+    insecure: Annotated[
+        bool,
+        cyclopts.Parameter(
+            alias="--insecure",
+            help="Skip TLS certificate verification",
+        ),
+    ] = False
 
 
 def execute_probe(config: ProbeConfig) -> None:
@@ -114,6 +121,7 @@ async def _probe_async(config: ProbeConfig) -> None:
             api_type=api_type,
             num_workers=1,
             warmup_connections=0,
+            insecure=config.insecure,
         )
         # Client creates its own event loop in a separate thread
         client = HTTPEndpointClient(http_config)
