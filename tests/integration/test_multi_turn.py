@@ -77,6 +77,7 @@ def _make_dataset(rows: list[dict]) -> MultiTurnDataset:
 def _make_strategy(
     ds: MultiTurnDataset,
     use_dataset_history: bool = True,
+    target_concurrency: int | None = None,
 ) -> MultiTurnStrategy:
     mt_cfg = MultiTurnConfig(
         turn_timeout_s=10.0,
@@ -86,6 +87,7 @@ def _make_strategy(
         conversation_manager=ConversationManager(),
         dataset_metadata=ds.conversation_metadata,
         multi_turn_config=mt_cfg,
+        target_concurrency=target_concurrency,
     )
 
 
@@ -598,6 +600,114 @@ async def test_concurrent_conversations_stress(echo_server):
     expected_client_turns = num_convs * (turns_per_conv - 1)  # 24
     assert count == expected_client_turns
     assert len(responses) == expected_client_turns
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_multi_turn_active_conversations_respects_target_concurrency(echo_server):
+    num_convs = 20
+    rows = []
+    for i in range(num_convs):
+        conv_id = f"cap_conv_{i}"
+        rows += [
+            {
+                "conversation_id": conv_id,
+                "turn": 1,
+                "role": "user",
+                "content": f"Q1-{i}",
+            },
+            {
+                "conversation_id": conv_id,
+                "turn": 2,
+                "role": "assistant",
+                "content": f"A1-{i}",
+            },
+            {
+                "conversation_id": conv_id,
+                "turn": 3,
+                "role": "user",
+                "content": f"Q2-{i}",
+            },
+        ]
+
+    ds = _make_dataset(rows)
+    strategy = _make_strategy(ds, target_concurrency=4)
+    responses: dict = {}
+
+    observed_max: list[int] = []
+    orig_on_sample_complete = strategy.on_sample_complete
+
+    def tracked_on_sample_complete(result) -> None:
+        observed_max.append(len(strategy._active_iters))
+        orig_on_sample_complete(result)
+
+    strategy.on_sample_complete = tracked_on_sample_complete
+
+    await _run_session(echo_server.url, ds, strategy, responses)
+
+    assert len(responses) == num_convs * 2  # 2 client turns per conversation
+    assert max(observed_max, default=0) <= 4
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_multi_turn_pipeline_exception_propagates(echo_server):
+    rows = [
+        {"conversation_id": "err_c1", "turn": 1, "role": "user", "content": "Q1"},
+        {"conversation_id": "err_c1", "turn": 2, "role": "assistant", "content": "A1"},
+        {"conversation_id": "err_c1", "turn": 3, "role": "user", "content": "Q2"},
+    ]
+    ds = _make_dataset(rows)
+    strategy = _make_strategy(ds)
+
+    call_count = 0
+    orig_issue_next_turn = strategy._issue_next_turn
+
+    def failing_issue_next_turn(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count >= 2:
+            raise RuntimeError("injected pipeline error")
+        return orig_issue_next_turn(*args, **kwargs)
+
+    strategy._issue_next_turn = failing_issue_next_turn
+
+    loop = asyncio.get_running_loop()
+    http_config = HTTPClientConfig(
+        endpoint_urls=[urljoin(echo_server.url, "/v1/chat/completions")],
+        warmup_connections=0,
+        num_workers=2,
+    )
+    http_client = await HTTPEndpointClient.create(http_config, loop)
+    issuer = HttpClientSampleIssuer(http_client)
+
+    try:
+        session = BenchmarkSession(
+            issuer=issuer,
+            event_publisher=_NoOpPublisher(),
+            loop=loop,
+            on_sample_complete=strategy.on_sample_complete,
+        )
+        rt = RuntimeSettings(
+            metrics.Throughput(1000),
+            [metrics.Throughput(1000)],
+            min_duration_ms=0,
+            max_duration_ms=30_000,
+            n_samples_from_dataset=ds.num_samples(),
+            n_samples_to_issue=ds.num_samples(),
+            min_sample_count=1,
+            rng_sched=random.Random(42),
+            rng_sample_index=random.Random(42),
+            load_pattern=LoadPattern(type=LoadPatternType.MAX_THROUGHPUT),
+        )
+        phase = PhaseConfig("perf", rt, ds, PhaseType.PERFORMANCE, strategy=strategy)
+
+        with pytest.raises(RuntimeError, match="injected pipeline error"):
+            await asyncio.wait_for(session.run([phase]), timeout=30.0)
+
+        assert strategy._inflight == {}
+    finally:
+        await http_client.shutdown_async()
 
 
 @pytest.mark.integration

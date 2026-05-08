@@ -39,6 +39,7 @@ from inference_endpoint.load_generator.session import (
     PhaseResult,
     PhaseType,
     SessionResult,
+    _extract_prompt_text,
 )
 from inference_endpoint.metrics.metric import Throughput
 
@@ -882,3 +883,53 @@ class TestSessionResult:
         assert len(sr.perf_results) == 2
         assert len(sr.accuracy_results) == 1
         assert sr.perf_results[0].name == "perf1"
+
+
+@pytest.mark.unit
+class TestExtractPromptText:
+    def test_string_content_extracted(self):
+        messages = [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "Hi"},
+        ]
+        assert _extract_prompt_text(messages) == "Hello\nHi"
+
+    def test_multimodal_list_content_text_parts_extracted(self):
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Describe this image"},
+                    {"type": "image_url"},
+                ],
+            }
+        ]
+        assert _extract_prompt_text(messages) == "Describe this image"
+
+    def test_mixed_string_and_list_content(self):
+        messages = [
+            {"role": "system", "content": "You are helpful"},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "What is this?"},
+                    {"type": "image_url"},
+                ],
+            },
+        ]
+        assert _extract_prompt_text(messages) == "You are helpful\nWhat is this?"
+
+    def test_none_content_skipped(self):
+        messages = [
+            {"role": "assistant", "content": None},
+            {"role": "user", "content": "Hello"},
+        ]
+        assert _extract_prompt_text(messages) == "Hello"
+
+    def test_list_content_with_no_text_parts_returns_none(self):
+        messages = [{"role": "user", "content": [{"type": "image_url"}]}]
+        assert _extract_prompt_text(messages) is None
+
+    def test_non_dict_messages_skipped(self):
+        messages = ["not a dict", {"role": "user", "content": "Valid"}]
+        assert _extract_prompt_text(messages) == "Valid"

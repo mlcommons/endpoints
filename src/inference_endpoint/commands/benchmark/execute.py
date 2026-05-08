@@ -299,6 +299,42 @@ def _load_datasets(
     return dataloader, accuracy_datasets, eval_configs
 
 
+def _precompute_isl_for_multi_turn(
+    dataloader: MultiTurnDataset, tokenizer_name: str
+) -> None:
+    """Tokenize pre-built message lists and store token counts in each sample.
+
+    Runs apply_chat_template once per client turn so the hot-path IslTrigger
+    sync path (len(token_ids)) is used instead of on-the-fly text tokenization.
+    Only affects dataset-history turns; live-history turns override 'messages'
+    at runtime so the stored input_tokens are stale (acceptable approximation).
+    """
+    # Local import: optional dependency, circular-import avoidance (consistent
+    # with _annotate_response_token_counts in this file).
+    from transformers import AutoTokenizer  # noqa: PLC0415
+
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+    skipped = 0
+    for sample in dataloader.data or []:
+        messages = sample.get("messages")
+        if not messages:
+            continue
+        try:
+            token_ids: list[int] = tokenizer.apply_chat_template(
+                messages,
+                tokenize=True,
+                add_generation_prompt=True,
+            )
+            sample["input_tokens"] = token_ids
+        except Exception:  # template errors vary by model; skip gracefully
+            skipped += 1
+    if skipped:
+        logger.warning(
+            "ISL pre-computation: %d turn(s) skipped (apply_chat_template failed)",
+            skipped,
+        )
+
+
 def setup_benchmark(config: BenchmarkConfig, test_mode: TestMode) -> BenchmarkContext:
     """Load tokenizer, dataset, create scheduler, setup report dir."""
     # CPU affinity
@@ -327,6 +363,10 @@ def setup_benchmark(config: BenchmarkConfig, test_mode: TestMode) -> BenchmarkCo
 
     # Datasets
     dataloader, accuracy_datasets, eval_configs = _load_datasets(config, report_dir)
+
+    if isinstance(dataloader, MultiTurnDataset) and tokenizer_name is not None:
+        logger.info("Pre-computing ISL token counts for multi-turn dataset…")
+        _precompute_isl_for_multi_turn(dataloader, tokenizer_name)
 
     # Setup runtime settings using factory method
     rt_settings = RuntimeSettings.from_config(config, dataloader.num_samples())
