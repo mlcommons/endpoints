@@ -320,11 +320,14 @@ def _precompute_isl_for_multi_turn(
         if not messages:
             continue
         try:
-            token_ids: list[int] = tokenizer.apply_chat_template(
+            raw = tokenizer.apply_chat_template(
                 messages,
                 tokenize=True,
                 add_generation_prompt=True,
             )
+            # Some tokenizers (e.g. Qwen3 fast tokenizer) return BatchEncoding
+            # instead of a plain list; extract .input_ids in that case.
+            token_ids: list[int] = raw.input_ids if hasattr(raw, "input_ids") else raw
             sample["input_tokens"] = token_ids
         except Exception:  # template errors vary by model; skip gracefully
             skipped += 1

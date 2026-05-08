@@ -91,6 +91,24 @@ class TestPrecomputeIslForMultiTurn:
         assert "1 turn(s) skipped" in caplog.text
 
     @pytest.mark.unit
+    def test_batch_encoding_return_value_is_unwrapped(self):
+        """Tokenizers like Qwen3 return BatchEncoding instead of list[int]."""
+        samples = [{"messages": [{"role": "user", "content": "hi"}]}]
+        dataloader = _make_dataloader(samples)
+
+        batch_encoding = MagicMock()
+        batch_encoding.input_ids = [1, 2, 3]
+
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.apply_chat_template.return_value = batch_encoding
+
+        with patch("transformers.AutoTokenizer") as mock_cls:
+            mock_cls.from_pretrained.return_value = mock_tokenizer
+            _precompute_isl_for_multi_turn(dataloader, "test-model")
+
+        assert samples[0]["input_tokens"] == [1, 2, 3]
+
+    @pytest.mark.unit
     def test_add_generation_prompt_true(self):
         samples = [{"messages": [{"role": "user", "content": "hi"}]}]
         dataloader = _make_dataloader(samples)
