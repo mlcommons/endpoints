@@ -4,7 +4,7 @@ type: online  # Test type: offline, online, eval, submission | options: offline,
 submission_ref: null
 benchmark_mode: null  # options: offline, online
 model_params:
-  name: '<MODEL_NAME eg: meta-llama/Llama-3.1-8B-Instruct>'
+  name: '<MODEL_NAME eg: TinyLlama/TinyLlama-1.1B-Chat-v1.0>'
   temperature: null  # Sampling temperature
   top_k: null  # Top-K sampling
   top_p: null  # Top-P (nucleus) sampling

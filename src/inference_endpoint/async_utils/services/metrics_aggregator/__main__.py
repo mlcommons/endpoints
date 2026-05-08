@@ -17,9 +17,11 @@
 
 import argparse
 import asyncio
+import logging
 from contextlib import AbstractContextManager, nullcontext
 from pathlib import Path
 
+from huggingface_hub.errors import GatedRepoError
 from inference_endpoint.async_utils.loop_manager import LoopManager
 from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
 from inference_endpoint.async_utils.transport.zmq.ready_check import send_ready_signal
@@ -28,6 +30,8 @@ from inference_endpoint.utils.logging import setup_logging
 from .aggregator import MetricsAggregatorService
 from .kv_store import BasicKVStore
 from .token_metrics import TokenizePool
+
+logger = logging.getLogger(__name__)
 
 
 async def main() -> None:
@@ -91,10 +95,28 @@ async def main() -> None:
 
     # Using ternary operator causes errors in MyPy object type coalescing
     # (coalesces to 'object' not 'AbstractContextManager[TokenizePool | None]')
+    pool_cm: AbstractContextManager[TokenizePool | None]
     if args.tokenizer:
-        pool_cm: AbstractContextManager[TokenizePool | None] = TokenizePool(
-            args.tokenizer, n_workers=args.tokenizer_workers
-        )
+        try:
+            pool_cm = TokenizePool(args.tokenizer, n_workers=args.tokenizer_workers)
+        except (GatedRepoError, OSError) as e:
+            # transformers re-raises GatedRepoError as OSError containing "gated"
+            if isinstance(e, GatedRepoError) or "gated" in str(e).lower():
+                logger.warning(
+                    "Tokenizer '%s' is a gated HuggingFace repo and this "
+                    "environment has no access. Set HF_TOKEN or use an "
+                    "ungated model to enable token metrics. Continuing "
+                    "without token metrics (ISL/OSL/TPOT unavailable).",
+                    args.tokenizer,
+                )
+            else:
+                logger.warning(
+                    "Failed to load tokenizer '%s': %s. Continuing without "
+                    "token metrics (ISL/OSL/TPOT unavailable).",
+                    args.tokenizer,
+                    e,
+                )
+            pool_cm = nullcontext()
     else:
         pool_cm = nullcontext()
 

@@ -38,7 +38,8 @@ from typing import Any
 from urllib.parse import urljoin
 
 import msgspec.json
-from huggingface_hub import model_info
+from huggingface_hub import HfApi, model_info
+from huggingface_hub.errors import GatedRepoError
 from tqdm import tqdm
 from transformers.utils import logging as transformers_logging
 
@@ -179,27 +180,39 @@ class BenchmarkContext:
 
 
 def _check_tokenizer_exists(model_name: str) -> bool:
-    """Check if a HuggingFace tokenizer exists for the model (API only, no download).
+    """Check if a HuggingFace tokenizer exists and is accessible for the model.
 
-    Returns True if the model repo exists and has tokenizer files, False otherwise.
-    This function is a probe — it never loads or downloads the tokenizer itself.
-    Downstream consumers that need tokenization (e.g. the MetricsAggregator
-    subprocess for ISL/OSL/TPOT, Harmony transforms for prompt preprocessing,
-    and any future plugin with its own tokenization need) each load their own
-    instance as required.
+    Returns True if the model repo exists, has tokenizer files, and the current
+    environment has read access. Returns False otherwise. This function is a
+    probe — it does not download the tokenizer itself, but for gated repos it
+    issues a HEAD request (via HfApi.auth_check) to verify that downstream
+    consumers (e.g. the MetricsAggregator subprocess for ISL/OSL/TPOT) will be
+    able to load it without auth errors.
     """
     try:
         info = model_info(model_name)
-        # Check for tokenizer files in the repo
         siblings = {s.rfilename for s in (info.siblings or [])}
         has_tokenizer = (
             "tokenizer_config.json" in siblings or "tokenizer.json" in siblings
         )
-        if has_tokenizer:
-            logger.info(f"Tokenizer available for model: {model_name}")
-        else:
+        if not has_tokenizer:
             logger.warning(f"Model {model_name} found but has no tokenizer files")
-        return has_tokenizer
+            return False
+        # The metadata API returns 200 for gated repos even without auth; we
+        # must explicitly check access or the subprocess will 401 on download.
+        if info.gated:
+            try:
+                HfApi().auth_check(repo_id=model_name)
+            except GatedRepoError:
+                logger.warning(
+                    f"Model '{model_name}' is a gated HuggingFace repo and "
+                    "this environment has no access. Set HF_TOKEN or use an "
+                    "ungated model to enable token metrics. Continuing "
+                    "without token metrics (ISL/OSL/TPOT unavailable)."
+                )
+                return False
+        logger.info(f"Tokenizer available for model: {model_name}")
+        return True
     except ImportError:
         # huggingface_hub not installed — fall back to assuming it works
         logger.info(

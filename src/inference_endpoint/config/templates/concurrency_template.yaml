@@ -1,7 +1,7 @@
 name: concurrency_benchmark
 type: online  # Test type: offline, online, eval, submission | options: offline, online, eval, submission
 model_params:
-  name: '<MODEL_NAME eg: meta-llama/Llama-3.1-8B-Instruct>'
+  name: '<MODEL_NAME eg: TinyLlama/TinyLlama-1.1B-Chat-v1.0>'
 datasets:  # Dataset configs
 - name: perf
   type: performance  # Dataset purpose: performance or accuracy | options: performance, accuracy
