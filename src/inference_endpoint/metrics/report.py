@@ -49,8 +49,17 @@ def _series_to_metric_dict(stat: SeriesStat) -> dict[str, Any]:
     avg = stat.total / stat.count if stat.count > 0 else 0.0
     if stat.count > 1:
         n = stat.count
-        var_num = stat.sum_sq - stat.total * stat.total / n
-        std_dev = math.sqrt(var_num / (n - 1)) if var_num > 0 else 0.0
+        # Integer-aggregate series (latency in ns) can have very large
+        # sum_sq and total values; the naive `sum_sq - total^2 / n`
+        # form loses precision when total^2 / n is close to sum_sq.
+        # Use the exact integer form `n*sum_sq - total^2` when inputs
+        # are int, falling back to the float form otherwise.
+        if isinstance(stat.total, int) and isinstance(stat.sum_sq, int):
+            var_num_int = n * stat.sum_sq - stat.total * stat.total
+            std_dev = math.sqrt(max(0, var_num_int)) / math.sqrt(n * (n - 1))
+        else:
+            var_num = stat.sum_sq - stat.total * stat.total / n
+            std_dev = math.sqrt(max(0.0, var_num / (n - 1)))
     else:
         std_dev = 0.0
 
