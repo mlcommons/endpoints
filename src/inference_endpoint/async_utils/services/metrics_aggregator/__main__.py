@@ -71,6 +71,18 @@ async def main() -> None:
         help="Live snapshot publish interval in seconds (default: 0.25, i.e. 4 Hz)",
     )
     parser.add_argument(
+        "--drain-timeout",
+        type=float,
+        default=60.0,
+        help=(
+            "Wall-clock budget (seconds) to wait for in-flight async tokenize "
+            "tasks to finish after ENDED before the aggregator cancels them "
+            "and emits the final snapshot with n_pending_tasks > 0 "
+            "(default: 60.0). Increase for long-context / low-worker-count "
+            "tokenize workloads."
+        ),
+    )
+    parser.add_argument(
         "--hdr-sig-figs",
         type=int,
         default=3,
@@ -156,6 +168,7 @@ async def main() -> None:
                 tokenize_pool=pool,
                 streaming=args.streaming,
                 shutdown_event=shutdown_event,
+                drain_timeout_s=args.drain_timeout,
             )
             aggregator.start()
 

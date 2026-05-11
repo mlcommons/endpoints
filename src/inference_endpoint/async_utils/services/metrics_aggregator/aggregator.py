@@ -96,7 +96,7 @@ _NS_HDR_HIGH: Final[int] = 3_600_000_000_000  # 1 hour in ns
 _TOKEN_HDR_LOW: Final[int] = 1
 _TOKEN_HDR_HIGH: Final[int] = 10_000_000  # 10M tokens
 
-_DRAIN_TIMEOUT_S: Final[float] = 30.0
+_DEFAULT_DRAIN_TIMEOUT_S: Final[float] = 60.0
 
 
 class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
@@ -120,8 +120,15 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
         tokenize_pool: TokenizePool | None = None,
         streaming: bool = False,
         shutdown_event: asyncio.Event | None = None,
+        drain_timeout_s: float = _DEFAULT_DRAIN_TIMEOUT_S,
         **kwargs,
     ):
+        # drain_timeout_s is injected (not derived) because the right
+        # value is workload-dependent: long-context tokenize-heavy runs
+        # need more headroom than the default 60 s, and the aggregator
+        # itself can't measure that ahead of time. Keeping it as an arg
+        # lets the __main__ CLI flag plumb the user's choice through
+        # without coupling this class to argparse.
         super().__init__(EventRecordCodec(), *args, **kwargs)
         self._registry = registry
         self._publisher = publisher
@@ -130,6 +137,7 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
         self._streaming = streaming
         self._shutdown_event = shutdown_event
         self._shutdown_received = False
+        self._drain_timeout_s = drain_timeout_s
 
         self._session_start_ns: int | None = None
         self._total_duration_ns: int = 0
@@ -340,12 +348,14 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
             self._session_state = SessionState.DRAINING
             logger.info("Draining %d async tasks...", table.in_flight_tasks_count)
             try:
-                await asyncio.wait_for(table.drain_tasks(), timeout=_DRAIN_TIMEOUT_S)
+                await asyncio.wait_for(
+                    table.drain_tasks(), timeout=self._drain_timeout_s
+                )
             except TimeoutError:
                 logger.warning(
                     "drain_tasks timed out after %.1fs; some async metrics "
                     "may be incomplete",
-                    _DRAIN_TIMEOUT_S,
+                    self._drain_timeout_s,
                 )
                 # cancel() only *schedules* cancellation at the next await
                 # point. Await the cancelled tasks so they actually exit
