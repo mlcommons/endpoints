@@ -97,7 +97,19 @@ class MetricsPublisher:
         callable is invoked once per tick and the values are plumbed into
         the published snapshot. ``COMPLETE`` is emitted only by
         ``publish_final``, never by the tick task.
+
+        Idempotent on the tick-task slot: a second call (e.g. from a
+        spurious duplicate ``STARTED`` event or a buggy replay producer)
+        is a no-op rather than orphaning the original task. The original
+        task remains the one cancelled by ``publish_final`` / ``aclose``.
         """
+        if self._tick_task is not None:
+            logger.warning(
+                "MetricsPublisher.start called again while tick task is "
+                "still running (id=%r); ignoring the second start.",
+                id(self._tick_task),
+            )
+            return
         if publish_interval_s <= 0:
             raise ValueError(
                 f"publish_interval_s must be positive, got {publish_interval_s}"
