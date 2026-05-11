@@ -61,10 +61,10 @@ async def main() -> None:
         help="Directory for the final-snapshot disk fallback (created if missing)",
     )
     parser.add_argument(
-        "--refresh-hz",
+        "--publish-interval",
         type=float,
-        default=4.0,
-        help="Live snapshot publish rate (default: 4.0)",
+        default=0.25,
+        help="Live snapshot publish interval in seconds (default: 0.25, i.e. 4 Hz)",
     )
     parser.add_argument(
         "--hdr-sig-figs",
@@ -146,7 +146,7 @@ async def main() -> None:
                 topics=None,
                 registry=registry,
                 publisher=publisher,
-                refresh_hz=args.refresh_hz,
+                publish_interval_s=args.publish_interval,
                 sig_figs=args.hdr_sig_figs,
                 n_histogram_buckets=args.n_histogram_buckets,
                 tokenize_pool=pool,

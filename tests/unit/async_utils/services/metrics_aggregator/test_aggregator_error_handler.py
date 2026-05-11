@@ -78,7 +78,7 @@ def _make_aggregator(
         loop,
         registry=registry,
         publisher=publisher,
-        refresh_hz=4.0,
+        publish_interval_s=0.25,
         sig_figs=3,
         n_histogram_buckets=10,
         streaming=streaming,

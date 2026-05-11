@@ -162,7 +162,7 @@ class TestPubSubRoundtrip:
 
             publisher.start(
                 registry,
-                refresh_hz=20.0,
+                publish_interval_s=0.05,
                 get_runtime_state=lambda: (SessionState.LIVE, 0),
             )
 

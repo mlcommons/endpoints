@@ -42,8 +42,8 @@ logger = logging.getLogger(__name__)
 class MetricsPublisher:
     """Periodic snapshot publisher with best-effort disk fallback.
 
-    The live tick task runs at ``1/refresh_hz`` cadence and publishes a
-    non-final snapshot each tick. ``publish_final`` cancels the tick task,
+    The live tick task runs at ``publish_interval_s`` cadence and publishes
+    a non-final snapshot each tick. ``publish_final`` cancels the tick task,
     publishes a final snapshot over pub/sub, and atomically writes a
     msgpack copy to ``fallback_path`` so a missed pub/sub final can still
     be reconstructed.
@@ -82,10 +82,10 @@ class MetricsPublisher:
     def start(
         self,
         registry: MetricsRegistry,
-        refresh_hz: float,
+        publish_interval_s: float,
         get_runtime_state: Callable[[], tuple[SessionState, int]],
     ) -> None:
-        """Begin publishing live ticks at ``refresh_hz``.
+        """Begin publishing live ticks every ``publish_interval_s`` seconds.
 
         ``get_runtime_state`` returns ``(state, n_pending_tasks)`` for the
         current moment: the aggregator's session state (``LIVE`` or
@@ -94,14 +94,15 @@ class MetricsPublisher:
         the published snapshot. ``COMPLETE`` is emitted only by
         ``publish_final``, never by the tick task.
         """
-        if refresh_hz <= 0:
-            raise ValueError(f"refresh_hz must be positive, got {refresh_hz}")
-        period = 1.0 / refresh_hz
+        if publish_interval_s <= 0:
+            raise ValueError(
+                f"publish_interval_s must be positive, got {publish_interval_s}"
+            )
 
         async def _tick() -> None:
             while True:
                 try:
-                    await asyncio.sleep(period)
+                    await asyncio.sleep(publish_interval_s)
                     state, n_pending = get_runtime_state()
                     snap = registry.build_snapshot(
                         state=state, n_pending_tasks=n_pending

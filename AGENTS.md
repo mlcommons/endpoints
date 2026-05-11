@@ -114,7 +114,7 @@ The aggregator is a separate process (`python -m inference_endpoint.async_utils.
 
 - **Series storage**: each `SeriesSampler` keeps three parallel views: O(1) cheap rollups (count/total/min/max/sum_sq, exact), an HDR Histogram (cheap live percentiles), and an in-memory `array.array` of raw values (for exact percentiles in the `COMPLETE` snapshot). Hot path is `registry.record(name, value)` — no allocation, no I/O.
 - **Counter API**: `registry.increment(name, delta=1)` for sample-event counters. `registry.set_counter(name, value)` only for the two duration counters (`total_duration_ns` max-of-elapsed, `tracked_duration_ns` sum-of-blocks).
-- **Lifecycle**: `LIVE` (run in progress, ticking at `--refresh-hz`) → `DRAINING` (set on `ENDED`; tick continues; bounded by 30 s `drain_tasks` timeout) → `COMPLETE` (sole snapshot from `publish_final`, exact stats). Drain timeout detected by consumers as `state == COMPLETE and n_pending_tasks > 0`.
+- **Lifecycle**: `LIVE` (run in progress, ticking every `--publish-interval` seconds) → `DRAINING` (set on `ENDED`; tick continues; bounded by 30 s `drain_tasks` timeout) → `COMPLETE` (sole snapshot from `publish_final`, exact stats). Drain timeout detected by consumers as `state == COMPLETE and n_pending_tasks > 0`.
 - **Final delivery is dual-path**: pub/sub publish AND atomic disk write (`tmp + fsync(file) + rename + fsync(parent_dir)`); each path is wrapped in its own try/except so one failure cannot suppress the other. Main process consumer prefers pub/sub `COMPLETE`, falls back to disk file, then to `latest` live snapshot (forced incomplete).
 - **Histogram bucket edges are dynamic per snapshot**: log-spaced over the observed `[min, max]`. Bucket count is fixed at construction; consumers MUST re-render from the snapshot's `(lo, hi, count)` triples each frame and MUST NOT track bucket-by-index across snapshots.
 
@@ -195,7 +195,7 @@ src/inference_endpoint/
 │   ├── services/
 │   │   ├── event_logger/      # EventLoggerService: writes EventRecords to JSONL/SQLite
 │   │   └── metrics_aggregator/  # MetricsAggregatorService: subscribes to events, publishes MetricsSnapshot
-│   │       ├── __main__.py     # Subprocess entry: --metrics-socket, --metrics-output-dir, --refresh-hz, --hdr-sig-figs, --n-histogram-buckets
+│   │       ├── __main__.py     # Subprocess entry: --metrics-socket, --metrics-output-dir, --publish-interval, --hdr-sig-figs, --n-histogram-buckets
 │   │       ├── aggregator.py   # MetricsAggregatorService (event router); SessionState lifecycle; tracked_samples_failed
 │   │       ├── snapshot.py     # MetricsSnapshot wire schema + SessionState enum + msgpack codec
 │   │       ├── registry.py     # MetricsRegistry, CounterSampler, SeriesSampler (HDR + raw array.array + cheap rollups)

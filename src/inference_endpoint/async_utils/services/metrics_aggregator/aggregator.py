@@ -114,7 +114,7 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
         *args,
         registry: MetricsRegistry,
         publisher: MetricsPublisher,
-        refresh_hz: float,
+        publish_interval_s: float,
         sig_figs: int,
         n_histogram_buckets: int,
         tokenize_pool: TokenizePool | None = None,
@@ -125,7 +125,7 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
         super().__init__(EventRecordCodec(), *args, **kwargs)
         self._registry = registry
         self._publisher = publisher
-        self._refresh_hz = refresh_hz
+        self._publish_interval_s = publish_interval_s
         self._tokenize_pool = tokenize_pool
         self._streaming = streaming
         self._shutdown_event = shutdown_event
@@ -279,7 +279,7 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
                         # pair at each emit.
                         self._publisher.start(
                             registry,
-                            self._refresh_hz,
+                            self._publish_interval_s,
                             get_runtime_state=lambda: (
                                 self._session_state,
                                 table.in_flight_tasks_count,

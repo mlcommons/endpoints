@@ -80,7 +80,7 @@ class TestMetricsPublisher:
 
             publisher.start(
                 registry,
-                refresh_hz=100.0,
+                publish_interval_s=0.01,
                 get_runtime_state=get_runtime_state,
             )
             assert publisher._tick_task is not None
@@ -187,7 +187,7 @@ class TestMetricsPublisher:
 
             publisher.start(
                 registry,
-                refresh_hz=100.0,
+                publish_interval_s=0.01,
                 get_runtime_state=lambda: (SessionState.LIVE, 0),
             )
             tick_task = publisher._tick_task
@@ -224,7 +224,7 @@ class TestMetricsPublisher:
         registry.register_counter("c")
         publisher.start(
             registry,
-            refresh_hz=10.0,
+            publish_interval_s=0.1,
             get_runtime_state=lambda: (SessionState.LIVE, 0),
         )
         tick_task = publisher._tick_task
