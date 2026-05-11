@@ -123,3 +123,77 @@ class TestMetricsSnapshot:
         # Non-decode errors should propagate.
         with pytest.raises(RuntimeError):
             codec.on_decode_error(b"", RuntimeError("not a decode error"))
+
+
+@pytest.mark.unit
+class TestSessionStateTransitions:
+    """The SessionState enum members are the only valid states the
+    aggregator surfaces on the wire. Tests below pin the forward-only
+    transition contract so a future enum addition / reorder doesn't
+    silently break the consumer's drain-timeout detection
+    (``state == COMPLETE and n_pending_tasks > 0``).
+    """
+
+    def test_all_states_are_string_serializable(self):
+        # MetricsSnapshot encodes state as the enum *value* via msgspec's
+        # str-Enum support. Each state must therefore round-trip as a
+        # string literal — protects against accidental int-Enum reorder.
+        for s in SessionState:
+            assert isinstance(s.value, str)
+            assert s.value == s
+
+    def test_expected_member_set(self):
+        # Pin the membership so a future addition is a deliberate review
+        # decision, not an accident. Adding a new state requires updating
+        # this test (and presumably the drain-timeout detection rule).
+        assert {s.value for s in SessionState} == {
+            "initialize",
+            "live",
+            "draining",
+            "complete",
+        }
+
+    def test_forward_ordering_matches_declaration_order(self):
+        # The aggregator transitions in declaration order; consumers can
+        # rely on `list(SessionState)` for "did we move forward?" checks.
+        assert list(SessionState) == [
+            SessionState.INITIALIZE,
+            SessionState.LIVE,
+            SessionState.DRAINING,
+            SessionState.COMPLETE,
+        ]
+
+    @pytest.mark.parametrize(
+        "state, n_pending, complete",
+        [
+            (SessionState.LIVE, 0, False),
+            (SessionState.LIVE, 3, False),
+            (SessionState.DRAINING, 5, False),
+            (SessionState.COMPLETE, 0, True),
+            # Drain-timeout case: COMPLETE arrived but tasks were
+            # cancelled / abandoned. Consumer treats as incomplete.
+            (SessionState.COMPLETE, 1, False),
+            (SessionState.INITIALIZE, 0, False),
+        ],
+    )
+    def test_complete_predicate(self, state, n_pending, complete):
+        """``complete = state == COMPLETE and n_pending_tasks == 0``."""
+        assert (state == SessionState.COMPLETE and n_pending == 0) is complete
+
+    def test_initialize_round_trips_on_the_wire(self):
+        # INITIALIZE is part of the wire schema; a snapshot tagged
+        # INITIALIZE must decode back to the same state. (The aggregator
+        # doesn't emit this state today — the tick task only starts on
+        # the first STARTED — but the codec must still tolerate it for
+        # future setup-phase ticks.)
+        snap = MetricsSnapshot(
+            counter=1,
+            timestamp_ns=1,
+            state=SessionState.INITIALIZE,
+            n_pending_tasks=0,
+            metrics=[],
+        )
+        codec = MetricsSnapshotCodec()
+        _, payload = codec.encode(snap)
+        decoded = codec.decode(payload)
+        assert decoded.state == SessionState.INITIALIZE

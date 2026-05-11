@@ -144,9 +144,10 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
         self._total_processed = 0
         self._last_log_count = 0
         # Tracks the run's lifecycle state, surfaced on the wire as
-        # MetricsSnapshot.state. Transitions: LIVE → DRAINING (on ENDED) →
+        # MetricsSnapshot.state. Transitions are forward-only:
+        # INITIALIZE → LIVE (on first STARTED) → DRAINING (on ENDED) →
         # COMPLETE (set implicitly via publish_final).
-        self._session_state: SessionState = SessionState.LIVE
+        self._session_state: SessionState = SessionState.INITIALIZE
 
         # Pre-register all metrics on the registry. Tests can introspect via
         # registry.has_counter / has_series.
@@ -281,6 +282,11 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
                 else:
                     if ev == SessionEventType.STARTED:
                         self._session_start_ns = record.timestamp_ns
+                        # First STARTED: leave INITIALIZE for LIVE. The
+                        # publisher.start guard makes a duplicate STARTED
+                        # a no-op (council #8), so this re-assignment is
+                        # also safe on replay.
+                        self._session_state = SessionState.LIVE
                         # Now that we have an event loop running, start the
                         # publisher tick task. The callable is invoked once
                         # per tick to capture the live (state, n_pending_tasks)

@@ -35,18 +35,31 @@ from inference_endpoint.core.record import TOPIC_FRAME_SIZE
 class SessionState(str, Enum):
     """The aggregator's session state at the time a snapshot was emitted.
 
+    INITIALIZE → aggregator has been constructed but no ``STARTED`` event
+                 has arrived yet. The tick task is not running, so consumers
+                 should not see a snapshot in this state on the wire today;
+                 it exists so the in-process state machine has a well-defined
+                 starting point (and so future setup-phase ticks have a
+                 state to carry).
     LIVE      → run in progress; tick task publishing live HDR-derived stats.
     DRAINING  → ``SessionEventType.ENDED`` has been received; the aggregator
                 is awaiting the in-flight async tokenize tasks (bounded by
-                the 30 s drain timeout). Tick task continues at this stage,
-                still HDR-derived; no new events will arrive.
+                the ``--drain-timeout`` budget, default 60 s). Tick task
+                continues at this stage, still HDR-derived; no new events
+                will arrive.
     COMPLETE  → the ``MetricsPublisher.publish_final()`` snapshot. Percentiles
                 and histograms are exact (computed from raw values). This
                 is always the last snapshot of the run.
 
+    Transitions are forward-only:
+        INITIALIZE → LIVE → DRAINING → COMPLETE
+    No state ever moves backward, and DRAINING / COMPLETE are not re-entrant
+    (``MetricsPublisher._finalized`` enforces single-COMPLETE).
+
     Drain timeout is detected as ``state == COMPLETE and n_pending_tasks > 0``.
     """
 
+    INITIALIZE = "initialize"
     LIVE = "live"
     DRAINING = "draining"
     COMPLETE = "complete"
