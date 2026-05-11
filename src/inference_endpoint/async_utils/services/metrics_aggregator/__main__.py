@@ -201,4 +201,18 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    LoopManager().default_loop.run_until_complete(main())
+    # Surface startup / bind / tokenizer-load failures with structured
+    # context. Without this wrap, the parent's ServiceLauncher only sees
+    # the non-zero exit code and a raw traceback — no diagnostic context
+    # to correlate against the parent's logs. The except/raise pattern
+    # preserves the original exit code (1) and traceback while emitting
+    # the structured logger.exception line before the interpreter prints
+    # the trace.
+    try:
+        LoopManager().default_loop.run_until_complete(main())
+    except SystemExit:
+        # argparse / explicit sys.exit — already user-facing, don't dress up.
+        raise
+    except BaseException:
+        logger.exception("metrics aggregator subprocess crashed")
+        raise
