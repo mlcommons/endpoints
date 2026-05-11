@@ -156,6 +156,15 @@ class SeriesSampler(MetricSampler):
         # HDR low must be >=1; a bound of 0 is rejected by the C library.
         self._hdr_low = max(int(hdr_low), 1)
         self._hdr_high = int(hdr_high)
+        # hdrhistogram's C constructor requires `high >= 2*low`; the error
+        # it raises is opaque ("ValueError: Could not allocate..."), so
+        # validate up front with both values in the message for callers
+        # who hit this from a custom registration site.
+        if self._hdr_high < self._hdr_low * 2:
+            raise ValueError(
+                f"{name}: HDR high ({self._hdr_high}) must be >= 2 * low "
+                f"({self._hdr_low}); got high/low={self._hdr_high / self._hdr_low:.2f}"
+            )
         self._hdr = HdrHistogram(self._hdr_low, self._hdr_high, sig_figs)
         self._raw: array.array = array.array(_ARRAY_TYPECODE[dtype])
         # Bucket count is fixed; edges are derived per snapshot from the
