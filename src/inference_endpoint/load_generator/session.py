@@ -412,6 +412,13 @@ class BenchmarkSession:
             # while the in-flight tracked row still exists. COMPLETE
             # removes the row, so any state lookup at ERROR time after
             # COMPLETE would silently miss tracked failures.
+            #
+            # Invariant: the EventPublisher MUST preserve publish-call
+            # order on the wire (ZMQ PUB→SUB delivers in order to a
+            # single SUB, and ZmqMessagePublisher batches without
+            # reordering). Any future transport refactor that breaks
+            # this property breaks tracked-failure counting — and
+            # silently, since neither side has an assertion.
             if resp.error is not None:
                 self._publisher.publish(
                     EventRecord(
