@@ -489,11 +489,31 @@ class MetricsTable:
 
     # --- Task draining ---
 
+    @property
+    def in_flight_tasks_count(self) -> int:
+        """Number of async trigger tasks currently in flight."""
+        return len(self._in_flight_tasks)
+
     async def drain_tasks(self) -> None:
         """Await all in-flight async trigger tasks."""
         if self._in_flight_tasks:
             await asyncio.gather(*self._in_flight_tasks, return_exceptions=True)
             self._in_flight_tasks.clear()
+
+    def cancel_in_flight_tasks(self) -> list[asyncio.Task]:
+        """Cancel every in-flight async trigger task that hasn't finished.
+
+        Returns the tasks that were cancelled so callers can await them
+        (cancellation is only scheduled by ``Task.cancel()`` — the tasks
+        must still be awaited at a later point for the cancellation to
+        actually take effect).
+        """
+        cancelled: list[asyncio.Task] = []
+        for t in list(self._in_flight_tasks):
+            if not t.done():
+                t.cancel()
+                cancelled.append(t)
+        return cancelled
 
     # --- Internal ---
 

@@ -54,7 +54,7 @@ def _make_registry(n_samples: int = 50) -> MetricsRegistry:
     keep the test data minimal — ``Report.from_snapshot`` ignores them.
     """
     registry = MetricsRegistry()
-    for key in MetricCounterKey:
+    for key in MetricCounterKey.__members__.values():
         registry.register_counter(key.value)
     registry.register_series(
         MetricSeriesKey.SAMPLE_LATENCY_NS.value,

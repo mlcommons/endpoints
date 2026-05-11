@@ -282,7 +282,7 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
                             self._refresh_hz,
                             get_runtime_state=lambda: (
                                 self._session_state,
-                                len(table._in_flight_tasks),
+                                table.in_flight_tasks_count,
                             ),
                         )
                     table.handle_session_event(record)
@@ -338,7 +338,7 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
             # ENDED has been observed; transition to DRAINING so any tick
             # that fires before publish_final reflects the new state.
             self._session_state = SessionState.DRAINING
-            logger.info("Draining %d async tasks...", len(table._in_flight_tasks))
+            logger.info("Draining %d async tasks...", table.in_flight_tasks_count)
             try:
                 await asyncio.wait_for(table.drain_tasks(), timeout=_DRAIN_TIMEOUT_S)
             except TimeoutError:
@@ -347,10 +347,8 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
                     "may be incomplete",
                     _DRAIN_TIMEOUT_S,
                 )
-                for t in list(table._in_flight_tasks):
-                    if not t.done():
-                        t.cancel()
-            n_pending = len(table._in_flight_tasks)
+                table.cancel_in_flight_tasks()
+            n_pending = table.in_flight_tasks_count
             logger.info(
                 "Async tasks drained (n_pending_tasks=%d at finalize)", n_pending
             )

@@ -976,10 +976,10 @@ class TestAsyncTriggers:
                     ]
                 )
                 # Tasks are in-flight but not yet complete
-                assert len(agg._table._in_flight_tasks) > 0
+                assert agg._table.in_flight_tasks_count > 0
 
                 await agg._table.drain_tasks()
-                assert len(agg._table._in_flight_tasks) == 0
+                assert agg._table.in_flight_tasks_count == 0
                 assert snapshot_series_total(registry, MetricSeriesKey.ISL.value) == 5
             finally:
                 agg.close()
