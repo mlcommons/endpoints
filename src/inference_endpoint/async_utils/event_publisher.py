@@ -18,13 +18,14 @@ import uuid
 
 from inference_endpoint.async_utils.loop_manager import LoopManager
 from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
-from inference_endpoint.async_utils.transport.zmq.pubsub import ZmqEventRecordPublisher
+from inference_endpoint.async_utils.transport.zmq.pubsub import ZmqMessagePublisher
+from inference_endpoint.core.record import EventRecord, EventRecordCodec
 
 
-class EventPublisherService(ZmqEventRecordPublisher):
+class EventPublisherService(ZmqMessagePublisher[EventRecord]):
     """Publisher for publishing event records over ZMQ PUB socket.
 
-    Wraps ZmqEventRecordPublisher with LoopManager integration and
+    Wraps ZmqMessagePublisher[EventRecord] with LoopManager integration and
     auto-generated socket names.
     """
 
@@ -44,7 +45,7 @@ class EventPublisherService(ZmqEventRecordPublisher):
                 synchronization mechanism (e.g., ENDED as a stop signal).
             isolated_event_loop: If True, runs on a separate event loop thread.
             send_threshold: Minimum number of buffered records before an
-                automatic flush is triggered. See ZmqEventRecordPublisher.
+                automatic flush is triggered. See ZmqMessagePublisher.
         """
         if extra_eager:
             loop = None
@@ -54,6 +55,7 @@ class EventPublisherService(ZmqEventRecordPublisher):
             loop = LoopManager().default_loop
         self.socket_name = f"ev_pub_{uuid.uuid4().hex[:8]}"
         super().__init__(
+            EventRecordCodec(),
             self.socket_name,
             managed_zmq_context,
             loop=loop,

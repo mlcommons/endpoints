@@ -194,6 +194,7 @@ examples/03_BenchmarkComparison/vllm_venv/
 .cursor/
 docs/superpowers/
 .claude/agent-memory/
+.worktrees/
 
 # User-specific local dev configs; do not commit
 CLAUDE.local.md
