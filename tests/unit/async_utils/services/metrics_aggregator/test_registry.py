@@ -279,3 +279,160 @@ class TestMetricsRegistry:
         reg.register_counter("dup")
         with pytest.raises(ValueError, match="already registered"):
             reg.register_series("dup", hdr_low=1, hdr_high=_NS_HIGH)
+
+
+@pytest.mark.unit
+class TestSeriesSamplerBoundaries:
+    """Boundary-condition coverage for ``SeriesSampler``.
+
+    The tests below pin behavior at HDR bounds, sig_figs extremes, and
+    the warn-once clamp logic — internal contracts callers shouldn't have
+    to discover by reading source.
+    """
+
+    def _make(
+        self,
+        *,
+        hdr_low: int = 1,
+        hdr_high: int = _NS_HIGH,
+        sig_figs: int = 3,
+        dtype: type = int,
+    ) -> SeriesSampler:
+        return SeriesSampler(
+            "s",
+            hdr_low=hdr_low,
+            hdr_high=hdr_high,
+            sig_figs=sig_figs,
+            n_histogram_buckets=5,
+            percentiles=(50.0, 99.0),
+            dtype=dtype,
+        )
+
+    # -- HDR construction-time validation ----------------------------------
+
+    def test_high_below_2x_low_is_rejected(self):
+        # hdrhistogram requires high >= 2*low; the pre-check catches it
+        # up-front with both values in the message.
+        with pytest.raises(ValueError, match=r"high \(10\) must be >= 2 \* low \(6\)"):
+            self._make(hdr_low=6, hdr_high=10)
+
+    def test_high_equal_to_2x_low_is_accepted(self):
+        # Exact boundary: high == 2*low must succeed.
+        s = self._make(hdr_low=5, hdr_high=10)
+        s.record(7)
+        stat = s.build_stat(exact=True)
+        assert stat.count == 1
+
+    def test_low_zero_is_coerced_to_one(self):
+        # HDR rejects low=0; the sampler silently raises it to 1 to keep
+        # the "anything positive" registration contract.
+        s = self._make(hdr_low=0, hdr_high=100)
+        assert s._hdr_low == 1
+
+    def test_unsupported_dtype_rejected(self):
+        with pytest.raises(ValueError, match="Unsupported series dtype"):
+            self._make(dtype=str)  # type: ignore[arg-type]
+
+    # -- Value clamping at hot-path boundaries -----------------------------
+
+    def test_value_at_hdr_low_is_unclamped(self):
+        s = self._make(hdr_low=10, hdr_high=10_000)
+        s.record(10)
+        # No clamp → warn-once flag stays False.
+        assert s._warned_clamp is False
+        stat = s.build_stat(exact=True)
+        assert stat.min == 10 and stat.max == 10
+
+    def test_value_at_hdr_high_is_unclamped(self):
+        s = self._make(hdr_low=10, hdr_high=10_000)
+        s.record(10_000)
+        assert s._warned_clamp is False
+        stat = s.build_stat(exact=True)
+        assert stat.max == 10_000
+
+    def test_value_below_hdr_low_clamps_and_warns_once(self, caplog):
+        s = self._make(hdr_low=10, hdr_high=10_000)
+        with caplog.at_level("WARNING"):
+            s.record(5)
+            s.record(7)  # second under-clamp should NOT warn again
+        clamp_warnings = [
+            r for r in caplog.records if "outside HDR bounds" in r.message
+        ]
+        assert len(clamp_warnings) == 1
+        assert s._warned_clamp is True
+        # Raw values are preserved un-clamped — only the HDR view is clamped.
+        stat = s.build_stat(exact=True)
+        assert stat.min == 5
+        assert stat.count == 2
+
+    def test_value_above_hdr_high_clamps_and_warns_once(self, caplog):
+        s = self._make(hdr_low=10, hdr_high=1_000)
+        with caplog.at_level("WARNING"):
+            s.record(5_000)
+            s.record(10_000)
+        clamp_warnings = [
+            r for r in caplog.records if "outside HDR bounds" in r.message
+        ]
+        assert len(clamp_warnings) == 1
+        # Raw values preserved.
+        stat = s.build_stat(exact=True)
+        assert stat.max == 10_000
+
+    def test_float_value_uses_float_clamp(self):
+        # The int branch would int-truncate the clamp boundary; the float
+        # path must keep float-precision so 0.5 below an integer low is
+        # still recognized as below-bound.
+        s = self._make(hdr_low=10, hdr_high=10_000, dtype=float)
+        s.record(9.5)  # below low → clamped
+        assert s._warned_clamp is True
+
+    # -- sig_figs extremes -------------------------------------------------
+
+    def test_sig_figs_min(self):
+        # HDR accepts sig_figs in [1, 5]. sig_figs=1 means very coarse
+        # percentiles but must still satisfy the bucket-sum invariant.
+        s = self._make(sig_figs=1)
+        for v in range(1, 101):
+            s.record(v * 1000)
+        stat = s.build_stat(exact=False)
+        total = sum(c for _, c in stat.histogram)
+        assert total == stat.count == 100
+
+    def test_sig_figs_max(self):
+        # sig_figs=5 is the HDR max; sub-bucket count is largest and memory
+        # is highest, but construction must still work.
+        s = self._make(sig_figs=5)
+        s.record(1000)
+        s.record(50_000)
+        stat = s.build_stat(exact=True)
+        assert stat.count == 2
+
+    # -- Rollup edges ------------------------------------------------------
+
+    def test_count_one_rollups(self):
+        # Single-value series: min == max == total, sum_sq == value^2.
+        s = self._make()
+        s.record(42)
+        stat = s.build_stat(exact=True)
+        assert stat.count == 1
+        assert stat.min == 42
+        assert stat.max == 42
+        assert stat.total == 42
+        assert stat.sum_sq == 42 * 42
+
+    def test_empty_rollups_have_inf_min_neg_inf_max(self):
+        # No data: build_stat returns empty histogram and untouched min/max
+        # sentinels. Consumers MUST check count > 0 before reading min/max.
+        s = self._make()
+        stat = s.build_stat(exact=False)
+        assert stat.count == 0
+        assert stat.histogram == []
+
+    def test_warn_once_resets_per_sampler(self):
+        # The warn-once flag is per-sampler, not per-process — a separate
+        # registration starts fresh.
+        s1 = self._make(hdr_low=10, hdr_high=100)
+        s2 = self._make(hdr_low=10, hdr_high=100)
+        s1.record(5)
+        assert s1._warned_clamp is True
+        assert s2._warned_clamp is False
