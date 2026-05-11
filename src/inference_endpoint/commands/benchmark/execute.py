@@ -421,8 +421,22 @@ def _build_phases(
 
     # Accuracy phases — use eval_cfg.dataset_name as phase name so it matches
     # what Scorer._load_sample_index_map() looks up in sample_idx_map.json
+    perf_lp = ctx.rt_settings.load_pattern
     for eval_cfg in ctx.eval_configs:
         acc_ds = eval_cfg.dataset
+        if (
+            perf_lp is not None
+            and perf_lp.type == LoadPatternType.MULTI_TURN
+            and not isinstance(acc_ds, MultiTurnDataset)
+        ):
+            # Plain accuracy datasets are single-turn; the multi-turn scheduler
+            # requires MultiTurnDataset. Downgrade to CONCURRENCY with same cap.
+            acc_load_pattern: LoadPattern | None = LoadPattern(
+                type=LoadPatternType.CONCURRENCY,
+                target_concurrency=perf_lp.target_concurrency,
+            )
+        else:
+            acc_load_pattern = perf_lp
         acc_settings = RuntimeSettings(
             metric_target=ctx.rt_settings.metric_target,
             reported_metrics=ctx.rt_settings.reported_metrics,
@@ -433,7 +447,7 @@ def _build_phases(
             min_sample_count=acc_ds.num_samples() * acc_ds.repeats,
             rng_sched=ctx.rt_settings.rng_sched,
             rng_sample_index=ctx.rt_settings.rng_sample_index,
-            load_pattern=LoadPattern(type=LoadPatternType.MAX_THROUGHPUT),
+            load_pattern=acc_load_pattern,
         )
         phases.append(
             PhaseConfig(eval_cfg.dataset_name, acc_settings, acc_ds, PhaseType.ACCURACY)
