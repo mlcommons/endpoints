@@ -347,7 +347,15 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
                     "may be incomplete",
                     _DRAIN_TIMEOUT_S,
                 )
-                table.cancel_in_flight_tasks()
+                # cancel() only *schedules* cancellation at the next await
+                # point. Await the cancelled tasks so they actually exit
+                # before publish_final reads n_pending — otherwise the
+                # snapshot reports stale-high pending counts and the
+                # event-loop tear-down emits "Task was destroyed but it
+                # is pending!" warnings on the cancelled set.
+                cancelled = table.cancel_in_flight_tasks()
+                if cancelled:
+                    await asyncio.gather(*cancelled, return_exceptions=True)
             n_pending = table.in_flight_tasks_count
             logger.info(
                 "Async tasks drained (n_pending_tasks=%d at finalize)", n_pending
@@ -357,7 +365,7 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
                 table.total_tracked_duration_ns,
             )
             await self._publisher.publish_final(registry, n_pending_tasks=n_pending)
-            self._publisher.close()
+            await self._publisher.aclose()
             self._finalize()
 
     # ------------------------------------------------------------------

@@ -163,11 +163,13 @@ def make_aggregator(
     Returns ``(agg, registry, publisher_mock)``.
     """
     registry = MetricsRegistry()
-    # ``publish_final`` is awaited by the aggregator's ENDED handler, so it
-    # must be an AsyncMock. The remaining surface (``start``, ``close``) is
-    # synchronous and falls back to MagicMock's default attribute behavior.
+    # ``publish_final`` and ``aclose`` are awaited by the aggregator's
+    # ENDED handler, so they must be AsyncMocks. The remaining surface
+    # (``start``, ``close``) is synchronous and falls back to MagicMock's
+    # default attribute behavior.
     publisher = MagicMock()
     publisher.publish_final = AsyncMock()
+    publisher.aclose = AsyncMock()
     agg = MetricsAggregatorService(
         socket_name,
         zmq_ctx,

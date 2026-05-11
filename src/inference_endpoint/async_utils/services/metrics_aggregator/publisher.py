@@ -74,6 +74,10 @@ class MetricsPublisher:
         self._tick_task: asyncio.Task | None = None
         self._encoder = msgspec.msgpack.Encoder()
         self._closed = False
+        # publish_final is idempotent: the SIGTERM handler in
+        # __main__.py and the aggregator's ENDED-driven path can both
+        # call it; the second call must not re-publish a COMPLETE frame.
+        self._finalized = False
 
     # ------------------------------------------------------------------
     # Live tick task
@@ -136,7 +140,15 @@ class MetricsPublisher:
 
         Pub/sub publish and disk fallback are independent best-effort
         paths, each wrapped in its own try/except.
+
+        Idempotent: only the first call publishes; subsequent calls
+        early-return. This is the contract the SIGTERM handler in
+        __main__.py relies on to be safe to call alongside the
+        ENDED-driven path.
         """
+        if self._finalized:
+            return
+        self._finalized = True
         if self._tick_task is not None:
             self._tick_task.cancel()
             try:
@@ -200,6 +212,13 @@ class MetricsPublisher:
     def close(self) -> None:
         """Cancel tick task and close the underlying publisher.
 
+        Sync, best-effort. The tick task is cancelled but NOT awaited;
+        if a live tick is mid-publish when this runs, it may print a
+        CancelledError-during-shutdown trace before the loop tears down.
+        Prefer :meth:`aclose` from async contexts to avoid that. This
+        sync form exists for error-path / signal-handler fallbacks where
+        no event loop is reasonably available to await on.
+
         ``ZmqMessagePublisher.close()`` drains pending frames; bounded by
         the ``linger=10s`` set at construction.
         """
@@ -208,4 +227,24 @@ class MetricsPublisher:
         self._closed = True
         if self._tick_task is not None:
             self._tick_task.cancel()
+        self._publisher.close()
+
+    async def aclose(self) -> None:
+        """Async-aware close: cancel the tick task and await its exit.
+
+        Preferred over :meth:`close` whenever the caller is running on
+        an event loop. Eliminates the cancelled-tick-task-vs-publisher-
+        close race that the sync :meth:`close` is exposed to.
+        """
+        if self._closed:
+            return
+        self._closed = True
+        if self._tick_task is not None:
+            self._tick_task.cancel()
+            try:
+                await self._tick_task
+            except asyncio.CancelledError:
+                # Expected: we just cancelled it.
+                pass
+            self._tick_task = None
         self._publisher.close()

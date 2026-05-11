@@ -17,6 +17,8 @@
 
 import argparse
 import asyncio
+import logging
+import signal
 from contextlib import AbstractContextManager, nullcontext
 from pathlib import Path
 
@@ -30,6 +32,8 @@ from .publisher import MetricsPublisher
 from .registry import MetricsRegistry
 from .snapshot import MetricsSnapshotCodec
 from .token_metrics import TokenizePool
+
+logger = logging.getLogger(__name__)
 
 
 async def main() -> None:
@@ -155,12 +159,45 @@ async def main() -> None:
             )
             aggregator.start()
 
+            # SIGTERM / SIGINT: parents (ServiceLauncher.kill_all, or a
+            # user ^C) can kill us before an ENDED EventRecord arrives.
+            # The normal ENDED-driven path inside MetricsAggregatorService
+            # is what flushes publish_final + the disk fallback; without
+            # this handler a signal mid-run leaves the consumer's triple-
+            # redundant snapshot path empty. publish_final is idempotent
+            # (see MetricsPublisher._finalized), so racing with the
+            # ENDED-driven call is safe.
+            def _on_signal(signum: int) -> None:
+                logger.warning(
+                    "metrics aggregator received signal %d; "
+                    "flushing final snapshot defensively",
+                    signum,
+                )
+                loop.create_task(_signal_finalize(signum))
+
+            async def _signal_finalize(signum: int) -> None:
+                try:
+                    await publisher.publish_final(
+                        registry,
+                        n_pending_tasks=aggregator._table.in_flight_tasks_count,
+                    )
+                except Exception:  # noqa: BLE001 — best-effort.
+                    logger.exception(
+                        "metrics aggregator: signal-triggered publish_final failed"
+                    )
+                shutdown_event.set()
+
+            loop.add_signal_handler(signal.SIGTERM, _on_signal, signal.SIGTERM)
+            loop.add_signal_handler(signal.SIGINT, _on_signal, signal.SIGINT)
+
             if args.readiness_path:
                 await send_ready_signal(zmq_ctx, args.readiness_path, args.readiness_id)
 
             await shutdown_event.wait()
         finally:
-            publisher.close()
+            # aclose() awaits the tick task before closing the underlying
+            # transport, avoiding cancelled-tick-vs-socket-close races.
+            await publisher.aclose()
 
 
 if __name__ == "__main__":
