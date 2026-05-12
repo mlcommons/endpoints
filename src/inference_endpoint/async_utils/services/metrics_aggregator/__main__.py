@@ -27,7 +27,7 @@ from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQConte
 from inference_endpoint.async_utils.transport.zmq.ready_check import send_ready_signal
 from inference_endpoint.utils.logging import setup_logging
 
-from .aggregator import MetricsAggregatorService
+from .aggregator import MetricCounterKey, MetricsAggregatorService
 from .publisher import MetricsPublisher
 from .registry import MetricsRegistry
 from .snapshot import MetricsSnapshotCodec
@@ -172,26 +172,48 @@ async def main() -> None:
             )
             aggregator.start()
 
-            # SIGTERM / SIGINT: parents (ServiceLauncher.kill_all, or a
-            # user ^C) can kill us before an ENDED EventRecord arrives.
-            # The ENDED-driven path inside MetricsAggregatorService is
-            # what flushes publish_final; without this handler a signal
-            # mid-run leaves the Report consumer with no final_snapshot
-            # file. The signal-triggered snapshot is tagged INTERRUPTED
-            # so Report can distinguish "user killed the run" from a
-            # clean shutdown. publish_final is idempotent (see
+            # SIGTERM only — the parent's ServiceLauncher.kill_all uses
+            # SIGTERM to kill the aggregator child before an ENDED event
+            # arrives; without this handler that path leaves the Report
+            # consumer with no final_snapshot file. The signal-triggered
+            # snapshot is tagged INTERRUPTED so Report can distinguish
+            # "parent killed the run" from a clean shutdown.
+            # publish_final is idempotent (see
             # MetricsPublisher._finalized), so racing with the
             # ENDED-driven call is safe.
-            def _on_signal(signum: int) -> None:
+            #
+            # SIGINT is deliberately NOT handled in the same way. On an
+            # interactive ^C, the OS sends SIGINT to the whole
+            # foreground process group — parent + child both receive
+            # it. If we finalized eagerly here, the aggregator would
+            # write final_snapshot.json from whatever state it had at
+            # signal time, then exit; samples that completed during the
+            # parent's own graceful shutdown window would never reach
+            # the file (the parent eventually emits ENDED on its events
+            # channel, but `_finalized=True` makes that a no-op). The
+            # parent's clean-shutdown path is what we want to drive the
+            # aggregator's finalize — so we install a no-op handler for
+            # SIGINT here, which prevents Python's default
+            # KeyboardInterrupt and lets the parent control the lifecycle.
+            def _on_sigterm() -> None:
                 logger.warning(
-                    "metrics aggregator received signal %d; "
-                    "writing INTERRUPTED final snapshot",
-                    signum,
+                    "metrics aggregator received SIGTERM; "
+                    "writing INTERRUPTED final snapshot"
                 )
-                loop.create_task(_signal_finalize(signum))
+                loop.create_task(_signal_finalize())
 
-            async def _signal_finalize(signum: int) -> None:
+            async def _signal_finalize() -> None:
                 try:
+                    # Mirror the ENDED-driven path: refresh
+                    # tracked_duration_ns from the table BEFORE
+                    # publish_final, otherwise an interrupted run whose
+                    # STOP_PERFORMANCE_TRACKING never fired would
+                    # report duration_ns=0 and QPS=N/A in the final
+                    # report even after processing many tracked samples.
+                    registry.set_counter(
+                        MetricCounterKey.TRACKED_DURATION_NS.value,
+                        aggregator._table.total_tracked_duration_ns,
+                    )
                     await publisher.publish_final(
                         registry,
                         n_pending_tasks=aggregator._table.in_flight_tasks_count,
@@ -199,12 +221,20 @@ async def main() -> None:
                     )
                 except Exception:  # noqa: BLE001 — best-effort.
                     logger.exception(
-                        "metrics aggregator: signal-triggered publish_final failed"
+                        "metrics aggregator: SIGTERM-triggered publish_final failed"
                     )
                 shutdown_event.set()
 
-            loop.add_signal_handler(signal.SIGTERM, _on_signal, signal.SIGTERM)
-            loop.add_signal_handler(signal.SIGINT, _on_signal, signal.SIGINT)
+            loop.add_signal_handler(signal.SIGTERM, _on_sigterm)
+            # No-op SIGINT handler: silence the default KeyboardInterrupt
+            # and let the parent's ENDED-driven path drive shutdown.
+            loop.add_signal_handler(
+                signal.SIGINT,
+                lambda: logger.info(
+                    "metrics aggregator received SIGINT — ignoring "
+                    "(parent's ENDED path is authoritative)"
+                ),
+            )
 
             if args.readiness_path:
                 await send_ready_signal(zmq_ctx, args.readiness_path, args.readiness_id)
