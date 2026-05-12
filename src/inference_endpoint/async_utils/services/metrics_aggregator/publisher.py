@@ -231,7 +231,13 @@ class MetricsPublisher:
 
         # TUI signal: msgpack pub/sub send. Wrapped so a transport bug
         # doesn't suppress the file write above and so a SUB-side issue
-        # doesn't crash the aggregator on shutdown.
+        # doesn't crash the aggregator on shutdown. Also legitimately
+        # covers the ENDED-vs-SIGTERM race: if a signal-driven
+        # publish_final raced ahead and reached `aclose()` before this
+        # publish call runs, the underlying ZMQ socket is already
+        # closed and the send raises. Dropping the TUI frame in that
+        # race is acceptable — the JSON file written above is the
+        # authoritative Report source.
         try:
             self._publisher.publish(snap)
         except Exception:  # noqa: BLE001 — best-effort; file is the source of truth.
@@ -243,10 +249,12 @@ class MetricsPublisher:
         Sequence: write tmp + fsync(tmp) → rename → fsync(parent dir) so
         the rename itself is durable across crashes. The path either
         contains the new snapshot or contains the old contents (if any)
-        — never partial bytes.
+        — never partial bytes. The parent directory is the caller's
+        responsibility — `__main__.py` validates it on startup so a
+        missing directory surfaces in the subprocess's own context
+        rather than as a 30 s parent-side launch timeout.
         """
         path = self._final_snapshot_path
-        path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(path.suffix + ".tmp")
         with tmp.open("wb") as f:
             f.write(payload)

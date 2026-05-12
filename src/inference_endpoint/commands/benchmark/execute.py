@@ -575,8 +575,8 @@ async def _run_benchmark_async(
             elif metrics_subscriber.latest is not None:
                 snap_dict = snapshot_to_dict(metrics_subscriber.latest)
                 logger.warning(
-                    "No final_snapshot.json on disk; falling back to "
-                    "latest live snapshot — report will be marked incomplete"
+                    "No final_snapshot.json on disk; falling back to last "
+                    "pub/sub snapshot (state may or may not be terminal)"
                 )
             else:
                 logger.error("No metrics snapshot available; cannot build report")

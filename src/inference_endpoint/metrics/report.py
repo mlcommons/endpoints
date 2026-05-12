@@ -68,14 +68,19 @@ def _series_to_metric_dict(stat: dict[str, Any]) -> dict[str, Any]:
     else:
         std_dev = 0.0
 
-    # Median: prefer p50 from the producer, fall back to (min+max)/2 so
-    # ``display()`` still has a numeric value to format.
+    # p50 is contractually required on every registered series — see
+    # ``MetricsRegistry.register_series``, which rejects registrations
+    # whose percentiles tuple omits 50.0. The midrange fallback below
+    # only fires for hand-crafted snapshot dicts that bypass the
+    # registration path (e.g. a manually-edited JSON file), in which
+    # case the midrange is wrong-but-displayable rather than crashing.
     perc = stat.get("percentiles", {})
     if "50" in perc:
         median: float = perc["50"]
     elif "50.0" in perc:
         median = perc["50.0"]
     else:
+        # Approximate-only fallback for non-registry-produced dicts.
         median = (s_min + s_max) / 2
 
     histogram = stat.get("histogram", [])
@@ -250,12 +255,6 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
 
         if (tps := self.tps()) is not None:
             fn(f"TPS: {tps:.2f}{newline}")
-
-        if not self.complete:
-            fn(
-                f"WARNING: Some async metrics may be incomplete "
-                f"(drain timeout){newline}"
-            )
 
         if summary_only:
             fn(f"----------------- End of Summary -----------------{newline}")

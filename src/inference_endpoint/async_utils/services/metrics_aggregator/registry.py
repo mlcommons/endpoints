@@ -372,8 +372,25 @@ class MetricsRegistry:
         percentiles: tuple[float, ...] = _DEFAULT_PERCENTILES,
         dtype: type = int,
     ) -> SeriesSampler:
+        """Register a new series.
+
+        ``percentiles`` MUST include ``50.0`` (or ``50``) — median is a
+        mandatory metric on every series's display rollup, and
+        ``Report._series_to_metric_dict`` reads p50 from this tuple
+        rather than recomputing it from raw values. Without p50 the
+        median fallback degrades to ``(min + max) / 2`` (midrange),
+        which bears no relationship to the actual median; we reject
+        such registrations at construction time instead of producing
+        misleading reports downstream.
+        """
         if name in self._seen_names:
             raise ValueError(f"Metric name already registered: {name}")
+        if 50.0 not in percentiles and 50 not in percentiles:
+            raise ValueError(
+                f"register_series({name!r}): percentiles must include 50.0 — "
+                f"median is a mandatory metric on every series. Got: "
+                f"{percentiles!r}"
+            )
         sampler = SeriesSampler(
             name,
             hdr_low=hdr_low,

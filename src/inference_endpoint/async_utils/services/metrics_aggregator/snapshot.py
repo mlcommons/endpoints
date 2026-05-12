@@ -143,11 +143,12 @@ class MetricsSnapshot(
         timestamp_ns:     ``time.monotonic_ns()`` from the aggregator process
                           at snapshot composition time. Producer-local; not
                           comparable across processes.
-        state:            ``SessionState`` enum — ``LIVE``, ``DRAINING``, or
-                          ``COMPLETE``. See the enum docstring. ``COMPLETE``
-                          marks the last snapshot of the run; for
-                          ``COMPLETE`` snapshots, percentiles and histograms
-                          are exact, otherwise HDR-derived.
+        state:            ``SessionState`` enum — ``INITIALIZE``, ``LIVE``,
+                          ``DRAINING``, ``COMPLETE``, or ``INTERRUPTED``. See
+                          the enum docstring. Terminal states (``COMPLETE``,
+                          ``INTERRUPTED``) mark the last snapshot of the run;
+                          for ``COMPLETE`` snapshots percentiles and
+                          histograms are exact, otherwise HDR-derived.
         n_pending_tasks:  Count of in-flight async tokenize tasks at snapshot
                           composition time. ``> 0`` during normal load (ISL/
                           OSL/TPOT post-processing in flight) and during the

@@ -127,8 +127,19 @@ async def main() -> None:
     args = parser.parse_args()
     setup_logging(level="INFO")
 
+    # The parent owns directory setup — `commands/benchmark/execute.py`
+    # creates `<report_dir>/metrics/` and validates it before launching
+    # this subprocess. Validate here as a fail-fast contract check so a
+    # misbehaving launcher (or a manual invocation) surfaces a clear
+    # error in this subprocess's stderr instead of crashing later on
+    # the atomic-write path.
     metrics_output_dir: Path = args.metrics_output_dir
-    metrics_output_dir.mkdir(parents=True, exist_ok=True)
+    if not metrics_output_dir.is_dir():
+        raise SystemExit(
+            f"FATAL: --metrics-output-dir {metrics_output_dir!s} does not "
+            "exist or is not a directory. The parent process is responsible "
+            "for creating it before launching the aggregator subprocess."
+        )
 
     shutdown_event = asyncio.Event()
     loop = LoopManager().default_loop
