@@ -270,6 +270,12 @@ if __name__ == "__main__":
     except SystemExit:
         # argparse / explicit sys.exit — already user-facing, don't dress up.
         raise
-    except BaseException:
-        logger.exception("metrics aggregator subprocess crashed")
+    except Exception as e:
+        # Catch Exception (not BaseException) so KeyboardInterrupt /
+        # SystemExit propagate untouched — those are control-flow
+        # signals, not crashes, and labeling them as "crashed" would
+        # mislead operators. The exception type goes first in the log
+        # message so it's grep-able without scrolling through the
+        # traceback.
+        logger.exception("metrics aggregator subprocess crashed (%s)", type(e).__name__)
         raise

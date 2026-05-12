@@ -395,9 +395,23 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
                 MetricCounterKey.TRACKED_DURATION_NS.value,
                 table.total_tracked_duration_ns,
             )
-            await self._publisher.publish_final(registry, n_pending_tasks=n_pending)
-            await self._publisher.aclose()
-            self._finalize()
+            try:
+                await self._publisher.publish_final(registry, n_pending_tasks=n_pending)
+            finally:
+                # Whatever happens above, the aggregator MUST close the
+                # publisher and signal shutdown — otherwise the main()
+                # entry point's `await shutdown_event.wait()` hangs
+                # forever and the subprocess never exits cleanly. Each
+                # cleanup step is independently wrapped: a failure in
+                # aclose must not prevent _finalize, since _finalize is
+                # what sets the shutdown event.
+                try:
+                    await self._publisher.aclose()
+                except Exception:  # noqa: BLE001 — best-effort cleanup.
+                    logger.exception(
+                        "metrics: publisher.aclose failed during ENDED finalize"
+                    )
+                self._finalize()
 
     # ------------------------------------------------------------------
     # Lifecycle
