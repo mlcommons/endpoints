@@ -195,7 +195,7 @@ class PhaseIssuer:
             # parts (e.g. [{"type": "text", ...}, {"type": "image_url", ...}])
             # which the HTTP adapter handles directly. `PromptData.text` is only
             # meaningful for ISL reporting on text-only prompts.
-            # Therefore, setting `text=None` for non-string prompts 
+            # Therefore, setting `text=None` for non-string prompts
             # means that ISL reporting will be unavailable for multimodal samples.
             prompt = data.get("prompt")
             prompt_data = PromptData(
