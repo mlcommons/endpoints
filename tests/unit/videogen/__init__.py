@@ -12,24 +12,3 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-
-"""Preset transforms for the GPQA dataset."""
-
-from inference_endpoint.dataset_manager.transforms import (
-    Transform,
-    UserPromptFormatter,
-)
-
-_FORMAT = (
-    "{question}\n\n"
-    "(A) {choice1}\n"
-    "(B) {choice2}\n"
-    "(C) {choice3}\n"
-    "(D) {choice4}\n\n"
-    "Express your final answer as the corresponding option 'A', 'B', 'C', or 'D'."
-)
-
-
-def gptoss() -> list[Transform]:
-    return [UserPromptFormatter(user_prompt_format=_FORMAT)]

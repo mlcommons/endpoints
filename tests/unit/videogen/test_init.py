@@ -13,23 +13,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Verify videogen public namespace exports."""
 
-"""Preset transforms for the GPQA dataset."""
-
-from inference_endpoint.dataset_manager.transforms import (
-    Transform,
-    UserPromptFormatter,
-)
-
-_FORMAT = (
-    "{question}\n\n"
-    "(A) {choice1}\n"
-    "(B) {choice2}\n"
-    "(C) {choice3}\n"
-    "(D) {choice4}\n\n"
-    "Express your final answer as the corresponding option 'A', 'B', 'C', or 'D'."
+import pytest
+from inference_endpoint.videogen import (
+    VideoGenAccumulator,
+    VideoGenAdapter,
+    VideoPathRequest,
+    VideoPathResponse,
+    VideoPayloadResponse,
 )
 
 
-def gptoss() -> list[Transform]:
-    return [UserPromptFormatter(user_prompt_format=_FORMAT)]
+@pytest.mark.unit
+class TestVideoGenPublicExports:
+    def test_all_public_exports_importable(self):
+        assert VideoPathRequest is not None
+        assert VideoPathResponse is not None
+        assert VideoPayloadResponse is not None
+        assert VideoGenAdapter is not None
+        assert VideoGenAccumulator is not None

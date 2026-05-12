@@ -35,15 +35,21 @@ class APIType(str, Enum):
     """
 
     OPENAI = "openai"
+    OPENAI_COMPLETIONS = "openai_completions"
     SGLANG = "sglang"
+    VIDEOGEN = "videogen"
 
     def default_route(self) -> str:
         """Return the default HTTP path for this API type."""
         match self:
             case APIType.OPENAI:
                 return "/v1/chat/completions"
+            case APIType.OPENAI_COMPLETIONS:
+                return "/v1/completions"
             case APIType.SGLANG:
                 return "/generate"
+            case APIType.VIDEOGEN:
+                return "/v1/videos/generations"
             case _:
                 raise ValueError(f"Invalid API type: {self}")
 

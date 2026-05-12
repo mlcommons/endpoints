@@ -13,23 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Public API for the video generation inference module."""
 
-"""Preset transforms for the GPQA dataset."""
+from .adapter import VideoGenAccumulator, VideoGenAdapter
+from .types import VideoPathRequest, VideoPathResponse, VideoPayloadResponse
 
-from inference_endpoint.dataset_manager.transforms import (
-    Transform,
-    UserPromptFormatter,
-)
-
-_FORMAT = (
-    "{question}\n\n"
-    "(A) {choice1}\n"
-    "(B) {choice2}\n"
-    "(C) {choice3}\n"
-    "(D) {choice4}\n\n"
-    "Express your final answer as the corresponding option 'A', 'B', 'C', or 'D'."
-)
-
-
-def gptoss() -> list[Transform]:
-    return [UserPromptFormatter(user_prompt_format=_FORMAT)]
+__all__ = [
+    "VideoGenAdapter",
+    "VideoGenAccumulator",
+    "VideoPathRequest",
+    "VideoPathResponse",
+    "VideoPayloadResponse",
+]
