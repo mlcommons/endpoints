@@ -84,6 +84,7 @@ class TestAPIType:
     def test_default_routes(self):
         assert APIType.OPENAI.default_route() == "/v1/chat/completions"
         assert APIType.SGLANG.default_route() == "/generate"
+        assert APIType.OPENAI_COMPLETIONS.default_route() == "/v1/completions"
 
 
 class TestDataset:
@@ -450,3 +451,15 @@ class TestClientAPITypePropagation:
         client = HTTPClientConfig(api_type=APIType.OPENAI, adapter=OpenAIAdapter)
         assert client.adapter is OpenAIAdapter
         assert client.adapter is not OpenAIMsgspecAdapter
+
+    @pytest.mark.unit
+    def test_openai_completions_endpoint_resolves_adapter(self):
+        from inference_endpoint.openai.accumulator import OpenAISSEAccumulator
+        from inference_endpoint.openai.completions_adapter import (
+            OpenAITextCompletionsAdapter,
+        )
+
+        config = BenchmarkConfig(**self._common(APIType.OPENAI_COMPLETIONS))
+        assert config.settings.client.api_type is APIType.OPENAI_COMPLETIONS
+        assert config.settings.client.adapter is OpenAITextCompletionsAdapter
+        assert config.settings.client.accumulator is OpenAISSEAccumulator
