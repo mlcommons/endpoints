@@ -35,8 +35,8 @@ from inference_endpoint.async_utils.services.metrics_aggregator.registry import 
     MetricsRegistry,
 )
 from inference_endpoint.async_utils.services.metrics_aggregator.snapshot import (
-    MetricsSnapshot,
     SessionState,
+    snapshot_to_dict,
 )
 from inference_endpoint.metrics.report import Report
 
@@ -110,9 +110,16 @@ def _build_report(
     state: SessionState = SessionState.COMPLETE,
     n_pending_tasks: int = 0,
 ) -> Report:
-    """Build a Report from a snapshot of ``registry`` at ``state``."""
+    """Build a Report from a snapshot dict (matches the consumer contract).
+
+    ``Report.from_snapshot`` consumes the dict form produced by
+    ``snapshot_to_dict``; that's also the shape persisted to
+    ``final_snapshot.json``. We deliberately route through the dict
+    here so the tests exercise the same path the production consumer
+    does (loaded JSON file → Report).
+    """
     snap = registry.build_snapshot(state=state, n_pending_tasks=n_pending_tasks)
-    return Report.from_snapshot(snap)
+    return Report.from_snapshot(snapshot_to_dict(snap))
 
 
 # ---------------------------------------------------------------------------
@@ -247,6 +254,7 @@ class TestReportDisplayAndSerialize:
             n_samples_completed=100,
             n_samples_failed=0,
             duration_ns=None,
+            state="complete",
             complete=True,
             ttft={},
             tpot={},
@@ -266,6 +274,7 @@ class TestReportDisplayAndSerialize:
             n_samples_completed=0,
             n_samples_failed=0,
             duration_ns=None,
+            state="complete",
             complete=True,
             ttft={},
             tpot={},
@@ -287,6 +296,7 @@ class TestReportDisplayAndSerialize:
             n_samples_completed=10,
             n_samples_failed=0,
             duration_ns=1_000_000_000,
+            state="complete",  # drain-timeout case: complete state, n_pending>0
             complete=False,
             ttft={},
             tpot={},
@@ -298,30 +308,100 @@ class TestReportDisplayAndSerialize:
         output = "\n".join(lines)
         assert "WARNING" in output or "incomplete" in output.lower()
 
+    def test_display_warns_when_interrupted(self):
+        """Reports with ``state == "interrupted"`` surface a distinct WARNING."""
+        report = Report(
+            version="test",
+            git_sha=None,
+            test_started_at=0,
+            n_samples_issued=10,
+            n_samples_completed=5,
+            n_samples_failed=0,
+            duration_ns=1_000_000_000,
+            state="interrupted",
+            complete=False,
+            ttft={},
+            tpot={},
+            latency={},
+            output_sequence_lengths={},
+        )
+        lines: list[str] = []
+        report.display(fn=lines.append, summary_only=True)
+        output = "\n".join(lines)
+        assert "interrupted" in output.lower()
+        assert "SIGTERM" in output or "signal" in output.lower()
+
 
 # ---------------------------------------------------------------------------
-# Direct snapshot construction (no registry) — explicit wire shape coverage
+# Direct dict construction — Report.from_snapshot accepts arbitrary dicts
+# (matches the JSON-file → consumer path; defaults absorb partial input).
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
-class TestFromSnapshotDirect:
-    def test_minimal_snapshot_yields_empty_report(self):
-        """A snapshot with no metrics produces a Report whose counters are 0
-        and whose series dicts are empty. ``duration_ns`` is None because
-        ``tracked_duration_ns`` is missing.
+class TestFromSnapshotDict:
+    def test_minimal_dict_yields_empty_report(self):
+        """A snapshot dict with no metrics produces a Report whose counters
+        are 0 and whose series dicts are empty. ``duration_ns`` is None
+        because ``tracked_duration_ns`` is missing.
         """
-        snap = MetricsSnapshot(
-            counter=1,
-            timestamp_ns=0,
-            state=SessionState.COMPLETE,
-            n_pending_tasks=0,
-            metrics=[],
-        )
+        snap = {
+            "counter": 1,
+            "timestamp_ns": 0,
+            "state": "complete",
+            "n_pending_tasks": 0,
+            "metrics": [],
+        }
         report = Report.from_snapshot(snap)
         assert report.n_samples_issued == 0
         assert report.n_samples_completed == 0
         assert report.n_samples_failed == 0
         assert report.duration_ns is None
+        assert report.state == "complete"
         assert report.complete is True
         assert report.ttft == {}
+
+    def test_empty_dict_defaults_to_interrupted_incomplete(self):
+        """A dict missing every key (e.g. corrupt file, truncated read)
+        produces a non-crashing Report tagged interrupted and incomplete.
+        Defaults: state→interrupted, counters→0, series→empty.
+        """
+        report = Report.from_snapshot({})
+        assert report.state == "interrupted"
+        assert report.complete is False
+        assert report.n_samples_issued == 0
+        assert report.ttft == {}
+
+    def test_interrupted_state_round_trips_to_report(self):
+        """An INTERRUPTED snapshot dict produces a Report flagged as such."""
+        snap = {
+            "counter": 1,
+            "timestamp_ns": 0,
+            "state": "interrupted",
+            "n_pending_tasks": 5,
+            "metrics": [
+                {"type": "counter", "name": "tracked_samples_issued", "value": 100},
+                {"type": "counter", "name": "tracked_samples_completed", "value": 80},
+            ],
+        }
+        report = Report.from_snapshot(snap)
+        assert report.state == "interrupted"
+        assert report.complete is False
+        # Partial counters still surface through.
+        assert report.n_samples_issued == 100
+        assert report.n_samples_completed == 80
+
+    def test_missing_metric_type_is_skipped_not_crashed(self):
+        """A malformed metric entry (no 'type' field) is skipped rather
+        than crashing the whole report build.
+        """
+        snap = {
+            "state": "complete",
+            "n_pending_tasks": 0,
+            "metrics": [
+                {"name": "orphan_no_type", "value": 99},  # missing 'type'
+                {"type": "counter", "name": "tracked_samples_issued", "value": 5},
+            ],
+        }
+        report = Report.from_snapshot(snap)
+        assert report.n_samples_issued == 5

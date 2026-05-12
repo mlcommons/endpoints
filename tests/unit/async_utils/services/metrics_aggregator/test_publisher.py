@@ -13,16 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for ``MetricsPublisher`` (tick task + final publish + disk fallback)."""
+"""Tests for ``MetricsPublisher`` (tick task + final JSON write + pub/sub signal)."""
 
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from unittest.mock import MagicMock
 
-import msgspec
-import msgspec.msgpack
 import pytest
 from inference_endpoint.async_utils.services.metrics_aggregator.publisher import (
     MetricsPublisher,
@@ -31,20 +30,10 @@ from inference_endpoint.async_utils.services.metrics_aggregator.registry import 
     MetricsRegistry,
 )
 from inference_endpoint.async_utils.services.metrics_aggregator.snapshot import (
-    MetricsSnapshot,
     MetricsSnapshotCodec,
     SessionState,
 )
 from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
-
-
-def _build_publisher(
-    fallback_path: Path, loop: asyncio.AbstractEventLoop
-) -> tuple[MetricsPublisher, ManagedZMQContext]:
-    """Construct a MetricsPublisher backed by a real IPC socket scoped to a temp dir."""
-    # ManagedZMQContext.scoped() returns a context manager — use raw construct
-    # so the test owns lifecycle and can scope it via a fixture.
-    raise NotImplementedError("constructed inline within fixture/test")
 
 
 @pytest.fixture
@@ -66,7 +55,7 @@ class TestMetricsPublisher:
             zmq_ctx_scope,
             "test_pub_start",
             loop,
-            fallback_path=tmp_path / "final_snapshot.msgpack",
+            final_snapshot_path=tmp_path / "final_snapshot.json",
         )
         try:
             registry = MetricsRegistry()
@@ -93,17 +82,17 @@ class TestMetricsPublisher:
             publisher.close()
 
     @pytest.mark.asyncio
-    async def test_publish_final_writes_disk_atomically(
+    async def test_publish_final_writes_json_atomically(
         self, tmp_path: Path, zmq_ctx_scope: ManagedZMQContext
     ):
         loop = asyncio.get_event_loop()
-        target = tmp_path / "final_snapshot.msgpack"
+        target = tmp_path / "final_snapshot.json"
         publisher = MetricsPublisher(
             MetricsSnapshotCodec(),
             zmq_ctx_scope,
             "test_pub_disk",
             loop,
-            fallback_path=target,
+            final_snapshot_path=target,
         )
         try:
             registry = MetricsRegistry()
@@ -117,9 +106,34 @@ class TestMetricsPublisher:
             assert not tmp_target.exists(), "tmp file should have been renamed"
             assert target.exists(), "final snapshot should be on disk"
 
-            decoded = msgspec.msgpack.decode(target.read_bytes(), type=MetricsSnapshot)
-            assert decoded.state == SessionState.COMPLETE
-            assert decoded.n_pending_tasks == 0
+            decoded = json.loads(target.read_bytes())
+            assert decoded["state"] == SessionState.COMPLETE.value
+            assert decoded["n_pending_tasks"] == 0
+        finally:
+            publisher.close()
+
+    @pytest.mark.asyncio
+    async def test_publish_final_writes_interrupted_state(
+        self, tmp_path: Path, zmq_ctx_scope: ManagedZMQContext
+    ):
+        """``interrupted=True`` tags the snapshot INTERRUPTED so consumers
+        can distinguish "user killed the run" from a clean shutdown."""
+        loop = asyncio.get_event_loop()
+        target = tmp_path / "final_snapshot.json"
+        publisher = MetricsPublisher(
+            MetricsSnapshotCodec(),
+            zmq_ctx_scope,
+            "test_pub_interrupted",
+            loop,
+            final_snapshot_path=target,
+        )
+        try:
+            registry = MetricsRegistry()
+            registry.register_counter("c")
+            await publisher.publish_final(registry, n_pending_tasks=3, interrupted=True)
+            decoded = json.loads(target.read_bytes())
+            assert decoded["state"] == SessionState.INTERRUPTED.value
+            assert decoded["n_pending_tasks"] == 3
         finally:
             publisher.close()
 
@@ -127,7 +141,7 @@ class TestMetricsPublisher:
     async def test_disk_failure_does_not_block_pubsub(
         self, tmp_path: Path, zmq_ctx_scope: ManagedZMQContext
     ):
-        """Disk fallback failure MUST NOT prevent pub/sub publish."""
+        """Disk write failure MUST NOT prevent pub/sub publish."""
         loop = asyncio.get_event_loop()
         # Point the fallback at a path whose parent is a *file*, not a dir.
         # Writing into it will fail; pub/sub publish should still complete.
@@ -138,7 +152,7 @@ class TestMetricsPublisher:
             zmq_ctx_scope,
             "test_pub_diskfail",
             loop,
-            fallback_path=bad_parent / "final_snapshot.msgpack",
+            final_snapshot_path=bad_parent / "final_snapshot.json",
         )
         try:
             registry = MetricsRegistry()
@@ -152,7 +166,7 @@ class TestMetricsPublisher:
 
             assert inner_mock.publish.call_count == 1
             # Disk should not have been written.
-            assert not (bad_parent / "final_snapshot.msgpack").exists()
+            assert not (bad_parent / "final_snapshot.json").exists()
         finally:
             try:
                 publisher.close()
@@ -179,7 +193,7 @@ class TestMetricsPublisher:
             zmq_ctx_scope,
             "test_pub_finalrace",
             loop,
-            fallback_path=tmp_path / "final_snapshot.msgpack",
+            final_snapshot_path=tmp_path / "final_snapshot.json",
         )
         try:
             registry = MetricsRegistry()
@@ -217,7 +231,7 @@ class TestMetricsPublisher:
             zmq_ctx_scope,
             "test_pub_close",
             loop,
-            fallback_path=tmp_path / "final_snapshot.msgpack",
+            final_snapshot_path=tmp_path / "final_snapshot.json",
         )
 
         registry = MetricsRegistry()

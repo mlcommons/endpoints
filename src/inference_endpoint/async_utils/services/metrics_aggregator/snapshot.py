@@ -171,6 +171,61 @@ class MetricsSnapshot(
 METRICS_SNAPSHOT_TOPIC: Final[bytes] = b"MET\x00".ljust(TOPIC_FRAME_SIZE, b"\x00")
 
 
+# ---------------------------------------------------------------------------
+# Dict form of a snapshot.
+#
+# This is the shape used by:
+# - the persisted ``final_snapshot.json`` file (writer in ``publisher.py``)
+# - ``Report.from_snapshot`` as its canonical input
+#
+# The wire ``MetricsSnapshot`` Struct uses ``array_like=True`` for compact
+# msgpack on the pub/sub hot path — that encoding is positional, which is
+# wrong for both file storage (unreadable JSON arrays) and for consumer
+# code that wants to read fields by name. ``snapshot_to_dict`` is the
+# one-way bridge from the wire form to the consumer form.
+#
+# There is intentionally no inverse: consumers operate on the dict
+# directly with ``dict.get(key, default)``. Decoding a dict back into an
+# ``array_like=True`` Struct is ergonomically painful (msgspec's decoders
+# follow the Struct's array_like flag), and the consumer doesn't need it.
+# ---------------------------------------------------------------------------
+
+
+def snapshot_to_dict(snap: MetricsSnapshot) -> dict:
+    """Convert a wire ``MetricsSnapshot`` to its dict form.
+
+    Manual mapping is the source of truth for the dict schema. When
+    adding a field to ``MetricsSnapshot`` (or ``CounterStat`` /
+    ``SeriesStat``), update this function so the field appears in both
+    the persisted JSON file and the input to ``Report.from_snapshot``.
+    """
+    return {
+        "counter": snap.counter,
+        "timestamp_ns": snap.timestamp_ns,
+        "state": snap.state.value,
+        "n_pending_tasks": snap.n_pending_tasks,
+        "metrics": [_metric_to_dict(m) for m in snap.metrics],
+    }
+
+
+def _metric_to_dict(m: MetricStat) -> dict:
+    if isinstance(m, CounterStat):
+        return {"type": "counter", "name": m.name, "value": m.value}
+    return {
+        "type": "series",
+        "name": m.name,
+        "count": m.count,
+        "total": m.total,
+        "min": m.min,
+        "max": m.max,
+        "sum_sq": m.sum_sq,
+        "percentiles": dict(m.percentiles),
+        # Histogram tuples → JSON arrays. Consumers reading the dict can
+        # iterate the two-element ranges directly without coercion.
+        "histogram": [[list(rng), c] for rng, c in m.histogram],
+    }
+
+
 class MetricsSnapshotCodec:
     """``MessageCodec[MetricsSnapshot]`` — binds pub/sub layer to msgpack.
 

@@ -49,7 +49,7 @@ from inference_endpoint.async_utils.services.launcher import (
     ServiceLauncher,
 )
 from inference_endpoint.async_utils.services.metrics_aggregator.snapshot import (
-    MetricsSnapshot,
+    snapshot_to_dict,
 )
 from inference_endpoint.async_utils.services.metrics_aggregator.subscriber import (
     MetricsSnapshotSubscriber,
@@ -384,15 +384,24 @@ def _build_phases(ctx: BenchmarkContext) -> list[PhaseConfig]:
     return phases
 
 
-def _load_final_snapshot_from_disk(path: Path) -> MetricsSnapshot | None:
-    """Best-effort decode of the disk-fallback final snapshot."""
+def _load_final_snapshot_from_disk(path: Path) -> dict[str, Any] | None:
+    """Read the persisted ``final_snapshot.json`` written by the aggregator.
+
+    Returns the snapshot in its dict form — the same shape produced by
+    ``snapshot_to_dict`` and consumed by ``Report.from_snapshot``. No
+    intermediate Struct decode (see ``Report.from_snapshot`` docstring
+    for why the dict shape is the consumer contract).
+
+    Returns ``None`` if the file is missing (the aggregator was killed
+    by an uncatchable signal — SIGKILL, OOM-kill — before its handler
+    could write) or unreadable.
+    """
     if not path.exists():
         return None
     try:
-        payload = path.read_bytes()
-        return msgspec.msgpack.Decoder(type=MetricsSnapshot).decode(payload)
-    except Exception as e:  # noqa: BLE001 — fallback is best-effort.
-        logger.warning("Failed to read disk fallback %s: %s", path, e)
+        return json.loads(path.read_bytes())
+    except Exception as e:  # noqa: BLE001 — best-effort.
+        logger.warning("Failed to read final snapshot %s: %s", path, e)
         return None
 
 
@@ -550,50 +559,36 @@ async def _run_benchmark_async(
             logger.info("Waiting for services to finish processing...")
             await asyncio.to_thread(launcher.wait_for_exit, None)
 
-            # The aggregator publishes the final snapshot just before exit;
-            # the SUB queue may have it but our process() handler hasn't run
-            # yet because we were blocked in wait_for_exit (in a thread).
-            # Give the loop a brief window to receive and dispatch it before
-            # falling back to disk.
-            if not await metrics_subscriber.wait_for_complete(timeout=2.0):
-                logger.debug(
-                    "No final snapshot received via pub/sub within 2s; "
-                    "falling back to disk."
+            # Source the snapshot dict for Report:
+            # 1. Preferred: the JSON file the aggregator atomically wrote
+            #    in publish_final (ENDED-driven or signal-handler-driven).
+            # 2. Fallback: convert the last live snapshot from pub/sub to
+            #    its dict form. Only reached when the aggregator was killed
+            #    by an uncatchable signal (SIGKILL / OOM) before its
+            #    handler could write. Report will be marked incomplete
+            #    because state will be LIVE / DRAINING, not "complete".
+            snap_dict: dict[str, Any] | None = _load_final_snapshot_from_disk(
+                metrics_output_dir / "final_snapshot.json"
+            )
+            if snap_dict is not None:
+                logger.info("Built report from final_snapshot.json")
+            elif metrics_subscriber.latest is not None:
+                snap_dict = snapshot_to_dict(metrics_subscriber.latest)
+                logger.warning(
+                    "No final_snapshot.json on disk; falling back to "
+                    "latest live snapshot — report will be marked incomplete"
                 )
-
-            # Build report from MetricsSnapshot. Triple-redundant source:
-            # 1. pub/sub COMPLETE (preferred)
-            # 2. disk fallback (final_snapshot.msgpack)
-            # 3. latest live snapshot — its state will be LIVE or DRAINING,
-            #    so Report.from_snapshot will mark the report incomplete.
-            snap: MetricsSnapshot | None = None
-            if metrics_subscriber.complete is not None:
-                snap = metrics_subscriber.complete
-                logger.info("Built report from pub/sub COMPLETE snapshot")
             else:
-                disk_snap = _load_final_snapshot_from_disk(
-                    metrics_output_dir / "final_snapshot.msgpack"
-                )
-                if disk_snap is not None:
-                    snap = disk_snap
-                    logger.info("Built report from disk fallback snapshot")
-                elif metrics_subscriber.latest is not None:
-                    snap = metrics_subscriber.latest
-                    logger.warning(
-                        "No COMPLETE snapshot received; falling back to "
-                        "latest live snapshot — report will be marked "
-                        "incomplete"
-                    )
-                else:
-                    logger.error("No metrics snapshot available; cannot build report")
+                logger.error("No metrics snapshot available; cannot build report")
 
-            if snap is not None:
+            if snap_dict is not None:
                 try:
-                    report = Report.from_snapshot(snap)
+                    report = Report.from_snapshot(snap_dict)
                     if not report.complete:
                         logger.warning(
-                            "Some async metrics may be incomplete (drain "
-                            "timeout or missed COMPLETE snapshot)"
+                            "Report is incomplete (state=%s, n_pending_tasks=%d)",
+                            report.state,
+                            snap_dict.get("n_pending_tasks", 0),
                         )
                 except Exception as e:  # noqa: BLE001 — best-effort report build.
                     logger.warning(f"Failed to build report from snapshot: {e}")

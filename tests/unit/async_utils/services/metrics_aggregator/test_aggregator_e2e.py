@@ -13,23 +13,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""End-to-end pub/sub round-trip tests for the metrics aggregator.
+"""End-to-end tests for the metrics aggregator's two delivery channels.
 
-The wire surface that matters at this layer is the snapshot pub/sub
-channel: aggregator → ``MetricsPublisher`` → ZMQ PUB →
-``MetricsSnapshotSubscriber``.
+The aggregator publishes snapshots through two independent paths:
+
+1. ``final_snapshot.json`` on disk — the **primary** delivery surface
+   for the Report consumer. Written atomically by ``publish_final``.
+2. ZMQ PUB → ``MetricsSnapshotSubscriber`` — live ticks for TUI / live
+   consumers, plus a terminal-state frame at end-of-run as a
+   "run is over" signal.
 
 These tests stand up a real ``MetricsPublisher`` and
 ``MetricsSnapshotSubscriber`` against a single ``ManagedZMQContext.scoped``
-context, publish snapshots, and verify the subscriber receives them with
-the expected wire shape. The full event pipeline (events → aggregator →
-metrics) is covered in ``test_aggregator.py``; this module is concerned
-strictly with the snapshot transport.
+context and verify both channels deliver the right state. The full event
+pipeline (events → aggregator → metrics) is covered in
+``test_aggregator.py``; this module is concerned with the publish layer.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 
 import pytest
@@ -55,6 +59,22 @@ from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQConte
 _WAIT_TIMEOUT = 3.0
 
 
+async def _wait_for_terminal_state(
+    subscriber: MetricsSnapshotSubscriber, timeout: float = _WAIT_TIMEOUT
+) -> bool:
+    """Poll ``subscriber.latest`` until a terminal-state frame arrives."""
+    deadline = asyncio.get_event_loop().time() + timeout
+    while asyncio.get_event_loop().time() < deadline:
+        latest = subscriber.latest
+        if latest is not None and latest.state in (
+            SessionState.COMPLETE,
+            SessionState.INTERRUPTED,
+        ):
+            return True
+        await asyncio.sleep(0.02)
+    return False
+
+
 @pytest.fixture
 def zmq_ctx_scope(tmp_path: Path):
     """Provide a scoped ManagedZMQContext for the duration of a test."""
@@ -66,7 +86,7 @@ def _make_pair(
     socket_name: str,
     zmq_ctx: ManagedZMQContext,
     loop: asyncio.AbstractEventLoop,
-    fallback_path: Path,
+    final_snapshot_path: Path,
     *,
     conflate: bool = False,
 ) -> tuple[MetricsPublisher, MetricsSnapshotSubscriber]:
@@ -83,7 +103,7 @@ def _make_pair(
             zmq_ctx,
             socket_name,
             loop,
-            fallback_path=fallback_path,
+            final_snapshot_path=final_snapshot_path,
         )
     except zmq.ZMQError as exc:
         pytest.skip(f"ZMQ IPC bind unavailable (sandboxed?): {exc}")
@@ -95,24 +115,23 @@ def _make_pair(
 
 
 @pytest.mark.unit
-class TestPubSubRoundtrip:
+class TestFinalSnapshotDelivery:
     @pytest.mark.asyncio
-    async def test_publish_final_arrives_at_subscriber(
+    async def test_publish_final_writes_json_and_signals_pubsub(
         self, tmp_path: Path, zmq_ctx_scope: ManagedZMQContext
     ):
-        """``publish_final`` produces a COMPLETE snapshot reachable over IPC.
+        """``publish_final`` writes the JSON file AND fires the pub/sub signal.
 
-        The aggregator's ``publish_final`` is what crosses the wire, and
-        the ``MetricsSnapshotSubscriber`` is what the main process uses
-        to observe the run's end. The exact metric values aren't the
-        point here — the round-trip + state field is.
+        The JSON file is the primary Report source; the pub/sub frame is
+        the TUI shutdown signal. Both must land on a clean shutdown.
         """
         loop = asyncio.get_event_loop()
+        target = tmp_path / "final_snapshot.json"
         publisher, subscriber = _make_pair(
             "test_e2e_final",
             zmq_ctx_scope,
             loop,
-            tmp_path / "final_snapshot.msgpack",
+            target,
         )
         try:
             registry = MetricsRegistry()
@@ -123,11 +142,17 @@ class TestPubSubRoundtrip:
             await asyncio.sleep(0.2)
             await publisher.publish_final(registry, n_pending_tasks=0)
 
-            arrived = await subscriber.wait_for_complete(timeout=_WAIT_TIMEOUT)
-            assert arrived, "subscriber must receive COMPLETE snapshot"
-            assert subscriber.complete is not None
-            assert subscriber.complete.state == SessionState.COMPLETE
-            assert subscriber.complete.n_pending_tasks == 0
+            # JSON file landed with the right terminal state.
+            assert target.exists(), "publish_final must write final_snapshot.json"
+            decoded = json.loads(target.read_bytes())
+            assert decoded["state"] == SessionState.COMPLETE.value
+            assert decoded["n_pending_tasks"] == 0
+
+            # Pub/sub signal landed at the subscriber as the most recent frame.
+            arrived = await _wait_for_terminal_state(subscriber)
+            assert arrived, "subscriber must receive terminal-state frame"
+            assert subscriber.latest is not None
+            assert subscriber.latest.state == SessionState.COMPLETE
         finally:
             subscriber.close()
             publisher.close()
@@ -136,21 +161,20 @@ class TestPubSubRoundtrip:
     async def test_live_tick_then_final(
         self, tmp_path: Path, zmq_ctx_scope: ManagedZMQContext
     ):
-        """Live ticks deliver LIVE-state snapshots; final delivers COMPLETE.
+        """Live ticks deliver LIVE-state snapshots; final flips to COMPLETE.
 
-        Tracks the lifecycle the main process sees: subscriber's
-        ``latest`` is updated by every live tick, and ``complete`` is
-        only set once (when the COMPLETE-state snapshot arrives).
+        Tracks the lifecycle a TUI sees: subscriber's ``latest`` is
+        updated by every live tick, then replaced by the terminal-state
+        frame at end-of-run.
         """
         loop = asyncio.get_event_loop()
         publisher, subscriber = _make_pair(
             "test_e2e_live_then_final",
             zmq_ctx_scope,
             loop,
-            tmp_path / "final_snapshot.msgpack",
-            # conflate=True: we don't care which live tick lands, just
-            # that at least one does. This is the same setting the main
-            # process consumer uses.
+            tmp_path / "final_snapshot.json",
+            # conflate=True mirrors the default subscriber setting — we
+            # only care which state is *most recent*, not the count.
             conflate=True,
         )
         try:
@@ -173,14 +197,12 @@ class TestPubSubRoundtrip:
                     break
             assert subscriber.latest is not None, "expected at least one live tick"
             assert subscriber.latest.state == SessionState.LIVE
-            # Complete must NOT be set yet.
-            assert subscriber.complete is None
 
             await publisher.publish_final(registry, n_pending_tasks=0)
-            arrived = await subscriber.wait_for_complete(timeout=_WAIT_TIMEOUT)
+            arrived = await _wait_for_terminal_state(subscriber)
             assert arrived
-            assert subscriber.complete is not None
-            assert subscriber.complete.state == SessionState.COMPLETE
+            assert subscriber.latest is not None
+            assert subscriber.latest.state == SessionState.COMPLETE
         finally:
             subscriber.close()
             publisher.close()
@@ -189,19 +211,20 @@ class TestPubSubRoundtrip:
     async def test_multiple_metrics_round_trip(
         self, tmp_path: Path, zmq_ctx_scope: ManagedZMQContext
     ):
-        """Counters and series both round-trip with the right payload shape.
+        """Counters and series both land in the JSON file with the right shape.
 
-        Counter values must be exact; series presence (count + total)
-        must round-trip cleanly. Histogram bucket geometry is covered in
-        ``test_registry.py`` and ``test_snapshot.py`` — here we just
-        confirm the wire format survives the IPC hop.
+        Counter values must be exact; series count + total must
+        round-trip. Histogram bucket geometry is covered in
+        ``test_registry.py`` and ``test_snapshot.py`` — here we confirm
+        the on-disk format preserves the shape end-to-end.
         """
         loop = asyncio.get_event_loop()
+        target = tmp_path / "final_snapshot.json"
         publisher, subscriber = _make_pair(
             "test_e2e_multimetric",
             zmq_ctx_scope,
             loop,
-            tmp_path / "final_snapshot.msgpack",
+            target,
         )
         try:
             registry = MetricsRegistry()
@@ -225,26 +248,18 @@ class TestPubSubRoundtrip:
             await asyncio.sleep(0.2)
             await publisher.publish_final(registry, n_pending_tasks=0)
 
-            arrived = await subscriber.wait_for_complete(timeout=_WAIT_TIMEOUT)
-            assert arrived
-            snap = subscriber.complete
-            assert snap is not None
-
-            # Build a name → metric lookup off the wire side.
-            from inference_endpoint.async_utils.services.metrics_aggregator.snapshot import (  # noqa: E501
-                CounterStat,
-                SeriesStat,
-            )
-
+            decoded = json.loads(target.read_bytes())
             counters = {
-                m.name: m.value for m in snap.metrics if isinstance(m, CounterStat)
+                m["name"]: m["value"]
+                for m in decoded["metrics"]
+                if m["type"] == "counter"
             }
-            series = {m.name: m for m in snap.metrics if isinstance(m, SeriesStat)}
+            series = {m["name"]: m for m in decoded["metrics"] if m["type"] == "series"}
             assert counters["tracked_samples_issued"] == 2
             assert counters["tracked_samples_completed"] == 2
             assert "sample_latency_ns" in series
-            assert series["sample_latency_ns"].count == 2
-            assert series["sample_latency_ns"].total == 4_000_000
+            assert series["sample_latency_ns"]["count"] == 2
+            assert series["sample_latency_ns"]["total"] == 4_000_000
         finally:
             subscriber.close()
             publisher.close()

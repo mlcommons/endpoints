@@ -25,65 +25,71 @@ from typing import Any
 
 import msgspec.json
 
-from inference_endpoint.async_utils.services.metrics_aggregator.snapshot import (
-    CounterStat,
-    MetricsSnapshot,
-    SeriesStat,
-    SessionState,
-)
 from inference_endpoint.utils.version import get_version_info
 
 from ..utils import monotime_to_datetime
 
 
-def _series_to_metric_dict(stat: SeriesStat) -> dict[str, Any]:
-    """Convert a wire ``SeriesStat`` into the dict shape ``display()`` expects.
+def _series_to_metric_dict(stat: dict[str, Any]) -> dict[str, Any]:
+    """Convert a series-stat dict into the shape ``display()`` expects.
 
-    Derives ``avg``, ``std_dev``, and ``median`` from the rollups +
-    percentiles. ``median`` falls back to the bucket-midpoint search if
-    the producer didn't emit p50.
+    Input is the dict form produced by ``snapshot_to_dict``. Derives
+    ``avg``, ``std_dev``, and ``median`` from the rollups + percentiles.
+    ``median`` falls back to ``(min + max) / 2`` if the producer didn't
+    emit p50.
+
+    All field reads use ``.get(...)`` with sensible defaults so a
+    truncated / partial dict (e.g. an INTERRUPTED snapshot) produces an
+    honest empty rollup instead of crashing.
     """
-    if stat.count == 0:
+    count = stat.get("count", 0)
+    if count == 0:
         return {}
 
-    avg = stat.total / stat.count if stat.count > 0 else 0.0
-    if stat.count > 1:
-        n = stat.count
+    total = stat.get("total", 0)
+    sum_sq = stat.get("sum_sq", 0)
+    s_min = stat.get("min", 0)
+    s_max = stat.get("max", 0)
+
+    avg = total / count if count > 0 else 0.0
+    if count > 1:
+        n = count
         # Integer-aggregate series (latency in ns) can have very large
         # sum_sq and total values; the naive `sum_sq - total^2 / n`
         # form loses precision when total^2 / n is close to sum_sq.
         # Use the exact integer form `n*sum_sq - total^2` when inputs
         # are int, falling back to the float form otherwise.
-        if isinstance(stat.total, int) and isinstance(stat.sum_sq, int):
-            var_num_int = n * stat.sum_sq - stat.total * stat.total
+        if isinstance(total, int) and isinstance(sum_sq, int):
+            var_num_int = n * sum_sq - total * total
             std_dev = math.sqrt(max(0, var_num_int)) / math.sqrt(n * (n - 1))
         else:
-            var_num = stat.sum_sq - stat.total * stat.total / n
+            var_num = sum_sq - total * total / n
             std_dev = math.sqrt(max(0.0, var_num / (n - 1)))
     else:
         std_dev = 0.0
 
     # Median: prefer p50 from the producer, fall back to (min+max)/2 so
     # ``display()`` still has a numeric value to format.
-    perc = stat.percentiles
+    perc = stat.get("percentiles", {})
     if "50" in perc:
         median: float = perc["50"]
     elif "50.0" in perc:
         median = perc["50.0"]
     else:
-        median = (stat.min + stat.max) / 2
+        median = (s_min + s_max) / 2
 
+    histogram = stat.get("histogram", [])
     return {
-        "total": stat.total,
-        "min": stat.min,
-        "max": stat.max,
+        "total": total,
+        "min": s_min,
+        "max": s_max,
         "median": median,
         "avg": avg,
         "std_dev": std_dev,
-        "percentiles": dict(stat.percentiles),
+        "percentiles": dict(perc),
         "histogram": {
-            "buckets": [(lo, hi) for (lo, hi), _ in stat.histogram],
-            "counts": [c for _, c in stat.histogram],
+            "buckets": [(rng[0], rng[1]) for rng, _ in histogram],
+            "counts": [c for _, c in histogram],
         },
     }
 
@@ -103,10 +109,15 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
     n_samples_completed: int
     n_samples_failed: int
     duration_ns: int | None
-    # True iff the snapshot was state=COMPLETE AND n_pending_tasks==0.
-    # False signals partial async metrics — either drain timed out
-    # (state=COMPLETE, n_pending_tasks>0) or no COMPLETE snapshot was
-    # received and we fell back to a live/draining snapshot.
+    # The terminal SessionState that produced this report. Surfaced as a
+    # raw string so ``display()`` can render an INTERRUPTED indicator
+    # without re-parsing the source dict, and so JSON round-trips don't
+    # depend on Report importing the SessionState enum.
+    state: str
+    # True iff state=="complete" AND n_pending_tasks==0. False signals
+    # partial async metrics — drain timed out (state=="complete",
+    # n_pending_tasks>0), the run was interrupted (state=="interrupted"),
+    # or no final snapshot was found and we fell back to a live tick.
     complete: bool
 
     # Per-metric rollup dicts (output of _series_to_metric_dict)
@@ -129,33 +140,54 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
         return total / (self.duration_ns / 1e9)
 
     @classmethod
-    def from_snapshot(cls, snap: MetricsSnapshot) -> Report:
-        """Build a Report from a MetricsSnapshot.
+    def from_snapshot(cls, snap: dict[str, Any]) -> Report:
+        """Build a Report from a snapshot dict.
 
-        Counters are looked up by name; series are converted to the
-        dict shape that ``display()`` expects. Percentiles / histograms
-        are passed straight through from the snapshot.
+        Input is the dict form produced by
+        ``inference_endpoint.async_utils.services.metrics_aggregator.snapshot
+        .snapshot_to_dict``, which is also the shape persisted to
+        ``final_snapshot.json``. Consumers can therefore feed
+        ``json.loads(path.read_bytes())`` straight in without an
+        intermediate Struct decode — this is deliberate, because the
+        wire ``MetricsSnapshot`` uses ``array_like=True`` for compact
+        msgpack and decoding a dict back into an array-like Struct is
+        ergonomically painful (msgspec's decoders follow the Struct's
+        ``array_like`` flag).
+
+        All field reads use ``.get(...)`` with defaults that produce an
+        honest "incomplete" report on missing fields instead of crashing:
+        missing ``state`` defaults to ``"interrupted"`` (worst-case),
+        missing counters / series to zero / empty.
         """
         counters: dict[str, int | float] = {}
-        series: dict[str, SeriesStat] = {}
-        for stat in snap.metrics:
-            if isinstance(stat, CounterStat):
-                counters[stat.name] = stat.value
-            elif isinstance(stat, SeriesStat):
-                series[stat.name] = stat
+        series: dict[str, dict[str, Any]] = {}
+        for stat in snap.get("metrics", []):
+            stat_type = stat.get("type")
+            name = stat.get("name", "")
+            if not name:
+                continue
+            if stat_type == "counter":
+                counters[name] = stat.get("value", 0)
+            elif stat_type == "series":
+                series[name] = stat
 
         def _counter(key: str) -> int:
-            val = counters.get(key, 0)
-            return int(val)
+            return int(counters.get(key, 0))
 
         def _series_dict(key: str) -> dict[str, Any]:
             stat = series.get(key)
-            if stat is None or stat.count == 0:
+            if stat is None or stat.get("count", 0) == 0:
                 return {}
             return _series_to_metric_dict(stat)
 
         version_info = get_version_info()
         duration_ns = _counter("tracked_duration_ns")
+        # Default missing state to "interrupted" — a malformed / partial
+        # snapshot dict is treated as worst-case (run did not reach a
+        # clean completion). Drives complete=False and the interrupted
+        # indicator in display().
+        state = snap.get("state", "interrupted")
+        n_pending_tasks = snap.get("n_pending_tasks", 0)
 
         return cls(
             version=str(version_info.get("version", "unknown")),
@@ -165,9 +197,8 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
             n_samples_completed=_counter("tracked_samples_completed"),
             n_samples_failed=_counter("tracked_samples_failed"),
             duration_ns=duration_ns if duration_ns > 0 else None,
-            complete=(
-                snap.state == SessionState.COMPLETE and snap.n_pending_tasks == 0
-            ),
+            state=state,
+            complete=(state == "complete" and n_pending_tasks == 0),
             ttft=_series_dict("ttft_ns"),
             tpot=_series_dict("tpot_ns"),
             latency=_series_dict("sample_latency_ns"),
@@ -188,6 +219,16 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
         newline: str = "",
     ) -> None:
         fn(f"----------------- Summary -----------------{newline}")
+        if self.state == "interrupted":
+            fn(
+                "WARNING: run was interrupted (SIGTERM/SIGINT) — "
+                f"metrics below are best-effort partial data.{newline}"
+            )
+        elif not self.complete:
+            fn(
+                "WARNING: report is incomplete (drain timed out or no "
+                f"final snapshot received) — some async metrics may be missing.{newline}"
+            )
         fn(f"Version: {self.version}{newline}")
         if self.git_sha:
             fn(f"Git SHA: {self.git_sha}{newline}")

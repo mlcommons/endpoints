@@ -13,18 +13,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""``MetricsPublisher``: publish ``MetricsSnapshot`` over pub/sub + disk fallback."""
+"""``MetricsPublisher``: publish ``MetricsSnapshot`` over pub/sub + JSON file."""
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from collections.abc import Callable
 from pathlib import Path
 
-import msgspec
-import msgspec.msgpack
 from inference_endpoint.async_utils.services.metrics_aggregator.registry import (
     MetricsRegistry,
 )
@@ -32,6 +31,7 @@ from inference_endpoint.async_utils.services.metrics_aggregator.snapshot import 
     MetricsSnapshot,
     MetricsSnapshotCodec,
     SessionState,
+    snapshot_to_dict,
 )
 from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
 from inference_endpoint.async_utils.transport.zmq.pubsub import ZmqMessagePublisher
@@ -40,15 +40,27 @@ logger = logging.getLogger(__name__)
 
 
 class MetricsPublisher:
-    """Periodic snapshot publisher with best-effort disk fallback.
+    """Periodic snapshot publisher: pub/sub for live, JSON file for final.
 
     The live tick task runs at ``publish_interval_s`` cadence and publishes
-    a non-final snapshot each tick. ``publish_final`` cancels the tick task,
-    publishes a final snapshot over pub/sub, and atomically writes a
-    msgpack copy to ``fallback_path`` so a missed pub/sub final can still
-    be reconstructed.
+    a non-final snapshot over pub/sub each tick. ``publish_final``:
 
-    Pub/sub publish and disk fallback are **independent** best-effort
+    1. Cancels the tick task (and awaits its exit).
+    2. Atomically writes the final snapshot as pretty-printed JSON to
+       ``final_snapshot_path`` — this is the **primary** delivery path
+       and what the Report consumer reads.
+    3. Publishes a (msgpack) terminal-state snapshot over pub/sub as a
+       **TUI shutdown signal** — a future TUI can switch to "final view"
+       on seeing this frame without polling the file. The Report consumer
+       does NOT depend on this pub/sub send.
+
+    Decoupling the file from pub/sub means ``conflate=True`` on the SUB
+    side is unambiguously safe (a TUI that drops the COMPLETE frame just
+    needs to notice the file appeared / the publisher socket dropped),
+    and the file artifact is self-contained: ``cat final_snapshot.json``
+    is the canonical source of truth for a finished run.
+
+    Pub/sub publish and disk write are **independent** best-effort
     paths: a failure in one MUST NOT suppress the other.
     """
 
@@ -58,8 +70,11 @@ class MetricsPublisher:
         zmq_ctx: ManagedZMQContext,
         socket_name: str,
         loop: asyncio.AbstractEventLoop,
-        fallback_path: Path,
+        final_snapshot_path: Path,
     ) -> None:
+        # final_snapshot_path is the absolute path the JSON file is written
+        # to. Injected (not derived from output_dir) so tests can place it
+        # in tmp_path without recomputing extension/filename.
         self._publisher: ZmqMessagePublisher[MetricsSnapshot] = ZmqMessagePublisher(
             codec,
             socket_name,
@@ -70,13 +85,12 @@ class MetricsPublisher:
             linger=10_000,
         )
         self._loop = loop
-        self._fallback_path = fallback_path
+        self._final_snapshot_path = final_snapshot_path
         self._tick_task: asyncio.Task | None = None
-        self._encoder = msgspec.msgpack.Encoder()
         self._closed = False
-        # publish_final is idempotent: the SIGTERM handler in
+        # publish_final is idempotent: the SIGTERM/SIGINT handler in
         # __main__.py and the aggregator's ENDED-driven path can both
-        # call it; the second call must not re-publish a COMPLETE frame.
+        # call it; the second call must not re-publish or re-write.
         self._finalized = False
 
     # ------------------------------------------------------------------
@@ -137,26 +151,47 @@ class MetricsPublisher:
     # ------------------------------------------------------------------
 
     async def publish_final(
-        self, registry: MetricsRegistry, *, n_pending_tasks: int
+        self,
+        registry: MetricsRegistry,
+        *,
+        n_pending_tasks: int,
+        interrupted: bool = False,
     ) -> None:
-        """Publish the ``COMPLETE`` snapshot over pub/sub AND mirror to disk.
+        """Write the final snapshot to disk and signal pub/sub consumers.
 
         ``n_pending_tasks`` is the count of in-flight async tokenize tasks
-        at finalization time. Drain timeout is detected by consumers as
-        ``state == COMPLETE and n_pending_tasks > 0``.
+        at finalization time. Drain timeout is detected by Report consumers
+        as ``state == COMPLETE and n_pending_tasks > 0``.
 
-        Awaits tick-task cancellation BEFORE building/publishing so a late
-        live tick cannot land after the COMPLETE frame on the wire (which
-        would let a conflate-mode subscriber see the live tick as the
-        latest message instead of COMPLETE).
+        ``interrupted=True`` is set by the signal handler in __main__.py
+        when SIGTERM/SIGINT triggers shutdown before ``ENDED`` arrived;
+        the resulting snapshot is tagged ``state=INTERRUPTED`` so Report
+        can distinguish "user killed the run mid-execution" from a clean
+        end. Stats in an INTERRUPTED snapshot are best-effort partial
+        captures of whatever the aggregator had at signal time.
 
-        Pub/sub publish and disk fallback are independent best-effort
-        paths, each wrapped in its own try/except.
+        Two delivery channels, independent best-effort:
 
-        Idempotent: only the first call publishes; subsequent calls
-        early-return. This is the contract the SIGTERM handler in
-        __main__.py relies on to be safe to call alongside the
-        ENDED-driven path.
+        1. **JSON file at ``final_snapshot_path``** (primary). Atomic
+           write (tmp + fsync(file) + rename + fsync(parent dir)) so the
+           file is either fully present or absent — partial reads are
+           impossible. Pretty-printed for ``cat`` / ``jq`` use. This is
+           what the Report consumer reads.
+        2. **msgpack pub/sub** (TUI signal). A future TUI uses this as
+           the "run is over, switch to final view" cue without polling
+           the file. The Report consumer does NOT read this channel.
+
+        A failure in one channel MUST NOT suppress the other; each is
+        wrapped in its own try/except.
+
+        Awaits tick-task cancellation BEFORE building the snapshot so a
+        late live tick cannot land after the terminal frame on the wire
+        (which would let a conflate-mode TUI see the live tick instead
+        of the terminal state as the last message).
+
+        Idempotent: only the first call writes/publishes; subsequent
+        calls early-return. The SIGTERM/SIGINT handler relies on this to
+        race safely with the ENDED-driven path.
         """
         if self._finalized:
             return
@@ -169,48 +204,48 @@ class MetricsPublisher:
                 # Expected: we just cancelled it.
                 pass
             self._tick_task = None
+
+        terminal_state = (
+            SessionState.INTERRUPTED if interrupted else SessionState.COMPLETE
+        )
         snap = registry.build_snapshot(
-            state=SessionState.COMPLETE, n_pending_tasks=n_pending_tasks
+            state=terminal_state, n_pending_tasks=n_pending_tasks
         )
 
-        # Pub/sub first — buffer write, can't fail in normal operation.
-        # Wrapped anyway so a transport bug doesn't suppress the disk
-        # fallback below.
+        # Primary: atomic JSON file write. Run on a worker thread because
+        # fsync(file) + fsync(parent dir) can block tens-to-hundreds of ms
+        # on a busy host and would otherwise back-pressure any in-flight
+        # event-record processing on the aggregator's event loop.
+        try:
+            payload = json.dumps(snapshot_to_dict(snap), indent=2).encode("utf-8")
+            await asyncio.to_thread(self._write_atomic_json, payload)
+        except Exception:  # noqa: BLE001 — best-effort; pub/sub still needs to fire.
+            logger.exception("metrics: final JSON snapshot write failed")
+
+        # TUI signal: msgpack pub/sub send. Wrapped so a transport bug
+        # doesn't suppress the file write above and so a SUB-side issue
+        # doesn't crash the aggregator on shutdown.
         try:
             self._publisher.publish(snap)
-        except Exception:  # noqa: BLE001 — best-effort, must not block disk.
-            logger.exception("metrics: pub/sub final publish failed")
+        except Exception:  # noqa: BLE001 — best-effort; file is the source of truth.
+            logger.exception("metrics: pub/sub final signal failed")
 
-        # Disk fallback — best-effort, must not affect pub/sub above.
-        # The atomic write does synchronous f.flush + fsync(file) +
-        # fsync(parent dir) + rename, which can block tens-to-hundreds of
-        # ms on a busy host. Run it on a worker thread so it doesn't
-        # back-pressure any in-flight event-record processing on the
-        # aggregator's event loop.
-        try:
-            await asyncio.to_thread(
-                self._write_atomic_fallback, self._encoder.encode(snap)
-            )
-        except Exception:  # noqa: BLE001 — best-effort.
-            logger.exception("metrics: disk fallback write failed")
-
-    def _write_atomic_fallback(self, payload: bytes) -> None:
-        """Write payload atomically to ``fallback_path``.
+    def _write_atomic_json(self, payload: bytes) -> None:
+        """Write payload atomically to ``final_snapshot_path``.
 
         Sequence: write tmp + fsync(tmp) → rename → fsync(parent dir) so
-        the rename itself is durable across crashes.
+        the rename itself is durable across crashes. The path either
+        contains the new snapshot or contains the old contents (if any)
+        — never partial bytes.
         """
-        path = self._fallback_path
+        path = self._final_snapshot_path
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(path.suffix + ".tmp")
-        # 1. Write payload to tmp + fsync the file.
         with tmp.open("wb") as f:
             f.write(payload)
             f.flush()
             os.fsync(f.fileno())
-        # 2. Atomic rename.
         os.rename(tmp, path)
-        # 3. fsync parent dir so the rename is durable across crash.
         dir_fd = os.open(path.parent, os.O_RDONLY)
         try:
             os.fsync(dir_fd)

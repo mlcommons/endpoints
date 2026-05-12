@@ -152,7 +152,7 @@ async def main() -> None:
             zmq_ctx,
             args.metrics_socket,
             loop,
-            fallback_path=metrics_output_dir / "final_snapshot.msgpack",
+            final_snapshot_path=metrics_output_dir / "final_snapshot.json",
         )
         try:
             aggregator = MetricsAggregatorService(
@@ -174,16 +174,18 @@ async def main() -> None:
 
             # SIGTERM / SIGINT: parents (ServiceLauncher.kill_all, or a
             # user ^C) can kill us before an ENDED EventRecord arrives.
-            # The normal ENDED-driven path inside MetricsAggregatorService
-            # is what flushes publish_final + the disk fallback; without
-            # this handler a signal mid-run leaves the consumer's triple-
-            # redundant snapshot path empty. publish_final is idempotent
-            # (see MetricsPublisher._finalized), so racing with the
+            # The ENDED-driven path inside MetricsAggregatorService is
+            # what flushes publish_final; without this handler a signal
+            # mid-run leaves the Report consumer with no final_snapshot
+            # file. The signal-triggered snapshot is tagged INTERRUPTED
+            # so Report can distinguish "user killed the run" from a
+            # clean shutdown. publish_final is idempotent (see
+            # MetricsPublisher._finalized), so racing with the
             # ENDED-driven call is safe.
             def _on_signal(signum: int) -> None:
                 logger.warning(
                     "metrics aggregator received signal %d; "
-                    "flushing final snapshot defensively",
+                    "writing INTERRUPTED final snapshot",
                     signum,
                 )
                 loop.create_task(_signal_finalize(signum))
@@ -193,6 +195,7 @@ async def main() -> None:
                     await publisher.publish_final(
                         registry,
                         n_pending_tasks=aggregator._table.in_flight_tasks_count,
+                        interrupted=True,
                     )
                 except Exception:  # noqa: BLE001 — best-effort.
                     logger.exception(

@@ -15,10 +15,11 @@
 
 """Subscribe to ``MetricsSnapshot`` from the aggregator subprocess.
 
-The main process uses ``MetricsSnapshotSubscriber`` to keep the latest
-live snapshot, and to capture the snapshot whose ``state`` is
-``SessionState.COMPLETE`` when it arrives. Mirrors the publisher on the
-aggregator side.
+A live-state subscriber for TUI / dashboard consumers. Keeps the latest
+snapshot in ``self.latest`` and updates it on every tick. Terminal
+snapshots (``SessionState.COMPLETE`` / ``INTERRUPTED``) arrive over
+pub/sub as a "run finished" signal for consumers that want to switch to
+a final-view rendering on the wire event.
 """
 
 from __future__ import annotations
@@ -29,7 +30,6 @@ import logging
 from inference_endpoint.async_utils.services.metrics_aggregator.snapshot import (
     MetricsSnapshot,
     MetricsSnapshotCodec,
-    SessionState,
 )
 from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
 from inference_endpoint.async_utils.transport.zmq.pubsub import ZmqMessageSubscriber
@@ -38,12 +38,12 @@ logger = logging.getLogger(__name__)
 
 
 class MetricsSnapshotSubscriber(ZmqMessageSubscriber[MetricsSnapshot]):
-    """Subscriber that tracks ``latest`` and the ``COMPLETE`` snapshot.
+    """Subscriber that tracks the latest ``MetricsSnapshot`` for live views.
 
     ``latest`` is updated on every received snapshot regardless of state.
-    ``complete`` is set the first time a snapshot with
-    ``state == SessionState.COMPLETE`` arrives, and ``_complete_event`` is
-    signaled so the main process can ``await`` it.
+    A consumer detects "run finished" by observing
+    ``latest.state in {COMPLETE, INTERRUPTED}`` — both are terminal and
+    no further snapshots will arrive.
     """
 
     def __init__(
@@ -54,11 +54,10 @@ class MetricsSnapshotSubscriber(ZmqMessageSubscriber[MetricsSnapshot]):
         *,
         conflate: bool = True,
     ) -> None:
-        # conflate=True (default) keeps only the freshest snapshot in the SUB
-        # queue — appropriate for a TUI and safe for the main process Report
-        # consumer (the COMPLETE snapshot is the last message the publisher
-        # emits, so it's never conflated away). Pass conflate=False if a
-        # consumer needs every intermediate tick.
+        # conflate=True (default) keeps only the freshest snapshot in the
+        # SUB queue — the right shape for live consumers that render the
+        # current state on a timer. Pass conflate=False if a consumer
+        # needs every intermediate tick (no current callers do).
         super().__init__(
             MetricsSnapshotCodec(),
             path,
@@ -68,29 +67,7 @@ class MetricsSnapshotSubscriber(ZmqMessageSubscriber[MetricsSnapshot]):
             conflate=conflate,
         )
         self.latest: MetricsSnapshot | None = None
-        self.complete: MetricsSnapshot | None = None
-        self._complete_event = asyncio.Event()
-
-    async def wait_for_complete(self, timeout: float | None = None) -> bool:
-        """Wait until a ``COMPLETE``-state snapshot arrives.
-
-        Returns True iff received before ``timeout``.
-        """
-        try:
-            await asyncio.wait_for(self._complete_event.wait(), timeout=timeout)
-            return True
-        except TimeoutError:
-            return False
 
     async def process(self, items: list[MetricsSnapshot]) -> None:
         for snap in items:
             self.latest = snap
-            if snap.state == SessionState.COMPLETE and self.complete is None:
-                self.complete = snap
-                self._complete_event.set()
-                logger.info(
-                    "Received COMPLETE metrics snapshot "
-                    "(counter=%d, n_pending_tasks=%d)",
-                    snap.counter,
-                    snap.n_pending_tasks,
-                )
