@@ -183,13 +183,18 @@ _GENERATED_TEMPLATES = sorted(
 )
 
 
-# Non-gated tokenizer model used in place of the templates' default
-# (which references gated meta-llama/Llama-3.1-*). The echo-server e2e
-# path doesn't care about the model identity, only that the tokenizer
-# exists for the metrics aggregator's ISL/OSL/TPOT triggers. TinyLlama's
-# tokenizer is ~1MB and matches the Llama-family tokenizer the templates
-# were written against.
-_TEST_MODEL_NAME = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+# Local character-level tokenizer fixture used in place of the templates'
+# default (which references gated `meta-llama/Llama-3.1-*`). The echo-server
+# e2e path doesn't care about the model identity, only that a tokenizer
+# loads for the metrics aggregator's ISL/OSL/TPOT triggers. Using a local
+# fixture removes the HuggingFace Hub dependency from CI: no network call,
+# no ~1 MB download, no HF_TOKEN requirement, and the load completes in
+# milliseconds rather than seconds — well inside the parent launcher's
+# readiness timeout. ``AutoTokenizer.from_pretrained`` supports local
+# directories as a first-class input, so this uses the same production
+# code path with no test-only hooks.
+_TEST_TOKENIZER_DIR = Path(__file__).resolve().parents[2] / "assets/tokenizers/char"
+_TEST_MODEL_NAME = str(_TEST_TOKENIZER_DIR)
 
 
 def _resolve_template(template_path: Path, server_url: str) -> dict:

@@ -95,6 +95,11 @@ class TestAggregatorSignalHandling:
         socket_dir = tmp_path / "sockets"
         socket_dir.mkdir()
         output_dir = tmp_path / "output"
+        # The parent owns directory setup — the aggregator subprocess
+        # fail-fasts (SystemExit) on a missing output dir to surface
+        # contract violations in its own stderr instead of crashing
+        # later on the atomic-write path. Mirror that contract here.
+        output_dir.mkdir()
         # Use a unique socket name per test to avoid collisions if a
         # previous test run left an IPC file behind.
         suffix = uuid.uuid4().hex[:8]
@@ -149,6 +154,7 @@ class TestAggregatorSignalHandling:
         socket_dir = tmp_path / "sockets"
         socket_dir.mkdir()
         output_dir = tmp_path / "output"
+        output_dir.mkdir()  # parent owns dir setup (see sibling test)
         suffix = uuid.uuid4().hex[:8]
         proc = _spawn_aggregator(
             socket_dir,
