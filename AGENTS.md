@@ -315,7 +315,7 @@ See [Development Guide](docs/DEVELOPMENT.md) for full setup and workflow details
 - `max_throughput_runtime_settings`, `poisson_runtime_settings`, `concurrency_runtime_settings` — preset configs
 - `clean_sample_event_hooks` — ensures event hooks are cleared between tests
 
-**Test data**: `tests/datasets/dummy_1k.jsonl` (1000 samples), `tests/datasets/squad_pruned/`
+**Test data**: `tests/assets/datasets/dummy_1k.jsonl` (1000 samples), `tests/assets/datasets/squad_pruned/`
 
 ### Performance Guidelines
 

@@ -134,7 +134,7 @@ Issues = "https://github.com/mlperf/inference-endpoint/issues"
 target-version = "py312"
 line-length = 88
 exclude = [
-    "tests/datasets/*",
+    "tests/assets/datasets/*",
     "src/inference_endpoint/openai/openai_types_gen.py",
     "src/inference_endpoint/openai/openapi.yaml",
     "datasets/*",
