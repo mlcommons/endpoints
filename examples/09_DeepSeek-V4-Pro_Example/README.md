@@ -86,11 +86,10 @@ fit within the fp8 KV cache budget without preemption on 8×B200.
 
 ### Thinking mode and `budget_tokens`
 
-The `aime25::gptoss_budget_20k` preset enables DeepSeek's thinking mode
-(`chat_template_kwargs: {thinking: True, budget_tokens: 20000}`). Without `budget_tokens`,
-the model can spend all 32k tokens in the `<think>` block and return an empty boxed answer —
-observed on ~85% of responses in early testing. Setting `budget_tokens=20000` caps the
-reasoning phase and forces a final answer.
+DeepSeek-V4-Pro uses chain-of-thought reasoning via `chat_template_kwargs: {thinking: True}`.
+Without `budget_tokens`, the model can spend all 32k tokens in the `<think>` block and return
+an empty boxed answer — observed on ~85% of responses in early testing. Setting
+`budget_tokens: 20000` caps the reasoning phase and forces a final answer.
 
 ### Measured results (8×B200, `deepseekv4-cu130`)
 
@@ -162,11 +161,9 @@ accuracy-only runs. Use the perf-warmup entry with `n_samples_to_issue: 1`.
 
 **Empty boxed answers / low AIME accuracy**
 
-The model exhausted `max_new_tokens` in the thinking phase. Add `budget_tokens` to the preset:
-
-```yaml
-- name: aime25::gptoss_budget_20k # uses budget_tokens=20000
-```
+The model exhausted `max_new_tokens` in the thinking phase. Ensure the dataset preset
+includes `chat_template_kwargs: {thinking: True, budget_tokens: 20000}` to cap the
+reasoning phase.
 
 **`uv: cannot execute binary file: Exec format error`**
 
