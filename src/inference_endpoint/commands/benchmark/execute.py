@@ -179,27 +179,38 @@ class BenchmarkContext:
 
 
 def _check_tokenizer_exists(model_name: str) -> bool:
-    """Check if a HuggingFace tokenizer exists for the model (API only, no download).
+    """Check if a tokenizer exists for the model (local dir or HF repo, no download).
 
-    Returns True if the model repo exists and has tokenizer files, False otherwise.
-    This function is a probe — it never loads or downloads the tokenizer itself.
-    Downstream consumers that need tokenization (e.g. the MetricsAggregator
-    subprocess for ISL/OSL/TPOT, Harmony transforms for prompt preprocessing,
-    and any future plugin with its own tokenization need) each load their own
-    instance as required.
+    Returns True if a tokenizer is available, False otherwise. This function is
+    a probe — it never loads or downloads the tokenizer itself. Downstream
+    consumers that need tokenization (e.g. the MetricsAggregator subprocess
+    for ISL/OSL/TPOT, Harmony transforms for prompt preprocessing, and any
+    future plugin with its own tokenization need) each load their own instance
+    as required.
+
+    ``model_name`` may be a local checkpoint directory (e.g. an NVFP4 snapshot
+    cached under ``/root/.cache/huggingface/hub/...``) or an HF repo ID. Local
+    directories are probed directly; otherwise we ask the HF Hub for the file
+    listing.
     """
     try:
-        info = model_info(model_name)
-        # Check for tokenizer files in the repo
-        siblings = {s.rfilename for s in (info.siblings or [])}
+        local_path = Path(model_name)
+        if local_path.is_dir():
+            siblings = {p.name for p in local_path.iterdir() if p.is_file()}
+        else:
+            info = model_info(model_name)
+            siblings = {s.rfilename for s in (info.siblings or [])}
+
         has_tokenizer = (
             "tokenizer_config.json" in siblings or "tokenizer.json" in siblings
         )
+
         if has_tokenizer:
             logger.info(f"Tokenizer available for model: {model_name}")
         else:
             logger.warning(f"Model {model_name} found but has no tokenizer files")
         return has_tokenizer
+
     except ImportError:
         # huggingface_hub not installed — fall back to assuming it works
         logger.info(

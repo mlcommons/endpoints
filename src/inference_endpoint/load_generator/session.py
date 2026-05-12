@@ -191,8 +191,14 @@ class PhaseIssuer:
         prompt_data: PromptData
         if isinstance(data, dict):
             token_ids = data.get("input_tokens") or data.get("token_ids")
+            # Multimodal datasets store ``prompt`` as a list of OpenAI content
+            # parts (e.g. [{"type": "text", ...}, {"type": "image_url", ...}])
+            # which the HTTP adapter handles directly. PromptData.text is only
+            # meaningful for ISL on text-only prompts, so coerce non-strings
+            # to None and rely on token_ids when the dataset pre-tokenizes.
+            prompt = data.get("prompt")
             prompt_data = PromptData(
-                text=data.get("prompt"),
+                text=prompt if isinstance(prompt, str) else None,
                 token_ids=tuple(token_ids) if token_ids is not None else None,
             )
         else:
