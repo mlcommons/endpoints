@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""OpenAI /v1/completions adapter for vLLM with pre-tokenized prompts."""
+"""OpenAI /v1/completions adapter for pre-tokenized prompts (bypasses server chat template)."""
 
 import msgspec
 from inference_endpoint.config.schema import ModelParams, StreamingMode

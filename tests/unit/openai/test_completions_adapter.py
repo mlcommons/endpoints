@@ -190,31 +190,16 @@ class TestAPITypeIntegration:
 
 class TestPresetExistence:
     @pytest.mark.unit
-    def test_aime25_gptoss_sglang_preset_exists(self):
-        transforms = aime25_presets.gptoss_sglang()
+    def test_aime25_gptoss_preset_exists(self):
+        transforms = aime25_presets.gptoss()
         assert len(transforms) == 1
 
     @pytest.mark.unit
-    def test_aime25_gptoss_vllm_preset_exists(self):
-        transforms = aime25_presets.gptoss_vllm()
+    def test_gpqa_gptoss_preset_exists(self):
+        transforms = gpqa_presets.gptoss()
         assert len(transforms) == 1
 
     @pytest.mark.unit
-    def test_gpqa_gptoss_sglang_preset_exists(self):
-        transforms = gpqa_presets.gptoss_sglang()
-        assert len(transforms) == 1
-
-    @pytest.mark.unit
-    def test_gpqa_gptoss_vllm_preset_exists(self):
-        transforms = gpqa_presets.gptoss_vllm()
-        assert len(transforms) == 1
-
-    @pytest.mark.unit
-    def test_livecodebench_gptoss_sglang_preset_exists(self):
-        transforms = livecodebench_presets.gptoss_sglang()
-        assert len(transforms) == 1
-
-    @pytest.mark.unit
-    def test_livecodebench_gptoss_vllm_preset_exists(self):
-        transforms = livecodebench_presets.gptoss_vllm()
+    def test_livecodebench_gptoss_preset_exists(self):
+        transforms = livecodebench_presets.gptoss()
         assert len(transforms) == 1

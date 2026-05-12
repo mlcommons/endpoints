@@ -17,20 +17,20 @@ datasets:
     path: "examples/04_GPTOSS120B_Example/data/perf_eval_ref.parquet"
     parser:
       input_tokens: "input_tokens"
-  - name: "livecodebench::gptoss_vllm"
+  - name: "livecodebench::gptoss"
     type: "accuracy"
     accuracy_config:
       eval_method: "code_bench_scorer"
       extractor: "python_code_extractor"
       num_repeats: 3
-  - name: "aime25::gptoss_vllm"
+  - name: "aime25::gptoss"
     type: "accuracy"
     accuracy_config:
       eval_method: "pass_at_1"
       ground_truth: "answer"
       extractor: "boxed_math_extractor"
       num_repeats: 8
-  - name: "gpqa::gptoss_vllm"
+  - name: "gpqa::gptoss"
     type: "accuracy"
     accuracy_config:
       eval_method: "pass_at_1"

@@ -31,9 +31,5 @@ _FORMAT = (
 )
 
 
-def gptoss_sglang() -> list[Transform]:
-    return [UserPromptFormatter(user_prompt_format=_FORMAT)]
-
-
-def gptoss_vllm() -> list[Transform]:
+def gptoss() -> list[Transform]:
     return [UserPromptFormatter(user_prompt_format=_FORMAT)]
