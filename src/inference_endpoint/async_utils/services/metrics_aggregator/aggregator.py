@@ -281,24 +281,39 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
                     saw_shutdown = True
                 else:
                     if ev == SessionEventType.STARTED:
-                        self._session_start_ns = record.timestamp_ns
-                        # First STARTED: leave INITIALIZE for LIVE. The
-                        # publisher.start guard makes a duplicate STARTED
-                        # a no-op (council #8), so this re-assignment is
-                        # also safe on replay.
-                        self._session_state = SessionState.LIVE
-                        # Now that we have an event loop running, start the
-                        # publisher tick task. The callable is invoked once
-                        # per tick to capture the live (state, n_pending_tasks)
-                        # pair at each emit.
-                        self._publisher.start(
-                            registry,
-                            self._publish_interval_s,
-                            get_runtime_state=lambda: (
-                                self._session_state,
-                                table.in_flight_tasks_count,
-                            ),
-                        )
+                        if self._session_start_ns is not None:
+                            # A duplicate STARTED is a producer bug:
+                            # re-assigning _session_start_ns would freeze
+                            # total_duration_ns (the max-of-elapsed guard
+                            # never updates once the start moves forward)
+                            # and corrupt every downstream rate calc for
+                            # the rest of the run. Surface loudly and
+                            # ignore — the publisher.start guard already
+                            # rejects the second tick-task spawn, but
+                            # session-state must also be defended here.
+                            logger.error(
+                                "Duplicate STARTED event received "
+                                "(original at ts=%d, duplicate at ts=%d); "
+                                "ignoring — producer must emit STARTED "
+                                "exactly once per session.",
+                                self._session_start_ns,
+                                record.timestamp_ns,
+                            )
+                        else:
+                            self._session_start_ns = record.timestamp_ns
+                            self._session_state = SessionState.LIVE
+                            # Now that we have an event loop running, start
+                            # the publisher tick task. The callable is
+                            # invoked once per tick to capture the live
+                            # (state, n_pending_tasks) pair at each emit.
+                            self._publisher.start(
+                                registry,
+                                self._publish_interval_s,
+                                get_runtime_state=lambda: (
+                                    self._session_state,
+                                    table.in_flight_tasks_count,
+                                ),
+                            )
                     table.handle_session_event(record)
                     if ev == SessionEventType.STOP_PERFORMANCE_TRACKING:
                         registry.set_counter(

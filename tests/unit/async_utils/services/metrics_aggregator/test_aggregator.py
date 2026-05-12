@@ -464,6 +464,43 @@ class TestEdgeCases:
                 agg.close()
 
     @pytest.mark.asyncio
+    async def test_duplicate_started_logs_error_and_preserves_state(
+        self, tmp_path, caplog
+    ):
+        """A duplicate ``STARTED`` event is a producer bug.
+
+        The aggregator MUST NOT re-assign ``_session_start_ns`` on a
+        second STARTED — doing so freezes ``total_duration_ns`` for the
+        rest of the run (the max-of-elapsed guard never beats the new
+        smaller deltas). Verify the error is logged AND the original
+        start timestamp is preserved.
+        """
+        loop = asyncio.get_event_loop()
+        with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
+            agg, _, _ = make_aggregator(ctx, loop, "agg_dup_started")
+            try:
+                with caplog.at_level("ERROR"):
+                    await agg.process(
+                        [
+                            session_event(SessionEventType.STARTED, ts=1_000),
+                            session_event(SessionEventType.STARTED, ts=5_000),
+                        ]
+                    )
+                # Original start timestamp must be preserved.
+                assert agg._session_start_ns == 1_000
+                # And an error must have been logged with both timestamps.
+                error_records = [
+                    r for r in caplog.records if "Duplicate STARTED" in r.message
+                ]
+                assert (
+                    len(error_records) == 1
+                ), "duplicate STARTED must log exactly one error"
+                assert "1000" in error_records[0].getMessage()
+                assert "5000" in error_records[0].getMessage()
+            finally:
+                agg.close()
+
+    @pytest.mark.asyncio
     async def test_complete_removes_row(self, tmp_path):
         loop = asyncio.get_event_loop()
         with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
