@@ -151,16 +151,20 @@ class TestSessionStateTransitions:
             "live",
             "draining",
             "complete",
+            "interrupted",
         }
 
     def test_forward_ordering_matches_declaration_order(self):
         # The aggregator transitions in declaration order; consumers can
         # rely on `list(SessionState)` for "did we move forward?" checks.
+        # COMPLETE and INTERRUPTED are sibling terminal states — either is
+        # reachable from DRAINING but not from each other.
         assert list(SessionState) == [
             SessionState.INITIALIZE,
             SessionState.LIVE,
             SessionState.DRAINING,
             SessionState.COMPLETE,
+            SessionState.INTERRUPTED,
         ]
 
     @pytest.mark.parametrize(
@@ -174,6 +178,11 @@ class TestSessionStateTransitions:
             # cancelled / abandoned. Consumer treats as incomplete.
             (SessionState.COMPLETE, 1, False),
             (SessionState.INITIALIZE, 0, False),
+            # INTERRUPTED never satisfies the complete predicate, regardless
+            # of n_pending_tasks — a kill-signal-triggered snapshot is
+            # always partial data.
+            (SessionState.INTERRUPTED, 0, False),
+            (SessionState.INTERRUPTED, 7, False),
         ],
     )
     def test_complete_predicate(self, state, n_pending, complete):
@@ -197,3 +206,17 @@ class TestSessionStateTransitions:
         _, payload = codec.encode(snap)
         decoded = codec.decode(payload)
         assert decoded.state == SessionState.INITIALIZE
+
+    def test_interrupted_round_trips_on_the_wire(self):
+        # INTERRUPTED is emitted by the signal handler's publish_final
+        # call (SIGTERM/SIGINT). The msgpack wire form must round-trip.
+        snap = MetricsSnapshot(
+            counter=42,
+            timestamp_ns=12345,
+            state=SessionState.INTERRUPTED,
+            n_pending_tasks=3,
+            metrics=[CounterStat(name="c", value=7)],
+        )
+        codec = MetricsSnapshotCodec()
+        _, msgpack_payload = codec.encode(snap)
+        assert codec.decode(msgpack_payload).state == SessionState.INTERRUPTED
