@@ -24,6 +24,7 @@ aggregator and any consumer (main process, future TUI).
 
 from __future__ import annotations
 
+import math
 from enum import Enum
 from typing import ClassVar, Final
 
@@ -191,6 +192,21 @@ METRICS_SNAPSHOT_TOPIC: Final[bytes] = b"MET\x00".ljust(TOPIC_FRAME_SIZE, b"\x00
 # ---------------------------------------------------------------------------
 
 
+def _scrub_nonfinite(v):
+    """Map non-finite floats (``NaN`` / ``±Inf``) to ``None``.
+
+    The dict form is consumed by ``json.dumps(..., allow_nan=False)``,
+    which rejects non-finite floats so the producer-side bug surfaces
+    loudly rather than silently writing ``NaN`` / ``Infinity`` literals
+    that ``jq``, Go's ``encoding/json``, and any strict-JSON consumer
+    refuse to parse. Mapping non-finite to ``None`` keeps the JSON
+    strict and self-describes the gap to the consumer.
+    """
+    if isinstance(v, float) and not math.isfinite(v):
+        return None
+    return v
+
+
 def snapshot_to_dict(snap: MetricsSnapshot) -> dict:
     """Convert a wire ``MetricsSnapshot`` to its dict form.
 
@@ -210,19 +226,23 @@ def snapshot_to_dict(snap: MetricsSnapshot) -> dict:
 
 def _metric_to_dict(m: MetricStat) -> dict:
     if isinstance(m, CounterStat):
-        return {"type": "counter", "name": m.name, "value": m.value}
+        return {"type": "counter", "name": m.name, "value": _scrub_nonfinite(m.value)}
     return {
         "type": "series",
         "name": m.name,
         "count": m.count,
-        "total": m.total,
-        "min": m.min,
-        "max": m.max,
-        "sum_sq": m.sum_sq,
-        "percentiles": dict(m.percentiles),
+        "total": _scrub_nonfinite(m.total),
+        "min": _scrub_nonfinite(m.min),
+        "max": _scrub_nonfinite(m.max),
+        "sum_sq": _scrub_nonfinite(m.sum_sq),
+        "percentiles": {k: _scrub_nonfinite(v) for k, v in m.percentiles.items()},
         # Histogram tuples → JSON arrays. Consumers reading the dict can
         # iterate the two-element ranges directly without coercion.
-        "histogram": [[list(rng), c] for rng, c in m.histogram],
+        # Bucket edges are floats from log-spacing — scrub for safety.
+        "histogram": [
+            [[_scrub_nonfinite(rng[0]), _scrub_nonfinite(rng[1])], c]
+            for rng, c in m.histogram
+        ],
     }
 
 

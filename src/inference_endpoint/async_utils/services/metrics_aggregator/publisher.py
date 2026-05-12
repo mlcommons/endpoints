@@ -217,7 +217,14 @@ class MetricsPublisher:
         # on a busy host and would otherwise back-pressure any in-flight
         # event-record processing on the aggregator's event loop.
         try:
-            payload = json.dumps(snapshot_to_dict(snap), indent=2).encode("utf-8")
+            # ``allow_nan=False`` makes a producer-side NaN/Inf leak a
+            # hard error here rather than a silent ``NaN`` / ``Infinity``
+            # token in the file (which strict JSON consumers reject).
+            # ``snapshot_to_dict`` already scrubs non-finite floats to
+            # ``None``, so the only way this raises is a genuine bug.
+            payload = json.dumps(
+                snapshot_to_dict(snap), indent=2, allow_nan=False
+            ).encode("utf-8")
             await asyncio.to_thread(self._write_atomic_json, payload)
         except Exception:  # noqa: BLE001 — best-effort; pub/sub still needs to fire.
             logger.exception("metrics: final JSON snapshot write failed")
