@@ -19,6 +19,7 @@ import argparse
 import asyncio
 import logging
 import signal
+from collections.abc import Callable
 from contextlib import AbstractContextManager, nullcontext
 from pathlib import Path
 
@@ -28,12 +29,70 @@ from inference_endpoint.async_utils.transport.zmq.ready_check import send_ready_
 from inference_endpoint.utils.logging import setup_logging
 
 from .aggregator import MetricCounterKey, MetricsAggregatorService
+from .metrics_table import MetricsTable
 from .publisher import MetricsPublisher
 from .registry import MetricsRegistry
 from .snapshot import MetricsSnapshotCodec
 from .token_metrics import TokenizePool
 
 logger = logging.getLogger(__name__)
+
+
+def _make_sigterm_handler(
+    *,
+    loop: asyncio.AbstractEventLoop,
+    registry: MetricsRegistry,
+    publisher: MetricsPublisher,
+    table: MetricsTable,
+    shutdown_event: asyncio.Event,
+) -> tuple[Callable[[], None], set[asyncio.Task]]:
+    """Build the SIGTERM handler that writes the INTERRUPTED final snapshot.
+
+    Returns ``(handler, pending_tasks)``. ``pending_tasks`` is the
+    strong-reference container that keeps spawned finalize tasks alive
+    while they run: asyncio tracks tasks only by weakref, so a task
+    whose only reference is the local variable inside the handler can
+    be garbage-collected mid-execution (per Python's asyncio docs).
+    Each spawned task self-removes from the set via
+    ``add_done_callback`` once it completes.
+
+    Exposed at module level (rather than nested in ``main()``) so the
+    GC-safety contract is unit-testable without driving the whole
+    subprocess lifecycle.
+    """
+    pending_tasks: set[asyncio.Task] = set()
+
+    async def _signal_finalize() -> None:
+        try:
+            # Mirror the ENDED-driven path: refresh tracked_duration_ns
+            # from the table BEFORE publish_final, otherwise an
+            # interrupted run whose STOP_PERFORMANCE_TRACKING never
+            # fired would report duration_ns=0 and QPS=N/A in the final
+            # report even after processing many tracked samples.
+            registry.set_counter(
+                MetricCounterKey.TRACKED_DURATION_NS.value,
+                table.total_tracked_duration_ns,
+            )
+            await publisher.publish_final(
+                registry,
+                n_pending_tasks=table.in_flight_tasks_count,
+                interrupted=True,
+            )
+        except Exception:  # noqa: BLE001 — best-effort.
+            logger.exception(
+                "metrics aggregator: SIGTERM-triggered publish_final failed"
+            )
+        shutdown_event.set()
+
+    def _on_sigterm() -> None:
+        logger.warning(
+            "metrics aggregator received SIGTERM; " "writing INTERRUPTED final snapshot"
+        )
+        task = loop.create_task(_signal_finalize())
+        pending_tasks.add(task)
+        task.add_done_callback(pending_tasks.discard)
+
+    return _on_sigterm, pending_tasks
 
 
 async def main() -> None:
@@ -206,37 +265,14 @@ async def main() -> None:
             # aggregator's finalize — so we install a no-op handler for
             # SIGINT here, which prevents Python's default
             # KeyboardInterrupt and lets the parent control the lifecycle.
-            def _on_sigterm() -> None:
-                logger.warning(
-                    "metrics aggregator received SIGTERM; "
-                    "writing INTERRUPTED final snapshot"
-                )
-                loop.create_task(_signal_finalize())
-
-            async def _signal_finalize() -> None:
-                try:
-                    # Mirror the ENDED-driven path: refresh
-                    # tracked_duration_ns from the table BEFORE
-                    # publish_final, otherwise an interrupted run whose
-                    # STOP_PERFORMANCE_TRACKING never fired would
-                    # report duration_ns=0 and QPS=N/A in the final
-                    # report even after processing many tracked samples.
-                    registry.set_counter(
-                        MetricCounterKey.TRACKED_DURATION_NS.value,
-                        aggregator._table.total_tracked_duration_ns,
-                    )
-                    await publisher.publish_final(
-                        registry,
-                        n_pending_tasks=aggregator._table.in_flight_tasks_count,
-                        interrupted=True,
-                    )
-                except Exception:  # noqa: BLE001 — best-effort.
-                    logger.exception(
-                        "metrics aggregator: SIGTERM-triggered publish_final failed"
-                    )
-                shutdown_event.set()
-
-            loop.add_signal_handler(signal.SIGTERM, _on_sigterm)
+            on_sigterm, _sigterm_tasks = _make_sigterm_handler(
+                loop=loop,
+                registry=registry,
+                publisher=publisher,
+                table=aggregator._table,
+                shutdown_event=shutdown_event,
+            )
+            loop.add_signal_handler(signal.SIGTERM, on_sigterm)
             # No-op SIGINT handler: silence the default KeyboardInterrupt
             # and let the parent's ENDED-driven path drive shutdown.
             loop.add_signal_handler(

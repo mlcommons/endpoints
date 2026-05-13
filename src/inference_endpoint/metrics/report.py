@@ -296,6 +296,16 @@ def _display_metric(
     scale_factor: float = 1.0,
     newline: str = "",
 ) -> None:
+    # ``_scrub_nonfinite`` (snapshot.py) maps producer-side NaN/±Inf to
+    # ``None`` so the persisted JSON stays strict. Any of the named
+    # scalars / percentile values below can therefore be ``None`` —
+    # render an ``N/A`` indicator instead of crashing on
+    # ``None * scale_factor``.
+    def _scaled(v: Any) -> str:
+        if v is None:
+            return "N/A"
+        return f"{v * scale_factor:.2f}"
+
     for name, key in [
         ("Min", "min"),
         ("Max", "max"),
@@ -303,7 +313,7 @@ def _display_metric(
         ("Avg.", "avg"),
         ("Std Dev.", "std_dev"),
     ]:
-        fn(f"  {name}: {metric_dict[key] * scale_factor:.2f} {unit}{newline}")
+        fn(f"  {name}: {_scaled(metric_dict[key])} {unit}{newline}")
 
     fn(f"\n  Histogram:{newline}")
     buckets = metric_dict["histogram"]["buckets"]
@@ -311,8 +321,7 @@ def _display_metric(
 
     if buckets:
         bucket_strs = [
-            f"  [{lo * scale_factor:.2f}, {hi * scale_factor:.2f}"
-            + ("]" if i == len(buckets) - 1 else ")")
+            f"  [{_scaled(lo)}, {_scaled(hi)}" + ("]" if i == len(buckets) - 1 else ")")
             for i, (lo, hi) in enumerate(buckets)
         ]
         max_count = max(counts)
@@ -325,4 +334,4 @@ def _display_metric(
 
     fn(f"\n  Percentiles:{newline}")
     for p, val in metric_dict.get("percentiles", {}).items():
-        fn(f"  {p:>6}: {val * scale_factor:.2f} {unit}{newline}")
+        fn(f"  {p:>6}: {_scaled(val)} {unit}{newline}")

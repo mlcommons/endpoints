@@ -368,26 +368,18 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
             # that fires before publish_final reflects the new state.
             self._session_state = SessionState.DRAINING
             logger.info("Draining %d async tasks...", table.in_flight_tasks_count)
-            try:
-                await asyncio.wait_for(
-                    table.drain_tasks(), timeout=self._drain_timeout_s
-                )
-            except TimeoutError:
+            # drain_tasks owns the timeout + cancel-and-await sequence so
+            # the pending count is captured BEFORE done-callbacks empty
+            # the in-flight set. Reading in_flight_tasks_count out here
+            # would always be 0 (see drain_tasks docstring).
+            n_pending = await table.drain_tasks(timeout=self._drain_timeout_s)
+            if n_pending > 0:
                 logger.warning(
-                    "drain_tasks timed out after %.1fs; some async metrics "
-                    "may be incomplete",
+                    "drain_tasks timed out after %.1fs; %d async tasks "
+                    "did not complete and were cancelled",
                     self._drain_timeout_s,
+                    n_pending,
                 )
-                # cancel() only *schedules* cancellation at the next await
-                # point. Await the cancelled tasks so they actually exit
-                # before publish_final reads n_pending — otherwise the
-                # snapshot reports stale-high pending counts and the
-                # event-loop tear-down emits "Task was destroyed but it
-                # is pending!" warnings on the cancelled set.
-                cancelled = table.cancel_in_flight_tasks()
-                if cancelled:
-                    await asyncio.gather(*cancelled, return_exceptions=True)
-            n_pending = table.in_flight_tasks_count
             logger.info(
                 "Async tasks drained (n_pending_tasks=%d at finalize)", n_pending
             )

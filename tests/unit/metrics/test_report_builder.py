@@ -405,3 +405,104 @@ class TestFromSnapshotDict:
         }
         report = Report.from_snapshot(snap)
         assert report.n_samples_issued == 5
+
+    def test_display_handles_scrubbed_nan_percentiles(self):
+        """``_scrub_nonfinite`` maps producer-side NaN/Inf to ``None`` so the
+        snapshot JSON stays strict. ``Report.display()`` is called from
+        ``finalize_benchmark`` outside the report-build try/except — a
+        ``None * scale_factor`` crash there takes down the whole run.
+
+        Asserts: display() does not raise and renders an N/A indicator
+        for the scrubbed values.
+        """
+        snap = {
+            "counter": 1,
+            "timestamp_ns": 0,
+            "state": "complete",
+            "n_pending_tasks": 0,
+            "metrics": [
+                {
+                    "type": "counter",
+                    "name": "tracked_samples_issued",
+                    "value": 5,
+                },
+                {
+                    "type": "counter",
+                    "name": "tracked_samples_completed",
+                    "value": 5,
+                },
+                {
+                    "type": "counter",
+                    "name": "tracked_duration_ns",
+                    "value": 1_000_000_000,
+                },
+                {
+                    "type": "series",
+                    "name": "ttft_ns",
+                    "count": 5,
+                    "total": 5_000_000,
+                    "min": 1_000_000,
+                    "max": 1_500_000,
+                    "sum_sq": 5_005_000_000_000,
+                    # All percentile values scrubbed from NaN → None.
+                    "percentiles": {"50.0": None, "90.0": None, "99.0": None},
+                    "histogram": [[[1_000_000.0, 1_500_000.0], 5]],
+                },
+            ],
+        }
+        report = Report.from_snapshot(snap)
+
+        lines: list[str] = []
+        # Currently crashes with TypeError on val * scale_factor.
+        report.display(fn=lines.append, summary_only=False)
+        output = "\n".join(lines)
+        assert "TTFT" in output
+        # Scrubbed values surface as a sentinel rather than crashing.
+        assert "N/A" in output
+
+
+@pytest.mark.unit
+def test_scrub_nonfinite_round_trip_yields_none():
+    """End-to-end: a registry that records a non-finite series value
+    produces a snapshot dict whose percentile entries are ``None`` (not
+    NaN literals). Anchors the producer-side invariant the display-time
+    None-guard depends on.
+    """
+    import math
+
+    from inference_endpoint.async_utils.services.metrics_aggregator.snapshot import (
+        MetricsSnapshot,
+        SeriesStat,
+        snapshot_to_dict,
+    )
+
+    series = SeriesStat(
+        name="ttft_ns",
+        count=1,
+        total=0.0,
+        min=0.0,
+        max=0.0,
+        sum_sq=0.0,
+        percentiles={
+            "50.0": float("nan"),
+            "90.0": float("inf"),
+            "99.0": float("-inf"),
+        },
+        histogram=[],
+    )
+    snap = MetricsSnapshot(
+        counter=1,
+        timestamp_ns=0,
+        state=SessionState.COMPLETE,
+        n_pending_tasks=0,
+        metrics=[series],
+    )
+    d = snapshot_to_dict(snap)
+    perc = d["metrics"][0]["percentiles"]
+    assert perc == {"50.0": None, "90.0": None, "99.0": None}
+    # And the result must be strict-JSON serializable.
+    import json
+
+    json.dumps(d, allow_nan=False)
+    # Sanity: original NaN was indeed non-finite.
+    assert not math.isfinite(float("nan"))

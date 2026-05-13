@@ -494,26 +494,37 @@ class MetricsTable:
         """Number of async trigger tasks currently in flight."""
         return len(self._in_flight_tasks)
 
-    async def drain_tasks(self) -> None:
-        """Await all in-flight async trigger tasks."""
-        if self._in_flight_tasks:
+    async def drain_tasks(self, *, timeout: float | None = None) -> int:
+        """Await in-flight async trigger tasks.
+
+        With ``timeout``, the pending set at the timeout boundary is
+        cancelled and awaited; the count of those pending tasks is
+        returned (>0 indicates the drain timed out). Without
+        ``timeout``, blocks indefinitely and returns 0 on clean drain.
+
+        The pending count must be captured BEFORE the cancel-and-await
+        step: each task's ``add_done_callback(_in_flight_tasks.discard)``
+        empties ``_in_flight_tasks`` as cancellation propagates, so
+        reading ``in_flight_tasks_count`` after this method returns
+        would always be 0 — making a drain timeout indistinguishable
+        from a clean run.
+        """
+        if not self._in_flight_tasks:
+            return 0
+        if timeout is None:
             await asyncio.gather(*self._in_flight_tasks, return_exceptions=True)
             self._in_flight_tasks.clear()
-
-    def cancel_in_flight_tasks(self) -> list[asyncio.Task]:
-        """Cancel every in-flight async trigger task that hasn't finished.
-
-        Returns the tasks that were cancelled so callers can await them
-        (cancellation is only scheduled by ``Task.cancel()`` — the tasks
-        must still be awaited at a later point for the cancellation to
-        actually take effect).
-        """
-        cancelled: list[asyncio.Task] = []
-        for t in list(self._in_flight_tasks):
-            if not t.done():
+            return 0
+        _, still_pending = await asyncio.wait(
+            list(self._in_flight_tasks), timeout=timeout
+        )
+        n_pending = len(still_pending)
+        if still_pending:
+            for t in still_pending:
                 t.cancel()
-                cancelled.append(t)
-        return cancelled
+            await asyncio.gather(*still_pending, return_exceptions=True)
+        self._in_flight_tasks.clear()
+        return n_pending
 
     # --- Internal ---
 

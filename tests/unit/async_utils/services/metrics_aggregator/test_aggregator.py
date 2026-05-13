@@ -1055,3 +1055,68 @@ class TestAsyncTriggers:
     # exercised here. Adding a MockTokenizePool that raises on
     # token_count_async would let us assert no metric is emitted, the
     # aggregator does not crash, and the task set is cleaned up.
+
+    @pytest.mark.asyncio
+    async def test_drain_timeout_reports_pending_count(self, tmp_path):
+        """On drain timeout, publish_final must receive n_pending_tasks > 0.
+
+        AGENTS.md and the ``MetricsSnapshot.n_pending_tasks`` docstring
+        document the consumer contract: a drain-timeout run is detected
+        downstream as ``state == COMPLETE and n_pending_tasks > 0``. If
+        the producer always reports 0 here, the timeout is silently
+        rebadged as a clean run and the Report shows no warning.
+        """
+        loop = asyncio.get_event_loop()
+
+        class BlockingTokenizePool:
+            async def token_count_async(self, text, _loop):
+                await asyncio.sleep(10.0)  # exceeds drain timeout
+                return 0
+
+            def token_count(self, text):
+                return 0
+
+            def close(self):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                self.close()
+
+        with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
+            agg, _, publisher = make_aggregator(
+                ctx,
+                loop,
+                "agg_drain_timeout",
+                tokenize_pool=BlockingTokenizePool(),
+            )
+            agg._drain_timeout_s = 0.05
+            try:
+                await agg.process(
+                    [
+                        session_event(
+                            SessionEventType.START_PERFORMANCE_TRACKING, ts=0
+                        ),
+                        sample_event(
+                            SampleEventType.ISSUED,
+                            "s1",
+                            ts=1000,
+                            data=PromptData(text="some text to tokenize"),
+                        ),
+                    ]
+                )
+                assert (
+                    agg._table.in_flight_tasks_count > 0
+                ), "precondition: ISL task must be in-flight before ENDED"
+                await agg.process([session_event(SessionEventType.ENDED, ts=2000)])
+
+                publisher.publish_final.assert_awaited_once()
+                kwargs = publisher.publish_final.await_args.kwargs
+                assert kwargs["n_pending_tasks"] > 0, (
+                    f"drain timeout must report stuck tasks; got "
+                    f"n_pending_tasks={kwargs['n_pending_tasks']}"
+                )
+            finally:
+                agg.close()
