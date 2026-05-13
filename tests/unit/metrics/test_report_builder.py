@@ -22,6 +22,7 @@ Reports are built from a ``MetricsSnapshot`` produced by a populated
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 import pytest
@@ -35,6 +36,8 @@ from inference_endpoint.async_utils.services.metrics_aggregator.registry import 
     MetricsRegistry,
 )
 from inference_endpoint.async_utils.services.metrics_aggregator.snapshot import (
+    MetricsSnapshot,
+    SeriesStat,
     SessionState,
     snapshot_to_dict,
 )
@@ -468,14 +471,6 @@ def test_scrub_nonfinite_round_trip_yields_none():
     NaN literals). Anchors the producer-side invariant the display-time
     None-guard depends on.
     """
-    import math
-
-    from inference_endpoint.async_utils.services.metrics_aggregator.snapshot import (
-        MetricsSnapshot,
-        SeriesStat,
-        snapshot_to_dict,
-    )
-
     series = SeriesStat(
         name="ttft_ns",
         count=1,
@@ -501,8 +496,6 @@ def test_scrub_nonfinite_round_trip_yields_none():
     perc = d["metrics"][0]["percentiles"]
     assert perc == {"50.0": None, "90.0": None, "99.0": None}
     # And the result must be strict-JSON serializable.
-    import json
-
     json.dumps(d, allow_nan=False)
     # Sanity: original NaN was indeed non-finite.
     assert not math.isfinite(float("nan"))
