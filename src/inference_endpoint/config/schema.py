@@ -22,6 +22,7 @@ on Annotated fields to declare shorthand aliases alongside dotted paths.
 
 from __future__ import annotations
 
+import re
 from collections import Counter
 from enum import Enum
 from pathlib import Path
@@ -453,6 +454,84 @@ class EndpointConfig(BaseModel):
         return v
 
 
+_SSH_ID_RE = re.compile(r"^(?P<username>[^@]+)@(?P<host>[^:]+?)(?::(?P<port>\d+))?$")
+
+
+class SshTarget(BaseModel):
+    """Parsed SSH target from a raw 'username@host' or 'username@host:port' string."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    username: str
+    host: str
+    port: int = 22
+
+    def to_mlcflow_str(self) -> str:
+        return f"{self.username}@{self.host}:{self.port}"
+
+    @field_validator("port", mode="after")
+    @classmethod
+    def _validate_port(cls, v: int) -> int:
+        if not (1 <= v <= 65535):
+            raise ValueError(f"Port must be in range 1-65535, got {v}")
+        return v
+
+
+class SysInfoCaptureConfig(BaseModel):
+    """Configuration for the sys_info_capture post-benchmark step."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    exclude_current_system: bool = False
+    accelerator_backend: Literal["cuda", "rocm"]
+    output_path: str
+    skip_ssh_key_file: bool = False
+    ssh_ids: list[str]
+
+    @field_validator("output_path", mode="after")
+    @classmethod
+    def _validate_output_path(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("output_path must be a non-empty string")
+        return v
+
+    @field_validator("ssh_ids", mode="after")
+    @classmethod
+    def _validate_ssh_ids(cls, v: list[str]) -> list[str]:
+        if not v:
+            raise ValueError("ssh_ids must be a non-empty list")
+        for entry in v:
+            m = _SSH_ID_RE.match(entry)
+            if not m:
+                raise ValueError(
+                    f"Invalid ssh_id entry {entry!r}: expected 'username@host' or 'username@host:port'"
+                )
+            port_str = m.group("port")
+            if port_str is not None:
+                port = int(port_str)
+                if not (1 <= port <= 65535):
+                    raise ValueError(
+                        f"Invalid port in ssh_id {entry!r}: {port} is not in range 1-65535"
+                    )
+        return v
+
+    @property
+    def parsed_ssh_ids(self) -> list[SshTarget]:
+        targets = []
+        for entry in self.ssh_ids:
+            m = _SSH_ID_RE.match(entry)
+            assert m is not None  # already validated
+            port_str = m.group("port")
+            targets.append(
+                SshTarget(
+                    username=m.group("username"),
+                    host=m.group("host"),
+                    port=int(port_str) if port_str is not None else 22,
+                )
+            )
+        return targets
+
+
 class BenchmarkConfig(WithUpdatesMixin, BaseModel):
     """Benchmark configuration — single source of truth for YAML and CLI.
 
@@ -504,6 +583,9 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
             help="NUMA-aware CPU pinning",
         ),
     ] = True
+    sys_info_capture: Annotated[
+        SysInfoCaptureConfig | None, cyclopts.Parameter(show=False)
+    ] = None
 
     @field_validator("datasets", mode="before")
     @classmethod

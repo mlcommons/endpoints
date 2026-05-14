@@ -730,6 +730,18 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
     except Exception as e:
         logger.error(f"Save failed: {e}")
 
+    if ctx.config.sys_info_capture is not None:
+        try:
+            # Local import: mlcflow is optional and only needed when sys_info_capture is configured.
+            from inference_endpoint.sys_info.capture import (  # noqa: PLC0415
+                capture_system_info,
+            )
+
+            output_path = capture_system_info(ctx.config.sys_info_capture)
+            logger.info("System info captured at: %s", output_path)
+        except Exception as e:
+            logger.warning("sys_info_capture failed and will be skipped: %s", e)
+
 
 def run_benchmark(config: BenchmarkConfig, test_mode: TestMode) -> None:
     """Orchestrate setup → execute → finalize."""

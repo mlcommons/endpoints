@@ -729,6 +729,25 @@ class TestColumnFilter:
         assert "col2" not in result.columns
         assert len(result) == 0
 
+    def test_repeated_calls_do_not_mutate_required_columns(self):
+        """Calling the transform multiple times must not grow required_columns.
+
+        Previously, columns_to_keep = self.required_columns was an alias (not a
+        copy), so += mutated self.required_columns, causing duplicate columns on
+        the second and subsequent calls.
+        """
+        df = pd.DataFrame({"req": [1], "opt": [2], "other": [3]})
+        transform = ColumnFilter(
+            required_columns=["req"],
+            optional_columns=["opt"],
+        )
+
+        for _ in range(3):
+            result = transform(df)
+            assert result.columns.is_unique
+            assert list(result.columns) == ["req", "opt"]
+            assert len(transform.required_columns) == 1
+
 
 class TestMakeAdapterCompatible:
     """Test suite for MakeAdapterCompatible transform."""
