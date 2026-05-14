@@ -558,6 +558,18 @@ class TestBenchmarkSession:
         # Bug #5: error event should also be published
         assert len(error_events) == 1
 
+        # ERROR must be emitted BEFORE COMPLETE so the metrics aggregator can
+        # observe the in-flight tracked row before set_field(...COMPLETE...)
+        # removes it. Reverting this order would silently zero
+        # tracked_samples_failed.
+        error_idx = publisher.events.index(error_events[0])
+        complete_idx = publisher.events.index(complete_events[0])
+        assert error_idx < complete_idx, (
+            f"ERROR event must be emitted before COMPLETE for metrics "
+            f"aggregator correctness; got error at idx {error_idx}, "
+            f"complete at idx {complete_idx}"
+        )
+
 
 @pytest.mark.unit
 class TestBenchmarkSessionPoissonIntegration:

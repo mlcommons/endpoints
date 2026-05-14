@@ -6,7 +6,7 @@ How to run and test the CLI locally using the built-in echo server and the inclu
 
 ### 1. Prepare Test Environment
 
-**Dataset:** The repo includes `tests/datasets/dummy_1k.jsonl` (1000 samples)
+**Dataset:** The repo includes `tests/assets/datasets/dummy_1k.jsonl` (1000 samples)
 **Format:** Automatically inferred from the file extension. Common local formats include `jsonl`, `json`, `csv`, `parquet`, and HuggingFace datasets.
 
 ### 2. Start the Echo Server
@@ -74,14 +74,14 @@ Waiting for 5 responses...
 uv run inference-endpoint -v benchmark offline \
   --endpoints http://localhost:8765 \
   --model Qwen/Qwen3-8B \
-  --dataset tests/datasets/dummy_1k.jsonl \
+  --dataset tests/assets/datasets/dummy_1k.jsonl \
   --duration 0
 
 # Production test with custom params and report generation
 uv run inference-endpoint -v benchmark offline \
   --endpoints http://localhost:8765 \
   --model Qwen/Qwen3-8B \
-  --dataset tests/datasets/dummy_1k.jsonl \
+  --dataset tests/assets/datasets/dummy_1k.jsonl \
   --num-samples 5000 \
   --workers 4 \
   --report-dir benchmark_report
@@ -114,7 +114,7 @@ Cleaning up...
 uv run inference-endpoint -v benchmark online \
   --endpoints http://localhost:8765 \
   --model Qwen/Qwen3-8B \
-  --dataset tests/datasets/dummy_1k.jsonl \
+  --dataset tests/assets/datasets/dummy_1k.jsonl \
   --duration 0 \
   --load-pattern poisson \
   --target-qps 100 \
@@ -154,7 +154,7 @@ uv run inference-endpoint validate-yaml --config offline_template.yaml
 uv run inference-endpoint benchmark offline \
   --endpoints http://localhost:8765 \
   --model Qwen/Qwen3-8B \
-  --dataset tests/datasets/ds_samples.jsonl \
+  --dataset tests/assets/datasets/ds_samples.jsonl \
   -v
 ```
 
@@ -246,7 +246,7 @@ uv run inference-endpoint probe --endpoints http://localhost:8000 --model Qwen/Q
 uv run inference-endpoint -v benchmark offline \
   --endpoints http://localhost:8000 \
   --model Qwen/Qwen3-8B \
-  --dataset tests/datasets/dummy_1k.jsonl \
+  --dataset tests/assets/datasets/dummy_1k.jsonl \
   --workers 4 \
   --report-dir benchmark_report
 
@@ -261,14 +261,14 @@ pkill -f echo_server
 uv run inference-endpoint benchmark offline \
   --endpoints http://localhost:8765 \
   --model Qwen/Qwen3-8B \
-  --dataset tests/datasets/dummy_1k.jsonl \
+  --dataset tests/assets/datasets/dummy_1k.jsonl \
   --report-dir offline_report
 
 # Online (Poisson distribution)
 uv run inference-endpoint benchmark online \
   --endpoints http://localhost:8765 \
   --model Qwen/Qwen3-8B \
-  --dataset tests/datasets/dummy_1k.jsonl \
+  --dataset tests/assets/datasets/dummy_1k.jsonl \
   --load-pattern poisson \
   --target-qps 500 \
   --report-dir online_report
@@ -277,21 +277,21 @@ uv run inference-endpoint benchmark online \
 uv run inference-endpoint benchmark offline \
   --endpoints http://localhost:8765 \
   --model Qwen/Qwen3-8B \
-  --dataset tests/datasets/dummy_1k.jsonl \
+  --dataset tests/assets/datasets/dummy_1k.jsonl \
   --num-samples 500
 
 # Force streaming on for offline mode (to test TTFT metrics)
 uv run inference-endpoint benchmark offline \
   --endpoints http://localhost:8765 \
   --model Qwen/Qwen3-8B \
-  --dataset tests/datasets/dummy_1k.jsonl \
+  --dataset tests/assets/datasets/dummy_1k.jsonl \
   --streaming on
 
 # Concurrency mode (fixed concurrent requests)
 uv run inference-endpoint benchmark online \
   --endpoints http://localhost:8765 \
   --model Qwen/Qwen3-8B \
-  --dataset tests/datasets/dummy_1k.jsonl \
+  --dataset tests/assets/datasets/dummy_1k.jsonl \
   --load-pattern concurrency \
   --concurrency 32
 ```
@@ -317,7 +317,7 @@ uv run inference-endpoint benchmark online \
 - Use `-v` for INFO logging, `-vv` for DEBUG
 - Echo server mirrors prompts back - perfect for quick testing without real inference
 - Press `Ctrl+C` to gracefully interrupt benchmarks
-- Default test dataset: `tests/datasets/dummy_1k.jsonl` (1000 samples)
+- Default test dataset: `tests/assets/datasets/dummy_1k.jsonl` (1000 samples)
 
 **Advanced:**
 

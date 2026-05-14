@@ -16,7 +16,6 @@
 """Integration tests for benchmark commands against echo server."""
 
 import json
-import os
 import re
 from pathlib import Path
 
@@ -184,11 +183,27 @@ _GENERATED_TEMPLATES = sorted(
 )
 
 
+# Local character-level tokenizer fixture used in place of the templates'
+# default (which references gated `meta-llama/Llama-3.1-*`). The echo-server
+# e2e path doesn't care about the model identity, only that a tokenizer
+# loads for the metrics aggregator's ISL/OSL/TPOT triggers. Using a local
+# fixture removes the HuggingFace Hub dependency from CI: no network call,
+# no ~1 MB download, no HF_TOKEN requirement, and the load completes in
+# milliseconds rather than seconds — well inside the parent launcher's
+# readiness timeout. ``AutoTokenizer.from_pretrained`` supports local
+# directories as a first-class input, so this uses the same production
+# code path with no test-only hooks.
+_TEST_TOKENIZER_DIR = Path(__file__).resolve().parents[2] / "assets/tokenizers/char"
+_TEST_MODEL_NAME = str(_TEST_TOKENIZER_DIR)
+
+
 def _resolve_template(template_path: Path, server_url: str) -> dict:
     """Load a template YAML, strip <PLACEHOLDER> wrappers, and patch for testing.
 
-    Only replaces placeholders with working values and caps n_samples_to_issue.
-    Everything else stays as the template defines it.
+    Replaces placeholders with working values, swaps the gated default
+    model for a non-gated tokenizer (so tests run without ``HF_TOKEN``),
+    and caps ``n_samples_to_issue``. Everything else stays as the template
+    defines it.
     """
     raw = template_path.read_text()
     # Strip <PLACEHOLDER eg: value> → value (all templates use eg: form)
@@ -197,10 +212,27 @@ def _resolve_template(template_path: Path, server_url: str) -> dict:
     raw = re.sub(r"http://localhost:\d+", server_url, raw)
     data = yaml.safe_load(raw)
 
+    # Swap the placeholder-default model name for a non-gated tokenizer
+    # (see _TEST_MODEL_NAME above) so these tests can run in CI without
+    # HF_TOKEN.
+    if "model_params" in data and isinstance(data["model_params"], dict):
+        data["model_params"]["name"] = _TEST_MODEL_NAME
+
     # Cap total samples so test finishes in seconds
     data.setdefault("settings", {})
     data["settings"].setdefault("runtime", {})
     data["settings"]["runtime"]["n_samples_to_issue"] = 10
+
+    # Bump the worker-init timeout for CI. The production default (60 s) is
+    # tight on small CI runners where Python's `spawn`-mode multiprocessing
+    # pays a full re-import cost per worker on top of ZMQ IPC setup; cold-
+    # start of the *first* parametrized template (alphabetical, so
+    # `concurrency_template.yaml`) consistently exceeds the budget in CI.
+    # The other 5 templates benefit from warm module / IPC caches and don't
+    # need the headroom. 120 s is a generous safety margin that does not
+    # change the production default, only this integration test.
+    data["settings"].setdefault("client", {})
+    data["settings"]["client"]["worker_initialization_timeout"] = 120.0
 
     # Accuracy datasets can't run e2e against echo server (no scorer), so keep only performance datasets.
     data["datasets"] = [
@@ -213,10 +245,6 @@ class TestTemplateIntegration:
     """Verify generated templates run end-to-end against a local server."""
 
     @pytest.mark.integration
-    @pytest.mark.skipif(
-        not os.environ.get("HF_TOKEN"),
-        reason="Templates reference gated HF models; requires HF_TOKEN to fetch tokenizer",
-    )
     @pytest.mark.parametrize("template", _GENERATED_TEMPLATES)
     def test_template_runs(self, mock_http_echo_server, tmp_path, caplog, template):
         data = _resolve_template(TEMPLATE_DIR / template, mock_http_echo_server.url)

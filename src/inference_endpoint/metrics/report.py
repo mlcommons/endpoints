@@ -24,90 +24,78 @@ from pathlib import Path
 from typing import Any
 
 import msgspec.json
-import numpy as np
 
-from inference_endpoint.async_utils.services.metrics_aggregator.kv_store import (
-    BasicKVStoreReader,
-    SeriesStats,
-)
 from inference_endpoint.utils.version import get_version_info
 
 from ..utils import monotime_to_datetime
 
-# ---------------------------------------------------------------------------
-# Summary computation
-# ---------------------------------------------------------------------------
 
-_DEFAULT_PERCENTILES = (99.9, 99, 97, 95, 90, 80, 75, 50, 25, 10, 5, 1)
+def _series_to_metric_dict(stat: dict[str, Any]) -> dict[str, Any]:
+    """Convert a series-stat dict into the shape ``display()`` expects.
 
+    Input is the dict form produced by ``snapshot_to_dict``. Derives
+    ``avg``, ``std_dev``, and ``median`` from the rollups + percentiles.
+    ``median`` falls back to ``(min + max) / 2`` if the producer didn't
+    emit p50.
 
-def compute_summary(
-    stats: SeriesStats,
-    percentiles: tuple[float, ...] = _DEFAULT_PERCENTILES,
-    n_histogram_buckets: int = 10,
-) -> dict[str, Any]:
-    """Compute rollup statistics from pre-computed SeriesStats.
-
-    Scalar stats (total, min, max, avg, std_dev) are derived from the
-    incrementally maintained rollups in SeriesStats. Numpy is only used
-    for percentiles and histograms, which require the raw values.
-
-    Returns a dict with: total, min, max, avg, std_dev, median,
-    percentiles (dict), and histogram (buckets + counts).
+    All field reads use ``.get(...)`` with sensible defaults so a
+    truncated / partial dict (e.g. an INTERRUPTED snapshot) produces an
+    honest empty rollup instead of crashing.
     """
-    if stats.count == 0:
-        return {
-            "total": 0,
-            "min": 0,
-            "max": 0,
-            "median": 0.0,
-            "avg": 0.0,
-            "std_dev": 0.0,
-            "percentiles": {str(p): 0.0 for p in percentiles},
-            "histogram": {"buckets": [], "counts": []},
-        }
+    count = stat.get("count", 0)
+    if count == 0:
+        return {}
 
-    # Scalar stats from pre-computed rollups (no numpy needed)
-    avg = stats.total / stats.count
-    # Bessel's correction (ddof=1) for sample standard deviation
-    if stats.count > 1:
-        n = stats.count
-        std_dev = math.sqrt((stats.sum_sq - stats.total**2 / n) / (n - 1))
+    total = stat.get("total", 0)
+    sum_sq = stat.get("sum_sq", 0)
+    s_min = stat.get("min", 0)
+    s_max = stat.get("max", 0)
+
+    avg = total / count if count > 0 else 0.0
+    if count > 1:
+        n = count
+        # Integer-aggregate series (latency in ns) can have very large
+        # sum_sq and total values; the naive `sum_sq - total^2 / n`
+        # form loses precision when total^2 / n is close to sum_sq.
+        # Use the exact integer form `n*sum_sq - total^2` when inputs
+        # are int, falling back to the float form otherwise.
+        if isinstance(total, int) and isinstance(sum_sq, int):
+            var_num_int = n * sum_sq - total * total
+            std_dev = math.sqrt(max(0, var_num_int)) / math.sqrt(n * (n - 1))
+        else:
+            var_num = sum_sq - total * total / n
+            std_dev = math.sqrt(max(0.0, var_num / (n - 1)))
     else:
         std_dev = 0.0
 
-    # Percentiles and histogram require raw values
-    # Don't force float64 — numpy preserves int for uint64 series,
-    # so percentile(method="lower") returns actual observed values
-    # in their original type.
-    arr = np.array(stats.values)
-    arr.sort()
+    # p50 is contractually required on every registered series — see
+    # ``MetricsRegistry.register_series``, which rejects registrations
+    # whose percentiles tuple omits 50.0. The midrange fallback below
+    # only fires for hand-crafted snapshot dicts that bypass the
+    # registration path (e.g. a manually-edited JSON file), in which
+    # case the midrange is wrong-but-displayable rather than crashing.
+    perc = stat.get("percentiles", {})
+    if "50" in perc:
+        median: float = perc["50"]
+    elif "50.0" in perc:
+        median = perc["50.0"]
+    else:
+        # Approximate-only fallback for non-registry-produced dicts.
+        median = (s_min + s_max) / 2
 
-    # Inject 50th percentile for median if not already requested
-    need_median = 50 not in percentiles
-    all_percentiles = (*percentiles, 50) if need_median else percentiles
-
-    perc_values = np.percentile(arr, all_percentiles, method="lower")
-    perc_dict = {
-        str(p): v.item() for p, v in zip(all_percentiles, perc_values, strict=True)
-    }
-    median = perc_dict.pop("50") if need_median else perc_dict["50"]
-
-    bounds = np.histogram_bin_edges(arr, bins=n_histogram_buckets)
-    counts, _ = np.histogram(arr, bins=bounds)
-    hist_buckets = [
-        (float(bounds[i]), float(bounds[i + 1])) for i in range(len(bounds) - 1)
-    ]
-
+    histogram = stat.get("histogram", [])
     return {
-        "total": stats.total,
-        "min": stats.min_val,
-        "max": stats.max_val,
+        "total": total,
+        "min": s_min,
+        "max": s_max,
         "median": median,
         "avg": avg,
         "std_dev": std_dev,
-        "percentiles": perc_dict,
-        "histogram": {"buckets": hist_buckets, "counts": counts.tolist()},
+        "percentiles": dict(perc),
+        "histogram": {
+            "buckets": [(rng[0], rng[1]) for rng, _ in histogram],
+            "counts": [c for _, c in histogram],
+        },
     }
 
 
@@ -126,8 +114,18 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
     n_samples_completed: int
     n_samples_failed: int
     duration_ns: int | None
+    # The terminal SessionState that produced this report. Surfaced as a
+    # raw string so ``display()`` can render an INTERRUPTED indicator
+    # without re-parsing the source dict, and so JSON round-trips don't
+    # depend on Report importing the SessionState enum.
+    state: str
+    # True iff state=="complete" AND n_pending_tasks==0. False signals
+    # partial async metrics — drain timed out (state=="complete",
+    # n_pending_tasks>0), the run was interrupted (state=="interrupted"),
+    # or no final snapshot was found and we fell back to a live tick.
+    complete: bool
 
-    # Per-metric rollup dicts (output of compute_summary)
+    # Per-metric rollup dicts (output of _series_to_metric_dict)
     ttft: dict[str, Any]
     tpot: dict[str, Any]
     latency: dict[str, Any]
@@ -147,44 +145,69 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
         return total / (self.duration_ns / 1e9)
 
     @classmethod
-    def from_kv_reader(cls, reader: BasicKVStoreReader) -> Report:
-        """Build a Report from the current KVStore state.
+    def from_snapshot(cls, snap: dict[str, Any]) -> Report:
+        """Build a Report from a snapshot dict.
 
-        Reads counters and series from the reader, computes rollup summaries
-        (percentiles, histograms) for each series metric, and returns a Report.
+        Input is the dict form produced by
+        ``inference_endpoint.async_utils.services.metrics_aggregator.snapshot
+        .snapshot_to_dict``, which is also the shape persisted to
+        ``final_snapshot.json``. Consumers can therefore feed
+        ``json.loads(path.read_bytes())`` straight in without an
+        intermediate Struct decode — this is deliberate, because the
+        wire ``MetricsSnapshot`` uses ``array_like=True`` for compact
+        msgpack and decoding a dict back into an array-like Struct is
+        ergonomically painful (msgspec's decoders follow the Struct's
+        ``array_like`` flag).
 
-        Works identically for live metrics (mid-test) and final reports
-        (post-drain). The caller decides when to call.
+        All field reads use ``.get(...)`` with defaults that produce an
+        honest "incomplete" report on missing fields instead of crashing:
+        missing ``state`` defaults to ``"interrupted"`` (worst-case),
+        missing counters / series to zero / empty.
         """
-        snap = reader.snapshot()
+        counters: dict[str, int | float] = {}
+        series: dict[str, dict[str, Any]] = {}
+        for stat in snap.get("metrics", []):
+            stat_type = stat.get("type")
+            name = stat.get("name", "")
+            if not name:
+                continue
+            if stat_type == "counter":
+                counters[name] = stat.get("value", 0)
+            elif stat_type == "series":
+                series[name] = stat
 
         def _counter(key: str) -> int:
-            val = snap.get(key)
-            return int(val) if isinstance(val, int) else 0
+            return int(counters.get(key, 0))
 
-        def _summarize(key: str) -> dict:
-            val = snap.get(key)
-            if isinstance(val, SeriesStats) and val.count > 0:
-                return compute_summary(val)
-            return {}
+        def _series_dict(key: str) -> dict[str, Any]:
+            stat = series.get(key)
+            if stat is None or stat.get("count", 0) == 0:
+                return {}
+            return _series_to_metric_dict(stat)
 
         version_info = get_version_info()
         duration_ns = _counter("tracked_duration_ns")
+        # Default missing state to "interrupted" — a malformed / partial
+        # snapshot dict is treated as worst-case (run did not reach a
+        # clean completion). Drives complete=False and the interrupted
+        # indicator in display().
+        state = snap.get("state", "interrupted")
+        n_pending_tasks = snap.get("n_pending_tasks", 0)
 
         return cls(
             version=str(version_info.get("version", "unknown")),
             git_sha=version_info.get("git_sha"),
-            test_started_at=0,  # TODO: add test_started_at counter to aggregator
+            test_started_at=0,  # TODO: surface session_started_ns via snapshot
             n_samples_issued=_counter("tracked_samples_issued"),
             n_samples_completed=_counter("tracked_samples_completed"),
-            # TODO: Add tracked_samples_failed to MetricCounterKey.
-            # For now, total_samples_failed is the best available.
-            n_samples_failed=_counter("total_samples_failed"),
+            n_samples_failed=_counter("tracked_samples_failed"),
             duration_ns=duration_ns if duration_ns > 0 else None,
-            ttft=_summarize("ttft_ns"),
-            tpot=_summarize("tpot_ns"),
-            latency=_summarize("sample_latency_ns"),
-            output_sequence_lengths=_summarize("osl"),
+            state=state,
+            complete=(state == "complete" and n_pending_tasks == 0),
+            ttft=_series_dict("ttft_ns"),
+            tpot=_series_dict("tpot_ns"),
+            latency=_series_dict("sample_latency_ns"),
+            output_sequence_lengths=_series_dict("osl"),
         )
 
     def to_json(self, save_to: os.PathLike | None = None) -> bytes:
@@ -201,6 +224,16 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
         newline: str = "",
     ) -> None:
         fn(f"----------------- Summary -----------------{newline}")
+        if self.state == "interrupted":
+            fn(
+                "WARNING: run was interrupted (SIGTERM/SIGINT) — "
+                f"metrics below are best-effort partial data.{newline}"
+            )
+        elif not self.complete:
+            fn(
+                "WARNING: report is incomplete (drain timed out or no "
+                f"final snapshot received) — some async metrics may be missing.{newline}"
+            )
         fn(f"Version: {self.version}{newline}")
         if self.git_sha:
             fn(f"Git SHA: {self.git_sha}{newline}")
@@ -263,6 +296,16 @@ def _display_metric(
     scale_factor: float = 1.0,
     newline: str = "",
 ) -> None:
+    # ``_scrub_nonfinite`` (snapshot.py) maps producer-side NaN/±Inf to
+    # ``None`` so the persisted JSON stays strict. Any of the named
+    # scalars / percentile values below can therefore be ``None`` —
+    # render an ``N/A`` indicator instead of crashing on
+    # ``None * scale_factor``.
+    def _scaled(v: Any) -> str:
+        if v is None:
+            return "N/A"
+        return f"{v * scale_factor:.2f}"
+
     for name, key in [
         ("Min", "min"),
         ("Max", "max"),
@@ -270,7 +313,7 @@ def _display_metric(
         ("Avg.", "avg"),
         ("Std Dev.", "std_dev"),
     ]:
-        fn(f"  {name}: {metric_dict[key] * scale_factor:.2f} {unit}{newline}")
+        fn(f"  {name}: {_scaled(metric_dict[key])} {unit}{newline}")
 
     fn(f"\n  Histogram:{newline}")
     buckets = metric_dict["histogram"]["buckets"]
@@ -278,8 +321,7 @@ def _display_metric(
 
     if buckets:
         bucket_strs = [
-            f"  [{lo * scale_factor:.2f}, {hi * scale_factor:.2f}"
-            + ("]" if i == len(buckets) - 1 else ")")
+            f"  [{_scaled(lo)}, {_scaled(hi)}" + ("]" if i == len(buckets) - 1 else ")")
             for i, (lo, hi) in enumerate(buckets)
         ]
         max_count = max(counts)
@@ -292,4 +334,4 @@ def _display_metric(
 
     fn(f"\n  Percentiles:{newline}")
     for p, val in metric_dict.get("percentiles", {}).items():
-        fn(f"  {p:>6}: {val * scale_factor:.2f} {unit}{newline}")
+        fn(f"  {p:>6}: {_scaled(val)} {unit}{newline}")
