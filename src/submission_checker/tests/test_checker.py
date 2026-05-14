@@ -304,13 +304,13 @@ _CONCURRENCIES = [16, 38, 88, 256, 512, 768, 1000]
 
 def _make_run_yaml(concurrency: int) -> dict:
     return {
-        "type": "submission",
-        "settings": {
-            "load_pattern": {"type": "concurrency", "target_concurrency": concurrency},
-            "runtime": {"min_duration_ms": 1_200_000},
-            "client": {"stream_all_chunks": True},
+        "concurrency": concurrency,
+        "dataset": "llm-perf-dataset-v1",
+        "runtime_settings": {
+            "load_pattern": "concurrency",
+            "min_duration_ms": 1_200_000,
+            "stream_all_chunks": True,
         },
-        "datasets": [{"name": "llm-perf-dataset-v1"}],
     }
 
 
@@ -337,19 +337,19 @@ def _build_submission(
 
     pareto_dir = root / "pareto"
     model_dir = pareto_dir / system_id / model
-    runs_dir = model_dir / "runs"
+    points_dir = model_dir / "points"
     results_dir = model_dir / "results"
     accuracy_dir = model_dir / "accuracy"
-    for d in (runs_dir, results_dir, accuracy_dir):
+    for d in (points_dir, results_dir, accuracy_dir):
         d.mkdir(parents=True)
 
     if write_runs:
         for c in concs:
-            (runs_dir / f"run_{c}.yaml").write_text(yaml.dump(_make_run_yaml(c)))
+            (points_dir / f"point_{c}.yaml").write_text(yaml.dump(_make_run_yaml(c)))
 
     if write_results:
         for c in concs:
-            result_dir = results_dir / f"run_{c}"
+            result_dir = results_dir / f"point_{c}"
             result_dir.mkdir(parents=True)
             (result_dir / "mlperf_endpoints_log_summary.json").write_text(json.dumps(_SUMMARY))
 
@@ -412,15 +412,15 @@ class TestCheckerEdgeCases:
         assert _errors(report, "benchmark-model-dir")
 
     def test_missing_model_subdirs_early_exit(self, tmp_path):
-        """pareto-subdir error when runs/ or results/ or accuracy/ is absent."""
+        """pareto-subdir error when points/ or results/ or accuracy/ is absent."""
         (tmp_path / "systems").mkdir()
         (tmp_path / "systems" / "test-sys.json").write_text(json.dumps(_SYSTEM_DESC))
         model_dir = tmp_path / "pareto" / "test-sys" / "llama3-70b"
-        # Only runs/ present — results/ and accuracy/ missing
-        (model_dir / "runs").mkdir(parents=True)
+        # Only points/ present — results/ and accuracy/ missing
+        (model_dir / "points").mkdir(parents=True)
         report = _check(tmp_path)
         assert _errors(report, "pareto-subdir")
-        # Should not attempt to list run_*.yaml (early exit after structure errors)
+        # Should not attempt to list point_*.yaml (early exit after structure errors)
         assert not any(r.rule == "measurement-runs-present" for r in report.results)
 
     def test_no_run_yamls(self, tmp_path):
@@ -439,7 +439,7 @@ class TestCheckerEdgeCases:
         """result-file-valid error when the result log JSON is malformed."""
         root = _build_submission(tmp_path)
         # Overwrite one summary with invalid JSON
-        bad_path = root / "pareto" / "test-sys" / "llama3-70b" / "results" / "run_16"
+        bad_path = root / "pareto" / "test-sys" / "llama3-70b" / "results" / "point_16"
         bad_path.mkdir(parents=True, exist_ok=True)
         (bad_path / "mlperf_endpoints_log_summary.json").write_text("{bad")
         report = _check(root)
@@ -469,20 +469,20 @@ class TestCheckerEdgeCases:
     def test_run_filename_concurrency_mismatch(self, tmp_path):
         """run-filename-concurrency warning when filename concurrency ≠ declared concurrency."""
         root = _build_submission(tmp_path)
-        # Add a run file whose name says 999 but YAML declares 64
-        mismatch_yaml = root / "pareto" / "test-sys" / "llama3-70b" / "runs" / "run_999.yaml"
+        # Add a point file whose name says 999 but YAML declares 64
+        mismatch_yaml = root / "pareto" / "test-sys" / "llama3-70b" / "points" / "point_999.yaml"
         mismatch_yaml.write_text(yaml.dump(_make_run_yaml(64)))
         # Also add the matching result dir so it doesn't error on result-file-present
-        result_dir = root / "pareto" / "test-sys" / "llama3-70b" / "results" / "run_64"
+        result_dir = root / "pareto" / "test-sys" / "llama3-70b" / "results" / "point_64"
         result_dir.mkdir(parents=True, exist_ok=True)
         (result_dir / "mlperf_endpoints_log_summary.json").write_text(json.dumps(_SUMMARY))
         report = _check(root)
         assert _warnings(report, "run-filename-concurrency")
 
     def test_invalid_run_yaml_is_skipped(self, tmp_path):
-        """A run_*.yaml that fails validation does not crash the checker."""
+        """A point_*.yaml that fails validation does not crash the checker."""
         root = _build_submission(tmp_path)
-        bad_yaml = root / "pareto" / "test-sys" / "llama3-70b" / "runs" / "run_99.yaml"
+        bad_yaml = root / "pareto" / "test-sys" / "llama3-70b" / "points" / "point_99.yaml"
         bad_yaml.write_text("{bad yaml [")
         report = _check(root)
         # Should produce a run-config-valid error for the bad file
@@ -507,11 +507,11 @@ class TestCheckerEdgeCases:
     def test_run_filename_non_numeric_suffix_ignored(self, tmp_path):
         """Filename parsing errors (non-numeric suffix) are silently ignored."""
         root = _build_submission(tmp_path)
-        # run_abc.yaml — stem is "run_abc", int("abc") raises ValueError
+        # point_abc.yaml — stem is "point_abc", int("abc") raises ValueError
         # This tests the except (IndexError, ValueError): pass branch
-        bad_name = root / "pareto" / "test-sys" / "llama3-70b" / "runs" / "run_abc.yaml"
+        bad_name = root / "pareto" / "test-sys" / "llama3-70b" / "points" / "point_abc.yaml"
         bad_name.write_text(yaml.dump(_make_run_yaml(64)))
-        result_dir = root / "pareto" / "test-sys" / "llama3-70b" / "results" / "run_64"
+        result_dir = root / "pareto" / "test-sys" / "llama3-70b" / "results" / "point_64"
         result_dir.mkdir(parents=True, exist_ok=True)
         (result_dir / "mlperf_endpoints_log_summary.json").write_text(json.dumps(_SUMMARY))
         report = _check(root)

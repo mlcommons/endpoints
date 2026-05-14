@@ -8,16 +8,13 @@ from pydantic import ValidationError
 from submission_checker.models import (
     AccuracyResult,
     CheckResult,
-    ClientConfig,
     Division,
-    LoadPatternConfig,
     PercentileStats,
     PublicationStatus,
     Report,
     RunConfig,
     RunSummary,
-    RuntimeConfig,
-    SettingsConfig,
+    RuntimeSettings,
     Severity,
     SystemDescription,
 )
@@ -185,47 +182,30 @@ def test_system_description_allows_extra_fields():
 # ---------------------------------------------------------------------------
 
 
-def _make_settings(
-    concurrency: int, min_duration_ms: int = 600_000, stream_all_chunks: bool = True
-) -> SettingsConfig:
-    return SettingsConfig(
-        load_pattern=LoadPatternConfig(type="concurrency", target_concurrency=concurrency),
-        runtime=RuntimeConfig(min_duration_ms=min_duration_ms),
-        client=ClientConfig(stream_all_chunks=stream_all_chunks),
-    )
-
-
 def test_measurement_point_config_valid():
     cfg = RunConfig(
-        settings=_make_settings(64, 1_200_000),
-        datasets=[{"name": "test-ds"}],
+        concurrency=64,
+        dataset="test-ds",
+        runtime_settings=RuntimeSettings(min_duration_ms=1_200_000),
     )
     assert cfg.concurrency == 64
     assert cfg.dataset == "test-ds"
-    assert cfg.settings.client.stream_all_chunks is True
+    assert cfg.runtime_settings.stream_all_chunks is True
 
 
-def test_measurement_point_config_concurrency_computed():
-    cfg = RunConfig(settings=_make_settings(128))
+def test_measurement_point_config_concurrency_stored():
+    cfg = RunConfig(concurrency=128)
     assert cfg.concurrency == 128
 
 
-def test_measurement_point_config_dataset_from_list():
-    cfg = RunConfig(
-        settings=_make_settings(32),
-        datasets=[{"name": "mlperf-perf-dataset-v1"}, {"name": "other"}],
-    )
-    assert cfg.dataset == "mlperf-perf-dataset-v1"
-
-
-def test_measurement_point_config_empty_datasets():
-    cfg = RunConfig(settings=_make_settings(32))
+def test_measurement_point_config_empty_dataset():
+    cfg = RunConfig(concurrency=32)
     assert cfg.dataset == ""
 
 
-def test_measurement_point_config_load_pattern_type_stored():
-    cfg = RunConfig(settings=_make_settings(64))
-    assert cfg.settings.load_pattern.type == "concurrency"
+def test_measurement_point_config_load_pattern_stored():
+    cfg = RunConfig(concurrency=64)
+    assert cfg.runtime_settings.load_pattern == "concurrency"
 
 
 # ---------------------------------------------------------------------------

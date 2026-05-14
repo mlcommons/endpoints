@@ -7,17 +7,15 @@ from pathlib import Path
 from submission_checker.models import (
     AccuracyResult,
     CheckResult,
-    ClientConfig,
     Division,
-    LoadPatternConfig,
+    MIN_QUERY_COUNT,
     ModelContext,
     PercentileStats,
     PublicationStatus,
     RunConfig,
     RunResult,
     RunSummary,
-    RuntimeConfig,
-    SettingsConfig,
+    RuntimeSettings,
     Severity,
     SystemDescription,
     compute_regions,
@@ -71,12 +69,13 @@ def _system_desc(
 
 def _config(concurrency: int = 64, stream: bool = True, lp_type: str = "concurrency") -> RunConfig:
     return RunConfig(
-        settings=SettingsConfig(
-            load_pattern=LoadPatternConfig(type=lp_type, target_concurrency=concurrency),
-            runtime=RuntimeConfig(min_duration_ms=1_200_000),
-            client=ClientConfig(stream_all_chunks=stream),
+        concurrency=concurrency,
+        dataset="mlperf-perf-dataset-v1",
+        runtime_settings=RuntimeSettings(
+            load_pattern=lp_type,
+            min_duration_ms=1_200_000,
+            stream_all_chunks=stream,
         ),
-        datasets=[{"name": "mlperf-perf-dataset-v1"}],
     )
 
 
@@ -112,7 +111,7 @@ def _model_ctx(
 ) -> ModelContext:
     model_dir = tmp_path / model_name
     model_dir.mkdir(exist_ok=True)
-    (model_dir / "runs").mkdir(exist_ok=True)
+    (model_dir / "points").mkdir(exist_ok=True)
     (model_dir / "results").mkdir(exist_ok=True)
     (model_dir / "accuracy").mkdir(exist_ok=True)
     return ModelContext(
@@ -120,7 +119,7 @@ def _model_ctx(
         system_desc=system_desc or _system_desc(benchmark_model=model_name),
         model_dir=model_dir,
         regions=_REGIONS,
-        runs_dir=model_dir / "runs",
+        points_dir=model_dir / "points",
         accuracy_dir=model_dir / "accuracy",
         all_run_count=all_run_count,
         valid_runs=valid_runs or [],
@@ -183,7 +182,7 @@ class TestModelDir:
     def test_missing_subdir(self, tmp_path):
         model_dir = tmp_path / "model"
         model_dir.mkdir()
-        (model_dir / "runs").mkdir()
+        (model_dir / "points").mkdir()
         (model_dir / "results").mkdir()
         # accuracy/ absent
         md = ModelDir(root=model_dir, system_id="sys-x", benchmark_model="llama3-70b")
@@ -192,14 +191,14 @@ class TestModelDir:
     def test_all_present(self, tmp_path):
         model_dir = tmp_path / "model"
         model_dir.mkdir()
-        for d in ("runs", "results", "accuracy"):
+        for d in ("points", "results", "accuracy"):
             (model_dir / d).mkdir()
         md = ModelDir(root=model_dir, system_id="sys-x", benchmark_model="llama3-70b")
         assert _passed(md._check_results)
 
     def test_computed_paths(self, tmp_path):
         md = ModelDir(root=tmp_path, system_id="sys-x", benchmark_model="llama3-70b")
-        assert md.runs_dir == tmp_path / "runs"
+        assert md.points_dir == tmp_path / "points"
         assert md.results_dir == tmp_path / "results"
         assert md.accuracy_dir == tmp_path / "accuracy"
 
@@ -232,8 +231,8 @@ class TestSrcDir:
 class TestLoadPatternValidator:
     def test_wrong_type(self, tmp_path):
         config = RunConfig.model_validate(
-            {"settings": {"load_pattern": {"type": "qps", "target_qps": 10.0}}},
-            context={"yaml_path": tmp_path / "run_64.yaml"},
+            {"concurrency": 64, "runtime_settings": {"load_pattern": "qps"}},
+            context={"yaml_path": tmp_path / "point_64.yaml"},
         )
         errors = [
             r
@@ -244,8 +243,8 @@ class TestLoadPatternValidator:
 
     def test_missing_target_concurrency(self, tmp_path):
         config = RunConfig.model_validate(
-            {"settings": {"load_pattern": {"type": "concurrency", "target_concurrency": None}}},
-            context={"yaml_path": tmp_path / "run_64.yaml"},
+            {"concurrency": 0, "runtime_settings": {"load_pattern": "concurrency"}},
+            context={"yaml_path": tmp_path / "point_0.yaml"},
         )
         errors = [
             r
@@ -256,8 +255,8 @@ class TestLoadPatternValidator:
 
     def test_valid(self, tmp_path):
         config = RunConfig.model_validate(
-            {"settings": {"load_pattern": {"type": "concurrency", "target_concurrency": 64}}},
-            context={"yaml_path": tmp_path / "run_64.yaml"},
+            {"concurrency": 64, "runtime_settings": {"load_pattern": "concurrency"}},
+            context={"yaml_path": tmp_path / "point_64.yaml"},
         )
         assert all(
             r.severity != Severity.ERROR for r in config._check_results if r.rule == "load-pattern"
@@ -267,13 +266,8 @@ class TestLoadPatternValidator:
 class TestStreamingValidator:
     def test_stream_false_errors(self, tmp_path):
         config = RunConfig.model_validate(
-            {
-                "settings": {
-                    "load_pattern": {"type": "concurrency", "target_concurrency": 64},
-                    "client": {"stream_all_chunks": False},
-                }
-            },
-            context={"yaml_path": tmp_path / "run_64.yaml"},
+            {"concurrency": 64, "runtime_settings": {"load_pattern": "concurrency", "stream_all_chunks": False}},
+            context={"yaml_path": tmp_path / "point_64.yaml"},
         )
         errors = [
             r
@@ -284,8 +278,8 @@ class TestStreamingValidator:
 
     def test_stream_true_passes(self, tmp_path):
         config = RunConfig.model_validate(
-            {"settings": {"load_pattern": {"type": "concurrency", "target_concurrency": 64}}},
-            context={"yaml_path": tmp_path / "run_64.yaml"},
+            {"concurrency": 64, "runtime_settings": {"load_pattern": "concurrency"}},
+            context={"yaml_path": tmp_path / "point_64.yaml"},
         )
         assert all(
             r.severity != Severity.ERROR
@@ -297,8 +291,8 @@ class TestStreamingValidator:
 class TestConcurrencyInRangeValidator:
     def test_out_of_range(self, tmp_path):
         config = RunConfig.model_validate(
-            {"settings": {"load_pattern": {"type": "concurrency", "target_concurrency": 9999}}},
-            context={"yaml_path": tmp_path / "run_9999.yaml", "regions": _REGIONS},
+            {"concurrency": 9999, "runtime_settings": {"load_pattern": "concurrency"}},
+            context={"yaml_path": tmp_path / "point_9999.yaml", "regions": _REGIONS},
         )
         errors = [
             r
@@ -309,8 +303,8 @@ class TestConcurrencyInRangeValidator:
 
     def test_in_range(self, tmp_path):
         config = RunConfig.model_validate(
-            {"settings": {"load_pattern": {"type": "concurrency", "target_concurrency": 64}}},
-            context={"yaml_path": tmp_path / "run_64.yaml", "regions": _REGIONS},
+            {"concurrency": 64, "runtime_settings": {"load_pattern": "concurrency"}},
+            context={"yaml_path": tmp_path / "point_64.yaml", "regions": _REGIONS},
         )
         assert all(
             r.severity != Severity.ERROR
@@ -320,8 +314,8 @@ class TestConcurrencyInRangeValidator:
 
     def test_no_regions_skips_check(self, tmp_path):
         config = RunConfig.model_validate(
-            {"settings": {"load_pattern": {"type": "concurrency", "target_concurrency": 9999}}},
-            context={"yaml_path": tmp_path / "run_9999.yaml"},
+            {"concurrency": 9999, "runtime_settings": {"load_pattern": "concurrency"}},
+            context={"yaml_path": tmp_path / "point_9999.yaml"},
         )
         # No regions in context — concurrency-in-range should not be present
         rules = {r.rule for r in config._check_results}
@@ -450,6 +444,215 @@ class TestMetricConsistencyValidator:
 
 
 # ---------------------------------------------------------------------------
+# TPS consistency checks (§9.1)
+# ---------------------------------------------------------------------------
+
+# Derived values for the default _summary():
+#   total_output_tokens = 500_000, duration_ns = 1_200_000_000_000 (1200 s)
+#   system_tps = 500_000 / 1200 ≈ 416.667 tok/s
+#   tps_per_user (concurrency=64) ≈ 6.5104 tok/s/user
+
+
+def _summary_with(**extras) -> RunSummary:
+    """Return the default summary but with extra fields stored for consistency checks."""
+    return RunSummary(
+        n_samples_completed=1000,
+        n_samples_issued=1000,
+        n_samples_failed=0,
+        duration_ns=1_200_000_000_000.0,
+        ttft=PercentileStats(total=0.0, percentiles={"50": 150_000_000.0, "95": 300_000_000.0}),
+        output_sequence_lengths=PercentileStats(total=500_000.0),
+        **extras,
+    )
+
+
+class TestTpsConsistencyValidator:
+    def test_system_tps_derivable_ok(self, tmp_path):
+        run_result = RunResult.model_validate(
+            {"config": _config(concurrency=64), "summary": _summary(), "yaml_path": tmp_path / "run_64.yaml"},
+            context={"summary_path": tmp_path / "summary.json"},
+        )
+        assert any(
+            r.rule == "metric-consistency-system-tps" and r.severity != Severity.ERROR
+            for r in run_result._check_results
+        )
+
+    def test_system_tps_stored_match_ok(self, tmp_path):
+        """Stored system_tps matching derived value within 1% passes."""
+        run_result = RunResult.model_validate(
+            {
+                "config": _config(concurrency=64),
+                "summary": _summary_with(system_tps=416.67),  # derived ≈ 416.667
+                "yaml_path": tmp_path / "run_64.yaml",
+            },
+            context={"summary_path": tmp_path / "summary.json"},
+        )
+        assert any(
+            r.rule == "metric-consistency-system-tps" and r.severity != Severity.ERROR
+            for r in run_result._check_results
+        )
+
+    def test_system_tps_stored_mismatch_errors(self, tmp_path):
+        """Stored system_tps differing from derived by >1% is an error."""
+        run_result = RunResult.model_validate(
+            {
+                "config": _config(concurrency=64),
+                "summary": _summary_with(system_tps=999.0),  # derived ≈ 416.667
+                "yaml_path": tmp_path / "run_64.yaml",
+            },
+            context={"summary_path": tmp_path / "summary.json"},
+        )
+        assert any(
+            r.rule == "metric-consistency-system-tps" and r.severity == Severity.ERROR
+            for r in run_result._check_results
+        )
+
+    def test_tps_per_user_derivable_ok(self, tmp_path):
+        run_result = RunResult.model_validate(
+            {"config": _config(concurrency=64), "summary": _summary(), "yaml_path": tmp_path / "run_64.yaml"},
+            context={"summary_path": tmp_path / "summary.json"},
+        )
+        assert any(
+            r.rule == "metric-consistency-tps-per-user" and r.severity != Severity.ERROR
+            for r in run_result._check_results
+        )
+
+    def test_tps_per_user_stored_match_ok(self, tmp_path):
+        """Stored tps_per_user matching system_tps/concurrency within 1% passes."""
+        run_result = RunResult.model_validate(
+            {
+                "config": _config(concurrency=64),
+                "summary": _summary_with(tps_per_user=6.51),  # derived ≈ 6.5104
+                "yaml_path": tmp_path / "run_64.yaml",
+            },
+            context={"summary_path": tmp_path / "summary.json"},
+        )
+        assert any(
+            r.rule == "metric-consistency-tps-per-user" and r.severity != Severity.ERROR
+            for r in run_result._check_results
+        )
+
+    def test_tps_per_user_stored_mismatch_errors(self, tmp_path):
+        """Stored tps_per_user differing from system_tps/concurrency by >1% is an error."""
+        run_result = RunResult.model_validate(
+            {
+                "config": _config(concurrency=64),
+                "summary": _summary_with(tps_per_user=999.0),  # derived ≈ 6.5104
+                "yaml_path": tmp_path / "run_64.yaml",
+            },
+            context={"summary_path": tmp_path / "summary.json"},
+        )
+        assert any(
+            r.rule == "metric-consistency-tps-per-user" and r.severity == Severity.ERROR
+            for r in run_result._check_results
+        )
+
+    def test_tps_per_user_zero_concurrency_errors(self, tmp_path):
+        """concurrency=0 must error rather than divide by zero."""
+        config = RunConfig(
+            concurrency=0,
+            dataset="mlperf-perf-dataset-v1",
+            runtime_settings=RuntimeSettings(min_duration_ms=1_200_000),
+        )
+        run_result = RunResult.model_validate(
+            {"config": config, "summary": _summary(), "yaml_path": tmp_path / "run_64.yaml"},
+            context={"summary_path": tmp_path / "summary.json"},
+        )
+        assert any(
+            r.rule == "metric-consistency-tps-per-user" and r.severity == Severity.ERROR
+            for r in run_result._check_results
+        )
+
+
+# ---------------------------------------------------------------------------
+# Minimum query count (§12)
+# ---------------------------------------------------------------------------
+
+
+def _config_with_dataset(dataset: str, concurrency: int = 64) -> RunConfig:
+    return RunConfig(
+        concurrency=concurrency,
+        dataset=dataset,
+        runtime_settings=RuntimeSettings(min_duration_ms=1_200_000),
+    )
+
+
+class TestMinQueryCountValidator:
+    def test_meets_minimum_ok(self, tmp_path):
+        for dataset, min_q in MIN_QUERY_COUNT.items():
+            run_result = RunResult.model_validate(
+                {
+                    "config": _config_with_dataset(dataset),
+                    "summary": _summary(n_completed=min_q),
+                    "yaml_path": tmp_path / "run_64.yaml",
+                },
+                context={"summary_path": tmp_path / "summary.json"},
+            )
+            assert any(
+                r.rule == "min-query-count" and r.severity != Severity.ERROR
+                for r in run_result._check_results
+            ), f"Expected ok for dataset '{dataset}' with {min_q} completed"
+
+    def test_below_minimum_errors(self, tmp_path):
+        for dataset, min_q in MIN_QUERY_COUNT.items():
+            if min_q == 0:
+                continue
+            run_result = RunResult.model_validate(
+                {
+                    "config": _config_with_dataset(dataset),
+                    "summary": _summary(n_completed=min_q - 1),
+                    "yaml_path": tmp_path / "run_64.yaml",
+                },
+                context={"summary_path": tmp_path / "summary.json"},
+            )
+            assert any(
+                r.rule == "min-query-count" and r.severity == Severity.ERROR
+                for r in run_result._check_results
+            ), f"Expected error for dataset '{dataset}' with {min_q - 1} completed"
+
+    def test_unknown_dataset_skipped(self, tmp_path):
+        run_result = RunResult.model_validate(
+            {
+                "config": _config_with_dataset("unknown-dataset-xyz"),
+                "summary": _summary(n_completed=0),
+                "yaml_path": tmp_path / "run_64.yaml",
+            },
+            context={"summary_path": tmp_path / "summary.json"},
+        )
+        assert not any(r.rule == "min-query-count" for r in run_result._check_results)
+
+    def test_dataset_a_boundary(self, tmp_path):
+        """dataset-a requires exactly 1 query — 0 fails, 1 passes."""
+        base = {"yaml_path": tmp_path / "run_64.yaml"}
+        ctx = {"summary_path": tmp_path / "summary.json"}
+
+        fail = RunResult.model_validate(
+            {"config": _config_with_dataset("dataset-a"), "summary": _summary(n_completed=0), **base}, context=ctx
+        )
+        assert any(r.rule == "min-query-count" and r.severity == Severity.ERROR for r in fail._check_results)
+
+        ok_result = RunResult.model_validate(
+            {"config": _config_with_dataset("dataset-a"), "summary": _summary(n_completed=1), **base}, context=ctx
+        )
+        assert any(r.rule == "min-query-count" and r.severity != Severity.ERROR for r in ok_result._check_results)
+
+    def test_dataset_c_boundary(self, tmp_path):
+        """dataset-c requires 100 queries — 99 fails, 100 passes."""
+        base = {"yaml_path": tmp_path / "run_64.yaml"}
+        ctx = {"summary_path": tmp_path / "summary.json"}
+
+        fail = RunResult.model_validate(
+            {"config": _config_with_dataset("dataset-c"), "summary": _summary(n_completed=99), **base}, context=ctx
+        )
+        assert any(r.rule == "min-query-count" and r.severity == Severity.ERROR for r in fail._check_results)
+
+        ok_result = RunResult.model_validate(
+            {"config": _config_with_dataset("dataset-c"), "summary": _summary(n_completed=100), **base}, context=ctx
+        )
+        assert any(r.rule == "min-query-count" and r.severity != Severity.ERROR for r in ok_result._check_results)
+
+
+# ---------------------------------------------------------------------------
 # ModelContext validators
 # ---------------------------------------------------------------------------
 
@@ -491,7 +694,7 @@ class TestRegionalCoverageValidator:
         assert errors == coverage_rules
 
     def test_concurrency_in_low_latency(self, tmp_path):
-        yaml_path = tmp_path / "llama3-70b" / "runs" / "run_16.yaml"
+        yaml_path = tmp_path / "llama3-70b" / "points" / "point_16.yaml"
         valid_runs = [(yaml_path, _config(concurrency=16))]
         ctx = _model_ctx(tmp_path, valid_runs=valid_runs)
         assert all(
@@ -504,20 +707,14 @@ class TestRegionalCoverageValidator:
 class TestConfigConsistencyValidator:
     def test_inconsistent_datasets(self, tmp_path):
         c1 = RunConfig(
-            settings=SettingsConfig(
-                load_pattern=LoadPatternConfig(type="concurrency", target_concurrency=64),
-                runtime=RuntimeConfig(),
-                client=ClientConfig(),
-            ),
-            datasets=[{"name": "dataset-a"}],
+            concurrency=64,
+            dataset="dataset-a",
+            runtime_settings=RuntimeSettings(),
         )
         c2 = RunConfig(
-            settings=SettingsConfig(
-                load_pattern=LoadPatternConfig(type="concurrency", target_concurrency=128),
-                runtime=RuntimeConfig(),
-                client=ClientConfig(),
-            ),
-            datasets=[{"name": "dataset-b"}],
+            concurrency=128,
+            dataset="dataset-b",
+            runtime_settings=RuntimeSettings(),
         )
         s = _summary()
         ctx = _model_ctx(tmp_path, loaded_results=[(c1, s), (c2, s)])
@@ -531,7 +728,7 @@ class TestConfigConsistencyValidator:
         # but _model_ctx uses model_name for both, so test a case where they differ
         model_dir = tmp_path / "actual-name"
         model_dir.mkdir(exist_ok=True)
-        (model_dir / "runs").mkdir(exist_ok=True)
+        (model_dir / "points").mkdir(exist_ok=True)
         (model_dir / "results").mkdir(exist_ok=True)
         (model_dir / "accuracy").mkdir(exist_ok=True)
         s = _summary()
@@ -540,7 +737,7 @@ class TestConfigConsistencyValidator:
             system_desc=_system_desc(benchmark_model="expected-name"),
             model_dir=model_dir,
             regions=_REGIONS,
-            runs_dir=model_dir / "runs",
+            points_dir=model_dir / "points",
             accuracy_dir=model_dir / "accuracy",
             all_run_count=7,
             valid_runs=[],

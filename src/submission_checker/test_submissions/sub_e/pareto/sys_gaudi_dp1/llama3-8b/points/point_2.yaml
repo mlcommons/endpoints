@@ -1,0 +1,6 @@
+concurrency: 2
+dataset: mlperf-perf-dataset-v1
+runtime_settings:
+  load_pattern: concurrency
+  min_duration_ms: 600000
+  stream_all_chunks: true

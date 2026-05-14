@@ -77,7 +77,7 @@ def test_load_run_config_non_dict_yaml(tmp_path):
 
 def test_load_run_config_schema_error(tmp_path):
     p = tmp_path / "bad.yaml"
-    p.write_text(yaml.dump({"type": "submission"}))  # missing settings
+    p.write_text(yaml.dump({"dataset": "test"}))  # missing required concurrency
     model, results = load_run_config(p)
     assert model is None
     assert len(results) == 1
@@ -86,13 +86,13 @@ def test_load_run_config_schema_error(tmp_path):
 
 
 def test_load_run_config_valid_returns_check_results(tmp_path):
-    p = tmp_path / "run_64.yaml"
+    p = tmp_path / "point_64.yaml"
     p.write_text(
         yaml.dump(
             {
-                "settings": {
-                    "load_pattern": {"type": "concurrency", "target_concurrency": 64},
-                }
+                "concurrency": 64,
+                "dataset": "mlperf-perf-dataset-v1",
+                "runtime_settings": {"load_pattern": "concurrency"},
             }
         )
     )
@@ -168,9 +168,8 @@ def test_load_json_os_error(tmp_path):
 
 def test_load_yaml_os_error(tmp_path):
     """_load_yaml must surface an OSError (e.g. permission denied) as an error message."""
-    p = tmp_path / "run_64.yaml"
-    lp = {"type": "concurrency", "target_concurrency": 64}
-    p.write_text(yaml.dump({"settings": {"load_pattern": lp}}))
+    p = tmp_path / "point_64.yaml"
+    p.write_text(yaml.dump({"concurrency": 64, "runtime_settings": {"load_pattern": "concurrency"}}))
     with patch("pathlib.Path.read_text", side_effect=OSError("permission denied")):
         model, results = load_run_config(p)
     assert model is None

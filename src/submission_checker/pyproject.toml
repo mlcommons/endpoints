@@ -1,6 +1,6 @@
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "submission-checker"
@@ -32,8 +32,12 @@ docs = [
     "furo>=2024.1",
 ]
 
-[tool.hatch.build.targets.wheel]
-packages = ["src/submission_checker"]
+[tool.setuptools]
+packages = ["submission_checker", "submission_checker.models"]
+
+[tool.setuptools.package-dir]
+"submission_checker" = "src"
+"submission_checker.models" = "src/models"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
