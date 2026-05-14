@@ -22,6 +22,8 @@ import re
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any
 
+import msgspec
+
 from inference_endpoint.core.types import Query, QueryResult
 
 if TYPE_CHECKING:
@@ -128,8 +130,8 @@ class HttpRequestAdapter(ABC):
         for json_doc in json_docs:
             try:
                 content = cls.decode_sse_message(json_doc)
-            except Exception:
-                logger.debug("skipping non-content SSE frame: %s", json_doc[:120])
+            except (msgspec.DecodeError, msgspec.ValidationError):
+                logger.warning("skipping malformed SSE frame: %s", json_doc[:120])
                 continue
             if content is not None:
                 parsed.append(content)

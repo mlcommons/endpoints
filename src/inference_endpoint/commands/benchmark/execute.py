@@ -629,6 +629,7 @@ async def _run_benchmark_async(
                 )
                 if perf_ds_cfg is not None:
                     mt_cfg = perf_ds_cfg.multi_turn
+            assert ctx.dataloader.conversation_metadata is not None
             multi_turn_strategy = MultiTurnStrategy(
                 conversation_manager=ConversationManager(),
                 dataset_metadata=ctx.dataloader.conversation_metadata,

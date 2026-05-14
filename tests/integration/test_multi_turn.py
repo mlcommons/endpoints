@@ -84,6 +84,7 @@ def _make_strategy(
         turn_timeout_s=10.0,
         use_dataset_history=use_dataset_history,
     )
+    assert ds.conversation_metadata is not None
     return MultiTurnStrategy(
         conversation_manager=ConversationManager(),
         dataset_metadata=ds.conversation_metadata,

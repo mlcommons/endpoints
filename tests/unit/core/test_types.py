@@ -33,6 +33,7 @@ from inference_endpoint.core.types import (
 )
 
 
+@pytest.mark.unit
 class TestErrorData:
     """Test ErrorData string representation."""
 
@@ -47,6 +48,7 @@ class TestErrorData:
         assert str(err) == "TimeoutError"
 
 
+@pytest.mark.unit
 class TestQuerySerialization:
     """Test Query msgspec.msgpack serialization with various field combinations."""
 
@@ -186,6 +188,7 @@ class TestQuerySerialization:
         assert decoded2.created_at == original.created_at
 
 
+@pytest.mark.unit
 class TestQueryResultSerialization:
     """Test QueryResult msgspec.msgpack serialization with various field combinations."""
 
@@ -467,6 +470,7 @@ class TestQueryResultSerialization:
         assert decoded2.metadata == original.metadata
 
 
+@pytest.mark.unit
 class TestStreamChunkSerialization:
     """Test StreamChunk msgspec.msgpack serialization with various field combinations."""
 
@@ -589,6 +593,7 @@ class TestStreamChunkSerialization:
         assert decoded2.metadata == original.metadata
 
 
+@pytest.mark.unit
 class TestQueryResultWorkerPatterns:
     """Test QueryResult serialization patterns used by worker.py (TextModelOutput)."""
 
@@ -690,6 +695,7 @@ class TestQueryResultWorkerPatterns:
         assert len(decoded.response_output.output) == 1
 
 
+@pytest.mark.unit
 class TestTextAfterFirstChunk:
     """Test TextModelOutput.text_after_first_chunk() for all reasoning/output combos."""
 
@@ -744,6 +750,7 @@ class TestTextAfterFirstChunk:
         assert tmo.text_after_first_chunk() == expected
 
 
+@pytest.mark.unit
 class TestMixedTypeSerialization:
     """Test serialization of mixed type combinations and edge cases."""
 
