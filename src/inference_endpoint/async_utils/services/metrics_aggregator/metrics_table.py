@@ -231,7 +231,7 @@ class AsyncTokenTrigger(EmitTrigger):
         if message_parts is not None:
             content, reasoning, tool_calls = message_parts
             pool, loop = self._pool, self._loop
-            store, name = self.kv_store, self.metric_name
+            registry, name = self.registry, self.metric_name
             uuid = row.sample_uuid
 
             async def _tokenize_message_and_emit() -> None:
@@ -241,7 +241,7 @@ class AsyncTokenTrigger(EmitTrigger):
                     )
                     value = self._compute_value(count, ev_rec, pre_change)
                     if value is not None:
-                        store.update(name, value)
+                        registry.record(name, value)
                 except Exception:
                     logger.exception("%s tokenization failed for %s", name, uuid)
 

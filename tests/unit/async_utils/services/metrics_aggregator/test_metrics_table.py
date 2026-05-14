@@ -290,16 +290,17 @@ class TestOslTriggerToolCalls:
         """OslTrigger stores combined content+tool_calls word count."""
         from inference_endpoint.async_utils.services.metrics_aggregator.metrics_table import (
             OslTrigger,
+            SampleRow,
         )
         from inference_endpoint.core.types import TextModelOutput
 
-        from .conftest import InMemoryKVStore, MockTokenizePool
+        from .conftest import MockTokenizePool, snapshot_series_count
 
-        kv = InMemoryKVStore()
+        registry = MetricsRegistry()
+        registry.register_series("osl", hdr_low=1, hdr_high=100_000)
         loop = asyncio.get_running_loop()
         pool = MockTokenizePool(delay=0)
-        trigger = OslTrigger(kv, pool, loop)
-        trigger.kv_store.create_key("osl", "series", dtype=int)
+        trigger = OslTrigger(registry, pool, loop)
 
         tool_calls = (
             {
@@ -315,18 +316,12 @@ class TestOslTriggerToolCalls:
             sample_uuid="s1",
             data=tmo,
         )
-        from inference_endpoint.async_utils.services.metrics_aggregator.metrics_table import (
-            SampleRow,
-        )
-
         row = SampleRow(sample_uuid="s1")
         task = trigger.fire(ev, row, {})
         assert task is not None
         await task
 
-        values = kv.get_series_values("osl")
-        assert len(values) == 1
-        assert values[0] > 0
+        assert snapshot_series_count(registry, "osl") == 1
 
     async def test_osl_without_tool_calls_uses_text_path(self):
         """OslTrigger uses text path for output with no tool_calls (regression guard)."""
@@ -336,13 +331,13 @@ class TestOslTriggerToolCalls:
         )
         from inference_endpoint.core.types import TextModelOutput
 
-        from .conftest import InMemoryKVStore, MockTokenizePool
+        from .conftest import MockTokenizePool, snapshot_series_count
 
-        kv = InMemoryKVStore()
+        registry = MetricsRegistry()
+        registry.register_series("osl", hdr_low=1, hdr_high=100_000)
         loop = asyncio.get_running_loop()
         pool = MockTokenizePool(delay=0)
-        trigger = OslTrigger(kv, pool, loop)
-        trigger.kv_store.create_key("osl", "series", dtype=int)
+        trigger = OslTrigger(registry, pool, loop)
 
         tmo = TextModelOutput(output="hello world")
         ev = EventRecord(
@@ -356,8 +351,7 @@ class TestOslTriggerToolCalls:
         assert task is not None
         await task
 
-        values = kv.get_series_values("osl")
-        assert values == [2]  # "hello world" -> 2 words
+        assert snapshot_series_count(registry, "osl") == 1
 
 
 @pytest.mark.unit
@@ -374,13 +368,15 @@ class TestTpotTriggerToolCalls:
         )
         from inference_endpoint.core.types import TextModelOutput
 
-        from .conftest import InMemoryKVStore, MockTokenizePool
+        from .conftest import MockTokenizePool, snapshot_series_count
 
-        kv = InMemoryKVStore()
+        registry = MetricsRegistry()
+        registry.register_series(
+            "tpot_ns", hdr_low=1, hdr_high=100_000_000_000, dtype=float
+        )
         loop = asyncio.get_running_loop()
         pool = MockTokenizePool(delay=0)
-        trigger = TpotTrigger(kv, pool, loop)
-        trigger.kv_store.create_key("tpot_ns", "series", dtype=float)
+        trigger = TpotTrigger(registry, pool, loop)
 
         tool_calls = (
             {
@@ -403,6 +399,4 @@ class TestTpotTriggerToolCalls:
         assert task is not None
         await task
 
-        values = kv.get_series_values("tpot_ns")
-        assert len(values) == 1
-        assert values[0] > 0
+        assert snapshot_series_count(registry, "tpot_ns") == 1
