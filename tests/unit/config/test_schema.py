@@ -499,7 +499,10 @@ class TestMultiTurnValidation:
 
     @pytest.mark.unit
     def test_multi_turn_without_multi_turn_dataset_rejected(self):
-        with pytest.raises(ValueError, match="requires at least one dataset"):
+        with pytest.raises(
+            ValueError,
+            match="requires the performance dataset to have multi_turn config",
+        ):
             BenchmarkConfig(
                 type=TestType.ONLINE,
                 model_params={"name": "M"},
@@ -512,7 +515,7 @@ class TestMultiTurnValidation:
 
     @pytest.mark.unit
     def test_multi_turn_dataset_without_multi_turn_load_pattern_rejected(self):
-        with pytest.raises(ValueError, match="require load_pattern.type=multi_turn"):
+        with pytest.raises(ValueError, match="requires load_pattern.type=multi_turn"):
             BenchmarkConfig(
                 type=TestType.ONLINE,
                 model_params={"name": "M"},
