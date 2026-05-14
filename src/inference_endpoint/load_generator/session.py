@@ -457,6 +457,27 @@ class BenchmarkSession:
                 conv_id_str, turn_num = phase_issuer.uuid_to_conv_info.pop(
                     query_id, ("", None)
                 )
+            # Emit ERROR before COMPLETE for failed queries so downstream
+            # consumers (notably the metrics aggregator) see the ERROR
+            # while the in-flight tracked row still exists. COMPLETE
+            # removes the row, so any state lookup at ERROR time after
+            # COMPLETE would silently miss tracked failures.
+            #
+            # Invariant: the EventPublisher MUST preserve publish-call
+            # order on the wire (ZMQ PUB→SUB delivers in order to a
+            # single SUB, and ZmqMessagePublisher batches without
+            # reordering). Any future transport refactor that breaks
+            # this property breaks tracked-failure counting — and
+            # silently, since neither side has an assertion.
+            if resp.error is not None:
+                self._publisher.publish(
+                    EventRecord(
+                        event_type=ErrorEventType.GENERIC,
+                        timestamp_ns=time.monotonic_ns(),
+                        sample_uuid=query_id,
+                        data=resp.error,
+                    )
+                )
             self._publisher.publish(
                 EventRecord(
                     event_type=SampleEventType.COMPLETE,
@@ -469,17 +490,6 @@ class BenchmarkSession:
                     data=resp.response_output,
                 )
             )
-            if resp.error is not None:
-                self._publisher.publish(
-                    EventRecord(
-                        event_type=ErrorEventType.GENERIC,
-                        timestamp_ns=time.monotonic_ns(),
-                        sample_uuid=query_id,
-                        conversation_id=conv_id_str,
-                        turn=turn_num,
-                        data=resp.error,
-                    )
-                )
             if phase_issuer is not None and query_id in phase_issuer.uuid_to_index:
                 phase_issuer.inflight -= 1
                 if phase_issuer.inflight <= 0:

@@ -36,7 +36,7 @@ def create_dummy_dataset(num_samples: int = 1000, output_path: str = None):
 
     Args:
         num_samples: Number of samples to generate
-        output_path: Output file path (default: tests/datasets/dummy_1k.jsonl)
+        output_path: Output file path (default: tests/assets/datasets/dummy_1k.jsonl)
     """
     # Create varied prompts
     prompt_templates = [
@@ -122,7 +122,7 @@ def main():
         "--output",
         "-o",
         type=str,
-        help="Output file path (default: tests/datasets/dummy_1k.jsonl)",
+        help="Output file path (default: tests/assets/datasets/dummy_1k.jsonl)",
     )
 
     args = parser.parse_args()

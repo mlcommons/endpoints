@@ -74,14 +74,14 @@ MODEL_FOR_TYPE: dict[TestType, type[BenchmarkConfig]] = {
 PERF_DATASET = {
     "name": "perf",
     "type": "performance",
-    "path": "<DATASET_PATH eg: tests/datasets/dummy_1k.jsonl>",
+    "path": "<DATASET_PATH eg: tests/assets/datasets/dummy_1k.jsonl>",
     "parser": {"prompt": "text_input"},
 }
 
 ACC_DATASET = {
     "name": "accuracy",
     "type": "accuracy",
-    "path": "<DATASET_PATH eg: tests/datasets/ds_samples.jsonl>",
+    "path": "<DATASET_PATH eg: tests/assets/datasets/ds_samples.jsonl>",
     "eval_method": "exact_match",
     "parser": {"prompt": "question", "system": "system_prompt"},
     "accuracy_config": {

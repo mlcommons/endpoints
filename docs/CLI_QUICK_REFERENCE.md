@@ -13,13 +13,13 @@ Command-line reference for all `inference-endpoint` subcommands, flags, load pat
 inference-endpoint benchmark offline \
   --endpoints URL \
   --model Qwen/Qwen3-8B \
-  --dataset tests/datasets/dummy_1k.jsonl
+  --dataset tests/assets/datasets/dummy_1k.jsonl
 
 # Online (sustained QPS - requires --load-pattern, --target-qps)
 inference-endpoint benchmark online \
   --endpoints URL \
   --model Qwen/Qwen3-8B \
-  --dataset tests/datasets/dummy_1k.jsonl \
+  --dataset tests/assets/datasets/dummy_1k.jsonl \
   --load-pattern poisson \
   --target-qps 100
 
@@ -35,14 +35,14 @@ inference-endpoint benchmark offline \
 inference-endpoint benchmark offline \
   --endpoints URL \
   --model Qwen/Qwen3-8B \
-  --dataset tests/datasets/dummy_1k.jsonl \
+  --dataset tests/assets/datasets/dummy_1k.jsonl \
   --report-dir my_benchmark_report
 
 # YAML-based
 inference-endpoint benchmark from-config --config test.yaml
 ```
 
-**Default Test Dataset:** Use `tests/datasets/dummy_1k.jsonl` (1000 samples) for local testing.
+**Default Test Dataset:** Use `tests/assets/datasets/dummy_1k.jsonl` (1000 samples) for local testing.
 
 **Dataset format:** `--dataset [perf|acc:]<path>[,key=value...]` — TOML-style dotted paths. Type prefix is optional (defaults to `perf`):
 
@@ -200,7 +200,7 @@ inference-endpoint benchmark offline \
 inference-endpoint benchmark offline \
   --endpoints http://localhost:8000 \
   --model Qwen/Qwen3-8B \
-  --dataset tests/datasets/dummy_1k.jsonl
+  --dataset tests/assets/datasets/dummy_1k.jsonl
 ```
 
 ### Production Benchmark

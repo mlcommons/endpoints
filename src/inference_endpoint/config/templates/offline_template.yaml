@@ -5,7 +5,7 @@ model_params:
 datasets:  # Dataset configs
 - name: perf
   type: performance  # Dataset purpose: performance or accuracy | options: performance, accuracy
-  path: '<DATASET_PATH eg: tests/datasets/dummy_1k.jsonl>'  # Dataset file path
+  path: '<DATASET_PATH eg: tests/assets/datasets/dummy_1k.jsonl>'  # Dataset file path
   parser:  # Column remapping: {prompt: <col>, system: <col>}
     prompt: text_input
 settings:
