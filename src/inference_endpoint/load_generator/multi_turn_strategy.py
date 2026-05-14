@@ -184,23 +184,22 @@ class MultiTurnStrategy:
         if not self._active_iters and not self._inflight:
             return phase_issuer.issued_count
 
-        await self._all_done.wait()
-
-        for handle in self._timeout_handles.values():
-            handle.cancel()
-        self._timeout_handles.clear()
-
-        if self._inflight:
-            logger.warning(
-                "%d query(ies) never received a response (session stop or transport failure): %s",
-                len(self._inflight),
-                list(self._inflight.keys()),
-            )
-            self._inflight.clear()
-
-        if self._error is not None:
-            raise self._error
-        return phase_issuer.issued_count
+        try:
+            await self._all_done.wait()
+            if self._error is not None:
+                raise self._error
+            return phase_issuer.issued_count
+        finally:
+            for handle in self._timeout_handles.values():
+                handle.cancel()
+            self._timeout_handles.clear()
+            if self._inflight:
+                logger.warning(
+                    "%d query(ies) never received a response (session stop or transport failure): %s",
+                    len(self._inflight),
+                    list(self._inflight.keys()),
+                )
+                self._inflight.clear()
 
     def _start_conversation(self) -> None:
         """Pop the next conversation from the pending queue and issue its first turn."""
@@ -231,7 +230,11 @@ class MultiTurnStrategy:
             ).get((conv_id, turn))
             if current_turn_messages:
                 live_messages = state.message_history.copy() + current_turn_messages
-                data_override = {"messages": live_messages}
+                data_override = {
+                    "messages": live_messages,
+                    "input_tokens": None,
+                    "token_ids": None,
+                }
 
         assert self._phase_issuer is not None
         query_id = self._phase_issuer.issue(idx, data_override=data_override)
@@ -265,6 +268,13 @@ class MultiTurnStrategy:
         if self._inflight.pop(query_id, None) is None:
             return
         self._timeout_handles.pop(query_id, None)
+
+        if (
+            self._phase_issuer is not None
+            and hasattr(self._phase_issuer, "uuid_to_index")
+            and query_id in self._phase_issuer.uuid_to_index  # type: ignore[attr-defined]
+        ):
+            self._phase_issuer.inflight -= 1  # type: ignore[attr-defined]
 
         logger.warning(
             "Turn timed out for conversation %s (query=%s)", conv_id, query_id

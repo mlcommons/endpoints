@@ -38,7 +38,7 @@ Multi-turn datasets use JSONL format with the following structure:
    conversations into memory first.
 2. Conversations must follow a valid role sequence:
    - Plain chat: `user → assistant → user → ...`
-   - Agentic: `user → assistant (with tool_calls) → tool → [tool | assistant (with tool_calls)]* → assistant → user → ...`
+   - Agentic: `user → assistant (with tool_calls) → tool (tool_results list; parallel results merged) → [assistant (with tool_calls) → tool]* → assistant → user → ...`
 3. First turn must be "user" role
 4. Turn numbers must be sequential (1, 2, 3, ...)
 5. Each conversation must have at least one turn
@@ -210,7 +210,9 @@ Multi-turn benchmarks produce per-turn metrics:
 - **Per-turn metrics**: Latency, TTFT, TPOT for each individual turn
 - **Per-conversation metrics**: Total conversation latency, conversations per second _(planned — not yet implemented)_
 
-Results are stored in the configured `report_dir` with conversation metadata included in the events log (`events.jsonl`).
+**Note**: Multi-turn datasets are only supported as performance datasets. Using a multi-turn dataset as an accuracy dataset (`type: accuracy`) is not yet supported and will raise an error at startup.
+
+Results are stored in the configured `report_dir`. The `events.jsonl` log contains one record per turn keyed by `sample_uuid`. To correlate events with conversations, join through `sample_idx_map.json` and the dataset's `conversation_metadata["samples"]`.
 
 ## Example Datasets
 

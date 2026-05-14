@@ -11,7 +11,6 @@ datasets:
   - name: customer_support_conversations
     type: performance
     path: examples/09_MultiTurn/customer_support_conversations.jsonl
-    samples: 10
     multi_turn:
       turn_timeout_s: 300.0
 

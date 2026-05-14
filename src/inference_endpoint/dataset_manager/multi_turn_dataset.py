@@ -161,6 +161,7 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
         for conv_id, group in self._conv_groups.items():
             sorted_group = group.sort_values("turn")
             state = "start"
+            prev_assistant_had_tool_calls = False
 
             for _, row in sorted_group.iterrows():
                 role = row["role"]
@@ -172,6 +173,11 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
                     )
 
                 if role == "tool":
+                    if state == "assistant" and not prev_assistant_had_tool_calls:
+                        raise InputValidationError(
+                            f"Conversation {conv_id} turn {row['turn']}: "
+                            "'tool' row must follow an 'assistant' row that has non-empty 'tool_calls'"
+                        )
                     tool_results = row.get("tool_results")
                     if not isinstance(tool_results, list) or len(tool_results) == 0:
                         raise InputValidationError(
@@ -194,6 +200,10 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
                             f"Conversation {conv_id} turn {row['turn']}: "
                             "assistant rows must have non-empty 'content' or non-empty 'tool_calls'"
                         )
+                    prev_assistant_had_tool_calls = has_tool_calls
+
+                if role != "assistant":
+                    prev_assistant_had_tool_calls = False
 
                 state = role
 
@@ -265,7 +275,13 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
                 prior_rows = sorted_group[sorted_group["turn"] < t_n]
                 for _, prior_row in prior_rows.iterrows():
                     msg: dict[str, Any] = {}
-                    for key in ("role", "content", "tool_calls", "tool_results"):
+                    for key in (
+                        "role",
+                        "content",
+                        "name",
+                        "tool_calls",
+                        "tool_results",
+                    ):
                         val = prior_row.get(key)
                         if val is not None and not (
                             isinstance(val, float) and pd.isna(val)
@@ -296,7 +312,7 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
                     current_turn_msgs = expanded
                 else:
                     cur: dict[str, Any] = {}
-                    for key in ("role", "content"):
+                    for key in ("role", "content", "name"):
                         val = row.get(key)
                         if val is not None and not (
                             isinstance(val, float) and pd.isna(val)
@@ -425,11 +441,15 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
                 if k not in sample:
                     sample[k] = v
 
-            # max_new_tokens → max_completion_tokens alias
-            if "max_completion_tokens" not in sample and "max_new_tokens" in sample:
-                sample["max_completion_tokens"] = sample.pop("max_new_tokens")
-            if "max_completion_tokens" not in sample:
-                sample["max_completion_tokens"] = 128
+            # Normalize max-tokens across all adapter aliases.
+            max_tokens_val = (
+                sample.pop("max_new_tokens", None)
+                or sample.get("max_completion_tokens")
+                or 128
+            )
+            sample["max_new_tokens"] = max_tokens_val
+            sample["max_completion_tokens"] = max_tokens_val
+            sample["max_tokens"] = max_tokens_val
             if "stream" not in sample:
                 sample["stream"] = False
 

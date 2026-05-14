@@ -49,7 +49,7 @@ settings:
     target_concurrency: 32 # ← Required: max simultaneous conversations
 
   client:
-    workers: 4
+    num_workers: 4
 
 endpoint_config:
   endpoints:
@@ -71,8 +71,7 @@ That's it! Your benchmark will now:
 
 - ✅ Enforce turn ordering (turn N+1 waits for turn N)
 - ✅ Include conversation history in each request
-- ✅ Track per-turn and per-conversation metrics
-- ✅ Log all turns with conversation metadata
+- ✅ Log all turns to events.jsonl
 
 ---
 
@@ -82,21 +81,12 @@ After the benchmark completes, check the directory configured via `report_dir`:
 
 ### Events Log
 
-The `events.jsonl` file contains one JSON record per line:
-
-- Standard fields: `sample_uuid`, `event_type`, `timestamp_ns`
-- **New fields**: `conversation_id`, `turn_number`
-
-Query examples:
-
-```bash
-# All events for a specific conversation
-grep '"conversation_id": "c1"' logs/my_multi_turn_benchmark/events.jsonl
-
-# With jq for structured output
-jq 'select(.conversation_id == "c1") | {conversation_id, turn_number, event_type, timestamp_ns}' \
-  logs/my_multi_turn_benchmark/events.jsonl
-```
+The `events.jsonl` file contains one JSON record per line, with the standard
+`sample_uuid`, `event_type`, and `timestamp_ns` fields. Events are keyed by
+`sample_uuid` only. To correlate events with conversations, join through
+`sample_idx_map.json` (written next to `events.jsonl`) and the multi-turn
+dataset's `conversation_metadata["samples"]`, which maps sample indices to
+`(conversation_id, turn)` tuples.
 
 ### Metrics
 
@@ -235,9 +225,9 @@ cat logs/multi_turn_test/benchmark.log
 ### 3. Verify Event Recording
 
 ```bash
-# List all unique conversation IDs in the events log
-jq -r '.conversation_id' logs/multi_turn_test/events.jsonl | sort -u
-# Should show your conversation IDs
+# List all sample UUIDs in the events log
+jq -r '.sample_uuid' logs/multi_turn_test/events.jsonl | sort -u
+# Should show UUIDs; correlate to conversations via sample_idx_map.json
 ```
 
 ---
@@ -252,7 +242,7 @@ jq -r '.conversation_id' logs/multi_turn_test/events.jsonl | sort -u
 
 ### Performance
 
-- **Workers**: `client.workers` controls HTTP worker processes, independent of `target_concurrency`. The default (`-1`) auto-tunes based on NUMA topology.
+- **Workers**: `client.num_workers` controls HTTP worker processes, independent of `target_concurrency`. The default (`-1`) auto-tunes based on NUMA topology.
 - **Timeout**: Set `turn_timeout_s` = 2x your longest expected turn latency
 - **Memory**: ~1KB per turn, plan accordingly for large datasets
 
@@ -283,5 +273,6 @@ Before running your first multi-turn benchmark:
 - [ ] File uses `.jsonl` extension (format is auto-detected)
 - [ ] Conversation IDs are unique per conversation
 - [ ] Turn numbers are sequential (1, 2, 3, ...)
+- [ ] Dataset is configured as `type: performance` (accuracy evaluation of multi-turn datasets is not yet supported)
 
 Happy benchmarking!

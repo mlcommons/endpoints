@@ -59,6 +59,9 @@ from inference_endpoint.async_utils.services.metrics_aggregator.kv_store import 
 from inference_endpoint.async_utils.services.metrics_aggregator.metrics_table import (
     MetricSeriesKey,
 )
+from inference_endpoint.async_utils.services.metrics_aggregator.token_metrics import (
+    _normalize_tool_calls_for_template,
+)
 from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import (
@@ -318,8 +321,18 @@ def _precompute_isl_for_multi_turn(
         if not messages:
             continue
         try:
+            normalized_messages = []
+            for msg in messages:
+                if msg.get("tool_calls"):
+                    msg = {
+                        **msg,
+                        "tool_calls": _normalize_tool_calls_for_template(
+                            msg["tool_calls"]
+                        ),
+                    }
+                normalized_messages.append(msg)
             raw = tokenizer.apply_chat_template(
-                messages,
+                normalized_messages,
                 tokenize=True,
                 add_generation_prompt=True,
             )
@@ -432,11 +445,12 @@ def _build_phases(
     perf_lp = ctx.rt_settings.load_pattern
     for eval_cfg in ctx.eval_configs:
         acc_ds = eval_cfg.dataset
-        if (
-            perf_lp is not None
-            and perf_lp.type == LoadPatternType.MULTI_TURN
-            and not isinstance(acc_ds, MultiTurnDataset)
-        ):
+        if isinstance(acc_ds, MultiTurnDataset):
+            raise InputValidationError(
+                f"Accuracy dataset '{eval_cfg.dataset_name}' is a MultiTurnDataset, "
+                "which is not yet supported for accuracy evaluation."
+            )
+        if perf_lp is not None and perf_lp.type == LoadPatternType.MULTI_TURN:
             # Plain accuracy datasets are single-turn; the multi-turn scheduler
             # requires MultiTurnDataset. Downgrade to CONCURRENCY with same cap.
             acc_load_pattern: LoadPattern | None = LoadPattern(
@@ -445,18 +459,6 @@ def _build_phases(
             )
         else:
             acc_load_pattern = perf_lp
-        if (
-            acc_load_pattern is not None
-            and acc_load_pattern.type == LoadPatternType.MULTI_TURN
-            and not isinstance(acc_ds, MultiTurnDataset)
-        ):
-            raise InputValidationError(
-                f"Accuracy phase '{eval_cfg.dataset_name}' would use MULTI_TURN "
-                "load pattern but its dataset is not a MultiTurnDataset. This is "
-                "currently blocked by schema validation; if you're seeing this, "
-                "update _build_phases to construct a dedicated MultiTurnStrategy "
-                "for the accuracy phase."
-            )
         acc_settings = RuntimeSettings(
             metric_target=ctx.rt_settings.metric_target,
             reported_metrics=ctx.rt_settings.reported_metrics,

@@ -223,6 +223,7 @@ class OpenAIMsgspecAdapter(HttpRequestAdapter):
             id=result_id or response.id,
             response_output=TextModelOutput(
                 output=choice.message.content or "",
+                reasoning=choice.message.reasoning_content,
                 tool_calls=tool_calls_tuple,
             ),
             metadata=metadata,
