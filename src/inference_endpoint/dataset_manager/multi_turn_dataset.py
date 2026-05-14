@@ -16,6 +16,7 @@
 """Multi-turn conversation dataset for conversational AI benchmarking."""
 
 import logging
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import pandas as pd
@@ -30,6 +31,41 @@ from .transforms import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ConversationSampleEntry:
+    """One client-turn entry in ConversationMetadata.samples.
+
+    sample_index is populated after transforms in MultiTurnDataset.load();
+    None before load() is called.
+    """
+
+    conversation_id: str
+    turn: int
+    sample_index: int | None = None
+
+
+@dataclass
+class ConversationMetadata:
+    """Bundle of maps/lists consumed by MultiTurnStrategy.
+
+    Produced by MultiTurnDataset._build_metadata() from the post-transform dataframe.
+    Keys in the *_by_key dicts are (str(conversation_id), int(turn)).
+    Populated by load(); None before load() is called.
+    """
+
+    samples: list[ConversationSampleEntry]
+    num_conversations: int
+    max_turns_per_conv: int
+    client_turns_per_conversation: dict[str, int]
+    pre_built_messages_by_key: dict[tuple[str, int], list[dict]] = field(
+        default_factory=dict
+    )
+    current_turn_messages_by_key: dict[tuple[str, int], list[dict]] = field(
+        default_factory=dict
+    )
+    system_prompts_by_conv: dict[str, str | None] = field(default_factory=dict)
 
 
 def _expand_tool_results(row: dict) -> list[dict]:
@@ -94,10 +130,9 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
         - max_new_tokens / max_completion_tokens: Max tokens for this turn (alias; mapped to max_completion_tokens)
 
     Attributes:
-        conversation_metadata: Metadata dict containing:
-            - samples: List of user turn metadata (index, conversation_id, turn, system)
-            - num_conversations: Total number of unique conversations
-            - max_turns_per_conv: Maximum turns in any conversation
+        conversation_metadata: ConversationMetadata populated by load() (None before).
+            Validators run at construction; metadata is built once in load() against
+            the post-transform dataframe so pre_built_messages_by_key is always in sync.
     """
 
     COLUMN_NAMES = ["conversation_id", "turn", "role", "content"]
@@ -120,7 +155,8 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
         self._validate_conversation_grouping()
         self._validate_conversation_structure()
         self._validate_turn_numbering()
-        self.conversation_metadata = self._build_metadata()
+        # Populated by load() after transforms; None until then.
+        self.conversation_metadata: ConversationMetadata | None = None
 
     def _validate_conversation_grouping(self) -> None:
         """Validate that all rows for each conversation_id appear consecutively in file order.
@@ -222,17 +258,16 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
                     f"got {turns}"
                 )
 
-    def _build_metadata(self) -> dict[str, Any]:
+    def _build_metadata(self) -> ConversationMetadata:
         """Build metadata for scheduler (maps sample index to conversation context).
 
         Pre-computes the complete message list for each client turn so that
         conversation history does not need to be accumulated at runtime.
 
         Returns:
-            Metadata dict with samples list, num_conversations, max_turns_per_conv,
-            client_turns_per_conversation, and pre_built_messages_by_key.
+            ConversationMetadata with samples, counts, and pre-built message maps.
         """
-        samples = []
+        samples: list[ConversationSampleEntry] = []
 
         # Count client turns (user + tool) per conversation for completion tracking
         client_turns_per_conv = {
@@ -326,23 +361,21 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
                 current_turn_messages_by_key[(str_conv_id, t_n)] = current_turn_msgs
 
                 samples.append(
-                    {
-                        "conversation_id": str_conv_id,
-                        "turn": t_n,
-                    }
+                    ConversationSampleEntry(
+                        conversation_id=str_conv_id,
+                        turn=t_n,
+                    )
                 )
 
-        return {
-            "samples": samples,
-            "num_conversations": len(self._conv_groups),
-            "max_turns_per_conv": max(
-                g["turn"].max() for g in self._conv_groups.values()
-            ),
-            "client_turns_per_conversation": client_turns_per_conv,
-            "pre_built_messages_by_key": pre_built_messages_by_key,
-            "current_turn_messages_by_key": current_turn_messages_by_key,
-            "system_prompts_by_conv": system_prompts_by_conv,
-        }
+        return ConversationMetadata(
+            samples=samples,
+            num_conversations=len(self._conv_groups),
+            max_turns_per_conv=max(g["turn"].max() for g in self._conv_groups.values()),
+            client_turns_per_conversation=client_turns_per_conv,
+            pre_built_messages_by_key=pre_built_messages_by_key,
+            current_turn_messages_by_key=current_turn_messages_by_key,
+            system_prompts_by_conv=system_prompts_by_conv,
+        )
 
     def load(
         self,
@@ -390,12 +423,18 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
             if defaults:
                 df = AddStaticColumns(defaults, overwrite=False)(df)
 
+        # Rebuild conv_groups + metadata from the final post-transform df so
+        # pre_built_messages_by_key reflects any transforms applied above.
+        self.dataframe = df
+        self._conv_groups = dict(list(df.groupby("conversation_id", sort=False)))
+        self.conversation_metadata = self._build_metadata()
+
         all_rows = df.to_dict(orient="records")
 
         # Pre-bake: assemble one complete sample dict per client turn.
         # NaN filtering replaces the GENERATION_PARAMS allowlist — any key whose
         # value is float NaN was absent in the original dataset row.
-        pre_built = self.conversation_metadata.get("pre_built_messages_by_key", {})
+        pre_built = self.conversation_metadata.pre_built_messages_by_key
         client_turn_samples: list[dict[str, Any]] = []
         # Maps (conv_id, turn) → dense sample_index for metadata backfill.
         key_to_sample_index: dict[tuple[str, int], int] = {}
@@ -466,13 +505,15 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
             key_to_sample_index[key] = len(client_turn_samples)
             client_turn_samples.append(sample)
 
-        # Backfill explicit sample_index into conversation_metadata["samples"].
+        # Backfill explicit sample_index into conversation_metadata.samples.
         # Drop entries whose key is absent (truncated turns not in client_turn_samples).
         updated_samples = []
-        for s in self.conversation_metadata["samples"]:
-            skey: tuple[str, int] = (str(s["conversation_id"]), int(s["turn"]))
+        for s in self.conversation_metadata.samples:
+            skey: tuple[str, int] = (str(s.conversation_id), int(s.turn))
             if skey in key_to_sample_index:
-                updated_samples.append({**s, "sample_index": key_to_sample_index[skey]})
-        self.conversation_metadata["samples"] = updated_samples
+                updated_samples.append(
+                    replace(s, sample_index=key_to_sample_index[skey])
+                )
+        self.conversation_metadata.samples = updated_samples
 
         self.data = client_turn_samples

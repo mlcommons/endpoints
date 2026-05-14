@@ -19,6 +19,10 @@ import asyncio
 
 import pytest
 from inference_endpoint.core.types import QueryResult, TextModelOutput
+from inference_endpoint.dataset_manager.multi_turn_dataset import (
+    ConversationMetadata,
+    ConversationSampleEntry,
+)
 from inference_endpoint.load_generator.conversation_manager import ConversationManager
 from inference_endpoint.load_generator.multi_turn_strategy import MultiTurnStrategy
 
@@ -42,21 +46,26 @@ class FakePhaseIssuer:
         return query_id
 
 
-def _make_dataset_metadata(conversations: dict[str, list[int]]) -> dict:
-    """Build dataset_metadata dict from {conv_id: [turn_numbers]} mapping."""
+def _make_dataset_metadata(conversations: dict[str, list[int]]) -> ConversationMetadata:
+    """Build ConversationMetadata from {conv_id: [turn_numbers]} mapping."""
     samples = []
     sample_index = 0
     for conv_id, turns in conversations.items():
         for turn in turns:
             samples.append(
-                {
-                    "conversation_id": conv_id,
-                    "turn": turn,
-                    "sample_index": sample_index,
-                }
+                ConversationSampleEntry(
+                    conversation_id=conv_id,
+                    turn=turn,
+                    sample_index=sample_index,
+                )
             )
             sample_index += 1
-    return {"samples": samples}
+    return ConversationMetadata(
+        samples=samples,
+        num_conversations=len(conversations),
+        max_turns_per_conv=max((max(t) for t in conversations.values()), default=0),
+        client_turns_per_conversation={c: len(t) for c, t in conversations.items()},
+    )
 
 
 @pytest.mark.unit
@@ -252,24 +261,27 @@ async def test_error_response_marks_turn_failed():
 def _make_metadata_with_system(
     conversations: dict[str, list[int]],
     system_prompts: dict[str, str | None] | None = None,
-) -> dict:
-    """Build metadata dict including system_prompts_by_conv."""
+) -> ConversationMetadata:
+    """Build ConversationMetadata including system_prompts_by_conv."""
     samples = []
     sample_index = 0
     for conv_id, turns in conversations.items():
         for turn in turns:
             samples.append(
-                {
-                    "conversation_id": conv_id,
-                    "turn": turn,
-                    "sample_index": sample_index,
-                }
+                ConversationSampleEntry(
+                    conversation_id=conv_id,
+                    turn=turn,
+                    sample_index=sample_index,
+                )
             )
             sample_index += 1
-    return {
-        "samples": samples,
-        "system_prompts_by_conv": system_prompts or {},
-    }
+    return ConversationMetadata(
+        samples=samples,
+        num_conversations=len(conversations),
+        max_turns_per_conv=max((max(t) for t in conversations.values()), default=0),
+        client_turns_per_conversation={c: len(t) for c, t in conversations.items()},
+        system_prompts_by_conv=system_prompts or {},
+    )
 
 
 @pytest.mark.unit

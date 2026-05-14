@@ -23,6 +23,7 @@ from typing import Any
 
 from ..config.schema import MultiTurnConfig
 from ..core.types import ErrorData, QueryResult, TextModelOutput
+from ..dataset_manager.multi_turn_dataset import ConversationMetadata
 from ..exceptions import InputValidationError
 from .conversation_manager import ConversationManager, ConversationState
 from .strategy import PhaseIssuerProtocol
@@ -65,7 +66,7 @@ class MultiTurnStrategy:
     def __init__(
         self,
         conversation_manager: ConversationManager,
-        dataset_metadata: dict[str, Any],
+        dataset_metadata: ConversationMetadata,
         multi_turn_config: MultiTurnConfig | None = None,
         target_concurrency: int | None = None,
     ):
@@ -73,7 +74,7 @@ class MultiTurnStrategy:
 
         Args:
             conversation_manager: Manages conversation sequencing state.
-            dataset_metadata: Metadata from MultiTurnDataset (samples list).
+            dataset_metadata: ConversationMetadata from MultiTurnDataset (after load()).
             multi_turn_config: Multi-turn conversation configuration.
             target_concurrency: Maximum number of simultaneously active conversations.
                 None means all conversations run concurrently.
@@ -96,9 +97,7 @@ class MultiTurnStrategy:
         if self._store_in_history:
             tool_turn_keys = [
                 key
-                for key, msgs in dataset_metadata.get(
-                    "current_turn_messages_by_key", {}
-                ).items()
+                for key, msgs in dataset_metadata.current_turn_messages_by_key.items()
                 if any(m.get("role") == "tool" for m in msgs)
             ]
             if tool_turn_keys:
@@ -147,14 +146,13 @@ class MultiTurnStrategy:
         self._error = None
 
         conv_samples: dict[str, list[tuple[int, int]]] = defaultdict(list)
-        for sample_meta in self._dataset_metadata["samples"]:
-            conv_id = sample_meta["conversation_id"]
-            conv_samples[conv_id].append(
-                (sample_meta["sample_index"], sample_meta["turn"])
-            )
+        for sample_meta in self._dataset_metadata.samples:
+            conv_id = sample_meta.conversation_id
+            assert sample_meta.sample_index is not None
+            conv_samples[conv_id].append((sample_meta.sample_index, sample_meta.turn))
 
         # Pre-create all conversation states before issuing any turns (no locking needed).
-        sys_prompts = self._dataset_metadata.get("system_prompts_by_conv", {})
+        sys_prompts = self._dataset_metadata.system_prompts_by_conv
         for conv_id, turns in conv_samples.items():
             sys_content = sys_prompts.get(conv_id) if self._store_in_history else None
             system_message = (
@@ -225,9 +223,9 @@ class MultiTurnStrategy:
         data_override: dict[str, Any] | None = None
         current_turn_messages: list[dict[str, Any]] | None = None
         if self._store_in_history:
-            current_turn_messages = self._dataset_metadata.get(
-                "current_turn_messages_by_key", {}
-            ).get((conv_id, turn))
+            current_turn_messages = (
+                self._dataset_metadata.current_turn_messages_by_key.get((conv_id, turn))
+            )
             if current_turn_messages:
                 live_messages = state.message_history.copy() + current_turn_messages
                 data_override = {

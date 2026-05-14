@@ -132,3 +132,42 @@ class TestPrecomputeIslForMultiTurn:
         _, kwargs = mock_tokenizer.apply_chat_template.call_args
         assert kwargs.get("add_generation_prompt") is True
         assert kwargs.get("tokenize") is True
+
+    @pytest.mark.unit
+    def test_normalizes_tool_call_arguments_before_apply_chat_template(self):
+        """_normalize_tool_calls_for_template converts arguments strings to dicts."""
+        samples = [
+            {
+                "messages": [
+                    {"role": "user", "content": "use a tool"},
+                    {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "c1",
+                                "type": "function",
+                                "function": {
+                                    "name": "bash",
+                                    "arguments": '{"cmd": "ls"}',
+                                },
+                            }
+                        ],
+                    },
+                ]
+            },
+        ]
+        dataloader = _make_dataloader(samples)
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.apply_chat_template.return_value = [1, 2, 3]
+
+        with patch(
+            "inference_endpoint.commands.benchmark.execute.AutoTokenizer"
+        ) as mock_cls:
+            mock_cls.from_pretrained.return_value = mock_tokenizer
+            _precompute_isl_for_multi_turn(dataloader, "test-model")
+
+        # Production code builds new dicts, so call_args captures the normalized value.
+        passed_msgs = mock_tokenizer.apply_chat_template.call_args[0][0]
+        asst_msg = next(m for m in passed_msgs if m.get("role") == "assistant")
+        assert asst_msg["tool_calls"][0]["function"]["arguments"] == {"cmd": "ls"}

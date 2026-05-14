@@ -194,25 +194,19 @@ def test_multi_turn_dataset_conversation_metadata(valid_multi_turn_jsonl):
 
     metadata = dataset.conversation_metadata
 
-    # Check metadata structure
-    assert "samples" in metadata
-    assert "num_conversations" in metadata
-    assert "max_turns_per_conv" in metadata
-    assert "client_turns_per_conversation" in metadata
-
     # Should have 3 client turn samples (fixture has only user turns, no tool turns)
-    assert len(metadata["samples"]) == 3
+    assert len(metadata.samples) == 3
 
     # Should have 2 conversations
-    assert metadata["num_conversations"] == 2
+    assert metadata.num_conversations == 2
 
     # Max turns per conversation should be 3 (conv_001 has 3 turns)
-    assert metadata["max_turns_per_conv"] == 3
+    assert metadata.max_turns_per_conv == 3
 
     # Check sample metadata structure
-    sample_meta = metadata["samples"][0]
-    assert "conversation_id" in sample_meta
-    assert "turn" in sample_meta
+    sample_meta = metadata.samples[0]
+    assert sample_meta.conversation_id is not None
+    assert sample_meta.turn is not None
 
 
 @pytest.mark.unit
@@ -273,8 +267,8 @@ def test_multi_turn_dataset_multiple_conversations():
 
         # Metadata checks
         metadata = dataset.conversation_metadata
-        assert metadata["num_conversations"] == 3
-        assert metadata["max_turns_per_conv"] == 4  # c2 has 4 turns
+        assert metadata.num_conversations == 3
+        assert metadata.max_turns_per_conv == 4  # c2 has 4 turns
 
         # Verify user turns are correctly indexed
         samples = [dataset.load_sample(i) for i in range(5)]
@@ -898,8 +892,9 @@ def test_build_metadata_pre_built_messages():
     """
     df = _make_tool_sequence_df()
     ds = MultiTurnDataset(df)
+    ds.load()
 
-    pbm = ds.conversation_metadata["pre_built_messages_by_key"]
+    pbm = ds.conversation_metadata.pre_built_messages_by_key
 
     # Client turn 1 (user, t=1): [system, user(1)]
     msgs_t1 = pbm[("c1", 1)]
@@ -936,7 +931,8 @@ def test_build_metadata_pre_built_messages_no_tools():
         ]
     )
     ds = MultiTurnDataset(df)
-    pbm = ds.conversation_metadata["pre_built_messages_by_key"]
+    ds.load()
+    pbm = ds.conversation_metadata.pre_built_messages_by_key
 
     # Turn 1: just the user message (no system, no prior rows)
     assert pbm[("c1", 1)] == [{"role": "user", "content": "A"}]
@@ -1072,7 +1068,8 @@ def test_prior_tool_row_expanded_with_tool_call_id():
     """Prior tool rows must expand to messages with tool_call_id and content (BUG 1)."""
     df = _make_tool_sequence_df()
     ds = MultiTurnDataset(df)
-    pbm = ds.conversation_metadata["pre_built_messages_by_key"]
+    ds.load()
+    pbm = ds.conversation_metadata.pre_built_messages_by_key
 
     # Client turn 3 (user, t=5) has a prior tool row at t=3.
     # msgs_t5[3] should be the expanded tool message with proper fields.
@@ -1126,7 +1123,8 @@ def test_prior_parallel_tool_results_expand_to_multiple_messages():
         ]
     )
     ds = MultiTurnDataset(df)
-    pbm = ds.conversation_metadata["pre_built_messages_by_key"]
+    ds.load()
+    pbm = ds.conversation_metadata.pre_built_messages_by_key
 
     # user(5) sees prior rows: user(1), assistant(2), tool(3)x2, assistant(4)
     msgs_t5 = pbm[("c1", 5)]
@@ -1143,7 +1141,8 @@ def test_assistant_content_null_preserved_in_history():
     """Assistant messages with tool_calls and content:null include content key (BUG 2)."""
     df = _make_tool_sequence_df()
     ds = MultiTurnDataset(df)
-    pbm = ds.conversation_metadata["pre_built_messages_by_key"]
+    ds.load()
+    pbm = ds.conversation_metadata.pre_built_messages_by_key
 
     # Client turn 2 (tool, t=3): prior includes assistant(2) with tool_calls + content: null
     msgs_t3 = pbm[("c1", 3)]
@@ -1284,7 +1283,8 @@ def test_current_turn_messages_by_key_parallel_tools():
         ]
     )
     ds = MultiTurnDataset(df)
-    ctm = ds.conversation_metadata["current_turn_messages_by_key"]
+    ds.load()
+    ctm = ds.conversation_metadata.current_turn_messages_by_key
 
     # user(1) current turn is 1 message
     assert len(ctm[("c1", 1)]) == 1
@@ -1318,8 +1318,9 @@ def test_metadata_contains_system_prompts_by_conv():
     ]
     df = pd.DataFrame(data)
     ds = MultiTurnDataset(df)
+    ds.load()
 
-    spc = ds.conversation_metadata["system_prompts_by_conv"]
+    spc = ds.conversation_metadata.system_prompts_by_conv
     assert spc["c1"] == "Be concise"
     assert spc["c2"] is None
 
@@ -1347,8 +1348,9 @@ def test_metadata_system_prompts_multiple_convs():
     ]
     df = pd.DataFrame(data)
     ds = MultiTurnDataset(df)
+    ds.load()
 
-    spc = ds.conversation_metadata["system_prompts_by_conv"]
+    spc = ds.conversation_metadata.system_prompts_by_conv
     assert spc["c1"] == "Sys1"
     assert spc["c2"] == "Sys2"
 
