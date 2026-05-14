@@ -626,17 +626,30 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
                     "Online mode requires --load-pattern (poisson, concurrency, or multi_turn)"
                 )
 
-        # Cross-validate load_pattern.type=multi_turn ↔ dataset.multi_turn config
-        has_multi_turn_dataset = any(
-            d.multi_turn is not None for d in (self.datasets or [])
+        # Cross-validate load_pattern.type=multi_turn ↔ performance dataset.multi_turn config
+        has_multi_turn_perf_dataset = any(
+            d.multi_turn is not None
+            for d in (self.datasets or [])
+            if d.type == DatasetType.PERFORMANCE
         )
-        if lp.type == LoadPatternType.MULTI_TURN and not has_multi_turn_dataset:
+        has_multi_turn_non_perf_dataset = any(
+            d.multi_turn is not None
+            for d in (self.datasets or [])
+            if d.type != DatasetType.PERFORMANCE
+        )
+        if has_multi_turn_non_perf_dataset:
             raise ValueError(
-                "load_pattern.type=multi_turn requires at least one dataset with multi_turn config"
+                "multi_turn config is only supported on performance datasets; "
+                "accuracy datasets with multi_turn are not supported"
             )
-        if has_multi_turn_dataset and lp.type != LoadPatternType.MULTI_TURN:
+        if lp.type == LoadPatternType.MULTI_TURN and not has_multi_turn_perf_dataset:
             raise ValueError(
-                f"Datasets with multi_turn config require load_pattern.type=multi_turn, got '{lp.type}'"
+                "load_pattern.type=multi_turn requires the performance dataset to have multi_turn config"
+            )
+        if has_multi_turn_perf_dataset and lp.type != LoadPatternType.MULTI_TURN:
+            raise ValueError(
+                f"Performance dataset with multi_turn config requires load_pattern.type=multi_turn, "
+                f"got '{lp.type}'"
             )
 
         return self

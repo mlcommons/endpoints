@@ -22,6 +22,7 @@ import pandas as pd
 import pytest
 from inference_endpoint.dataset_manager.dataset import DatasetFormat
 from inference_endpoint.dataset_manager.multi_turn_dataset import MultiTurnDataset
+from inference_endpoint.exceptions import InputValidationError
 
 
 @pytest.fixture
@@ -223,15 +224,13 @@ def test_multi_turn_dataset_validation_invalid_role_sequence(
 
 @pytest.mark.unit
 def test_multi_turn_dataset_validation_missing_fields(missing_fields_jsonl):
-    """Missing content field is preserved as None in the loaded sample."""
-    dataset = MultiTurnDataset.load_from_file(
-        missing_fields_jsonl, format=DatasetFormat.JSONL
-    )
-    dataset.load()
-
-    sample = dataset.load_sample(0)
-    # Missing content is no longer propagated to the sample dict
-    assert "content" not in sample
+    """User rows with missing content are rejected at construction time."""
+    with pytest.raises(
+        InputValidationError, match="user rows must have non-empty 'content'"
+    ):
+        MultiTurnDataset.load_from_file(
+            missing_fields_jsonl, format=DatasetFormat.JSONL
+        )
 
 
 @pytest.mark.unit

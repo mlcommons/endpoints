@@ -88,6 +88,11 @@ def _expand_tool_results(row: dict) -> list[dict]:
         return []
     messages = []
     for i, result in enumerate(tool_results):
+        if not isinstance(result, dict):
+            raise InputValidationError(
+                f"tool_results[{i}] in conversation {row.get('conversation_id')!r} "
+                f"turn {row.get('turn')} must be a dict, got {type(result).__name__}"
+            )
         tool_call_id = result.get("tool_call_id")
         content = result.get("content")
         if tool_call_id is None:
@@ -236,7 +241,35 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
                             f"Conversation {conv_id} turn {row['turn']}: "
                             "assistant rows must have non-empty 'content' or non-empty 'tool_calls'"
                         )
+                    if (
+                        tool_calls is not None
+                        and not (isinstance(tool_calls, float) and pd.isna(tool_calls))
+                        and not has_tool_calls
+                    ):
+                        raise InputValidationError(
+                            f"Conversation {conv_id} turn {row['turn']}: "
+                            "'tool_calls' field is present but is not a non-empty list; "
+                            "omit the field or provide a valid non-empty list"
+                        )
                     prev_assistant_had_tool_calls = has_tool_calls
+                elif role == "user":
+                    content = row.get("content")
+                    is_empty_content = (
+                        content is None
+                        or (isinstance(content, float) and pd.isna(content))
+                        or content == ""
+                    )
+                    if is_empty_content:
+                        raise InputValidationError(
+                            f"Conversation {conv_id} turn {row['turn']}: "
+                            "user rows must have non-empty 'content'"
+                        )
+                    if state == "assistant" and prev_assistant_had_tool_calls:
+                        raise InputValidationError(
+                            f"Conversation {conv_id} turn {row['turn']}: "
+                            "'user' row cannot follow an assistant row with 'tool_calls'; "
+                            "a 'tool' result row is required first"
+                        )
 
                 if role != "assistant":
                     prev_assistant_had_tool_calls = False

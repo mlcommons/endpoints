@@ -35,6 +35,8 @@ class FakePhaseIssuer:
         self._stop_after = stop_after
         self.issued: list[int] = []
         self.issued_count = 0
+        self.inflight: int = 0
+        self.uuid_to_index: dict[str, int] = {}
 
     def issue(self, sample_index: int, data_override: dict | None = None) -> str | None:
         if self._stop_after is not None and self._count >= self._stop_after:

@@ -48,11 +48,7 @@ class PhaseIssuerProtocol(Protocol):
     """Minimal interface that strategies see for issuing samples."""
 
     def issue(
-        self,
-        sample_index: int,
-        data_override: dict[str, Any] | None = None,
-        conversation_id: str = "",
-        turn: int | None = None,
+        self, sample_index: int, data_override: dict[str, Any] | None = None
     ) -> str | None:
         """Issue a sample. Returns query_id, or None if the session is stopping.
 

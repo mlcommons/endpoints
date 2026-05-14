@@ -350,8 +350,11 @@ def _precompute_isl_for_multi_turn(
         )
     total_with_messages = len([s for s in (dataloader.data or []) if s.get("messages")])
     if total_with_messages > 0 and skipped == total_with_messages:
-        raise RuntimeError(
-            "ISL precomputation failed for all samples; check tokenizer/template compatibility"
+        logger.warning(
+            "ISL precomputation: all %d turn(s) failed apply_chat_template; "
+            "ISL metrics will use text-tokenization fallback. "
+            "Check tokenizer/template compatibility.",
+            total_with_messages,
         )
 
 

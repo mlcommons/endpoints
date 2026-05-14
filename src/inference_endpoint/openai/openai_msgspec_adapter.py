@@ -95,6 +95,7 @@ class OpenAIMsgspecAdapter(HttpRequestAdapter):
             "logit_bias",
             "user",
             "chat_template",
+            "tools",
         ]
         return [
             ColumnFilter(

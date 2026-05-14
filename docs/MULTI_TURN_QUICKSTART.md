@@ -71,7 +71,7 @@ That's it! Your benchmark will now:
 
 - ✅ Enforce turn ordering (turn N+1 waits for turn N)
 - ✅ Include conversation history in each request
-- ✅ Log all turns to events.jsonl
+- ✅ Log all issued (client) turns to events.jsonl — scripted assistant rows are context only and do not produce sample events
 
 ---
 
@@ -93,7 +93,7 @@ dataset's `conversation_metadata["samples"]`, which maps sample indices to
 Currently available:
 
 - **Per-turn metrics**: Latency, TTFT, TPOT for each turn
-- **Conversation tracking**: All events tagged with conversation_id
+- **Conversation tracking**: events are keyed by `sample_uuid` only; correlate any event back to a conversation by joining through `sample_idx_map.json` and `conversation_metadata["samples"]`
 
 _Note: Per-conversation aggregation (e.g., "conversations/sec") is coming in a future update._
 

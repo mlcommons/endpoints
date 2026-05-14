@@ -58,7 +58,7 @@ class OpenAIAdapter(HttpRequestAdapter):
         return [
             ColumnFilter(
                 required_columns=["prompt"],
-                optional_columns=["system"],
+                optional_columns=["system", "tools"],
             ),
             AddStaticColumns(metadata),
         ]

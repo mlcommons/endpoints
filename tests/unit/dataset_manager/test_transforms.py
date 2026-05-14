@@ -822,8 +822,10 @@ class TestMakeAdapterCompatible:
         transform = MakeAdapterCompatible()
         result = transform(df)
 
-        # Should not raise error or create prompt column
+        # Should not raise error, should not create prompt, and must preserve unrelated columns
         assert "prompt" not in result.columns
+        assert "unrelated" in result.columns
+        assert list(result["unrelated"]) == ["data"]
 
 
 class TestAddStaticColumnsNoOverwrite:
