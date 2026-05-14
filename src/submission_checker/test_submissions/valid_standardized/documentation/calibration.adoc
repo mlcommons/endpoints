@@ -1,0 +1,5 @@
+= Weight Transformation Documentation
+
+== Quantization
+
+Applied INT8 post-training quantization using GPTQ with 512-sample calibration dataset drawn from the performance dataset. No gradient updates applied. Calibration dataset disclosed in full in calibration_data/.

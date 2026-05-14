@@ -1,0 +1,6 @@
+{
+  "metric": "rouge1",
+  "score": 0.45,
+  "quality_target": 0.43,
+  "passed": true
+}

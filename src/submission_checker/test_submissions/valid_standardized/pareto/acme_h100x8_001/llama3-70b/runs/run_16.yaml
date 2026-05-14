@@ -1,0 +1,11 @@
+type: submission
+settings:
+  load_pattern:
+    type: concurrency
+    target_concurrency: 16
+  runtime:
+    min_duration_ms: 600000
+  client:
+    stream_all_chunks: true
+datasets:
+- name: llm-perf-dataset-v1

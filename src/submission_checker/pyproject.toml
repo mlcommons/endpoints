@@ -1,0 +1,71 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "submission-checker"
+version = "0.1.0"
+description = "CLI tool for validating MLPerf submissions"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "MLCommons", email = "arav@mlcommons.org" }]
+dependencies = [
+    "click>=8.1",
+    "pydantic>=2.0",
+    "rich>=13.0",
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+submission-checker = "submission_checker.cli:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.4",
+]
+docs = [
+    "sphinx>=7.0",
+    "sphinx-autodoc-typehints>=2.0",
+    "furo>=2024.1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/submission_checker"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--cov=submission_checker --cov-report=term-missing -v"
+
+[tool.coverage.run]
+source = ["src"]
+
+[tool.coverage.report]
+show_missing = true
+
+[tool.ruff]
+src = ["src"]
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes (unused imports, undefined names)
+    "I",   # isort
+    "UP",  # pyupgrade (modern Python syntax)
+    "B",   # flake8-bugbear (likely bugs / bad practices)
+    "C4",  # flake8-comprehensions (unnecessary comprehension patterns)
+    "SIM", # flake8-simplify
+]
+ignore = [
+    "SIM108", # ternary operator — sometimes less readable
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["submission_checker"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["TCH"]  # test files don't need TYPE_CHECKING optimisation

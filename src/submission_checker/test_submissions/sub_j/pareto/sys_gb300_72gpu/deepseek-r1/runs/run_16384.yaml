@@ -1,0 +1,11 @@
+type: submission
+settings:
+  load_pattern:
+    type: concurrency
+    target_concurrency: 16384
+  runtime:
+    min_duration_ms: 1200000
+  client:
+    stream_all_chunks: true
+datasets:
+- name: mlperf-perf-dataset-v1
