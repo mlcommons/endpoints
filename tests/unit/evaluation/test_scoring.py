@@ -374,3 +374,68 @@ class TestVBenchScorer:
                 ground_truth_column="prompt",
                 vbench_project_path=nonexistent,
             )
+
+    def test_score_filters_empty_outputs(
+        self, dataset, tmp_path, vbench_project, patch_subprocess, caplog
+    ):
+        """Failed queries (record.data=None → output="") must not reach _stage_videos.
+
+        Without filtering, Path("").resolve() returns cwd and the staged
+        symlink would point at the repo root.
+        """
+        report_dir = tmp_path / "report"
+        report_dir.mkdir()
+        video_paths = []
+        for i in range(3):
+            p = tmp_path / f"video_{i}.mp4"
+            p.write_bytes(b"")
+            video_paths.append(str(p))
+
+        uuids = [f"uuid-{i}" for i in range(3)]
+        sample_idx_map = {"vid_acc": dict(zip(uuids, range(3), strict=True))}
+        (report_dir / "sample_idx_map.json").write_bytes(
+            msgspec.json.encode(sample_idx_map)
+        )
+
+        encoder = msgspec.json.Encoder(enc_hook=EventType.encode_hook)
+        # Sample 1 has no TextModelOutput data — simulates a failed query
+        # where worker set response_output=None.
+        with (report_dir / "events.jsonl").open("wb") as f:
+            for i, (uid, vp) in enumerate(zip(uuids, video_paths, strict=True)):
+                data = None if i == 1 else TextModelOutput(output=vp)
+                rec = EventRecord(
+                    event_type=SampleEventType.COMPLETE, sample_uuid=uid, data=data
+                )
+                f.write(encoder.encode(rec) + b"\n")
+
+        scorer = VBenchScorer(
+            dataset_name="vid_acc",
+            dataset=dataset,
+            report_dir=report_dir,
+            ground_truth_column="prompt",
+            vbench_project_path=vbench_project,
+        )
+        with caplog.at_level("WARNING"):
+            mean_score, _ = scorer.score()
+
+        assert mean_score == pytest.approx(0.55)
+        assert "dropped 1" in caplog.text
+        # Only the two non-empty samples were staged.
+        names = sorted(p.name for p in (report_dir / "vbench_videos").iterdir())
+        assert names == ["a cat-0.mp4", "a tree-0.mp4"]
+
+    def test_stage_videos_idempotent_on_rerun(
+        self, dataset, staged, vbench_project, patch_subprocess
+    ):
+        """Calling score() twice on the same report_dir must not raise FileExistsError."""
+        report_dir, _ = staged
+        scorer = VBenchScorer(
+            dataset_name="vid_acc",
+            dataset=dataset,
+            report_dir=report_dir,
+            ground_truth_column="prompt",
+            vbench_project_path=vbench_project,
+        )
+        scorer.score()
+        # Second call must not crash with FileExistsError on the symlinks.
+        scorer.score()

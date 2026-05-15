@@ -15,6 +15,7 @@
 
 
 import inspect
+import logging
 import os
 import subprocess
 import sys
@@ -47,6 +48,8 @@ from ..core.record import EventRecord, EventType, SampleEventType
 from ..dataset_manager.dataset import Dataset
 from ..dataset_manager.predefined.shopify_product_catalogue import ProductMetadata
 from .extractor import Extractor, PythonCodeExtractor
+
+logger = logging.getLogger(__name__)
 
 
 class Scorer(ABC):
@@ -934,7 +937,8 @@ class VBenchScorer(Scorer, scorer_id="vbench"):
         """Symlink each video into staged_dir as `{prompt}-{index}.mp4`.
 
         Indexing is per-prompt to disambiguate when the same prompt appears
-        multiple times (num_repeats > 1).
+        multiple times (num_repeats > 1). Stale symlinks from a prior run
+        are removed first so re-scoring an existing report_dir is safe.
         """
         per_prompt_idx: dict[str, int] = defaultdict(int)
         for video_path, prompt in zip(video_paths, prompts, strict=True):
@@ -942,6 +946,7 @@ class VBenchScorer(Scorer, scorer_id="vbench"):
             per_prompt_idx[prompt] += 1
             src = Path(video_path)
             dst = staged_dir / f"{prompt}-{idx}{src.suffix or '.mp4'}"
+            dst.unlink(missing_ok=True)
             dst.symlink_to(src.resolve())
 
     def _run_vbench_subprocess(
@@ -972,6 +977,18 @@ class VBenchScorer(Scorer, scorer_id="vbench"):
         df = self.get_outputs()
         valid_uuids = self.sample_index_map.keys()
         df = df[df["sample_uuid"].isin(valid_uuids)]
+        # Drop failed queries: Scorer.get_outputs() emits "" when record.data
+        # is None (workers set response_output=None on error). Passing "" to
+        # _stage_videos would Path("").resolve() → cwd and symlink the repo
+        # root as a "video", corrupting the entire VBench run.
+        n_total = len(df)
+        df = df[df["output"].astype(bool)]
+        n_dropped = n_total - len(df)
+        if n_dropped:
+            logger.warning(
+                "VBenchScorer: dropped %d failed/empty-output sample(s) before staging",
+                n_dropped,
+            )
         df = df.apply(self.match_sample_index, axis=1)
 
         video_paths: list[str] = df["output"].tolist()

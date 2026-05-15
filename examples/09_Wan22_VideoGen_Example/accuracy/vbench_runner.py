@@ -23,8 +23,10 @@ to `--out-dir/{run_name}_eval_results.json`.
 
 import argparse
 import sys
+from importlib.resources import files as _pkg_files
 
 import torch
+import vbench as _vbench_pkg
 from vbench import VBench
 
 
@@ -45,13 +47,25 @@ def main() -> int:
     parser.add_argument(
         "--full-info-json",
         default=None,
-        help="Optional path to vbench_full_info.json; uses VBench default if omitted.",
+        help=(
+            "Optional path to a VBench_full_info.json file. When omitted, "
+            "falls back to the JSON bundled with the installed vbench "
+            "package — required for vbench_standard mode (which the "
+            "MLPerf WAN 2.2 prompt set, a subset of VBench's standard "
+            "suite, runs under)."
+        ),
     )
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     dimension_list = [d.strip() for d in args.dims.split(",") if d.strip()]
-    vb = VBench(device, args.full_info_json, args.out_dir)
+    # VBench's `full_info_dir` arg is actually a JSON *file* path (despite
+    # the name). vbench_standard mode (used here) requires a valid file;
+    # passing None crashes inside VBench's load_json().
+    full_info_json = args.full_info_json or str(
+        _pkg_files(_vbench_pkg).joinpath("VBench_full_info.json")
+    )
+    vb = VBench(device, full_info_json, args.out_dir)
     vb.evaluate(
         videos_path=args.videos_dir,
         name=args.name,

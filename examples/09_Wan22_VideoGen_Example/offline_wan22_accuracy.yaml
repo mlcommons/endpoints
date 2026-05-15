@@ -14,8 +14,10 @@
 #   - trtllm-serve running with response_format=video_path support, saving
 #     videos to a Lustre path readable by this process (VBench reads the
 #     videos directly via the path returned by the server).
-#   - VBench installed in the eval environment:
-#       pip install vbench
+#   - The isolated VBench environment synced on the accuracy host:
+#       cd examples/09_Wan22_VideoGen_Example/accuracy && uv sync
+#     vbench pins transformers==4.33.2 and numpy<2, incompatible with the
+#     parent endpoints env; do NOT install vbench into the parent venv.
 #     Heavy GPU dependency (torch + decord + opencv + per-dim models);
 #     intended for a separate accuracy host, not the load-generator host.
 
