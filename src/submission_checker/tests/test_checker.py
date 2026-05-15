@@ -56,7 +56,7 @@ class TestValidStandardized:
         assert not _errors(_check(valid_standardized), "accuracy-gate")
 
     def test_point_count(self, valid_standardized):
-        assert not _errors(_check(valid_standardized), "run-count")
+        assert not _errors(_check(valid_standardized), "point-count")
 
 
 # ---------------------------------------------------------------------------
@@ -69,7 +69,7 @@ class TestInvalidSubmission:
         assert not _check(invalid_submission).passed
 
     def test_point_count_error(self, invalid_submission):
-        assert _errors(_check(invalid_submission), "run-count")
+        assert _errors(_check(invalid_submission), "point-count")
 
     def test_accuracy_gate_error(self, invalid_submission):
         assert _errors(_check(invalid_submission), "accuracy-gate")
@@ -88,7 +88,7 @@ class TestInvalidSubmission:
 
 class TestSubA:
     def test_point_count_passes(self, sub_a):
-        assert not _errors(_check(sub_a), "run-count")
+        assert not _errors(_check(sub_a), "point-count")
 
     def test_low_latency_covered(self, sub_a):
         assert not _errors(_check(sub_a), "low-latency-coverage")
@@ -122,7 +122,7 @@ class TestSubB:
 
 class TestSubC:
     def test_point_count_passes(self, sub_c):
-        assert not _errors(_check(sub_c), "run-count")
+        assert not _errors(_check(sub_c), "point-count")
 
     def test_low_latency_covered(self, sub_c):
         assert not _errors(_check(sub_c), "low-latency-coverage")
@@ -154,7 +154,7 @@ class TestSubD:
 
 class TestSubE:
     def test_point_count_passes(self, sub_e):
-        assert not _errors(_check(sub_e), "run-count")
+        assert not _errors(_check(sub_e), "point-count")
 
     def test_low_latency_covered(self, sub_e):
         assert not _errors(_check(sub_e), "low-latency-coverage")
@@ -192,7 +192,7 @@ class TestSubG:
         assert _errors(_check(sub_g), "low-throughput-coverage")
 
     def test_point_count_passes(self, sub_g):
-        assert not _errors(_check(sub_g), "run-count")
+        assert not _errors(_check(sub_g), "point-count")
 
     def test_metric_consistency(self, sub_g):
         report = _check(sub_g)
@@ -229,9 +229,9 @@ class TestSubI:
         assert not _errors(report, "metric-consistency-duration")
         assert not _errors(report, "metric-consistency-accounting")
 
-    def test_run_duration_warnings_not_errors(self, sub_i):
+    def test_point_duration_warnings_not_errors(self, sub_i):
         report = _check(sub_i)
-        assert not _errors(report, "run-duration"), "run-duration fires as WARNING, not ERROR"
+        assert not _errors(report, "point-duration"), "point-duration fires as WARNING, not ERROR"
 
 
 # ---------------------------------------------------------------------------
@@ -352,6 +352,7 @@ def _build_submission(
             result_dir = results_dir / f"point_{c}"
             result_dir.mkdir(parents=True)
             (result_dir / "mlperf_endpoints_log_summary.json").write_text(json.dumps(_SUMMARY))
+            (result_dir / "mlperf_endpoints_log_detail.json").write_text("{}")
 
     if write_accuracy:
         (accuracy_dir / "accuracy.txt").write_text("ROUGE-1: 0.45")
@@ -421,19 +422,28 @@ class TestCheckerEdgeCases:
         report = _check(tmp_path)
         assert _errors(report, "pareto-subdir")
         # Should not attempt to list point_*.yaml (early exit after structure errors)
-        assert not any(r.rule == "measurement-runs-present" for r in report.results)
+        assert not any(r.rule == "measurement-points-present" for r in report.results)
 
-    def test_no_run_yamls(self, tmp_path):
-        """measurement-runs-present error when runs/ has no run_*.yaml files."""
+    def test_no_point_yamls(self, tmp_path):
+        """measurement-points-present error when points/ has no point_*.yaml files."""
         root = _build_submission(tmp_path, write_runs=False, write_results=False)
         report = _check(root)
-        assert _errors(report, "measurement-runs-present")
+        assert _errors(report, "measurement-points-present")
 
     def test_missing_result_log(self, tmp_path):
-        """result-file-present error when results/run_<N>/ log is absent."""
+        """result-file-present error when results/point_<N>/ log is absent."""
         root = _build_submission(tmp_path, write_results=False)
         report = _check(root)
         assert _errors(report, "result-file-present")
+
+    def test_missing_detail_log(self, tmp_path):
+        """result-detail-present error when mlperf_endpoints_log_detail.json is absent."""
+        root = _build_submission(tmp_path)
+        # Remove the detail log for one point
+        detail = root / "pareto" / "test-sys" / "llama3-70b" / "results" / "point_16" / "mlperf_endpoints_log_detail.json"
+        detail.unlink()
+        report = _check(root)
+        assert _errors(report, "result-detail-present")
 
     def test_invalid_result_log(self, tmp_path):
         """result-file-valid error when the result log JSON is malformed."""
@@ -442,6 +452,7 @@ class TestCheckerEdgeCases:
         bad_path = root / "pareto" / "test-sys" / "llama3-70b" / "results" / "point_16"
         bad_path.mkdir(parents=True, exist_ok=True)
         (bad_path / "mlperf_endpoints_log_summary.json").write_text("{bad")
+        (bad_path / "mlperf_endpoints_log_detail.json").write_text("{}")
         report = _check(root)
         assert _errors(report, "result-file-valid")
 
@@ -466,8 +477,8 @@ class TestCheckerEdgeCases:
         report = _check(root)
         assert _errors(report, "accuracy-valid")
 
-    def test_run_filename_concurrency_mismatch(self, tmp_path):
-        """run-filename-concurrency warning when filename concurrency ≠ declared concurrency."""
+    def test_point_filename_concurrency_mismatch(self, tmp_path):
+        """point-filename-concurrency warning when filename concurrency ≠ declared concurrency."""
         root = _build_submission(tmp_path)
         # Add a point file whose name says 999 but YAML declares 64
         mismatch_yaml = root / "pareto" / "test-sys" / "llama3-70b" / "points" / "point_999.yaml"
@@ -476,17 +487,18 @@ class TestCheckerEdgeCases:
         result_dir = root / "pareto" / "test-sys" / "llama3-70b" / "results" / "point_64"
         result_dir.mkdir(parents=True, exist_ok=True)
         (result_dir / "mlperf_endpoints_log_summary.json").write_text(json.dumps(_SUMMARY))
+        (result_dir / "mlperf_endpoints_log_detail.json").write_text("{}")
         report = _check(root)
-        assert _warnings(report, "run-filename-concurrency")
+        assert _warnings(report, "point-filename-concurrency")
 
-    def test_invalid_run_yaml_is_skipped(self, tmp_path):
+    def test_invalid_point_yaml_is_skipped(self, tmp_path):
         """A point_*.yaml that fails validation does not crash the checker."""
         root = _build_submission(tmp_path)
         bad_yaml = root / "pareto" / "test-sys" / "llama3-70b" / "points" / "point_99.yaml"
         bad_yaml.write_text("{bad yaml [")
         report = _check(root)
-        # Should produce a run-config-valid error for the bad file
-        assert _errors(report, "run-config-valid")
+        # Should produce a point-config-valid error for the bad file
+        assert _errors(report, "point-config-valid")
 
     def test_region_computation_error(self, tmp_path):
         """region-computation error when compute_regions raises ValueError."""
@@ -514,6 +526,7 @@ class TestCheckerEdgeCases:
         result_dir = root / "pareto" / "test-sys" / "llama3-70b" / "results" / "point_64"
         result_dir.mkdir(parents=True, exist_ok=True)
         (result_dir / "mlperf_endpoints_log_summary.json").write_text(json.dumps(_SUMMARY))
+        (result_dir / "mlperf_endpoints_log_detail.json").write_text("{}")
         report = _check(root)
         # No run-filename-concurrency warning — the ValueError was swallowed
-        assert not _warnings(report, "run-filename-concurrency")
+        assert not _warnings(report, "point-filename-concurrency")

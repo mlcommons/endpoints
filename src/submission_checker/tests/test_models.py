@@ -12,8 +12,8 @@ from submission_checker.models import (
     PercentileStats,
     PublicationStatus,
     Report,
-    RunConfig,
-    RunSummary,
+    PointConfig,
+    PointSummary,
     RuntimeSettings,
     Severity,
     SystemDescription,
@@ -178,12 +178,12 @@ def test_system_description_allows_extra_fields():
 
 
 # ---------------------------------------------------------------------------
-# RunConfig
+# PointConfig
 # ---------------------------------------------------------------------------
 
 
 def test_measurement_point_config_valid():
-    cfg = RunConfig(
+    cfg = PointConfig(
         concurrency=64,
         dataset="test-ds",
         runtime_settings=RuntimeSettings(min_duration_ms=1_200_000),
@@ -194,22 +194,22 @@ def test_measurement_point_config_valid():
 
 
 def test_measurement_point_config_concurrency_stored():
-    cfg = RunConfig(concurrency=128)
+    cfg = PointConfig(concurrency=128)
     assert cfg.concurrency == 128
 
 
 def test_measurement_point_config_empty_dataset():
-    cfg = RunConfig(concurrency=32)
+    cfg = PointConfig(concurrency=32)
     assert cfg.dataset == ""
 
 
 def test_measurement_point_config_load_pattern_stored():
-    cfg = RunConfig(concurrency=64)
+    cfg = PointConfig(concurrency=64)
     assert cfg.runtime_settings.load_pattern == "concurrency"
 
 
 # ---------------------------------------------------------------------------
-# RunSummary
+# PointSummary
 # ---------------------------------------------------------------------------
 
 
@@ -221,8 +221,8 @@ def _make_summary(
     total_tokens: float = 500_000.0,
     ttft_p50_ns: float = 150_000_000.0,
     ttft_p95_ns: float = 300_000_000.0,
-) -> RunSummary:
-    return RunSummary(
+) -> PointSummary:
+    return PointSummary(
         n_samples_completed=n_completed,
         n_samples_issued=n_issued,
         n_samples_failed=n_failed,

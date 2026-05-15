@@ -1,7 +1,7 @@
 """Submission checker — orchestrates §9.1 automated compliance checks.
 
 Loading and structural validation live here; all rule logic lives in Pydantic
-model validators on RunConfig, RunResult, and ModelContext.
+model validators on PointConfig, PointResult, and ModelContext.
 """
 
 from __future__ import annotations
@@ -10,18 +10,19 @@ from typing import TYPE_CHECKING
 
 from .loader import (
     load_accuracy_result,
+    load_point_config,
     load_result_summary,
-    load_run_config,
     load_system_description,
 )
 from .models import (
     CheckResult,
     ModelContext,
+    PointConfig,
+    PointResult,
+    PointSummary,
     Regions,
     Report,
-    RunConfig,
-    RunResult,
-    RunSummary,
+    RuntimeSettings,
     Severity,
     SystemDescription,
     compute_regions,
@@ -192,11 +193,11 @@ class SubmissionChecker:
         results_dir = model_structure.results_dir
         accuracy_dir = model_structure.accuracy_dir
 
-        run_yamls = sorted(points_dir.glob("point_*.yaml"))
-        if not run_yamls:
+        point_yamls = sorted(points_dir.glob("point_*.yaml"))
+        if not point_yamls:
             results.append(
                 _err(
-                    "measurement-runs-present",
+                    "measurement-points-present",
                     f"No point_*.yaml files in {points_dir.relative_to(self.submission_path)}",
                     points_dir,
                     "#1",
@@ -204,11 +205,11 @@ class SubmissionChecker:
             )
             return results
 
-        valid_runs: list[tuple[Path, RunConfig]] = []
-        loaded_results: list[tuple[RunConfig, RunSummary]] = []
+        valid_points: list[tuple[Path, PointConfig]] = []
+        loaded_points: list[tuple[PointConfig, PointSummary]] = []
 
-        for yaml_path in run_yamls:
-            config, config_results = load_run_config(
+        for yaml_path in point_yamls:
+            config, config_results = load_point_config(
                 yaml_path, context={"regions": regions, "yaml_path": yaml_path}
             )
             results.extend(config_results)
@@ -221,7 +222,7 @@ class SubmissionChecker:
                 if fname_concurrency != config.concurrency:
                     results.append(
                         _warn(
-                            "run-filename-concurrency",
+                            "point-filename-concurrency",
                             f"{yaml_path.name}: filename concurrency {fname_concurrency}"
                             f" ≠ declared {config.concurrency}",
                             yaml_path,
@@ -231,11 +232,12 @@ class SubmissionChecker:
             except (IndexError, ValueError):
                 pass
 
-            valid_runs.append((yaml_path, config))
+            valid_points.append((yaml_path, config))
 
-            summary_path = (
-                results_dir / f"point_{config.concurrency}" / "mlperf_endpoints_log_summary.json"
-            )
+            point_result_dir = results_dir / f"point_{config.concurrency}"
+            summary_path = point_result_dir / "mlperf_endpoints_log_summary.json"
+            detail_path = point_result_dir / "mlperf_endpoints_log_detail.json"
+
             if not summary_path.exists():
                 results.append(
                     _err(
@@ -248,18 +250,29 @@ class SubmissionChecker:
                 )
                 continue
 
+            if not detail_path.exists():
+                results.append(
+                    _err(
+                        "result-detail-present",
+                        f"Missing detail log for point_{config.concurrency}:"
+                        f" {detail_path.relative_to(self.submission_path)}",
+                        detail_path,
+                        "#1",
+                    )
+                )
+
             summary, load_err = load_result_summary(summary_path)
             if load_err:
                 results.append(_err("result-file-valid", load_err, summary_path, "#1"))
                 continue
 
-            # RunResult validates run-duration and metric-consistency
-            run_result = RunResult.model_validate(
+            # PointResult validates point-duration and metric-consistency
+            point_result = PointResult.model_validate(
                 {"config": config, "summary": summary, "yaml_path": yaml_path},
                 context={"regions": regions, "summary_path": summary_path},
             )
-            results.extend(run_result._check_results)
-            loaded_results.append((config, summary))
+            results.extend(point_result._check_results)
+            loaded_points.append((config, summary))
 
         # Load accuracy
         accuracy_result = None
@@ -277,7 +290,7 @@ class SubmissionChecker:
                 results.append(_err("accuracy-valid", acc_err, json_path, "#15"))
                 accuracy_result = None
 
-        # ModelContext validates run-count, regional-coverage, config-consistency, accuracy-gate
+        # ModelContext validates point-count, regional-coverage, config-consistency, accuracy-gate
         model_ctx = ModelContext(
             system_id=system_id,
             system_desc=system_desc,
@@ -285,9 +298,9 @@ class SubmissionChecker:
             regions=regions,
             points_dir=points_dir,
             accuracy_dir=accuracy_dir,
-            all_run_count=len(run_yamls),
-            valid_runs=valid_runs,
-            loaded_results=loaded_results,
+            all_point_count=len(point_yamls),
+            valid_points=valid_points,
+            loaded_points=loaded_points,
             accuracy_result=accuracy_result,
         )
         results.extend(model_ctx._check_results)

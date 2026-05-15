@@ -1,4 +1,4 @@
-"""Model context — aggregate model-level validation (run count, coverage, consistency, accuracy)."""
+"""Model context — aggregate model-level validation (point count, coverage, consistency, accuracy)."""
 
 from __future__ import annotations
 
@@ -6,14 +6,15 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, PrivateAttr, model_validator
 
-from .regions import Regions
-from .results import CheckResult, err, ok, warn
-from .run_config import RunConfig
-from .run_result import AccuracyResult, RunSummary
-from .system import SystemDescription
+from ..regions import Regions
+from ..results import CheckResult, err, ok, warn
+from ..file.accuracy import AccuracyResult
+from ..file.point_config import PointConfig
+from ..file.point_summary import PointSummary
+from ..file.system import SystemDescription
 
-_MIN_RUNS = 7
-_MAX_RUNS = 32
+_MIN_POINTS = 7
+_MAX_POINTS = 32
 
 
 class ModelContext(BaseModel):
@@ -28,38 +29,38 @@ class ModelContext(BaseModel):
     regions: Regions
     points_dir: Path
     accuracy_dir: Path
-    all_run_count: int
-    valid_runs: list[tuple[Path, RunConfig]]
-    loaded_results: list[tuple[RunConfig, RunSummary]]
+    all_point_count: int
+    valid_points: list[tuple[Path, PointConfig]]
+    loaded_points: list[tuple[PointConfig, PointSummary]]
     accuracy_result: AccuracyResult | None = None
 
     @model_validator(mode="after")
-    def _check_run_count(self) -> ModelContext:
-        """§2, §8: submission must have 7–32 measurement runs."""
-        n = self.all_run_count
-        if n < _MIN_RUNS:
+    def _check_point_count(self) -> ModelContext:
+        """§2, §8: submission must have 7–32 measurement points."""
+        n = self.all_point_count
+        if n < _MIN_POINTS:
             self._check_results.append(
                 err(
-                    "run-count",
-                    f"Only {n} measurement run(s) — minimum {_MIN_RUNS} required",
+                    "point-count",
+                    f"Only {n} measurement point(s) — minimum {_MIN_POINTS} required",
                     self.points_dir,
                     "#2, #8",
                 )
             )
         else:
             self._check_results.append(
-                ok("run-count", f"Run count OK: {n}", self.points_dir, "#2, #8")
+                ok("point-count", f"Point count OK: {n}", self.points_dir, "#2, #8")
             )
-        if n > _MAX_RUNS:
+        if n > _MAX_POINTS:
             self._check_results.append(
-                err("run-cap", f"{n} runs exceed the {_MAX_RUNS}-run cap", self.points_dir, "#2, #8")
+                err("point-cap", f"{n} points exceed the {_MAX_POINTS}-point cap", self.points_dir, "#2, #8")
             )
         return self
 
     @model_validator(mode="after")
     def _check_regional_coverage(self) -> ModelContext:
-        """§3–6: at least one valid run must fall in each of the four concurrency regions."""
-        concurrencies = [config.concurrency for _, config in self.valid_runs]
+        """§3–6: at least one valid point must fall in each of the four concurrency regions."""
+        concurrencies = [config.concurrency for _, config in self.valid_points]
         r = self.regions
         coverage_checks = [
             ("low-latency-coverage", "Low Latency", r.low_latency),
@@ -82,7 +83,7 @@ class ModelContext(BaseModel):
                 self._check_results.append(
                     err(
                         rule,
-                        f"No run in {label} region (concurrency {bounds})",
+                        f"No point in {label} region (concurrency {bounds})",
                         self.points_dir,
                         "#3–6",
                     )
@@ -91,15 +92,15 @@ class ModelContext(BaseModel):
 
     @model_validator(mode="after")
     def _check_config_consistency(self) -> ModelContext:
-        """§16: all runs must use the same dataset; directory name must match benchmark_model."""
-        if not self.loaded_results:
+        """§16: all points must use the same dataset; directory name must match benchmark_model."""
+        if not self.loaded_points:
             return self
-        datasets = {config.dataset for config, _ in self.loaded_results}
+        datasets = {config.dataset for config, _ in self.loaded_points}
         if len(datasets) > 1:
             self._check_results.append(
                 err(
                     "config-consistency-dataset",
-                    f"Inconsistent datasets across runs: {datasets}",
+                    f"Inconsistent datasets across points: {datasets}",
                     self.model_dir,
                     "#16",
                 )

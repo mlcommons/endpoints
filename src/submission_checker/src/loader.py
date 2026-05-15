@@ -12,8 +12,8 @@ from pydantic import BaseModel, ValidationError
 from .models import (
     AccuracyResult,
     CheckResult,
-    RunConfig,
-    RunSummary,
+    PointConfig,
+    PointSummary,
     Severity,
     SystemDescription,
 )
@@ -64,9 +64,9 @@ def load_system_description(path: Path) -> tuple[SystemDescription | None, str |
     return _load_validated(data, SystemDescription, path.name) if data is not None else (None, err)
 
 
-def load_run_config(
+def load_point_config(
     path: Path, context: dict | None = None
-) -> tuple[RunConfig | None, list[CheckResult]]:
+) -> tuple[PointConfig | None, list[CheckResult]]:
     """Load and validate a ``point_<N>.yaml`` measurement-point config.
 
     Returns:
@@ -78,17 +78,17 @@ def load_run_config(
     if load_err:
         return None, [
             CheckResult(
-                rule="run-config-valid", message=load_err, severity=Severity.ERROR, path=path
+                rule="point-config-valid", message=load_err, severity=Severity.ERROR, path=path
             )
         ]
     try:
-        instance = RunConfig.model_validate(data, context=context or {})
+        instance = PointConfig.model_validate(data, context=context or {})
         return instance, list(instance._check_results)
     except ValidationError as exc:
         first = exc.errors()[0]
         return None, [
             CheckResult(
-                rule="run-config-valid",
+                rule="point-config-valid",
                 message=f"Validation error in {path.name}: {first['loc']} — {first['msg']}",
                 severity=Severity.ERROR,
                 path=path,
@@ -96,14 +96,14 @@ def load_run_config(
         ]
 
 
-def load_result_summary(path: Path) -> tuple[RunSummary | None, str | None]:
+def load_result_summary(path: Path) -> tuple[PointSummary | None, str | None]:
     """Load and validate ``mlperf_endpoints_log_summary.json``.
 
     Returns:
         A ``(model, error)`` pair — exactly one of the two is ``None``.
     """
     data, err = _load_json(path)
-    return _load_validated(data, RunSummary, path.name) if data is not None else (None, err)
+    return _load_validated(data, PointSummary, path.name) if data is not None else (None, err)
 
 
 def load_accuracy_result(path: Path) -> tuple[AccuracyResult | None, str | None]:

@@ -12,9 +12,9 @@ from submission_checker.models import (
     ModelContext,
     PercentileStats,
     PublicationStatus,
-    RunConfig,
-    RunResult,
-    RunSummary,
+    PointConfig,
+    PointResult,
+    PointSummary,
     RuntimeSettings,
     Severity,
     SystemDescription,
@@ -67,8 +67,8 @@ def _system_desc(
     )
 
 
-def _config(concurrency: int = 64, stream: bool = True, lp_type: str = "concurrency") -> RunConfig:
-    return RunConfig(
+def _config(concurrency: int = 64, stream: bool = True, lp_type: str = "concurrency") -> PointConfig:
+    return PointConfig(
         concurrency=concurrency,
         dataset="mlperf-perf-dataset-v1",
         runtime_settings=RuntimeSettings(
@@ -85,8 +85,8 @@ def _summary(
     n_failed: int = 0,
     duration_ns: float = 1_200_000_000_000.0,
     total_tokens: float = 500_000.0,
-) -> RunSummary:
-    return RunSummary(
+) -> PointSummary:
+    return PointSummary(
         n_samples_completed=n_completed,
         n_samples_issued=n_issued,
         n_samples_failed=n_failed,
@@ -102,9 +102,9 @@ def _passed(results: list[CheckResult]) -> bool:
 
 def _model_ctx(
     tmp_path: Path,
-    all_run_count: int = 7,
-    valid_runs: list[tuple[Path, RunConfig]] | None = None,
-    loaded_results: list[tuple[RunConfig, RunSummary]] | None = None,
+    all_point_count: int = 7,
+    valid_points: list[tuple[Path, PointConfig]] | None = None,
+    loaded_points: list[tuple[PointConfig, PointSummary]] | None = None,
     system_desc: SystemDescription | None = None,
     model_name: str = "llama3-70b",
     accuracy_result: AccuracyResult | None = None,
@@ -121,9 +121,9 @@ def _model_ctx(
         regions=_REGIONS,
         points_dir=model_dir / "points",
         accuracy_dir=model_dir / "accuracy",
-        all_run_count=all_run_count,
-        valid_runs=valid_runs or [],
-        loaded_results=loaded_results or [],
+        all_point_count=all_point_count,
+        valid_points=valid_points or [],
+        loaded_points=loaded_points or [],
         accuracy_result=accuracy_result,
     )
 
@@ -224,13 +224,13 @@ class TestSrcDir:
 
 
 # ---------------------------------------------------------------------------
-# RunConfig validators
+# PointConfig validators
 # ---------------------------------------------------------------------------
 
 
 class TestLoadPatternValidator:
     def test_wrong_type(self, tmp_path):
-        config = RunConfig.model_validate(
+        config = PointConfig.model_validate(
             {"concurrency": 64, "runtime_settings": {"load_pattern": "qps"}},
             context={"yaml_path": tmp_path / "point_64.yaml"},
         )
@@ -242,7 +242,7 @@ class TestLoadPatternValidator:
         assert errors
 
     def test_missing_target_concurrency(self, tmp_path):
-        config = RunConfig.model_validate(
+        config = PointConfig.model_validate(
             {"concurrency": 0, "runtime_settings": {"load_pattern": "concurrency"}},
             context={"yaml_path": tmp_path / "point_0.yaml"},
         )
@@ -254,7 +254,7 @@ class TestLoadPatternValidator:
         assert errors
 
     def test_valid(self, tmp_path):
-        config = RunConfig.model_validate(
+        config = PointConfig.model_validate(
             {"concurrency": 64, "runtime_settings": {"load_pattern": "concurrency"}},
             context={"yaml_path": tmp_path / "point_64.yaml"},
         )
@@ -265,7 +265,7 @@ class TestLoadPatternValidator:
 
 class TestStreamingValidator:
     def test_stream_false_errors(self, tmp_path):
-        config = RunConfig.model_validate(
+        config = PointConfig.model_validate(
             {"concurrency": 64, "runtime_settings": {"load_pattern": "concurrency", "stream_all_chunks": False}},
             context={"yaml_path": tmp_path / "point_64.yaml"},
         )
@@ -277,7 +277,7 @@ class TestStreamingValidator:
         assert errors
 
     def test_stream_true_passes(self, tmp_path):
-        config = RunConfig.model_validate(
+        config = PointConfig.model_validate(
             {"concurrency": 64, "runtime_settings": {"load_pattern": "concurrency"}},
             context={"yaml_path": tmp_path / "point_64.yaml"},
         )
@@ -290,7 +290,7 @@ class TestStreamingValidator:
 
 class TestConcurrencyInRangeValidator:
     def test_out_of_range(self, tmp_path):
-        config = RunConfig.model_validate(
+        config = PointConfig.model_validate(
             {"concurrency": 9999, "runtime_settings": {"load_pattern": "concurrency"}},
             context={"yaml_path": tmp_path / "point_9999.yaml", "regions": _REGIONS},
         )
@@ -302,7 +302,7 @@ class TestConcurrencyInRangeValidator:
         assert errors
 
     def test_in_range(self, tmp_path):
-        config = RunConfig.model_validate(
+        config = PointConfig.model_validate(
             {"concurrency": 64, "runtime_settings": {"load_pattern": "concurrency"}},
             context={"yaml_path": tmp_path / "point_64.yaml", "regions": _REGIONS},
         )
@@ -313,7 +313,7 @@ class TestConcurrencyInRangeValidator:
         )
 
     def test_no_regions_skips_check(self, tmp_path):
-        config = RunConfig.model_validate(
+        config = PointConfig.model_validate(
             {"concurrency": 9999, "runtime_settings": {"load_pattern": "concurrency"}},
             context={"yaml_path": tmp_path / "point_9999.yaml"},
         )
@@ -323,7 +323,83 @@ class TestConcurrencyInRangeValidator:
 
 
 # ---------------------------------------------------------------------------
-# RunResult validators
+# PointConfig region-declared validator
+# ---------------------------------------------------------------------------
+
+
+class TestRegionDeclaredValidator:
+    def test_absent_region_no_check(self, tmp_path):
+        """No region-declared result when region field is omitted."""
+        config = PointConfig.model_validate(
+            {"concurrency": 64, "runtime_settings": {"load_pattern": "concurrency"}},
+            context={"yaml_path": tmp_path / "point_64.yaml", "regions": _REGIONS},
+        )
+        assert not any(r.rule == "region-declared" for r in config._check_results)
+
+    def test_invalid_region_value_errors(self, tmp_path):
+        """An unrecognised region string must produce a region-declared error."""
+        config = PointConfig.model_validate(
+            {"concurrency": 64, "region": "not_a_region", "runtime_settings": {"load_pattern": "concurrency"}},
+            context={"yaml_path": tmp_path / "point_64.yaml"},
+        )
+        assert any(
+            r.rule == "region-declared" and r.severity == Severity.ERROR
+            for r in config._check_results
+        )
+
+    def test_valid_region_matches_computed(self, tmp_path):
+        """Declared region matching the computed region produces an ok result."""
+        # concurrency=64 → med_throughput for M=1024
+        config = PointConfig.model_validate(
+            {"concurrency": 64, "region": "med_throughput", "runtime_settings": {"load_pattern": "concurrency"}},
+            context={"yaml_path": tmp_path / "point_64.yaml", "regions": _REGIONS},
+        )
+        assert any(
+            r.rule == "region-declared" and r.severity != Severity.ERROR
+            for r in config._check_results
+        )
+
+    def test_region_mismatch_warns(self, tmp_path):
+        """Declared region that doesn't match the computed region produces a warning."""
+        # concurrency=64 → med_throughput, but we declare low_latency
+        config = PointConfig.model_validate(
+            {"concurrency": 64, "region": "low_latency", "runtime_settings": {"load_pattern": "concurrency"}},
+            context={"yaml_path": tmp_path / "point_64.yaml", "regions": _REGIONS},
+        )
+        assert any(
+            r.rule == "region-declared" and r.severity == Severity.WARNING
+            for r in config._check_results
+        )
+
+    def test_submitters_choice_no_cross_check(self, tmp_path):
+        """submitters_choice is valid for any concurrency — no cross-check performed."""
+        config = PointConfig.model_validate(
+            {"concurrency": 64, "region": "submitters_choice", "runtime_settings": {"load_pattern": "concurrency"}},
+            context={"yaml_path": tmp_path / "point_64.yaml", "regions": _REGIONS},
+        )
+        assert any(
+            r.rule == "region-declared" and r.severity != Severity.ERROR
+            for r in config._check_results
+        )
+        assert not any(
+            r.rule == "region-declared" and r.severity == Severity.WARNING
+            for r in config._check_results
+        )
+
+    def test_valid_region_no_regions_context(self, tmp_path):
+        """Valid region string without regions context emits ok without cross-check."""
+        config = PointConfig.model_validate(
+            {"concurrency": 64, "region": "high_throughput", "runtime_settings": {"load_pattern": "concurrency"}},
+            context={"yaml_path": tmp_path / "point_64.yaml"},
+        )
+        assert any(
+            r.rule == "region-declared" and r.severity != Severity.ERROR
+            for r in config._check_results
+        )
+
+
+# ---------------------------------------------------------------------------
+# PointResult validators
 # ---------------------------------------------------------------------------
 
 
@@ -331,50 +407,50 @@ class TestRunDurationValidator:
     def test_short_duration_warns(self, tmp_path):
         config = _config(concurrency=64)
         short = _summary(duration_ns=100_000_000_000.0)  # 100 s — below any minimum
-        run_result = RunResult.model_validate(
+        run_result = PointResult.model_validate(
             {"config": config, "summary": short, "yaml_path": tmp_path / "run_64.yaml"},
             context={"regions": _REGIONS, "summary_path": tmp_path / "summary.json"},
         )
         assert any(
-            r.rule == "run-duration" and r.severity == Severity.WARNING
+            r.rule == "point-duration" and r.severity == Severity.WARNING
             for r in run_result._check_results
         )
 
     def test_sufficient_duration_passes(self, tmp_path):
         config = _config(concurrency=64)
         long_s = _summary(duration_ns=1_200_000_000_000.0)  # 1200 s
-        run_result = RunResult.model_validate(
+        run_result = PointResult.model_validate(
             {"config": config, "summary": long_s, "yaml_path": tmp_path / "run_64.yaml"},
             context={"regions": _REGIONS, "summary_path": tmp_path / "summary.json"},
         )
         assert all(
             r.severity != Severity.ERROR
             for r in run_result._check_results
-            if r.rule == "run-duration"
+            if r.rule == "point-duration"
         )
 
     def test_out_of_range_concurrency_skipped(self, tmp_path):
         config = _config(concurrency=9999)
-        run_result = RunResult.model_validate(
+        run_result = PointResult.model_validate(
             {"config": config, "summary": _summary(), "yaml_path": tmp_path / "run_9999.yaml"},
             context={"regions": _REGIONS, "summary_path": tmp_path / "summary.json"},
         )
         # run-duration should not appear because concurrency is out of range
-        assert not any(r.rule == "run-duration" for r in run_result._check_results)
+        assert not any(r.rule == "point-duration" for r in run_result._check_results)
 
     def test_no_regions_skips(self, tmp_path):
         config = _config(concurrency=64)
-        run_result = RunResult.model_validate(
+        run_result = PointResult.model_validate(
             {"config": config, "summary": _summary(), "yaml_path": tmp_path / "run_64.yaml"},
             context={"summary_path": tmp_path / "summary.json"},
         )
-        assert not any(r.rule == "run-duration" for r in run_result._check_results)
+        assert not any(r.rule == "point-duration" for r in run_result._check_results)
 
 
 class TestMetricConsistencyValidator:
     def test_zero_duration_errors(self, tmp_path):
         config = _config(concurrency=64)
-        run_result = RunResult.model_validate(
+        run_result = PointResult.model_validate(
             {
                 "config": config,
                 "summary": _summary(duration_ns=0.0),
@@ -389,7 +465,7 @@ class TestMetricConsistencyValidator:
 
     def test_negative_duration_errors(self, tmp_path):
         config = _config(concurrency=64)
-        run_result = RunResult.model_validate(
+        run_result = PointResult.model_validate(
             {
                 "config": config,
                 "summary": _summary(duration_ns=-1.0),
@@ -404,7 +480,7 @@ class TestMetricConsistencyValidator:
 
     def test_accounting_mismatch_errors(self, tmp_path):
         config = _config(concurrency=64)
-        run_result = RunResult.model_validate(
+        run_result = PointResult.model_validate(
             {
                 "config": config,
                 "summary": _summary(n_completed=990, n_issued=1000, n_failed=5),
@@ -420,7 +496,7 @@ class TestMetricConsistencyValidator:
 
     def test_valid_summary_passes(self, tmp_path):
         config = _config(concurrency=64)
-        run_result = RunResult.model_validate(
+        run_result = PointResult.model_validate(
             {"config": config, "summary": _summary(), "yaml_path": tmp_path / "run_64.yaml"},
             context={"summary_path": tmp_path / "summary.json"},
         )
@@ -429,7 +505,7 @@ class TestMetricConsistencyValidator:
     def test_negative_output_tokens_errors(self, tmp_path):
         """Negative output token total must produce a metric-consistency-output-tokens error."""
         config = _config(concurrency=64)
-        run_result = RunResult.model_validate(
+        run_result = PointResult.model_validate(
             {
                 "config": config,
                 "summary": _summary(total_tokens=-1.0),
@@ -453,9 +529,9 @@ class TestMetricConsistencyValidator:
 #   tps_per_user (concurrency=64) ≈ 6.5104 tok/s/user
 
 
-def _summary_with(**extras) -> RunSummary:
+def _summary_with(**extras) -> PointSummary:
     """Return the default summary but with extra fields stored for consistency checks."""
-    return RunSummary(
+    return PointSummary(
         n_samples_completed=1000,
         n_samples_issued=1000,
         n_samples_failed=0,
@@ -468,7 +544,7 @@ def _summary_with(**extras) -> RunSummary:
 
 class TestTpsConsistencyValidator:
     def test_system_tps_derivable_ok(self, tmp_path):
-        run_result = RunResult.model_validate(
+        run_result = PointResult.model_validate(
             {"config": _config(concurrency=64), "summary": _summary(), "yaml_path": tmp_path / "run_64.yaml"},
             context={"summary_path": tmp_path / "summary.json"},
         )
@@ -479,7 +555,7 @@ class TestTpsConsistencyValidator:
 
     def test_system_tps_stored_match_ok(self, tmp_path):
         """Stored system_tps matching derived value within 1% passes."""
-        run_result = RunResult.model_validate(
+        run_result = PointResult.model_validate(
             {
                 "config": _config(concurrency=64),
                 "summary": _summary_with(system_tps=416.67),  # derived ≈ 416.667
@@ -494,7 +570,7 @@ class TestTpsConsistencyValidator:
 
     def test_system_tps_stored_mismatch_errors(self, tmp_path):
         """Stored system_tps differing from derived by >1% is an error."""
-        run_result = RunResult.model_validate(
+        run_result = PointResult.model_validate(
             {
                 "config": _config(concurrency=64),
                 "summary": _summary_with(system_tps=999.0),  # derived ≈ 416.667
@@ -508,7 +584,7 @@ class TestTpsConsistencyValidator:
         )
 
     def test_tps_per_user_derivable_ok(self, tmp_path):
-        run_result = RunResult.model_validate(
+        run_result = PointResult.model_validate(
             {"config": _config(concurrency=64), "summary": _summary(), "yaml_path": tmp_path / "run_64.yaml"},
             context={"summary_path": tmp_path / "summary.json"},
         )
@@ -519,7 +595,7 @@ class TestTpsConsistencyValidator:
 
     def test_tps_per_user_stored_match_ok(self, tmp_path):
         """Stored tps_per_user matching system_tps/concurrency within 1% passes."""
-        run_result = RunResult.model_validate(
+        run_result = PointResult.model_validate(
             {
                 "config": _config(concurrency=64),
                 "summary": _summary_with(tps_per_user=6.51),  # derived ≈ 6.5104
@@ -534,7 +610,7 @@ class TestTpsConsistencyValidator:
 
     def test_tps_per_user_stored_mismatch_errors(self, tmp_path):
         """Stored tps_per_user differing from system_tps/concurrency by >1% is an error."""
-        run_result = RunResult.model_validate(
+        run_result = PointResult.model_validate(
             {
                 "config": _config(concurrency=64),
                 "summary": _summary_with(tps_per_user=999.0),  # derived ≈ 6.5104
@@ -549,12 +625,12 @@ class TestTpsConsistencyValidator:
 
     def test_tps_per_user_zero_concurrency_errors(self, tmp_path):
         """concurrency=0 must error rather than divide by zero."""
-        config = RunConfig(
+        config = PointConfig(
             concurrency=0,
             dataset="mlperf-perf-dataset-v1",
             runtime_settings=RuntimeSettings(min_duration_ms=1_200_000),
         )
-        run_result = RunResult.model_validate(
+        run_result = PointResult.model_validate(
             {"config": config, "summary": _summary(), "yaml_path": tmp_path / "run_64.yaml"},
             context={"summary_path": tmp_path / "summary.json"},
         )
@@ -569,8 +645,8 @@ class TestTpsConsistencyValidator:
 # ---------------------------------------------------------------------------
 
 
-def _config_with_dataset(dataset: str, concurrency: int = 64) -> RunConfig:
-    return RunConfig(
+def _config_with_dataset(dataset: str, concurrency: int = 64) -> PointConfig:
+    return PointConfig(
         concurrency=concurrency,
         dataset=dataset,
         runtime_settings=RuntimeSettings(min_duration_ms=1_200_000),
@@ -580,7 +656,7 @@ def _config_with_dataset(dataset: str, concurrency: int = 64) -> RunConfig:
 class TestMinQueryCountValidator:
     def test_meets_minimum_ok(self, tmp_path):
         for dataset, min_q in MIN_QUERY_COUNT.items():
-            run_result = RunResult.model_validate(
+            run_result = PointResult.model_validate(
                 {
                     "config": _config_with_dataset(dataset),
                     "summary": _summary(n_completed=min_q),
@@ -597,7 +673,7 @@ class TestMinQueryCountValidator:
         for dataset, min_q in MIN_QUERY_COUNT.items():
             if min_q == 0:
                 continue
-            run_result = RunResult.model_validate(
+            run_result = PointResult.model_validate(
                 {
                     "config": _config_with_dataset(dataset),
                     "summary": _summary(n_completed=min_q - 1),
@@ -611,7 +687,7 @@ class TestMinQueryCountValidator:
             ), f"Expected error for dataset '{dataset}' with {min_q - 1} completed"
 
     def test_unknown_dataset_skipped(self, tmp_path):
-        run_result = RunResult.model_validate(
+        run_result = PointResult.model_validate(
             {
                 "config": _config_with_dataset("unknown-dataset-xyz"),
                 "summary": _summary(n_completed=0),
@@ -626,12 +702,12 @@ class TestMinQueryCountValidator:
         base = {"yaml_path": tmp_path / "run_64.yaml"}
         ctx = {"summary_path": tmp_path / "summary.json"}
 
-        fail = RunResult.model_validate(
+        fail = PointResult.model_validate(
             {"config": _config_with_dataset("dataset-a"), "summary": _summary(n_completed=0), **base}, context=ctx
         )
         assert any(r.rule == "min-query-count" and r.severity == Severity.ERROR for r in fail._check_results)
 
-        ok_result = RunResult.model_validate(
+        ok_result = PointResult.model_validate(
             {"config": _config_with_dataset("dataset-a"), "summary": _summary(n_completed=1), **base}, context=ctx
         )
         assert any(r.rule == "min-query-count" and r.severity != Severity.ERROR for r in ok_result._check_results)
@@ -641,12 +717,12 @@ class TestMinQueryCountValidator:
         base = {"yaml_path": tmp_path / "run_64.yaml"}
         ctx = {"summary_path": tmp_path / "summary.json"}
 
-        fail = RunResult.model_validate(
+        fail = PointResult.model_validate(
             {"config": _config_with_dataset("dataset-c"), "summary": _summary(n_completed=99), **base}, context=ctx
         )
         assert any(r.rule == "min-query-count" and r.severity == Severity.ERROR for r in fail._check_results)
 
-        ok_result = RunResult.model_validate(
+        ok_result = PointResult.model_validate(
             {"config": _config_with_dataset("dataset-c"), "summary": _summary(n_completed=100), **base}, context=ctx
         )
         assert any(r.rule == "min-query-count" and r.severity != Severity.ERROR for r in ok_result._check_results)
@@ -659,27 +735,27 @@ class TestMinQueryCountValidator:
 
 class TestRunCountValidator:
     def test_too_few(self, tmp_path):
-        ctx = _model_ctx(tmp_path, all_run_count=3)
+        ctx = _model_ctx(tmp_path, all_point_count=3)
         assert any(
-            r.rule == "run-count" and r.severity == Severity.ERROR for r in ctx._check_results
+            r.rule == "point-count" and r.severity == Severity.ERROR for r in ctx._check_results
         )
 
     def test_cap_exceeded(self, tmp_path):
-        ctx = _model_ctx(tmp_path, all_run_count=33)
-        assert any(r.rule == "run-cap" and r.severity == Severity.ERROR for r in ctx._check_results)
+        ctx = _model_ctx(tmp_path, all_point_count=33)
+        assert any(r.rule == "point-cap" and r.severity == Severity.ERROR for r in ctx._check_results)
 
     def test_valid_count(self, tmp_path):
-        ctx = _model_ctx(tmp_path, all_run_count=10)
+        ctx = _model_ctx(tmp_path, all_point_count=10)
         assert all(
             r.severity != Severity.ERROR
             for r in ctx._check_results
-            if r.rule in ("run-count", "run-cap")
+            if r.rule in ("point-count", "point-cap")
         )
 
 
 class TestRegionalCoverageValidator:
     def test_no_runs_all_regions_missing(self, tmp_path):
-        ctx = _model_ctx(tmp_path, valid_runs=[])
+        ctx = _model_ctx(tmp_path, valid_points=[])
         coverage_rules = {
             "low-latency-coverage",
             "low-throughput-coverage",
@@ -695,8 +771,8 @@ class TestRegionalCoverageValidator:
 
     def test_concurrency_in_low_latency(self, tmp_path):
         yaml_path = tmp_path / "llama3-70b" / "points" / "point_16.yaml"
-        valid_runs = [(yaml_path, _config(concurrency=16))]
-        ctx = _model_ctx(tmp_path, valid_runs=valid_runs)
+        valid_points = [(yaml_path, _config(concurrency=16))]
+        ctx = _model_ctx(tmp_path, valid_points=valid_points)
         assert all(
             r.severity != Severity.ERROR
             for r in ctx._check_results
@@ -706,18 +782,18 @@ class TestRegionalCoverageValidator:
 
 class TestConfigConsistencyValidator:
     def test_inconsistent_datasets(self, tmp_path):
-        c1 = RunConfig(
+        c1 = PointConfig(
             concurrency=64,
             dataset="dataset-a",
             runtime_settings=RuntimeSettings(),
         )
-        c2 = RunConfig(
+        c2 = PointConfig(
             concurrency=128,
             dataset="dataset-b",
             runtime_settings=RuntimeSettings(),
         )
         s = _summary()
-        ctx = _model_ctx(tmp_path, loaded_results=[(c1, s), (c2, s)])
+        ctx = _model_ctx(tmp_path, loaded_points=[(c1, s), (c2, s)])
         assert any(
             r.rule == "config-consistency-dataset" and r.severity == Severity.ERROR
             for r in ctx._check_results
@@ -739,9 +815,9 @@ class TestConfigConsistencyValidator:
             regions=_REGIONS,
             points_dir=model_dir / "points",
             accuracy_dir=model_dir / "accuracy",
-            all_run_count=7,
-            valid_runs=[],
-            loaded_results=[(_config(), s)],
+            all_point_count=7,
+            valid_points=[],
+            loaded_points=[(_config(), s)],
             accuracy_result=None,
         )
         assert any(
@@ -750,8 +826,8 @@ class TestConfigConsistencyValidator:
         )
 
     def test_empty_results_skips(self, tmp_path):
-        ctx = _model_ctx(tmp_path, loaded_results=[])
-        # config-consistency-dataset should not appear when loaded_results is empty
+        ctx = _model_ctx(tmp_path, loaded_points=[])
+        # config-consistency-dataset should not appear when loaded_points is empty
         assert not any(r.rule == "config-consistency-dataset" for r in ctx._check_results)
 
 

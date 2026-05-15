@@ -1,4 +1,4 @@
-"""Run configuration model — §8.3 measurement point YAML schema and per-point checks."""
+"""Point configuration model — §8.3 measurement point YAML schema and per-point checks."""
 
 from __future__ import annotations
 
@@ -13,8 +13,13 @@ from pydantic import (
     model_validator,
 )
 
-from .regions import classify_concurrency
-from .results import CheckResult, err, ok
+from ..regions import classify_concurrency
+from ..results import CheckResult, err, ok, warn
+
+
+_VALID_REGIONS = frozenset(
+    {"low_latency", "low_throughput", "med_throughput", "high_throughput", "submitters_choice"}
+)
 
 
 class RuntimeSettings(BaseModel):
@@ -35,7 +40,7 @@ class RuntimeSettings(BaseModel):
     stream_all_chunks: bool = True
 
 
-class RunConfig(BaseModel):
+class PointConfig(BaseModel):
     """Parsed contents of ``points/point_<N>.yaml`` (§8.3).
 
     Attributes:
@@ -54,7 +59,7 @@ class RunConfig(BaseModel):
     runtime_settings: RuntimeSettings = Field(default_factory=RuntimeSettings)
 
     @model_validator(mode="after")
-    def _check_load_pattern(self, info: ValidationInfo) -> RunConfig:
+    def _check_load_pattern(self, info: ValidationInfo) -> PointConfig:
         """§10: load_pattern must be 'concurrency' with a positive concurrency level."""
         path: Path | None = (info.context or {}).get("yaml_path")
         lp = self.runtime_settings.load_pattern
@@ -88,8 +93,8 @@ class RunConfig(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def _check_streaming(self, info: ValidationInfo) -> RunConfig:
-        """§13: stream_all_chunks must be True for all submission runs."""
+    def _check_streaming(self, info: ValidationInfo) -> PointConfig:
+        """§13: stream_all_chunks must be True for all submission points."""
         path: Path | None = (info.context or {}).get("yaml_path")
         if not self.runtime_settings.stream_all_chunks:
             self._check_results.append(
@@ -112,7 +117,7 @@ class RunConfig(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def _check_concurrency_range(self, info: ValidationInfo) -> RunConfig:
+    def _check_concurrency_range(self, info: ValidationInfo) -> PointConfig:
         """§9: concurrency must not exceed the high_throughput upper bound (incl. 10% margin)."""
         path: Path | None = (info.context or {}).get("yaml_path")
         regions = (info.context or {}).get("regions")
@@ -137,5 +142,50 @@ class RunConfig(BaseModel):
                     path,
                     "#9",
                 )
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _check_region_declared(self, info: ValidationInfo) -> PointConfig:
+        """§8.3: region must be a valid value; if declared, must match the computed region."""
+        path: Path | None = (info.context or {}).get("yaml_path")
+        region = self.region
+        if region is None:
+            return self  # optional field — absence is not an error
+        if region not in _VALID_REGIONS:
+            self._check_results.append(
+                err(
+                    "region-declared",
+                    f"Invalid region '{region}': must be one of {sorted(_VALID_REGIONS)}",
+                    path,
+                    "#8.3",
+                )
+            )
+            return self
+        regions = (info.context or {}).get("regions")
+        if regions is not None and region != "submitters_choice":
+            computed = classify_concurrency(self.concurrency, regions)
+            if computed is not None and computed != region:
+                self._check_results.append(
+                    warn(
+                        "region-declared",
+                        f"Declared region '{region}' ≠ computed region '{computed}'"
+                        f" for concurrency {self.concurrency}",
+                        path,
+                        "#8.3",
+                    )
+                )
+            else:
+                self._check_results.append(
+                    ok(
+                        "region-declared",
+                        f"Declared region '{region}' consistent with concurrency {self.concurrency}",
+                        path,
+                        "#8.3",
+                    )
+                )
+        else:
+            self._check_results.append(
+                ok("region-declared", f"region='{region}'", path, "#8.3")
             )
         return self
