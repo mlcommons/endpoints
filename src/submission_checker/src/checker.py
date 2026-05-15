@@ -285,9 +285,9 @@ class SubmissionChecker:
                 _err("accuracy-file", "Missing accuracy/accuracy_result.json", json_path, "#15")
             )
         else:
-            accuracy_result, acc_err = load_accuracy_result(json_path)
-            if acc_err:
-                results.append(_err("accuracy-valid", acc_err, json_path, "#15"))
+            accuracy_result, acc_results = load_accuracy_result(json_path)
+            results.extend(acc_results)
+            if any(r.severity == Severity.ERROR for r in acc_results):
                 accuracy_result = None
 
         # ModelContext validates point-count, regional-coverage, config-consistency, accuracy-gate

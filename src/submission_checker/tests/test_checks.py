@@ -852,3 +852,45 @@ class TestAccuracyGateValidator:
         assert any(
             r.rule == "accuracy-gate" and r.severity == Severity.ERROR for r in ctx._check_results
         )
+
+
+# ---------------------------------------------------------------------------
+# AccuracyResult score-consistency validator
+# ---------------------------------------------------------------------------
+
+
+class TestAccuracyConsistencyValidator:
+    def test_consistent_pass(self):
+        ar = AccuracyResult(metric="rouge1", score=0.45, quality_target=0.43, passed=True)
+        assert any(
+            r.rule == "accuracy-consistency" and r.severity != Severity.ERROR
+            for r in ar._check_results
+        )
+
+    def test_consistent_fail(self):
+        ar = AccuracyResult(metric="rouge1", score=0.30, quality_target=0.43, passed=False)
+        assert any(
+            r.rule == "accuracy-consistency" and r.severity != Severity.ERROR
+            for r in ar._check_results
+        )
+
+    def test_passed_true_but_score_below_target(self):
+        ar = AccuracyResult(metric="rouge1", score=0.30, quality_target=0.43, passed=True)
+        assert any(
+            r.rule == "accuracy-consistency" and r.severity == Severity.ERROR
+            for r in ar._check_results
+        )
+
+    def test_passed_false_but_score_meets_target(self):
+        ar = AccuracyResult(metric="rouge1", score=0.50, quality_target=0.43, passed=False)
+        assert any(
+            r.rule == "accuracy-consistency" and r.severity == Severity.ERROR
+            for r in ar._check_results
+        )
+
+    def test_score_exactly_at_boundary(self):
+        ar = AccuracyResult(metric="rouge1", score=0.43, quality_target=0.43, passed=True)
+        assert any(
+            r.rule == "accuracy-consistency" and r.severity != Severity.ERROR
+            for r in ar._check_results
+        )

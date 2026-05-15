@@ -106,11 +106,33 @@ def load_result_summary(path: Path) -> tuple[PointSummary | None, str | None]:
     return _load_validated(data, PointSummary, path.name) if data is not None else (None, err)
 
 
-def load_accuracy_result(path: Path) -> tuple[AccuracyResult | None, str | None]:
+def load_accuracy_result(
+    path: Path,
+) -> tuple[AccuracyResult | None, list[CheckResult]]:
     """Load and validate ``accuracy_result.json``.
 
     Returns:
-        A ``(model, error)`` pair — exactly one of the two is ``None``.
+        A ``(model, check_results)`` pair.  On success the model is not None and
+        check_results contains the validator-produced CheckResult entries.
+        On failure the model is None and check_results contains a single ERROR entry.
     """
-    data, err = _load_json(path)
-    return _load_validated(data, AccuracyResult, path.name) if data is not None else (None, err)
+    data, load_err = _load_json(path)
+    if load_err:
+        return None, [
+            CheckResult(
+                rule="accuracy-valid", message=load_err, severity=Severity.ERROR, path=path
+            )
+        ]
+    try:
+        instance = AccuracyResult.model_validate(data, context={"json_path": path})
+        return instance, list(instance._check_results)
+    except ValidationError as exc:
+        first = exc.errors()[0]
+        return None, [
+            CheckResult(
+                rule="accuracy-valid",
+                message=f"Validation error in {path.name}: {first['loc']} — {first['msg']}",
+                severity=Severity.ERROR,
+                path=path,
+            )
+        ]

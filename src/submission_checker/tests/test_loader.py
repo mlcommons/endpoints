@@ -137,17 +137,21 @@ def test_load_result_summary_schema_error(tmp_path):
 
 
 def test_load_accuracy_result_missing_file(tmp_path):
-    model, err = load_accuracy_result(tmp_path / "missing.json")
+    model, results = load_accuracy_result(tmp_path / "missing.json")
     assert model is None
-    assert "File not found" in err
+    assert len(results) == 1
+    assert results[0].severity == Severity.ERROR
+    assert "File not found" in results[0].message
 
 
 def test_load_accuracy_result_schema_error(tmp_path):
     p = tmp_path / "bad.json"
     p.write_text(json.dumps({"metric": "rouge1"}))  # missing score, quality_target, passed
-    model, err = load_accuracy_result(p)
+    model, results = load_accuracy_result(p)
     assert model is None
-    assert "Validation error" in err
+    assert len(results) == 1
+    assert results[0].severity == Severity.ERROR
+    assert "Validation error" in results[0].message
 
 
 # ---------------------------------------------------------------------------
@@ -161,9 +165,11 @@ def test_load_json_os_error(tmp_path):
     payload = {"metric": "rouge1", "score": 0.5, "quality_target": 0.43, "passed": True}
     p.write_text(json.dumps(payload))
     with patch("pathlib.Path.read_text", side_effect=OSError("permission denied")):
-        model, err = load_accuracy_result(p)
+        model, results = load_accuracy_result(p)
     assert model is None
-    assert "IO error" in err
+    assert len(results) == 1
+    assert results[0].severity == Severity.ERROR
+    assert "IO error" in results[0].message
 
 
 def test_load_yaml_os_error(tmp_path):
