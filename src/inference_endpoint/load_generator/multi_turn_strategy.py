@@ -310,62 +310,17 @@ class MultiTurnStrategy:
             conv_id, store_in_history=self._store_in_history
         )
 
-        # Route a synthetic failure result so the accuracy collector and event
-        # logger see the timed-out turn.
-        timeout_result = QueryResult(
-            id=query_id,
-            error=ErrorData(
-                error_type="TurnTimeout",
-                error_message=f"turn timeout after {self._turn_timeout_s}s",
-            ),
+        self._publish_synthetic_failure(
+            query_id,
+            conv_id_str,
+            turn_num,
+            error_type="TurnTimeout",
+            error_message=f"turn timeout after {self._turn_timeout_s}s",
         )
 
-        # Publish ERROR + COMPLETE so the metrics aggregator and event logger
-        # see the timeout (matches BenchmarkSession._handle_response ordering).
-        if self._session_publisher is not None:
-            try:
-                self._session_publisher.publish(
-                    EventRecord(
-                        event_type=ErrorEventType.GENERIC,
-                        timestamp_ns=time.monotonic_ns(),
-                        sample_uuid=query_id,
-                        data=timeout_result.error,
-                        conversation_id=conv_id_str,
-                        turn=turn_num,
-                    )
-                )
-                self._session_publisher.publish(
-                    EventRecord(
-                        event_type=SampleEventType.COMPLETE,
-                        timestamp_ns=time.monotonic_ns(),
-                        sample_uuid=query_id,
-                        data=None,
-                        conversation_id=conv_id_str,
-                        turn=turn_num,
-                    )
-                )
-            except Exception:
-                logger.exception(
-                    "Failed to publish timeout EventRecords (query=%s)", query_id
-                )
-
-        if self._session_on_sample_complete is not None:
-            try:
-                self._session_on_sample_complete(timeout_result)
-            except Exception:
-                logger.exception(
-                    "on_sample_complete callback raised for timeout result (query=%s)",
-                    query_id,
-                )
-
-        it = self._active_iters.pop(conv_id, None)
-        dropped = 0
-        if it is not None:
-            for _ in it:
-                self._conv_manager.mark_turn_failed(
-                    conv_id, store_in_history=self._store_in_history
-                )
-                dropped += 1
+        dropped = self._abort_remaining_turns(
+            conv_id, reason=f"prior turn timed out (query={query_id})"
+        )
         if dropped:
             logger.warning(
                 "turn timeout on conv=%s dropped %d remaining client turn(s)",
@@ -374,6 +329,79 @@ class MultiTurnStrategy:
             )
 
         self._fill_slot()
+
+    def _publish_synthetic_failure(
+        self,
+        query_id: str,
+        conv_id: str,
+        turn: int | None,
+        error_type: str,
+        error_message: str,
+    ) -> None:
+        synthetic_result = QueryResult(
+            id=query_id,
+            error=ErrorData(error_type=error_type, error_message=error_message),
+        )
+        if self._session_publisher is not None:
+            try:
+                self._session_publisher.publish(
+                    EventRecord(
+                        event_type=ErrorEventType.GENERIC,
+                        timestamp_ns=time.monotonic_ns(),
+                        sample_uuid=query_id,
+                        data=synthetic_result.error,
+                        conversation_id=conv_id,
+                        turn=turn,
+                    )
+                )
+                self._session_publisher.publish(
+                    EventRecord(
+                        event_type=SampleEventType.COMPLETE,
+                        timestamp_ns=time.monotonic_ns(),
+                        sample_uuid=query_id,
+                        data=None,
+                        conversation_id=conv_id,
+                        turn=turn,
+                    )
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to publish synthetic-failure EventRecords (query=%s)",
+                    query_id,
+                )
+        if self._session_on_sample_complete is not None:
+            try:
+                self._session_on_sample_complete(synthetic_result)
+            except Exception:
+                logger.exception(
+                    "on_sample_complete callback raised for synthetic failure (query=%s)",
+                    query_id,
+                )
+
+    def _abort_remaining_turns(self, conv_id: str, reason: str) -> int:
+        it = self._active_iters.pop(conv_id, None)
+        if it is None:
+            return 0
+        assert self._phase_issuer is not None
+        dropped = 0
+        for idx, turn in it:
+            self._conv_manager.mark_turn_failed(
+                conv_id, store_in_history=self._store_in_history
+            )
+            skipped_id = self._phase_issuer.register_skipped(
+                idx, conversation_id=conv_id, turn=turn
+            )
+            if skipped_id is None:
+                break
+            self._publish_synthetic_failure(
+                skipped_id,
+                conv_id,
+                turn,
+                error_type="TurnAbortedByPriorFailure",
+                error_message=reason,
+            )
+            dropped += 1
+        return dropped
 
     def on_query_complete(self, query_id: str) -> None:
         """No-op. Required by LoadStrategy protocol; called by BenchmarkSession."""
@@ -437,14 +465,12 @@ class MultiTurnStrategy:
         # later turns against a corrupt history (assistant placeholder /
         # missing tool result) is meaningless and matches the timeout path.
         if result.error is not None:
-            it = self._active_iters.pop(conv_id, None)
-            dropped = 0
-            if it is not None:
-                for _ in it:
-                    self._conv_manager.mark_turn_failed(
-                        conv_id, store_in_history=self._store_in_history
-                    )
-                    dropped += 1
+            err_type = (
+                result.error.error_type if result.error is not None else "unknown"
+            )
+            dropped = self._abort_remaining_turns(
+                conv_id, reason=f"prior turn errored: {err_type}"
+            )
             if dropped:
                 logger.warning(
                     "turn error on conv=%s dropped %d remaining client turn(s)",

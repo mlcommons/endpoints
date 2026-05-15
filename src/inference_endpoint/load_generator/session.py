@@ -265,6 +265,31 @@ class PhaseIssuer:
         self.issued_count += 1
         return query_id
 
+    def register_skipped(
+        self,
+        sample_index: int,
+        conversation_id: str = "",
+        turn: int | None = None,
+    ) -> str | None:
+        if self._stop_check():
+            return None
+        query_id = uuid.uuid4().hex
+        self.uuid_to_index[query_id] = sample_index
+        self.uuid_to_conv_info[query_id] = (conversation_id, turn)
+        self.completed_uuids.add(query_id)
+        self._publisher.publish(
+            EventRecord(
+                event_type=SampleEventType.ISSUED,
+                timestamp_ns=time.monotonic_ns(),
+                sample_uuid=query_id,
+                conversation_id=conversation_id,
+                turn=turn,
+                data=PromptData(),
+            )
+        )
+        self.issued_count += 1
+        return query_id
+
 
 # ---------------------------------------------------------------------------
 # BenchmarkSession

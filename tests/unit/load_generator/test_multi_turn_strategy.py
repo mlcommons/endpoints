@@ -58,6 +58,19 @@ class FakePhaseIssuer:
         self.uuid_to_conv_info[query_id] = (conversation_id, turn)
         return query_id
 
+    def register_skipped(
+        self,
+        sample_index: int,
+        conversation_id: str = "",
+        turn: int | None = None,
+    ) -> str | None:
+        self.issued_count += 1
+        query_id = f"q-skip-{sample_index:04d}"
+        self.uuid_to_index[query_id] = sample_index
+        self.uuid_to_conv_info[query_id] = (conversation_id, turn)
+        self.completed_uuids.add(query_id)
+        return query_id
+
 
 def _make_dataset_metadata(conversations: dict[str, list[int]]) -> ConversationMetadata:
     """Build ConversationMetadata from {conv_id: [turn_numbers]} mapping."""
@@ -232,8 +245,8 @@ async def test_turn_timeout_triggers_failure():
     # Do NOT simulate any response — turn 1 will timeout
     await strategy.execute(issuer)
 
-    # Only turn 1 should be issued (turn 2 never gets to run)
-    assert issuer.issued_count == 1
+    # Turn 1 was issued normally; turn 2 registered as skipped (total = 2)
+    assert issuer.issued_count == 2
 
 
 @pytest.mark.unit
@@ -613,18 +626,20 @@ async def test_conversation_slot_reuse():
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_timeout_publishes_error_and_complete_events():
-    """_handle_timeout publishes ERROR then COMPLETE EventRecords via session_publisher."""
+    """_handle_timeout publishes ERROR+COMPLETE for timed-out turn and each dropped turn."""
     conv_manager = ConversationManager()
-    conv_manager.get_or_create("conv-x", expected_client_turns=1)
-    metadata = _make_dataset_metadata({"conv-x": [1]})
+    conv_manager.get_or_create("conv-x", expected_client_turns=3)
+    metadata = _make_dataset_metadata({"conv-x": [1, 2, 3]})
     strategy = MultiTurnStrategy(conv_manager, metadata)
 
     publisher = MagicMock()
+    on_sample_complete = MagicMock()
     strategy._session_publisher = publisher
+    strategy._session_on_sample_complete = on_sample_complete
 
-    # Seed _inflight so _handle_timeout finds the entry
+    # Seed: turn 1 in-flight, turns 2+3 still pending
     strategy._inflight["q-x"] = "conv-x"
-    strategy._active_iters["conv-x"] = iter([])
+    strategy._active_iters["conv-x"] = iter([(1, 2), (2, 3)])
 
     issuer = FakePhaseIssuer()
     issuer.uuid_to_index["q-x"] = 0
@@ -637,23 +652,27 @@ async def test_timeout_publishes_error_and_complete_events():
 
     strategy._handle_timeout("q-x", "conv-x")
 
-    assert publisher.publish.call_count == 2
+    # 2 events for the timed-out turn + 2 per dropped turn (ERROR + COMPLETE each)
+    assert publisher.publish.call_count == 6
     assert issuer.inflight == 0
     assert "q-x" in issuer.completed_uuids
-    # Conv info must be cleared so a late real response can't reuse stale state.
+    # Conv info cleared so a late real response can't reuse stale state.
     assert "q-x" not in issuer.uuid_to_conv_info
-    first_call, second_call = publisher.publish.call_args_list
-    first_record = first_call.args[0]
-    second_record = second_call.args[0]
 
-    assert first_record.event_type == ErrorEventType.GENERIC
-    assert first_record.sample_uuid == "q-x"
-    assert first_record.conversation_id == "conv-x"
-    assert first_record.turn == 1
-    assert second_record.event_type == SampleEventType.COMPLETE
-    assert second_record.sample_uuid == "q-x"
-    assert second_record.conversation_id == "conv-x"
-    assert second_record.turn == 1
+    published_records = [call.args[0] for call in publisher.publish.call_args_list]
+    event_turn_pairs = {(r.event_type, r.turn) for r in published_records}
+    assert (ErrorEventType.GENERIC, 1) in event_turn_pairs
+    assert (SampleEventType.COMPLETE, 1) in event_turn_pairs
+    assert (ErrorEventType.GENERIC, 2) in event_turn_pairs
+    assert (SampleEventType.COMPLETE, 2) in event_turn_pairs
+    assert (ErrorEventType.GENERIC, 3) in event_turn_pairs
+    assert (SampleEventType.COMPLETE, 3) in event_turn_pairs
+
+    assert issuer.issued_count == 2
+    assert "q-skip-0001" in issuer.uuid_to_index
+    assert "q-skip-0002" in issuer.uuid_to_index
+    assert issuer.completed_uuids == {"q-x", "q-skip-0001", "q-skip-0002"}
+    assert on_sample_complete.call_count == 3
 
 
 @pytest.mark.unit
@@ -741,6 +760,11 @@ async def test_error_turn_aborts_remaining_turns():
     strategy = MultiTurnStrategy(conv_manager, metadata)
     issuer = FakePhaseIssuer()
 
+    publisher = MagicMock()
+    on_sample_complete = MagicMock()
+    strategy._session_publisher = publisher
+    strategy._session_on_sample_complete = on_sample_complete
+
     strategy._all_done = asyncio.Event()
     strategy._loop = asyncio.get_running_loop()
     strategy._phase_issuer = issuer
@@ -766,3 +790,14 @@ async def test_error_turn_aborts_remaining_turns():
     state = conv_manager.get_state("conv1")
     assert state is not None
     assert state.failed_turns == 3  # the failing turn + 2 dropped
+
+    assert issuer.issued_count == 2
+    assert "q-skip-0001" in issuer.uuid_to_index
+    assert "q-skip-0002" in issuer.uuid_to_index
+    assert issuer.completed_uuids == {"q-skip-0001", "q-skip-0002"}
+    assert issuer.inflight == 0
+
+    assert on_sample_complete.call_count == 2
+    for call in on_sample_complete.call_args_list:
+        dropped_result = call.args[0]
+        assert dropped_result.error is not None

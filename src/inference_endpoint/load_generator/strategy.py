@@ -69,6 +69,17 @@ class PhaseIssuerProtocol(Protocol):
         """
         ...
 
+    def register_skipped(
+        self,
+        sample_index: int,
+        conversation_id: str = "",
+        turn: int | None = None,
+    ) -> str | None:
+        """Register an event-only sample (no HTTP issuance). Returns query_id,
+        or None if the session is stopping. Mirrors ``issue()`` bookkeeping
+        minus the HTTP request and the ``inflight`` increment."""
+        ...
+
     issued_count: int
 
 

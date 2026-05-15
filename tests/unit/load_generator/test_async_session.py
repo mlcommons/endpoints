@@ -209,6 +209,36 @@ class TestPhaseIssuer:
         assert issued[0].conversation_id == "conv-1"
         assert issued[0].turn == 3
 
+    def test_register_skipped_populates_state_without_issuing_http(self):
+        dataset = FakeDataset(5)
+        issuer = FakeIssuer()
+        issuer._auto_respond = False
+        publisher = FakePublisher()
+        phase_issuer = PhaseIssuer(dataset, issuer, publisher, lambda: False)
+
+        qid = phase_issuer.register_skipped(2, conversation_id="c1", turn=4)
+
+        assert qid is not None
+        assert phase_issuer.uuid_to_index[qid] == 2
+        assert phase_issuer.uuid_to_conv_info[qid] == ("c1", 4)
+        assert qid in phase_issuer.completed_uuids
+        assert phase_issuer.issued_count == 1
+        assert phase_issuer.inflight == 0
+        assert issuer.issued_queries == []
+
+        issued = publisher.events_of_type(SampleEventType.ISSUED)
+        assert len(issued) == 1
+        assert issued[0].sample_uuid == qid
+        assert issued[0].conversation_id == "c1"
+        assert issued[0].turn == 4
+
+    def test_register_skipped_returns_none_when_stopped(self):
+        phase_issuer = PhaseIssuer(
+            FakeDataset(5), FakeIssuer(), FakePublisher(), lambda: True
+        )
+        assert phase_issuer.register_skipped(0) is None
+        assert phase_issuer.issued_count == 0
+
 
 # ---------------------------------------------------------------------------
 # BenchmarkSession tests
