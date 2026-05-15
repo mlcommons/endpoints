@@ -22,7 +22,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, PreTrainedTokenizerFast
 
 if TYPE_CHECKING:
     from transformers import PreTrainedTokenizerBase
@@ -76,9 +76,19 @@ class TokenizePool:
     def _get_thread_tokenizer(self) -> PreTrainedTokenizerBase:
         """Return the tokenizer for the current thread, loading it if needed."""
         if getattr(self._thread_local, "tokenizer", None) is None:
-            self._thread_local.tokenizer = AutoTokenizer.from_pretrained(
-                self._tokenizer_name
-            )
+            try:
+                self._thread_local.tokenizer = AutoTokenizer.from_pretrained(
+                    self._tokenizer_name
+                )
+            except Exception:
+                # AutoTokenizer loads config.json to detect the model type; for
+                # models with unknown model_type (e.g. deepseek_v4 in older
+                # transformers) or missing rope config fields, this fails.
+                # Fall back to PreTrainedTokenizerFast which reads only
+                # tokenizer.json / tokenizer_config.json and skips model config.
+                self._thread_local.tokenizer = PreTrainedTokenizerFast.from_pretrained(
+                    self._tokenizer_name
+                )
         return self._thread_local.tokenizer
 
     def _token_count_worker(self, text: str) -> int:

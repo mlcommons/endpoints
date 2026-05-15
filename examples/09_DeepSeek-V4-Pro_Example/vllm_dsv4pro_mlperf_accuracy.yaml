@@ -1,0 +1,115 @@
+name: dsv4pro-vllm-b200x8-mlperf-accuracy
+version: "1.0"
+type: offline
+timeout: 600.0
+
+# MLPerf Inference accuracy evaluation for DeepSeek-R1 / DeepSeek-V4-Pro.
+#
+# Runs the 4 sub-datasets used in the MLPerf submission accuracy check:
+#   - Math (AIME1983 + MATH500)  1431 samples  boxed_math_extractor
+#   - GPQA                         198 samples  abcd_extractor
+#   - MMLU-Pro                    2410 samples  abcd_extractor
+#   - LiveCodeBench (commented)    349 samples  python_code_extractor
+#
+# Golden accuracy (fp32 reference): exact_match = 81.3582%
+# MLPerf pass threshold:            exact_match ≥ 80.52%  (99% of golden)
+#
+# MMLU-Pro and LiveCodeBench must be extracted from the combined parquet first:
+#   python examples/09_DeepSeek-V4-Pro_Example/extract_mlperf_subsets.py
+
+model_params:
+  name: deepseek-ai/DeepSeek-V4-Pro
+  temperature: 1.0
+  max_new_tokens: 32768
+  top_p: 1.0
+  streaming: "on"
+  # tokenizer_name: /path/to/local/weights  # optional: set if weights are not in HF cache
+
+datasets:
+  - name: perf-warmup
+    type: performance
+    path: datasets/deepseek/mlperf_deepseek_r1_dataset_4388_fp8_eval.parquet
+    parser:
+      prompt: templated_text_input
+
+  # AIME1983 + MATH500 (1431 samples). Prompts are already formatted as
+  # templated_text_input — no parser transform needed.
+  - name: mlperf-math
+    type: accuracy
+    path: datasets/deepseek/mlperf_deepseek_r1_math_accuracy.parquet
+    parser:
+      prompt: templated_text_input
+    accuracy_config:
+      eval_method: pass_at_1
+      ground_truth: ground_truth
+      extractor: boxed_math_extractor
+      num_repeats: 1
+
+  # GPQA (198 samples). Ground truth is stored as raw letters ("A"–"D") in
+  # this parquet, so letter_extractor is required (abcd_extractor would return
+  # "choice1"–"choice4" and score 0% against letter ground truth).
+  - name: mlperf-gpqa
+    type: accuracy
+    path: datasets/deepseek/mlperf_deepseek_r1_mcq_accuracy.parquet
+    parser:
+      prompt: templated_text_input
+    accuracy_config:
+      eval_method: pass_at_1
+      ground_truth: ground_truth
+      extractor: letter_extractor
+      num_repeats: 1
+
+  # MMLU-Pro (2410 samples) — extracted from the combined accuracy parquet by
+  # extract_mlperf_subsets.py. Ground truth is "A"–"J" (10 choices); use
+  # letter_extractor which handles the full A–J range.
+  - name: mlperf-mmlu-pro
+    type: accuracy
+    path: datasets/deepseek/mlperf_deepseek_r1_mmlu_pro_accuracy.parquet
+    parser:
+      prompt: templated_text_input
+    accuracy_config:
+      eval_method: pass_at_1
+      ground_truth: ground_truth
+      extractor: letter_extractor
+      num_repeats: 1
+
+  # LiveCodeBench (349 samples) — requires lcb-service container on port 13835.
+  # Uncomment after running extract_mlperf_subsets.py and launching the container.
+  # - name: mlperf-livecodebench
+  #   type: accuracy
+  #   path: datasets/deepseek/mlperf_deepseek_r1_livecodebench_accuracy.parquet
+  #   parser:
+  #     prompt: templated_text_input
+  #   accuracy_config:
+  #     eval_method: code_bench_scorer
+  #     ground_truth: ground_truth
+  #     extractor: python_code_extractor
+  #     num_repeats: 1
+
+settings:
+  runtime:
+    min_duration_ms: 0
+    max_duration_ms: 0
+    n_samples_to_issue: 1
+    scheduler_random_seed: 42
+    dataloader_random_seed: 42
+
+  load_pattern:
+    type: max_throughput
+
+  client:
+    num_workers: -1
+    log_level: INFO
+    warmup_connections: false
+    max_connections: 64
+    worker_initialization_timeout: 120.0
+
+endpoint_config:
+  endpoints:
+    - http://localhost:8000
+  api_key: null
+  api_type: openai
+
+report_dir: results/dsv4pro_vllm_b200x8_mlperf_accuracy
+verbose: false
+enable_cpu_affinity: true

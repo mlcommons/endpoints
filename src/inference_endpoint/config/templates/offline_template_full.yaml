@@ -12,6 +12,7 @@ model_params:
   max_new_tokens: 1024  # Max output tokens
   osl_distribution: null  # Output sequence length distribution
   streaming: 'off'  # Streaming mode: auto/on/off | options: auto, on, off
+  tokenizer_name: null  # Local tokenizer path override. Use when AutoTokenizer.from_pretrained fails for the HF model name (e.g. transformers ≥5.4 rope_theta regression for DeepSeek-V4). Defaults to the model name if unset.
 datasets:  # Dataset configs
 - name: perf
   type: performance  # Dataset purpose: performance or accuracy | options: performance, accuracy

@@ -82,6 +82,7 @@ class OpenAIMsgspecAdapter(HttpRequestAdapter):
             "logit_bias",
             "user",
             "chat_template",
+            "chat_template_kwargs",
         ]
         return [
             ColumnFilter(
@@ -164,6 +165,7 @@ class OpenAIMsgspecAdapter(HttpRequestAdapter):
             logit_bias=query.data.get("logit_bias"),
             user=query.data.get("user"),
             chat_template=query.data.get("chat_template"),
+            chat_template_kwargs=query.data.get("chat_template_kwargs"),
         )
 
     @classmethod

@@ -123,7 +123,12 @@ class AddStaticColumns(Transform):
     def __call__(self, df: pd.DataFrame) -> pd.DataFrame:
         """Add the static columns to the row."""
         for key, value in self.data.items():
-            df[key] = value
+            # Wrap dict/list values in a list so pandas doesn't try to align
+            # on index keys (e.g. {"thinking": True} would produce NaN otherwise).
+            if isinstance(value, dict | list):
+                df[key] = [value] * len(df)
+            else:
+                df[key] = value
         return df
 
 
