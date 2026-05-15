@@ -47,15 +47,16 @@ Prints the concurrency ranges for each region given a declared Maximum Supported
 ```
 <org>/
 ├── systems/
-│   └── <system_desc_id>.json      # §8.2 — hardware + software description
+│   └── <system_desc_id>.json         # §8.2 — hardware + software description
 └── pareto/
     └── <system_desc_id>/
         └── <benchmark_model>/
-            ├── runs/
-            │   └── run_<N>.yaml   # §8.3 — one config per measurement point
+            ├── points/
+            │   └── point_<N>.yaml    # §8.3 — one config per measurement point
             ├── results/
-            │   └── run_<N>/
-            │       └── mlperf_endpoints_log_summary.json
+            │   └── point_<N>/
+            │       ├── mlperf_endpoints_log_summary.json
+            │       └── mlperf_endpoints_log_detail.json
             └── accuracy/
                 ├── accuracy.txt
                 └── accuracy_result.json
@@ -67,35 +68,43 @@ Prints the concurrency ranges for each region given a declared Maximum Supported
 |------|------|-------------|
 | `path-exists` | §1 | Submission root directory exists |
 | `required-dir` | §1 | `systems/` and `pareto/` present |
+| `system-description-present` | §1 | At least one `*.json` file found in `systems/` |
 | `system-description-valid` | §1 | `systems/*.json` parses against schema |
 | `src-dir` | §1 | `src/` present for Standardized submissions |
 | `pareto-dir-exists` | §1 | `pareto/<system_id>/` directory exists |
-| `pareto-subdir` | §1 | `runs/`, `results/`, `accuracy/` present |
-| `measurement-runs-present` | §1 | At least one `run_*.yaml` found |
-| `run-config-valid` | §1 | YAML parses against `RunConfig` schema |
-| `run-filename-concurrency` | §1 | Filename concurrency matches declared value |
-| `result-file-present` | §1 | Result log exists for each run config |
-| `result-file-valid` | §1 | Result log parses against `RunSummary` schema |
-| `run-count` | §2, §8 | 7–32 measurement runs |
-| `run-cap` | §2, §8 | Run count does not exceed 32 |
-| `low-latency-coverage` | §3 | At least one run in Low Latency region |
-| `low-throughput-coverage` | §4 | At least one run in Low Throughput region |
-| `med-throughput-coverage` | §5 | At least one run in Medium Throughput region |
-| `high-throughput-coverage` | §6 | At least one run in High Throughput region |
+| `benchmark-model-dir` | §1 | At least one benchmark-model directory in `pareto/<system_id>/` |
+| `pareto-subdir` | §1 | `points/`, `results/`, `accuracy/` present |
+| `measurement-points-present` | §1 | At least one `point_*.yaml` found |
+| `point-config-valid` | §1 | YAML parses against `PointConfig` schema |
+| `point-filename-concurrency` | §1 | Filename concurrency matches declared value |
+| `result-file-present` | §1 | Result summary log exists for each point config |
+| `result-detail-present` | §1 | Result detail log exists for each point config |
+| `result-file-valid` | §1 | Result summary log parses against `PointSummary` schema |
+| `point-count` | §2, §8 | 7–32 measurement points |
+| `point-cap` | §2, §8 | Point count does not exceed 32 |
+| `low-latency-coverage` | §3 | At least one point in Low Latency region |
+| `low-throughput-coverage` | §4 | At least one point in Low Throughput region |
+| `med-throughput-coverage` | §5 | At least one point in Medium Throughput region |
+| `high-throughput-coverage` | §6 | At least one point in High Throughput region |
 | `max-concurrency-declared` | §7 | `max_supported_concurrency` field present |
 | `region-computation` | §7 | *M* > 32 (required for region formula) |
 | `concurrency-in-range` | §9 | Concurrency within region bounds (incl. 10% margin) |
-| `load-pattern` | §10 | `load_pattern.type` is `concurrency` with `target_concurrency` set |
-| `run-duration` | §11 | Run meets per-region minimum duration |
+| `load-pattern` | §10 | `load_pattern` is `concurrency` with a positive concurrency level |
+| `point-duration` | §11 | Point meets per-region minimum duration |
+| `min-query-count` | §12 | `n_samples_completed` meets dataset-specific minimum (§6.4) |
 | `streaming-config` | §13 | `stream_all_chunks` is `True` |
 | `metric-consistency-duration` | §14 | `duration_ns` > 0 |
 | `metric-consistency-accounting` | §14 | `completed + failed == issued` |
 | `metric-consistency-output-tokens` | §14 | `total_output_tokens` ≥ 0 |
+| `metric-consistency-system-tps` | §9.1 | Stored `system_tps` consistent with derived value |
+| `metric-consistency-tps-per-user` | §9.1 | Stored `tps_per_user` consistent with `system_tps / concurrency` |
 | `accuracy-file` | §15 | `accuracy.txt` and `accuracy_result.json` present |
 | `accuracy-valid` | §15 | `accuracy_result.json` parses correctly |
+| `accuracy-consistency` | §15 | `passed` flag consistent with `score >= quality_target` |
 | `accuracy-gate` | §15 | Score ≥ quality target |
-| `config-consistency-dataset` | §16 | All runs use the same dataset |
+| `config-consistency-dataset` | §16 | All points use the same dataset |
 | `config-consistency-model` | §16 | Directory name matches `benchmark_model` |
+| `region-declared` | §8.3 | Declared `region` field (if present) is valid and matches computed region |
 
 ## Programmatic API
 
@@ -117,7 +126,7 @@ The `Report` object also exposes `report.warnings` and serialises cleanly via `r
 ## Development
 
 ```bash
-uv run pytest                                          # run tests (166 tests, 100% coverage)
+uv run pytest                                          # run tests (189 tests, 100% coverage)
 uv run pytest --no-cov -x                             # fast fail on first error
 uv run ruff check src/ tests/                         # lint
 uv run ruff format src/ tests/                        # auto-format
@@ -129,10 +138,23 @@ uv run sphinx-build -W docs docs/_build/html          # build docs
 ```
 cli.py          Entry point — Click commands, Rich table output
 checker.py      SubmissionChecker — orchestrates loading and validation
-loader.py       File I/O — JSON/YAML loading with structured error returns
-models.py       Pydantic models — all rule logic lives in model_validators
+loader.py       File I/O — JSON/YAML loading, returns (model | None, list[CheckResult])
 structure.py    Directory structure validators (§8.1)
-regions.py      Region boundary computation (§5.5 reference algorithm)
+models/
+  results.py         CheckResult, Severity, ok/warn/err helpers
+  regions.py         Region boundary computation (§5.5 reference algorithm)
+  file/              Per-artifact models — each validates a single file
+    system.py          SystemDescription (systems/*.json)
+    point_config.py    PointConfig + RuntimeSettings (points/point_<N>.yaml)
+    point_summary.py   PointSummary + PercentileStats (mlperf_endpoints_log_summary.json)
+    accuracy.py        AccuracyResult (accuracy/accuracy_result.json)
+  aggregate/         Cross-artifact models — validate across multiple files
+    point_result.py    PointResult — pairs one PointConfig with its PointSummary
+    context.py         ModelContext — validates point count, coverage, consistency, accuracy
 ```
 
-Validation logic is co-located with the data models: each Pydantic model runs its own `@model_validator` methods and accumulates results in a private `_check_results` list. `SubmissionChecker.run()` orchestrates loading, instantiates models, and collects results into a `Report`.
+Validation logic is co-located with the data models: each Pydantic model runs its own
+`@model_validator` methods and accumulates results in a private `_check_results` list.
+`SubmissionChecker.run()` orchestrates loading, instantiates models, and collects results
+into a `Report`. All loaders return `(model | None, list[CheckResult])` — failure surfaces
+every Pydantic validation error, not just the first.
