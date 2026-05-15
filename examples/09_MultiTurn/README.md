@@ -154,7 +154,7 @@ settings:
 
 ### Concurrency Control
 
-The `target_concurrency` field is **required** for the `multi_turn` load pattern and controls the maximum number of in-flight requests across all conversations:
+The `target_concurrency` field is **required** for the `multi_turn` load pattern and controls the maximum number of conversations active simultaneously (each active conversation has at most one in-flight turn):
 
 ```yaml
 settings:

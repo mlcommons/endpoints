@@ -155,7 +155,7 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
         super().__init__(dataframe, **kwargs)
         assert self.dataframe is not None, "Dataframe must be initialized"
         self._conv_groups = dict(
-            list(self.dataframe.groupby("conversation_id", sort=False))
+            list(self.dataframe.groupby("conversation_id", sort=False, dropna=False))
         )
         self._validate_conversation_grouping()
         self._validate_conversation_structure()
@@ -172,8 +172,17 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
         assert self.dataframe is not None, "Dataframe must be initialized"
         seen: set[str] = set()
         last_conv: str | None = None
-        for row in self.dataframe.to_dict(orient="records"):
-            conv_id = str(row["conversation_id"])
+        for row_idx, row in enumerate(self.dataframe.to_dict(orient="records")):
+            raw_id = row["conversation_id"]
+            if (
+                raw_id is None
+                or (isinstance(raw_id, float) and pd.isna(raw_id))
+                or str(raw_id) in ("", "nan")
+            ):
+                raise InputValidationError(
+                    f"Row {row_idx}: 'conversation_id' must be a non-empty string"
+                )
+            conv_id = str(raw_id)
             if conv_id != last_conv:
                 if conv_id in seen:
                     raise InputValidationError(
@@ -225,6 +234,27 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
                             f"Conversation {conv_id} turn {row['turn']}: "
                             "tool rows must have a non-empty 'tool_results' list"
                         )
+                    for res_idx, res in enumerate(tool_results):
+                        if not isinstance(res, dict):
+                            raise InputValidationError(
+                                f"Conversation {conv_id} turn {row['turn']} "
+                                f"tool_results[{res_idx}]: must be a dict"
+                            )
+                        if (
+                            not isinstance(res.get("tool_call_id"), str)
+                            or not res["tool_call_id"]
+                        ):
+                            raise InputValidationError(
+                                f"Conversation {conv_id} turn {row['turn']} "
+                                f"tool_results[{res_idx}]: "
+                                "'tool_call_id' must be a non-empty string"
+                            )
+                        if "content" not in res:
+                            raise InputValidationError(
+                                f"Conversation {conv_id} turn {row['turn']} "
+                                f"tool_results[{res_idx}]: "
+                                "'content' field is required"
+                            )
                 elif role == "assistant":
                     content = row.get("content")
                     is_empty_content = (
@@ -236,6 +266,44 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
                     has_tool_calls = (
                         isinstance(tool_calls, list) and len(tool_calls) > 0
                     )
+                    if has_tool_calls:
+                        for call_idx, call in enumerate(tool_calls):
+                            if not isinstance(call, dict):
+                                raise InputValidationError(
+                                    f"Conversation {conv_id} turn {row['turn']} "
+                                    f"tool_calls[{call_idx}]: must be a dict"
+                                )
+                            if not isinstance(call.get("id"), str) or not call["id"]:
+                                raise InputValidationError(
+                                    f"Conversation {conv_id} turn {row['turn']} "
+                                    f"tool_calls[{call_idx}]: "
+                                    "missing or empty 'id' (string)"
+                                )
+                            if call.get("type") != "function":
+                                raise InputValidationError(
+                                    f"Conversation {conv_id} turn {row['turn']} "
+                                    f"tool_calls[{call_idx}]: "
+                                    "'type' must be 'function'"
+                                )
+                            fn = call.get("function")
+                            if not isinstance(fn, dict):
+                                raise InputValidationError(
+                                    f"Conversation {conv_id} turn {row['turn']} "
+                                    f"tool_calls[{call_idx}]: "
+                                    "'function' must be a dict"
+                                )
+                            if not isinstance(fn.get("name"), str) or not fn["name"]:
+                                raise InputValidationError(
+                                    f"Conversation {conv_id} turn {row['turn']} "
+                                    f"tool_calls[{call_idx}]: "
+                                    "'function.name' must be a non-empty string"
+                                )
+                            if not isinstance(fn.get("arguments"), str | dict):
+                                raise InputValidationError(
+                                    f"Conversation {conv_id} turn {row['turn']} "
+                                    f"tool_calls[{call_idx}]: "
+                                    "'function.arguments' must be a JSON string or dict"
+                                )
                     if is_empty_content and not has_tool_calls:
                         raise InputValidationError(
                             f"Conversation {conv_id} turn {row['turn']}: "
@@ -419,11 +487,8 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
     ):
         """Load dataset, apply adapter defaults, and pre-bake client-turn samples.
 
-        Unlike single-turn datasets, multi-turn rows do not have a `prompt` column,
-        so ColumnFilter (which requires prompt) is skipped. AddStaticColumns entries
-        from the adapter are applied via AddStaticColumns(..., overwrite=False)
-        (fill-missing-only) so that
-        per-row dataset overrides are preserved.
+        Passing ``adapter=`` without ``api_type`` and ``model_params`` raises
+        ``NotImplementedError``; use ``load(api_type=..., model_params=...)`` instead.
 
         After transforms, only client turns (user + tool) are stored in self.data as
         fully assembled sample dicts (with messages attached).
@@ -431,6 +496,15 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
         """
         if not force and self.data is not None:
             return
+
+        if adapter is not None and (api_type is None or model_params is None):
+            raise NotImplementedError(
+                "MultiTurnDataset.load(adapter=...) is not supported; "
+                "pass api_type=... and model_params=... instead. "
+                "Multi-turn datasets cherry-pick AddStaticColumns defaults from "
+                "the api_type's transforms because rows lack a 'prompt' column "
+                "and the full adapter pipeline (ColumnFilter) does not apply."
+            )
 
         df = self.dataframe
         if df is None:
@@ -459,7 +533,9 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
         # Rebuild conv_groups + metadata from the final post-transform df so
         # pre_built_messages_by_key reflects any transforms applied above.
         self.dataframe = df
-        self._conv_groups = dict(list(df.groupby("conversation_id", sort=False)))
+        self._conv_groups = dict(
+            list(df.groupby("conversation_id", sort=False, dropna=False))
+        )
         self.conversation_metadata = self._build_metadata()
 
         all_rows = df.to_dict(orient="records")

@@ -692,6 +692,47 @@ async def test_issue_passes_conversation_id_and_turn_to_phase_issuer():
 
 @pytest.mark.unit
 @pytest.mark.asyncio
+async def test_fill_slot_failure_does_not_hang_execute():
+    """_fill_slot errors surface from execute() instead of hanging on _all_done."""
+    conv_manager = ConversationManager()
+    # Two 1-turn conversations; target_concurrency=1 so conv2 only starts via _fill_slot.
+    metadata = _make_dataset_metadata({"conv1": [1], "conv2": [1]})
+    strategy = MultiTurnStrategy(conv_manager, metadata, target_concurrency=1)
+
+    call_count = 0
+
+    class RaisingIssuer:
+        issued_count = 0
+        inflight = 0
+        uuid_to_index: dict = {}
+        uuid_to_conv_info: dict = {}
+        completed_uuids: set = set()
+
+        def issue(self, idx, data_override=None, conversation_id="", turn=None):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                self.issued_count += 1
+                query_id = f"q{idx:04d}"
+                self.uuid_to_conv_info[query_id] = (conversation_id, turn)
+                return query_id
+            # Raises on the second call, which is triggered by _fill_slot after conv1 completes.
+            raise RuntimeError("simulated slot-refill failure")
+
+    issuer = RaisingIssuer()
+
+    async def complete_conv1():
+        await asyncio.sleep(0.02)
+        result = QueryResult(id="q0000", response_output=TextModelOutput(output="ok"))
+        strategy.on_sample_complete(result)
+
+    asyncio.create_task(complete_conv1())
+    with pytest.raises(RuntimeError, match="simulated slot-refill failure"):
+        await asyncio.wait_for(strategy.execute(issuer), timeout=2.0)
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
 async def test_error_turn_aborts_remaining_turns():
     """on_sample_complete with result.error aborts and marks-failed remaining turns."""
     conv_manager = ConversationManager()

@@ -268,11 +268,18 @@ class MultiTurnStrategy:
 
     def _fill_slot(self) -> None:
         """Start a new conversation from the pending queue, or signal all done."""
-        if self._pending_convs:
-            self._start_conversation()
-        elif not self._active_iters:
-            assert self._all_done is not None
-            self._all_done.set()
+        # Errors here must not leave _all_done unset — that would hang execute().
+        try:
+            if self._pending_convs:
+                self._start_conversation()
+            elif not self._active_iters:
+                assert self._all_done is not None
+                self._all_done.set()
+        except Exception as exc:
+            logger.exception("Error filling slot")
+            self._error = exc
+            if self._all_done is not None:
+                self._all_done.set()
 
     def _handle_timeout(self, query_id: str, conv_id: str) -> None:
         """Called by the event loop when a turn response does not arrive in time."""

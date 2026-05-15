@@ -1425,3 +1425,125 @@ def test_no_dead_system_content_field():
     for i in range(ds.num_samples()):
         s = ds.load_sample(i)
         assert "system_content" not in s, f"Sample {i} has dead field system_content"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "conv_id",
+    [None, "", float("nan")],
+    ids=["none", "empty_string", "nan_float"],
+)
+def test_multi_turn_dataset_null_conversation_id_rejected(conv_id):
+    rows = [{"conversation_id": conv_id, "turn": 1, "role": "user", "content": "Hi"}]
+    df = pd.DataFrame(rows)
+    with pytest.raises(InputValidationError, match="conversation_id"):
+        MultiTurnDataset(df)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "tool_calls,expected_match",
+    [
+        ([{"id": "x"}], "type"),
+        ([{"id": "x", "type": "function"}], "function"),
+        ([{"id": "x", "type": "function", "function": {}}], "function.name"),
+        (
+            [
+                {
+                    "id": "",
+                    "type": "function",
+                    "function": {"name": "f", "arguments": "{}"},
+                }
+            ],
+            "id",
+        ),
+        (
+            [{"id": "x", "type": "tool", "function": {"name": "f", "arguments": "{}"}}],
+            "type",
+        ),
+        (
+            [
+                {
+                    "id": "x",
+                    "type": "function",
+                    "function": {"name": "f", "arguments": 123},
+                }
+            ],
+            "arguments",
+        ),
+    ],
+)
+def test_multi_turn_dataset_malformed_tool_calls_rejected(tool_calls, expected_match):
+    rows = [
+        {
+            "conversation_id": "c1",
+            "turn": 1,
+            "role": "user",
+            "content": "go",
+            "tools": [
+                {"type": "function", "function": {"name": "f", "parameters": {}}}
+            ],
+        },
+        {
+            "conversation_id": "c1",
+            "turn": 2,
+            "role": "assistant",
+            "tool_calls": tool_calls,
+        },
+    ]
+    df = pd.DataFrame(rows)
+    with pytest.raises(InputValidationError, match=expected_match):
+        MultiTurnDataset(df)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "tool_results,expected_match",
+    [
+        (["not-a-dict"], "must be a dict"),
+        ([{"content": "ok"}], "tool_call_id"),
+        ([{"tool_call_id": "", "content": "ok"}], "tool_call_id"),
+        ([{"tool_call_id": "x"}], "content"),
+    ],
+)
+def test_multi_turn_dataset_malformed_tool_results_rejected(
+    tool_results, expected_match
+):
+    rows = [
+        {"conversation_id": "c1", "turn": 1, "role": "user", "content": "go"},
+        {
+            "conversation_id": "c1",
+            "turn": 2,
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "x",
+                    "type": "function",
+                    "function": {"name": "f", "arguments": "{}"},
+                }
+            ],
+        },
+        {
+            "conversation_id": "c1",
+            "turn": 3,
+            "role": "tool",
+            "tool_results": tool_results,
+        },
+    ]
+    df = pd.DataFrame(rows)
+    with pytest.raises(InputValidationError, match=expected_match):
+        MultiTurnDataset(df)
+
+
+@pytest.mark.unit
+def test_multi_turn_dataset_load_with_adapter_only_raises():
+    """load(adapter=...) without api_type/model_params must raise NotImplementedError."""
+    rows = [
+        {"conversation_id": "c1", "turn": 1, "role": "user", "content": "Hi"},
+        {"conversation_id": "c1", "turn": 2, "role": "assistant", "content": "Yo"},
+    ]
+    df = pd.DataFrame(rows)
+    ds = MultiTurnDataset(df)
+    sentinel_adapter = object()
+    with pytest.raises(NotImplementedError, match="api_type"):
+        ds.load(adapter=sentinel_adapter)
