@@ -1,0 +1,65 @@
+# Offline Accuracy Run for WAN 2.2 (GB200/GB300) — VBench scoring
+#
+# Mirrors offline_wan22.yaml but treats the WAN 2.2 prompt set as an
+# *accuracy* dataset and scores the produced videos with VBench across the
+# six MLPerf dimensions (subject_consistency, background_consistency,
+# motion_smoothness, dynamic_degree, appearance_style, scene). The final
+# accuracy score is the mean of the per-dimension aggregates.
+#
+# Assumes the MLPerf WAN 2.2 prompt set is a subset of VBench's standard
+# prompt suite, so each prompt is scored only on its matching dimension(s)
+# via VBench's bundled `vbench_full_info.json` lookup.
+#
+# Prerequisites:
+#   - trtllm-serve running with response_format=video_path support, saving
+#     videos to a Lustre path readable by this process (VBench reads the
+#     videos directly via the path returned by the server).
+#   - VBench installed in the eval environment:
+#       pip install vbench
+#     Heavy GPU dependency (torch + decord + opencv + per-dim models);
+#     intended for a separate accuracy host, not the load-generator host.
+
+name: "offline-wan22-accuracy-vbench"
+version: "1.0"
+type: "offline"
+
+model_params:
+  name: "wan22"
+  max_new_tokens: 1
+  streaming: "off"
+
+datasets:
+  - name: wan22_vbench
+    path: examples/09_Wan22_VideoGen_Example/wan22_prompts.jsonl
+    type: "accuracy"
+    samples: 248
+    accuracy_config:
+      eval_method: "vbench"
+      # VBench's input pair is (prompt, video). The scorer reads each
+      # sample's prompt from this column — not a ground-truth comparison.
+      ground_truth: "prompt"
+      # Identity passthrough: VideoGenAdapter mirrors video_path into
+      # response_output, and the scorer consumes it as-is.
+      extractor: "identity_extractor"
+      num_repeats: 1
+
+settings:
+  runtime:
+    max_duration_ms: 600000
+    scheduler_random_seed: 42
+    dataloader_random_seed: 42
+    n_samples_to_issue: 248
+
+  load_pattern:
+    type: "max_throughput"
+
+  client:
+    num_workers: 4
+
+endpoint_config:
+  endpoints:
+    - "http://localhost:8000"
+  api_type: "videogen"
+  api_key: null
+
+report_dir: logs/wan22_video_accuracy_vbench

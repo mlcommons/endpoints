@@ -842,3 +842,171 @@ class ShopifyCategoryF1Scorer(Scorer, scorer_id="shopify_category_f1"):
 
         n_repeats = len(data) // self.dataset.num_samples()
         return hf1, n_repeats
+
+
+_VBENCH_DIMENSIONS: tuple[str, ...] = (
+    "subject_consistency",
+    "background_consistency",
+    "motion_smoothness",
+    "dynamic_degree",
+    "appearance_style",
+    "scene",
+)
+
+_DEFAULT_VBENCH_PROJECT_PATH = (
+    Path(__file__).resolve().parents[3]
+    / "examples"
+    / "09_Wan22_VideoGen_Example"
+    / "accuracy"
+)
+
+
+class VBenchScorer(Scorer, scorer_id="vbench"):
+    """VBench accuracy scorer for video generation outputs.
+
+    Runs the six MLPerf WAN2.2 dimensions (subject_consistency,
+    background_consistency, motion_smoothness, dynamic_degree,
+    appearance_style, scene) on the produced videos and returns the mean
+    of the per-dimension scores.
+
+    VBench is invoked as a subprocess via `uv run --project <vbench_project_path>`
+    so the main benchmark environment never imports vbench (which pins
+    transformers==4.33.2 and numpy<2, incompatible with our core deps).
+    The subproject lives at examples/09_Wan22_VideoGen_Example/accuracy/.
+
+    Assumes the MLPerf WAN2.2 prompt set is a subset of VBench's standard
+    prompt suite, so we use VBench's default evaluation flow: videos are
+    staged into a directory with VBench's expected filename convention,
+    `{prompt}-{index}.mp4`, and VBench looks each prompt up in its
+    bundled `vbench_full_info.json`.
+
+    The scorer reads each sample's video path from response_output (the
+    VideoGenAdapter mirrors `video_path` into `TextModelOutput.output`)
+    and the prompt from `dataset.dataframe[ground_truth_column]` — the
+    prompt is the VBench input, not a comparison target, so callers should
+    set `ground_truth_column: prompt` in `accuracy_config`.
+    """
+
+    DIMENSIONS: ClassVar[tuple[str, ...]] = _VBENCH_DIMENSIONS
+
+    def __init__(
+        self,
+        dataset_name: str,
+        dataset: Dataset,
+        report_dir: os.PathLike,
+        extractor: type[Extractor] | None = None,
+        ground_truth_column: str | None = "prompt",
+        dimensions: tuple[str, ...] = _VBENCH_DIMENSIONS,
+        full_info_json_path: str | None = None,
+        vbench_project_path: os.PathLike | None = None,
+        uv_executable: str = "uv",
+    ):
+        super().__init__(
+            dataset_name=dataset_name,
+            dataset=dataset,
+            report_dir=report_dir,
+            extractor=extractor,
+            ground_truth_column=ground_truth_column,
+        )
+        self.dimensions = dimensions
+        self.full_info_json_path = full_info_json_path
+        self.vbench_project_path = Path(
+            vbench_project_path
+            if vbench_project_path is not None
+            else _DEFAULT_VBENCH_PROJECT_PATH
+        )
+        self.uv_executable = uv_executable
+        runner = self.vbench_project_path / "vbench_runner.py"
+        if not runner.exists():
+            raise FileNotFoundError(
+                f"vbench_runner.py not found at {runner}. "
+                "Run `uv sync` in the accuracy subproject first."
+            )
+
+    def score_single_sample(self, value: str, ground_truth: str) -> float:
+        raise RuntimeError(
+            "VBench scoring requires batch processing; call score() instead."
+        )
+
+    def _stage_videos(
+        self, staged_dir: Path, video_paths: list[str], prompts: list[str]
+    ) -> None:
+        """Symlink each video into staged_dir as `{prompt}-{index}.mp4`.
+
+        Indexing is per-prompt to disambiguate when the same prompt appears
+        multiple times (num_repeats > 1).
+        """
+        per_prompt_idx: dict[str, int] = defaultdict(int)
+        for video_path, prompt in zip(video_paths, prompts, strict=True):
+            idx = per_prompt_idx[prompt]
+            per_prompt_idx[prompt] += 1
+            src = Path(video_path)
+            dst = staged_dir / f"{prompt}-{idx}{src.suffix or '.mp4'}"
+            dst.symlink_to(src.resolve())
+
+    def _run_vbench_subprocess(
+        self, staged_dir: Path, vbench_out: Path, run_name: str
+    ) -> None:
+        """Invoke vbench_runner.py via `uv run --project <subproject>`."""
+        cmd = [
+            self.uv_executable,
+            "run",
+            "--project",
+            str(self.vbench_project_path),
+            "python",
+            str(self.vbench_project_path / "vbench_runner.py"),
+            "--videos-dir",
+            str(staged_dir),
+            "--out-dir",
+            str(vbench_out),
+            "--name",
+            run_name,
+            "--dims",
+            ",".join(self.dimensions),
+        ]
+        if self.full_info_json_path is not None:
+            cmd += ["--full-info-json", self.full_info_json_path]
+        subprocess.run(cmd, check=True)
+
+    def score(self) -> tuple[float, int]:
+        df = self.get_outputs()
+        valid_uuids = self.sample_index_map.keys()
+        df = df[df["sample_uuid"].isin(valid_uuids)]
+        df = df.apply(self.match_sample_index, axis=1)
+
+        video_paths: list[str] = df["output"].tolist()
+        order = df["sample_index"].to_numpy().astype(int)
+        assert (
+            self.dataset.dataframe is not None
+        ), f"Dataset {self.dataset} has no dataframe loaded"
+        assert (
+            self.ground_truth_column in self.dataset.dataframe.columns
+        ), f"Prompt column {self.ground_truth_column} not found in dataset"
+        prompts: list[str] = [
+            str(p)
+            for p in self.dataset.dataframe[self.ground_truth_column].to_numpy()[order]
+        ]
+
+        # Stage videos for VBench in a per-run scratch dir under report_dir
+        # so artifacts survive after the benchmark for re-evaluation.
+        staged_dir = self.report_dir / "vbench_videos"
+        staged_dir.mkdir(parents=True, exist_ok=True)
+        self._stage_videos(staged_dir, video_paths, prompts)
+
+        vbench_out = self.report_dir / "vbench_results"
+        vbench_out.mkdir(parents=True, exist_ok=True)
+        run_name = f"vbench_{self.dataset_name}"
+        self._run_vbench_subprocess(staged_dir, vbench_out, run_name)
+
+        # VBench writes `{run_name}_eval_results.json` to vbench_out. Each
+        # dim entry is `[aggregate_score, [per_video_results, ...]]`.
+        results_path = vbench_out / f"{run_name}_eval_results.json"
+        with results_path.open() as f:
+            results = msgspec.json.decode(f.read())
+
+        per_dim_scores: list[float] = [
+            float(results[dim][0]) for dim in self.dimensions
+        ]
+        mean_score = float(np.mean(per_dim_scores))
+        n_repeats = len(video_paths) // self.dataset.num_samples()
+        return mean_score, n_repeats

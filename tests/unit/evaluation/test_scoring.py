@@ -16,17 +16,23 @@
 """Unit tests for evaluation scoring module."""
 
 import json
+from pathlib import Path
 from unittest.mock import MagicMock
 
+import msgspec
 import pandas as pd
 import pytest
+from inference_endpoint.core.record import EventRecord, EventType, SampleEventType
+from inference_endpoint.core.types import TextModelOutput
 from inference_endpoint.dataset_manager.predefined.shopify_product_catalogue import (
     ProductMetadata,
 )
+from inference_endpoint.evaluation import scoring as scoring_mod
 from inference_endpoint.evaluation.scoring import (
     _PRED_CATEGORY_PAD,
     Scorer,
     ShopifyCategoryF1Scorer,
+    VBenchScorer,
     _calculate_hierarchical_f1,
     _create_pred_pad_category,
     _match_hierarchical_paths,
@@ -214,4 +220,157 @@ class TestShopifyCategoryF1Scorer:
                 dataset_name="test",
                 dataset=mock_dataset,
                 report_dir=report_dir,
+            )
+
+
+@pytest.mark.unit
+class TestVBenchScorerRegistration:
+    def test_scorer_registered(self):
+        assert "vbench" in Scorer.available_scorers()
+        assert Scorer.get("vbench") is VBenchScorer
+
+
+@pytest.mark.unit
+class TestVBenchScorer:
+    """VBenchScorer unit tests with VBench monkey-patched."""
+
+    DIMS = (
+        "subject_consistency",
+        "background_consistency",
+        "motion_smoothness",
+        "dynamic_degree",
+        "appearance_style",
+        "scene",
+    )
+    # Per-dim aggregate scores. Mean = 0.55.
+    DIM_SCORES = {
+        "subject_consistency": 0.9,
+        "background_consistency": 0.8,
+        "motion_smoothness": 0.7,
+        "dynamic_degree": 0.4,
+        "appearance_style": 0.3,
+        "scene": 0.2,
+    }
+
+    @pytest.fixture
+    def dataset(self):
+        df = pd.DataFrame({"prompt": ["a cat", "a dog", "a tree"]})
+        ds = MagicMock()
+        ds.dataframe = df
+        ds.num_samples.return_value = 3
+        return ds
+
+    @pytest.fixture
+    def staged(self, tmp_path):
+        """Build report_dir with sample_idx_map + events.jsonl pointing at fake mp4s.
+
+        Three samples; each video file is a real (empty) file so symlinking
+        works on a real filesystem.
+        """
+        report_dir = tmp_path / "report"
+        report_dir.mkdir()
+
+        video_paths = []
+        for i in range(3):
+            p = tmp_path / f"video_{i}.mp4"
+            p.write_bytes(b"")
+            video_paths.append(str(p))
+
+        uuids = [f"uuid-{i}" for i in range(3)]
+        sample_idx_map = {"vid_acc": dict(zip(uuids, range(3), strict=True))}
+        (report_dir / "sample_idx_map.json").write_bytes(
+            msgspec.json.encode(sample_idx_map)
+        )
+
+        encoder = msgspec.json.Encoder(enc_hook=EventType.encode_hook)
+        events_path = report_dir / "events.jsonl"
+        with events_path.open("wb") as f:
+            for uid, vp in zip(uuids, video_paths, strict=True):
+                rec = EventRecord(
+                    event_type=SampleEventType.COMPLETE,
+                    sample_uuid=uid,
+                    data=TextModelOutput(output=vp),
+                )
+                f.write(encoder.encode(rec) + b"\n")
+        return report_dir, video_paths
+
+    @pytest.fixture
+    def vbench_project(self, tmp_path):
+        """Stub accuracy subproject with a vbench_runner.py the scorer can find."""
+        project = tmp_path / "accuracy"
+        project.mkdir()
+        (project / "vbench_runner.py").write_text("# stub\n")
+        return project
+
+    @pytest.fixture
+    def patch_subprocess(self, monkeypatch):
+        """Capture subprocess.run; side-effect writes a fake VBench results JSON.
+
+        The fake parses --out-dir / --name / --dims out of the command list and
+        writes results.json shaped like VBench's real output:
+        `{dim: [aggregate_score, [per_video_results, ...]]}`.
+        """
+        captured = {}
+
+        def fake_run(cmd, check):
+            captured["cmd"] = cmd
+            captured["check"] = check
+            out_dir = Path(cmd[cmd.index("--out-dir") + 1])
+            name = cmd[cmd.index("--name") + 1]
+            dims = cmd[cmd.index("--dims") + 1].split(",")
+            results = {dim: [TestVBenchScorer.DIM_SCORES[dim], []] for dim in dims}
+            (out_dir / f"{name}_eval_results.json").write_bytes(
+                msgspec.json.encode(results)
+            )
+            return MagicMock(returncode=0)
+
+        monkeypatch.setattr(scoring_mod.subprocess, "run", fake_run)
+        return captured
+
+    def test_score_averages_six_dims(
+        self, dataset, staged, vbench_project, patch_subprocess
+    ):
+        report_dir, video_paths = staged
+        scorer = VBenchScorer(
+            dataset_name="vid_acc",
+            dataset=dataset,
+            report_dir=report_dir,
+            ground_truth_column="prompt",
+            vbench_project_path=vbench_project,
+        )
+        mean_score, n_repeats = scorer.score()
+
+        assert mean_score == pytest.approx(0.55)
+        assert n_repeats == 1
+
+        # Subprocess was invoked via `uv run --project <subproject> python ...`.
+        cmd = patch_subprocess["cmd"]
+        assert cmd[0] == "uv"
+        assert cmd[1:3] == ["run", "--project"]
+        assert Path(cmd[3]) == vbench_project
+        assert Path(cmd[5]) == vbench_project / "vbench_runner.py"
+        # All six dims passed through, in declared order.
+        dims_arg = cmd[cmd.index("--dims") + 1]
+        assert dims_arg.split(",") == list(self.DIMS)
+
+        # Videos were staged as `{prompt}-0.mp4`.
+        staged_dir = report_dir / "vbench_videos"
+        names = sorted(p.name for p in staged_dir.iterdir())
+        assert names == ["a cat-0.mp4", "a dog-0.mp4", "a tree-0.mp4"]
+        # And each symlink resolves to the original mp4.
+        for staged_file, original in zip(
+            sorted(staged_dir.iterdir()), sorted(video_paths), strict=True
+        ):
+            assert staged_file.resolve() == Path(original).resolve()
+
+    def test_missing_subproject_raises_at_init(self, dataset, staged, tmp_path):
+        report_dir, _ = staged
+        nonexistent = tmp_path / "no_such_project"
+        with pytest.raises(FileNotFoundError, match="vbench_runner.py"):
+            VBenchScorer(
+                dataset_name="vid_acc",
+                dataset=dataset,
+                report_dir=report_dir,
+                ground_truth_column="prompt",
+                vbench_project_path=nonexistent,
             )

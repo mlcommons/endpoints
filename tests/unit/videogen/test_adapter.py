@@ -19,7 +19,7 @@ import json
 
 import pytest
 from inference_endpoint.config.schema import ModelParams
-from inference_endpoint.core.types import APIType, Query, QueryResult
+from inference_endpoint.core.types import APIType, Query, QueryResult, TextModelOutput
 from inference_endpoint.endpoint_client.accumulator_protocol import (
     SSEAccumulatorProtocol,
 )
@@ -118,7 +118,11 @@ class TestVideoGenAdapter:
         }
 
     def test_decode_response_returns_video_path_in_metadata(self):
-        """Perf-mode decode branch — covered separately from integration."""
+        """Perf-mode decode branch — covered separately from integration.
+
+        video_path is also mirrored into response_output so the event log
+        carries it to the accuracy scorer (VBench reads videos by path).
+        """
         resp = VideoPathResponse(
             video_id="vid_perf_001",
             video_path="/lustre/videos/vid_perf_001.mp4",
@@ -127,7 +131,9 @@ class TestVideoGenAdapter:
         assert isinstance(result, QueryResult)
         assert result.id == "q1"
         assert result.error is None
-        assert result.response_output is None
+        assert result.response_output == TextModelOutput(
+            output="/lustre/videos/vid_perf_001.mp4"
+        )
         assert result.metadata == {
             "video_id": "vid_perf_001",
             "video_path": "/lustre/videos/vid_perf_001.mp4",

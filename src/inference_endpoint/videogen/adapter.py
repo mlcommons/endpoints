@@ -22,6 +22,7 @@ from inference_endpoint.core.types import (
     Query,
     QueryResult,
     StreamChunk,
+    TextModelOutput,
 )
 from inference_endpoint.dataset_manager.transforms import ColumnFilter
 from inference_endpoint.endpoint_client.adapter_protocol import HttpRequestAdapter
@@ -100,8 +101,11 @@ class VideoGenAdapter(HttpRequestAdapter):
                 },
             )
         resp_path = VideoPathResponse.model_validate(raw)
+        # Mirror video_path into response_output so the event log carries it
+        # to the accuracy scorer (VBench reads videos by path).
         return QueryResult(
             id=query_id,
+            response_output=TextModelOutput(output=resp_path.video_path),
             metadata={
                 "video_id": resp_path.video_id,
                 "video_path": resp_path.video_path,

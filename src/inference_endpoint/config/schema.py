@@ -97,6 +97,7 @@ class ScorerMethod(str, Enum):
     ROUGE = "rouge"
     CODE_BENCH = "code_bench_scorer"
     SHOPIFY_CATEGORY_F1 = "shopify_category_f1"
+    VBENCH = "vbench"
 
 
 class TestMode(str, Enum):
