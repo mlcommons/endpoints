@@ -46,7 +46,7 @@ settings:
     scheduler_random_seed: 42  # Scheduler RNG seed
     dataloader_random_seed: 42  # Dataloader RNG seed
   load_pattern:
-    type: max_throughput  # Load pattern type | options: max_throughput, poisson, concurrency, multi_turn, burst, step
+    type: max_throughput  # Load pattern type | offline only: max_throughput
     target_qps: null  # Target QPS
     target_concurrency: null  # Concurrent requests
   client:

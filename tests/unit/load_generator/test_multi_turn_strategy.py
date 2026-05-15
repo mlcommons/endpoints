@@ -648,8 +648,12 @@ async def test_timeout_publishes_error_and_complete_events():
 
     assert first_record.event_type == ErrorEventType.GENERIC
     assert first_record.sample_uuid == "q-x"
+    assert first_record.conversation_id == "conv-x"
+    assert first_record.turn == 1
     assert second_record.event_type == SampleEventType.COMPLETE
     assert second_record.sample_uuid == "q-x"
+    assert second_record.conversation_id == "conv-x"
+    assert second_record.turn == 1
 
 
 @pytest.mark.unit

@@ -96,6 +96,11 @@ class MultiTurnStrategy:
             else False
         )
 
+        # Dataset-supplied `role: tool` turns carry baked tool_call_ids that
+        # cannot reference the live model's freshly generated ids — reject them.
+        # Datasets that only declare `tools` on user turns or have `tool_calls`
+        # in scripted assistant rows are fine: live history never replays
+        # scripted assistant rows, so model-generated ids stay self-consistent.
         if self._store_in_history:
             tool_turn_keys = [
                 key
@@ -104,9 +109,9 @@ class MultiTurnStrategy:
             ]
             if tool_turn_keys:
                 raise InputValidationError(
-                    "Multi-turn with tool turns requires use_dataset_history=True. "
-                    "Live-history mode (use_dataset_history=False) with tool calls "
-                    "is not implemented yet. "
+                    "Multi-turn with tool result rows requires use_dataset_history=True. "
+                    "Live-history mode cannot replay dataset tool_call_ids against "
+                    "freshly generated model responses. "
                     f"Offending turn(s): {tool_turn_keys[:5]}"
                     + (
                         f" (+{len(tool_turn_keys) - 5} more)"
@@ -275,6 +280,8 @@ class MultiTurnStrategy:
             return
         self._timeout_handles.pop(query_id, None)
 
+        conv_id_str: str = ""
+        turn_num: int | None = None
         if (
             self._phase_issuer is not None
             and hasattr(self._phase_issuer, "uuid_to_index")
@@ -284,7 +291,9 @@ class MultiTurnStrategy:
             if hasattr(self._phase_issuer, "completed_uuids"):
                 self._phase_issuer.completed_uuids.add(query_id)  # type: ignore[attr-defined]
             if hasattr(self._phase_issuer, "uuid_to_conv_info"):
-                self._phase_issuer.uuid_to_conv_info.pop(query_id, None)  # type: ignore[attr-defined]
+                conv_id_str, turn_num = self._phase_issuer.uuid_to_conv_info.pop(  # type: ignore[attr-defined]
+                    query_id, ("", None)
+                )
 
         logger.warning(
             "Turn timed out for conversation %s (query=%s)", conv_id, query_id
@@ -314,6 +323,8 @@ class MultiTurnStrategy:
                         timestamp_ns=time.monotonic_ns(),
                         sample_uuid=query_id,
                         data=timeout_result.error,
+                        conversation_id=conv_id_str,
+                        turn=turn_num,
                     )
                 )
                 self._session_publisher.publish(
@@ -322,6 +333,8 @@ class MultiTurnStrategy:
                         timestamp_ns=time.monotonic_ns(),
                         sample_uuid=query_id,
                         data=None,
+                        conversation_id=conv_id_str,
+                        turn=turn_num,
                     )
                 )
             except Exception:

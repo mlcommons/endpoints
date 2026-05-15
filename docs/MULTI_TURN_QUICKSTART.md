@@ -81,21 +81,24 @@ After the benchmark completes, check the directory configured via `report_dir`:
 
 ### Events Log
 
-The `events.jsonl` file contains one JSON record per line, with the standard
-`sample_uuid`, `event_type`, and `timestamp_ns` fields. Events are keyed by
-`sample_uuid` only. To correlate events with conversations, join through
-`sample_idx_map.json` (written next to `events.jsonl`) and the multi-turn
-dataset's `conversation_metadata["samples"]`, which maps sample indices to
-`(conversation_id, turn)` tuples.
+Each record in `events.jsonl` carries `conversation_id` and `turn` alongside
+`sample_uuid`, so conversation-level filtering requires no join:
+
+    jq -c 'select(.conversation_id == "sim_001")' events.jsonl
+
+`sample_idx_map.json` is still written for callers that need a
+`sample_uuid → dataset sample index` mapping.
 
 ### Metrics
 
 Currently available:
 
-- **Per-turn metrics**: Latency, TTFT, TPOT for each turn
-- **Conversation tracking**: events are keyed by `sample_uuid` only; correlate any event back to a conversation by joining through `sample_idx_map.json` and `conversation_metadata["samples"]`
+- **Per-turn metrics**: Latency, TTFT, TPOT recorded per client turn.
+- **Conversation correlation**: events carry `conversation_id` and `turn`
+  directly; group / aggregate as needed in post-processing.
 
-_Note: Per-conversation aggregation (e.g., "conversations/sec") is coming in a future update._
+_Note: First-class per-conversation aggregation (e.g., "conversations/sec",
+end-to-end conversation latency) is planned but not yet implemented._
 
 ---
 
@@ -125,10 +128,11 @@ Use the bundled validation script to check your JSONL file for schema errors bef
 python scripts/validate_jsonl_schema.py path/to/your/conversations.jsonl
 ```
 
-This catches per-row schema errors (missing required fields, wrong types,
-malformed `tool_results`). Cross-row invariants (consecutive turn numbers,
-valid role sequences, grouped conversations) are enforced by
-`MultiTurnDataset` at load time and will surface at benchmark startup.
+The validator performs **row-level JSON-schema** validation. Cross-row
+invariants — consecutive `conversation_id` grouping, sequential turn
+numbering, valid role transitions (`user → assistant → tool → ...`) — are
+enforced by `MultiTurnDataset` at load time and will surface as
+`InputValidationError` when the benchmark runs.
 
 ### "Conversation has invalid role sequence"
 

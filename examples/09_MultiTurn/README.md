@@ -212,7 +212,10 @@ Multi-turn benchmarks produce per-turn metrics:
 
 **Note**: Multi-turn datasets are only supported as performance datasets. Using a multi-turn dataset as an accuracy dataset (`type: accuracy`) is not yet supported and will raise an error at startup.
 
-Results are stored in the configured `report_dir`. The `events.jsonl` log contains one record per turn keyed by `sample_uuid`. To correlate events with conversations, join through `sample_idx_map.json` and the dataset's `conversation_metadata["samples"]`.
+Results are stored in the configured `report_dir`. Each record in
+`events.jsonl` carries `conversation_id` and `turn` alongside `sample_uuid`,
+so conversation-level filtering requires no join. `sample_idx_map.json` maps
+`sample_uuid → dataset sample index` for callers that need it.
 
 ## Example Datasets
 
@@ -263,8 +266,12 @@ For agentic datasets, use the conversion script (`scripts/convert_agentic_snapsh
 produce a properly sequenced flat-row file. The valid agentic sequence is:
 
 ```
-user -> assistant (tool_calls) -> tool -> [tool | assistant (tool_calls)]* -> assistant -> user -> ...
+user -> assistant (tool_calls) -> tool -> [assistant (tool_calls) -> tool]* -> assistant -> user -> ...
 ```
+
+**Note**: Parallel tool results from a single dispatch must be **merged into
+one row** with a `tool_results` list, not represented as multiple consecutive
+`tool` rows. The validator rejects consecutive `tool` rows.
 
 ### "Turn timed out"
 
