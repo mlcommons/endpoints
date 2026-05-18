@@ -71,11 +71,7 @@ def make_response_bytes(text: str) -> bytes:
 def make_sse_bytes(text: str) -> bytes:
     """Create SSE message JSON bytes."""
     return json.dumps(
-        {
-            "choices": [
-                {"delta": {"content": text, "reasoning": ""}, "finish_reason": None}
-            ]
-        }
+        {"choices": [{"delta": {"content": text}, "finish_reason": None}]}
     ).encode()
 
 

@@ -63,7 +63,7 @@ Describe space exploration (case 3) in detail
 uv run inference-endpoint benchmark offline \
   --endpoints http://localhost:8765 \
   --model Qwen/Qwen3-8B \
-  --dataset tests/datasets/dummy_1k.jsonl
+  --dataset tests/assets/datasets/dummy_1k.jsonl
 
 # Test probe
 uv run inference-endpoint probe \

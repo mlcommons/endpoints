@@ -18,14 +18,52 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
+import msgspec
 from transformers import AutoTokenizer
+
+# Minimal user message used to satisfy chat templates that reject assistant-only
+# message lists. Its token count is subtracted so only the assistant payload is
+# measured.
+_PREFIX_USER_MSG: dict[str, str] = {"role": "user", "content": ""}
+
+
+def _normalize_tool_calls_for_template(
+    tool_calls: tuple[dict[str, Any], ...] | list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Ensure ``function.arguments`` is a dict, not the OpenAI-wire JSON string.
+
+    Hermes-style chat templates iterate ``arguments`` as a mapping; a string
+    payload raises and forces the fallback path, inflating token counts.
+    """
+    normalized: list[dict[str, Any]] = []
+    for tc in tool_calls:
+        fn = tc.get("function") or {}
+        args = fn.get("arguments")
+        if isinstance(args, str):
+            try:
+                parsed = json.loads(args)
+            except (json.JSONDecodeError, TypeError):
+                normalized.append(tc)
+                continue
+            if isinstance(parsed, dict):
+                new_tc = dict(tc)
+                new_tc["function"] = {**fn, "arguments": parsed}
+                normalized.append(new_tc)
+                continue
+        normalized.append(tc)
+    return normalized
+
 
 if TYPE_CHECKING:
     from transformers import PreTrainedTokenizerBase
+
+logger = logging.getLogger(__name__)
 
 
 class TokenizePool:
@@ -52,6 +90,7 @@ class TokenizePool:
         self._tokenizer_name = tokenizer_name
         self._n_workers = n_workers
         self._thread_local = threading.local()
+        self._fallback_warned: set[str] = set()
         self._executor: ThreadPoolExecutor | None = ThreadPoolExecutor(
             max_workers=n_workers,
             thread_name_prefix="TokenizePool",
@@ -79,6 +118,35 @@ class TokenizePool:
             self._thread_local.tokenizer = AutoTokenizer.from_pretrained(
                 self._tokenizer_name
             )
+            # Baseline = tokens contributed by a [user, empty-assistant] pair minus
+            # the [user] prefix alone. Some templates (Qwen3-Coder, etc.) reject
+            # assistant-only message lists, so a user prefix is required; we
+            # subtract it out so the baseline reflects only the assistant frame.
+            try:
+                tok = self._thread_local.tokenizer
+                prefix_rendered = tok.apply_chat_template(
+                    [_PREFIX_USER_MSG],
+                    tokenize=False,
+                    add_generation_prompt=False,
+                )
+                prefix_len = len(tok.tokenize(prefix_rendered))
+                with_empty_assistant_rendered = tok.apply_chat_template(
+                    [_PREFIX_USER_MSG, {"role": "assistant", "content": ""}],
+                    tokenize=False,
+                    add_generation_prompt=False,
+                )
+                with_empty_assistant_len = len(
+                    tok.tokenize(with_empty_assistant_rendered)
+                )
+                self._thread_local.prefix_len = prefix_len
+                self._thread_local.baseline = with_empty_assistant_len - prefix_len
+            except Exception:
+                self._thread_local.prefix_len = 0
+                self._thread_local.baseline = 0
+                logger.exception(
+                    "Failed to compute chat-template baseline for %s; tool-call token counts may be over-estimated",
+                    self._tokenizer_name,
+                )
         return self._thread_local.tokenizer
 
     def _token_count_worker(self, text: str) -> int:
@@ -86,11 +154,72 @@ class TokenizePool:
         tokenizer = self._get_thread_tokenizer()
         return len(tokenizer.tokenize(text))
 
+    def _token_count_message_worker(
+        self,
+        content: str,
+        reasoning: str | None,
+        tool_calls: tuple[dict[str, Any], ...] | None,
+    ) -> int:
+        """Worker entry: tokenize a full assistant message using apply_chat_template.
+
+        Falls back to whitespace-split tokenization if apply_chat_template raises
+        (e.g. the template does not support tool_calls or reasoning fields).
+        """
+        tokenizer = self._get_thread_tokenizer()
+        msg: dict[str, Any] = {"role": "assistant", "content": content or ""}
+        if reasoning:
+            msg["reasoning_content"] = reasoning
+        if tool_calls:
+            msg["tool_calls"] = _normalize_tool_calls_for_template(tool_calls)
+        try:
+            rendered = tokenizer.apply_chat_template(
+                [_PREFIX_USER_MSG, msg],
+                tokenize=False,
+                add_generation_prompt=False,
+            )
+            full = len(tokenizer.tokenize(rendered))
+            prefix_len = getattr(self._thread_local, "prefix_len", 0)
+            baseline = getattr(self._thread_local, "baseline", 0)
+            return max(0, full - prefix_len - baseline)
+        except Exception as exc:
+            key = f"{self._tokenizer_name}:{type(exc).__name__}"
+            if key not in self._fallback_warned:
+                self._fallback_warned.add(key)
+                logger.exception(
+                    "apply_chat_template failed for %s (%s); falling back to "
+                    "whitespace tokenization. Tool-call OSL/TPOT may diverge "
+                    "from server-side counts for this run.",
+                    self._tokenizer_name,
+                    type(exc).__name__,
+                )
+            tool_calls_json = (
+                msgspec.json.encode(list(tool_calls)).decode() if tool_calls else None
+            )
+            parts = [
+                p for p in (content or None, reasoning or None, tool_calls_json) if p
+            ]
+            fallback_text = "\n".join(parts)
+            return self._token_count_worker(fallback_text)
+
     def token_count(self, text: str) -> int:
         """Return the number of tokens in the input string (blocking)."""
         if self._executor is None:
             raise RuntimeError("TokenizePool is closed")
         future = self._executor.submit(self._token_count_worker, text)
+        return future.result()
+
+    def token_count_message(
+        self,
+        content: str,
+        reasoning: str | None,
+        tool_calls: tuple[dict[str, Any], ...] | None,
+    ) -> int:
+        """Return the token count for an assistant message (blocking)."""
+        if self._executor is None:
+            raise RuntimeError("TokenizePool is closed")
+        future = self._executor.submit(
+            self._token_count_message_worker, content, reasoning, tool_calls
+        )
         return future.result()
 
     async def token_count_async(
@@ -105,6 +234,24 @@ class TokenizePool:
             raise RuntimeError("TokenizePool is closed")
         return await loop.run_in_executor(
             self._executor, self._token_count_worker, text
+        )
+
+    async def token_count_message_async(
+        self,
+        content: str,
+        reasoning: str | None,
+        tool_calls: tuple[dict[str, Any], ...] | None,
+        loop: asyncio.AbstractEventLoop,
+    ) -> int:
+        """Return the token count for an assistant message without blocking the event loop."""
+        if self._executor is None:
+            raise RuntimeError("TokenizePool is closed")
+        return await loop.run_in_executor(
+            self._executor,
+            self._token_count_message_worker,
+            content,
+            reasoning,
+            tool_calls,
         )
 
     def close(self) -> None:

@@ -66,6 +66,8 @@ class TestEventRecordConstruction:
         after = time.monotonic_ns()
         assert before <= record.timestamp_ns <= after
         assert record.sample_uuid == ""
+        assert record.conversation_id == ""
+        assert record.turn is None
         assert record.data is None
 
 
@@ -192,6 +194,8 @@ class TestEventRecordRoundTrip:
         decoded = _codec.decode(payload)
         assert decoded.event_type.topic == SessionEventType.ENDED.topic
         assert decoded.sample_uuid == ""
+        assert decoded.conversation_id == ""
+        assert decoded.turn is None
         assert decoded.data is None
         assert decoded.timestamp_ns > 0
 
@@ -204,6 +208,20 @@ class TestEventRecordRoundTrip:
         _, payload = _codec.encode(record)
         decoded = _codec.decode(payload)
         assert decoded.timestamp_ns == ts
+
+    def test_conversation_id_and_turn_round_trip(self):
+        record = EventRecord(
+            event_type=SampleEventType.ISSUED,
+            sample_uuid="q-mt",
+            conversation_id="conv-7",
+            turn=4,
+            data=PromptData(text="hi"),
+        )
+        _, payload = _codec.encode(record)
+        decoded = _codec.decode(payload)
+        assert decoded.conversation_id == "conv-7"
+        assert decoded.turn == 4
+        assert decoded.sample_uuid == "q-mt"
 
 
 class TestEventRecordCodecOnDecodeError:

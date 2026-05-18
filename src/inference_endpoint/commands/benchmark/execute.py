@@ -26,20 +26,22 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import platform
 import shutil
 import signal
 import tempfile
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin
 
+import msgspec
 import msgspec.json
 from huggingface_hub import model_info
 from tqdm import tqdm
+from transformers import AutoTokenizer
 from transformers.utils import logging as transformers_logging
 
 from inference_endpoint.async_utils.event_publisher import EventPublisherService
@@ -48,14 +50,14 @@ from inference_endpoint.async_utils.services.launcher import (
     ServiceConfig,
     ServiceLauncher,
 )
-from inference_endpoint.async_utils.services.metrics_aggregator.aggregator import (
-    MetricCounterKey,
+from inference_endpoint.async_utils.services.metrics_aggregator.snapshot import (
+    snapshot_to_dict,
 )
-from inference_endpoint.async_utils.services.metrics_aggregator.kv_store import (
-    BasicKVStoreReader,
+from inference_endpoint.async_utils.services.metrics_aggregator.subscriber import (
+    MetricsSnapshotSubscriber,
 )
-from inference_endpoint.async_utils.services.metrics_aggregator.metrics_table import (
-    MetricSeriesKey,
+from inference_endpoint.async_utils.services.metrics_aggregator.token_metrics import (
+    _normalize_tool_calls_for_template,
 )
 from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
 from inference_endpoint.config.runtime_settings import RuntimeSettings
@@ -72,6 +74,7 @@ from inference_endpoint.config.schema import (
 from inference_endpoint.core.types import QueryResult
 from inference_endpoint.dataset_manager.dataset import Dataset
 from inference_endpoint.dataset_manager.factory import DataLoaderFactory
+from inference_endpoint.dataset_manager.multi_turn_dataset import MultiTurnDataset
 from inference_endpoint.endpoint_client.cpu_affinity import AffinityPlan, pin_loadgen
 from inference_endpoint.endpoint_client.http_client import HTTPEndpointClient
 from inference_endpoint.endpoint_client.http_sample_issuer import HttpClientSampleIssuer
@@ -82,6 +85,8 @@ from inference_endpoint.exceptions import (
     InputValidationError,
     SetupError,
 )
+from inference_endpoint.load_generator.conversation_manager import ConversationManager
+from inference_endpoint.load_generator.multi_turn_strategy import MultiTurnStrategy
 from inference_endpoint.load_generator.session import (
     BenchmarkSession,
     PhaseConfig,
@@ -133,7 +138,6 @@ class BenchmarkResult:
     collector: ResponseCollector
     report: Report | None
     tmpfs_dir: Path
-    metrics_dir: Path | None = None
 
 
 @dataclass
@@ -295,6 +299,75 @@ def _load_datasets(
     return dataloader, accuracy_datasets, eval_configs
 
 
+def _precompute_isl_for_multi_turn(
+    dataloader: MultiTurnDataset, tokenizer_name: str
+) -> None:
+    """Tokenize pre-built message lists and store token counts in each sample.
+
+    Runs apply_chat_template once per client turn so the hot-path IslTrigger
+    sync path (len(token_ids)) is used instead of on-the-fly text tokenization.
+    Only affects dataset-history turns; live-history turns override 'messages'
+    at runtime so the stored input_tokens are stale (acceptable approximation).
+    """
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+    except Exception:
+        logger.exception(
+            "ISL pre-computation: failed to load tokenizer %s; "
+            "falling back to text-tokenization at runtime",
+            tokenizer_name,
+        )
+        return
+    skipped = 0
+    first_failure_logged = False
+    for sample in dataloader.data or []:
+        messages = sample.get("messages")
+        if not messages:
+            continue
+        try:
+            normalized_messages = []
+            for msg in messages:
+                if msg.get("tool_calls"):
+                    msg = {
+                        **msg,
+                        "tool_calls": _normalize_tool_calls_for_template(
+                            msg["tool_calls"]
+                        ),
+                    }
+                normalized_messages.append(msg)
+            tools = sample.get("tools")
+            raw = tokenizer.apply_chat_template(
+                normalized_messages,
+                tools=tools if tools else None,
+                tokenize=True,
+                add_generation_prompt=True,
+            )
+            # Some tokenizers (e.g. Qwen3 fast tokenizer) return BatchEncoding
+            # instead of a plain list; extract .input_ids in that case.
+            token_ids: list[int] = raw.input_ids if hasattr(raw, "input_ids") else raw
+            sample["input_tokens"] = token_ids
+        except Exception:
+            if not first_failure_logged:
+                logger.exception(
+                    "ISL pre-computation: apply_chat_template failed (first failure shown)"
+                )
+                first_failure_logged = True
+            skipped += 1
+    if skipped:
+        logger.warning(
+            "ISL pre-computation: %d turn(s) skipped (apply_chat_template failed)",
+            skipped,
+        )
+    total_with_messages = len([s for s in (dataloader.data or []) if s.get("messages")])
+    if total_with_messages > 0 and skipped == total_with_messages:
+        logger.warning(
+            "ISL precomputation: all %d turn(s) failed apply_chat_template; "
+            "ISL metrics will use text-tokenization fallback. "
+            "Check tokenizer/template compatibility.",
+            total_with_messages,
+        )
+
+
 def setup_benchmark(config: BenchmarkConfig, test_mode: TestMode) -> BenchmarkContext:
     """Load tokenizer, dataset, create scheduler, setup report dir."""
     # CPU affinity
@@ -323,6 +396,10 @@ def setup_benchmark(config: BenchmarkConfig, test_mode: TestMode) -> BenchmarkCo
 
     # Datasets
     dataloader, accuracy_datasets, eval_configs = _load_datasets(config, report_dir)
+
+    if isinstance(dataloader, MultiTurnDataset) and tokenizer_name is not None:
+        logger.info("Pre-computing ISL token counts for multi-turn dataset…")
+        _precompute_isl_for_multi_turn(dataloader, tokenizer_name)
 
     # Setup runtime settings using factory method
     rt_settings = RuntimeSettings.from_config(config, dataloader.num_samples())
@@ -354,14 +431,21 @@ def setup_benchmark(config: BenchmarkConfig, test_mode: TestMode) -> BenchmarkCo
     )
 
 
-def _build_phases(ctx: BenchmarkContext) -> list[PhaseConfig]:
+def _build_phases(
+    ctx: BenchmarkContext,
+    perf_strategy: MultiTurnStrategy | None = None,
+) -> list[PhaseConfig]:
     """Build the phase list from BenchmarkContext."""
     phases: list[PhaseConfig] = []
 
     # Performance phase
     phases.append(
         PhaseConfig(
-            "performance", ctx.rt_settings, ctx.dataloader, PhaseType.PERFORMANCE
+            "performance",
+            ctx.rt_settings,
+            ctx.dataloader,
+            PhaseType.PERFORMANCE,
+            strategy=perf_strategy,
         )
     )
 
@@ -369,6 +453,17 @@ def _build_phases(ctx: BenchmarkContext) -> list[PhaseConfig]:
     # what Scorer._load_sample_index_map() looks up in sample_idx_map.json
     for eval_cfg in ctx.eval_configs:
         acc_ds = eval_cfg.dataset
+        if isinstance(acc_ds, MultiTurnDataset):
+            raise InputValidationError(
+                f"Accuracy dataset '{eval_cfg.dataset_name}' is a MultiTurnDataset, "
+                "which is not yet supported for accuracy evaluation."
+            )
+        # Accuracy phases run at MAX_THROUGHPUT; inheriting perf_lp (e.g. POISSON)
+        # would silently rate-limit evaluation until a multi-turn accuracy strategy
+        # and QPS-budgeting support are added.
+        acc_load_pattern: LoadPattern | None = LoadPattern(
+            type=LoadPatternType.MAX_THROUGHPUT
+        )
         acc_settings = RuntimeSettings(
             metric_target=ctx.rt_settings.metric_target,
             reported_metrics=ctx.rt_settings.reported_metrics,
@@ -379,7 +474,7 @@ def _build_phases(ctx: BenchmarkContext) -> list[PhaseConfig]:
             min_sample_count=acc_ds.num_samples() * acc_ds.repeats,
             rng_sched=ctx.rt_settings.rng_sched,
             rng_sample_index=ctx.rt_settings.rng_sample_index,
-            load_pattern=LoadPattern(type=LoadPatternType.MAX_THROUGHPUT),
+            load_pattern=acc_load_pattern,
         )
         phases.append(
             PhaseConfig(eval_cfg.dataset_name, acc_settings, acc_ds, PhaseType.ACCURACY)
@@ -388,26 +483,25 @@ def _build_phases(ctx: BenchmarkContext) -> list[PhaseConfig]:
     return phases
 
 
-def _setup_kv_reader(
-    metrics_dir: Path,
-    streaming: bool,
-) -> BasicKVStoreReader:
-    """Create a KVStoreReader pre-registered with all metric keys."""
-    reader = BasicKVStoreReader(metrics_dir)
-    for counter_key in MetricCounterKey:
-        reader.register_key(counter_key.value, "counter")
-    _STREAMING_ONLY = {
-        MetricSeriesKey.TTFT_NS,
-        MetricSeriesKey.CHUNK_DELTA_NS,
-        MetricSeriesKey.TPOT_NS,
-    }
-    _FLOAT_SERIES = {MetricSeriesKey.TPOT_NS}
-    for series_key in MetricSeriesKey:
-        if series_key in _STREAMING_ONLY and not streaming:
-            continue
-        dtype = float if series_key in _FLOAT_SERIES else int
-        reader.register_key(series_key.value, "series", dtype=dtype)
-    return reader
+def _load_final_snapshot_from_disk(path: Path) -> dict[str, Any] | None:
+    """Read the persisted ``final_snapshot.json`` written by the aggregator.
+
+    Returns the snapshot in its dict form — the same shape produced by
+    ``snapshot_to_dict`` and consumed by ``Report.from_snapshot``. No
+    intermediate Struct decode (see ``Report.from_snapshot`` docstring
+    for why the dict shape is the consumer contract).
+
+    Returns ``None`` if the file is missing (the aggregator was killed
+    by an uncatchable signal — SIGKILL, OOM-kill — before its handler
+    could write) or unreadable.
+    """
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_bytes())
+    except Exception as e:  # noqa: BLE001 — best-effort.
+        logger.warning("Failed to read final snapshot %s: %s", path, e)
+        return None
 
 
 async def _run_benchmark_async(
@@ -432,44 +526,50 @@ async def _run_benchmark_async(
         publisher = EventPublisherService(zmq_ctx)
         pub_socket_name = publisher.socket_name
 
-        # Tmpfs for high-frequency writes (metrics mmap + event log).
-        # On ARM, metrics need an on-disk directory so msync provides
-        # write ordering for cross-process mmap reads. Event logs are
-        # append-only and don't have ordering requirements, so they
-        # can stay on tmpfs.
+        # Tmpfs for high-frequency writes (event log).
         shm = Path("/dev/shm")
         use_shm = shm.exists()
         tmpfs_base = shm if use_shm else Path(tempfile.gettempdir())
         tmpfs_dir = tmpfs_base / f"benchmark_{session_id}"
         tmpfs_dir.mkdir(parents=True, exist_ok=True)
 
-        # On ARM, mmap write ordering requires msync on a real filesystem.
-        # msync is a no-op on tmpfs, so metrics must use an on-disk directory.
-        if use_shm and platform.machine() != "x86_64":
-            logger.info(
-                "ARM platform: using on-disk metrics directory for mmap ordering"
-            )
-            metrics_dir = Path(
-                tempfile.mkdtemp(prefix=f"metrics_{session_id}_", dir=".")
-            )
-        else:
-            metrics_dir = tmpfs_dir / "metrics"
-            metrics_dir.mkdir(parents=True, exist_ok=True)
-
         event_log_dir = tmpfs_dir / "events"
         event_log_dir.mkdir(parents=True, exist_ok=True)
 
-        # Launch service subprocesses
-        launcher = ServiceLauncher(zmq_ctx)
+        # Metrics-snapshot output (disk fallback for the final snapshot).
+        # Lives under the report dir so it's preserved with the rest of
+        # the run artifacts.
+        metrics_output_dir = ctx.report_dir / "metrics"
+        metrics_output_dir.mkdir(parents=True, exist_ok=True)
+
+        metrics_socket_name = f"metrics_pub_{uuid.uuid4().hex[:8]}"
+
+        # Connect the metrics-snapshot subscriber BEFORE launching the
+        # aggregator subprocess that binds the matching PUB socket. ZMQ
+        # tolerates connect-before-bind on IPC (the connect resolves once
+        # the binder appears), and starting the SUB reader early gives
+        # the subscription handshake time to complete during the
+        # ~1-2 second subprocess-launch window. This eliminates the
+        # slow-joiner risk of dropping early live ticks (or the worst
+        # case: missing COMPLETE if the SUB handshake never warms up).
         if zmq_ctx.socket_dir is None:
             raise RuntimeError("ZMQ socket_dir must be set after publisher bind")
+        metrics_subscriber = MetricsSnapshotSubscriber(
+            metrics_socket_name, zmq_ctx, loop
+        )
+        metrics_subscriber.start()
+
+        # Launch service subprocesses
+        launcher = ServiceLauncher(zmq_ctx)
         aggregator_args: list[str] = [
             "--socket-dir",
             zmq_ctx.socket_dir,
             "--socket-name",
             pub_socket_name,
-            "--metrics-dir",
-            str(metrics_dir),
+            "--metrics-socket",
+            metrics_socket_name,
+            "--metrics-output-dir",
+            str(metrics_output_dir),
         ]
         if ctx.enable_streaming:
             aggregator_args.append("--streaming")
@@ -524,16 +624,63 @@ async def _run_benchmark_async(
             launcher.kill_all()
             raise SetupError(f"Failed to connect to endpoint: {e}") from e
 
+        # Build multi-turn strategy if the performance dataset is a MultiTurnDataset.
+        multi_turn_strategy: MultiTurnStrategy | None = None
+        if isinstance(ctx.dataloader, MultiTurnDataset):
+            mt_cfg = None
+            if ctx.config.datasets:
+                perf_ds_cfg = next(
+                    (
+                        d
+                        for d in ctx.config.datasets
+                        if d.type == DatasetType.PERFORMANCE
+                    ),
+                    None,
+                )
+                if perf_ds_cfg is not None:
+                    mt_cfg = perf_ds_cfg.multi_turn
+            assert ctx.dataloader.conversation_metadata is not None
+            multi_turn_strategy = MultiTurnStrategy(
+                conversation_manager=ConversationManager(),
+                dataset_metadata=ctx.dataloader.conversation_metadata,
+                multi_turn_config=mt_cfg,
+                target_concurrency=ctx.config.settings.load_pattern.target_concurrency,
+            )
+
+        _on_sample_complete: Callable[[QueryResult], None]
+        if multi_turn_strategy is not None:
+
+            def _on_sample_complete(result: QueryResult) -> None:
+                try:
+                    multi_turn_strategy.on_sample_complete(result)
+                except Exception:
+                    logger.exception(
+                        "multi_turn_strategy.on_sample_complete failed (result=%s)",
+                        result.id,
+                    )
+                try:
+                    collector.on_complete_hook(result)
+                except Exception:
+                    logger.exception(
+                        "collector.on_complete_hook failed (result=%s)", result.id
+                    )
+
+            multi_turn_strategy._session_on_sample_complete = _on_sample_complete
+            multi_turn_strategy._session_publisher = publisher
+
+        else:
+            _on_sample_complete = collector.on_complete_hook
+
         # Create session
         session = BenchmarkSession(
             issuer=issuer,
             event_publisher=publisher,
             loop=loop,
-            on_sample_complete=collector.on_complete_hook,
+            on_sample_complete=_on_sample_complete,
             session_id=session_id,
         )
 
-        phases = _build_phases(ctx)
+        phases = _build_phases(ctx, perf_strategy=multi_turn_strategy)
         report: Report | None = None
 
         loop.add_signal_handler(signal.SIGINT, session.stop)
@@ -558,25 +705,48 @@ async def _run_benchmark_async(
             logger.info("Waiting for services to finish processing...")
             await asyncio.to_thread(launcher.wait_for_exit, None)
 
-            # Build report AFTER aggregator has exited — ensures all metrics
-            # (TTFT, TPOT, OSL, latency) are fully written to KVStore.
-            try:
-                kv_reader = _setup_kv_reader(metrics_dir, ctx.enable_streaming)
-                report = Report.from_kv_reader(kv_reader)
-                kv_reader.close()
-            except Exception as e:
-                logger.warning(f"Failed to build report from metrics: {e}")
+            # Source the snapshot dict for Report:
+            # 1. Preferred: the JSON file the aggregator atomically wrote
+            #    in publish_final (ENDED-driven or signal-handler-driven).
+            # 2. Fallback: convert the last live snapshot from pub/sub to
+            #    its dict form. Only reached when the aggregator was killed
+            #    by an uncatchable signal (SIGKILL / OOM) before its
+            #    handler could write. Report will be marked incomplete
+            #    because state will be LIVE / DRAINING, not "complete".
+            snap_dict: dict[str, Any] | None = _load_final_snapshot_from_disk(
+                metrics_output_dir / "final_snapshot.json"
+            )
+            if snap_dict is not None:
+                logger.info("Built report from final_snapshot.json")
+            elif metrics_subscriber.latest is not None:
+                snap_dict = snapshot_to_dict(metrics_subscriber.latest)
+                logger.warning(
+                    "No final_snapshot.json on disk; falling back to last "
+                    "pub/sub snapshot (state may or may not be terminal)"
+                )
+            else:
+                logger.error("No metrics snapshot available; cannot build report")
 
+            if snap_dict is not None:
+                try:
+                    report = Report.from_snapshot(snap_dict)
+                    if not report.complete:
+                        logger.warning(
+                            "Report is incomplete (state=%s, n_pending_tasks=%d)",
+                            report.state,
+                            snap_dict.get("n_pending_tasks", 0),
+                        )
+                except Exception as e:  # noqa: BLE001 — best-effort report build.
+                    logger.warning(f"Failed to build report from snapshot: {e}")
+
+            metrics_subscriber.close()
             pbar.close()
 
-    # Track metrics_dir separately if it's not under tmpfs_dir (ARM on-disk case)
-    separate_metrics = metrics_dir if metrics_dir.parent != tmpfs_dir else None
     return BenchmarkResult(
         session=result,
         collector=collector,
         report=report,
         tmpfs_dir=tmpfs_dir,
-        metrics_dir=separate_metrics,
     )
 
 
@@ -628,16 +798,6 @@ def _salvage_tmpfs(report_dir: Path, tmpfs_dir: Path) -> None:
         shutil.copy2(src_events, dst_events)
         logger.debug(f"Copied {src_events} -> {dst_events}")
 
-    # metrics mmap files (from MetricsAggregator KVStore)
-    src_metrics = tmpfs_dir / "metrics"
-    if src_metrics.exists():
-        dst_metrics = report_dir / "metrics"
-        dst_metrics.mkdir(parents=True, exist_ok=True)
-        for f in src_metrics.iterdir():
-            if f.is_file():
-                shutil.copy2(f, dst_metrics / f.name)
-        logger.debug(f"Copied metrics from {src_metrics} -> {dst_metrics}")
-
 
 def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
     """Score accuracy, aggregate results, write JSON."""
@@ -646,7 +806,7 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
     collector = bench.collector
     report = bench.report
 
-    # Display report if available (from MetricsAggregator KVStore)
+    # Display report if available (from MetricsAggregator pub/sub snapshot)
     if report is not None:
         report.display(fn=lambda s: logger.info(s), summary_only=True)
         report.to_json(save_to=ctx.report_dir / "result_summary.json")
@@ -682,7 +842,7 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
         }
         logger.info(f"Score for {eval_cfg.dataset_name}: {score} ({n_repeats} repeats)")
 
-    # Report metrics: prefer Report from KVStore, fall back to SessionResult
+    # Report metrics: prefer Report from MetricsSnapshot, fall back to SessionResult
     if report is not None and report.duration_ns is not None:
         perf_elapsed = report.duration_ns / 1e9
         total_issued = report.n_samples_issued
@@ -761,6 +921,4 @@ def run_benchmark(config: BenchmarkConfig, test_mode: TestMode) -> None:
             if bench.tmpfs_dir.exists():
                 _salvage_tmpfs(ctx.report_dir, bench.tmpfs_dir)
                 shutil.rmtree(bench.tmpfs_dir, ignore_errors=True)
-            if bench.metrics_dir and bench.metrics_dir.exists():
-                shutil.rmtree(bench.metrics_dir, ignore_errors=True)
             logger.info(f"Partial results saved to {ctx.report_dir}")

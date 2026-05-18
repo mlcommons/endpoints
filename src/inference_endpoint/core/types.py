@@ -90,23 +90,33 @@ class TextModelOutput(
 ):  # type: ignore[call-arg]
     """Structured output from a text model.
 
-    Supports main output and optional reasoning (e.g. chain-of-thought).
+    Supports main output, optional reasoning (e.g. chain-of-thought), and tool calls.
     Each field may be a string (non-streaming) or tuple of strings (streaming chunks).
+
+    AT-RISK (gc=False): Has mutable container field `tool_calls`. Any change that
+    mutates `tool_calls` after construction or stores cyclic references in it
+    must be audited; if so, remove gc=False.
 
     Attributes:
         output: Main model output. Defaults to empty string.
         reasoning: Optional reasoning trace. Defaults to None.
+        tool_calls: Optional structured tool calls. Defaults to None.
+                    Placed after reasoning so wire-format with array_like=True is
+                    backward compatible (missing trailing elements decode as default).
     """
 
     output: OUTPUT_ELEM_TYPE = ""
     reasoning: OUTPUT_ELEM_TYPE | None = None
+    tool_calls: tuple[dict[str, Any], ...] | None = None
 
     def __post_init__(self):
-        """Convert list to tuple for output and reasoning to preserve immutability."""
+        """Convert list to tuple for output, reasoning, and tool_calls to preserve immutability."""
         if isinstance(self.output, list):
             msgspec.structs.force_setattr(self, "output", tuple(self.output))
         if self.reasoning is not None and isinstance(self.reasoning, list):
             msgspec.structs.force_setattr(self, "reasoning", tuple(self.reasoning))
+        if self.tool_calls is not None and isinstance(self.tool_calls, list):
+            msgspec.structs.force_setattr(self, "tool_calls", tuple(self.tool_calls))
 
     def __str__(self) -> str:
         """Return the full output as a single string (joins tuple chunks if streaming)."""
@@ -123,6 +133,9 @@ class TextModelOutput(
             elif isinstance(self.output, tuple):
                 parts.extend(self.output)
 
+        if self.tool_calls:
+            parts.append(msgspec.json.encode(list(self.tool_calls)).decode())
+
         # NOTE: Not sure how output is formatted - there *might* need to be a space or separator between
         # reasoning and output depending on the accumulator / API.
         return "".join(parts)
@@ -136,6 +149,10 @@ class TextModelOutput(
 
         For non-streaming (str fields), there is no "first chunk" concept so
         this returns an empty string.
+
+        Tool calls are always included when present — they are accumulated across
+        multiple deltas and only realized at stream end, so they always contribute
+        to the TPOT denominator.
         """
         parts: list[str] = []
         if self.reasoning:
@@ -155,7 +172,56 @@ class TextModelOutput(
                 elif len(self.output) > 1:
                     # No reasoning; first chunk is output[0], skip it.
                     parts.extend(self.output[1:])
+        if self.tool_calls:
+            parts.append(msgspec.json.encode(list(self.tool_calls)).decode())
         return "".join(parts)
+
+    def as_message_parts(
+        self,
+    ) -> tuple[str, str | None, tuple[dict[str, Any], ...] | None]:
+        """Return (content, reasoning, tool_calls) for chat-template tokenization."""
+        if isinstance(self.output, str):
+            content = self.output
+        else:
+            content = "".join(self.output)
+
+        reasoning_str: str | None = None
+        if self.reasoning:
+            if isinstance(self.reasoning, str):
+                reasoning_str = self.reasoning
+            else:
+                reasoning_str = "".join(self.reasoning)
+
+        return content, reasoning_str, self.tool_calls
+
+    def as_message_parts_after_first_chunk(
+        self,
+    ) -> tuple[str, str | None, tuple[dict[str, Any], ...] | None]:
+        """Return (content_after_first, reasoning_after_first, tool_calls) for TPOT tokenization."""
+        reasoning_after: str | None = None
+        if isinstance(self.reasoning, tuple) and len(self.reasoning) > 1:
+            reasoning_after = "".join(self.reasoning[1:])
+
+        # has_reasoning_tail: reasoning[1:] is non-empty (mirrors `parts` logic in text_after_first_chunk)
+        has_reasoning_tail = reasoning_after is not None
+
+        content_after = ""
+        if self.output:
+            if isinstance(self.output, str):
+                # Include if reasoning is any non-empty tuple (it was the first chunk)
+                if has_reasoning_tail or (
+                    self.reasoning and isinstance(self.reasoning, tuple)
+                ):
+                    content_after = self.output
+            elif isinstance(self.output, tuple):
+                if has_reasoning_tail or self.reasoning:
+                    # First chunk was in reasoning; include all output chunks.
+                    content_after = "".join(self.output)
+                elif len(self.output) > 1:
+                    # No reasoning; first chunk is output[0], skip it.
+                    content_after = "".join(self.output[1:])
+
+        return content_after, reasoning_after, self.tool_calls
 
 
 OUTPUT_TYPE = TextModelOutput
@@ -245,7 +311,7 @@ class Query(
         gc=False: Safe because data/headers are simple key-value pairs without cycles.
         Do NOT store self-referential or cyclic structures in data/headers fields.
 
-        array_like=True: Encodes as array instead of object (e.g., ["id", {...}, {...}, 0.0]
+        array_like=True: Encodes as array instead of object (e.g., ["id", {...}, 0.0]
         instead of {"id": ..., "data": ..., ...}). Provides ~6-50% size reduction and
         ~6-29% ser/des speedup for ZMQ transport depending on payload size.
 

@@ -36,16 +36,25 @@ ChatMessageContent = str | list[dict[str, Any]]
 
 # NOTE(vir): msgspec usage
 # omit_defaults=True: Fields with static defaults are omitted if value equals default (ie those not using default_factory)
-# gc=False: Safe for request/response structs with scalar and nested struct fields only.
+# gc=False: audit 2026-05: all container fields are populated at construction and never mutated.
 # frozen=True: Makes structs immutable and hashable, also enables faster struct decoding
 #              (direct attribute access via fixed memory offset vs hash table lookup)
 
 
+# gc=False: audit 2026-05: tool_calls is set at construction; frozen=True blocks field reassignment.
 class SSEDelta(msgspec.Struct, frozen=True, kw_only=True, omit_defaults=True, gc=False):  # type: ignore[call-arg]
-    """SSE delta object containing content."""
+    """SSE delta object containing content.
 
-    content: str = ""
-    reasoning: str = ""
+    AT-RISK (gc=False): Has mutable container field `tool_calls`. Any change that
+    mutates `tool_calls` after construction or stores cyclic references in it
+    must be audited; if so, remove gc=False.
+    """
+
+    role: str | None = None
+    content: str | None = None
+    reasoning_content: str | None = None  # SGLang / DeepSeek field name
+    reasoning: str | None = None  # vLLM field name
+    tool_calls: list[dict[str, Any]] | None = None
 
 
 class SSEChoice(
@@ -70,23 +79,39 @@ class SSEMessage(
 # ============================================================================
 
 
+# gc=False: audit 2026-05: content/tool_calls set at construction; frozen=True blocks field reassignment.
 class ChatMessage(
     msgspec.Struct, frozen=True, kw_only=True, omit_defaults=True, gc=False
 ):  # type: ignore[call-arg]
     """Chat message in OpenAI format.
 
-    content: str for text-only messages; list[dict] for multimodal (vision).
+    AT-RISK (gc=False): Has mutable container fields `content` (list[dict] for multimodal)
+    and `tool_calls`. Any change that mutates these after construction or stores cyclic
+    references in them must be audited; if so, remove gc=False.
+
+    content: str for text-only messages; list[dict] for multimodal (vision);
+             None for tool-dispatching assistant messages.
+    tool_calls: list of tool call objects for assistant messages that invoke tools.
+    tool_call_id: correlates a tool result message to its tool call.
     """
 
     role: str
-    content: ChatMessageContent
+    content: ChatMessageContent | None = None
     name: str | None = None
+    tool_calls: list[dict[str, Any]] | None = None
+    tool_call_id: str | None = None
 
 
+# gc=False: audit 2026-05: messages/tools set at construction; frozen=True blocks field reassignment.
 class ChatCompletionRequest(
     msgspec.Struct, frozen=True, kw_only=True, omit_defaults=True, gc=False
 ):  # type: ignore[call-arg]
-    """OpenAI chat completion request."""
+    """OpenAI chat completion request.
+
+    AT-RISK (gc=False): Has mutable container fields `messages`, `tools`, and `logit_bias`.
+    Any change that mutates these after construction or stores cyclic references in them
+    must be audited; if so, remove gc=False.
+    """
 
     model: str
     messages: list[ChatMessage]
@@ -103,8 +128,10 @@ class ChatCompletionRequest(
     logit_bias: dict[str, float] | None = None
     user: str | None = None
     chat_template: str | None = None
+    tools: list[dict[str, Any]] | None = None
 
 
+# gc=False: audit 2026-05: tool_calls set at construction; frozen=True blocks field reassignment.
 class ChatCompletionResponseMessage(
     msgspec.Struct, frozen=True, kw_only=True, omit_defaults=True, gc=False
 ):  # type: ignore[call-arg]
@@ -118,6 +145,8 @@ class ChatCompletionResponseMessage(
     role: str
     content: str | None = None
     refusal: str | None = None
+    tool_calls: list[dict[str, Any]] | None = None
+    reasoning_content: str | None = None
 
 
 class ChatCompletionChoice(
@@ -144,6 +173,7 @@ class CompletionUsage(
     total_tokens: int
 
 
+# gc=False: audit 2026-05: choices set at construction; frozen=True blocks field reassignment.
 class ChatCompletionResponse(
     msgspec.Struct,
     frozen=True,

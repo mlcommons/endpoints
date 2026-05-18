@@ -60,6 +60,7 @@ class LoadPatternType(str, Enum):
     MAX_THROUGHPUT = "max_throughput"  # Offline: all queries at t=0
     POISSON = "poisson"  # Online: fixed QPS with Poisson distribution
     CONCURRENCY = "concurrency"  # Online: fixed concurrent requests
+    MULTI_TURN = "multi_turn"  # Multi-turn conversations with turn sequencing
     BURST = "burst"  # Burst pattern (TODO)
     STEP = "step"  # Step pattern (TODO)
 
@@ -230,6 +231,27 @@ class SubmissionReference(BaseModel):
         return get_ruleset(self.ruleset)
 
 
+class MultiTurnConfig(BaseModel):
+    """Multi-turn conversation configuration.
+
+    Configuration for benchmarking conversational AI workloads with turn sequencing.
+    Enables testing multi-turn conversations where each turn depends on previous responses.
+    Presence of this block in the dataset config enables multi-turn mode.
+
+    Attributes:
+        turn_timeout_s: Deadline between issuing a turn and receiving its
+            response. A timeout aborts that turn and all remaining client
+            turns of the same conversation because subsequent turns depend
+            on the timed-out response.
+        use_dataset_history: If True, use pre-built message history from dataset.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    turn_timeout_s: float = Field(default=300.0, gt=0)
+    use_dataset_history: bool = True
+
+
 class Dataset(BaseModel):
     """Dataset configuration.
 
@@ -259,6 +281,9 @@ class Dataset(BaseModel):
     )
     accuracy_config: AccuracyConfig | None = Field(
         None, description="Accuracy evaluation settings"
+    )
+    multi_turn: MultiTurnConfig | None = Field(
+        None, description="Multi-turn conversation configuration"
     )
 
     @model_validator(mode="after")
@@ -388,6 +413,12 @@ class LoadPattern(BaseModel):
         ):
             raise ValueError(
                 "Concurrency requires --concurrency (e.g., --concurrency 10)"
+            )
+        if self.type == LoadPatternType.MULTI_TURN and (
+            not self.target_concurrency or self.target_concurrency <= 0
+        ):
+            raise ValueError(
+                "Multi-turn requires --concurrency (e.g., --concurrency 96)"
             )
         return self
 
@@ -586,10 +617,40 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
                     f"Offline benchmarks must use 'max_throughput', got '{lp.type}'"
                 )
         elif effective_mode == TestType.ONLINE:
-            if lp.type not in (LoadPatternType.POISSON, LoadPatternType.CONCURRENCY):
+            if lp.type not in (
+                LoadPatternType.POISSON,
+                LoadPatternType.CONCURRENCY,
+                LoadPatternType.MULTI_TURN,
+            ):
                 raise ValueError(
-                    "Online mode requires --load-pattern (poisson or concurrency)"
+                    "Online mode requires --load-pattern (poisson, concurrency, or multi_turn)"
                 )
+
+        # Cross-validate load_pattern.type=multi_turn ↔ performance dataset.multi_turn config
+        has_multi_turn_perf_dataset = any(
+            d.multi_turn is not None
+            for d in (self.datasets or [])
+            if d.type == DatasetType.PERFORMANCE
+        )
+        has_multi_turn_non_perf_dataset = any(
+            d.multi_turn is not None
+            for d in (self.datasets or [])
+            if d.type != DatasetType.PERFORMANCE
+        )
+        if has_multi_turn_non_perf_dataset:
+            raise ValueError(
+                "multi_turn config is only supported on performance datasets; "
+                "accuracy datasets with multi_turn are not supported"
+            )
+        if lp.type == LoadPatternType.MULTI_TURN and not has_multi_turn_perf_dataset:
+            raise ValueError(
+                "load_pattern.type=multi_turn requires the performance dataset to have multi_turn config"
+            )
+        if has_multi_turn_perf_dataset and lp.type != LoadPatternType.MULTI_TURN:
+            raise ValueError(
+                f"Performance dataset with multi_turn config requires load_pattern.type=multi_turn, "
+                f"got '{lp.type}'"
+            )
 
         return self
 

@@ -1,0 +1,557 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Multi-Turn Conversation Dataset Schema",
+  "description": "JSON schema describing the structure and requirements for multi-turn conversation datasets in the MLPerf Inference Endpoint Benchmarking System",
+  "version": "1.0.0",
+
+  "definitions": {
+    "basicMessageTypes": {
+      "title": "Basic Message Types",
+      "description": "Plain conversational messages without tool calls",
+      "oneOf": [
+        {
+          "title": "User Message",
+          "type": "object",
+          "properties": {
+            "conversation_id": {
+              "type": "string",
+              "description": "Unique identifier for the conversation"
+            },
+            "turn": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Turn number within conversation (1-indexed)"
+            },
+            "role": {
+              "const": "user",
+              "description": "Message role - user initiates turns"
+            },
+            "content": {
+              "type": "string",
+              "description": "Message content from the user"
+            },
+            "system": {
+              "type": "string",
+              "description": "System prompt (typically only on first user turn)"
+            }
+          },
+          "required": ["conversation_id", "turn", "role", "content"],
+          "additionalProperties": true
+        },
+        {
+          "title": "Assistant Message",
+          "type": "object",
+          "properties": {
+            "conversation_id": {
+              "type": "string",
+              "description": "Unique identifier for the conversation"
+            },
+            "turn": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Turn number within conversation"
+            },
+            "role": {
+              "const": "assistant",
+              "description": "Message role - assistant responds to user"
+            },
+            "content": {
+              "type": "string",
+              "description": "Message content from the assistant"
+            }
+          },
+          "required": ["conversation_id", "turn", "role", "content"],
+          "not": { "required": ["tool_calls"] },
+          "additionalProperties": true
+        }
+      ]
+    },
+
+    "toolCallMessage": {
+      "title": "Assistant Message with Tool Calls",
+      "description": "Assistant message that dispatches one or more tool calls. Role must be 'assistant' with a non-empty tool_calls array (OpenAI wire format).",
+      "type": "object",
+      "properties": {
+        "conversation_id": {
+          "type": "string",
+          "description": "Unique identifier for the conversation"
+        },
+        "turn": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Turn number within conversation"
+        },
+        "role": {
+          "const": "assistant",
+          "description": "Role for a tool-dispatching assistant message."
+        },
+        "content": {
+          "type": ["string", "null"],
+          "description": "Optional textual prefix alongside tool dispatch (e.g., 'I will investigate this with bash'). Typically null/absent."
+        },
+        "tool_calls": {
+          "type": "array",
+          "minItems": 1,
+          "description": "List of tool calls dispatched by the assistant",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "Unique identifier for this tool call (e.g., 'functions.bash:0')"
+              },
+              "type": {
+                "type": "string",
+                "const": "function",
+                "description": "Tool type (currently only 'function' supported)"
+              },
+              "function": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "description": "Name of the tool/function to invoke"
+                  },
+                  "arguments": {
+                    "type": "string",
+                    "description": "JSON string containing function arguments"
+                  }
+                },
+                "required": ["name", "arguments"]
+              }
+            },
+            "required": ["id", "type", "function"]
+          }
+        }
+      },
+      "required": ["conversation_id", "turn", "role", "tool_calls"],
+      "additionalProperties": true
+    },
+
+    "toolMessage": {
+      "title": "Tool Result Message",
+      "description": "Tool execution results as a list. Single results have one entry; parallel results have multiple entries.",
+      "type": "object",
+      "properties": {
+        "conversation_id": {
+          "type": "string",
+          "description": "Unique identifier for the conversation"
+        },
+        "turn": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Turn number within conversation"
+        },
+        "role": {
+          "const": "tool",
+          "description": "Tool result role"
+        },
+        "tool_results": {
+          "type": "array",
+          "minItems": 1,
+          "description": "List of tool execution results. Single tool calls have one entry; parallel tool calls have multiple entries.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "tool_call_id": {
+                "type": "string",
+                "description": "ID of the tool call this result corresponds to"
+              },
+              "content": {
+                "type": "string",
+                "description": "Output/result content from the tool execution"
+              }
+            },
+            "required": ["tool_call_id", "content"]
+          }
+        }
+      },
+      "required": ["conversation_id", "turn", "role", "tool_results"],
+      "additionalProperties": true
+    },
+
+    "generationParameters": {
+      "title": "Generation Parameters",
+      "description": "Optional parameters controlling the model's behavior for generation",
+      "type": "object",
+      "properties": {
+        "model": {
+          "type": "string",
+          "description": "Model name override for this turn"
+        },
+        "max_new_tokens": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Maximum number of tokens to generate"
+        },
+        "max_completion_tokens": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "OpenAI API compatible max tokens parameter"
+        },
+        "stream": {
+          "type": "boolean",
+          "description": "Whether to use streaming for this turn"
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 2,
+          "description": "Sampling temperature (0 = deterministic, higher = more random)"
+        },
+        "top_p": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Nucleus sampling parameter"
+        },
+        "top_k": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Top-k sampling parameter"
+        },
+        "seed": {
+          "type": "integer",
+          "description": "Random seed for reproducibility"
+        },
+        "repetition_penalty": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Penalty for repeating tokens"
+        },
+        "frequency_penalty": {
+          "type": "number",
+          "minimum": -2,
+          "maximum": 2,
+          "description": "Frequency penalty for tokens"
+        },
+        "presence_penalty": {
+          "type": "number",
+          "minimum": -2,
+          "maximum": 2,
+          "description": "Presence penalty for tokens"
+        },
+        "stop": {
+          "oneOf": [
+            { "type": "string" },
+            { "type": "array", "items": { "type": "string" } }
+          ],
+          "description": "Stop sequences for generation"
+        },
+        "n": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Number of completions to generate"
+        },
+        "logit_bias": {
+          "type": "object",
+          "description": "Token probability adjustments (token_id -> bias)"
+        },
+        "name": {
+          "type": "string",
+          "description": "Entity name for role tracking (e.g., 'Bob')"
+        },
+        "user": {
+          "type": "string",
+          "description": "End-user identifier for monitoring/abuse detection"
+        },
+        "chat_template": {
+          "type": "string",
+          "description": "Custom chat formatting template"
+        },
+        "tools": {
+          "type": "array",
+          "description": "OpenAI tool definitions for tool-calling models",
+          "items": { "type": "object" }
+        }
+      }
+    }
+  },
+
+  "type": "object",
+  "oneOf": [
+    {
+      "title": "Plain Conversation Row",
+      "description": "A single row representing a plain user or assistant message",
+      "allOf": [
+        { "$ref": "#/definitions/basicMessageTypes" },
+        { "$ref": "#/definitions/generationParameters" }
+      ]
+    },
+    {
+      "title": "Tool Call Row",
+      "description": "A single row representing an assistant dispatch of tool calls",
+      "allOf": [
+        { "$ref": "#/definitions/toolCallMessage" },
+        { "$ref": "#/definitions/generationParameters" }
+      ]
+    },
+    {
+      "title": "Tool Result Row",
+      "description": "A single row representing one or more tool results",
+      "allOf": [
+        { "$ref": "#/definitions/toolMessage" },
+        { "$ref": "#/definitions/generationParameters" }
+      ]
+    }
+  ],
+
+  "examples": [
+    {
+      "title": "Basic user message",
+      "data": {
+        "conversation_id": "conv_001",
+        "turn": 1,
+        "role": "user",
+        "content": "I need help resetting my password",
+        "system": "You are a helpful customer support agent"
+      }
+    },
+    {
+      "title": "Assistant response",
+      "data": {
+        "conversation_id": "conv_001",
+        "turn": 2,
+        "role": "assistant",
+        "content": "I'd be happy to help. Can you provide your email address?"
+      }
+    },
+    {
+      "title": "Assistant with tool calls (converter/OpenAI wire format)",
+      "data": {
+        "conversation_id": "sim_001",
+        "turn": 2,
+        "role": "assistant",
+        "tool_calls": [
+          {
+            "id": "functions.bash:0",
+            "type": "function",
+            "function": {
+              "name": "bash",
+              "arguments": "{\"cmd\": \"cat foo.py\"}"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "title": "Tool result from execution",
+      "data": {
+        "conversation_id": "sim_001",
+        "turn": 3,
+        "role": "tool",
+        "tool_results": [
+          {
+            "tool_call_id": "functions.bash:0",
+            "content": "def foo():\n    return 1/0"
+          }
+        ]
+      }
+    },
+    {
+      "title": "Merged parallel tool results",
+      "data": {
+        "conversation_id": "sim_002",
+        "turn": 3,
+        "role": "tool",
+        "tool_results": [
+          {
+            "tool_call_id": "functions.bash:0",
+            "content": "file1.txt"
+          },
+          {
+            "tool_call_id": "functions.bash:1",
+            "content": "file2.txt"
+          }
+        ]
+      }
+    },
+    {
+      "title": "User turn with generation parameters",
+      "data": {
+        "conversation_id": "conv_002",
+        "turn": 5,
+        "role": "user",
+        "content": "What's the best way to optimize this code?",
+        "temperature": 0.7,
+        "max_new_tokens": 256,
+        "top_p": 0.9
+      }
+    }
+  ],
+
+  "documentation": {
+    "overview": "Multi-turn conversation datasets enable benchmarking of realistic conversational AI workloads where each turn depends on previous responses. The system maintains conversation history and enforces turn sequencing.",
+
+    "requiredFields": [
+      {
+        "field": "conversation_id",
+        "type": "string",
+        "description": "Unique identifier for each conversation. All rows belonging to the same conversation must share the same conversation_id."
+      },
+      {
+        "field": "turn",
+        "type": "integer",
+        "description": "Turn number within conversation (1-indexed). Must be consecutive starting at 1 (i.e., 1, 2, 3, …, N with no gaps or duplicates)."
+      },
+      {
+        "field": "role",
+        "type": "string",
+        "enum": ["user", "assistant", "tool"],
+        "description": "Speaker role. 'user' or 'tool' are client-initiated turns. 'assistant' is the server response — either a terminal reply or a tool dispatch (with tool_calls field)."
+      },
+      {
+        "field": "content",
+        "type": "string",
+        "description": "Message content. Required for 'user' role and plain 'assistant' rows. For tool-dispatching assistant rows, content may be omitted (null/absent). For 'tool' rows using tool_results (merged parallel results), top-level content is absent — results are in the tool_results array instead."
+      }
+    ],
+
+    "optionalFields": [
+      {
+        "field": "system",
+        "type": "string",
+        "description": "System prompt (typically only on first user turn). Applied to all messages in the conversation."
+      },
+      {
+        "field": "tool_calls",
+        "type": "array",
+        "description": "Tool calls dispatched by assistant (for tool-dispatching 'assistant' rows). Each element has {id, type, function: {name, arguments}}."
+      },
+      {
+        "field": "tool_results",
+        "type": "array",
+        "description": "Tool execution results (required for all 'tool' role rows). Each element has {tool_call_id, content}. Single results have one entry; parallel results have multiple entries."
+      },
+      {
+        "field": "model",
+        "type": "string",
+        "description": "Model name override for this turn."
+      },
+      {
+        "field": "max_new_tokens",
+        "type": "integer",
+        "description": "Maximum tokens to generate for this turn."
+      },
+      {
+        "field": "temperature",
+        "type": "number",
+        "description": "Sampling temperature (0 to 2)."
+      },
+      {
+        "field": "top_p",
+        "type": "number",
+        "description": "Nucleus sampling parameter (0 to 1)."
+      },
+      {
+        "field": "tools",
+        "type": "array",
+        "description": "OpenAI tool definitions forwarded to the endpoint for tool-calling models. The converter attaches this only to client-turn rows (user and tool) to avoid duplicating the large array on every assistant row. Hand-authored datasets typically place it on the first user turn."
+      }
+    ],
+
+    "validRoleSequences": [
+      {
+        "name": "Plain conversation",
+        "sequence": "user → assistant → user → assistant → ...",
+        "description": "Standard alternating conversation without tool use."
+      },
+      {
+        "name": "Agentic with tools",
+        "sequence": "user → assistant → tool → [assistant → tool]* → assistant → user",
+        "description": "Agent dispatches tools (assistant with tool_calls), executes them, and returns results before final response. 'tool → user' is also valid when no terminal assistant response is needed before the next user turn."
+      }
+    ],
+    "stateMachine": {
+      "description": "Complete valid-next-state table from _validate_conversation_structure()",
+      "transitions": {
+        "start": ["user"],
+        "user": ["assistant"],
+        "assistant": ["tool", "user"],
+        "tool": ["assistant", "user"]
+      }
+    },
+
+    "validationRules": [
+      {
+        "rule": "Turn numbers must be consecutive starting at 1",
+        "violation": "Turn sequence is not exactly 1, 2, 3, …, N (missing, duplicate, or out-of-range turns)"
+      },
+      {
+        "rule": "Role sequences must follow the state machine",
+        "violation": "Invalid transition (e.g., 'user' directly followed by 'user', consecutive 'assistant' rows). Note: 'tool → user' IS a valid transition. The state machine also implicitly enforces that the first row must be a user turn."
+      }
+    ],
+    "notValidated": [
+      "tool_results[*].tool_call_id pairing: the validator does NOT verify that tool_call_id values inside tool_results items reference a prior assistant tool_calls entry. Correct pairing is the dataset author's or converter's responsibility."
+    ],
+
+    "dataTypes": [
+      {
+        "name": "Basic Message",
+        "roles": ["user", "assistant"],
+        "fields": {
+          "required": ["conversation_id", "turn", "role", "content"],
+          "optional": ["system", "...generation parameters"]
+        }
+      },
+      {
+        "name": "Tool Call Dispatch",
+        "roles": ["assistant"],
+        "fields": {
+          "required": ["conversation_id", "turn", "role", "tool_calls"],
+          "optional": ["content", "...generation parameters"]
+        }
+      },
+      {
+        "name": "Tool Result",
+        "roles": ["tool"],
+        "fields": {
+          "required": ["conversation_id", "turn", "role", "tool_results"],
+          "optional": ["...generation parameters"],
+          "note": "Expands to one OpenAI tool message per result entry at the wire layer"
+        }
+      }
+    ],
+
+    "conversionFromSnapshot": {
+      "description": "Agentic datasets are often stored as full-conversation snapshots. Use scripts/convert_agentic_snapshot.py to convert.",
+      "sourceFormat": "Each JSONL line is a complete conversation snapshot with 'messages' array",
+      "targetFormat": "Each JSONL line is a single message row with conversation metadata",
+      "process": [
+        "Extract conversation_id, conversation_idx, and messages array",
+        "Use highest-indexed snapshot per conversation_id",
+        "Collapse consecutive user messages into a single user row (newline-joined content)",
+        "Emit all tool result rows as tool_results arrays (single results have one entry; consecutive tool results from parallel dispatch are merged into one row with multiple entries)",
+        "Flatten messages into individual rows, numbering turns sequentially from 1",
+        "Attach system prompt to first user row only",
+        "Attach tools array to client-turn rows (user and tool) only — not to assistant rows",
+        "Tool-dispatching assistant messages are written as role 'assistant' with tool_calls (OpenAI wire format)"
+      ]
+    },
+
+    "performanceNotes": [
+      "Pre-built messages: The system pre-computes complete message lists during dataset load() for efficient turn serving",
+      "Memory efficiency: ~1KB per turn average; 1000 conversations × 10 turns = ~10MB",
+      "Hot path: Only client turns (user/tool) are issued; assistant turns remain in backing store for history"
+    ],
+
+    "commonErrors": [
+      {
+        "error": "Invalid role sequence",
+        "cause": "Violates state machine (e.g., user→user, user→tool, consecutive assistant rows)",
+        "fix": "Verify alternation or use conversion script for agentic data"
+      },
+      {
+        "error": "Turn numbers not consecutive",
+        "cause": "Turn sequence has gaps, duplicates, or doesn't start at 1",
+        "fix": "Ensure turns are numbered 1, 2, 3, …, N with no missing or duplicate values"
+      },
+      {
+        "error": "Turn timeout",
+        "cause": "Previous turn took too long to complete",
+        "fix": "Increase turn_timeout_s in configuration or check endpoint performance"
+      }
+    ]
+  }
+}
