@@ -49,11 +49,7 @@ class SSEDelta(msgspec.Struct, frozen=True, kw_only=True, omit_defaults=True, gc
     mutates `tool_calls` after construction or stores cyclic references in it
     must be audited; if so, remove gc=False.
 
-    Thinking-mode payloads may arrive as ``reasoning_content`` (SGLang /
-    DeepSeek-style parsers) or ``reasoning`` (some vLLM parser variants).
-    All text-bearing fields are nullable: servers can send ``null`` (not an
-    empty string) for any field that has no payload in a given chunk — e.g. a
-    chunk emitting reasoning text has ``content: null, tool_calls: null``.
+    Thinking-mode payloads may arrive as ``reasoning_content`` or ``reasoning``.
     """
 
     role: str | None = None
@@ -99,10 +95,7 @@ class ChatMessage(
              None for tool-dispatching assistant messages.
     tool_calls: list of tool call objects for assistant messages that invoke tools.
     tool_call_id: correlates a tool result message to its tool call.
-    reasoning_content: thinking-mode trace from a prior assistant turn — must
-             be replayed as part of the message history for trajectories
-             captured under thinking-mode parsers (SGLang/vLLM); without it,
-             the rendered prompt drifts from the original capture.
+    reasoning_content: thinking-mode trace from a prior assistant turn.
     """
 
     role: str
@@ -149,11 +142,7 @@ class ChatCompletionResponseMessage(
 ):  # type: ignore[call-arg]
     """Response message from OpenAI.
 
-    All non-role fields default to None — many OpenAI-compatible servers
-    (SGLang, vLLM) don't emit ``refusal`` and may omit ``content`` when the
-    response is purely a tool dispatch. msgspec requires defaults for fields
-    that may be absent from the wire payload (the type being optional is not
-    enough on its own).
+    Non-role fields default to None because compatible servers may omit them.
     """
 
     role: str

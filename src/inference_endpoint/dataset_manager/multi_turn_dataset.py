@@ -156,8 +156,7 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
         Args:
             dataframe: DataFrame with conversation data.
             enable_salt: If True, append a per-trajectory hash to the end of
-                each trajectory's system prompt (cache-bursting salt; see
-                ``examples/09_MultiTurn/docs/EVALUATION.md``).
+                each trajectory's system prompt.
             **kwargs: Additional arguments passed to Dataset.__init__.
 
         Raises:
@@ -165,10 +164,6 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
         """
         super().__init__(dataframe, **kwargs)
         assert self.dataframe is not None, "Dataframe must be initialized"
-        # Some upstream snapshots (e.g. Workato) ship a single ``dataset_metadata``
-        # sentinel record on line 1 carrying license/source attribution. It has
-        # no conversation_id and is not a real conversation; drop it before
-        # grouping. Real flat rows always have a conversation_id.
         if "_type" in self.dataframe.columns:
             metadata_rows = self.dataframe["_type"] == "dataset_metadata"
             if metadata_rows.any():
@@ -411,11 +406,6 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
         pre_built_messages_by_key: dict[tuple, list[dict]] = {}
         current_turn_messages_by_key: dict[tuple, list[dict]] = {}
         system_prompts_by_conv: dict[str, str | None] = {}
-        # Per-turn wall-clock delay (seconds) to wait before issuing this client
-        # turn. Populated only for tool rows that carry a ``delay_seconds``
-        # field (typically embedded from upstream capture timestamps; see
-        # ``scripts/embed_tool_delays.py``). Rows without the field are absent
-        # from this map and are treated as zero delay at issue time.
         delay_seconds_by_key: dict[tuple, float] = {}
 
         assert self.dataframe is not None, "Dataframe must be initialized"
@@ -430,11 +420,6 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
                 if val and isinstance(val, str):
                     system_content = val
                     break
-            # Cache-bursting salt: append a per-trajectory hash to the end of
-            # the system prompt so the engine's prefix cache cannot extend
-            # past the system boundary across trajectories. Salt is computed
-            # once per trajectory and reused on every turn of that trajectory,
-            # so within-trajectory prefix caching is preserved.
             if self._enable_salt and system_content:
                 system_content = apply_salt(system_content, compute_salt(str(conv_id)))
             system_prompts_by_conv[str(conv_id)] = system_content
@@ -448,11 +433,6 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
 
                 # All dataset rows strictly before this client turn (includes
                 # assistant rows and prior tool results).
-                # ``reasoning_content`` MUST be propagated so prior assistant
-                # turns send their thinking back into context — without it,
-                # the chat-template-rendered prompt diverges from what the
-                # original capture sent, and replay outputs differ from the
-                # captured trajectory even at temperature=0.
                 prior_rows = sorted_group[sorted_group["turn"] < t_n]
                 for _, prior_row in prior_rows.iterrows():
                     msg: dict[str, Any] = {}
@@ -608,10 +588,6 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
 
         # Collect per-conversation defaults from the first user row so that
         # fields like model/max_completion_tokens propagate to tool rows.
-        # ``tools`` MUST be propagated so every turn sends the tool definitions —
-        # SGLang's tool-call parser is gated on the request having a non-empty
-        # ``tools`` array, and without it the parser silently doesn't fire and
-        # the model's literal tool-call markup leaks into the ``content`` channel.
         _PROPAGATED_KEYS = {
             "model",
             "max_completion_tokens",
@@ -645,8 +621,6 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
             # Strip dataset-internal fields that must not reach the endpoint.
             sample.pop("tool_results", None)
             sample.pop("tool_calls", None)
-            # ``delay_seconds`` is consumed by the multi-turn strategy via the
-            # metadata map; the endpoint adapter must not see it.
             sample.pop("delay_seconds", None)
 
             # Fill missing propagated fields from the first user row of this conversation.

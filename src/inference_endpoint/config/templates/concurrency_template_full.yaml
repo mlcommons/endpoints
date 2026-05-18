@@ -11,7 +11,7 @@ model_params:
   repetition_penalty: null  # Repetition penalty
   presence_penalty: null  # Presence penalty
   frequency_penalty: null  # Frequency penalty
-  chat_template_kwargs: null  # Per-request chat-template kwargs forwarded to vLLM/SGLang (e.g. {'thinking': True, 'preserve_thinking': True} for Kimi-K2.6 agentic multi-turn workloads).
+  chat_template_kwargs: null  # Per-request chat-template kwargs forwarded to compatible servers.
   max_new_tokens: 1024  # Max output tokens
   osl_distribution: null  # Output sequence length distribution
   streaming: 'on'  # Streaming mode: auto/on/off | options: auto, on, off

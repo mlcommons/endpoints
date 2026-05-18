@@ -125,14 +125,7 @@ class OpenAIMsgspecAdapter(HttpRequestAdapter):
 
     @classmethod
     def decode_sse_message(cls, json_bytes: bytes) -> SSEChoice | None:
-        """Decode SSE message and return the SSEChoice (delta + finish_reason).
-
-        On decode failure (e.g. wire-shape drift in a server upgrade), logs the
-        raw chunk bytes at WARNING and returns None so the upstream stream
-        keeps draining. Without this guard, msgspec raises and the worker's
-        outer ``except Exception`` swallows the chunk silently — leading to
-        ``response_output`` being empty for every turn with no diagnostic.
-        """
+        """Decode SSE message and return the SSEChoice."""
         try:
             msg = cls._sse_decoder.decode(json_bytes)
         except msgspec.ValidationError as e:
