@@ -369,14 +369,20 @@ class BenchmarkSession:
     async def _drain_inflight(self, phase_issuer: PhaseIssuer) -> None:
         """Wait for all in-flight responses from this phase to complete.
 
-        Only bounded if the caller has scheduled a loop.call_later that calls
-        stop() (e.g. the perf-phase global timeout); with no timer scheduled,
-        a hung request will stall here until SIGINT."""
+        Hard-bounded at 240 s; logs an error and returns if exceeded so the
+        next phase starts regardless of stuck requests."""
         if phase_issuer.inflight <= 0 or self._stop_requested:
             return
         logger.info("Draining %d in-flight responses...", phase_issuer.inflight)
         self._drain_event.clear()
-        await self._drain_event.wait()
+        try:
+            await asyncio.wait_for(self._drain_event.wait(), timeout=240.0)
+        except TimeoutError:
+            logger.error(
+                "Drain timed out after 240 s with %d responses still in flight; "
+                "proceeding to next phase.",
+                phase_issuer.inflight,
+            )
 
     async def _receive_responses(self) -> None:
         """Receive responses from the issuer. Runs as a concurrent task."""

@@ -17,6 +17,7 @@ import copy
 import inspect
 import os
 import random
+import warnings
 from abc import ABC
 from enum import Enum
 from logging import getLogger
@@ -482,6 +483,16 @@ class Dataset:
         if not callable(cls.generate):
             raise ValueError(
                 f"Dataset {cls.__name__} has a generate method that is not callable and cannot be auto-loaded"
+            )
+
+        # TODO: remove this warning once dataset_cache/ is universally adopted
+        if datasets_dir == Path("dataset_cache") and Path("datasets").exists():
+            warnings.warn(
+                "Found a legacy 'datasets/' directory. The default cache directory is now "
+                "'dataset_cache/'. Rename the directory or pass --datasets-dir explicitly "
+                "to silence this warning.",
+                DeprecationWarning,
+                stacklevel=2,
             )
 
         df = cls.generate(datasets_dir=datasets_dir, force=force_regenerate, **kwargs)

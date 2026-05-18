@@ -392,28 +392,51 @@ class LoadPattern(BaseModel):
         return self
 
 
+@cyclopts.Parameter(name="*")
 class WarmupConfig(BaseModel):
     """Warmup phase configuration. Runs before the performance phase; results are not recorded."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    enabled: bool = Field(
-        False, description="Enable warmup phase before performance run"
-    )
-    n_requests: int | None = Field(
-        None, gt=0, description="Warmup request count (None = full dataset once)"
-    )
-    salt: bool = Field(
+    enabled: Annotated[
+        bool,
+        cyclopts.Parameter(
+            alias="--warmup", help="Enable warmup phase before performance run"
+        ),
+    ] = Field(False, description="Enable warmup phase before performance run")
+    n_requests: Annotated[
+        int | None,
+        cyclopts.Parameter(
+            alias="--warmup-requests",
+            help="Warmup request count (None = full dataset once)",
+        ),
+    ] = Field(None, gt=0, description="Warmup request count (None = full dataset once)")
+    salt: Annotated[
+        bool,
+        cyclopts.Parameter(
+            alias="--warmup-salt",
+            help="Prepend a unique random hex salt to each warmup prompt",
+        ),
+    ] = Field(
         False, description="Prepend a unique random hex salt to each warmup prompt"
     )
-    drain: bool = Field(
+    drain: Annotated[
+        bool,
+        cyclopts.Parameter(
+            alias="--warmup-drain",
+            help="Drain in-flight warmup requests before starting the performance phase",
+        ),
+    ] = Field(
         False,
         description="Drain in-flight warmup requests before starting the performance phase",
     )
-    warmup_random_seed: int = Field(
-        42,
-        description="RNG seed for warmup scheduling and sample ordering",
-    )
+    warmup_random_seed: Annotated[
+        int,
+        cyclopts.Parameter(
+            alias="--warmup-seed",
+            help="RNG seed for warmup scheduling and sample ordering",
+        ),
+    ] = Field(42, description="RNG seed for warmup scheduling and sample ordering")
 
 
 @cyclopts.Parameter(name="*")
