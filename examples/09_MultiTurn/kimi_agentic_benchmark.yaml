@@ -25,7 +25,6 @@ datasets:
 settings:
   runtime:
     min_duration_ms: 0
-    max_duration_ms: 3600000
 
   load_pattern:
     type: multi_turn

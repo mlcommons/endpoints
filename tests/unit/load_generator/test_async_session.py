@@ -193,6 +193,7 @@ class TestPhaseIssuer:
 
         query_id = phase_issuer.issue(2, conversation_id="conv-1", turn=3)
         assert query_id is not None
+        assert issuer.issued_queries[0].headers == {"X-Session-ID": "conv-1"}
         assert phase_issuer.uuid_to_conv_info[query_id] == ("conv-1", 3)
 
         issued = publisher.events_of_type(SampleEventType.ISSUED)
