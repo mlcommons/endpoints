@@ -19,7 +19,7 @@ model_params:
 datasets:
   - name: agentic_coding
     type: performance
-    path: examples/09_MultiTurn/datasets/agentic_coding_t1.jsonl
+    path: examples/09_MultiTurn/datasets/agentic_coding_v3.jsonl
     multi_turn:
       turn_timeout_s: 600.0
       enable_salt: true # cache-bursting salt — see docs/EVALUATION.md §2

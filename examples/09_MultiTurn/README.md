@@ -82,12 +82,12 @@ Run from the repo root:
 # First argument: input snapshot JSONL; second argument: output flat-row JSONL
 python scripts/convert_agentic_snapshot.py \
     /path/to/agentic_coding_dataset.jsonl \
-    examples/09_MultiTurn/datasets/agentic_coding_t1.jsonl \
+    examples/09_MultiTurn/datasets/agentic_coding_v3.jsonl \
     --verify
 
 python scripts/convert_agentic_snapshot.py \
     /path/to/agentic_workflow_dataset.jsonl \
-    examples/09_MultiTurn/datasets/agentic_workflow_t1.jsonl \
+    examples/09_MultiTurn/datasets/agentic_workflow_v3.jsonl \
     --verify
 ```
 
@@ -142,7 +142,7 @@ inference-endpoint benchmark from-config \
 datasets:
   - name: agentic_coding
     type: performance
-    path: examples/09_MultiTurn/datasets/agentic_coding_t1.jsonl
+    path: examples/09_MultiTurn/datasets/agentic_coding_v3.jsonl
     multi_turn:
       turn_timeout_s: 300.0
 
@@ -224,7 +224,7 @@ the dataset's reference assistant turns:
 
 ```bash
 python examples/09_MultiTurn/scripts/score_inline_accuracy.py \
-    --gt examples/09_MultiTurn/datasets/agentic_<domain>_t1.jsonl \
+    --gt examples/09_MultiTurn/datasets/agentic_<domain>_v3.jsonl \
     --domain <domain> \
     --report-dir <report_dir>
 ```
