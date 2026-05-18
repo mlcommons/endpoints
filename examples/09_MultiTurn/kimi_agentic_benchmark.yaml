@@ -1,14 +1,9 @@
-name: "agentic-coding-benchmark"
+name: "kimi-agentic-benchmark"
 version: "1.0"
 type: "online"
 
 model_params:
-  name: "/model" # SGLang registers the model under its --model-path
-  # Moonshot's recommended Thinking-mode sampling for Kimi-K2.6
-  # (https://huggingface.co/moonshotai/Kimi-K2.6). preserve_thinking is a
-  # no-op for tool-calling trajectories (the chat template already keeps
-  # reasoning when every prior assistant has tool_calls), but kept on for
-  # symmetry with the model card and to mirror the workflow yaml.
+  name: "/model"
   temperature: 1.0
   top_p: 0.95
   max_new_tokens: 20000 # covers longest observed assistant turn (~18k tokens)
@@ -17,12 +12,15 @@ model_params:
     preserve_thinking: true
 
 datasets:
+  # Select the dataset to run by updating both `name` and `path`.
+  # Use agentic_coding for coding traces or agentic_workflow for workflow traces.
   - name: agentic_coding
     type: performance
-    path: examples/09_MultiTurn/datasets/agentic_coding_v3.jsonl
+    path: /path/to/agentic_dataset.jsonl
     multi_turn:
       turn_timeout_s: 600.0
-      enable_salt: true # cache-bursting salt — see docs/EVALUATION.md §2
+      enable_salt: true # add salt after system prompt to prevent cache reuse across trajectories
+      inject_tool_delay: true # add delay before user/tool turns
 
 settings:
   runtime:
@@ -31,7 +29,7 @@ settings:
 
   load_pattern:
     type: multi_turn
-    target_concurrency: 4
+    target_concurrency: 8
 
   # Mandatory: with the default warmup behaviour, every request fails with
   # ConnectionResetError because uvicorn closes pre-warmed idle sockets after 5s.
@@ -44,4 +42,4 @@ endpoint_config:
     - "http://localhost:8000"
   api_type: openai
 
-report_dir: logs/agentic_coding
+report_dir: logs/kimi_agentic

@@ -46,62 +46,10 @@ Multi-turn datasets use JSONL format with the following structure:
 ## Agentic (Tool-Sequence) Datasets
 
 For agentic workloads where the model dispatches tools, the dataset must include tool-call
-metadata. The source format for these datasets is a **snapshot JSONL** — each line contains the
-full conversation history at a particular checkpoint. The benchmarker requires **flat-row JSONL**
-(one row per message), so a conversion step is needed first.
+metadata in flat-row JSONL form: one row per message, with all rows for a conversation grouped
+contiguously.
 
-### Source snapshot format
-
-Each line in the source file represents one snapshot of a conversation:
-
-```json
-{
-  "conversation_id": "sim_001",
-  "conversation_idx": 5,
-  "messages": [
-    {"role": "system", "content": "..."},
-    {"role": "user", "content": "..."},
-    {"role": "assistant", "tool_calls": [{"id": "...", "type": "function", "function": {"name": "bash", "arguments": "{\"cmd\": \"ls\"}"}}]},
-    {"role": "tool", "tool_call_id": "...", "content": "file1.txt\nfile2.txt"},
-    {"role": "assistant", "content": "Done."}
-  ],
-  "tools": [...],
-  "metadata": {}
-}
-```
-
-Multiple snapshots may exist per `conversation_id` (one per `conversation_idx`); only the
-highest-indexed snapshot per conversation is used.
-
-### Converting to flat-row format
-
-The following commands convert each source snapshot file to the flat-row format required by the benchmarker.
-Run from the repo root:
-
-```bash
-# First argument: input snapshot JSONL; second argument: output flat-row JSONL
-python scripts/convert_agentic_snapshot.py \
-    /path/to/agentic_coding_dataset.jsonl \
-    examples/09_MultiTurn/datasets/agentic_coding_v3.jsonl \
-    --verify
-
-python scripts/convert_agentic_snapshot.py \
-    /path/to/agentic_workflow_dataset.jsonl \
-    examples/09_MultiTurn/datasets/agentic_workflow_v3.jsonl \
-    --verify
-```
-
-The `datasets/` directory under `examples/09_MultiTurn/` is a placeholder; run the conversion
-commands above to populate it before benchmarking.
-
-The `--verify` flag cross-checks every client turn's message history against the source snapshot
-and exits with code 1 if any mismatch is found. The script also:
-
-- Collapses consecutive `user` messages into one (keeps turn sequencing clean)
-- Merges consecutive `tool` messages for the same assistant dispatch into a single row with a
-  `tool_results` list (so all parallel results are sent together in one API call)
-
-### Flat-row format after conversion
+### Agentic Row Fields
 
 The extra fields supported beyond plain user/assistant:
 
@@ -111,7 +59,7 @@ The extra fields supported beyond plain user/assistant:
 | `tool` results (single or merged parallel) | `tool_results: [{tool_call_id, content}, ...]`                     |
 | `user` or `tool` turns                     | `tools: [...]` (OpenAI tool definitions forwarded to the endpoint) |
 
-Example rows from a converted agentic dataset:
+Example rows from an agentic dataset:
 
 ```jsonl
 {"conversation_id": "sim_001", "turn": 1, "role": "user", "content": "Fix the bug in foo.py", "system": "You are a coding agent.", "tools": [...]}
@@ -122,14 +70,12 @@ Example rows from a converted agentic dataset:
 
 ### Running agentic benchmarks
 
-After converting the datasets, update the `path` field in the config files and run:
+Update the `name` and `path` fields in the config file for the local dataset you want to run,
+then start the benchmark:
 
 ```bash
 inference-endpoint benchmark from-config \
-    --config examples/09_MultiTurn/agentic_coding_benchmark.yaml
-
-inference-endpoint benchmark from-config \
-    --config examples/09_MultiTurn/agentic_workflow_benchmark.yaml
+    --config examples/09_MultiTurn/kimi_agentic_benchmark.yaml
 ```
 
 ---
@@ -142,14 +88,15 @@ inference-endpoint benchmark from-config \
 datasets:
   - name: agentic_coding
     type: performance
-    path: examples/09_MultiTurn/datasets/agentic_coding_v3.jsonl
+    path: /path/to/agentic_dataset.jsonl
     multi_turn:
       turn_timeout_s: 300.0
+      inject_tool_delay: true
 
 settings:
   load_pattern:
     type: multi_turn
-    target_concurrency: 32 # ← Required for multi_turn load pattern
+    target_concurrency: 8 # ← Required for multi_turn load pattern
 ```
 
 ### Concurrency Control
@@ -160,7 +107,7 @@ The `target_concurrency` field is **required** for the `multi_turn` load pattern
 settings:
   load_pattern:
     type: multi_turn
-    target_concurrency: 32 # ← Limit to 32 concurrent requests
+    target_concurrency: 8 # ← Limit to 8 concurrent requests
 ```
 
 **Behavior**:
@@ -174,13 +121,13 @@ settings:
 - **Large-scale testing**: Benchmark 1000+ conversations without overwhelming system
 - **Resource management**: Stay within port limits, memory constraints
 
-**Example**: 100 conversations with `target_concurrency: 32`
+**Example**: 100 conversations with `target_concurrency: 8`
 
 ```
-t=0:   Start 32 conversations, issue turn-1 for each (32 in-flight)
-t=0.5: Turn-1 of conv A completes → issue turn-2 of conv A (still 32 in-flight)
-t=1.0: All turns of conv B complete → start conv 33, issue its turn-1 (still 32 in-flight)
-...    Maintains at most 32 active conversations
+t=0:   Start 8 conversations, issue turn-1 for each (8 in-flight)
+t=0.5: Turn-1 of conv A completes → issue turn-2 of conv A (still 8 in-flight)
+t=1.0: All turns of conv B complete → start conv 9, issue its turn-1 (still 8 in-flight)
+...    Maintains at most 8 active conversations
 ```
 
 ### Turn Timeout
@@ -200,7 +147,7 @@ If a turn does not receive a response within `turn_timeout_s` seconds, that turn
 
 ```bash
 inference-endpoint benchmark from-config \
-  --config examples/09_MultiTurn/agentic_coding_benchmark.yaml
+  --config examples/09_MultiTurn/kimi_agentic_benchmark.yaml
 ```
 
 ### Viewing Results
@@ -212,29 +159,8 @@ Multi-turn benchmarks produce per-turn metrics:
 
 **Note**: Multi-turn datasets are only supported as performance datasets. Using a multi-turn dataset as an accuracy dataset (`type: accuracy`) is not yet supported and will raise an error at startup.
 
-Results are stored in the configured `report_dir`. Each record in
-`events.jsonl` carries `conversation_id` and `turn` alongside `sample_uuid`,
-so conversation-level filtering requires no join. `sample_idx_map.json` maps
-`sample_uuid → dataset sample index` for callers that need it.
-
-### Accuracy Evaluation
-
-For the agentic coding and workflow datasets, score a completed run against
-the dataset's reference assistant turns:
-
-```bash
-python examples/09_MultiTurn/scripts/score_inline_accuracy.py \
-    --gt examples/09_MultiTurn/datasets/agentic_<domain>_v3.jsonl \
-    --domain <domain> \
-    --report-dir <report_dir>
-```
-
-`<domain>` is `coding` or `workflow`; `<report_dir>` is the same path used
-as `report_dir` in the benchmark config. The scorer extracts model
-assistant turns from `events.jsonl`, aligns them with the ground-truth
-flat JSONL on `(conversation_id, turn)`, and writes `model_assistants.jsonl`
-and `scores.json` into the report directory. The metric is multiset IoU on
-bash executables for `coding` and exact-match on intent code for `workflow`
+Results are stored in the configured `report_dir`; per-turn records include
+`conversation_id` and `turn` for conversation-level filtering.
 
 ## Architecture Notes
 
@@ -271,8 +197,7 @@ Each conversation maintains message history in memory. For large-scale benchmark
 user -> assistant -> user -> assistant -> ...
 ```
 
-For agentic datasets, use the conversion script (`scripts/convert_agentic_snapshot.py`) to
-produce a properly sequenced flat-row file. The valid agentic sequence is:
+For agentic datasets, make sure the input JSONL is already in the valid flat-row sequence:
 
 ```
 user -> assistant (tool_calls) -> tool -> [assistant (tool_calls) -> tool]* -> assistant -> user -> ...
