@@ -204,7 +204,7 @@ def ds_dataset_path():
     """
     Returns the path to the ds_samples.jsonl file.
     """
-    return "tests/datasets/ds_samples.jsonl"
+    return "tests/assets/datasets/ds_samples.jsonl"
 
 
 @pytest.fixture
@@ -220,7 +220,7 @@ def hf_squad_dataset_path():
     """
     Returns the path to the squad dataset.
     """
-    return "tests/datasets/squad_pruned"
+    return "tests/assets/datasets/squad_pruned"
 
 
 @pytest.fixture

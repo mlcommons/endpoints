@@ -324,7 +324,7 @@ type: "offline"
 model_params:
   name: "test-model"
 datasets:
-  - path: "tests/datasets/dummy_1k.jsonl"
+  - path: "tests/assets/datasets/dummy_1k.jsonl"
 endpoint_config:
   endpoints: ["http://test:8000"]
 """)

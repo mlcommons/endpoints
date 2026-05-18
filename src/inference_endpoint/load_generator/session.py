@@ -189,8 +189,15 @@ class PhaseIssuer:
         prompt_data: PromptData
         if isinstance(data, dict):
             token_ids = data.get("input_tokens") or data.get("token_ids")
+            # Multimodal datasets store ``prompt`` as a list of OpenAI content
+            # parts (e.g. [{"type": "text", ...}, {"type": "image_url", ...}])
+            # which the HTTP adapter handles directly. `PromptData.text` is only
+            # meaningful for ISL reporting on text-only prompts.
+            # Therefore, setting `text=None` for non-string prompts
+            # means that ISL reporting will be unavailable for multimodal samples.
+            prompt = data.get("prompt")
             prompt_data = PromptData(
-                text=data.get("prompt"),
+                text=prompt if isinstance(prompt, str) else None,
                 token_ids=tuple(token_ids) if token_ids is not None else None,
             )
         else:
@@ -399,6 +406,28 @@ class BenchmarkSession:
 
         if isinstance(resp, QueryResult):
             query_id = resp.id
+
+            # Emit ERROR before COMPLETE for failed queries so downstream
+            # consumers (notably the metrics aggregator) see the ERROR
+            # while the in-flight tracked row still exists. COMPLETE
+            # removes the row, so any state lookup at ERROR time after
+            # COMPLETE would silently miss tracked failures.
+            #
+            # Invariant: the EventPublisher MUST preserve publish-call
+            # order on the wire (ZMQ PUB→SUB delivers in order to a
+            # single SUB, and ZmqMessagePublisher batches without
+            # reordering). Any future transport refactor that breaks
+            # this property breaks tracked-failure counting — and
+            # silently, since neither side has an assertion.
+            if resp.error is not None:
+                self._publisher.publish(
+                    EventRecord(
+                        event_type=ErrorEventType.GENERIC,
+                        timestamp_ns=time.monotonic_ns(),
+                        sample_uuid=query_id,
+                        data=resp.error,
+                    )
+                )
             if self._current_phase_type != PhaseType.WARMUP:
                 self._publisher.publish(
                     EventRecord(
@@ -410,15 +439,7 @@ class BenchmarkSession:
                         data=resp.response_output,
                     )
                 )
-            if resp.error is not None:
-                self._publisher.publish(
-                    EventRecord(
-                        event_type=ErrorEventType.GENERIC,
-                        timestamp_ns=time.monotonic_ns(),
-                        sample_uuid=query_id,
-                        data=resp.error,
-                    )
-                )
+
             if phase_issuer is not None and query_id in phase_issuer.uuid_to_index:
                 phase_issuer.inflight -= 1
                 if phase_issuer.inflight <= 0:

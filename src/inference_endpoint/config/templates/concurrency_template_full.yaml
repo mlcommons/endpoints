@@ -15,7 +15,7 @@ model_params:
 datasets:  # Dataset configs
 - name: perf
   type: performance  # Dataset purpose: performance or accuracy | options: performance, accuracy
-  path: '<DATASET_PATH eg: tests/datasets/dummy_1k.jsonl>'  # Dataset file path
+  path: '<DATASET_PATH eg: tests/assets/datasets/dummy_1k.jsonl>'  # Dataset file path
   format: null  # Dataset format (auto-detected)
   samples: null  # Number of samples to use
   eval_method: null
@@ -24,7 +24,7 @@ datasets:  # Dataset configs
   accuracy_config: null  # Accuracy evaluation settings
 - name: accuracy
   type: accuracy  # Dataset purpose: performance or accuracy | options: performance, accuracy
-  path: '<DATASET_PATH eg: tests/datasets/ds_samples.jsonl>'  # Dataset file path
+  path: '<DATASET_PATH eg: tests/assets/datasets/ds_samples.jsonl>'  # Dataset file path
   format: null  # Dataset format (auto-detected)
   samples: null  # Number of samples to use
   eval_method: exact_match  # Accuracy evaluation method | options: exact_match, contains, judge
