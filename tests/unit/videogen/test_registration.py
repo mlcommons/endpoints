@@ -29,7 +29,7 @@ def test_api_type_videogen_exists():
 
 @pytest.mark.unit
 def test_api_type_videogen_default_route():
-    assert APIType.VIDEOGEN.default_route() == "/v1/videos/generations"
+    assert APIType.VIDEOGEN.default_route() == "v1/videos/generations"
 
 
 @pytest.mark.unit

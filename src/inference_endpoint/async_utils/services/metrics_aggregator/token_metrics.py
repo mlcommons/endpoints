@@ -109,8 +109,13 @@ class TokenizePool:
         futures = [
             self._executor.submit(self._get_thread_tokenizer) for _ in range(n_workers)
         ]
-        for f in futures:
-            f.result()
+        try:
+            for f in futures:
+                f.result()
+        except Exception:
+            self._executor.shutdown(wait=False)
+            self._executor = None
+            raise
 
     def _get_thread_tokenizer(self) -> PreTrainedTokenizerBase:
         """Return the tokenizer for the current thread, loading it if needed."""

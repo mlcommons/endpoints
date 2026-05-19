@@ -13,8 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
 import inspect
 import os
+import random
+import warnings
 from abc import ABC
 from enum import Enum
 from logging import getLogger
@@ -276,11 +279,12 @@ class Dataset:
     def __init_subclass__(
         cls,
         dataset_id: str | None = None,
+        register: bool = True,
         **kwargs,
     ):
         super().__init_subclass__(**kwargs)
 
-        if not inspect.isabstract(cls):
+        if register and not inspect.isabstract(cls):
             if dataset_id is None:
                 dataset_id = cls.__name__
             cls.DATASET_ID = dataset_id
@@ -309,6 +313,7 @@ class Dataset:
         self.transforms = transforms
         self.repeats = repeats
         self.data: list[dict[str, Any]] | None = None
+        self._salt_rng: random.Random | None = None
 
     @classmethod
     def load_from_file(
@@ -402,7 +407,60 @@ class Dataset:
             IOError: If data cannot be loaded from disk.
         """
         assert self.data is not None, "Dataset not loaded. Call load() first."
-        return self.data[index]
+        data = self.data[index]
+        if self._salt_rng is not None:
+            data = self._apply_salt(data)
+        return data
+
+    def with_salt(self, rng: random.Random) -> "Dataset":
+        """Return a shallow copy of this dataset that salts each load_sample() call.
+
+        The returned dataset shares the same loaded data — no re-loading needed.
+        Each load_sample() call on the returned dataset prepends a unique hex salt
+        derived from rng to the prompt field, preventing KV-cache reuse.
+        """
+        clone = copy.copy(self)
+        clone._salt_rng = rng
+        return clone
+
+    def _apply_salt(self, data: Any) -> Any:
+        """Prepend a unique salt to the prompt field of a sample dict."""
+        assert self._salt_rng is not None
+        if not isinstance(data, dict):
+            return data
+        if "input_tokens" in data and "prompt" not in data:
+            self.logger.warning(
+                "salt=True: sample has 'input_tokens' but no 'prompt' — "
+                "salt cannot be applied to pre-tokenized input; KV-cache reuse may not be prevented"
+            )
+            return data
+        if "input_tokens" in data and "prompt" in data:
+            self.logger.warning(
+                "salt=True: sample has both 'input_tokens' and 'prompt' — "
+                "salt applied to 'prompt' only; adapters that use 'input_tokens' "
+                "directly will still reuse the KV cache"
+            )
+        if "prompt" not in data:
+            return data
+        prompt = data["prompt"]
+        salt = self._salt_rng.randbytes(8).hex()
+        if isinstance(prompt, str):
+            return {**data, "prompt": f"[{salt}] {prompt}"}
+        if isinstance(prompt, list) and prompt:
+            # Find the first text part at any index (image-first prompts place text at index 1+)
+            for i, part in enumerate(prompt):
+                if isinstance(part, dict) and part.get("type") == "text":
+                    salted_parts = [
+                        *prompt[:i],
+                        {**part, "text": f"[{salt}] {part['text']}"},
+                        *prompt[i + 1 :],
+                    ]
+                    return {**data, "prompt": salted_parts}
+            self.logger.warning(
+                "salt=True: multimodal prompt has no text part — "
+                "salt cannot be applied; KV-cache reuse may not be prevented"
+            )
+        return data  # unsupported prompt type — skip salting
 
     def num_samples(self) -> int:
         assert self.data is not None, "Dataset not loaded. Call load() first."
@@ -411,7 +469,7 @@ class Dataset:
     @classmethod
     def get_dataloader(
         cls,
-        datasets_dir: Path = Path("datasets"),
+        datasets_dir: Path = Path("dataset_cache"),
         num_repeats: int = 1,
         transforms: list[Transform] | None = None,
         force_regenerate: bool = False,
@@ -425,6 +483,16 @@ class Dataset:
         if not callable(cls.generate):
             raise ValueError(
                 f"Dataset {cls.__name__} has a generate method that is not callable and cannot be auto-loaded"
+            )
+
+        # TODO: remove this warning once dataset_cache/ is universally adopted
+        if datasets_dir == Path("dataset_cache") and Path("datasets").exists():
+            warnings.warn(
+                "Found a legacy 'datasets/' directory. The default cache directory is now "
+                "'dataset_cache/'. Rename the directory or pass --datasets-dir explicitly "
+                "to silence this warning.",
+                DeprecationWarning,
+                stacklevel=2,
             )
 
         df = cls.generate(datasets_dir=datasets_dir, force=force_regenerate, **kwargs)

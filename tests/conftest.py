@@ -34,7 +34,11 @@ from inference_endpoint.config.schema import LoadPattern, LoadPatternType
 from inference_endpoint.dataset_manager.dataset import Dataset, DatasetFormat
 from inference_endpoint.dataset_manager.transforms import ColumnRemap
 from inference_endpoint.testing.docker_server import DockerServer
-from inference_endpoint.testing.echo_server import EchoServer, HTTPServer
+from inference_endpoint.testing.echo_server import (
+    EchoServer,
+    HTTPServer,
+    RequestHandler,
+)
 
 logger = logging.getLogger(__name__)
 # Add src to path for imports
@@ -72,38 +76,65 @@ def temp_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 
 @pytest.fixture(scope="function")
-def mock_http_echo_server():
+def mock_http_echo_server_factory():
+    """Factory fixture for EchoServer with an optional custom request handler.
+
+    Yields a factory callable: ``factory(handler=None) -> EchoServer``.
+
+    When called with no arguments the server uses the default echo behaviour.
+    When called with a ``handler`` the handler is invoked for every incoming
+    request *instead of* the built-in echo logic.  The handler may be a plain
+    (sync) callable or an async coroutine function; in both cases it receives
+    the ``aiohttp.web.Request`` and must return an ``aiohttp.web.Response``.
+
+    All servers created by the factory are stopped automatically at the end of
+    the test.
+
+    Example::
+
+        def test_custom(mock_http_echo_server_factory):
+            server = mock_http_echo_server_factory()          # default echo
+            custom = mock_http_echo_server_factory(           # custom handler
+                lambda req: web.json_response({"ok": True})
+            )
     """
-    Mock HTTP server that echoes back the request payload in the appropriate format.
+    servers: list[EchoServer] = []
+
+    def factory(handler: RequestHandler | None = None) -> EchoServer:
+        server = EchoServer(port=0, request_handler=handler)
+        logging.info("Starting mock HTTP echo server")
+        server.start()
+        servers.append(server)
+        return server
+
+    yield factory
+
+    for server in servers:
+        logging.info("Stopping mock HTTP echo server")
+        server.stop()
+
+
+@pytest.fixture(scope="function")
+def mock_http_echo_server(mock_http_echo_server_factory):
+    """Mock HTTP server that echoes back the request payload in the appropriate format.
 
     This fixture creates a real HTTP server running on localhost that captures
     any HTTP request and returns the request payload as the response. Useful for
     testing HTTP clients with real network calls but controlled responses.
 
+    For a server with a custom per-request handler, use
+    ``mock_http_echo_server_factory`` instead.
+
     Returns:
-        A server instance with URL.
+        A running ``EchoServer`` instance.
 
-    Example:
+    Example::
+
         def test_my_http_client(mock_http_echo_server):
-            server = mock_http_echo_server
-            # Make real HTTP requests to server.url
-            # The response will contain the exact payload you sent
+            # Make real HTTP requests to mock_http_echo_server.url
+            # The response will contain the exact payload you sent.
     """
-
-    # Create and start the server with dynamic port allocation (port=0)
-
-    try:
-        server = EchoServer(port=0)
-        logging.info("Starting mock HTTP echo server")
-        server.start()
-        yield server
-    except Exception as e:
-        logging.error(f"Mock Echo Server error: {e}")
-        raise RuntimeError(f"Mock Echo Server error: {e}") from e
-    finally:
-        logging.info("Stopping mock HTTP echo server")
-        if server:
-            server.stop()
+    yield mock_http_echo_server_factory()
 
 
 @pytest.fixture

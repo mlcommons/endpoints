@@ -108,7 +108,8 @@ async def _probe_async(config: ProbeConfig) -> None:
         # Disable warmup for probe - it's a quick health check
         http_config = HTTPClientConfig(
             endpoint_urls=[
-                urljoin(e, api_type.default_route()) for e in endpoints.split(",")
+                urljoin(e.rstrip("/") + "/", api_type.default_route())
+                for e in endpoints.split(",")
             ],
             api_type=api_type,
             num_workers=1,

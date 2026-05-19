@@ -23,7 +23,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import time
 import uuid
 from collections.abc import Callable
@@ -44,8 +43,6 @@ from .sample_order import create_sample_order
 from .strategy import LoadStrategy, create_load_strategy
 
 logger = logging.getLogger(__name__)
-
-_WARMUP_ENABLED = os.environ.get("ENABLE_WARMUP") == "1"
 
 
 def _extract_prompt_text(messages: list[Any]) -> str | None:
@@ -92,6 +89,7 @@ class PhaseConfig:
     runtime_settings: RuntimeSettings
     dataset: Dataset
     phase_type: PhaseType = PhaseType.PERFORMANCE
+    drain_after: bool = True
     strategy: LoadStrategy | None = field(default=None, compare=False)
 
 
@@ -322,6 +320,7 @@ class BenchmarkSession:
         self._stop_requested = False
         self._done = False
         self._current_phase_issuer: PhaseIssuer | None = None
+        self._current_phase_type: PhaseType | None = None
         self._current_strategy: LoadStrategy | None = None
         self._recv_task: asyncio.Task | None = None
         self._strategy_task: asyncio.Task | None = None
@@ -339,7 +338,11 @@ class BenchmarkSession:
         if self._strategy_task and not self._strategy_task.done():
             self._strategy_task.cancel()
 
-    async def run(self, phases: list[PhaseConfig]) -> SessionResult:
+    async def run(
+        self,
+        phases: list[PhaseConfig],
+        on_phase_start: Callable[[PhaseConfig], None] | None = None,
+    ) -> SessionResult:
         """Run all benchmark phases sequentially.
 
         Returns SessionResult with per-phase results.
@@ -354,12 +357,8 @@ class BenchmarkSession:
             for phase in phases:
                 if self._stop_requested:
                     break
-                if phase.phase_type == PhaseType.WARMUP and not _WARMUP_ENABLED:
-                    logger.info(
-                        "Skipping warmup phase %s (set ENABLE_WARMUP=1 to enable)",
-                        phase.name,
-                    )
-                    continue
+                if on_phase_start is not None:
+                    on_phase_start(phase)
                 result = await self._run_phase(phase)
                 if result is not None:
                     phase_results.append(result)
@@ -401,6 +400,7 @@ class BenchmarkSession:
         )
 
         self._current_phase_issuer = phase_issuer
+        self._current_phase_type = phase.phase_type
         self._current_strategy = strategy
 
         # Performance phases get tracking events
@@ -416,8 +416,7 @@ class BenchmarkSession:
         finally:
             self._strategy_task = None
 
-        # Drain in-flight (skip for warmup — keep concurrency hot)
-        if phase.phase_type != PhaseType.WARMUP:
+        if phase.drain_after:
             await self._drain_inflight(phase_issuer)
 
         if phase.phase_type == PhaseType.PERFORMANCE:
@@ -446,14 +445,20 @@ class BenchmarkSession:
     async def _drain_inflight(self, phase_issuer: PhaseIssuer) -> None:
         """Wait for all in-flight responses from this phase to complete.
 
-        Currently, there is no timeout for the drain step. In the future,
-        we can possibly add a dynamic timeout based on the rate of completion
-        throughout the current phase."""
+        Hard-bounded at 240 s; logs an error and returns if exceeded so the
+        next phase starts regardless of stuck requests."""
         if phase_issuer.inflight <= 0 or self._stop_requested:
             return
         logger.info("Draining %d in-flight responses...", phase_issuer.inflight)
         self._drain_event.clear()
-        await self._drain_event.wait()
+        try:
+            await asyncio.wait_for(self._drain_event.wait(), timeout=240.0)
+        except TimeoutError:
+            logger.error(
+                "Drain timed out after 240 s with %d responses still in flight; "
+                "proceeding to next phase.",
+                phase_issuer.inflight,
+            )
 
     async def _receive_responses(self) -> None:
         """Receive responses from the issuer. Runs as a concurrent task."""
@@ -520,18 +525,20 @@ class BenchmarkSession:
                         data=resp.error,
                     )
                 )
-            self._publisher.publish(
-                EventRecord(
-                    event_type=SampleEventType.COMPLETE,
-                    timestamp_ns=resp.completed_at
-                    if isinstance(resp.completed_at, int)
-                    else time.monotonic_ns(),
-                    sample_uuid=query_id,
-                    conversation_id=conv_id_str,
-                    turn=turn_num,
-                    data=resp.response_output,
+            if self._current_phase_type != PhaseType.WARMUP:
+                self._publisher.publish(
+                    EventRecord(
+                        event_type=SampleEventType.COMPLETE,
+                        timestamp_ns=resp.completed_at
+                        if isinstance(resp.completed_at, int)
+                        else time.monotonic_ns(),
+                        sample_uuid=query_id,
+                        conversation_id=conv_id_str,
+                        turn=turn_num,
+                        data=resp.response_output,
+                    )
                 )
-            )
+
             if phase_issuer is not None and query_id in phase_issuer.uuid_to_index:
                 phase_issuer.completed_uuids.add(query_id)
                 phase_issuer.inflight -= 1
@@ -539,7 +546,10 @@ class BenchmarkSession:
                     self._drain_event.set()
                 if self._current_strategy:
                     self._current_strategy.on_query_complete(query_id)
-                if self._on_sample_complete:
+                if (
+                    self._on_sample_complete
+                    and self._current_phase_type != PhaseType.WARMUP
+                ):
                     self._on_sample_complete(resp)
 
         elif isinstance(resp, StreamChunk):
