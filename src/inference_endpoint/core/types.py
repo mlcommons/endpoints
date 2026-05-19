@@ -43,13 +43,13 @@ class APIType(str, Enum):
         """Return the default HTTP path for this API type."""
         match self:
             case APIType.OPENAI:
-                return "/v1/chat/completions"
+                return "v1/chat/completions"
             case APIType.OPENAI_COMPLETIONS:
-                return "/v1/completions"
+                return "v1/completions"
             case APIType.SGLANG:
-                return "/generate"
+                return "generate"
             case APIType.VIDEOGEN:
-                return "/v1/videos/generations"
+                return "v1/videos/generations"
             case _:
                 raise ValueError(f"Invalid API type: {self}")
 

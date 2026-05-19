@@ -152,7 +152,7 @@ class TestVideoGenAdapter:
         assert set(cf.optional_columns or []) == expected_optional
 
     def test_default_route_is_trtllm_native(self):
-        assert APIType.VIDEOGEN.default_route() == "/v1/videos/generations"
+        assert APIType.VIDEOGEN.default_route() == "v1/videos/generations"
 
 
 @pytest.mark.unit

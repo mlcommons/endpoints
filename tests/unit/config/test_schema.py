@@ -16,6 +16,7 @@
 """Tests for configuration schema models and validation."""
 
 import random
+from urllib.parse import urljoin
 
 import pytest
 from inference_endpoint import metrics
@@ -88,9 +89,26 @@ class TestModelParams:
 class TestAPIType:
     @pytest.mark.unit
     def test_default_routes(self):
-        assert APIType.OPENAI.default_route() == "/v1/chat/completions"
-        assert APIType.SGLANG.default_route() == "/generate"
-        assert APIType.OPENAI_COMPLETIONS.default_route() == "/v1/completions"
+        assert APIType.OPENAI.default_route() == "v1/chat/completions"
+        assert APIType.SGLANG.default_route() == "generate"
+        assert APIType.OPENAI_COMPLETIONS.default_route() == "v1/completions"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "base,expected",
+        [
+            ("http://localhost:8080", "http://localhost:8080/v1/chat/completions"),
+            ("http://localhost:8080/", "http://localhost:8080/v1/chat/completions"),
+            # Non-root base: route appends rather than replacing the path prefix.
+            (
+                "https://openrouter.ai/api",
+                "https://openrouter.ai/api/v1/chat/completions",
+            ),
+        ],
+    )
+    def test_url_assembly(self, base: str, expected: str):
+        url = urljoin(base.rstrip("/") + "/", APIType.OPENAI.default_route())
+        assert url == expected
 
 
 class TestDataset:

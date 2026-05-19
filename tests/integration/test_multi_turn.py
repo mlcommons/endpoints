@@ -111,7 +111,7 @@ async def _run_session(
         responses_out[result.id] = result.get_response_output_string()
 
     http_config = HTTPClientConfig(
-        endpoint_urls=[urljoin(server_url, "/v1/chat/completions")],
+        endpoint_urls=[urljoin(server_url.rstrip("/") + "/", "v1/chat/completions")],
         warmup_connections=0,
         num_workers=2,
     )
@@ -378,7 +378,9 @@ async def test_turn_ordering_enforced_end_to_end(echo_server):
     responses: dict[str, str] = {}
 
     http_config = HTTPClientConfig(
-        endpoint_urls=[urljoin(echo_server.url, "/v1/chat/completions")],
+        endpoint_urls=[
+            urljoin(echo_server.url.rstrip("/") + "/", "v1/chat/completions")
+        ],
         warmup_connections=0,
         num_workers=1,
     )
@@ -676,7 +678,9 @@ async def test_multi_turn_pipeline_exception_propagates(echo_server):
 
     loop = asyncio.get_running_loop()
     http_config = HTTPClientConfig(
-        endpoint_urls=[urljoin(echo_server.url, "/v1/chat/completions")],
+        endpoint_urls=[
+            urljoin(echo_server.url.rstrip("/") + "/", "v1/chat/completions")
+        ],
         warmup_connections=0,
         num_workers=2,
     )
