@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import TypeVar
 
 import yaml
-from pydantic import BaseModel, ValidationError
+from pydantic import ValidationError
 
 from .models import (
     AccuracyResult,
@@ -17,8 +16,6 @@ from .models import (
     Severity,
     SystemDescription,
 )
-
-_T = TypeVar("_T", bound=BaseModel)
 
 
 def _load_json(path: Path) -> tuple[dict | None, str | None]:
@@ -46,22 +43,36 @@ def _load_yaml(path: Path) -> tuple[dict | None, str | None]:
         return None, f"IO error reading {path.name}: {exc}"
 
 
-def _load_validated(data: dict, model_cls: type[_T], filename: str) -> tuple[_T | None, str | None]:
-    try:
-        return model_cls.model_validate(data), None
-    except ValidationError as exc:
-        first = exc.errors()[0]
-        return None, f"Validation error in {filename}: {first['loc']} — {first['msg']}"
+def _validation_errors(exc: ValidationError, rule: str, path: Path) -> list[CheckResult]:
+    return [
+        CheckResult(
+            rule=rule,
+            message=f"Validation error in {path.name}: {e['loc']} — {e['msg']}",
+            severity=Severity.ERROR,
+            path=path,
+        )
+        for e in exc.errors()
+    ]
 
 
-def load_system_description(path: Path) -> tuple[SystemDescription | None, str | None]:
+def load_system_description(
+    path: Path,
+) -> tuple[SystemDescription | None, list[CheckResult]]:
     """Load and validate ``system_desc_id.json``.
 
     Returns:
-        A ``(model, error)`` pair — exactly one of the two is ``None``.
+        A ``(model, check_results)`` pair.  On success the model is not None and
+        check_results is empty.  On failure the model is None and check_results
+        contains one entry per validation error.
     """
-    data, err = _load_json(path)
-    return _load_validated(data, SystemDescription, path.name) if data is not None else (None, err)
+    data, load_err = _load_json(path)
+    if load_err:
+        return None, [CheckResult(rule="system-description-valid", message=load_err,
+                                  severity=Severity.ERROR, path=path)]
+    try:
+        return SystemDescription.model_validate(data), []
+    except ValidationError as exc:
+        return None, _validation_errors(exc, "system-description-valid", path)
 
 
 def load_point_config(
@@ -72,38 +83,36 @@ def load_point_config(
     Returns:
         A ``(model, check_results)`` pair.  On success the model is not None and
         check_results contains the validator-produced CheckResult entries.
-        On failure the model is None and check_results contains a single ERROR entry.
+        On failure the model is None and check_results contains one entry per
+        validation error.
     """
     data, load_err = _load_yaml(path)
     if load_err:
-        return None, [
-            CheckResult(
-                rule="point-config-valid", message=load_err, severity=Severity.ERROR, path=path
-            )
-        ]
+        return None, [CheckResult(rule="point-config-valid", message=load_err,
+                                  severity=Severity.ERROR, path=path)]
     try:
         instance = PointConfig.model_validate(data, context=context or {})
         return instance, list(instance._check_results)
     except ValidationError as exc:
-        first = exc.errors()[0]
-        return None, [
-            CheckResult(
-                rule="point-config-valid",
-                message=f"Validation error in {path.name}: {first['loc']} — {first['msg']}",
-                severity=Severity.ERROR,
-                path=path,
-            )
-        ]
+        return None, _validation_errors(exc, "point-config-valid", path)
 
 
-def load_result_summary(path: Path) -> tuple[PointSummary | None, str | None]:
+def load_result_summary(path: Path) -> tuple[PointSummary | None, list[CheckResult]]:
     """Load and validate ``mlperf_endpoints_log_summary.json``.
 
     Returns:
-        A ``(model, error)`` pair — exactly one of the two is ``None``.
+        A ``(model, check_results)`` pair.  On success the model is not None and
+        check_results is empty.  On failure the model is None and check_results
+        contains one entry per validation error.
     """
-    data, err = _load_json(path)
-    return _load_validated(data, PointSummary, path.name) if data is not None else (None, err)
+    data, load_err = _load_json(path)
+    if load_err:
+        return None, [CheckResult(rule="result-file-valid", message=load_err,
+                                  severity=Severity.ERROR, path=path)]
+    try:
+        return PointSummary.model_validate(data), []
+    except ValidationError as exc:
+        return None, _validation_errors(exc, "result-file-valid", path)
 
 
 def load_accuracy_result(
@@ -114,25 +123,15 @@ def load_accuracy_result(
     Returns:
         A ``(model, check_results)`` pair.  On success the model is not None and
         check_results contains the validator-produced CheckResult entries.
-        On failure the model is None and check_results contains a single ERROR entry.
+        On failure the model is None and check_results contains one entry per
+        validation error.
     """
     data, load_err = _load_json(path)
     if load_err:
-        return None, [
-            CheckResult(
-                rule="accuracy-valid", message=load_err, severity=Severity.ERROR, path=path
-            )
-        ]
+        return None, [CheckResult(rule="accuracy-valid", message=load_err,
+                                  severity=Severity.ERROR, path=path)]
     try:
         instance = AccuracyResult.model_validate(data, context={"json_path": path})
         return instance, list(instance._check_results)
     except ValidationError as exc:
-        first = exc.errors()[0]
-        return None, [
-            CheckResult(
-                rule="accuracy-valid",
-                message=f"Validation error in {path.name}: {first['loc']} — {first['msg']}",
-                severity=Severity.ERROR,
-                path=path,
-            )
-        ]
+        return None, _validation_errors(exc, "accuracy-valid", path)

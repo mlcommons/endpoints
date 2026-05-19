@@ -118,11 +118,10 @@ class SubmissionChecker:
         results: list[CheckResult] = []
         system_id = system_json.stem
 
-        system_desc, load_err = load_system_description(system_json)
-        if load_err:
-            results.append(_err("system-description-valid", load_err, system_json, "#1"))
+        system_desc, load_results = load_system_description(system_json)
+        results.extend(load_results)
+        if system_desc is None:
             return results
-        assert system_desc is not None
         results.append(
             _ok(
                 "system-description-valid",
@@ -261,9 +260,9 @@ class SubmissionChecker:
                     )
                 )
 
-            summary, load_err = load_result_summary(summary_path)
-            if load_err:
-                results.append(_err("result-file-valid", load_err, summary_path, "#1"))
+            summary, load_results = load_result_summary(summary_path)
+            results.extend(load_results)
+            if summary is None:
                 continue
 
             # PointResult validates point-duration and metric-consistency

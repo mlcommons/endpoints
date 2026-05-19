@@ -21,25 +21,31 @@ from submission_checker.models import Severity
 
 
 def test_load_system_description_missing_file(tmp_path):
-    model, err = load_system_description(tmp_path / "missing.json")
+    model, results = load_system_description(tmp_path / "missing.json")
     assert model is None
-    assert "File not found" in err
+    assert len(results) == 1
+    assert results[0].severity == Severity.ERROR
+    assert "File not found" in results[0].message
 
 
 def test_load_system_description_invalid_json(tmp_path):
     p = tmp_path / "bad.json"
     p.write_text("{not valid json")
-    model, err = load_system_description(p)
+    model, results = load_system_description(p)
     assert model is None
-    assert "JSON parse error" in err
+    assert len(results) == 1
+    assert results[0].severity == Severity.ERROR
+    assert "JSON parse error" in results[0].message
 
 
 def test_load_system_description_schema_error(tmp_path):
     p = tmp_path / "bad.json"
     p.write_text(json.dumps({"division": "Standardized"}))  # missing required fields
-    model, err = load_system_description(p)
+    model, results = load_system_description(p)
     assert model is None
-    assert "Validation error" in err
+    assert all(r.severity == Severity.ERROR for r in results)
+    assert len(results) > 1  # all missing fields reported, not just the first
+    assert any("Validation error" in r.message for r in results)
 
 
 # ---------------------------------------------------------------------------
@@ -110,25 +116,31 @@ def test_load_point_config_valid_returns_check_results(tmp_path):
 
 
 def test_load_result_summary_missing_file(tmp_path):
-    model, err = load_result_summary(tmp_path / "missing.json")
+    model, results = load_result_summary(tmp_path / "missing.json")
     assert model is None
-    assert "File not found" in err
+    assert len(results) == 1
+    assert results[0].severity == Severity.ERROR
+    assert "File not found" in results[0].message
 
 
 def test_load_result_summary_invalid_json(tmp_path):
     p = tmp_path / "bad.json"
     p.write_text("}")
-    model, err = load_result_summary(p)
+    model, results = load_result_summary(p)
     assert model is None
-    assert "JSON parse error" in err
+    assert len(results) == 1
+    assert results[0].severity == Severity.ERROR
+    assert "JSON parse error" in results[0].message
 
 
 def test_load_result_summary_schema_error(tmp_path):
     p = tmp_path / "bad.json"
     p.write_text(json.dumps({"n_samples_completed": "not-a-number"}))
-    model, err = load_result_summary(p)
+    model, results = load_result_summary(p)
     assert model is None
-    assert "Validation error" in err
+    assert len(results) >= 1
+    assert all(r.severity == Severity.ERROR for r in results)
+    assert any("Validation error" in r.message for r in results)
 
 
 # ---------------------------------------------------------------------------
@@ -149,9 +161,9 @@ def test_load_accuracy_result_schema_error(tmp_path):
     p.write_text(json.dumps({"metric": "rouge1"}))  # missing score, quality_target, passed
     model, results = load_accuracy_result(p)
     assert model is None
-    assert len(results) == 1
-    assert results[0].severity == Severity.ERROR
-    assert "Validation error" in results[0].message
+    assert len(results) > 1  # all missing fields reported, not just the first
+    assert all(r.severity == Severity.ERROR for r in results)
+    assert any("Validation error" in r.message for r in results)
 
 
 # ---------------------------------------------------------------------------
