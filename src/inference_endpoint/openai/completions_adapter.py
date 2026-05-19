@@ -27,6 +27,7 @@ from inference_endpoint.dataset_manager.transforms import (
 from inference_endpoint.endpoint_client.adapter_protocol import HttpRequestAdapter
 
 from .types import (
+    SSEChoice,
     SSEDelta,
     TextCompletionRequest,
     TextCompletionResponse,
@@ -104,8 +105,12 @@ class OpenAITextCompletionsAdapter(HttpRequestAdapter):
         )
 
     @classmethod
-    def decode_sse_message(cls, json_bytes: bytes) -> SSEDelta:
+    def decode_sse_message(cls, json_bytes: bytes) -> SSEChoice:
         msg = cls._sse_decoder.decode(json_bytes)
         if not msg.choices:
-            return SSEDelta()
-        return SSEDelta(content=msg.choices[0].text)
+            return SSEChoice()
+        choice = msg.choices[0]
+        return SSEChoice(
+            delta=SSEDelta(content=choice.text),
+            finish_reason=choice.finish_reason,
+        )

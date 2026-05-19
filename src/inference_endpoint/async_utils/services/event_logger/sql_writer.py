@@ -50,6 +50,9 @@ class EventRowModel(Base):
     timestamp_ns: Mapped[int] = mapped_column(BigInteger, nullable=False)
     """Monotonic timestamp in nanoseconds."""
 
+    conversation_id: Mapped[str] = mapped_column(String, nullable=False, default="")
+    turn: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
     data: Mapped[bytes] = mapped_column(LargeBinary, nullable=False, default=b"")
     """JSON-encoded event data."""
 
@@ -61,6 +64,8 @@ def _record_to_row(record: EventRecord) -> EventRowModel:
         sample_uuid=record.sample_uuid,
         event_type=topic,
         timestamp_ns=record.timestamp_ns,
+        conversation_id=record.conversation_id,
+        turn=record.turn,
         data=msgspec.json.encode(record.data),
     )
 

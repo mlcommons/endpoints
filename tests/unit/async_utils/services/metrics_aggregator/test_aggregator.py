@@ -41,7 +41,7 @@ from inference_endpoint.core.record import (
     SampleEventType,
     SessionEventType,
 )
-from inference_endpoint.core.types import ErrorData, PromptData
+from inference_endpoint.core.types import ErrorData, PromptData, TextModelOutput
 
 from .conftest import (
     MockTokenizePool,
@@ -1118,5 +1118,45 @@ class TestAsyncTriggers:
                     f"drain timeout must report stuck tasks; got "
                     f"n_pending_tasks={kwargs['n_pending_tasks']}"
                 )
+            finally:
+                agg.close()
+
+    @pytest.mark.asyncio
+    async def test_tpot_osl_for_tool_call_complete(self, tmp_path):
+        """OSL and TPOT use message-path tokenization when COMPLETE carries tool_calls."""
+        loop = asyncio.get_event_loop()
+        pool = MockTokenizePool(delay=0.0)
+        with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
+            agg, registry, _ = make_aggregator(
+                ctx, loop, "agg_tpot_osl_tool_call", tokenize_pool=pool
+            )
+            try:
+                tool_call = {
+                    "id": "c1",
+                    "type": "function",
+                    "function": {"name": "f", "arguments": "{}"},
+                }
+                await agg.process(
+                    [
+                        session_event(
+                            SessionEventType.START_PERFORMANCE_TRACKING, ts=0
+                        ),
+                        sample_event(SampleEventType.ISSUED, "s1", ts=1000),
+                        sample_event(SampleEventType.RECV_FIRST, "s1", ts=2000),
+                        sample_event(
+                            SampleEventType.COMPLETE,
+                            "s1",
+                            ts=5000,
+                            data=TextModelOutput(output="ok", tool_calls=(tool_call,)),
+                        ),
+                    ]
+                )
+                await agg._table.drain_tasks()
+                # OSL = token_count("ok" + tool_calls_json) = 2
+                assert snapshot_series_total(registry, MetricSeriesKey.OSL.value) == 2
+                # tpot = (5000 - 2000) / token_count(tool_calls_json) = 3000 / 1 = 3000
+                assert snapshot_series_total(
+                    registry, MetricSeriesKey.TPOT_NS.value
+                ) == pytest.approx(3000.0)
             finally:
                 agg.close()

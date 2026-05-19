@@ -37,7 +37,7 @@ from inference_endpoint.dataset_manager.transforms import AddStaticColumns, Harm
 from inference_endpoint.openai.accumulator import OpenAISSEAccumulator
 from inference_endpoint.openai.completions_adapter import OpenAITextCompletionsAdapter
 from inference_endpoint.openai.types import (
-    SSEDelta,
+    SSEChoice,
     TextCompletionSSEChoice,
     TextCompletionSSEMessage,
 )
@@ -126,36 +126,38 @@ class TestOpenAITextCompletionsAdapterDecodeResponse:
 
 class TestOpenAITextCompletionsAdapterDecodeSSE:
     @pytest.mark.unit
-    def test_decode_sse_message_returns_sse_delta(self):
+    def test_decode_sse_message_returns_sse_choice(self):
         msg = TextCompletionSSEMessage(choices=(TextCompletionSSEChoice(text="tok"),))
         json_bytes = msgspec.json.encode(msg)
-        delta = OpenAITextCompletionsAdapter.decode_sse_message(json_bytes)
-        assert isinstance(delta, SSEDelta)
-        assert delta.content == "tok"
+        choice = OpenAITextCompletionsAdapter.decode_sse_message(json_bytes)
+        assert isinstance(choice, SSEChoice)
+        assert choice.delta is not None
+        assert choice.delta.content == "tok"
 
     @pytest.mark.unit
-    def test_decode_sse_empty_choices_returns_empty_delta(self):
+    def test_decode_sse_empty_choices_returns_empty_choice(self):
         msg = TextCompletionSSEMessage(choices=())
         json_bytes = msgspec.json.encode(msg)
-        delta = OpenAITextCompletionsAdapter.decode_sse_message(json_bytes)
-        assert isinstance(delta, SSEDelta)
-        assert delta.content == ""
+        choice = OpenAITextCompletionsAdapter.decode_sse_message(json_bytes)
+        assert isinstance(choice, SSEChoice)
+        assert choice.delta is None
 
     @pytest.mark.unit
-    def test_decode_sse_empty_text_returns_empty_delta(self):
+    def test_decode_sse_empty_text_returns_choice_with_empty_content(self):
         msg = TextCompletionSSEMessage(choices=(TextCompletionSSEChoice(text=""),))
         json_bytes = msgspec.json.encode(msg)
-        delta = OpenAITextCompletionsAdapter.decode_sse_message(json_bytes)
-        assert isinstance(delta, SSEDelta)
-        assert delta.content == ""
+        choice = OpenAITextCompletionsAdapter.decode_sse_message(json_bytes)
+        assert isinstance(choice, SSEChoice)
+        assert choice.delta is not None
+        assert choice.delta.content == ""
 
     @pytest.mark.unit
-    def test_sse_delta_compatible_with_openai_accumulator(self):
+    def test_sse_choice_compatible_with_openai_accumulator(self):
         acc = OpenAISSEAccumulator(query_id="q1", stream_all_chunks=True)
         msg = TextCompletionSSEMessage(choices=(TextCompletionSSEChoice(text="hello"),))
         json_bytes = msgspec.json.encode(msg)
-        delta = OpenAITextCompletionsAdapter.decode_sse_message(json_bytes)
-        chunk = acc.add_chunk(delta)
+        choice = OpenAITextCompletionsAdapter.decode_sse_message(json_bytes)
+        chunk = acc.add_chunk(choice)
         assert chunk is not None
         assert chunk.response_chunk == "hello"
 

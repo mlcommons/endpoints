@@ -14,7 +14,7 @@ settings:
     max_duration_ms: 0  # Maximum test duration in ms (0 for no limit)
     n_samples_to_issue: null  # Sample count override
   load_pattern:
-    type: poisson  # Load pattern type | options: max_throughput, poisson, concurrency, burst, step
+    type: poisson  # Load pattern type | options: max_throughput, poisson, concurrency, multi_turn, burst, step
     target_qps: 10.0  # Target QPS
 endpoint_config:
   endpoints:  # Endpoint URL(s). Must include scheme, e.g. 'http://host:port'.

@@ -274,7 +274,7 @@ class SeriesSampler(MetricSampler):
             total=self._total,
             min=self._min,
             max=self._max,
-            sum_sq=self._sum_sq,
+            sum_sq=float(self._sum_sq),
             percentiles=perc_dict,
             histogram=histogram,
         )
@@ -313,7 +313,7 @@ class SeriesSampler(MetricSampler):
             total=self._total,
             min=self._min,
             max=self._max,
-            sum_sq=self._sum_sq,
+            sum_sq=float(self._sum_sq),
             percentiles=perc_dict,
             histogram=histogram,
         )

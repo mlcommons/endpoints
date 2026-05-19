@@ -207,6 +207,13 @@ class TestSeriesSampler:
         assert stat.count == 3
         assert stat.total == pytest.approx(7.5)
 
+    def test_ns_range_sum_sq_is_float(self):
+        s = self._make()
+        s.record(_NS_HIGH)
+        s.record(_NS_HIGH)
+        assert isinstance(s.build_stat(exact=False).sum_sq, float)
+        assert isinstance(s.build_stat(exact=True).sum_sq, float)
+
 
 @pytest.mark.unit
 class TestMetricsRegistry:

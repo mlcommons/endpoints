@@ -57,6 +57,8 @@ dependencies = [
     "rich==14.3.3",
     # Needed for tokenization and OSL reporting
     "transformers==5.5.0",
+    # Required by transformers' apply_chat_template
+    "jinja2==3.1.6",
     "numpy==2.4.4",
     "datasets==4.8.4",
     "Pillow==12.2.0",

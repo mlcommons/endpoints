@@ -47,14 +47,22 @@ class TestCounterStat:
 
 @pytest.mark.unit
 class TestSeriesStat:
-    def test_roundtrip(self):
+    @pytest.mark.parametrize(
+        "sum_sq",
+        [
+            55000,
+            # Float exceeding uint64 max — would overflow msgpack if encoded as int.
+            2.0 * (2**64 - 1),
+        ],
+    )
+    def test_roundtrip(self, sum_sq):
         stat = SeriesStat(
             name="ttft_ns",
             count=5,
             total=500,
             min=50,
             max=150,
-            sum_sq=55000,
+            sum_sq=sum_sq,
             percentiles={"50": 100.0, "99": 145.0},
             histogram=[((50.0, 100.0), 2), ((100.0, 150.0), 3)],
         )

@@ -6,7 +6,6 @@ timeout: 14400
 
 model_params:
   name: "Qwen/Qwen3-VL-235B-A22B-Instruct"
-  temperature: 0
   top_p: 1
   max_new_tokens: 150
   streaming: "on" # Required for TTFT/TPOT measurement
@@ -14,20 +13,26 @@ model_params:
 datasets:
   - name: shopify_product_catalogue::q3vl
     type: "performance"
+  - name: shopify_product_catalogue::q3vl
+    type: "accuracy"
+    accuracy_config:
+      eval_method: "shopify_category_f1"
+      ground_truth: "ground_truth_category"
+      extractor: "identity_extractor"
+      num_repeats: 1
 
 settings:
   runtime:
-    min_duration_ms: 600000 # 10 minutes
-    n_samples_to_issue: 48289 # Full dataset size for this benchmark; lower this (e.g., 1000 or 100) for quick tests, or remove for an unconstrained full run
+    min_duration_ms: 600000 # 10 minutes, this is override when n_samples_to_issue is set
     scheduler_random_seed: 42
     dataloader_random_seed: 42
 
   load_pattern:
     type: "poisson"
-    target_qps: 6.5
+    target_qps: 5
 
   client:
-    num_workers: 2
+    num_workers: 5
     transport:
       type: zmq
       recv_buffer_size: 16777216

@@ -31,6 +31,7 @@ import shutil
 import signal
 import tempfile
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from dataclasses import replace as dataclass_replace
 from datetime import datetime
@@ -42,6 +43,7 @@ import msgspec
 import msgspec.json
 from huggingface_hub import model_info
 from tqdm import tqdm
+from transformers import AutoTokenizer
 from transformers.utils import logging as transformers_logging
 
 from inference_endpoint.async_utils.event_publisher import EventPublisherService
@@ -55,6 +57,9 @@ from inference_endpoint.async_utils.services.metrics_aggregator.snapshot import 
 )
 from inference_endpoint.async_utils.services.metrics_aggregator.subscriber import (
     MetricsSnapshotSubscriber,
+)
+from inference_endpoint.async_utils.services.metrics_aggregator.token_metrics import (
+    _normalize_tool_calls_for_template,
 )
 from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
 from inference_endpoint.config.runtime_settings import RuntimeSettings
@@ -71,6 +76,7 @@ from inference_endpoint.config.schema import (
 from inference_endpoint.core.types import QueryResult
 from inference_endpoint.dataset_manager.dataset import Dataset
 from inference_endpoint.dataset_manager.factory import DataLoaderFactory
+from inference_endpoint.dataset_manager.multi_turn_dataset import MultiTurnDataset
 from inference_endpoint.endpoint_client.cpu_affinity import AffinityPlan, pin_loadgen
 from inference_endpoint.endpoint_client.http_client import HTTPEndpointClient
 from inference_endpoint.endpoint_client.http_sample_issuer import HttpClientSampleIssuer
@@ -81,6 +87,8 @@ from inference_endpoint.exceptions import (
     InputValidationError,
     SetupError,
 )
+from inference_endpoint.load_generator.conversation_manager import ConversationManager
+from inference_endpoint.load_generator.multi_turn_strategy import MultiTurnStrategy
 from inference_endpoint.load_generator.session import (
     BenchmarkSession,
     PhaseConfig,
@@ -293,6 +301,75 @@ def _load_datasets(
     return dataloader, accuracy_datasets, eval_configs
 
 
+def _precompute_isl_for_multi_turn(
+    dataloader: MultiTurnDataset, tokenizer_name: str
+) -> None:
+    """Tokenize pre-built message lists and store token counts in each sample.
+
+    Runs apply_chat_template once per client turn so the hot-path IslTrigger
+    sync path (len(token_ids)) is used instead of on-the-fly text tokenization.
+    Only affects dataset-history turns; live-history turns override 'messages'
+    at runtime so the stored input_tokens are stale (acceptable approximation).
+    """
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+    except Exception:
+        logger.exception(
+            "ISL pre-computation: failed to load tokenizer %s; "
+            "falling back to text-tokenization at runtime",
+            tokenizer_name,
+        )
+        return
+    skipped = 0
+    first_failure_logged = False
+    for sample in dataloader.data or []:
+        messages = sample.get("messages")
+        if not messages:
+            continue
+        try:
+            normalized_messages = []
+            for msg in messages:
+                if msg.get("tool_calls"):
+                    msg = {
+                        **msg,
+                        "tool_calls": _normalize_tool_calls_for_template(
+                            msg["tool_calls"]
+                        ),
+                    }
+                normalized_messages.append(msg)
+            tools = sample.get("tools")
+            raw = tokenizer.apply_chat_template(
+                normalized_messages,
+                tools=tools if tools else None,
+                tokenize=True,
+                add_generation_prompt=True,
+            )
+            # Some tokenizers (e.g. Qwen3 fast tokenizer) return BatchEncoding
+            # instead of a plain list; extract .input_ids in that case.
+            token_ids: list[int] = raw.input_ids if hasattr(raw, "input_ids") else raw
+            sample["input_tokens"] = token_ids
+        except Exception:
+            if not first_failure_logged:
+                logger.exception(
+                    "ISL pre-computation: apply_chat_template failed (first failure shown)"
+                )
+                first_failure_logged = True
+            skipped += 1
+    if skipped:
+        logger.warning(
+            "ISL pre-computation: %d turn(s) skipped (apply_chat_template failed)",
+            skipped,
+        )
+    total_with_messages = len([s for s in (dataloader.data or []) if s.get("messages")])
+    if total_with_messages > 0 and skipped == total_with_messages:
+        logger.warning(
+            "ISL precomputation: all %d turn(s) failed apply_chat_template; "
+            "ISL metrics will use text-tokenization fallback. "
+            "Check tokenizer/template compatibility.",
+            total_with_messages,
+        )
+
+
 def setup_benchmark(config: BenchmarkConfig, test_mode: TestMode) -> BenchmarkContext:
     """Load tokenizer, dataset, create scheduler, setup report dir."""
     # CPU affinity
@@ -321,6 +398,10 @@ def setup_benchmark(config: BenchmarkConfig, test_mode: TestMode) -> BenchmarkCo
 
     # Datasets
     dataloader, accuracy_datasets, eval_configs = _load_datasets(config, report_dir)
+
+    if isinstance(dataloader, MultiTurnDataset) and tokenizer_name is not None:
+        logger.info("Pre-computing ISL token counts for multi-turn dataset…")
+        _precompute_isl_for_multi_turn(dataloader, tokenizer_name)
 
     # Setup runtime settings using factory method
     rt_settings = RuntimeSettings.from_config(config, dataloader.num_samples())
@@ -352,7 +433,10 @@ def setup_benchmark(config: BenchmarkConfig, test_mode: TestMode) -> BenchmarkCo
     )
 
 
-def _build_phases(ctx: BenchmarkContext) -> list[PhaseConfig]:
+def _build_phases(
+    ctx: BenchmarkContext,
+    perf_strategy: MultiTurnStrategy | None = None,
+) -> list[PhaseConfig]:
     """Build the phase list from BenchmarkContext."""
     phases: list[PhaseConfig] = []
 
@@ -388,7 +472,11 @@ def _build_phases(ctx: BenchmarkContext) -> list[PhaseConfig]:
     # Performance phase
     phases.append(
         PhaseConfig(
-            "performance", ctx.rt_settings, ctx.dataloader, PhaseType.PERFORMANCE
+            "performance",
+            ctx.rt_settings,
+            ctx.dataloader,
+            PhaseType.PERFORMANCE,
+            strategy=perf_strategy,
         )
     )
 
@@ -396,6 +484,17 @@ def _build_phases(ctx: BenchmarkContext) -> list[PhaseConfig]:
     # what Scorer._load_sample_index_map() looks up in sample_idx_map.json
     for eval_cfg in ctx.eval_configs:
         acc_ds = eval_cfg.dataset
+        if isinstance(acc_ds, MultiTurnDataset):
+            raise InputValidationError(
+                f"Accuracy dataset '{eval_cfg.dataset_name}' is a MultiTurnDataset, "
+                "which is not yet supported for accuracy evaluation."
+            )
+        # Accuracy phases run at MAX_THROUGHPUT; inheriting perf_lp (e.g. POISSON)
+        # would silently rate-limit evaluation until a multi-turn accuracy strategy
+        # and QPS-budgeting support are added.
+        acc_load_pattern: LoadPattern | None = LoadPattern(
+            type=LoadPatternType.MAX_THROUGHPUT
+        )
         acc_settings = RuntimeSettings(
             metric_target=ctx.rt_settings.metric_target,
             reported_metrics=ctx.rt_settings.reported_metrics,
@@ -406,7 +505,7 @@ def _build_phases(ctx: BenchmarkContext) -> list[PhaseConfig]:
             min_sample_count=acc_ds.num_samples() * acc_ds.repeats,
             rng_sched=ctx.rt_settings.rng_sched,
             rng_sample_index=ctx.rt_settings.rng_sample_index,
-            load_pattern=LoadPattern(type=LoadPatternType.MAX_THROUGHPUT),
+            load_pattern=acc_load_pattern,
         )
         phases.append(
             PhaseConfig(eval_cfg.dataset_name, acc_settings, acc_ds, PhaseType.ACCURACY)
@@ -556,16 +655,63 @@ async def _run_benchmark_async(
             launcher.kill_all()
             raise SetupError(f"Failed to connect to endpoint: {e}") from e
 
+        # Build multi-turn strategy if the performance dataset is a MultiTurnDataset.
+        multi_turn_strategy: MultiTurnStrategy | None = None
+        if isinstance(ctx.dataloader, MultiTurnDataset):
+            mt_cfg = None
+            if ctx.config.datasets:
+                perf_ds_cfg = next(
+                    (
+                        d
+                        for d in ctx.config.datasets
+                        if d.type == DatasetType.PERFORMANCE
+                    ),
+                    None,
+                )
+                if perf_ds_cfg is not None:
+                    mt_cfg = perf_ds_cfg.multi_turn
+            assert ctx.dataloader.conversation_metadata is not None
+            multi_turn_strategy = MultiTurnStrategy(
+                conversation_manager=ConversationManager(),
+                dataset_metadata=ctx.dataloader.conversation_metadata,
+                multi_turn_config=mt_cfg,
+                target_concurrency=ctx.config.settings.load_pattern.target_concurrency,
+            )
+
+        _on_sample_complete: Callable[[QueryResult], None]
+        if multi_turn_strategy is not None:
+
+            def _on_sample_complete(result: QueryResult) -> None:
+                try:
+                    multi_turn_strategy.on_sample_complete(result)
+                except Exception:
+                    logger.exception(
+                        "multi_turn_strategy.on_sample_complete failed (result=%s)",
+                        result.id,
+                    )
+                try:
+                    collector.on_complete_hook(result)
+                except Exception:
+                    logger.exception(
+                        "collector.on_complete_hook failed (result=%s)", result.id
+                    )
+
+            multi_turn_strategy._session_on_sample_complete = _on_sample_complete
+            multi_turn_strategy._session_publisher = publisher
+
+        else:
+            _on_sample_complete = collector.on_complete_hook
+
         # Create session
         session = BenchmarkSession(
             issuer=issuer,
             event_publisher=publisher,
             loop=loop,
-            on_sample_complete=collector.on_complete_hook,
+            on_sample_complete=_on_sample_complete,
             session_id=session_id,
         )
 
-        phases = _build_phases(ctx)
+        phases = _build_phases(ctx, perf_strategy=multi_turn_strategy)
         report: Report | None = None
 
         # Timer starts when the performance phase begins (after warmup drains),

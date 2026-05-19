@@ -375,11 +375,18 @@ def main(check_only: bool = False):
     if os.environ.get("CI"):
         check_only = True
 
-    comments = _collect_comments(BenchmarkConfig)
+    base_comments = _collect_comments(BenchmarkConfig)
+    # OfflineSettings only permits max_throughput; narrow the comment so the
+    # template doesn't list online-only types as valid offline options.
+    offline_comments = {
+        **base_comments,
+        "type: max_throughput": "# Load pattern type | offline only: max_throughput",
+    }
     stale = False
 
     for name, (test_type, overrides) in TEMPLATES.items():
         model_cls = MODEL_FOR_TYPE[test_type]
+        comments = offline_comments if test_type == TestType.OFFLINE else base_comments
         variants = {
             f"{name}_template.yaml": _build_minimal(test_type, overrides),
             f"{name}_template_full.yaml": _build_full(model_cls, overrides),

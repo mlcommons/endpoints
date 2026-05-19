@@ -24,8 +24,11 @@ from unittest.mock import patch
 
 import pandas as pd
 import pytest
+from inference_endpoint.dataset_manager.dataset import Dataset
 from inference_endpoint.dataset_manager.predefined.shopify_product_catalogue import (
+    BaseShopifyProductCatalogue,
     ShopifyProductCatalogue,
+    ShopifyProductCatalogue8k,
 )
 from inference_endpoint.dataset_manager.predefined.shopify_product_catalogue.presets import (
     ShopifyMultimodalFormatter,
@@ -33,12 +36,35 @@ from inference_endpoint.dataset_manager.predefined.shopify_product_catalogue.pre
 )
 from PIL import Image
 
+pytestmark = pytest.mark.unit
+
 
 def _make_pil_image(image_format: str = "JPEG") -> Image.Image:
     """Create a minimal 1x1 PIL Image with the given format attribute set."""
     img = Image.new("RGB", (1, 1), color=(128, 64, 32))
     img.format = image_format  # type: ignore[attr-defined]
     return img
+
+
+@pytest.fixture
+def mock_hf_dataset() -> list[dict]:
+    """Synthetic HuggingFace-style dataset for mocking load_from_huggingface.
+
+    Returns a list of sample dicts (indexable like HF Dataset via ds[i]).
+    """
+    return [
+        _make_mock_hf_row(
+            product_title="Shirt A",
+            product_description="Blue cotton shirt",
+            ground_truth_category="Clothing > Shirts > Polo",
+        ),
+        _make_mock_hf_row(
+            product_title="Shirt B",
+            product_description="Red silk shirt",
+            product_image=_make_pil_image("PNG"),
+            ground_truth_category="Clothing > Shirts > Dress",
+        ),
+    ]
 
 
 def _make_mock_hf_row(
@@ -73,26 +99,6 @@ def _make_mock_hf_row(
 
 class TestShopifyProductCatalogueGenerate:
     """Tests for ShopifyProductCatalogue.generate()."""
-
-    @pytest.fixture
-    def mock_hf_dataset(self) -> list[dict]:
-        """Synthetic HuggingFace-style dataset for mocking load_from_huggingface.
-
-        Returns a list of sample dicts (indexable like HF Dataset via ds[i]).
-        """
-        return [
-            _make_mock_hf_row(
-                product_title="Shirt A",
-                product_description="Blue cotton shirt",
-                ground_truth_category="Clothing > Shirts > Polo",
-            ),
-            _make_mock_hf_row(
-                product_title="Shirt B",
-                product_description="Red silk shirt",
-                product_image=_make_pil_image("PNG"),
-                ground_truth_category="Clothing > Shirts > Dress",
-            ),
-        ]
 
     def test_generate_produces_expected_columns(
         self, tmp_path: Path, mock_hf_dataset: list[dict]
@@ -343,6 +349,124 @@ class TestShopifyQ3vlPreset:
             return_value=mock_df,
         ):
             loader = ShopifyProductCatalogue.get_dataloader(
+                datasets_dir=tmp_path,
+                transforms=q3vl(),
+                num_repeats=1,
+                force_regenerate=True,
+            )
+        loader.load()
+        assert loader.num_samples() == 1
+        sample = loader.load_sample(0)
+        assert "system" in sample
+        assert "prompt" in sample
+        assert isinstance(sample["prompt"], list)
+
+
+class TestShopifyProductCatalogue8k:
+    """Tests for ShopifyProductCatalogue8k class."""
+
+    def test_class_inherits_from_base(self) -> None:
+        """ShopifyProductCatalogue8k inherits from BaseShopifyProductCatalogue."""
+        assert issubclass(ShopifyProductCatalogue8k, BaseShopifyProductCatalogue)
+
+    def test_has_correct_repo_id(self) -> None:
+        """REPO_ID points to nvidia/Shopify-product-catalogue-8k."""
+        assert (
+            ShopifyProductCatalogue8k.REPO_ID == "nvidia/Shopify-product-catalogue-8k"
+        )
+
+    def test_has_correct_dataset_id(self) -> None:
+        """DATASET_ID is shopify_product_catalogue_8k."""
+        assert ShopifyProductCatalogue8k.DATASET_ID == "shopify_product_catalogue_8k"
+
+    def test_registered_in_dataset_predefined(self) -> None:
+        """Class is auto-registered in Dataset.PREDEFINED."""
+        assert "shopify_product_catalogue_8k" in Dataset.PREDEFINED
+        assert (
+            Dataset.PREDEFINED["shopify_product_catalogue_8k"]
+            is ShopifyProductCatalogue8k
+        )
+
+    def test_shares_column_names_with_base(self) -> None:
+        """Column names are identical to ShopifyProductCatalogue."""
+        assert (
+            ShopifyProductCatalogue8k.COLUMN_NAMES
+            == ShopifyProductCatalogue.COLUMN_NAMES
+        )
+
+    def test_shares_presets_with_base(self) -> None:
+        """Presets are shared with base class (q3vl works)."""
+        assert ShopifyProductCatalogue8k.PRESETS is ShopifyProductCatalogue.PRESETS
+        assert hasattr(ShopifyProductCatalogue8k.PRESETS, "q3vl")
+
+    def test_default_splits_is_train_only(self) -> None:
+        """8k variant defaults to train split only (no test split available)."""
+        assert ShopifyProductCatalogue8k.DEFAULT_SPLITS == ["train"]
+        assert ShopifyProductCatalogue.DEFAULT_SPLITS == ["train", "test"]
+
+    def test_generate_uses_correct_repo_id(
+        self, tmp_path: Path, mock_hf_dataset: list[dict]
+    ) -> None:
+        """Generate uses the correct REPO_ID for 8k variant."""
+        with patch(
+            "inference_endpoint.dataset_manager.predefined.shopify_product_catalogue.load_dataset",
+            return_value=mock_hf_dataset,
+        ) as mock_load:
+            df = ShopifyProductCatalogue8k.generate(
+                datasets_dir=tmp_path,
+                split=["train"],
+                force=True,
+            )
+        # Verify load_dataset was called with the 8k repo ID
+        mock_load.assert_called_once()
+        assert mock_load.call_args.args[0] == "nvidia/Shopify-product-catalogue-8k"
+        # Verify output has correct columns
+        assert list(df.columns) == ShopifyProductCatalogue8k.COLUMN_NAMES
+
+    def test_generate_uses_correct_dataset_id_for_paths(
+        self, tmp_path: Path, mock_hf_dataset: list[dict]
+    ) -> None:
+        """Generated files use the 8k dataset_id in paths."""
+        with patch(
+            "inference_endpoint.dataset_manager.predefined.shopify_product_catalogue.load_dataset",
+            return_value=mock_hf_dataset,
+        ):
+            ShopifyProductCatalogue8k.generate(
+                datasets_dir=tmp_path,
+                split=["train"],
+                force=True,
+            )
+        # Verify cache path uses shopify_product_catalogue_8k
+        expected_path = (
+            tmp_path
+            / "shopify_product_catalogue_8k"
+            / "train"
+            / "shopify_product_catalogue_8k_train.parquet"
+        )
+        assert expected_path.exists()
+
+    def test_get_dataloader_with_q3vl_preset(self, tmp_path: Path) -> None:
+        """get_dataloader with q3vl preset works for 8k variant."""
+        mock_df = pd.DataFrame(
+            [
+                {
+                    "product_title": "T1",
+                    "product_description": "D1",
+                    "product_image_base64": "YQ==",
+                    "product_image_format": "JPEG",
+                    "potential_product_categories": "[]",
+                    "ground_truth_category": "A > B",
+                    "ground_truth_brand": "Brand",
+                    "ground_truth_is_secondhand": "false",
+                }
+            ]
+        )
+        with patch.object(
+            ShopifyProductCatalogue8k,
+            "generate",
+            return_value=mock_df,
+        ):
+            loader = ShopifyProductCatalogue8k.get_dataloader(
                 datasets_dir=tmp_path,
                 transforms=q3vl(),
                 num_repeats=1,

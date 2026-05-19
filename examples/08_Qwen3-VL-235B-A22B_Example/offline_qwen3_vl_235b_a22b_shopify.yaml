@@ -7,7 +7,6 @@ timeout: 14400 # Perf + acc run takes over 3 hours, consider limit n_samples_to_
 
 model_params:
   name: "Qwen/Qwen3-VL-235B-A22B-Instruct"
-  temperature: 0
   top_p: 1
   max_new_tokens: 150
 
@@ -24,8 +23,7 @@ datasets:
 
 settings:
   runtime:
-    min_duration_ms: 600000 # 10 minute
-    n_samples_to_issue: 100 # Limit queries for testing (remove or increase for full run)
+    min_duration_ms: 600000 # 10 minutes, this is override when n_samples_to_issue is set
     scheduler_random_seed: 42 # For Poisson/distribution sampling
     dataloader_random_seed: 42 # For dataset shuffling
 
@@ -33,7 +31,7 @@ settings:
     type: "max_throughput"
 
   client:
-    num_workers: 2
+    num_workers: 5
     transport:
       type: zmq
       recv_buffer_size: 16777216
