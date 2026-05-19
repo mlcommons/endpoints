@@ -92,6 +92,7 @@ class PhaseConfig:
     drain_after: bool = True
     strategy: LoadStrategy | None = field(default=None, compare=False)
 
+
 # ---------------------------------------------------------------------------
 # Results
 # ---------------------------------------------------------------------------
@@ -532,6 +533,8 @@ class BenchmarkSession:
                         if isinstance(resp.completed_at, int)
                         else time.monotonic_ns(),
                         sample_uuid=query_id,
+                        conversation_id=conv_id_str,
+                        turn=turn_num,
                         data=resp.response_output,
                     )
                 )
