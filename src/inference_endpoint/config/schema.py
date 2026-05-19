@@ -197,6 +197,10 @@ class ModelParams(BaseModel):
         StreamingMode,
         cyclopts.Parameter(alias="--streaming", help="Streaming mode: auto/on/off"),
     ] = StreamingMode.AUTO
+    tokenizer_name: str | None = Field(
+        None,
+        description="HuggingFace tokenizer repo ID. Overrides model name for tokenizer loading.",
+    )
 
 
 class SubmissionReference(BaseModel):

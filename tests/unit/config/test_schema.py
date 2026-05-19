@@ -68,6 +68,7 @@ class TestModelParams:
         params = ModelParams(name="test")
         assert params.temperature is None
         assert params.max_new_tokens == 1024
+        assert params.tokenizer_name is None
 
     @pytest.mark.unit
     def test_with_osl_distribution(self):
@@ -83,6 +84,14 @@ class TestModelParams:
         )
         assert params.temperature == 0.5
         assert params.osl_distribution.type == OSLDistributionType.NORMAL
+
+    @pytest.mark.unit
+    def test_tokenizer_name_override(self):
+        params = ModelParams(
+            name="qwen/qwen3.6-35b-a3b", tokenizer_name="Qwen/Qwen3.6-35B-A3B"
+        )
+        assert params.tokenizer_name == "Qwen/Qwen3.6-35B-A3B"
+        assert params.name == "qwen/qwen3.6-35b-a3b"
 
 
 class TestAPIType:
