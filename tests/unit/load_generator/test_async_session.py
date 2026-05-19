@@ -20,7 +20,6 @@ from __future__ import annotations
 import asyncio
 import random
 
-import inference_endpoint.load_generator.session as _session_mod
 import pytest
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import LoadPattern, LoadPatternType
@@ -42,13 +41,6 @@ from inference_endpoint.load_generator.session import (
     _extract_prompt_text,
 )
 from inference_endpoint.metrics.metric import Throughput
-
-
-@pytest.fixture(autouse=False)
-def enable_warmup(monkeypatch):
-    """Enable warmup phases for tests that use PhaseType.WARMUP."""
-    monkeypatch.setattr(_session_mod, "_WARMUP_ENABLED", True)
-
 
 # ---------------------------------------------------------------------------
 # Test doubles
@@ -303,7 +295,7 @@ class TestBenchmarkSession:
         )
 
     @pytest.mark.asyncio
-    async def test_warmup_produces_no_result(self, enable_warmup):
+    async def test_warmup_produces_no_result(self):
         loop = asyncio.get_running_loop()
         issuer = FakeIssuer()
         issuer._loop = loop
@@ -322,7 +314,7 @@ class TestBenchmarkSession:
         assert len(result.phase_results) == 0
 
     @pytest.mark.asyncio
-    async def test_multi_phase(self, enable_warmup):
+    async def test_multi_phase(self):
         loop = asyncio.get_running_loop()
         issuer = FakeIssuer()
         issuer._loop = loop
@@ -398,7 +390,7 @@ class TestBenchmarkSession:
         assert len(completed) == 5
 
     @pytest.mark.asyncio
-    async def test_stale_completions_ignored_by_strategy(self, enable_warmup):
+    async def test_stale_completions_ignored_by_strategy(self):
         """Responses from warmup phase should not affect perf phase strategy."""
         loop = asyncio.get_running_loop()
         publisher = FakePublisher()
@@ -857,7 +849,7 @@ class TestBenchmarkSessionMultiPhaseSatPerfSequence:
     """Multi-perf + warmup sequence (sat -> perf -> sat -> perf)."""
 
     @pytest.mark.asyncio
-    async def test_sat_perf_sat_perf(self, enable_warmup):
+    async def test_sat_perf_sat_perf(self):
         loop = asyncio.get_running_loop()
         issuer = FakeIssuer()
         issuer._loop = loop
@@ -918,7 +910,7 @@ class TestBenchmarkSessionStaleStreamChunk:
     """Stale StreamChunk from previous phase is ignored."""
 
     @pytest.mark.asyncio
-    async def test_stale_stream_chunk_ignored(self, enable_warmup):
+    async def test_stale_stream_chunk_ignored(self):
         """StreamChunk from warmup phase should not affect perf phase counts."""
         loop = asyncio.get_running_loop()
         publisher = FakePublisher()
@@ -946,7 +938,9 @@ class TestBenchmarkSessionStaleStreamChunk:
         )
 
         phases = [
-            PhaseConfig("sat", sat_settings, FakeDataset(2), PhaseType.WARMUP),
+            PhaseConfig(
+                "sat", sat_settings, FakeDataset(2), PhaseType.WARMUP, drain_after=False
+            ),
             PhaseConfig("perf", perf_settings, FakeDataset(2), PhaseType.PERFORMANCE),
         ]
 
@@ -991,7 +985,7 @@ class TestBenchmarkSessionStaleStreamChunk:
 
 @pytest.mark.unit
 class TestSessionResult:
-    def test_perf_results_filter(self, enable_warmup):
+    def test_perf_results_filter(self):
         results = [
             PhaseResult("sat", PhaseType.WARMUP, {}, 0, 0, 0),
             PhaseResult("perf1", PhaseType.PERFORMANCE, {"a": 1}, 10, 0, 100),
