@@ -946,6 +946,7 @@ class VBenchScorer(Scorer, scorer_id="vbench"):
             per_prompt_idx[prompt] += 1
             src = Path(video_path)
             dst = staged_dir / f"{prompt}-{idx}{src.suffix or '.mp4'}"
+            dst.parent.mkdir(parents=True, exist_ok=True)
             dst.unlink(missing_ok=True)
             dst.symlink_to(src.resolve())
 
