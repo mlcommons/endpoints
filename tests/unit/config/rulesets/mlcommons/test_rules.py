@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import pytest
 from inference_endpoint import metrics
 from inference_endpoint.config.rulesets.mlcommons import models
 from inference_endpoint.config.rulesets.mlcommons.rules import (
@@ -22,6 +23,7 @@ from inference_endpoint.config.rulesets.mlcommons.rules import (
 from inference_endpoint.config.user_config import UserConfig
 
 
+@pytest.mark.unit
 def test_apply_user_config():
     user_config = UserConfig(1234.5, max_duration_ms=42 * 60 * 1000)
     rt_settings = CURRENT.apply_user_config(
@@ -75,6 +77,7 @@ def test_apply_user_config():
     )
 
 
+@pytest.mark.unit
 def test_apply_user_config_insufficient_qps():
     user_config = UserConfig(2, max_duration_ms=42 * 60 * 1000)
     rt_settings = CURRENT.apply_user_config(
@@ -93,6 +96,7 @@ def test_apply_user_config_insufficient_qps():
     )
 
 
+@pytest.mark.unit
 def test_apply_user_config_min_sample_count_override():
     user_config = UserConfig(2, max_duration_ms=42 * 60 * 1000, min_sample_count=1)
     rt_settings = CURRENT.apply_user_config(

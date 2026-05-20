@@ -97,9 +97,9 @@ class TestModelParams:
 class TestAPIType:
     @pytest.mark.unit
     def test_default_routes(self):
-        assert APIType.OPENAI.default_route() == "/v1/chat/completions"
-        assert APIType.SGLANG.default_route() == "/generate"
-        assert APIType.OPENAI_COMPLETIONS.default_route() == "/v1/completions"
+        assert APIType.OPENAI.default_route() == "v1/chat/completions"
+        assert APIType.SGLANG.default_route() == "generate"
+        assert APIType.OPENAI_COMPLETIONS.default_route() == "v1/completions"
 
 
 class TestDataset:

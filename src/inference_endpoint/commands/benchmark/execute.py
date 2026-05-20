@@ -26,12 +26,14 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
 import shutil
 import signal
 import tempfile
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from dataclasses import replace as dataclass_replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -441,6 +443,35 @@ def _build_phases(
     """Build the phase list from BenchmarkContext."""
     phases: list[PhaseConfig] = []
 
+    # Warmup phase (optional, before performance)
+    warmup_cfg = ctx.config.settings.warmup
+    if warmup_cfg.enabled:
+        warmup_dataset: Dataset = (
+            ctx.dataloader.with_salt(random.Random(warmup_cfg.warmup_random_seed + 2))
+            if warmup_cfg.salt
+            else ctx.dataloader
+        )
+        warmup_rt = dataclass_replace(
+            ctx.rt_settings,
+            min_duration_ms=0,
+            max_duration_ms=None,
+            n_samples_from_dataset=ctx.dataloader.num_samples(),
+            n_samples_to_issue=warmup_cfg.n_requests,
+            min_sample_count=1,
+            rng_sched=random.Random(warmup_cfg.warmup_random_seed),
+            rng_sample_index=random.Random(warmup_cfg.warmup_random_seed + 1),
+            load_pattern=ctx.rt_settings.load_pattern,
+        )
+        phases.append(
+            PhaseConfig(
+                "warmup",
+                warmup_rt,
+                warmup_dataset,
+                PhaseType.WARMUP,
+                drain_after=warmup_cfg.drain,
+            )
+        )
+
     # Performance phase
     phases.append(
         PhaseConfig(
@@ -614,7 +645,10 @@ async def _run_benchmark_async(
             # client.api_type is propagated from endpoint_config.api_type by
             # BenchmarkConfig._propagate_client_api_type — no override needed here.
             http_config = config.settings.client.with_updates(
-                endpoint_urls=[urljoin(e, api_type.default_route()) for e in endpoints],
+                endpoint_urls=[
+                    urljoin(e.rstrip("/") + "/", api_type.default_route())
+                    for e in endpoints
+                ],
                 api_key=config.endpoint_config.api_key,
                 event_logs_dir=ctx.report_dir,
                 cpu_affinity=ctx.affinity_plan,
@@ -686,12 +720,39 @@ async def _run_benchmark_async(
         phases = _build_phases(ctx, perf_strategy=multi_turn_strategy)
         report: Report | None = None
 
+        # Timer starts when the performance phase begins (after warmup drains),
+        # so max_duration_ms applies only to the perf phase, not warmup.
+        global_timeout_handle = None
+        _timeout_done = False
+        max_duration_ms = ctx.rt_settings.max_duration_ms
+
+        def _on_global_timeout() -> None:
+            if not _timeout_done:
+                logger.warning(
+                    "Global experiment timeout reached (%d ms); stopping session.",
+                    max_duration_ms,
+                )
+                session.stop()
+
+        def _on_phase_start(phase: PhaseConfig) -> None:
+            nonlocal global_timeout_handle
+            if (
+                phase.phase_type == PhaseType.PERFORMANCE
+                and max_duration_ms is not None
+            ):
+                global_timeout_handle = loop.call_later(
+                    max_duration_ms / 1000.0, _on_global_timeout
+                )
+
         loop.add_signal_handler(signal.SIGINT, session.stop)
         try:
-            result = await session.run(phases)
+            result = await session.run(phases, on_phase_start=_on_phase_start)
         except Exception as e:
             raise ExecutionError(f"Benchmark execution failed: {e}") from e
         finally:
+            _timeout_done = True
+            if global_timeout_handle is not None:
+                global_timeout_handle.cancel()
             loop.remove_signal_handler(signal.SIGINT)
             logger.info("Cleaning up...")
             try:

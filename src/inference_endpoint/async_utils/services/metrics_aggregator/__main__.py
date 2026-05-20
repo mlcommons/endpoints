@@ -205,10 +205,9 @@ async def main() -> None:
 
     # Using ternary operator causes errors in MyPy object type coalescing
     # (coalesces to 'object' not 'AbstractContextManager[TokenizePool | None]')
+    pool_cm: AbstractContextManager[TokenizePool | None]
     if args.tokenizer:
-        pool_cm: AbstractContextManager[TokenizePool | None] = TokenizePool(
-            args.tokenizer, n_workers=args.tokenizer_workers
-        )
+        pool_cm = TokenizePool(args.tokenizer, n_workers=args.tokenizer_workers)
     else:
         pool_cm = nullcontext()
 
