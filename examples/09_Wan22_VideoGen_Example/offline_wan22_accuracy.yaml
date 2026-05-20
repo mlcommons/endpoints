@@ -31,6 +31,13 @@ model_params:
   streaming: "off"
 
 datasets:
+  # setup_benchmark() requires at least one performance dataset to drive
+  # request issuance; the accuracy entry below reuses the same JSONL and
+  # scores the videos VBench-style after the run.
+  - name: wan22_perf
+    path: examples/09_Wan22_VideoGen_Example/wan22_prompts.jsonl
+    type: "performance"
+    samples: 248
   - name: wan22_vbench
     path: examples/09_Wan22_VideoGen_Example/wan22_prompts.jsonl
     type: "accuracy"
@@ -40,9 +47,6 @@ datasets:
       # VBench's input pair is (prompt, video). The scorer reads each
       # sample's prompt from this column — not a ground-truth comparison.
       ground_truth: "prompt"
-      # Identity passthrough: VideoGenAdapter mirrors video_path into
-      # response_output, and the scorer consumes it as-is.
-      extractor: "identity_extractor"
       num_repeats: 1
 
 settings:

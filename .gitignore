@@ -189,6 +189,12 @@ outputs/
 # Example vLLM virtualenv
 examples/03_BenchmarkComparison/vllm_venv/
 
+# WAN 2.2 VBench accuracy subproject — heavy GPU checkpoints (~5GB) and
+# per-run evaluation outputs. `.venv` is already covered above; these are
+# what vbench drops in the subproject working dir.
+examples/09_Wan22_VideoGen_Example/accuracy/pretrained/
+examples/09_Wan22_VideoGen_Example/accuracy/evaluation_results/
+
 # AI tool artifacts (local development only)
 .cursor_artifacts/
 .cursor/

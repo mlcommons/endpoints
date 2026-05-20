@@ -19,15 +19,33 @@ Invoked as a subprocess by `inference_endpoint.evaluation.scoring.VBenchScorer`
 so the parent benchmark environment never has to import vbench (which pins
 incompatible transformers/numpy versions). Writes VBench's own results JSON
 to `--out-dir/{run_name}_eval_results.json`.
+
+Exit codes:
+    0  — VBench evaluation completed; results JSON written.
+    1  — VBench raised during evaluate(); structured error on stderr.
+    2  — CUDA required but unavailable (pass --allow-cpu to override).
 """
 
 import argparse
+import json
 import sys
+import traceback
 from importlib.resources import files as _pkg_files
 
 import torch
 import vbench as _vbench_pkg
 from vbench import VBench
+
+
+def _emit_error(exc: BaseException) -> None:
+    """Print a structured JSON error line on stderr for the parent to surface."""
+    payload = {
+        "status": "error",
+        "type": type(exc).__name__,
+        "message": str(exc),
+        "traceback": traceback.format_exc(),
+    }
+    print(json.dumps(payload), file=sys.stderr, flush=True)
 
 
 def main() -> int:
@@ -55,7 +73,35 @@ def main() -> int:
             "suite, runs under)."
         ),
     )
+    parser.add_argument(
+        "--allow-cpu",
+        action="store_true",
+        help=(
+            "Permit CPU fallback when CUDA is unavailable. VBench's per-dim "
+            "models (CLIP/DINO/RAFT/AMT) effectively need a GPU; CPU runs "
+            "take hours and may OOM the host. Off by default to avoid a "
+            "silent foot-gun."
+        ),
+    )
     args = parser.parse_args()
+
+    if not torch.cuda.is_available() and not args.allow_cpu:
+        print(
+            json.dumps(
+                {
+                    "status": "error",
+                    "type": "CudaUnavailable",
+                    "message": (
+                        "CUDA is not available; VBench requires a GPU. Pass "
+                        "--allow-cpu to override (not recommended for "
+                        "production accuracy runs)."
+                    ),
+                }
+            ),
+            file=sys.stderr,
+            flush=True,
+        )
+        return 2
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     dimension_list = [d.strip() for d in args.dims.split(",") if d.strip()]
@@ -65,12 +111,16 @@ def main() -> int:
     full_info_json = args.full_info_json or str(
         _pkg_files(_vbench_pkg).joinpath("VBench_full_info.json")
     )
-    vb = VBench(device, full_info_json, args.out_dir)
-    vb.evaluate(
-        videos_path=args.videos_dir,
-        name=args.name,
-        dimension_list=dimension_list,
-    )
+    try:
+        vb = VBench(device, full_info_json, args.out_dir)
+        vb.evaluate(
+            videos_path=args.videos_dir,
+            name=args.name,
+            dimension_list=dimension_list,
+        )
+    except Exception as e:
+        _emit_error(e)
+        return 1
     return 0
 
 

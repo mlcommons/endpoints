@@ -304,7 +304,11 @@ class AccuracyConfig(BaseModel):
     ground_truth: Column in the dataset containing ground truth. Defaults to "ground_truth".
     extractor: Post-processor to extract answers from model output
         (abcd_extractor, boxed_math_extractor, identity_extractor, python_code_extractor).
+        Optional for scorers that declare REQUIRES_EXTRACTOR = False (e.g. vbench).
     num_repeats: Number of times to repeat the dataset for evaluation. Defaults to 1.
+    extras: Free-form keyword args forwarded to the scorer's ``__init__`` —
+        used for scorer-specific knobs that don't warrant a top-level field
+        (e.g. ``vbench_project_path``, ``subprocess_timeout_s`` for VBench).
 
     Example:
         accuracy_config:
@@ -312,6 +316,8 @@ class AccuracyConfig(BaseModel):
           ground_truth: "answer"
           extractor: "boxed_math_extractor"
           num_repeats: 5
+          extras:
+            vbench_project_path: "/path/to/accuracy"
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -324,6 +330,10 @@ class AccuracyConfig(BaseModel):
     )
     num_repeats: int = Field(
         1, ge=1, description="Repeat dataset N times for evaluation"
+    )
+    extras: dict[str, Any] | None = Field(
+        None,
+        description="Free-form scorer kwargs (e.g. vbench_project_path, subprocess_timeout_s)",
     )
 
 
