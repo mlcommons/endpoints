@@ -87,7 +87,7 @@ Dataset Manager --> Load Generator --> Endpoint Client --> External Endpoint
 
 | Component              | Location                                                          | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | ---------------------- | ----------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Load Generator**     | `src/inference_endpoint/load_generator/`                          | Central orchestrator: `BenchmarkSession` owns the lifecycle, `Scheduler` controls timing, `LoadGenerator` issues queries. Emits `ERROR` before `COMPLETE` for failed queries (metrics aggregator depends on this order).                                                                                                                                                                                                                                          |
+| **Load Generator**     | `src/inference_endpoint/load_generator/`                          | Central orchestrator: `BenchmarkSession` owns the lifecycle, `PhaseIssuer` drives per-phase execution, `TimedIssueStrategy`/`BurstStrategy`/`ConcurrencyStrategy` control timing. Emits `ERROR` before `COMPLETE` for failed queries (metrics aggregator depends on this order).                                                                                                                                                                                  |
 | **Endpoint Client**    | `src/inference_endpoint/endpoint_client/`                         | Multi-process HTTP workers communicating via ZMQ IPC. `HTTPEndpointClient` is the main entry point                                                                                                                                                                                                                                                                                                                                                                |
 | **Dataset Manager**    | `src/inference_endpoint/dataset_manager/`                         | Loads JSONL, HuggingFace, CSV, JSON, Parquet datasets. `Dataset` base class with `load_sample()`/`num_samples()` interface                                                                                                                                                                                                                                                                                                                                        |
 | **Metrics Aggregator** | `src/inference_endpoint/async_utils/services/metrics_aggregator/` | Subprocess. Subscribes to events, aggregates per-sample metrics into a `MetricsRegistry` (counters + HDR-histogram series + raw values), publishes `MetricsSnapshot` over IPC PUB at a configurable cadence (`SessionState`: `INITIALIZE` → `LIVE` → `DRAINING` → {`COMPLETE` \| `INTERRUPTED`}). Final snapshot is atomically written to `final_snapshot.json` as the **primary** Report source; the terminal pub/sub frame is a TUI "run finished" signal only. |
@@ -96,6 +96,7 @@ Dataset Manager --> Load Generator --> Endpoint Client --> External Endpoint
 | **CLI**                | `src/inference_endpoint/main.py`, `commands/benchmark/cli.py`     | cyclopts-based, auto-generated from `schema.py` and `HTTPClientConfig` Pydantic models. Flat shorthands via `cyclopts.Parameter(alias=...)`                                                                                                                                                                                                                                                                                                                       |
 | **Async Utils**        | `src/inference_endpoint/async_utils/`                             | `LoopManager` (uvloop + eager_task_factory), ZMQ transport layer, generic `MessageCodec[T]`-parametrized pub/sub, event publisher                                                                                                                                                                                                                                                                                                                                 |
 | **OpenAI/SGLang**      | `src/inference_endpoint/openai/`, `sglang/`                       | Protocol adapters and response accumulators for different API formats. `openai_completions` adapter (`completions_adapter.py`) sends pre-tokenized token IDs to `/v1/completions`, bypassing the server chat template — required for gpt-oss-120b on vLLM. `sglang` adapter sends to `/generate` via `input_ids`. Both apply `Harmonize()` client-side.                                                                                                           |
+| **TensorRT-LLM**       | `src/inference_endpoint/trtllm/`                                  | Adapter for TensorRT-LLM endpoints. `TRTLLMAdapter` sends requests; `TRTLLMSSEAccumulator` handles SSE streaming responses.                                                                                                                                                                                                                                                                                                                                       |
 | **VideoGen**           | `src/inference_endpoint/videogen/`                                | Adapter for video-generation endpoints (e.g. trtllm-serve `POST /v1/videos/generations`, used by MLPerf WAN2.2-T2V-A14B). Defaults to `response_format=video_path` (server saves video to shared storage and returns path) to avoid large byte payloads; switch to `video_bytes` for accuracy mode. Dataset is ingested via the generic JSONL loader.                                                                                                             |
 
 ### Hot-Path Architecture
@@ -172,11 +173,12 @@ src/inference_endpoint/
 │   ├── types.py               # APIType, Query, QueryResult, StreamChunk, QueryStatus (msgspec Structs)
 │   └── record.py              # EventRecord — transport record used by event logger and ZMQ transport
 ├── load_generator/
-│   ├── session.py             # BenchmarkSession - top-level orchestrator
-│   ├── load_generator.py      # LoadGenerator, SchedulerBasedLoadGenerator
-│   ├── scheduler.py           # Scheduler, timing strategies
-│   ├── sample.py              # SampleEventHandler
-│   └── events.py              # SessionEvent, SampleEvent enums
+│   ├── session.py             # BenchmarkSession, PhaseIssuer, PhaseConfig, PhaseResult, SessionResult
+│   ├── strategy.py            # TimedIssueStrategy, BurstStrategy, ConcurrencyStrategy, LoadStrategy
+│   ├── multi_turn_strategy.py # MultiTurnStrategy
+│   ├── conversation_manager.py # ConversationManager, ConversationState
+│   ├── sample_order.py        # SampleOrder, WithoutReplacementSampleOrder, WithReplacementSampleOrder
+│   └── delay.py               # poisson_delay_fn, make_delay_fn
 ├── endpoint_client/
 │   ├── http_client.py         # HTTPEndpointClient - main client interface
 │   ├── worker.py              # Worker process implementation
@@ -230,6 +232,10 @@ src/inference_endpoint/
 │   ├── accumulator.py         # Streaming response accumulator (shared by chat + completions)
 │   └── harmony.py             # openai_harmony integration
 ├── sglang/                    # SGLang API adapter (/generate with input_ids)
+├── trtllm/                    # TensorRT-LLM adapter (/v1/chat/completions variant)
+│   ├── types.py               # TRTLLMChatRequest (msgspec Struct)
+│   ├── adapter.py             # TRTLLMAdapter (HttpRequestAdapter)
+│   └── accumulator.py         # TRTLLMAccumulator
 ├── videogen/                  # Video generation adapter (e.g. WAN2.2 T2V workload)
 │   ├── __init__.py
 │   ├── types.py               # Pydantic: VideoPathRequest, VideoPathResponse, VideoPayloadResponse
@@ -313,7 +319,6 @@ See [Development Guide](docs/DEVELOPMENT.md) for full setup and workflow details
 - `dummy_dataset` — in-memory test dataset
 - `hf_squad_dataset` — HuggingFace squad dataset
 - `max_throughput_runtime_settings`, `poisson_runtime_settings`, `concurrency_runtime_settings` — preset configs
-- `clean_sample_event_hooks` — ensures event hooks are cleared between tests
 
 **Test data**: `tests/assets/datasets/dummy_1k.jsonl` (1000 samples), `tests/assets/datasets/squad_pruned/`
 
