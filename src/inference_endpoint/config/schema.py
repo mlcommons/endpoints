@@ -477,16 +477,36 @@ class SshTarget(BaseModel):
         return v
 
 
+class NodeEntry(BaseModel):
+    """A single node type within a function group for multi-node system info."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    node_name: str = Field(
+        description="Node type identifier matched against detected GPU model name"
+    )
+    no_of_nodes: int = Field(
+        default=1, ge=1, description="Number of nodes of this type"
+    )
+
+
 class SysInfoCaptureConfig(BaseModel):
     """Configuration for the sys_info_capture post-benchmark step."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     exclude_current_system: bool = False
-    accelerator_backend: Literal["cuda", "rocm"]
-    output_path: str
+    accelerator_backend: Literal["cuda", "rocm", "none"] = "none"
+    output_path: str = "."
     skip_ssh_key_file: bool = False
     ssh_ids: list[str]
+    node_config: dict[str, list[NodeEntry]] | None = Field(
+        default=None,
+        description=(
+            "Function-based node groupings. Keys are function names (e.g. 'Prefill', "
+            "'Decode'); values are lists of NodeEntry specifying node type and count."
+        ),
+    )
 
     @field_validator("output_path", mode="after")
     @classmethod
@@ -530,6 +550,40 @@ class SysInfoCaptureConfig(BaseModel):
                 )
             )
         return targets
+
+
+class SysInfoFileConfig(BaseModel):
+    """Top-level model for a standalone sysinfo YAML config file.
+
+    The file must have a ``system_info`` key. Extra top-level keys are allowed
+    so the same YAML can be shared with benchmark configs.
+
+    ``report_dir`` mirrors the same field in ``BenchmarkConfig`` and takes
+    priority over ``system_info.output_path`` when set.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    system_info: SysInfoCaptureConfig
+    report_dir: Path | None = None
+
+    @classmethod
+    def from_yaml_file(cls, path: Path) -> SysInfoFileConfig:
+        """Load SysInfoFileConfig from a YAML file.
+
+        Raises:
+            FileNotFoundError: If the file does not exist.
+            ValueError: If the YAML is invalid or does not match the schema.
+        """
+        path = Path(path)
+        if not path.exists():
+            raise FileNotFoundError(f"Config file not found: {path}")
+        raw = path.read_text()
+        data = yaml.safe_load(raw)
+        if not isinstance(data, dict):
+            raise ValueError(f"Expected YAML mapping, got {type(data).__name__}")
+        resolve_env_vars(data)
+        return cls.model_validate(data)
 
 
 class BenchmarkConfig(WithUpdatesMixin, BaseModel):

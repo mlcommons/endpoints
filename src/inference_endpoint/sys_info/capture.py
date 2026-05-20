@@ -18,7 +18,11 @@
 from __future__ import annotations
 
 import logging
+import os
+import tempfile
 from pathlib import Path
+
+import yaml
 
 from inference_endpoint.config.schema import SysInfoCaptureConfig
 from inference_endpoint.exceptions import ExecutionError, SetupError
@@ -26,6 +30,33 @@ from inference_endpoint.exceptions import ExecutionError, SetupError
 logger = logging.getLogger(__name__)
 
 _OUT_FILE_NAME = "mlperf-multi-node-system-info.json"
+
+
+def _write_node_config_tmp(config: SysInfoCaptureConfig) -> str:
+    """Serialise node_config to a temp YAML file readable by customize.py.
+
+    customize.py expects:
+        system_info:
+          node_config:
+            <function>:
+              - node_name: ...
+                no_of_nodes: ...
+
+    Returns the path of the written temp file.
+    """
+    assert config.node_config is not None
+    data = {
+        "system_info": {
+            "node_config": {
+                func: [entry.model_dump() for entry in entries]
+                for func, entries in config.node_config.items()
+            }
+        }
+    }
+    fd, path = tempfile.mkstemp(suffix=".yaml", prefix="mlperf_node_cfg_")
+    with os.fdopen(fd, "w") as fh:
+        yaml.dump(data, fh, default_flow_style=False)
+    return path
 
 
 def capture_system_info(config: SysInfoCaptureConfig) -> Path:
@@ -46,10 +77,9 @@ def capture_system_info(config: SysInfoCaptureConfig) -> Path:
             "Install it with: pip install mlcflow"
         ) from exc
 
-    tags: list[str] = [
-        "get-mlperf-multi-node-system-info",
-        f"_{config.accelerator_backend}",
-    ]
+    tags: list[str] = ["get-mlperf-multi-node-system-info"]
+    if config.accelerator_backend != "none":
+        tags.append(f"_{config.accelerator_backend}")
     if config.exclude_current_system:
         tags.append("_exclude_current_node")
     tags_str = ",".join(tags)
@@ -63,18 +93,28 @@ def capture_system_info(config: SysInfoCaptureConfig) -> Path:
 
     logger.info("Capturing system info from %d node(s)...", len(config.parsed_ssh_ids))
 
-    result = mlc.access(
-        {
-            "action": "run",
-            "automation": "script",
-            "tags": tags_str,
-            "ssh_ids": ssh_ids_str,
-            "out_dir_path": config.output_path,
-            "out_file_name": _OUT_FILE_NAME,
-            "skip_ssh_key_file": skip_ssh_key_file_value,
-            "quiet": True,
-        }
-    )
+    mlc_kwargs: dict[str, object] = {
+        "action": "run",
+        "automation": "script",
+        "tags": tags_str,
+        "ssh_ids": ssh_ids_str,
+        "out_dir_path": config.output_path,
+        "out_file_name": _OUT_FILE_NAME,
+        "skip_ssh_key_file": skip_ssh_key_file_value,
+        "quiet": True,
+    }
+
+    node_config_tmp: str | None = None
+    if config.node_config is not None:
+        node_config_tmp = _write_node_config_tmp(config)
+        mlc_kwargs["node_config_file"] = node_config_tmp
+        logger.debug("Node config written to temp file: %s", node_config_tmp)
+
+    try:
+        result = mlc.access(mlc_kwargs)
+    finally:
+        if node_config_tmp and os.path.exists(node_config_tmp):
+            os.unlink(node_config_tmp)
 
     if result.get("return", 1) != 0:
         raise ExecutionError(
