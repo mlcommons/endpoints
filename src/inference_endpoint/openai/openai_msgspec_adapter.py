@@ -79,6 +79,8 @@ class OpenAIMsgspecAdapter(HttpRequestAdapter):
             "top_p": model_params.top_p,
             "top_k": model_params.top_k,
             "repetition_penalty": model_params.repetition_penalty,
+            "presence_penalty": model_params.presence_penalty,
+            "frequency_penalty": model_params.frequency_penalty,
         }
 
         # These fields are used in .to_endpoint_request() but don't exist in ModelParams,
@@ -89,8 +91,6 @@ class OpenAIMsgspecAdapter(HttpRequestAdapter):
         allowed = [
             "name",  # NOT the model name, but rather a proper noun like 'Bob' for the LLM to keep track of entities
             "n",
-            "presence_penalty",
-            "frequency_penalty",
             "stop",
             "logit_bias",
             "user",

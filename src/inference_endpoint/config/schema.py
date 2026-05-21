@@ -187,6 +187,8 @@ class ModelParams(BaseModel):
     top_k: int | None = Field(None, description="Top-K sampling")
     top_p: float | None = Field(None, description="Top-P (nucleus) sampling")
     repetition_penalty: float | None = Field(None, description="Repetition penalty")
+    presence_penalty: float | None = Field(None, description="Presence penalty")
+    frequency_penalty: float | None = Field(None, description="Frequency penalty")
     max_new_tokens: Annotated[
         int, cyclopts.Parameter(alias="--max-output-tokens", help="Max output tokens")
     ] = 1024
