@@ -13,9 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import pytest
-
 import inference_endpoint.dataset_manager.factory as factory_module
+import pytest
 from inference_endpoint.config.schema import Dataset as DatasetConfig
 from inference_endpoint.config.schema import MultiTurnConfig
 from inference_endpoint.dataset_manager.dataset import Dataset
