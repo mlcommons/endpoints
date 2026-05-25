@@ -21,6 +21,7 @@ import time
 from typing import Any
 
 import msgspec
+
 from inference_endpoint.config.schema import ModelParams, StreamingMode
 from inference_endpoint.core.types import Query, QueryResult, TextModelOutput
 from inference_endpoint.dataset_manager.transforms import (
