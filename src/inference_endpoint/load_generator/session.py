@@ -175,6 +175,7 @@ class PhaseIssuer:
     __slots__ = (
         "_dataset",
         "_issuer",
+        "_on_inflight_drained",
         "_publisher",
         "_stop_check",
         "uuid_to_index",
@@ -190,16 +191,23 @@ class PhaseIssuer:
         issuer: SampleIssuer,
         publisher: EventPublisher,
         stop_check: Callable[[], bool],
+        on_inflight_drained: Callable[[], None] | None = None,
     ):
         self._dataset = dataset
         self._issuer = issuer
         self._publisher = publisher
         self._stop_check = stop_check
+        self._on_inflight_drained = on_inflight_drained or (lambda: None)
         self.uuid_to_index: dict[str, int] = {}
         self.uuid_to_conv_info: dict[str, tuple[str, int | None]] = {}
         self.completed_uuids: set[str] = set()
         self.inflight: int = 0
         self.issued_count: int = 0
+
+    def mark_inflight_complete(self) -> None:
+        self.inflight -= 1
+        if self.inflight <= 0:
+            self._on_inflight_drained()
 
     def issue(
         self,
@@ -400,6 +408,7 @@ class BenchmarkSession:
             issuer=self._issuer,
             publisher=self._publisher,
             stop_check=self._make_stop_check(phase.runtime_settings, phase_start),
+            on_inflight_drained=self._drain_event.set,
         )
 
         self._current_phase_issuer = phase_issuer
@@ -491,9 +500,9 @@ class BenchmarkSession:
 
         if isinstance(resp, QueryResult):
             query_id = resp.id
-            # Drop late responses for queries already terminated (e.g. by
-            # MultiTurnStrategy._handle_timeout). Without this gate, a real
-            # response arriving after timeout double-publishes ERROR/COMPLETE
+            # Drop late responses for queries already synthetically terminated
+            # (e.g. by MultiTurnStrategy._handle_timeout). Without this gate,
+            # a real response arriving after timeout double-publishes ERROR/COMPLETE
             # and double-decrements inflight (no per-request HTTP timeout
             # exists in endpoint_client; late arrivals are possible).
             if phase_issuer is not None and query_id in phase_issuer.completed_uuids:
@@ -543,10 +552,7 @@ class BenchmarkSession:
                 )
 
             if phase_issuer is not None and query_id in phase_issuer.uuid_to_index:
-                phase_issuer.completed_uuids.add(query_id)
-                phase_issuer.inflight -= 1
-                if phase_issuer.inflight <= 0:
-                    self._drain_event.set()
+                phase_issuer.mark_inflight_complete()
                 if self._current_strategy:
                     self._current_strategy.on_query_complete(query_id)
                 if (

@@ -42,7 +42,7 @@ from inference_endpoint.config.schema import (
     LoadPatternType,
     MultiTurnConfig,
 )
-from inference_endpoint.core.record import EventRecord
+from inference_endpoint.core.record import EventRecord, SampleEventType
 from inference_endpoint.core.types import QueryResult
 from inference_endpoint.dataset_manager.multi_turn_dataset import MultiTurnDataset
 from inference_endpoint.endpoint_client.config import HTTPClientConfig
@@ -53,6 +53,7 @@ from inference_endpoint.load_generator.conversation_manager import ConversationM
 from inference_endpoint.load_generator.multi_turn_strategy import MultiTurnStrategy
 from inference_endpoint.load_generator.session import (
     BenchmarkSession,
+    EventPublisher,
     PhaseConfig,
     PhaseType,
 )
@@ -62,6 +63,17 @@ from inference_endpoint.testing.echo_server import EchoServer
 class _NoOpPublisher:
     def publish(self, event_record: EventRecord) -> None:
         pass
+
+    def flush(self) -> None:
+        pass
+
+
+class _RecordingPublisher:
+    def __init__(self, records: list[EventRecord]):
+        self.records = records
+
+    def publish(self, event_record: EventRecord) -> None:
+        self.records.append(event_record)
 
     def flush(self) -> None:
         pass
@@ -100,6 +112,7 @@ async def _run_session(
     ds: MultiTurnDataset,
     strategy: MultiTurnStrategy,
     responses_out: dict,
+    event_records_out: list[EventRecord] | None = None,
 ) -> int:
     """Wire up HTTPEndpointClient + BenchmarkSession and run one phase.
 
@@ -115,15 +128,23 @@ async def _run_session(
     http_config = HTTPClientConfig(
         endpoint_urls=[urljoin(server_url.rstrip("/") + "/", "v1/chat/completions")],
         warmup_connections=0,
-        num_workers=2,
+        num_workers=1,
+        max_connections=4,
+        min_required_connections=0,
+        worker_initialization_timeout=120.0,
     )
     http_client = await HTTPEndpointClient.create(http_config, loop)
     issuer = HttpClientSampleIssuer(http_client)
+    publisher: EventPublisher
+    if event_records_out is not None:
+        publisher = _RecordingPublisher(event_records_out)
+    else:
+        publisher = _NoOpPublisher()
 
     try:
         session = BenchmarkSession(
             issuer=issuer,
-            event_publisher=_NoOpPublisher(),
+            event_publisher=publisher,
             loop=loop,
             on_sample_complete=on_complete,
         )
@@ -912,36 +933,43 @@ async def test_delay_seconds_end_to_end(echo_server):
 
     ds_off = _make_dataset(baseline_rows)
     strat_off = _make_strategy(ds_off, inject_tool_delay=False)
-    t0 = time.monotonic()
-    count_off = await _run_session(echo_server.url, ds_off, strat_off, {})
-    elapsed_off = time.monotonic() - t0
+    events_off: list[EventRecord] = []
+    count_off = await _run_session(echo_server.url, ds_off, strat_off, {}, events_off)
 
     ds_on = _make_dataset(baseline_rows)
     strat_on = _make_strategy(ds_on, inject_tool_delay=True)
-    t1 = time.monotonic()
-    count_on = await _run_session(echo_server.url, ds_on, strat_on, {})
-    elapsed_on = time.monotonic() - t1
+    events_on: list[EventRecord] = []
+    count_on = await _run_session(echo_server.url, ds_on, strat_on, {}, events_on)
 
     assert count_off == count_on == 3
-    delta = elapsed_on - elapsed_off
-    assert 1.0 <= delta <= 3.0, (
-        f"delay-on minus delay-off should be ~1.5s, got delta={delta:.3f}s "
-        f"(off={elapsed_off:.3f}s, on={elapsed_on:.3f}s)"
-    )
+
+    def issue_delta_s(events: list[EventRecord]) -> float:
+        issued_by_turn = {
+            event.turn: event.timestamp_ns
+            for event in events
+            if event.event_type is SampleEventType.ISSUED
+        }
+        return (issued_by_turn[3] - issued_by_turn[1]) / 1e9
+
+    delta = issue_delta_s(events_on) - issue_delta_s(events_off)
+    assert (
+        1.0 <= delta <= 3.0
+    ), f"delay-on minus delay-off should be ~1.5s, got delta={delta:.3f}s"
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_delay_does_not_leak_to_endpoint_payload():
     received_payloads: list[dict] = []
+    payload_capture_errors: list[str] = []
 
     class CapturingEchoServer(EchoServer):
         async def _handle_echo_chat_completions_request(self, request):
             try:
                 payload = await request.json()
                 received_payloads.append(payload)
-            except Exception:
-                logger = None  # noqa: F841
+            except Exception as exc:
+                payload_capture_errors.append(repr(exc))
             return await super()._handle_echo_chat_completions_request(request)
 
     server = CapturingEchoServer(port=0)
@@ -956,8 +984,9 @@ async def test_delay_does_not_leak_to_endpoint_payload():
     finally:
         server.stop()
 
+    assert not payload_capture_errors
     assert received_payloads, "echo server captured no payloads"
     for payload in received_payloads:
-        assert "delay_seconds" not in payload, (
-            "delay_seconds leaked into request payload: " f"keys={list(payload.keys())}"
-        )
+        assert (
+            "delay_seconds" not in payload
+        ), f"delay_seconds leaked into request payload: keys={list(payload.keys())}"

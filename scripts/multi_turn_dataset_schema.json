@@ -259,6 +259,11 @@
           "type": "string",
           "description": "Custom chat formatting template"
         },
+        "delay_seconds": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Delay in seconds before issuing this client turn"
+        },
         "tools": {
           "type": "array",
           "description": "OpenAI tool definitions for tool-calling models",

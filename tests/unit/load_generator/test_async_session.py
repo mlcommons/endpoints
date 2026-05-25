@@ -225,6 +225,25 @@ class TestPhaseIssuer:
         assert issued[0].conversation_id == "c1"
         assert issued[0].turn == 4
 
+    def test_mark_inflight_complete_invokes_callback_when_drained(self):
+        dataset = FakeDataset(5)
+        issuer = FakeIssuer()
+        publisher = FakePublisher()
+        drained: list[bool] = []
+        phase_issuer = PhaseIssuer(
+            dataset,
+            issuer,
+            publisher,
+            lambda: False,
+            on_inflight_drained=lambda: drained.append(True),
+        )
+
+        phase_issuer.inflight = 1
+        phase_issuer.mark_inflight_complete()
+
+        assert phase_issuer.inflight == 0
+        assert drained == [True]
+
     def test_register_skipped_returns_none_when_stopped(self):
         phase_issuer = PhaseIssuer(
             FakeDataset(5), FakeIssuer(), FakePublisher(), lambda: True
@@ -653,6 +672,7 @@ class TestBenchmarkSession:
         complete = publisher.events_of_type(SampleEventType.COMPLETE)
         assert [(e.conversation_id, e.turn) for e in complete] == [("conv-9", 5)]
         assert "q-ok" not in phase_issuer.uuid_to_conv_info
+        assert "q-ok" not in phase_issuer.completed_uuids
 
         # Error path: ERROR (emitted before COMPLETE) also carries conv info.
         phase_issuer.uuid_to_index["q-err"] = 1
@@ -670,6 +690,7 @@ class TestBenchmarkSession:
         assert [(e.conversation_id, e.turn) for e in error_events] == [("conv-err", 2)]
         complete = publisher.events_of_type(SampleEventType.COMPLETE)
         assert (complete[-1].conversation_id, complete[-1].turn) == ("conv-err", 2)
+        assert "q-err" not in phase_issuer.completed_uuids
 
 
 @pytest.mark.unit

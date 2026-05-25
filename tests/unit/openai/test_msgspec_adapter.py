@@ -18,6 +18,7 @@
 import json
 
 import msgspec
+import pandas as pd
 import pytest
 from inference_endpoint.core.types import Query
 from inference_endpoint.openai.openai_msgspec_adapter import (
@@ -236,3 +237,22 @@ def test_dataset_transforms_includes_chat_template_kwargs():
         "thinking": True,
         "preserve_thinking": True,
     }
+
+
+@pytest.mark.unit
+def test_dataset_transforms_preserve_chat_template_kwargs_dict():
+    from inference_endpoint.config.schema import ModelParams
+
+    chat_template_kwargs = {"thinking": True, "preserve_thinking": True}
+    mp = ModelParams(name="m", chat_template_kwargs=chat_template_kwargs)
+    df = pd.DataFrame({"prompt": ["hi"]})
+
+    for transform in OpenAIMsgspecAdapter.dataset_transforms(mp):
+        df = transform(df)
+
+    row = df.to_dict(orient="records")[0]
+    assert row["chat_template_kwargs"] == chat_template_kwargs
+
+    request = OpenAIMsgspecAdapter.to_endpoint_request(Query(id="q5", data=row))
+    payload = json.loads(msgspec.json.encode(request))
+    assert payload["chat_template_kwargs"] == chat_template_kwargs

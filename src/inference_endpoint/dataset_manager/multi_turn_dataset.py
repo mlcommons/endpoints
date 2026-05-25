@@ -184,8 +184,7 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
         assert self.dataframe is not None, "Dataframe must be initialized"
         seen: set[str] = set()
         last_conv: str | None = None
-        for row_idx, row in enumerate(self.dataframe.to_dict(orient="records")):
-            raw_id = row["conversation_id"]
+        for row_idx, raw_id in enumerate(self.dataframe["conversation_id"]):
             if (
                 raw_id is None
                 or (isinstance(raw_id, float) and pd.isna(raw_id))
@@ -195,6 +194,11 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
                     f"Row {row_idx}: 'conversation_id' must be a non-empty string"
                 )
             conv_id = str(raw_id)
+            if any(ord(char) < 32 or ord(char) > 126 for char in conv_id):
+                raise InputValidationError(
+                    f"Row {row_idx}: 'conversation_id' must not contain "
+                    "non-printable or non-ASCII characters"
+                )
             if conv_id != last_conv:
                 if conv_id in seen:
                     raise InputValidationError(
@@ -415,6 +419,12 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
                     str(conv_id).encode("utf-8"), digest_size=8
                 ).hexdigest()
                 system_content = f"{system_content}\n\n[cache_salt: {salt_hex}]"
+            elif self._enable_salt:
+                logger.warning(
+                    "multi_turn.enable_salt requested but conversation %s has no "
+                    "system prompt; cache salt not applied",
+                    conv_id,
+                )
             system_prompts_by_conv[str(conv_id)] = system_content
 
             for _, row in client_rows.iterrows():

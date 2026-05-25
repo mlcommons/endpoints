@@ -23,6 +23,7 @@ from pathlib import Path
 
 from inference_endpoint.config.schema import Dataset as DatasetConfig
 from inference_endpoint.dataset_manager.dataset import Dataset, DatasetFormat
+from inference_endpoint.exceptions import InputValidationError
 
 from .multi_turn_dataset import MultiTurnDataset
 from .transforms import ColumnRemap, MakeAdapterCompatible, Transform
@@ -118,6 +119,9 @@ class DataLoaderFactory:
             num_repeats=num_repeats,
         )
         if config.multi_turn is not None and config.multi_turn.enable_salt:
-            assert isinstance(dataloader, MultiTurnDataset)
+            if not isinstance(dataloader, MultiTurnDataset):
+                raise InputValidationError(
+                    "enable_salt requires a multi-turn dataset loader"
+                )
             dataloader.enable_salt()
         return dataloader

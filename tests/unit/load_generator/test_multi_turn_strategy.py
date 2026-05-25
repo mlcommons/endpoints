@@ -41,6 +41,7 @@ class FakePhaseIssuer:
         self.uuid_to_index: dict[str, int] = {}
         self.uuid_to_conv_info: dict[str, tuple[str, int | None]] = {}
         self.completed_uuids: set[str] = set()
+        self.drained = False
 
     def issue(
         self,
@@ -70,6 +71,11 @@ class FakePhaseIssuer:
         self.uuid_to_conv_info[query_id] = (conversation_id, turn)
         self.completed_uuids.add(query_id)
         return query_id
+
+    def mark_inflight_complete(self) -> None:
+        self.inflight -= 1
+        if self.inflight <= 0:
+            self.drained = True
 
 
 def _make_dataset_metadata(conversations: dict[str, list[int]]) -> ConversationMetadata:
@@ -655,6 +661,7 @@ async def test_timeout_publishes_error_and_complete_events():
     # 2 events for the timed-out turn + 2 per dropped turn (ERROR + COMPLETE each)
     assert publisher.publish.call_count == 6
     assert issuer.inflight == 0
+    assert issuer.drained is True
     assert "q-x" in issuer.completed_uuids
     # Conv info cleared so a late real response can't reuse stale state.
     assert "q-x" not in issuer.uuid_to_conv_info
@@ -715,6 +722,90 @@ def _metadata_with_delay(
     md = _make_dataset_metadata({conv_id: turns})
     md.delay_seconds_by_key = {(conv_id, delay_turn): delay}
     return md
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_abort_remaining_turns_includes_pending_delayed_turn():
+    from inference_endpoint.config.schema import MultiTurnConfig
+
+    conv_manager = ConversationManager()
+    conv_manager.get_or_create("c1", expected_client_turns=3)
+    metadata = _metadata_with_delay("c1", [1, 2, 3], delay_turn=2, delay=60.0)
+    cfg = MultiTurnConfig(turn_timeout_s=5.0, inject_tool_delay=True)
+    strategy = MultiTurnStrategy(conv_manager, metadata, multi_turn_config=cfg)
+    issuer = FakePhaseIssuer()
+    publisher = MagicMock()
+    on_sample_complete = MagicMock()
+
+    strategy._loop = asyncio.get_running_loop()
+    strategy._phase_issuer = issuer
+    strategy._session_publisher = publisher
+    strategy._session_on_sample_complete = on_sample_complete
+    strategy._active_iters["c1"] = ([(0, 1), (1, 2), (2, 3)], 1)
+
+    strategy._issue_next_turn("c1")
+
+    assert issuer.issued == []
+    delay_handle = strategy._delay_handles["c1"]
+
+    dropped = strategy._abort_remaining_turns("c1", reason="prior turn failed")
+
+    assert dropped == 2
+    assert delay_handle.cancelled()
+    assert "c1" not in strategy._delay_handles
+    assert "c1" not in strategy._active_iters
+    assert "q-skip-0001" in issuer.uuid_to_index
+    assert "q-skip-0002" in issuer.uuid_to_index
+    assert issuer.completed_uuids == {"q-skip-0001", "q-skip-0002"}
+    assert on_sample_complete.call_count == 2
+
+    published_records = [call.args[0] for call in publisher.publish.call_args_list]
+    event_turn_pairs = {(r.event_type, r.turn) for r in published_records}
+    assert event_turn_pairs == {
+        (ErrorEventType.GENERIC, 2),
+        (SampleEventType.COMPLETE, 2),
+        (ErrorEventType.GENERIC, 3),
+        (SampleEventType.COMPLETE, 3),
+    }
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_execute_waits_for_delayed_first_turns():
+    from inference_endpoint.config.schema import MultiTurnConfig
+
+    conv_manager = ConversationManager()
+    metadata = _make_dataset_metadata({"c1": [1], "c2": [1]})
+    metadata.delay_seconds_by_key = {("c1", 1): 0.02, ("c2", 1): 0.02}
+    cfg = MultiTurnConfig(turn_timeout_s=5.0, inject_tool_delay=True)
+    strategy = MultiTurnStrategy(
+        conv_manager,
+        metadata,
+        multi_turn_config=cfg,
+        target_concurrency=2,
+    )
+    issuer = FakePhaseIssuer()
+
+    async def auto_respond():
+        already_done = 0
+        while True:
+            while already_done < len(issuer.issued):
+                idx = issuer.issued[already_done]
+                strategy.on_sample_complete(
+                    QueryResult(
+                        id=f"q{idx:04d}", response_output=TextModelOutput(output="r")
+                    )
+                )
+                already_done += 1
+            await asyncio.sleep(0.005)
+
+    responder = asyncio.create_task(auto_respond())
+    count = await asyncio.wait_for(strategy.execute(issuer), timeout=1.0)
+    responder.cancel()
+
+    assert count == 2
+    assert issuer.issued == [0, 1]
 
 
 @pytest.mark.unit

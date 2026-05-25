@@ -8,7 +8,7 @@ so a router can keep a conversation on the same backend.
 ## Dataset
 
 Use flat JSONL with one row per message. Rows for each `conversation_id` must be
-contiguous.
+contiguous and ordered by increasing `turn`.
 
 ```jsonl
 {"conversation_id":"c1","turn":1,"role":"user","system":"...","content":"...","tools":[...],"delay_seconds":0.4}
@@ -27,13 +27,14 @@ another accessible JSONL path.
 
 ## Start A Server
 
-Start an SGLang OpenAI-compatible server. This is the standard non-deterministic
-recipe used for throughput and inline-accuracy replays; adjust `--model-path`,
-`--tp`, and `--port` for your node.
+Start an SGLang OpenAI-compatible server. This is the standard recipe used for
+throughput and inline-accuracy replays; adjust `--model-path`, `--tp`, and
+`--port` for your node.
 
 ```bash
 python3 -m sglang.launch_server \
-  --model-path /model \
+  --model-path /path/to/Kimi-K2.6 \
+  --served-model-name kimi-k2.6 \
   --tp 8 \
   --trust-remote-code \
   --reasoning-parser kimi_k2 \
@@ -42,8 +43,10 @@ python3 -m sglang.launch_server \
   --port 8000
 ```
 
-The default YAML assumes the server is reachable at `http://localhost:8000` and
-the served model name is `/model`.
+`--model-path` is the checkpoint loaded by the server. It can be a local path
+visible to the server container or a Hugging Face model id, depending on your
+SGLang environment. `--served-model-name` is the OpenAI model name exposed to
+clients; set `model_params.name` in the YAML to the same value.
 
 ## Client YAML
 
@@ -59,16 +62,16 @@ Key fields:
   to the server. `max_new_tokens` is large because agent turns can be long.
 - `model_params.chat_template_kwargs`: Kimi-specific template options for
   reasoning preservation.
-- `datasets[0].name`: label used in benchmark outputs.
-- `datasets[0].type: performance`: multi-turn datasets are replayed as
+- First `datasets` entry `name`: label used in benchmark outputs.
+- First `datasets` entry `type: performance`: multi-turn datasets are replayed as
   performance datasets.
-- `datasets[0].path`: JSONL dataset path to run.
-- `datasets[0].multi_turn.turn_timeout_s`: per-turn deadline. A timeout aborts
-  the remaining turns in that conversation.
-- `datasets[0].multi_turn.enable_salt`: appends a deterministic cache salt to
-  each conversation system prompt.
-- `datasets[0].multi_turn.inject_tool_delay`: honors positive `delay_seconds`
-  values from client turns before issuing those turns.
+- First `datasets` entry `path`: JSONL dataset path to run.
+- First `datasets` entry `multi_turn.turn_timeout_s`: per-turn deadline. A
+  timeout aborts the remaining turns in that conversation.
+- First `datasets` entry `multi_turn.enable_salt`: appends a deterministic cache
+  salt to each conversation system prompt.
+- First `datasets` entry `multi_turn.inject_tool_delay`: honors positive
+  `delay_seconds` values from client turns before issuing those turns.
 - `settings.runtime.min_duration_ms`: minimum run duration. With no max duration
   override, the run finishes when the dataset is exhausted.
 - `settings.load_pattern.type: multi_turn`: enables conversation-aware issuing.
@@ -83,7 +86,7 @@ Key fields:
 
 ## Run The Client
 
-Update `datasets[0].name`, `datasets[0].path`, `model_params.name`, and
+Update the first `datasets` entry (`name` and `path`), `model_params.name`, and
 `endpoint_config.endpoints` as needed, then run:
 
 ```bash

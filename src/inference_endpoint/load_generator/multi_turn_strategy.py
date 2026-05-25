@@ -34,6 +34,11 @@ logger = logging.getLogger(__name__)
 # Default turn timeout when no MultiTurnConfig is provided.
 _DEFAULT_TURN_TIMEOUT_S = 300.0
 
+ConversationTurn = tuple[int, int]
+ConversationTurns = list[ConversationTurn]
+PendingConversation = tuple[str, ConversationTurns]
+ActiveConversationState = tuple[ConversationTurns, int]
+
 
 class MultiTurnStrategy:
     """Event-driven multi-turn strategy. Completion of each turn triggers the next.
@@ -130,8 +135,8 @@ class MultiTurnStrategy:
         self._conv_states: dict[str, ConversationState] = {}
 
         # Event-driven state — populated in execute().
-        self._pending_convs: deque[tuple[str, list[tuple[int, int]]]] = deque()
-        self._active_iters: dict[str, tuple[list[tuple[int, int]], int]] = {}
+        self._pending_convs: deque[PendingConversation] = deque()
+        self._active_iters: dict[str, ActiveConversationState] = {}
         self._timeout_handles: dict[str, asyncio.TimerHandle] = {}
         self._delay_handles: dict[str, asyncio.TimerHandle] = {}
         self._error: BaseException | None = None
@@ -153,7 +158,7 @@ class MultiTurnStrategy:
         self._all_done = asyncio.Event()
         self._error = None
 
-        conv_samples: dict[str, list[tuple[int, int]]] = defaultdict(list)
+        conv_samples: dict[str, ConversationTurns] = defaultdict(list)
         for sample_meta in self._dataset_metadata.samples:
             conv_id = sample_meta.conversation_id
             assert sample_meta.sample_index is not None
@@ -188,7 +193,7 @@ class MultiTurnStrategy:
             for _ in range(n_to_start):
                 self._start_conversation()
 
-            if not self._active_iters and not self._inflight:
+            if not self._has_work_remaining():
                 return phase_issuer.issued_count
 
             await self._all_done.wait()
@@ -210,6 +215,14 @@ class MultiTurnStrategy:
                 )
                 self._inflight.clear()
 
+    def _has_work_remaining(self) -> bool:
+        return bool(
+            self._pending_convs
+            or self._active_iters
+            or self._inflight
+            or self._delay_handles
+        )
+
     def _start_conversation(self) -> None:
         """Pop the next conversation from the pending queue and issue its first turn."""
         conv_id, turns = self._pending_convs.popleft()
@@ -229,7 +242,6 @@ class MultiTurnStrategy:
             return
 
         idx, turn = turns[cursor]
-        self._active_iters[conv_id] = (turns, cursor + 1)
 
         delay = 0.0
         if (
@@ -252,8 +264,22 @@ class MultiTurnStrategy:
         """Issue a single turn to the phase issuer."""
         self._delay_handles.pop(conv_id, None)
 
-        if conv_id not in self._active_iters:
+        active_iter = self._active_iters.get(conv_id)
+        if active_iter is None:
             return
+        turns, cursor = active_iter
+        if cursor >= len(turns):
+            return
+        expected_idx, expected_turn = turns[cursor]
+        if expected_idx != idx or expected_turn != turn:
+            logger.debug(
+                "dropping stale delayed turn for conv=%s idx=%s turn=%s",
+                conv_id,
+                idx,
+                turn,
+            )
+            return
+        self._active_iters[conv_id] = (turns, cursor + 1)
 
         state = self._conv_states[conv_id]
 
@@ -301,7 +327,7 @@ class MultiTurnStrategy:
         try:
             if self._pending_convs:
                 self._start_conversation()
-            elif not self._active_iters:
+            elif not self._has_work_remaining():
                 assert self._all_done is not None
                 self._all_done.set()
         except Exception as exc:
@@ -323,7 +349,7 @@ class MultiTurnStrategy:
             and hasattr(self._phase_issuer, "uuid_to_index")
             and query_id in self._phase_issuer.uuid_to_index  # type: ignore[attr-defined]
         ):
-            self._phase_issuer.inflight -= 1  # type: ignore[attr-defined]
+            self._phase_issuer.mark_inflight_complete()
             if hasattr(self._phase_issuer, "completed_uuids"):
                 self._phase_issuer.completed_uuids.add(query_id)  # type: ignore[attr-defined]
             if hasattr(self._phase_issuer, "uuid_to_conv_info"):
