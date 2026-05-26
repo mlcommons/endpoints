@@ -29,6 +29,7 @@ from inference_endpoint.config.schema import (
     BenchmarkConfig,
     OfflineBenchmarkConfig,
     OnlineBenchmarkConfig,
+    ProfilerEngine,
     TestMode,
     TestType,
 )
@@ -98,6 +99,13 @@ def from_config(
     config: Annotated[Path, cyclopts.Parameter(name=["--config", "-c"])],
     timeout: float | None = None,
     mode: TestMode | None = None,
+    profile: Annotated[
+        ProfilerEngine | None,
+        cyclopts.Parameter(
+            name="--profile",
+            help="Profile the named inference engine around the performance phase",
+        ),
+    ] = None,
 ):
     """Run benchmark from YAML config file."""
     try:
@@ -106,6 +114,14 @@ def from_config(
         raise InputValidationError(f"Config error: {e}") from e
     if timeout is not None:
         resolved = resolved.with_updates(timeout=timeout)
+    if profile is not None:
+        new_profiling = resolved.settings.profiling.model_copy(
+            update={"engine": profile}
+        )
+        new_settings = resolved.settings.model_copy(
+            update={"profiling": new_profiling}
+        )
+        resolved = resolved.with_updates(settings=new_settings)
     test_mode = mode or (
         TestMode.BOTH if resolved.type == TestType.SUBMISSION else TestMode.PERF
     )
