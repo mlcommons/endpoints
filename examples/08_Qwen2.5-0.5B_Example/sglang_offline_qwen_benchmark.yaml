@@ -1,0 +1,44 @@
+name: "qwen-0.5b-sglang-offline-benchmark"
+version: "1.0"
+type: "offline"
+
+model_params:
+  name: "Qwen/Qwen2.5-0.5B-Instruct"
+  temperature: 1.0
+  max_new_tokens: 100
+  top_p: 1.0
+  streaming: "on"
+
+datasets:
+  - name: "qwen-perf-test"
+    type: "performance"
+    path: "examples/08_Qwen2.5-0.5B_Example/data/test_dataset.pkl"
+    samples: 1000
+
+settings:
+  runtime:
+    min_duration_ms: 100
+    max_duration_ms: 60000
+    scheduler_random_seed: 42
+    dataloader_random_seed: 42
+
+  client:
+    workers: 1
+    max_connections: 100
+    warmup_connections: 0
+    record_worker_events: false
+
+metrics:
+  collect:
+    - "throughput"
+    - "latency"
+    - "ttft"
+    - "tpot"
+
+endpoint_config:
+  endpoints:
+    - "http://localhost:30000"
+  api_key: null
+  api_type: "sglang"
+
+report_dir: "results/qwen_sglang_offline_benchmark/"
