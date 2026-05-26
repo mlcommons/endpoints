@@ -606,6 +606,41 @@ class DrainConfig(BaseModel):
         2,
         ge=1,
         description="Number of tokenizer worker threads in the metrics aggregator (default: 2).",
+class ProfilerEngine(str, Enum):
+    """Inference engine whose profiling protocol the client should drive.
+
+    Selects the HTTP path layout used to derive start/stop URLs from
+    ``endpoint_config.endpoints``. Each value corresponds to one server-side
+    profiling protocol; add a new variant + ``_PROFILE_PATHS`` row to support
+    another engine.
+    """
+
+    VLLM = "vllm"
+
+
+@cyclopts.Parameter(name="*")
+class ProfilingConfig(BaseModel):
+    """Client-side trigger for the server's profiler.
+
+    When ``engine`` is set, fires POST ``<start_path>`` at performance-phase
+    begin and POST ``<stop_path>`` at performance-phase end. URLs are derived
+    from ``endpoint_config.endpoints`` using the engine-specific protocol.
+    Server must be launched with profiling enabled (e.g. vLLM's
+    ``--profiler-config.profiler=cuda|torch``); the schedule
+    (``delay_iterations``, ``max_iterations``) is set there, not here.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    engine: Annotated[
+        ProfilerEngine | None,
+        cyclopts.Parameter(
+            alias="--profile",
+            help="Profile the named inference engine around the performance phase",
+        ),
+    ] = Field(
+        None,
+        description="Profile the named inference engine around the performance phase",
     )
 
 
@@ -623,6 +658,7 @@ class Settings(BaseModel):
         description="Per-phase in-flight response drain timeout configuration",
     )
     warmup: WarmupConfig = Field(default_factory=WarmupConfig)
+    profiling: ProfilingConfig = Field(default_factory=ProfilingConfig)
 
 
 class OfflineSettings(Settings):
