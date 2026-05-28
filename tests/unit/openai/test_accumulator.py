@@ -67,12 +67,13 @@ class TestAccumulatorPureToolCalls:
 
         result = acc.get_final_output()
         assert isinstance(result.response_output, TextModelOutput)
-        assert result.response_output.tool_calls is not None
-        assert len(result.response_output.tool_calls) == 1
-        assert result.response_output.tool_calls[0]["function"]["name"] == "search"
-        assert (
-            result.response_output.tool_calls[0]["function"]["arguments"]
-            == '{"q":"test"}'
+        tool_calls = result.response_output.as_message_parts()[2]
+        assert tool_calls is not None
+        assert len(tool_calls) == 1
+        assert tool_calls[0]["function"]["name"] == "search"
+        assert tool_calls[0]["function"]["arguments"] == '{"q":"test"}'
+        assert result.response_output.as_message_parts_after_first_chunk()[2] == (
+            {"type": "function", "function": {"arguments": '"test"}'}},
         )
 
     def test_metadata_tool_calls_preserved(self):
@@ -83,6 +84,7 @@ class TestAccumulatorPureToolCalls:
         result = acc.get_final_output()
         assert "tool_calls" in result.metadata
         assert result.metadata["tool_calls"][0]["function"]["name"] == "f"
+        assert result.response_output.as_message_parts_after_first_chunk()[2] is None
 
     def test_first_tool_call_delta_emits_sentinel_stream_chunk(self):
         acc = OpenAISSEAccumulator("qid", stream_all_chunks=False)
@@ -137,8 +139,16 @@ class TestAccumulatorMixedReasoningAndToolCalls:
         result = acc.get_final_output()
         assert isinstance(result.response_output, TextModelOutput)
         assert result.response_output.reasoning is not None
-        assert result.response_output.tool_calls is not None
-        assert result.response_output.tool_calls[0]["function"]["name"] == "search"
+        tool_calls = result.response_output.as_message_parts()[2]
+        assert tool_calls is not None
+        assert tool_calls[0]["function"]["name"] == "search"
+        assert result.response_output.as_message_parts_after_first_chunk()[2] == (
+            {
+                "id": "c1",
+                "type": "function",
+                "function": {"name": "search", "arguments": '{"q":"x"}'},
+            },
+        )
 
     def test_content_then_tool_calls(self):
         acc = OpenAISSEAccumulator("qid", stream_all_chunks=False)
@@ -151,7 +161,14 @@ class TestAccumulatorMixedReasoningAndToolCalls:
             result.response_output.output == ("Hello",)
             or result.response_output.output == "Hello"
         )
-        assert result.response_output.tool_calls is not None
+        assert result.response_output.as_message_parts()[2] is not None
+        assert result.response_output.as_message_parts_after_first_chunk()[2] == (
+            {
+                "id": "c1",
+                "type": "function",
+                "function": {"name": "f", "arguments": "{}"},
+            },
+        )
 
     def test_no_tool_calls_returns_none_field(self):
         acc = OpenAISSEAccumulator("qid", stream_all_chunks=False)
@@ -160,4 +177,5 @@ class TestAccumulatorMixedReasoningAndToolCalls:
 
         result = acc.get_final_output()
         assert result.response_output.tool_calls is None
+        assert result.response_output.as_message_parts_after_first_chunk()[2] is None
         assert "tool_calls" not in result.metadata

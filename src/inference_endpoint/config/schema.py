@@ -190,6 +190,10 @@ class ModelParams(BaseModel):
     repetition_penalty: float | None = Field(None, description="Repetition penalty")
     presence_penalty: float | None = Field(None, description="Presence penalty")
     frequency_penalty: float | None = Field(None, description="Frequency penalty")
+    chat_template_kwargs: dict[str, Any] | None = Field(
+        None,
+        description="Per-request chat-template kwargs forwarded to compatible servers.",
+    )
     max_new_tokens: Annotated[
         int, cyclopts.Parameter(alias="--max-output-tokens", help="Max output tokens")
     ] = 1024
@@ -253,6 +257,8 @@ class MultiTurnConfig(BaseModel):
 
     turn_timeout_s: float = Field(default=300.0, gt=0)
     use_dataset_history: bool = True
+    enable_salt: bool = False
+    inject_tool_delay: bool = False
 
 
 class Dataset(BaseModel):

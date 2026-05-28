@@ -22,7 +22,7 @@ This module defines the basic data structures used throughout the system.
 import time
 import uuid
 from enum import Enum
-from typing import Any
+from typing import Any, cast
 
 import msgspec
 
@@ -78,6 +78,37 @@ class QueryStatus(Enum):
 OUTPUT_ELEM_TYPE = str | tuple[str, ...]
 """Type for a single output or reasoning value: string (non-streaming) or tuple of strings (streaming)."""
 
+TOOL_CALL_TYPE = dict[str, Any]
+TOOL_CALLS_TYPE = tuple[TOOL_CALL_TYPE, ...]
+TOOL_CALL_CHUNKS_TYPE = tuple[TOOL_CALLS_TYPE, ...]
+TOOL_CALL_ELEM_TYPE = tuple[Any, ...]
+
+
+def merge_tool_calls(tool_calls: TOOL_CALL_ELEM_TYPE | None) -> TOOL_CALLS_TYPE | None:
+    if not tool_calls:
+        return None
+    if not isinstance(tool_calls[0], list | tuple):
+        return cast(TOOL_CALLS_TYPE, tool_calls)
+
+    tool_call_chunks = cast(TOOL_CALL_CHUNKS_TYPE, tool_calls)
+    merged: dict[int, TOOL_CALL_TYPE] = {}
+    for chunk in tool_call_chunks:
+        for partial in chunk:
+            idx = partial.get("index", 0)
+            tool_call = merged.setdefault(
+                idx, {"type": "function", "function": {"arguments": ""}}
+            )
+            if partial.get("id"):
+                tool_call["id"] = partial["id"]
+            if partial.get("type"):
+                tool_call["type"] = partial["type"]
+            fn = partial.get("function") or {}
+            if fn.get("name"):
+                tool_call["function"]["name"] = fn["name"]
+            if fn.get("arguments"):
+                tool_call["function"]["arguments"] += fn["arguments"]
+    return tuple(merged[i] for i in sorted(merged))
+
 
 class TextModelOutput(
     msgspec.Struct,
@@ -107,7 +138,7 @@ class TextModelOutput(
 
     output: OUTPUT_ELEM_TYPE = ""
     reasoning: OUTPUT_ELEM_TYPE | None = None
-    tool_calls: tuple[dict[str, Any], ...] | None = None
+    tool_calls: TOOL_CALL_ELEM_TYPE | None = None
 
     def __post_init__(self):
         """Convert list to tuple for output, reasoning, and tool_calls to preserve immutability."""
@@ -133,8 +164,9 @@ class TextModelOutput(
             elif isinstance(self.output, tuple):
                 parts.extend(self.output)
 
-        if self.tool_calls:
-            parts.append(msgspec.json.encode(list(self.tool_calls)).decode())
+        tool_calls = merge_tool_calls(self.tool_calls)
+        if tool_calls:
+            parts.append(msgspec.json.encode(list(tool_calls)).decode())
 
         # NOTE: Not sure how output is formatted - there *might* need to be a space or separator between
         # reasoning and output depending on the accumulator / API.
@@ -150,9 +182,8 @@ class TextModelOutput(
         For non-streaming (str fields), there is no "first chunk" concept so
         this returns an empty string.
 
-        Tool calls are always included when present — they are accumulated across
-        multiple deltas and only realized at stream end, so they always contribute
-        to the TPOT denominator.
+        Streamed tool-call chunks are merged after dropping the first tool-call
+        chunk when the response starts with a pure tool-call delta.
         """
         parts: list[str] = []
         if self.reasoning:
@@ -172,13 +203,21 @@ class TextModelOutput(
                 elif len(self.output) > 1:
                     # No reasoning; first chunk is output[0], skip it.
                     parts.extend(self.output[1:])
-        if self.tool_calls:
-            parts.append(msgspec.json.encode(list(self.tool_calls)).decode())
+        tool_calls = self.tool_calls
+        if (
+            tool_calls
+            and isinstance(tool_calls[0], list | tuple)
+            and not (self.output or self.reasoning)
+        ):
+            tool_calls = tool_calls[1:]
+        merged_tool_calls = merge_tool_calls(tool_calls)
+        if merged_tool_calls:
+            parts.append(msgspec.json.encode(list(merged_tool_calls)).decode())
         return "".join(parts)
 
     def as_message_parts(
         self,
-    ) -> tuple[str, str | None, tuple[dict[str, Any], ...] | None]:
+    ) -> tuple[str, str | None, TOOL_CALLS_TYPE | None]:
         """Return (content, reasoning, tool_calls) for chat-template tokenization."""
         if isinstance(self.output, str):
             content = self.output
@@ -192,12 +231,12 @@ class TextModelOutput(
             else:
                 reasoning_str = "".join(self.reasoning)
 
-        return content, reasoning_str, self.tool_calls
+        return content, reasoning_str, merge_tool_calls(self.tool_calls)
 
     def as_message_parts_after_first_chunk(
         self,
-    ) -> tuple[str, str | None, tuple[dict[str, Any], ...] | None]:
-        """Return (content_after_first, reasoning_after_first, tool_calls) for TPOT tokenization."""
+    ) -> tuple[str, str | None, TOOL_CALLS_TYPE | None]:
+        """Return message parts emitted after the first stream chunk."""
         reasoning_after: str | None = None
         if isinstance(self.reasoning, tuple) and len(self.reasoning) > 1:
             reasoning_after = "".join(self.reasoning[1:])
@@ -221,7 +260,14 @@ class TextModelOutput(
                     # No reasoning; first chunk is output[0], skip it.
                     content_after = "".join(self.output[1:])
 
-        return content_after, reasoning_after, self.tool_calls
+        tool_calls = self.tool_calls
+        if (
+            tool_calls
+            and isinstance(tool_calls[0], list | tuple)
+            and not (self.output or self.reasoning)
+        ):
+            tool_calls = tool_calls[1:]
+        return content_after, reasoning_after, merge_tool_calls(tool_calls)
 
 
 OUTPUT_TYPE = TextModelOutput

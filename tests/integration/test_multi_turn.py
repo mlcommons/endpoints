@@ -42,7 +42,7 @@ from inference_endpoint.config.schema import (
     LoadPatternType,
     MultiTurnConfig,
 )
-from inference_endpoint.core.record import EventRecord
+from inference_endpoint.core.record import EventRecord, SampleEventType
 from inference_endpoint.core.types import QueryResult
 from inference_endpoint.dataset_manager.multi_turn_dataset import MultiTurnDataset
 from inference_endpoint.endpoint_client.config import HTTPClientConfig
@@ -53,6 +53,7 @@ from inference_endpoint.load_generator.conversation_manager import ConversationM
 from inference_endpoint.load_generator.multi_turn_strategy import MultiTurnStrategy
 from inference_endpoint.load_generator.session import (
     BenchmarkSession,
+    EventPublisher,
     PhaseConfig,
     PhaseType,
 )
@@ -62,6 +63,17 @@ from inference_endpoint.testing.echo_server import EchoServer
 class _NoOpPublisher:
     def publish(self, event_record: EventRecord) -> None:
         pass
+
+    def flush(self) -> None:
+        pass
+
+
+class _RecordingPublisher:
+    def __init__(self, records: list[EventRecord]):
+        self.records = records
+
+    def publish(self, event_record: EventRecord) -> None:
+        self.records.append(event_record)
 
     def flush(self) -> None:
         pass
@@ -79,10 +91,12 @@ def _make_strategy(
     ds: MultiTurnDataset,
     use_dataset_history: bool = True,
     target_concurrency: int | None = None,
+    inject_tool_delay: bool = False,
 ) -> MultiTurnStrategy:
     mt_cfg = MultiTurnConfig(
         turn_timeout_s=10.0,
         use_dataset_history=use_dataset_history,
+        inject_tool_delay=inject_tool_delay,
     )
     assert ds.conversation_metadata is not None
     return MultiTurnStrategy(
@@ -98,6 +112,7 @@ async def _run_session(
     ds: MultiTurnDataset,
     strategy: MultiTurnStrategy,
     responses_out: dict,
+    event_records_out: list[EventRecord] | None = None,
 ) -> int:
     """Wire up HTTPEndpointClient + BenchmarkSession and run one phase.
 
@@ -113,15 +128,23 @@ async def _run_session(
     http_config = HTTPClientConfig(
         endpoint_urls=[urljoin(server_url.rstrip("/") + "/", "v1/chat/completions")],
         warmup_connections=0,
-        num_workers=2,
+        num_workers=1,
+        max_connections=4,
+        min_required_connections=0,
+        worker_initialization_timeout=120.0,
     )
     http_client = await HTTPEndpointClient.create(http_config, loop)
     issuer = HttpClientSampleIssuer(http_client)
+    publisher: EventPublisher
+    if event_records_out is not None:
+        publisher = _RecordingPublisher(event_records_out)
+    else:
+        publisher = _NoOpPublisher()
 
     try:
         session = BenchmarkSession(
             issuer=issuer,
-            event_publisher=_NoOpPublisher(),
+            event_publisher=publisher,
             loop=loop,
             on_sample_complete=on_complete,
         )
@@ -837,3 +860,133 @@ def test_live_history_rejects_tool_turns():
             dataset_metadata=ds.conversation_metadata,
             multi_turn_config=mt_cfg,
         )
+
+
+def _tool_use_rows_with_delays(
+    tool_row_delays: dict[int, float | None],
+) -> list[dict]:
+    tool_calls = [
+        {
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "search", "arguments": '{"q": "test"}'},
+        }
+    ]
+    tool_results = [{"tool_call_id": "call_1", "content": "search result"}]
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "search",
+                "description": "Search",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"q": {"type": "string"}},
+                    "required": ["q"],
+                },
+            },
+        }
+    ]
+    rows: list[dict] = [
+        {
+            "conversation_id": "c1",
+            "turn": 1,
+            "role": "user",
+            "content": "Find something",
+            "tools": tools,
+        },
+        {
+            "conversation_id": "c1",
+            "turn": 2,
+            "role": "assistant",
+            "content": None,
+            "tool_calls": tool_calls,
+        },
+        {
+            "conversation_id": "c1",
+            "turn": 3,
+            "role": "tool",
+            "tool_results": tool_results,
+            "tools": tools,
+        },
+        {
+            "conversation_id": "c1",
+            "turn": 4,
+            "role": "assistant",
+            "content": "Here is the result",
+        },
+        {"conversation_id": "c1", "turn": 5, "role": "user", "content": "Thanks"},
+    ]
+    for turn_idx, delay in tool_row_delays.items():
+        if delay is None:
+            continue
+        for r in rows:
+            if r["turn"] == turn_idx and r["role"] == "tool":
+                r["delay_seconds"] = delay
+    return rows
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_delay_seconds_end_to_end(echo_server):
+    baseline_rows = _tool_use_rows_with_delays({3: 1.5})
+
+    ds_off = _make_dataset(baseline_rows)
+    strat_off = _make_strategy(ds_off, inject_tool_delay=False)
+    events_off: list[EventRecord] = []
+    count_off = await _run_session(echo_server.url, ds_off, strat_off, {}, events_off)
+
+    ds_on = _make_dataset(baseline_rows)
+    strat_on = _make_strategy(ds_on, inject_tool_delay=True)
+    events_on: list[EventRecord] = []
+    count_on = await _run_session(echo_server.url, ds_on, strat_on, {}, events_on)
+
+    assert count_off == count_on == 3
+
+    def issue_delta_s(events: list[EventRecord]) -> float:
+        issued_by_turn = {
+            event.turn: event.timestamp_ns
+            for event in events
+            if event.event_type is SampleEventType.ISSUED
+        }
+        return (issued_by_turn[3] - issued_by_turn[1]) / 1e9
+
+    delta = issue_delta_s(events_on) - issue_delta_s(events_off)
+    assert (
+        1.0 <= delta <= 3.0
+    ), f"delay-on minus delay-off should be ~1.5s, got delta={delta:.3f}s"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_delay_does_not_leak_to_endpoint_payload():
+    received_payloads: list[dict] = []
+    payload_capture_errors: list[str] = []
+
+    class CapturingEchoServer(EchoServer):
+        async def _handle_echo_chat_completions_request(self, request):
+            try:
+                payload = await request.json()
+                received_payloads.append(payload)
+            except Exception as exc:
+                payload_capture_errors.append(repr(exc))
+            return await super()._handle_echo_chat_completions_request(request)
+
+    server = CapturingEchoServer(port=0)
+    server.start()
+    try:
+        rows = _tool_use_rows_with_delays({3: 0.05})
+        ds = _make_dataset(rows)
+        strategy = _make_strategy(ds, inject_tool_delay=True)
+        responses: dict = {}
+
+        await _run_session(server.url, ds, strategy, responses)
+    finally:
+        server.stop()
+
+    assert not payload_capture_errors
+    assert received_payloads, "echo server captured no payloads"
+    for payload in received_payloads:
+        assert (
+            "delay_seconds" not in payload
+        ), f"delay_seconds leaked into request payload: keys={list(payload.keys())}"
