@@ -151,10 +151,15 @@ def test_poisson_binary_search_max_qps(max_tput_server, tmp_path, record_result)
     LO, HI = 10_000, 250_000  # search space (inclusive)
     PASS_RATIO = 0.95  # achieved/target threshold for "sustained"
 
+    # Standard binary search over candidate targets so the LO boundary is
+    # actually exercised: with ``while lo < hi`` we could converge to
+    # ``lo == hi == LO/STEP`` without ever issuing a run at LO, leaving
+    # ``max_sustained`` reported as 0 even if LO is sustainable.
     history: list[tuple[int, float, bool]] = []
+    best_sustained = 0
     lo, hi = LO // STEP, HI // STEP  # integer bounds in units of STEP
-    while lo < hi:
-        mid = (lo + hi + 1) // 2
+    while lo <= hi:
+        mid = (lo + hi) // 2
         target = mid * STEP
         results = run_cli(
             [
@@ -179,12 +184,12 @@ def test_poisson_binary_search_max_qps(max_tput_server, tmp_path, record_result)
         sustained = achieved >= target * PASS_RATIO
         history.append((target, achieved, sustained))
         if sustained:
-            lo = mid
+            best_sustained = target
+            lo = mid + 1
         else:
             hi = mid - 1
 
-    sustained_targets = [t for t, _, s in history if s]
-    max_sustained = max(sustained_targets) if sustained_targets else 0
+    max_sustained = best_sustained
     record_result(
         "poisson max_sustained",
         stream=max_tput_server.stream,
@@ -246,8 +251,11 @@ def test_low_qps_no_network_errors(variable_server, tmp_path, record_result):
             str(TARGET_QPS),
             "--duration",
             f"{DURATION_S}s",
+            # 2x Poisson expectation so wall time (--duration) always caps
+            # the run; without headroom, variance in inter-arrivals can
+            # finish the test early before the full idle-connection window.
             "--num-samples",
-            str(TARGET_QPS * DURATION_S),
+            str(TARGET_QPS * DURATION_S * 2),
             # Low QPS needs neither many workers nor pre-warmed connections;
             # using auto defaults makes startup slow and flaky against a stub
             # that has TTFT + per-token delays.
