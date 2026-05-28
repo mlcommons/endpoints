@@ -33,13 +33,13 @@ import zmq
 from inference_endpoint.async_utils.event_publisher import EventPublisherService
 from inference_endpoint.async_utils.loop_manager import LoopManager
 from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
-from inference_endpoint.async_utils.transport.zmq.pubsub import ZmqEventRecordSubscriber
+from inference_endpoint.async_utils.transport.zmq.pubsub import ZmqMessageSubscriber
 from inference_endpoint.core.record import (
     TOPIC_FRAME_SIZE,
     EventRecord,
+    EventRecordCodec,
     SampleEventType,
     SessionEventType,
-    decode_event_record,
 )
 from inference_endpoint.core.types import TextModelOutput
 
@@ -52,7 +52,7 @@ _WAIT_RECORDS_TIMEOUT = 1
 # =============================================================================
 
 
-class CollectingEventSubscriber(ZmqEventRecordSubscriber):
+class CollectingEventSubscriber(ZmqMessageSubscriber[EventRecord]):
     """Subscriber that appends all received EventRecords to a list for tests.
 
     Uses its own event loop (passed in). Call .start() to begin receiving.
@@ -61,7 +61,7 @@ class CollectingEventSubscriber(ZmqEventRecordSubscriber):
     """
 
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+        super().__init__(EventRecordCodec(), *args, **kwargs)
         self.received: list[EventRecord] = []
         self._wait_event: asyncio.Event | None = None
         self._wait_count: int | None = None
@@ -165,7 +165,7 @@ class TestEventPublisherService:
         topic_bytes = frame[:TOPIC_FRAME_SIZE].rstrip(b"\x00")
         payload = frame[TOPIC_FRAME_SIZE:]
         assert topic_bytes == b"session.started"
-        rec = decode_event_record(bytes(payload))
+        rec = EventRecordCodec().decode(bytes(payload))
         assert rec.event_type.value == SessionEventType.STARTED.value
         assert rec.data is None
         # Socket is closed by ManagedZMQContext.cleanup() in ev_pub_zmq_context fixture teardown.

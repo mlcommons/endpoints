@@ -34,9 +34,14 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 
-def _record(event_type, uuid="", ts=0, data=None):
+def _record(event_type, uuid="", ts=0, data=None, conversation_id="", turn=None):
     return EventRecord(
-        event_type=event_type, timestamp_ns=ts, sample_uuid=uuid, data=data
+        event_type=event_type,
+        timestamp_ns=ts,
+        sample_uuid=uuid,
+        conversation_id=conversation_id,
+        turn=turn,
+        data=data,
     )
 
 
@@ -58,6 +63,9 @@ class TestRecordToRow:
         assert row.event_type == "session.ended"
         assert row.sample_uuid == ""
         assert row.timestamp_ns == 42
+        # Defaults for non-multi-turn events: empty conversation_id, NULL turn.
+        assert row.conversation_id == ""
+        assert row.turn is None
 
     def test_error_event_topic(self):
         row = _record_to_row(_record(ErrorEventType.GENERIC, ts=99))
@@ -73,6 +81,19 @@ class TestRecordToRow:
         row = _record_to_row(_record(SampleEventType.ISSUED))
         decoded = msgspec.json.decode(row.data)
         assert decoded is None
+
+    def test_conversation_id_and_turn_copied_to_row(self):
+        row = _record_to_row(
+            _record(
+                SampleEventType.ISSUED,
+                uuid="q1",
+                ts=10,
+                conversation_id="conv-x",
+                turn=2,
+            )
+        )
+        assert row.conversation_id == "conv-x"
+        assert row.turn == 2
 
 
 # ---------------------------------------------------------------------------
@@ -258,5 +279,45 @@ class TestSQLWriter:
                 "sample.issued",
                 "error.generic",
                 "session.ended",
+            ]
+        engine.dispose()
+
+    def test_conversation_id_and_turn_persisted(self, tmp_path):
+        writer = SQLWriter(tmp_path / "events", flush_interval=1)
+        try:
+            writer.write(
+                _record(
+                    SampleEventType.ISSUED,
+                    uuid="q1",
+                    ts=10,
+                    conversation_id="conv-a",
+                    turn=1,
+                )
+            )
+            writer.write(
+                _record(
+                    SampleEventType.COMPLETE,
+                    uuid="q1",
+                    ts=20,
+                    conversation_id="conv-a",
+                    turn=1,
+                )
+            )
+            # Single-turn / non-conversation event leaves defaults.
+            writer.write(_record(SessionEventType.STARTED, ts=0))
+        finally:
+            writer.close()
+
+        engine = create_engine(f"sqlite:///{tmp_path / 'events.db'}")
+        with Session(engine) as session:
+            rows = (
+                session.execute(select(EventRowModel).order_by(EventRowModel.id))
+                .scalars()
+                .all()
+            )
+            assert [(r.conversation_id, r.turn) for r in rows] == [
+                ("conv-a", 1),
+                ("conv-a", 1),
+                ("", None),
             ]
         engine.dispose()

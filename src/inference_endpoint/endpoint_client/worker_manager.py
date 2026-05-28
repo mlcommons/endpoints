@@ -20,7 +20,10 @@ import logging
 import time
 from multiprocessing import Process
 
-from inference_endpoint.async_utils.transport import WorkerPoolTransport
+from inference_endpoint.async_utils.transport import (
+    WorkerConnector,
+    WorkerPoolTransport,
+)
 from inference_endpoint.endpoint_client.config import HTTPClientConfig
 from inference_endpoint.endpoint_client.cpu_affinity import set_cpu_affinity
 from inference_endpoint.endpoint_client.worker import worker_main
@@ -96,7 +99,7 @@ class WorkerManager:
             if not initialization_succeeded and self.workers:
                 await self.shutdown()
 
-    def _spawn_worker(self, worker_id: int, connector) -> Process:
+    def _spawn_worker(self, worker_id: int, connector: WorkerConnector) -> Process:
         """Spawn a worker process."""
         process = Process(
             target=worker_main,

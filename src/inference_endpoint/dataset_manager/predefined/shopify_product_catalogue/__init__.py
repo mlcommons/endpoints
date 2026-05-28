@@ -13,14 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Shopify product catalogue dataset for multimodal product taxonomy classification."""
+"""Shopify product catalogue datasets for multimodal product taxonomy classification."""
 
 import base64
 import json
+from abc import ABC
 from io import BytesIO
 from logging import getLogger
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import pandas as pd
 from datasets import load_dataset
@@ -66,16 +67,12 @@ def _process_sample_to_row(sample: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-class ShopifyProductCatalogue(
-    Dataset,
-    dataset_id="shopify_product_catalogue",
-):
-    """Shopify product catalogue: multimodal benchmark for product taxonomy classification.
+class BaseShopifyProductCatalogue(Dataset, ABC):
+    """Abstract base class for Shopify product catalogue datasets.
 
-    Reference: https://huggingface.co/datasets/Shopify/product-catalogue
-
-    Each sample includes product image, title, description, and candidate categories.
-    Compatible with OpenAI multimodal adapter (prompt/system with vision content).
+    Contains shared logic for downloading and processing product catalogue
+    data from HuggingFace. Subclasses only need to define REPO_ID,
+    dataset_id, and optionally DEFAULT_SPLITS.
     """
 
     COLUMN_NAMES = [
@@ -91,7 +88,11 @@ class ShopifyProductCatalogue(
 
     PRESETS = presets
 
-    REPO_ID = "Shopify/product-catalogue"
+    REPO_ID: str
+    """HuggingFace dataset repository ID. Must be set by subclass."""
+
+    DEFAULT_SPLITS: ClassVar[list[str]] = ["train", "test"]
+    """Default splits to load when split is not specified. Override in subclass if needed."""
 
     @classmethod
     def generate(
@@ -110,7 +111,7 @@ class ShopifyProductCatalogue(
 
         Args:
             datasets_dir: Directory to save transformed dataset.
-            split: Splits to load (e.g. ["train", "test"]). Defaults to ["train", "test"].
+            split: Splits to load (e.g. ["train", "test"]). Defaults to DEFAULT_SPLITS.
             force: Regenerate even if file exists.
             token: HuggingFace token for gated datasets.
             revision: Dataset revision/branch. Defaults to "main".
@@ -120,7 +121,7 @@ class ShopifyProductCatalogue(
             product_image_format, potential_product_categories.
         """
         if split is None:
-            split = ["train", "test"]
+            split = cls.DEFAULT_SPLITS
         split_key = "+".join(split)
         filename = f"{cls.DATASET_ID}_{split_key}.parquet"
         dst_path = datasets_dir / cls.DATASET_ID / split_key / filename
@@ -138,9 +139,7 @@ class ShopifyProductCatalogue(
             load_options["revision"] = revision
 
         ds = load_dataset(cls.REPO_ID, split=split_key, **load_options)
-        logger.info(
-            f"Loaded {len(ds)} samples from Shopify product catalogue ({split_key})"
-        )
+        logger.info(f"Loaded {len(ds)} samples from {cls.REPO_ID} ({split_key})")
 
         all_rows: list[dict[str, Any]] = []
         for i in tqdm(
@@ -158,4 +157,42 @@ class ShopifyProductCatalogue(
         return df
 
 
-__all__ = ["ProductMetadata", "ShopifyProductCatalogue"]
+class ShopifyProductCatalogue(
+    BaseShopifyProductCatalogue,
+    dataset_id="shopify_product_catalogue",
+):
+    """Shopify product catalogue: multimodal benchmark for product taxonomy classification.
+
+    Reference: https://huggingface.co/datasets/Shopify/product-catalogue
+
+    Each sample includes product image, title, description, and candidate categories.
+    Compatible with OpenAI multimodal adapter (prompt/system with vision content).
+    """
+
+    REPO_ID = "Shopify/product-catalogue"
+
+
+class ShopifyProductCatalogue8k(
+    BaseShopifyProductCatalogue,
+    dataset_id="shopify_product_catalogue_8k",
+):
+    """Shopify product catalogue 8k: 8,000 sample variant for product taxonomy classification.
+
+    Reference: https://huggingface.co/datasets/nvidia/Shopify-product-catalogue-8k
+
+    Each sample includes product image, title, description, and candidate categories.
+    Compatible with OpenAI multimodal adapter (prompt/system with vision content).
+
+    Note: This dataset only has a train split (no test split).
+    """
+
+    REPO_ID = "nvidia/Shopify-product-catalogue-8k"
+
+    DEFAULT_SPLITS = ["train"]
+
+
+__all__ = [
+    "ProductMetadata",
+    "ShopifyProductCatalogue",
+    "ShopifyProductCatalogue8k",
+]

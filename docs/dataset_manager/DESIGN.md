@@ -103,15 +103,16 @@ Transforms are composed in order; each receives the output of the previous.
 Registered in `dataset.py` under `Dataset.PREDEFINED`. Referenced by name in rulesets and YAML
 configs. Each predefined dataset ships with default transforms for supported model families.
 
-| Name                        | Source        | Notes                                      |
-| --------------------------- | ------------- | ------------------------------------------ |
-| `aime25`                    | AIME 2025     | Math reasoning                             |
-| `gpqa`                      | GPQA Diamond  | Science QA                                 |
-| `cnndailymail`              | CNN/DailyMail | Summarization                              |
-| `open_orca`                 | OpenOrca      | General instruction                        |
-| `livecodebench`             | LiveCodeBench | Code generation; requires additional setup |
-| `shopify_product_catalogue` | Shopify       | E-commerce Q&A (q3vl)                      |
-| `random`                    | Synthetic     | Generated prompts for throughput testing   |
+| Name                           | Source        | Notes                                                 |
+| ------------------------------ | ------------- | ----------------------------------------------------- |
+| `aime25`                       | AIME 2025     | Math reasoning                                        |
+| `gpqa`                         | GPQA Diamond  | Science QA                                            |
+| `cnndailymail`                 | CNN/DailyMail | Summarization                                         |
+| `open_orca`                    | OpenOrca      | General instruction                                   |
+| `livecodebench`                | LiveCodeBench | Code generation; requires additional setup            |
+| `shopify_product_catalogue`    | Shopify       | E-commerce Q&A (q3vl)                                 |
+| `shopify_product_catalogue_8k` | Shopify       | 8k sample variant of Shopify product catalogue (q3vl) |
+| `random`                       | Synthetic     | Generated prompts for throughput testing              |
 
 ## Preset System
 

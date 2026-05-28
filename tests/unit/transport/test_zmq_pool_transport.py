@@ -27,7 +27,7 @@ import pytest
 import zmq
 from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
 from inference_endpoint.async_utils.transport.zmq.pubsub import (
-    ZmqEventRecordPublisher,
+    ZmqMessagePublisher,
 )
 from inference_endpoint.async_utils.transport.zmq.ready_check import (
     ReadyCheckReceiver,
@@ -36,6 +36,7 @@ from inference_endpoint.async_utils.transport.zmq.transport import (
     ZMQTransportConfig,
     ZmqWorkerPoolTransport,
 )
+from inference_endpoint.core.record import EventRecordCodec
 
 
 @pytest.fixture(autouse=True)
@@ -122,7 +123,9 @@ class TestZmqPoolTransport:
         dummy = None
         if create_publisher:
             sid = uuid.uuid4().hex[:8]
-            publisher = ZmqEventRecordPublisher(f"ev_pub_{sid}", zmq_ctx, loop=loop)
+            publisher = ZmqMessagePublisher(
+                EventRecordCodec(), f"ev_pub_{sid}", zmq_ctx, loop=loop
+            )
         else:
             # Baseline: bind an unrelated PUB socket so the context is non-empty.
             dummy = zmq_ctx.socket(zmq.PUB)

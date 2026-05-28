@@ -17,15 +17,20 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+
+import msgspec
 
 from inference_endpoint.core.types import Query, QueryResult
 
 if TYPE_CHECKING:
     from inference_endpoint.config.schema import ModelParams
     from inference_endpoint.dataset_manager.transforms import Transform
+
+logger = logging.getLogger(__name__)
 
 
 class HttpRequestAdapter(ABC):
@@ -93,42 +98,41 @@ class HttpRequestAdapter(ABC):
 
     @classmethod
     @abstractmethod
-    def decode_sse_message(cls, json_bytes: bytes) -> str:
+    def decode_sse_message(cls, json_bytes: bytes) -> Any:
         """
-        Decode SSE message and extract content string.
+        Decode SSE message and return adapter-specific chunk object.
 
         Args:
             json_bytes: Raw JSON bytes from SSE stream
 
         Returns:
-            Content string from the SSE message
+            Adapter-specific chunk object passed to accumulator.add_chunk()
         """
         raise NotImplementedError("decode_sse_message not implemented")
 
     @classmethod
-    def parse_sse_chunk(cls, buffer: bytes, end_pos: int) -> list[str]:
-        """
-        Parse SSE chunk and extract all content strings.
+    def parse_sse_chunk(cls, buffer: bytes, end_pos: int) -> list[Any]:
+        """Parse SSE chunk and extract all chunk objects.
 
-        Extracts JSON documents from SSE stream and decodes them to content strings.
-        Silently ignores non-content SSE messages (role, finish_reason, etc).
+        Extracts JSON documents from SSE stream and decodes them to chunk objects.
+        Filters None returns from decode_sse_message and skips frames that fail
+        to decode (e.g. role-only or finish_reason-only frames).
 
         Args:
             buffer: Byte buffer containing SSE data
             end_pos: End position in buffer to parse up to
 
         Returns:
-            List of content strings extracted from the SSE chunk
+            List of chunk objects extracted from the SSE chunk
         """
         json_docs = cls.SSE_DATA_PATTERN.findall(buffer[:end_pos])
-        parsed_contents = []
-
+        parsed: list[Any] = []
+        # Note: if one frame is malformed, remaining frames are skipped
         try:
             for json_doc in json_docs:
                 content = cls.decode_sse_message(json_doc)
-                parsed_contents.append(content)
-        except Exception:
-            # Normal for non-content SSE messages (role, finish_reason, etc)
-            pass
-
-        return parsed_contents
+                if content is not None:
+                    parsed.append(content)
+        except (msgspec.DecodeError, msgspec.ValidationError) as exc:
+            logger.warning("skipping malformed SSE batch (%s)", type(exc).__name__)
+        return parsed

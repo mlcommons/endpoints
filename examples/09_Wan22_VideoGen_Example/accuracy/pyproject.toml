@@ -1,0 +1,29 @@
+# Isolated uv project for the WAN 2.2 VBench accuracy evaluator.
+#
+# Lives in its own subproject because vbench==0.1.5 pins
+# transformers==4.33.2 and numpy<2, which are incompatible with the
+# parent endpoints package's runtime deps (transformers==5.5.0,
+# numpy==2.4.4). Keeping the vbench env separate means the parent
+# lockfile stays solvable and the vbench env stays reproducible.
+#
+# `inference_endpoint.evaluation.scoring.VBenchScorer` invokes
+# `vbench_runner.py` in this subproject via `uv run --project`, so the
+# main benchmark process never needs vbench imports.
+#
+# Usage on the accuracy host:
+#   cd examples/09_Wan22_VideoGen_Example/accuracy
+#   uv sync
+#   # VBenchScorer in the parent will shell out automatically.
+
+[project]
+name = "wan22-vbench-accuracy"
+version = "0.1.0"
+description = "Isolated VBench accuracy environment for the WAN 2.2 example."
+requires-python = ">=3.12"
+dependencies = [
+    "vbench==0.1.5",
+]
+
+[tool.uv]
+# Script-runner env: no build, no install of this project itself.
+package = false

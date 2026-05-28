@@ -71,21 +71,35 @@ inference-endpoint sysinfo from-config --config config.yaml
 ```
 Dataset Manager --> Load Generator --> Endpoint Client --> External Endpoint
                         |
-                   Metrics Collector (EventRecorder + MetricsReporter)
+                   EventPublisher (events PUB)
+                        |
+        +---------------+---------------+
+        |                               |
+   EventLoggerService            MetricsAggregatorService
+   (events.jsonl)                (registry → publisher)
+                                        |
+                                  metrics PUB
+                                        |
+                                Main process SUB
+                                        |
+                                Report.from_snapshot
 ```
 
 ### Key Components
 
-| Component           | Location                                                      | Purpose                                                                                                                                     |
-| ------------------- | ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Load Generator**  | `src/inference_endpoint/load_generator/`                      | Central orchestrator: `BenchmarkSession` owns the lifecycle, `Scheduler` controls timing, `LoadGenerator` issues queries                    |
-| **Endpoint Client** | `src/inference_endpoint/endpoint_client/`                     | Multi-process HTTP workers communicating via ZMQ IPC. `HTTPEndpointClient` is the main entry point                                          |
-| **Dataset Manager** | `src/inference_endpoint/dataset_manager/`                     | Loads JSONL, HuggingFace, CSV, JSON, Parquet datasets. `Dataset` base class with `load_sample()`/`num_samples()` interface                  |
-| **Metrics**         | `src/inference_endpoint/metrics/`                             | `EventRecorder` writes to SQLite, `MetricsReporter` reads and aggregates (QPS, latency, TTFT, TPOT)                                         |
-| **Config**          | `src/inference_endpoint/config/`, `endpoint_client/config.py` | Pydantic-based YAML schema (`schema.py`), `HTTPClientConfig` (single Pydantic model for CLI/YAML/runtime), `RuntimeSettings`                |
-| **CLI**             | `src/inference_endpoint/main.py`, `commands/benchmark/cli.py` | cyclopts-based, auto-generated from `schema.py` and `HTTPClientConfig` Pydantic models. Flat shorthands via `cyclopts.Parameter(alias=...)` |
-| **Async Utils**     | `src/inference_endpoint/async_utils/`                         | `LoopManager` (uvloop + eager_task_factory), ZMQ transport layer, event publisher                                                           |
-| **OpenAI/SGLang**   | `src/inference_endpoint/openai/`, `sglang/`                   | Protocol adapters and response accumulators for different API formats                                                                       |
+| Component              | Location                                                          | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| ---------------------- | ----------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Load Generator**     | `src/inference_endpoint/load_generator/`                          | Central orchestrator: `BenchmarkSession` owns the lifecycle, `PhaseIssuer` drives per-phase execution, `TimedIssueStrategy`/`BurstStrategy`/`ConcurrencyStrategy` control timing. Emits `ERROR` before `COMPLETE` for failed queries (metrics aggregator depends on this order).                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| **Endpoint Client**    | `src/inference_endpoint/endpoint_client/`                         | Multi-process HTTP workers communicating via ZMQ IPC. `HTTPEndpointClient` is the main entry point                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| **Dataset Manager**    | `src/inference_endpoint/dataset_manager/`                         | Loads JSONL, HuggingFace, CSV, JSON, Parquet datasets. `Dataset` base class with `load_sample()`/`num_samples()` interface                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| **Metrics Aggregator** | `src/inference_endpoint/async_utils/services/metrics_aggregator/` | Subprocess. Subscribes to events, aggregates per-sample metrics into a `MetricsRegistry` (counters + HDR-histogram series + raw values), publishes `MetricsSnapshot` over IPC PUB at a configurable cadence (`SessionState`: `INITIALIZE` → `LIVE` → `DRAINING` → {`COMPLETE` \| `INTERRUPTED`}). Final snapshot is atomically written to `final_snapshot.json` as the **primary** Report source; the terminal pub/sub frame is a TUI "run finished" signal only.                                                                                                                                                                                                                                                                               |
+| **Report**             | `src/inference_endpoint/metrics/report.py`                        | `Report.from_snapshot(dict)` — pure-function builder consuming the dict form (`snapshot_to_dict`). Reads `final_snapshot.json` directly via `json.loads` (no Struct decode). Plumbs `complete = (state == "complete" and n_pending_tasks == 0)`; renders an explicit warning for `INTERRUPTED` runs.                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| **Config**             | `src/inference_endpoint/config/`, `endpoint_client/config.py`     | Pydantic-based YAML schema (`schema.py`), `HTTPClientConfig` (single Pydantic model for CLI/YAML/runtime), `RuntimeSettings`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| **CLI**                | `src/inference_endpoint/main.py`, `commands/benchmark/cli.py`     | cyclopts-based, auto-generated from `schema.py` and `HTTPClientConfig` Pydantic models. Flat shorthands via `cyclopts.Parameter(alias=...)`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| **Async Utils**        | `src/inference_endpoint/async_utils/`                             | `LoopManager` (uvloop + eager_task_factory), ZMQ transport layer, generic `MessageCodec[T]`-parametrized pub/sub, event publisher                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| **OpenAI/SGLang**      | `src/inference_endpoint/openai/`, `sglang/`                       | Protocol adapters and response accumulators for different API formats. `openai_completions` adapter (`completions_adapter.py`) sends pre-tokenized token IDs to `/v1/completions`, bypassing the server chat template — required for gpt-oss-120b on vLLM. `sglang` adapter sends to `/generate` via `input_ids`. Both apply `Harmonize()` client-side.                                                                                                                                                                                                                                                                                                                                                                                         |
+| **TensorRT-LLM**       | `src/inference_endpoint/trtllm/`                                  | Adapter for TensorRT-LLM endpoints. `TRTLLMAdapter` sends requests; `TRTLLMSSEAccumulator` handles SSE streaming responses.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| **VideoGen**           | `src/inference_endpoint/videogen/`                                | Adapter for video-generation endpoints (e.g. trtllm-serve `POST /v1/videos/generations`, used by MLPerf WAN2.2-T2V-A14B). Defaults to `response_format=video_path` (server saves video to shared storage and returns path) to avoid large byte payloads. Accuracy mode also runs on `video_path`: the adapter mirrors the path into `response_output` so the event log carries it to `VBenchScorer` (see `evaluation/scoring.py`), which scores videos via VBench from a sibling `uv` subproject at `examples/09_Wan22_VideoGen_Example/accuracy/` (vbench's `transformers==4.33.2` + `numpy<2` pins are incompatible with the parent env, so it runs out-of-process via `uv run --project`). Dataset is ingested via the generic JSONL loader. |
 
 ### Hot-Path Architecture
 
@@ -96,6 +110,16 @@ Multi-process, event-loop design optimized for throughput:
 - Uses `eager_task_factory` and `uvloop` for minimal async overhead
 - CPU affinity support (`cpu_affinity.py`) for performance tuning
 - Custom HTTP connection pooling (`http.py`) with `httptools` parser
+
+### Metrics Aggregator subprocess (pub/sub)
+
+The aggregator is a separate process (`python -m inference_endpoint.async_utils.services.metrics_aggregator`) that subscribes to events and publishes `MetricsSnapshot` messages. Key facts for working in this layer:
+
+- **Series storage**: each `SeriesSampler` keeps three parallel views: O(1) cheap rollups (count/total/min/max/sum_sq, exact), an HDR Histogram (cheap live percentiles), and an in-memory `array.array` of raw values (for exact percentiles in the `COMPLETE` snapshot). Hot path is `registry.record(name, value)` — no allocation, no I/O.
+- **Counter API**: `registry.increment(name, delta=1)` for sample-event counters. `registry.set_counter(name, value)` only for the two duration counters (`total_duration_ns` max-of-elapsed, `tracked_duration_ns` sum-of-blocks).
+- **Lifecycle**: `INITIALIZE` (constructed, awaiting first `STARTED`) → `LIVE` (run in progress, ticking every `--publish-interval` seconds) → `DRAINING` (set on `ENDED`; tick continues; bounded by `--drain-timeout` budget, default 60 s) → terminal: `COMPLETE` (clean end via `publish_final`, exact stats) **or** `INTERRUPTED` (signal-handler-triggered final via SIGTERM/SIGINT; best-effort partial stats). Drain timeout detected by consumers as `state == COMPLETE and n_pending_tasks > 0`; interrupted runs are detected as `state == INTERRUPTED` directly.
+- **Final delivery is dual-path with separated concerns**: `publish_final` atomically writes `final_snapshot.json` (`tmp + fsync(file) + rename + fsync(parent_dir)`) — this is the **primary** Report source — AND emits the terminal-state snapshot over pub/sub as a TUI shutdown signal. Each path is wrapped in its own try/except so one failure cannot suppress the other. Main process consumer reads `final_snapshot.json` (via `json.loads` to dict, no Struct decode); falls back to the subscriber's `latest` live snapshot only if the file is missing (e.g. SIGKILL / OOM before the signal handler ran). The dict form is the canonical consumer contract (see `snapshot_to_dict`).
+- **Histogram bucket edges are dynamic per snapshot**: log-spaced over the observed `[min, max]`. Bucket count is fixed at construction; consumers MUST re-render from the snapshot's `(lo, hi, count)` triples each frame and MUST NOT track bucket-by-index across snapshots.
 
 ### CLI Modes
 
@@ -155,11 +179,12 @@ src/inference_endpoint/
 │   ├── types.py               # APIType, Query, QueryResult, StreamChunk, QueryStatus (msgspec Structs)
 │   └── record.py              # EventRecord — transport record used by event logger and ZMQ transport
 ├── load_generator/
-│   ├── session.py             # BenchmarkSession - top-level orchestrator
-│   ├── load_generator.py      # LoadGenerator, SchedulerBasedLoadGenerator
-│   ├── scheduler.py           # Scheduler, timing strategies
-│   ├── sample.py              # SampleEventHandler
-│   └── events.py              # SessionEvent, SampleEvent enums
+│   ├── session.py             # BenchmarkSession, PhaseIssuer, PhaseConfig, PhaseResult, SessionResult
+│   ├── strategy.py            # TimedIssueStrategy, BurstStrategy, ConcurrencyStrategy, LoadStrategy
+│   ├── multi_turn_strategy.py # MultiTurnStrategy
+│   ├── conversation_manager.py # ConversationManager, ConversationState
+│   ├── sample_order.py        # SampleOrder, WithoutReplacementSampleOrder, WithReplacementSampleOrder
+│   └── delay.py               # poisson_delay_fn, make_delay_fn
 ├── endpoint_client/
 │   ├── http_client.py         # HTTPEndpointClient - main client interface
 │   ├── worker.py              # Worker process implementation
@@ -177,9 +202,17 @@ src/inference_endpoint/
 │   ├── event_publisher.py     # Async event pub/sub
 │   ├── services/
 │   │   ├── event_logger/      # EventLoggerService: writes EventRecords to JSONL/SQLite
-│   │   └── metrics_aggregator/ # MetricsAggregatorService: real-time metrics (TTFT, TPOT, ISL, OSL)
+│   │   └── metrics_aggregator/  # MetricsAggregatorService: subscribes to events, publishes MetricsSnapshot
+│   │       ├── __main__.py     # Subprocess entry: --metrics-socket, --metrics-output-dir, --publish-interval, --hdr-sig-figs, --n-histogram-buckets
+│   │       ├── aggregator.py   # MetricsAggregatorService (event router); SessionState lifecycle; tracked_samples_failed
+│   │       ├── snapshot.py     # MetricsSnapshot wire schema + SessionState enum + msgpack codec
+│   │       ├── registry.py     # MetricsRegistry, CounterSampler, SeriesSampler (HDR + raw array.array + cheap rollups)
+│   │       ├── publisher.py    # MetricsPublisher (tick task + atomic disk fallback)
+│   │       ├── subscriber.py   # MetricsSnapshotSubscriber (latest + COMPLETE snapshot capture)
+│   │       ├── metrics_table.py # In-flight sample rows + trigger dispatch (TTFT/TPOT/ISL/OSL)
+│   │       └── token_metrics.py # TokenizePool (HF tokenizer thread pool for ISL/OSL/TPOT)
 │   └── transport/             # ZMQ-based IPC transport layer
-│       ├── protocol.py        # Transport protocols + TransportConfig base
+│       ├── protocol.py        # Transport protocols + TransportConfig + MessageCodec[T]
 │       └── zmq/               # ZMQ implementation (context, pubsub, transport, ZMQTransportConfig)
 ├── dataset_manager/
 │   ├── dataset.py             # Dataset base class, DatasetFormat enum
@@ -187,8 +220,7 @@ src/inference_endpoint/
 │   ├── transforms.py          # ColumnRemap and other transforms
 │   └── predefined/            # Built-in datasets (aime25, cnndailymail, gpqa, etc.)
 ├── metrics/
-│   ├── recorder.py            # EventRecorder (SQLite-backed)
-│   ├── reporter.py            # MetricsReporter (aggregation)
+│   ├── report.py              # Report.from_snapshot(MetricsSnapshot); display + JSON serialization
 │   └── metric.py              # Metric types (Throughput, etc.)
 ├── config/
 │   ├── schema.py              # Single source of truth: Pydantic models + cyclopts annotations
@@ -199,12 +231,21 @@ src/inference_endpoint/
 │   ├── rulesets/mlcommons/    # MLCommons-specific rules, datasets, models
 │   └── templates/             # YAML config templates (_template.yaml minimal, _template_full.yaml all defaults)
 ├── openai/                    # OpenAI-compatible API types and adapters
-│   ├── types.py               # OpenAI response types
-│   ├── openai_adapter.py      # Request/response adapter
-│   ├── openai_msgspec_adapter.py  # msgspec-based adapter (fast path)
-│   ├── accumulator.py         # Streaming response accumulator
+│   ├── types.py               # OpenAI response types (chat + text completion)
+│   ├── openai_adapter.py      # Chat completions adapter (/v1/chat/completions)
+│   ├── openai_msgspec_adapter.py  # msgspec-based chat completions adapter (fast path)
+│   ├── completions_adapter.py # Text completions adapter (/v1/completions, pre-tokenized input)
+│   ├── accumulator.py         # Streaming response accumulator (shared by chat + completions)
 │   └── harmony.py             # openai_harmony integration
-├── sglang/                    # SGLang API adapter
+├── sglang/                    # SGLang API adapter (/generate with input_ids)
+├── trtllm/                    # TensorRT-LLM adapter (/v1/chat/completions variant)
+│   ├── types.py               # TRTLLMChatRequest (msgspec Struct)
+│   ├── adapter.py             # TRTLLMAdapter (HttpRequestAdapter)
+│   └── accumulator.py         # TRTLLMAccumulator
+├── videogen/                  # Video generation adapter (e.g. WAN2.2 T2V workload)
+│   ├── __init__.py
+│   ├── types.py               # Pydantic: VideoPathRequest, VideoPathResponse, VideoPayloadResponse
+│   └── adapter.py             # VideoGenAdapter (HttpRequestAdapter) + VideoGenAccumulator (no-op)
 ├── evaluation/                # Accuracy evaluation (extractor, scoring, livecodebench)
 ├── plugins/                   # Plugin system
 ├── profiling/                 # line_profiler integration, pytest plugin
@@ -283,11 +324,9 @@ See [Development Guide](docs/DEVELOPMENT.md) for full setup and workflow details
 - `mock_http_oracle_server` — dataset-driven response server
 - `dummy_dataset` — in-memory test dataset
 - `hf_squad_dataset` — HuggingFace squad dataset
-- `events_db` — pre-populated SQLite events database
 - `max_throughput_runtime_settings`, `poisson_runtime_settings`, `concurrency_runtime_settings` — preset configs
-- `clean_sample_event_hooks` — ensures event hooks are cleared between tests
 
-**Test data**: `tests/datasets/dummy_1k.jsonl` (1000 samples), `tests/datasets/squad_pruned/`
+**Test data**: `tests/assets/datasets/dummy_1k.jsonl` (1000 samples), `tests/assets/datasets/squad_pruned/`
 
 ### Performance Guidelines
 
@@ -304,21 +343,82 @@ These apply especially to code in the hot path (load generator, endpoint client,
 
 ### Key Dependencies
 
-| Package        | Purpose                                             |
-| -------------- | --------------------------------------------------- |
-| `uvloop`       | Performance-optimized event loop                    |
-| `httptools`    | Fast HTTP parser for custom connection pool         |
-| `msgspec`      | Fast serialization for core types and ZMQ transport |
-| `pyzmq`        | ZMQ IPC between main process and workers            |
-| `pydantic`     | Configuration validation                            |
-| `cyclopts`     | CLI framework — auto-generates flags from Pydantic  |
-| `duckdb`       | Data aggregation                                    |
-| `transformers` | Tokenization for OSL reporting                      |
+| Package        | Purpose                                                                |
+| -------------- | ---------------------------------------------------------------------- |
+| `uvloop`       | Performance-optimized event loop                                       |
+| `httptools`    | Fast HTTP parser for custom connection pool                            |
+| `msgspec`      | Fast serialization for core types, ZMQ transport, MetricsSnapshot wire |
+| `pyzmq`        | ZMQ IPC between main process and workers / metrics aggregator          |
+| `hdrhistogram` | HDR Histogram for live percentiles in metrics aggregator (C-backed)    |
+| `pydantic`     | Configuration validation                                               |
+| `cyclopts`     | CLI framework — auto-generates flags from Pydantic                     |
+| `duckdb`       | Data aggregation                                                       |
+| `transformers` | Tokenization for OSL reporting                                         |
 
 ### Files to NOT Modify
 
 - `src/inference_endpoint/openai/openai_types_gen.py` — auto-generated, excluded from ruff/pre-commit
 - `src/inference_endpoint/openai/openapi.yaml` — OpenAI API spec, excluded from pre-commit
+
+### Documentation references — no local-only artifacts
+
+**Code, comments, docstrings, tests, and committed Markdown MUST NOT reference paths that aren't in the repository.** This includes anything under `.gitignore`d directories (e.g. `.cursor_artifacts/`, design scratch dirs, untracked working notes), absolute paths to a contributor's workstation, build outputs, or unmerged branch artifacts. A reviewer fetching the PR should be able to follow every reference cited in the diff.
+
+**Why:** stale references compound — `See foo.md §3` is meaningless once `foo.md` is gone, renamed, or never existed in the merged tree, and rotting cross-references are how docs stop being trusted. AI agents reading the codebase later treat dangling pointers as ground truth and propagate confusion.
+
+**Allowed:**
+
+- Paths to files committed to the repo (`docs/...`, `src/...`, `tests/...`, `README.md`, etc.).
+- External URLs (issue trackers, PRs, RFCs, vendor docs).
+- Generic references to environment/setup that the reader is expected to create themselves (e.g. `source .venv/bin/activate` in a setup README, where `.venv` is the user's local venv).
+
+**Disallowed examples:**
+
+- `See .cursor_artifacts/foo_design.md §2` — `.cursor_artifacts/` is gitignored.
+- `See ~/work/notes/architecture.txt` — contributor-local.
+- `Tracked in metrics_pubsub_design_v5.md test impact section` — same gitignored doc.
+
+If a design doc is worth referencing from the source tree, commit it to `docs/` or inline the relevant content into the code comment / docstring. For one-off rationale that won't survive the conversation, prefer a self-contained explanation in the comment itself rather than a pointer to ephemera.
+
+### Comments and docstrings — describe current state, not development history
+
+**Don't write comments or docstrings that narrate iteration on the codebase.** Pointers to abandoned approaches, prior implementations, or design pivots belong in the PR description and `git log`, not in the source tree. They rot quickly: the prior implementation is gone, the reader has no way to evaluate the comparison, and the scaffolding accumulates with every iteration. Future readers — humans and AI agents alike — treat the comment as if it describes load-bearing context when it's actually historical clutter.
+
+This applies especially to AI-assisted development, where it's tempting to leave a paper trail of "we tried X first, then switched to Y" inside the source. That paper trail belongs in the PR description.
+
+**Disallowed patterns:**
+
+- `# Originally used X, but switched to Y for ...`
+- `# An earlier implementation did X — this version does Y`
+- `# Removed the foo parameter` / `# Replaced bar with baz`
+- `# Note: this used to be sync but is now async`
+- `# Regression: an earlier shape did X` — even in regression-test docstrings, drop the narrative framing.
+- `# An alternative design considered ... but was rejected because ...` (unless the rejected alternative is a _common_ path a future contributor might re-attempt — in that case, frame it as "**don't** do X because Y", not as developer history).
+
+**Allowed:**
+
+- **Current rationale**: `# Uses dict dispatch — hot path measured at sub-ms` (describes why the current design exists; no history).
+- **Regression context that doesn't narrate the prior bug's discovery**: `# Without this check, value > hdr_high silently corrupts the histogram total` (describes the bug being prevented, framed as a current invariant — not "we used to have a bug here").
+- **Inline TODO/FIXME** pointing at a tracking issue (URL or issue number, not "we plan to do X eventually").
+
+**Rule of thumb:** if removing the comment would leave the code's intent unchanged for someone seeing it for the first time, the comment is fine. If the comment only makes sense to someone who saw the prior version, delete it.
+
+### Comments and docstrings — no line-of-code estimates
+
+**Don't reference line counts in comments or docstrings.** Phrasing like "one ~20-line block", "this 50-LOC walker", "(~30 LOC)" rots the moment the code is refactored, conveys no actionable meaning, and adds maintenance burden — every edit nearby risks invalidating the count, and there is no warning when it does.
+
+**Disallowed patterns:**
+
+- `# Manual mapping (one ~20-line block) is the source of truth`
+- `# ~50 LOC of mirror types below`
+- `# This function is 30 lines; consider splitting if it grows past 50`
+
+**Allowed:**
+
+- Describe _what_ the code does and _why_, not how big it is.
+- If size is genuinely the point (e.g. a perf comment about an inlined hot path), name the property that matters: "kept inlined to avoid the call overhead measured at X µs", not "this is 12 lines".
+
+**Why:** the value of a comment is the invariant it pins. A line count isn't an invariant — it's an accident of formatting and current scope. Future readers will trust the number; it will be wrong; you've now created a misleading comment instead of an absent one.
 
 ## Keeping AGENTS.md Up to Date
 

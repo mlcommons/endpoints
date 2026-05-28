@@ -21,19 +21,17 @@ from inference_endpoint.dataset_manager.transforms import (
     UserPromptFormatter,
 )
 
+_FORMAT = (
+    "You are a python coding expert that solves problems step-by-step.\n"
+    "You must provide the reasoning to arriving at your solution and the code to solve the problem.\n"
+    "Do not try simulating the code execution. The code must be enclosed within ```python delimiters.\n\n\n"
+    "{question}\n"
+    "### Format: You will use the following starter code to write the solution to the problem and enclose your code within delimiters.\n"
+    "```python\n"
+    "{starter_code}\n"
+    "```\n"
+)
+
 
 def gptoss() -> list[Transform]:
-    return [
-        UserPromptFormatter(
-            user_prompt_format=(
-                "You are a python coding expert that solves problems step-by-step.\n"
-                "You must provide the reasoning to arriving at your solution and the code to solve the problem.\n"
-                "Do not try simulating the code execution. The code must be enclosed within ```python delimiters.\n\n\n"
-                "{question}\n"
-                "### Format: You will use the following starter code to write the solution to the problem and enclose your code within delimiters.\n"
-                "```python\n"
-                "{starter_code}\n"
-                "```\n"
-            ),
-        ),
-    ]
+    return [UserPromptFormatter(user_prompt_format=_FORMAT)]
