@@ -23,6 +23,7 @@ row — handy when running roofline + low-QPS together.
 
 from __future__ import annotations
 
+import os
 import platform
 from typing import Any
 
@@ -64,17 +65,17 @@ def record_result():
 
 def _host_info() -> dict[str, str]:
     cpu = "unknown"
-    cores = 0
     try:
         with open("/proc/cpuinfo") as f:
-            text = f.read()
-        for line in text.splitlines():
-            if line.startswith("model name"):
-                cpu = line.split(":", 1)[1].strip()
-                break
-        cores = text.count("processor\t:")
+            for line in f:
+                if line.startswith("model name"):
+                    cpu = line.split(":", 1)[1].strip()
+                    break
     except OSError:
+        # CPU model is informational; missing /proc/cpuinfo (non-Linux,
+        # restricted container) just leaves it as "unknown".
         pass
+    cores = os.cpu_count() or 0
     return {
         "host": platform.node(),
         "arch": platform.machine(),
@@ -88,18 +89,21 @@ def _fmt_cell(value: Any, kind: str) -> str:
         return "—"
     if kind == "stream":
         return "on " if value else "off"
-    if kind == "qps":
-        try:
+    # Conversions go through float() first so numeric strings ("100.0")
+    # don't crash int(). Any conversion failure falls back to str(value)
+    # so the end-of-session summary never blows up the pytest run.
+    try:
+        if kind == "qps":
             v = float(value)
-        except (TypeError, ValueError):
-            return str(value)
-        return f"{v:>9,.0f}" if v >= 100 else f"{v:>9.2f}"
-    if kind == "total":
-        return f"{int(value):>10,}"
-    if kind == "elapsed":
-        return f"{float(value):>7.2f}s"
-    if kind == "failed":
-        return f"{int(value):>4}"
+            return f"{v:>9,.0f}" if v >= 100 else f"{v:>9.2f}"
+        if kind == "total":
+            return f"{int(float(value)):>10,}"
+        if kind == "elapsed":
+            return f"{float(value):>7.2f}s"
+        if kind == "failed":
+            return f"{int(float(value)):>4}"
+    except (TypeError, ValueError):
+        return str(value)
     return str(value)
 
 
