@@ -62,10 +62,14 @@ def from_config(
         raise InputValidationError(f"Config error: {e}") from e
 
     capture_cfg = resolved.system_info
+    run_metadata_path = None
     if resolved.report_dir is not None:
         capture_cfg = capture_cfg.model_copy(
             update={"output_path": str(resolved.report_dir)}
         )
+        candidate = resolved.report_dir / "run_metadata.json"
+        if candidate.exists():
+            run_metadata_path = candidate
 
-    output_path = capture_system_info(capture_cfg)
+    output_path = capture_system_info(capture_cfg, run_metadata_path=run_metadata_path)
     print(f"System info written to: {output_path}")

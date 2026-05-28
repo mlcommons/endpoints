@@ -124,7 +124,7 @@ Both paths call `sys_info/capture.py::capture_system_info()` and produce the sam
 | `output_path` | str | `"."` | Output directory for the JSON file. Overridden by `report_dir` when set at the top level. |
 | `node_config` | object | `null` | Optional function-based node groupings (Prefill/Decode/etc). Maps function names to lists of `{node_name, no_of_nodes}` entries. `node_name` is matched as a case-insensitive substring against the detected GPU model name. |
 | `serving_node` | str | `null` | SSH target for the inference server (`user@host` or `user@host:port`). When set, the capture also SSHes into this node to extract serving configuration from the startup log. |
-| `log_path` | str | `null` | Path to the vLLM server log **on the serving node**. Required when `serving_node` is set and serving config extraction is desired. |
+| `log_path` | str | `null` | Path to the vLLM or SGLang server log **on the serving node**. Required when `serving_node` is set and serving config extraction is desired. |
 | `endpoint_url` | str | `null` | Base URL of the running inference server. Passed to the mlcflow script, which probes it via HTTP to detect the serving framework (e.g. `"vLLM 0.9.0"`). |
 
 ### Capture Flow
@@ -168,10 +168,8 @@ capture_system_info(config, run_metadata_path=...)
 inference-endpoint sysinfo from-config -c examples/sysinfo_example.yaml
 ```
 
-The YAML file has two top-level keys:
-
 ```yaml
-report_dir: results/h100_sysinfo/   # output directory (optional)
+report_dir: results/h100_sysinfo/   # output directory
 
 system_info:
   ssh_ids:
@@ -206,34 +204,6 @@ system_info:
 
 Output is written to `report_dir/mlperf-multi-node-system-info.json`.
 
-### Integrated Benchmark Config
-
-Add a `sys_info_capture` block to a benchmark YAML config. The `endpoint_url` field is auto-populated from `endpoint_config.endpoints[0]` if not explicitly set.
-
-```yaml
-sys_info_capture:
-  ssh_ids:
-    - root@ssh1:22
-    - root@ssh2:22
-    - root@ssh3:22
-    - root@ssh4:22
-    - root@ssh5:22
-    - root@ssh6:22
-    - root@ssh7:22
-  accelerator_backend: cuda
-  exclude_current_system: true
-  skip_ssh_key_file: false
-  serving_node: root@ssh1:22
-  log_path: /tmp/vllm.log
-  # endpoint_url is auto-populated from endpoint_config.endpoints[0] if not set
-  node_config:
-    Prefill:
-      - node_name: NVIDIA H100
-        no_of_nodes: 2
-    Decode:
-      - node_name: NVIDIA H100
-        no_of_nodes: 5
-```
 
 ### `node_config` Validation
 

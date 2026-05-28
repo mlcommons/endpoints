@@ -434,9 +434,8 @@ async def _run_benchmark_async(
         tmpfs_dir.mkdir(parents=True, exist_ok=True)
 
         # On ARM, mmap write ordering requires msync on a real filesystem.
-        # msync is a no-op on tmpfs (Linux ARM).
-        needs_on_disk = use_shm and platform.machine() != "x86_64"
-        if needs_on_disk:
+        #  msync is a no-op on tmpfs, so metrics must use an on-disk directory.
+        if use_shm and platform.machine() != "x86_64":
             logger.info(
                 "ARM platform: using on-disk metrics directory for mmap ordering"
             )
@@ -648,8 +647,7 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
             report.display(fn=lambda s: print(s, file=f))
         logger.info(f"Report written to {report_txt}")
 
-    # Write run metadata YAML
-    _generate_run_metadata(ctx, report)
+    run_metadata = _build_run_metadata(ctx, report)
 
     # Write scoring artifacts + copy event log from tmpfs to disk
     _write_scoring_artifacts(ctx, result, bench.tmpfs_dir)
@@ -735,21 +733,31 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
     except Exception as e:
         logger.error(f"Save failed: {e}")
 
-    if ctx.config.sys_info_capture is not None:
+    # Write run_metadata.json before sys_info capture so mlcflow's postprocess
+    # can read and patch it in-place with serving config values.
+    metadata_path = ctx.report_dir / "run_metadata.json"
+    with metadata_path.open("w") as f:
+        json.dump(run_metadata, f, indent=2)
+    logger.info("Run metadata written to %s", metadata_path)
+
+    if ctx.config.system_info is not None:
         try:
-            # Local import: mlcflow is optional and only needed when sys_info_capture is configured.
-            from inference_endpoint.sys_info.capture import (  # noqa: PLC0415
+            # Local import: mlcflow is optional and only needed when system_info is configured.
+            from inference_endpoint.sys_info.capture import (
                 capture_system_info,
             )
 
+            sic = ctx.config.system_info.model_copy(
+                update={"output_path": str(ctx.report_dir)}
+            )
             output_path = capture_system_info(
-                ctx.config.sys_info_capture,
-                run_metadata_path=ctx.report_dir / "run_metadata.yml",
+                sic,
+                run_metadata_path=ctx.report_dir / "run_metadata.json",
             )
             logger.info("System info captured at: %s", output_path)
         except ExecutionError as e:
             logger.error(
-                "sys_info_capture failed: %s\n"
+                "system_info failed: %s\n"
                 "  Benchmark results are complete at: %s\n"
                 "  Re-run sys_info manually once the issue is resolved:\n"
                 "    inference-endpoint sysinfo from-config -c <your-config>",
@@ -758,7 +766,7 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
             )
         except Exception as e:
             logger.error(
-                "sys_info_capture failed unexpectedly (%s: %s)\n"
+                "system_info failed unexpectedly (%s: %s)\n"
                 "  Benchmark results are complete at: %s",
                 type(e).__name__,
                 e,
@@ -766,8 +774,8 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
             )
 
 
-def _generate_run_metadata(ctx: BenchmarkContext, report: Report | None) -> None:
-    """Write run_metadata.yml to ctx.report_dir after a benchmark run."""
+def _build_run_metadata(ctx: BenchmarkContext, report: Report | None) -> dict[str, Any]:
+    """Build and return the run metadata dict."""
     load_pattern = ctx.config.settings.load_pattern
     concurrency = load_pattern.target_concurrency
 
@@ -780,10 +788,10 @@ def _generate_run_metadata(ctx: BenchmarkContext, report: Report | None) -> None
     def _pct(metric: dict[str, Any], p: str) -> float | None:
         return _ns_to_ms((metric.get("percentiles") or {}).get(p)) if metric else None
 
-    # node_config and disaggregated from sys_info_capture
+    # node_config and disaggregated from system_info
     node_config: Any = None
     disaggregated: bool | None = None
-    sic = ctx.config.sys_info_capture
+    sic = ctx.config.system_info
     if sic is not None and sic.node_config is not None:
         node_config = {
             fn: [ne.model_dump() for ne in nodes]
@@ -839,8 +847,8 @@ def _generate_run_metadata(ctx: BenchmarkContext, report: Report | None) -> None
         "measured_total_output_tokens": measured_total_output_tokens,
         "measured_run_duration": measured_run_duration,
         "measured_total_requests": measured_total_requests,
-        "link_config": str(ctx.report_dir / "config.yaml"),
-        "link_logs": str(ctx.report_dir / "events.jsonl"),
+        "link_config": None,
+        "link_logs": None,
         "measured_latency_ttft_min": _stat(ttft, "min"),
         "measured_latency_ttft_average": _stat(ttft, "avg"),
         "measured_latency_ttft_p50": _pct(ttft, "50"),
@@ -867,12 +875,7 @@ def _generate_run_metadata(ctx: BenchmarkContext, report: Report | None) -> None
         "measured_latency_request_max": _stat(latency, "max"),
     }
 
-    metadata_path = ctx.report_dir / "run_metadata.yml"
-    with metadata_path.open("w") as f:
-        yaml.dump(
-            metadata, f, default_flow_style=False, sort_keys=False, allow_unicode=True
-        )
-    logger.info("Run metadata written to %s", metadata_path)
+    return metadata
 
 
 def run_benchmark(config: BenchmarkConfig, test_mode: TestMode) -> None:

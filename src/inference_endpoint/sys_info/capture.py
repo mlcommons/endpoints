@@ -29,7 +29,7 @@ from inference_endpoint.exceptions import ExecutionError, SetupError
 
 logger = logging.getLogger(__name__)
 
-_OUT_FILE_NAME = "mlperf-multi-node-system-info.json"
+_OUT_FILE_NAME = "system_desc.json"
 
 
 def _write_node_config_tmp(config: SysInfoCaptureConfig) -> str:
@@ -134,9 +134,6 @@ def capture_system_info(
             f"{result.get('error', 'unknown error')}"
         )
 
-    output_path = Path(
-        result.get("new_env", {}).get("MLC_MULTI_NODE_SYSTEM_INFO_FILE_PATH")
-        or Path(config.output_path) / _OUT_FILE_NAME
-    )
+    output_path = Path(config.output_path) / _OUT_FILE_NAME
     logger.info("System info written to %s", output_path)
     return output_path
