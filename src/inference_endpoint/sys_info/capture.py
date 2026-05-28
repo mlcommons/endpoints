@@ -59,7 +59,10 @@ def _write_node_config_tmp(config: SysInfoCaptureConfig) -> str:
     return path
 
 
-def capture_system_info(config: SysInfoCaptureConfig) -> Path:
+def capture_system_info(
+    config: SysInfoCaptureConfig,
+    run_metadata_path: Path | None = None,
+) -> Path:
     """Invoke the get-mlperf-multi-node-system-info mlcflow script.
 
     Returns the Path to the generated combined system info JSON file.
@@ -101,8 +104,17 @@ def capture_system_info(config: SysInfoCaptureConfig) -> Path:
         "out_dir_path": config.output_path,
         "out_file_name": _OUT_FILE_NAME,
         "skip_ssh_key_file": skip_ssh_key_file_value,
+        "serving_framework_type": config.serving_framework,
         "quiet": True,
     }
+    if config.endpoint_url:
+        mlc_kwargs["endpoint_url"] = config.endpoint_url
+    if config.serving_node:
+        mlc_kwargs["serving_node"] = config.serving_node
+    if config.log_path:
+        mlc_kwargs["log_path"] = config.log_path
+    if run_metadata_path is not None:
+        mlc_kwargs["run_metadata_path"] = str(run_metadata_path)
 
     node_config_tmp: str | None = None
     if config.node_config is not None:

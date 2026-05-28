@@ -507,6 +507,57 @@ class SysInfoCaptureConfig(BaseModel):
             "'Decode'); values are lists of NodeEntry specifying node type and count."
         ),
     )
+    endpoint_url: str | None = Field(
+        default=None,
+        description=(
+            "Endpoint URL to probe for serving framework detection "
+            "(e.g. 'http://host:8000'). Auto-populated from endpoint_config when "
+            "used inside BenchmarkConfig."
+        ),
+    )
+    serving_node: str | None = Field(
+        default=None,
+        description=(
+            "SSH ID of the node running the serving framework "
+            "(e.g. 'root@host:8022'). Used together with log_path for "
+            "log-based framework detection when endpoint_url is unavailable."
+        ),
+    )
+    log_path: str | None = Field(
+        default=None,
+        description=(
+            "Absolute path on serving_node to which the server stdout/stderr "
+            "was redirected (e.g. '/tmp/vllm.log'). Used for log-based "
+            "serving framework detection."
+        ),
+    )
+    serving_framework: Literal["auto", "vllm", "sglang"] = Field(
+        default="auto",
+        description=(
+            "Serving engine type for log parsing: 'vllm', 'sglang', or 'auto' "
+            "(auto-detects from log keywords)."
+        ),
+    )
+
+    @field_validator("endpoint_url", mode="after")
+    @classmethod
+    def _validate_endpoint_url(cls, v: str | None) -> str | None:
+        if v is not None and not v.startswith(("http://", "https://")):
+            raise ValueError(
+                f"endpoint_url must include scheme (http:// or https://), got: {v!r}"
+            )
+        return v
+
+    @field_validator("serving_node", mode="after")
+    @classmethod
+    def _validate_serving_node(cls, v: str | None) -> str | None:
+        if v is not None:
+            m = _SSH_ID_RE.match(v)
+            if not m:
+                raise ValueError(
+                    f"Invalid serving_node {v!r}: expected 'username@host' or 'username@host:port'"
+                )
+        return v
 
     @field_validator("output_path", mode="after")
     @classmethod
@@ -725,6 +776,20 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
                     "Online mode requires --load-pattern (poisson or concurrency)"
                 )
 
+        return self
+
+    @model_validator(mode="after")
+    def _propagate_endpoint_url_to_sysinfo(self) -> Self:
+        """Copy endpoint_config.endpoints[0] into sys_info_capture.endpoint_url if unset."""
+        if (
+            self.sys_info_capture is not None
+            and self.sys_info_capture.endpoint_url is None
+            and self.endpoint_config.endpoints
+        ):
+            new_sic = self.sys_info_capture.model_copy(
+                update={"endpoint_url": self.endpoint_config.endpoints[0]}
+            )
+            object.__setattr__(self, "sys_info_capture", new_sic)
         return self
 
     @model_validator(mode="after")
