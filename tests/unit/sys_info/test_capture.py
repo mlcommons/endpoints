@@ -165,7 +165,7 @@ class TestCaptureSystemInfo:
             from inference_endpoint.sys_info import capture as capture_mod
 
             importlib.reload(capture_mod)
-            with pytest.raises(SetupError, match="pip install mlcflow"):
+            with pytest.raises(SetupError, match="pip install mlc-scripts"):
                 capture_mod.capture_system_info(cfg)
 
     @pytest.mark.unit
@@ -221,7 +221,7 @@ class TestCaptureSystemInfo:
 
             importlib.reload(capture_mod)
             result = capture_mod.capture_system_info(cfg)
-        assert result == Path(cfg.output_path) / "mlperf-multi-node-system-info.json"
+        assert result == Path(cfg.output_path) / "system_desc.json"
 
     @pytest.mark.unit
     def test_mlcflow_access_called_with_correct_args(self, tmp_path: Path) -> None:
@@ -253,7 +253,7 @@ class TestCaptureSystemInfo:
         assert call_args["ssh_ids"] == "alice@10.0.0.1:2222,bob@10.0.0.2:22"
         assert call_args["skip_ssh_key_file"] == "yes"
         assert call_args["out_dir_path"] == str(tmp_path)
-        assert call_args["out_file_name"] == "mlperf-multi-node-system-info.json"
+        assert call_args["out_file_name"] == "system_desc.json"
         assert call_args["action"] == "run"
         assert call_args["automation"] == "script"
 

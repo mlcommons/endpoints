@@ -11,8 +11,8 @@ report_dir: results/a40_prefill_h100_decode_sysinfo/
 
 system_info:
   ssh_ids:
-    - root@63.141.33.33:22053   # A40 node (RunPod)
-    - anandhusooraj@mlc2        # 8×H100 node (mlc2)
+    - root@63.141.33.33:22053 # A40 node (RunPod)
+    - anandhusooraj@mlc2 # 8×H100 node (mlc2)
 
   accelerator_backend: cuda
 
@@ -20,8 +20,8 @@ system_info:
 
   node_config:
     Prefill:
-      - node_name: A40      # matched as substring of detected GPU name
+      - node_name: A40 # matched as substring of detected GPU name
         no_of_nodes: 1
     Decode:
-      - node_name: H100     # matched as substring of detected GPU name
+      - node_name: H100 # matched as substring of detected GPU name
         no_of_nodes: 1

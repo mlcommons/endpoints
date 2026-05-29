@@ -70,14 +70,13 @@ def capture_system_info(
     Raises ExecutionError if the script returns a non-zero return code.
     """
     # Optional dependency — only imported when this function is actually called.
-    # mlcflow (PyPI) installs its runtime under the 'mlc' module name.
-    # mlcflow is not a required dependency of this package; see pyproject.toml [sys-info].
+    # mlc-scripts (PyPI) installs its runtime under the 'mlc' module name.
     try:
         import mlc  # noqa: PLC0415
     except ImportError as exc:
         raise SetupError(
-            "mlcflow is required for sys_info_capture. "
-            "Install it with: pip install mlcflow"
+            "mlc-scripts is required for sys_info_capture. "
+            "Install it with: pip install mlc-scripts"
         ) from exc
 
     tags: list[str] = ["get-mlperf-multi-node-system-info"]

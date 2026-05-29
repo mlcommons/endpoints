@@ -41,7 +41,6 @@ from urllib.parse import urljoin
 
 import msgspec
 import msgspec.json
-import yaml
 from huggingface_hub import model_info
 from tqdm import tqdm
 from transformers import AutoTokenizer
