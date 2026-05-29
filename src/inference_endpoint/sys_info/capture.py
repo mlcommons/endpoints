@@ -133,6 +133,13 @@ def capture_system_info(
             f"{result.get('error', 'unknown error')}"
         )
 
-    output_path = Path(config.output_path) / _OUT_FILE_NAME
+    new_env_path = (result.get("new_env") or {}).get(
+        "MLC_MULTI_NODE_SYSTEM_INFO_FILE_PATH"
+    )
+    output_path = (
+        Path(new_env_path)
+        if new_env_path
+        else Path(config.output_path) / _OUT_FILE_NAME
+    )
     logger.info("System info written to %s", output_path)
     return output_path

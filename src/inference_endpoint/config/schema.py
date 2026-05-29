@@ -782,7 +782,7 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
             help="NUMA-aware CPU pinning",
         ),
     ] = True
-    system_info: Annotated[
+    sys_info_capture: Annotated[
         SysInfoCaptureConfig | None, cyclopts.Parameter(show=False)
     ] = None
 
@@ -904,16 +904,16 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
 
     @model_validator(mode="after")
     def _propagate_endpoint_url_to_sysinfo(self) -> Self:
-        """Copy endpoint_config.endpoints[0] into system_info.endpoint_url if unset."""
+        """Copy endpoint_config.endpoints[0] into sys_info_capture.endpoint_url if unset."""
         if (
-            self.system_info is not None
-            and self.system_info.endpoint_url is None
+            self.sys_info_capture is not None
+            and self.sys_info_capture.endpoint_url is None
             and self.endpoint_config.endpoints
         ):
-            new_sic = self.system_info.model_copy(
+            new_sic = self.sys_info_capture.model_copy(
                 update={"endpoint_url": self.endpoint_config.endpoints[0]}
             )
-            object.__setattr__(self, "system_info", new_sic)
+            object.__setattr__(self, "sys_info_capture", new_sic)
         return self
 
     @model_validator(mode="after")

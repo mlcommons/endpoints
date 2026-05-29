@@ -987,14 +987,14 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
         json.dump(run_metadata, f, indent=2)
     logger.info("Run metadata written to %s", metadata_path)
 
-    if ctx.config.system_info is not None:
+    if ctx.config.sys_info_capture is not None:
         try:
             # Local import: mlcflow is optional and only needed when system_info is configured.
             from inference_endpoint.sys_info.capture import (
                 capture_system_info,
             )
 
-            sic = ctx.config.system_info.model_copy(
+            sic = ctx.config.sys_info_capture.model_copy(
                 update={"output_path": str(ctx.report_dir)}
             )
             output_path = capture_system_info(
@@ -1038,7 +1038,7 @@ def _build_run_metadata(ctx: BenchmarkContext, report: Report | None) -> dict[st
     # node_config and disaggregated from system_info
     node_config: Any = None
     disaggregated: bool | None = None
-    sic = ctx.config.system_info
+    sic = ctx.config.sys_info_capture
     if sic is not None and sic.node_config is not None:
         node_config = {
             fn: [ne.model_dump() for ne in nodes]
