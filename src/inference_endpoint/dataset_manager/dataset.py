@@ -30,7 +30,12 @@ import pandas as pd
 from datasets import load_dataset, load_from_disk
 
 from ..config.schema import APIType, ModelParams
-from .transforms import Transform, apply_transforms, get_transforms_for_api_type
+from .transforms import (
+    ColumnFilter,
+    Transform,
+    apply_transforms,
+    get_transforms_for_api_type,
+)
 
 if TYPE_CHECKING:
     from inference_endpoint.endpoint_client.adapter_protocol import HttpRequestAdapter
@@ -324,9 +329,9 @@ class Dataset:
         dataset_id: str | None = None,
         num_repeats: int = 1,
     ) -> "Dataset":
-        assert format is None or isinstance(
-            format, DatasetFormat
-        ), "Format must be a DatasetFormat"
+        assert format is None or isinstance(format, DatasetFormat), (
+            "Format must be a DatasetFormat"
+        )
         # TODO add arguments to the loader class
         LoaderClass = DatafileLoader.get_loader(file_path, format=format)
         loader = LoaderClass(file_path)
@@ -373,11 +378,24 @@ class Dataset:
             transforms.extend(self.transforms)
 
         # If adapter is specified, use it to get transforms, otherwise fallback to use APIType to
-        # get transforms.
+        # get transforms. When the dataset already provides a ColumnFilter (e.g. via a preset),
+        # skip the adapter's ColumnFilter to avoid schema conflicts (the adapter's filter
+        # expects "prompt" but function-calling datasets use "messages"+"tools" instead).
         if adapter is not None and model_params is not None:
-            transforms.extend(adapter.dataset_transforms(model_params))
+            adapter_transforms = adapter.dataset_transforms(model_params)
         elif api_type is not None and model_params is not None:
-            transforms.extend(get_transforms_for_api_type(api_type, model_params))
+            adapter_transforms = get_transforms_for_api_type(api_type, model_params)
+        else:
+            adapter_transforms = []
+
+        has_user_column_filter = any(isinstance(t, ColumnFilter) for t in transforms)
+        for t in adapter_transforms:
+            if has_user_column_filter and isinstance(t, ColumnFilter):
+                self.logger.debug(
+                    "Skipping adapter ColumnFilter (preset already provides one)"
+                )
+                continue
+            transforms.append(t)
 
         if transforms:
             df = apply_transforms(df, transforms)

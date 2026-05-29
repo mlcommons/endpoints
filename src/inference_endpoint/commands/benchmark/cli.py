@@ -37,8 +37,15 @@ from inference_endpoint.exceptions import DatasetValidationError, InputValidatio
 benchmark_app = cyclopts.App(name="benchmark", help="Run benchmarks.")
 
 
-def _run(config: BenchmarkConfig, dataset: list[str], mode: TestMode) -> None:
+def _run(
+    config: BenchmarkConfig,
+    dataset: list[str],
+    mode: TestMode,
+    accuracy_only: bool = False,
+) -> None:
     """Unified entry point: inject CLI datasets if needed, then run."""
+    if accuracy_only:
+        mode = TestMode.ACC
     if not config.datasets and dataset:
         try:
             # Raw strings are parsed by BenchmarkConfig._coerce_dataset_strings validator
@@ -51,7 +58,7 @@ def _run(config: BenchmarkConfig, dataset: list[str], mode: TestMode) -> None:
             raise DatasetValidationError(f"Invalid --dataset: {msgs}") from e
         except ValueError as e:
             raise DatasetValidationError(f"Invalid --dataset: {e}") from e
-    run_benchmark(config, mode)
+    run_benchmark(config, mode, accuracy_only=accuracy_only)
 
 
 @benchmark_app.command
@@ -68,9 +75,16 @@ def offline(
         TestMode,
         cyclopts.Parameter(help="Test mode: perf, acc, or both"),
     ] = TestMode.PERF,
+    accuracy_only: Annotated[
+        bool,
+        cyclopts.Parameter(
+            name="--accuracy-only",
+            help="Run only accuracy evaluation, skip the performance phase entirely",
+        ),
+    ] = False,
 ):
     """Offline benchmark — all queries at t=0 for max throughput."""
-    _run(config, dataset, mode)
+    _run(config, dataset, mode, accuracy_only=accuracy_only)
 
 
 @benchmark_app.command(name="online")
@@ -87,9 +101,16 @@ def online(
         TestMode,
         cyclopts.Parameter(help="Test mode: perf, acc, or both"),
     ] = TestMode.PERF,
+    accuracy_only: Annotated[
+        bool,
+        cyclopts.Parameter(
+            name="--accuracy-only",
+            help="Run only accuracy evaluation, skip the performance phase entirely",
+        ),
+    ] = False,
 ):
     """Online benchmark — sustained QPS with load pattern."""
-    _run(config, dataset, mode)
+    _run(config, dataset, mode, accuracy_only=accuracy_only)
 
 
 @benchmark_app.command(name="from-config")
@@ -98,6 +119,13 @@ def from_config(
     config: Annotated[Path, cyclopts.Parameter(name=["--config", "-c"])],
     timeout: float | None = None,
     mode: TestMode | None = None,
+    accuracy_only: Annotated[
+        bool,
+        cyclopts.Parameter(
+            name="--accuracy-only",
+            help="Run only accuracy evaluation, skip the performance phase entirely",
+        ),
+    ] = False,
 ):
     """Run benchmark from YAML config file."""
     try:
@@ -109,4 +137,4 @@ def from_config(
     test_mode = mode or (
         TestMode.BOTH if resolved.type == TestType.SUBMISSION else TestMode.PERF
     )
-    _run(resolved, [], test_mode)
+    _run(resolved, [], test_mode, accuracy_only=accuracy_only)

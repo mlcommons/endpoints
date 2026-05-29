@@ -98,6 +98,7 @@ class ScorerMethod(str, Enum):
     CODE_BENCH = "code_bench_scorer"
     SHOPIFY_CATEGORY_F1 = "shopify_category_f1"
     VBENCH = "vbench"
+    BFCL_V4 = "bfcl_v4"
 
 
 class TestMode(str, Enum):
@@ -299,6 +300,9 @@ class Dataset(BaseModel):
     )
     parser: dict[str, str] | None = Field(
         None, description="Column remapping: {prompt: <col>, system: <col>}"
+    )
+    params: dict[str, Any] | None = Field(
+        None, description="Dataset-specific parameters passed to the generate() method"
     )
     accuracy_config: AccuracyConfig | None = Field(
         None, description="Accuracy evaluation settings"

@@ -132,6 +132,7 @@ class ChatCompletionRequest(
     chat_template: str | None = None
     chat_template_kwargs: dict[str, Any] | None = None
     tools: list[dict[str, Any]] | None = None
+    tool_choice: str | dict[str, Any] | None = None
 
 
 # gc=False: audit 2026-05: tool_calls set at construction; frozen=True blocks field reassignment.

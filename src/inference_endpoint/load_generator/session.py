@@ -400,7 +400,10 @@ class BenchmarkSession:
         if phase.strategy is not None:
             strategy = phase.strategy
         else:
-            sample_order = create_sample_order(phase.runtime_settings)
+            sample_order = create_sample_order(
+                phase.runtime_settings,
+                sequential=(phase.phase_type == PhaseType.ACCURACY),
+            )
             strategy = create_load_strategy(
                 phase.runtime_settings, self._loop, sample_order
             )

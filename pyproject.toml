@@ -122,6 +122,11 @@ performance = [
     "pytest-benchmark==5.2.3",
     "memory-profiler==0.61.0",
 ]
+bfcl = [
+    # BFCL v4 function-calling evaluation. Pins numpy==1.26.4, which is why
+    # the top-level numpy requirement is a lower bound (see chore/relax-numpy-pin).
+    "bfcl-eval==2026.3.23",
+]
 
 [project.scripts]
 inference-endpoint = "inference_endpoint.main:run"
