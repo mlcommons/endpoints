@@ -521,7 +521,13 @@ def _build_phases(
             load_pattern=acc_load_pattern,
         )
         phases.append(
-            PhaseConfig(eval_cfg.dataset_name, acc_settings, acc_ds, PhaseType.ACCURACY)
+            PhaseConfig(
+                eval_cfg.dataset_name,
+                acc_settings,
+                acc_ds,
+                PhaseType.ACCURACY,
+                drain_timeout=None,
+            )
         )
 
     return phases
