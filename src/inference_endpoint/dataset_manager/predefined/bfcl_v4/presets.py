@@ -29,15 +29,15 @@ from inference_endpoint.dataset_manager.transforms import (
 def function_calling() -> list[Transform]:
     """Default transform for function-calling evaluation.
 
-    Passes through pre-formatted messages and tools columns directly.
+    Passes through pre-formatted messages, tools, and tool_choice columns directly.
     The OpenAI adapter will use these to construct the request with tool definitions.
 
-    Note: tool_choice is intentionally NOT sent. Evalscope/BFCL reference does not
-    send it either, relying on the server default (which is "auto" when tools are
-    present). Explicitly sending it can change behavior on some servers.
+    tool_choice is set to "auto" on each row (see BFCLv4._process_sample). Sending
+    it explicitly avoids server-default ambiguity: some servers stall when tools are
+    present but tool_choice is omitted.
     """
     return [
         ColumnFilter(
-            required_columns=["messages", "tools"],
+            required_columns=["messages", "tools", "tool_choice"],
         ),
     ]

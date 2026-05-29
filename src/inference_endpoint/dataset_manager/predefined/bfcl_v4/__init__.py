@@ -140,6 +140,7 @@ class BFCLv4(
     COLUMN_NAMES = [
         "messages",
         "tools",
+        "tool_choice",
         "ground_truth",
         "func_description",
         "subset",
@@ -455,6 +456,10 @@ class BFCLv4(
         return {
             "messages": messages,
             "tools": tools,
+            # Send tool_choice explicitly rather than relying on the server
+            # default: some servers (e.g. trtllm-serve on Thor) stall when tools
+            # are present but tool_choice is omitted.
+            "tool_choice": "auto",
             "ground_truth": ground_truth_str,
             "func_description": json.dumps(functions),
             "subset": subset,
