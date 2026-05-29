@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""End-to-end performance + correctness tests for the benchmark CLI.
+"""End-to-end performance tests for the benchmark CLI.
 
 Two families of tests, both driving the cyclopts ``inference-endpoint``
 app in-process and parameterized on stream/non-stream:
@@ -21,28 +21,22 @@ app in-process and parameterized on stream/non-stream:
 * **Roofline** against :class:`MaxThroughputServer` (instant pre-compiled
   responses). Measures peak QPS for each load pattern
   (``max_throughput``, ``concurrency``, ``poisson``). Prints numbers
-  rather than asserting on them. Marker: ``performance`` (CI-skipped).
+  rather than asserting on them.
 
 * **Low-QPS correctness** against :class:`VariableResponseServer`
   (realistic TTFT + per-token TPOT). Asserts zero ``failed`` requests at
   5 QPS for 20 s — guards keep-alive / idle-pool / slow-response
-  regressions. Marker: ``integration`` (CI-included).
+  regressions.
 
-Results from every parametrized case are written via the
-``record_result`` fixture and rendered as a single summary table by
-``conftest.py`` after the session completes.
+Both families are marked ``performance`` and are therefore CI-skipped;
+run them explicitly when investigating throughput regressions or
+benchmarking a new machine. Results from every parametrized case are
+written via the ``record_result`` fixture and rendered as a single
+summary table by ``conftest.py`` after the session completes.
 
 Run::
 
-    # roofline only
-    pytest -xvs -m performance --no-cov tests/performance/commands/test_e2e_perf.py
-
-    # low-QPS only
-    pytest -xvs -m integration tests/performance/commands/test_e2e_perf.py
-
-    # both
-    pytest -xvs -m "performance or integration" --no-cov \\
-        tests/performance/commands/test_e2e_perf.py
+    pytest -vs -m performance --no-cov tests/performance/commands/test_e2e_perf.py
 """
 
 from __future__ import annotations
@@ -229,7 +223,7 @@ def variable_server(request):
         yield srv
 
 
-@pytest.mark.integration
+@pytest.mark.performance
 @pytest.mark.xdist_group(name="serial_performance")
 def test_low_qps_no_network_errors(variable_server, tmp_path, record_result):
     """Sustain 5 QPS Poisson for 20 s — must complete with zero failed requests.
