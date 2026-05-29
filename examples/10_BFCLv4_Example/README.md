@@ -4,8 +4,8 @@ Berkeley Function Calling Leaderboard (BFCL) v4 accuracy evaluation against an
 OpenAI-compatible endpoint. Covers both single-turn function-calling subsets and
 the agentic multi-turn subsets.
 
-The sampling here is tuned so a full four-category run finishes on an embedded
-device (e.g. NVIDIA Thor) in **under 3 hours**.
+The sampling here is tuned so a full four-category run finishes on an edge
+device in **under 3 hours**.
 
 ## Prerequisites
 
@@ -70,9 +70,9 @@ Omit `--sample-pct` to run all entries (the full ~200-entry `multi_turn_base`
 plus the other multi-turn subsets), or pass `--subsets multi_turn_base` to
 restrict to one subset.
 
-## Thor budget (validated)
+## Edge device budget (validated)
 
-Full four-category run on Thor (`Qwen3.6-27B-Q4_K_M`, `temperature=0`):
+Full four-category run on an edge device (`Qwen3.6-27B-Q4_K_M`, `temperature=0`):
 
 | Category | % | Samples | Est. time |
 | --- | --- | --- | --- |

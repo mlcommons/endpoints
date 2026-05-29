@@ -1,8 +1,8 @@
-# BFCL v4 single-turn accuracy — Thor (<3h) budget
+# BFCL v4 single-turn accuracy — edge device (<3h) budget
 #
 # Runs the three single-turn BFCL v4 categories (non_live, live, hallucination)
 # through the accuracy pipeline with per-category sampling tuned to finish on an
-# embedded device (e.g. Thor) within ~3 hours. Multi-turn (the slow category) is
+# edge device within ~3 hours. Multi-turn (the slow category) is
 # run separately via the CLI — see README.md.
 #
 # Run with the --accuracy-only flag (there is no performance dataset here):

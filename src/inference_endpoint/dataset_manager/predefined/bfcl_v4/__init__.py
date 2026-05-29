@@ -195,7 +195,7 @@ class BFCLv4(
             # Run live + hallucination at 25% sampling
             BFCLv4.generate(datasets_dir, categories=["live", "hallucination"], sample_pct=25)
 
-            # Per-category rates with a tiny-subset floor (Thor <3h budget)
+            # Per-category rates with a tiny-subset floor (edge-device <3h budget)
             BFCLv4.generate(
                 datasets_dir,
                 categories=["non_live", "live", "hallucination"],
