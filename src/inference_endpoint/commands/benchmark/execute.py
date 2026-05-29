@@ -781,7 +781,9 @@ async def _run_benchmark_async(
         # so max_duration_ms applies only to the perf phase, not warmup.
         global_timeout_handle = None
         _timeout_done = False
-        max_duration_ms = ctx.rt_settings.max_duration_ms
+        max_duration_ms = (
+            ctx.rt_settings.max_duration_ms if ctx.rt_settings is not None else None
+        )
 
         def _on_global_timeout() -> None:
             if not _timeout_done:
