@@ -27,8 +27,11 @@ import os
 from collections import defaultdict
 from typing import Any
 
+import msgspec.json
 import numpy as np
+import pandas as pd
 
+from ..core.record import EventRecord, EventType, SampleEventType
 from ..dataset_manager.dataset import Dataset
 from ..dataset_manager.predefined.bfcl_v4 import CATEGORY_MAP, SINGLE_TURN_SUBSETS
 from .extractor import Extractor, FunctionCallExtractor
@@ -101,6 +104,42 @@ class BFCLv4Scorer(Scorer, scorer_id="bfcl_v4"):
                 "bfcl-eval is required for BFCL v4 scoring. "
                 "Install with: pip install inference-endpoint[bfcl]"
             )
+
+    def get_outputs(self) -> pd.DataFrame:
+        """Read COMPLETE events, preferring structured tool_calls for scoring.
+
+        When the model returns structured tool calls, score against the
+        serialized tool_calls directly rather than str(TextModelOutput): the
+        latter prepends any prose preamble the model emitted alongside the call
+        (e.g. "Sure, I'll do that.\\n[{...}]"), which is not valid JSON and
+        defeats the function-call parser. The function call is the answer here;
+        the prose is chatter. Plain-text responses (no tool calls, e.g.
+        hallucination refusals) fall back to the full string.
+        """
+        events_log_path = self.report_dir / "events.jsonl"
+        if not events_log_path.exists():
+            raise FileNotFoundError(f"Events log file not found at {events_log_path}")
+
+        decoder = msgspec.json.Decoder(type=EventRecord, dec_hook=EventType.decode_hook)
+        outputs: list[dict[str, str]] = []
+        with events_log_path.open("r") as f:
+            for line in f:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                record = decoder.decode(stripped)
+                if record.event_type != SampleEventType.COMPLETE:
+                    continue
+                data = record.data
+                tool_calls = getattr(data, "tool_calls", None)
+                if tool_calls:
+                    output_text = msgspec.json.encode(list(tool_calls)).decode()
+                else:
+                    output_text = str(data) if data is not None else ""
+                outputs.append(
+                    {"sample_uuid": record.sample_uuid, "output": output_text}
+                )
+        return pd.DataFrame(outputs)
 
     def score_single_sample(self, value: str, ground_truth: str) -> float:
         """Score a single function-calling sample using ast_checker.
