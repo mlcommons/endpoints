@@ -36,6 +36,7 @@ import argparse
 import json
 import logging
 import time
+from collections import defaultdict
 from pathlib import Path
 
 from ..dataset_manager.predefined.bfcl_v4.multi_turn import (
@@ -68,6 +69,13 @@ def main() -> None:
         default=None,
         choices=MULTI_TURN_SUBSETS,
         help=f"Subsets to evaluate. Default: all ({', '.join(MULTI_TURN_SUBSETS)})",
+    )
+    parser.add_argument(
+        "--sample-pct",
+        type=float,
+        default=None,
+        help="Percentage (0-100) of entries per subset to evaluate. "
+        "Selection is deterministic (first N). Default: all entries.",
     )
     parser.add_argument(
         "--api-key",
@@ -118,6 +126,28 @@ def main() -> None:
     logger.info("Loading BFCL v4 multi-turn entries for: %s", subsets)
     entries = load_multi_turn_entries(subsets=subsets)
     logger.info("Loaded %d entries", len(entries))
+
+    if args.sample_pct is not None:
+        if not (0 < args.sample_pct <= 100):
+            parser.error("--sample-pct must be in (0, 100]")
+        by_subset: dict[str, list] = defaultdict(list)
+        for entry in entries:
+            by_subset[entry.subset].append(entry)
+        sampled: list = []
+        for subset_name, subset_entries in by_subset.items():
+            n = max(1, int(len(subset_entries) * args.sample_pct / 100))
+            sampled.extend(subset_entries[:n])
+            logger.info(
+                "  %s: %d/%d entries (%.1f%%)",
+                subset_name,
+                n,
+                len(subset_entries),
+                args.sample_pct,
+            )
+        entries = sampled
+        logger.info(
+            "After %.1f%% sampling: %d total entries", args.sample_pct, len(entries)
+        )
 
     # Run conversations
     logger.info(

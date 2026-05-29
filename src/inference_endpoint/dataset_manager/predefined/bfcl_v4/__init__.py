@@ -76,6 +76,10 @@ CATEGORY_MAP = {
     "multi_turn": MULTI_TURN_SUBSETS,
 }
 
+# Reverse lookup: subset name -> its category. Used to apply per-category
+# sampling rates to the subsets within each category.
+SUBSET_TO_CATEGORY = {s: cat for cat, subsets in CATEGORY_MAP.items() for s in subsets}
+
 BFCL_V4_HF_REPO = "gorilla-llm/Berkeley-Function-Calling-Leaderboard"
 
 
@@ -151,6 +155,8 @@ class BFCLv4(
         categories: list[str] | None = None,
         subsets: list[str] | None = None,
         sample_pct: float | None = None,
+        category_sample_pct: dict[str, float] | None = None,
+        subset_floor: int | None = None,
         max_samples: int | None = None,
         force: bool = False,
     ) -> pd.DataFrame:
@@ -166,8 +172,16 @@ class BFCLv4(
                 to the corresponding subsets. Ignored if `subsets` is explicitly given.
             subsets: Explicit list of subset names to include. Overrides `categories`.
                 Defaults to all single-turn subsets.
-            sample_pct: Percentage (0-100) of samples to use from each sub-category.
-                Applied uniformly per subset (e.g. 10 means 10% of each subset).
+            sample_pct: Percentage (0-100) of samples to use from each subset. Applied
+                uniformly to every subset. Acts as the fallback rate for subsets whose
+                category is absent from `category_sample_pct`.
+            category_sample_pct: Per-category sampling rates, e.g.
+                {"non_live": 20, "live": 10, "hallucination": 5}. A subset is sampled at
+                its category's rate; categories not listed fall back to `sample_pct`
+                (or are kept in full if `sample_pct` is also None).
+            subset_floor: Tiny-subset floor. Any subset whose *total* size is <= this
+                value is taken in full, bypassing the percentage. Prevents small subsets
+                (e.g. live_parallel) from collapsing to one or two noisy samples.
             max_samples: Maximum total samples to include (for smoke testing).
             force: If True, regenerate even if cached file exists.
 
@@ -181,8 +195,13 @@ class BFCLv4(
             # Run live + hallucination at 25% sampling
             BFCLv4.generate(datasets_dir, categories=["live", "hallucination"], sample_pct=25)
 
-            # Run all categories at 10% sampling
-            BFCLv4.generate(datasets_dir, sample_pct=10)
+            # Per-category rates with a tiny-subset floor (Thor <3h budget)
+            BFCLv4.generate(
+                datasets_dir,
+                categories=["non_live", "live", "hallucination"],
+                category_sample_pct={"non_live": 20, "live": 10, "hallucination": 5},
+                subset_floor=25,
+            )
         """
         # Resolve which subsets to include
         if subsets is None:
@@ -249,21 +268,39 @@ class BFCLv4(
             f"Selected {len(df)} samples across {len(subsets)} subsets: {subsets}"
         )
 
-        # Apply per-subset percentage sampling
-        if sample_pct is not None and len(df) > 0:
-            if not (0 < sample_pct <= 100):
-                raise ValueError(
-                    f"sample_pct must be between 0 and 100, got {sample_pct}"
-                )
+        # Apply per-subset sampling (uniform rate, per-category rate, and/or floor).
+        # Selection is deterministic (head(n)) so runs are reproducible.
+        apply_sampling = (
+            sample_pct is not None
+            or category_sample_pct is not None
+            or subset_floor is not None
+        )
+        if apply_sampling and len(df) > 0:
+            pcts_to_check = [sample_pct] if sample_pct is not None else []
+            if category_sample_pct is not None:
+                pcts_to_check.extend(category_sample_pct.values())
+            for p in pcts_to_check:
+                if not (0 < p <= 100):
+                    raise ValueError(
+                        f"sampling percentage must be in (0, 100], got {p}"
+                    )
+
             sampled_parts = []
             for subset_name, group in df.groupby("subset"):
-                n = max(1, int(len(group) * sample_pct / 100))
-                sampled_parts.append(group.head(n))
-                logger.info(
-                    f"  {subset_name}: {n}/{len(group)} samples ({sample_pct}%)"
+                total = len(group)
+                pct = cls._resolve_subset_pct(
+                    subset_name, sample_pct, category_sample_pct
                 )
+                if subset_floor is not None and total <= subset_floor:
+                    n = total
+                elif pct is not None:
+                    n = max(1, int(total * pct / 100))
+                else:
+                    n = total
+                sampled_parts.append(group.head(n))
+                logger.info(f"  {subset_name}: {n}/{total} samples")
             df = pd.concat(sampled_parts).reset_index(drop=True)
-            logger.info(f"After {sample_pct}% sampling: {len(df)} total samples")
+            logger.info(f"After sampling: {len(df)} total samples")
 
         # Final cap
         if max_samples is not None and max_samples < len(df):
@@ -271,6 +308,23 @@ class BFCLv4(
             logger.info(f"Truncated to {max_samples} samples")
 
         return df
+
+    @staticmethod
+    def _resolve_subset_pct(
+        subset_name: str,
+        sample_pct: float | None,
+        category_sample_pct: dict[str, float] | None,
+    ) -> float | None:
+        """Resolve the sampling rate for a subset.
+
+        A per-category rate takes precedence; subsets whose category is not listed
+        (or have no category) fall back to the uniform `sample_pct`.
+        """
+        if category_sample_pct is not None:
+            category = SUBSET_TO_CATEGORY.get(subset_name)
+            if category is not None and category in category_sample_pct:
+                return category_sample_pct[category]
+        return sample_pct
 
     @staticmethod
     def _deserialize_complex_columns(df: pd.DataFrame) -> pd.DataFrame:
