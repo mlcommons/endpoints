@@ -223,11 +223,11 @@ class OpenAIMsgspecAdapter(HttpRequestAdapter):
         if message.reasoning_content:
             metadata["reasoning_content"] = message.reasoning_content
 
-        # Prefer serialized tool_calls for BFCL scoring when the model returns tools.
-        if message.tool_calls:
-            output_text = msgspec.json.encode(message.tool_calls).decode("utf-8")
-        else:
-            output_text = message.content or ""
+        # Keep `output` as the textual content only. Structured tool calls live in
+        # the dedicated `tool_calls` field; TextModelOutput.__str__ serializes them
+        # once for scoring. Serializing them into `output` here too would make
+        # __str__ emit the JSON twice, corrupting it for downstream parsers.
+        output_text = message.content or ""
 
         tool_calls_tuple = tuple(message.tool_calls) if message.tool_calls else None
         return QueryResult(
