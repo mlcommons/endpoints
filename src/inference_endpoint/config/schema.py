@@ -22,6 +22,7 @@ on Annotated fields to declare shorthand aliases alongside dotted paths.
 
 from __future__ import annotations
 
+import re
 from collections import Counter
 from enum import Enum
 from pathlib import Path
@@ -547,6 +548,189 @@ class EndpointConfig(BaseModel):
         return v
 
 
+_SSH_ID_RE = re.compile(r"^(?P<username>[^@]+)@(?P<host>[^:]+?)(?::(?P<port>\d+))?$")
+
+
+class SshTarget(BaseModel):
+    """Parsed SSH target from a raw 'username@host' or 'username@host:port' string."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    username: str
+    host: str
+    port: int = 22
+
+    def to_mlcflow_str(self) -> str:
+        return f"{self.username}@{self.host}:{self.port}"
+
+    @field_validator("port", mode="after")
+    @classmethod
+    def _validate_port(cls, v: int) -> int:
+        if not (1 <= v <= 65535):
+            raise ValueError(f"Port must be in range 1-65535, got {v}")
+        return v
+
+
+class NodeEntry(BaseModel):
+    """A single node type within a function group for multi-node system info."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    node_name: str = Field(
+        description="Node type identifier matched against detected GPU model name"
+    )
+    no_of_nodes: int = Field(
+        default=1, ge=1, description="Number of nodes of this type"
+    )
+
+
+class SysInfoCaptureConfig(BaseModel):
+    """Configuration for the sys_info_capture post-benchmark step."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    exclude_current_system: bool = False
+    accelerator_backend: Literal["cuda", "rocm", "none"] = "none"
+    output_path: str = "."
+    skip_ssh_key_file: bool = False
+    ssh_ids: list[str]
+    node_config: dict[str, list[NodeEntry]] | None = Field(
+        default=None,
+        description=(
+            "Function-based node groupings. Keys are function names (e.g. 'Prefill', "
+            "'Decode'); values are lists of NodeEntry specifying node type and count."
+        ),
+    )
+    endpoint_url: str | None = Field(
+        default=None,
+        description=(
+            "Endpoint URL to probe for serving framework detection "
+            "(e.g. 'http://host:8000'). Auto-populated from endpoint_config when "
+            "used inside BenchmarkConfig."
+        ),
+    )
+    serving_node: str | None = Field(
+        default=None,
+        description=(
+            "SSH ID of the node running the serving framework "
+            "(e.g. 'root@host:8022'). Used together with log_path for "
+            "log-based framework detection when endpoint_url is unavailable."
+        ),
+    )
+    log_path: str | None = Field(
+        default=None,
+        description=(
+            "Absolute path on serving_node to which the server stdout/stderr "
+            "was redirected (e.g. '/tmp/vllm.log'). Used for log-based "
+            "serving framework detection."
+        ),
+    )
+    serving_framework: Literal["auto", "vllm", "sglang"] = Field(
+        default="auto",
+        description=(
+            "Serving engine type for log parsing: 'vllm', 'sglang', or 'auto' "
+            "(auto-detects from log keywords)."
+        ),
+    )
+
+    @field_validator("endpoint_url", mode="after")
+    @classmethod
+    def _validate_endpoint_url(cls, v: str | None) -> str | None:
+        if v is not None and not v.startswith(("http://", "https://")):
+            raise ValueError(
+                f"endpoint_url must include scheme (http:// or https://), got: {v!r}"
+            )
+        return v
+
+    @field_validator("serving_node", mode="after")
+    @classmethod
+    def _validate_serving_node(cls, v: str | None) -> str | None:
+        if v is not None:
+            m = _SSH_ID_RE.match(v)
+            if not m:
+                raise ValueError(
+                    f"Invalid serving_node {v!r}: expected 'username@host' or 'username@host:port'"
+                )
+        return v
+
+    @field_validator("output_path", mode="after")
+    @classmethod
+    def _validate_output_path(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("output_path must be a non-empty string")
+        return v
+
+    @field_validator("ssh_ids", mode="after")
+    @classmethod
+    def _validate_ssh_ids(cls, v: list[str]) -> list[str]:
+        if not v:
+            raise ValueError("ssh_ids must be a non-empty list")
+        for entry in v:
+            m = _SSH_ID_RE.match(entry)
+            if not m:
+                raise ValueError(
+                    f"Invalid ssh_id entry {entry!r}: expected 'username@host' or 'username@host:port'"
+                )
+            port_str = m.group("port")
+            if port_str is not None:
+                port = int(port_str)
+                if not (1 <= port <= 65535):
+                    raise ValueError(
+                        f"Invalid port in ssh_id {entry!r}: {port} is not in range 1-65535"
+                    )
+        return v
+
+    @property
+    def parsed_ssh_ids(self) -> list[SshTarget]:
+        targets = []
+        for entry in self.ssh_ids:
+            m = _SSH_ID_RE.match(entry)
+            assert m is not None  # already validated
+            port_str = m.group("port")
+            targets.append(
+                SshTarget(
+                    username=m.group("username"),
+                    host=m.group("host"),
+                    port=int(port_str) if port_str is not None else 22,
+                )
+            )
+        return targets
+
+
+class SysInfoFileConfig(BaseModel):
+    """Top-level model for a standalone sysinfo YAML config file.
+
+    The file must have a ``system_info`` key. Extra top-level keys are allowed
+    so the same YAML can be shared with benchmark configs.
+
+    ``report_dir`` mirrors the same field in ``BenchmarkConfig`` and takes
+    priority over ``system_info.output_path`` when set.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    system_info: SysInfoCaptureConfig
+    report_dir: Path | None = None
+
+    @classmethod
+    def from_yaml_file(cls, path: Path) -> SysInfoFileConfig:
+        """Load SysInfoFileConfig from a YAML file.
+
+        Raises:
+            FileNotFoundError: If the file does not exist.
+            ValueError: If the YAML is invalid or does not match the schema.
+        """
+        path = Path(path)
+        if not path.exists():
+            raise FileNotFoundError(f"Config file not found: {path}")
+        raw = path.read_text()
+        data = yaml.safe_load(raw)
+        if not isinstance(data, dict):
+            raise ValueError(f"Expected YAML mapping, got {type(data).__name__}")
+        resolve_env_vars(data)
+        return cls.model_validate(data)
+
+
 class BenchmarkConfig(WithUpdatesMixin, BaseModel):
     """Benchmark configuration — single source of truth for YAML and CLI.
 
@@ -598,6 +782,9 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
             help="NUMA-aware CPU pinning",
         ),
     ] = True
+    sys_info_capture: Annotated[
+        SysInfoCaptureConfig | None, cyclopts.Parameter(show=False)
+    ] = None
 
     @field_validator("datasets", mode="before")
     @classmethod
@@ -713,6 +900,20 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
                 f"got '{lp.type}'"
             )
 
+        return self
+
+    @model_validator(mode="after")
+    def _propagate_endpoint_url_to_sysinfo(self) -> Self:
+        """Copy endpoint_config.endpoints[0] into sys_info_capture.endpoint_url if unset."""
+        if (
+            self.sys_info_capture is not None
+            and self.sys_info_capture.endpoint_url is None
+            and self.endpoint_config.endpoints
+        ):
+            new_sic = self.sys_info_capture.model_copy(
+                update={"endpoint_url": self.endpoint_config.endpoints[0]}
+            )
+            object.__setattr__(self, "sys_info_capture", new_sic)
         return self
 
     @model_validator(mode="after")

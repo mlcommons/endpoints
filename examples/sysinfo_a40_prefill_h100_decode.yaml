@@ -1,0 +1,27 @@
+# MLPerf system-info capture — A40 (Prefill) + 8×H100 (Decode)
+#
+# Usage:
+#   inference-endpoint sysinfo from-config -c examples/sysinfo_a40_prefill_h100_decode.yaml
+#
+# Node assignments:
+#   Prefill : <user>@<host>  — NVIDIA A40  (1 GPU per node)
+#   Decode  : <user>@<host>  — NVIDIA H100 (8 GPUs per node)
+
+report_dir: results/a40_prefill_h100_decode_sysinfo/
+
+system_info:
+  ssh_ids:
+    - root@63.141.33.33:22053 # A40 node (RunPod)
+    - anandhusooraj@mlc2 # 8×H100 node (mlc2)
+
+  accelerator_backend: cuda
+
+  exclude_current_system: true
+
+  node_config:
+    Prefill:
+      - node_name: A40 # matched as substring of detected GPU name
+        no_of_nodes: 1
+    Decode:
+      - node_name: H100 # matched as substring of detected GPU name
+        no_of_nodes: 1
