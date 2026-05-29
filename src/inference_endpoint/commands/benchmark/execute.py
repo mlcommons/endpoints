@@ -551,7 +551,7 @@ def _build_phases(
                 acc_settings,
                 acc_ds,
                 PhaseType.ACCURACY,
-                drain_timeout=drain_cfg.accuracy_timeout_s,
+                drain_timeout=None,
             )
         )
 
