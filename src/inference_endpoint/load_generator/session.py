@@ -465,7 +465,7 @@ class BenchmarkSession:
             await asyncio.wait_for(self._drain_event.wait(), timeout=timeout)
         except TimeoutError:
             logger.error(
-                "Drain timed out after %.0f s with %d responses still in flight; "
+                "Drain timed out after %s s with %d responses still in flight; "
                 "proceeding to next phase.",
                 timeout,
                 phase_issuer.inflight,
