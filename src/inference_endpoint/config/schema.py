@@ -483,6 +483,46 @@ class WarmupConfig(BaseModel):
     ] = Field(42, description="RNG seed for warmup scheduling and sample ordering")
 
 
+class DrainConfig(BaseModel):
+    """Per-phase in-flight response drain timeout configuration."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    warmup_timeout_s: Annotated[
+        float | None,
+        cyclopts.Parameter(
+            alias="--warmup-drain-timeout",
+            help="Warmup drain timeout in seconds (None = wait indefinitely)",
+        ),
+    ] = Field(
+        240.0,
+        gt=0,
+        description="Warmup drain timeout in seconds (None = wait indefinitely)",
+    )
+    performance_timeout_s: Annotated[
+        float | None,
+        cyclopts.Parameter(
+            alias="--performance-drain-timeout",
+            help="Performance drain timeout in seconds (None = wait indefinitely)",
+        ),
+    ] = Field(
+        240.0,
+        gt=0,
+        description="Performance drain timeout in seconds (None = wait indefinitely)",
+    )
+    accuracy_timeout_s: Annotated[
+        float | None,
+        cyclopts.Parameter(
+            alias="--accuracy-drain-timeout",
+            help="Accuracy drain timeout in seconds (None = wait indefinitely)",
+        ),
+    ] = Field(
+        None,
+        gt=0,
+        description="Accuracy drain timeout in seconds (None = wait indefinitely)",
+    )
+
+
 @cyclopts.Parameter(name="*")
 class Settings(BaseModel):
     """Test settings."""
@@ -492,6 +532,7 @@ class Settings(BaseModel):
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
     load_pattern: LoadPattern = Field(default_factory=LoadPattern)
     client: HTTPClientConfig = Field(default_factory=HTTPClientConfig)
+    drain: DrainConfig = Field(default_factory=DrainConfig)
     warmup: WarmupConfig = Field(default_factory=WarmupConfig)
 
 

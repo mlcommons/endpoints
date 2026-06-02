@@ -37,6 +37,7 @@ from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import (
     BenchmarkConfig,
     DatasetType,
+    DrainConfig,
     LoadPattern,
     LoadPatternType,
     OfflineSettings,
@@ -475,6 +476,56 @@ settings:
         assert warmup.n_requests is None
 
 
+class TestDrainConfig:
+    """Tests for DrainConfig schema model."""
+
+    @pytest.mark.unit
+    def test_defaults(self):
+        cfg = DrainConfig()
+        assert cfg.warmup_timeout_s == 240.0
+        assert cfg.performance_timeout_s == 240.0
+        assert cfg.accuracy_timeout_s is None
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "field",
+        ["warmup_timeout_s", "performance_timeout_s", "accuracy_timeout_s"],
+    )
+    @pytest.mark.parametrize("value", [0, -1.0])
+    def test_timeout_must_be_positive_or_none(self, field, value):
+        with pytest.raises(ValidationError):
+            DrainConfig(**{field: value})
+
+    @pytest.mark.unit
+    def test_extra_fields_rejected(self):
+        with pytest.raises(ValidationError):
+            DrainConfig(unknown_field=1)
+
+    @pytest.mark.unit
+    def test_yaml_roundtrip(self, tmp_path):
+        yaml_content = """
+type: "offline"
+model_params:
+  name: "test-model"
+endpoint_config:
+  endpoints: ["http://test:8000"]
+datasets:
+  - path: "test.jsonl"
+settings:
+  drain:
+    warmup_timeout_s: 12.5
+    performance_timeout_s: 30.0
+    accuracy_timeout_s: null
+"""
+        config_file = tmp_path / "drain.yaml"
+        config_file.write_text(yaml_content)
+        config = BenchmarkConfig.from_yaml_file(config_file)
+        drain = config.settings.drain
+        assert drain.warmup_timeout_s == 12.5
+        assert drain.performance_timeout_s == 30.0
+        assert drain.accuracy_timeout_s is None
+
+
 class TestBuildPhases:
     """Tests for _build_phases() in execute.py."""
 
@@ -698,6 +749,44 @@ class TestBuildPhases:
         phases = _build_phases(ctx)
 
         assert phases[1].runtime_settings is base_rt_settings
+
+    @pytest.mark.unit
+    def test_configured_drain_timeouts_propagate_to_phases(
+        self, base_rt_settings, simple_dataset
+    ):
+        config = OfflineConfig(
+            **_OFFLINE_KWARGS,
+            settings=OfflineSettings(
+                drain=DrainConfig(
+                    warmup_timeout_s=7.0,
+                    performance_timeout_s=15.0,
+                    accuracy_timeout_s=45.0,
+                ),
+                warmup=WarmupConfig(enabled=True, drain=True),
+            ),
+        )
+        ctx = self._make_ctx(config, base_rt_settings, simple_dataset)
+        ctx.eval_configs = [self._make_eval_config(simple_dataset)]
+        phases = _build_phases(ctx)
+
+        warmup = next(p for p in phases if p.phase_type == PhaseType.WARMUP)
+        perf = next(p for p in phases if p.phase_type == PhaseType.PERFORMANCE)
+        acc = next(p for p in phases if p.phase_type == PhaseType.ACCURACY)
+        assert warmup.drain_timeout == 7.0
+        assert perf.drain_timeout == 15.0
+        assert acc.drain_timeout == 45.0
+
+    @pytest.mark.unit
+    def test_accuracy_drain_timeout_defaults_to_unbounded(
+        self, base_rt_settings, simple_dataset
+    ):
+        config = OfflineConfig(**_OFFLINE_KWARGS)
+        ctx = self._make_ctx(config, base_rt_settings, simple_dataset)
+        ctx.eval_configs = [self._make_eval_config(simple_dataset)]
+        phases = _build_phases(ctx)
+
+        acc = next(p for p in phases if p.phase_type == PhaseType.ACCURACY)
+        assert acc.drain_timeout is None
 
     @pytest.mark.unit
     def test_warmup_uses_independent_rng_instances(
