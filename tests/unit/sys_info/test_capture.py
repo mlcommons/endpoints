@@ -207,7 +207,8 @@ class TestCaptureSystemInfo:
         assert result == Path("/tmp/out.json")
 
     @pytest.mark.unit
-    def test_happy_path_output_path_fallback(self, tmp_path: Path) -> None:
+    def test_missing_env_path_raises_execution_error(self, tmp_path: Path) -> None:
+        """Return code 0 without MLC_MULTI_NODE_SYSTEM_INFO_FILE_PATH raises ExecutionError."""
         cfg = _make_config(output_path=str(tmp_path))
         mock_mlcflow = MagicMock()
         mock_mlcflow.access.return_value = {
@@ -220,8 +221,32 @@ class TestCaptureSystemInfo:
             from inference_endpoint.sys_info import capture as capture_mod
 
             importlib.reload(capture_mod)
+            with pytest.raises(
+                ExecutionError, match="MLC_MULTI_NODE_SYSTEM_INFO_FILE_PATH"
+            ):
+                capture_mod.capture_system_info(cfg)
+
+    @pytest.mark.unit
+    def test_unreachable_node_no_node_config_succeeds(self, tmp_path: Path) -> None:
+        """mlcflow returning 0 (one node internally unreachable, no node_config) is non-fatal."""
+        cfg = _make_config(output_path=str(tmp_path))
+        mock_mlcflow = MagicMock()
+        mock_mlcflow.access.return_value = {
+            "return": 0,
+            "new_env": {
+                "MLC_MULTI_NODE_SYSTEM_INFO_FILE_PATH": str(
+                    tmp_path / "system_desc.json"
+                ),
+            },
+        }
+        with patch.dict("sys.modules", {"mlc": mock_mlcflow}):
+            import importlib
+
+            from inference_endpoint.sys_info import capture as capture_mod
+
+            importlib.reload(capture_mod)
             result = capture_mod.capture_system_info(cfg)
-        assert result == Path(cfg.output_path) / "system_desc.json"
+        assert result == tmp_path / "system_desc.json"
 
     @pytest.mark.unit
     def test_mlcflow_access_called_with_correct_args(self, tmp_path: Path) -> None:

@@ -37,7 +37,7 @@ from pydantic import ValidationError
 
 _BASE_SYSTEM_INFO = {
     "accelerator_backend": "cuda",
-    "ssh_ids": ["anandhusooraj@mlc2"],
+    "ssh_ids": ["user@10.0.0.1"],
 }
 
 
@@ -162,7 +162,7 @@ class TestSysInfoFileConfig:
                 """\
                 system_info:
                   ssh_ids:
-                    - anandhusooraj@mlc2
+                    - user@10.0.0.1
                   accelerator_backend: cuda
                 """
             )
@@ -181,7 +181,7 @@ class TestSysInfoFileConfig:
                 report_dir: results/my_system/
                 system_info:
                   ssh_ids:
-                    - anandhusooraj@mlc2
+                    - user@10.0.0.1
                   accelerator_backend: cuda
                 """
             )
@@ -199,7 +199,7 @@ class TestSysInfoFileConfig:
                 """\
                 system_info:
                   ssh_ids:
-                    - anandhusooraj@mlc2
+                    - user@10.0.0.1
                   accelerator_backend: cuda
                   output_path: /tmp/sys_info
                   node_config:
@@ -228,7 +228,7 @@ class TestSysInfoFileConfig:
                 """\
                 system_info:
                   ssh_ids:
-                    - anandhusooraj@mlc2
+                    - user@10.0.0.1
                   accelerator_backend: cuda
                   output_path: /tmp/sys_info
                 some_other_section:
@@ -438,7 +438,7 @@ class TestReportDirResolution:
                 report_dir: {tmp_path}/results/
                 system_info:
                   ssh_ids:
-                    - anandhusooraj@mlc2
+                    - user@10.0.0.1
                   accelerator_backend: cuda
                   output_path: /should/be/ignored
                 """
@@ -469,7 +469,7 @@ class TestReportDirResolution:
                 f"""\
                 system_info:
                   ssh_ids:
-                    - anandhusooraj@mlc2
+                    - user@10.0.0.1
                   accelerator_backend: cuda
                   output_path: {tmp_path}/custom/
                 """
@@ -492,6 +492,42 @@ class TestReportDirResolution:
         assert Path(captured_configs[0].output_path) == tmp_path / "custom"
 
 
+class TestMissingSshIds:
+    @pytest.mark.unit
+    def test_missing_ssh_ids_raises_validation_error(self, tmp_path: Path) -> None:
+        config_path = tmp_path / "sysinfo.yaml"
+        config_path.write_text("system_info:\n  accelerator_backend: cuda\n")
+        with pytest.raises(ValidationError):
+            SysInfoFileConfig.from_yaml_file(config_path)
+
+    @pytest.mark.unit
+    def test_missing_ssh_ids_exclude_current_false_still_raises(
+        self, tmp_path: Path
+    ) -> None:
+        """exclude_current_system=False does not relax the ssh_ids requirement."""
+        config_path = tmp_path / "sysinfo.yaml"
+        config_path.write_text(
+            "system_info:\n  accelerator_backend: cuda\n  exclude_current_system: false\n"
+        )
+        with pytest.raises(ValidationError):
+            SysInfoFileConfig.from_yaml_file(config_path)
+
+    @pytest.mark.unit
+    def test_missing_ssh_ids_via_cli_raises_input_validation_error(
+        self, tmp_path: Path
+    ) -> None:
+        config_path = tmp_path / "sysinfo.yaml"
+        config_path.write_text("system_info:\n  accelerator_backend: cuda\n")
+        with patch(
+            "inference_endpoint.commands.sysinfo.cli.capture_system_info"
+        ) as mock_cap:
+            from inference_endpoint.commands.sysinfo.cli import from_config
+
+            with pytest.raises(InputValidationError):
+                from_config(config=config_path)
+            mock_cap.assert_not_called()
+
+
 class TestFromConfigCLI:
     @pytest.mark.unit
     def test_from_config_calls_capture(self, tmp_path: Path) -> None:
@@ -501,7 +537,7 @@ class TestFromConfigCLI:
                 """\
                 system_info:
                   ssh_ids:
-                    - anandhusooraj@mlc2
+                    - user@10.0.0.1
                   accelerator_backend: cuda
                   output_path: /tmp/sys_info
                   node_config:

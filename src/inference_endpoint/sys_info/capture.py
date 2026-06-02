@@ -136,10 +136,11 @@ def capture_system_info(
     new_env_path = (result.get("new_env") or {}).get(
         "MLC_MULTI_NODE_SYSTEM_INFO_FILE_PATH"
     )
-    output_path = (
-        Path(new_env_path)
-        if new_env_path
-        else Path(config.output_path) / _OUT_FILE_NAME
-    )
+    if not new_env_path:
+        raise ExecutionError(
+            "sys_info capture returned success but MLC_MULTI_NODE_SYSTEM_INFO_FILE_PATH "
+            "was not set — no system info was collected"
+        )
+    output_path = Path(new_env_path)
     logger.info("System info written to %s", output_path)
     return output_path
