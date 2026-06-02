@@ -257,8 +257,20 @@ class MultiTurnConfig(BaseModel):
 
     turn_timeout_s: float = Field(default=300.0, gt=0)
     use_dataset_history: bool = True
-    enable_salt: bool = False
-    inject_tool_delay: bool = False
+    enable_salt: bool = Field(
+        False,
+        description=(
+            "Enable salt addition after system prompt to prevent KV cache reuse "
+            "across trajectories in multi-turn setting."
+        ),
+    )
+    inject_tool_delay: bool = Field(
+        False,
+        description=(
+            "Pause for a predefined duration between turns. Duration is defined "
+            "in dataset."
+        ),
+    )
 
 
 class Dataset(BaseModel):

@@ -80,17 +80,17 @@ OUTPUT_ELEM_TYPE = str | tuple[str, ...]
 
 TOOL_CALL_TYPE = dict[str, Any]
 TOOL_CALLS_TYPE = tuple[TOOL_CALL_TYPE, ...]
-TOOL_CALL_CHUNKS_TYPE = tuple[TOOL_CALLS_TYPE, ...]
-TOOL_CALL_ELEM_TYPE = tuple[Any, ...]
+_TOOL_CALL_CHUNKS_TYPE = tuple[TOOL_CALLS_TYPE, ...]
+_TOOL_CALL_ELEM_TYPE = tuple[Any, ...]
 
 
-def merge_tool_calls(tool_calls: TOOL_CALL_ELEM_TYPE | None) -> TOOL_CALLS_TYPE | None:
+def merge_tool_calls(tool_calls: _TOOL_CALL_ELEM_TYPE | None) -> TOOL_CALLS_TYPE | None:
     if not tool_calls:
         return None
     if not isinstance(tool_calls[0], list | tuple):
         return cast(TOOL_CALLS_TYPE, tool_calls)
 
-    tool_call_chunks = cast(TOOL_CALL_CHUNKS_TYPE, tool_calls)
+    tool_call_chunks = cast(_TOOL_CALL_CHUNKS_TYPE, tool_calls)
     merged: dict[int, TOOL_CALL_TYPE] = {}
     for chunk in tool_call_chunks:
         for partial in chunk:
@@ -138,7 +138,7 @@ class TextModelOutput(
 
     output: OUTPUT_ELEM_TYPE = ""
     reasoning: OUTPUT_ELEM_TYPE | None = None
-    tool_calls: TOOL_CALL_ELEM_TYPE | None = None
+    tool_calls: _TOOL_CALL_ELEM_TYPE | None = None
 
     def __post_init__(self):
         """Convert list to tuple for output, reasoning, and tool_calls to preserve immutability."""
