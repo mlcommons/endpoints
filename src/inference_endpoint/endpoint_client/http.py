@@ -244,11 +244,16 @@ class HttpResponseProtocol(asyncio.Protocol):
 
         See: https://bugs.python.org/issue44805 (asyncio EOF detection on reused sockets)
         See: https://superuser.com/questions/298919/tcp-half-open-vs-half-closed
+
+        Return False so asyncio closes the transport itself, which then triggers
+        connection_lost() promptly (resolving any pending _body_future). TLS does
+        not support TCP half-close, so returning True is a no-op on SSL transports
+        (asyncio logs a warning) — False is the correct value for both plain and
+        SSL connections.
         """
         self._connection_lost = True
         self._signal_stream_end()  # Unblock any waiting iter_body()
-        # Return True to keep transport open briefly for pending data processing
-        return True
+        return False
 
     # -------------------------------------------------------------------------
     # httptools callbacks

@@ -136,6 +136,15 @@ class HTTPClientConfig(WithUpdatesMixin, BaseModel):
         0.5, description="Force kill timeout after graceful wait (seconds)"
     )
 
+    # Set to True to skip certificate verification (e.g. self-signed certs).
+    insecure: Annotated[
+        bool,
+        cyclopts.Parameter(
+            alias="--insecure",
+            help="Skip TLS certificate verification",
+        ),
+    ] = Field(False, description="Skip TLS certificate verification")
+
     # Connection idle timeout - discard connections idle longer than this.
     # Two fold benefits:
     # 1. Prevents keep-alive race condition where server closes idle connection
