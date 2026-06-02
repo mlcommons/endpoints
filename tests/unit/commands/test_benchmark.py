@@ -29,6 +29,7 @@ from inference_endpoint.commands.benchmark.cli import (
     online,
 )
 from inference_endpoint.commands.benchmark.execute import (
+    AccuracyConfiguration,
     BenchmarkContext,
     ResponseCollector,
     _build_phases,
@@ -562,6 +563,17 @@ class TestBuildPhases:
             total_samples=dataloader.num_samples(),
             accuracy_datasets=[],
             eval_configs=[],
+        )
+
+    def _make_eval_config(self, dataset):
+        return AccuracyConfiguration(
+            scorer=Scorer.get("pass_at_1"),
+            extractor=None,
+            dataset_name="accuracy",
+            dataset=dataset,
+            report_dir=Path("/tmp"),
+            ground_truth_column=None,
+            num_repeats=dataset.repeats,
         )
 
     @pytest.mark.unit
