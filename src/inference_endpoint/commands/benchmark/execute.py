@@ -343,6 +343,7 @@ def _precompute_isl_for_multi_turn(
         unit="turn",
         smoothing=0,
         mininterval=2.0,
+        disable=not logger.isEnabledFor(logging.INFO),
     ):
         messages = sample.get("messages")
         if not messages:
