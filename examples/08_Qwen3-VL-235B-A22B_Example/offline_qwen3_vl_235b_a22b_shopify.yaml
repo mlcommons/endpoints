@@ -45,7 +45,7 @@ settings:
     accuracy_timeout_s: null  # Accuracy drain timeout in seconds (None = wait indefinitely)
   warmup:
     enabled: true  # Enable warmup phase before performance run
-    n_requests: 400  # Warmup request count (None = full dataset once)
+    n_requests: 1600  # Warmup request count (None = full dataset once)
     salt: false
 
 endpoint_config:
