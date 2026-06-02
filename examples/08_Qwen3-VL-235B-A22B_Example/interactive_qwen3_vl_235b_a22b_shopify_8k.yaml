@@ -42,8 +42,8 @@ settings:
     worker_initialization_timeout: 120
 
   warmup:
-    enabled: true  # Enable warmup phase before performance run
-    n_requests: 400  # Warmup request count (None = full dataset once)
+    enabled: true # Enable warmup phase before performance run
+    n_requests: 400 # Warmup request count (None = full dataset once)
     salt: false
 
 endpoint_config:

@@ -73,7 +73,7 @@ settings:
     max_idle_time: 4.0  # Discard connections idle longer than this (seconds)
     min_required_connections: -1  # Min connections to initialize (-1=auto, 0=disabled)
     worker_gc_mode: relaxed  # Worker GC strategy | options: disabled, relaxed, system
-  drain:
+  drain:  # Drain in-flight warmup requests before starting the performance phase
     warmup_timeout_s: 240.0  # Warmup drain timeout in seconds (None = wait indefinitely)
     performance_timeout_s: 240.0  # Performance drain timeout in seconds (None = wait indefinitely)
     accuracy_timeout_s: null  # Accuracy drain timeout in seconds (None = wait indefinitely)
