@@ -458,10 +458,6 @@ class BenchmarkSession:
             return
         logger.info("Draining %d in-flight responses...", phase_issuer.inflight)
         self._drain_event.clear()
-        # Re-check after clear: a completion may have set the event between the
-        # initial inflight check and clear(), which would otherwise be lost.
-        if phase_issuer.inflight <= 0:
-            return
         if timeout is None:
             await self._drain_event.wait()
             return
