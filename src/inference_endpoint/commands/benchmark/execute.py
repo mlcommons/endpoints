@@ -145,12 +145,13 @@ class BenchmarkResult:
 @dataclass
 class AccuracyConfiguration:
     scorer: type[Scorer]
-    extractor: type[Extractor]
+    extractor: type[Extractor] | None
     dataset_name: str
     dataset: Dataset
     report_dir: Path
     ground_truth_column: str | None
     num_repeats: int
+    extras: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -253,11 +254,22 @@ def _load_datasets(
         if (
             acc_cfg.accuracy_config is None
             or acc_cfg.accuracy_config.eval_method is None
-            or acc_cfg.accuracy_config.extractor is None
         ):
             raise InputValidationError(
-                f"Dataset '{acc_cfg.name}' requires accuracy_config with eval_method and extractor"
+                f"Dataset '{acc_cfg.name}' requires accuracy_config with eval_method"
             )
+
+        scorer_cls = Scorer.get(acc_cfg.accuracy_config.eval_method)
+        extractor_name = acc_cfg.accuracy_config.extractor
+        if extractor_name is None:
+            if scorer_cls.REQUIRES_EXTRACTOR:
+                raise InputValidationError(
+                    f"Dataset '{acc_cfg.name}' uses scorer "
+                    f"'{acc_cfg.accuracy_config.eval_method}' which requires an extractor"
+                )
+            extractor_cls: type[Extractor] | None = None
+        else:
+            extractor_cls = Extractor.get(extractor_name)
 
         ds = DataLoaderFactory.create_loader(
             acc_cfg, num_repeats=acc_cfg.accuracy_config.num_repeats
@@ -266,13 +278,14 @@ def _load_datasets(
         # TODO add tests and defaults
         eval_configs.append(
             AccuracyConfiguration(
-                Scorer.get(acc_cfg.accuracy_config.eval_method),
-                Extractor.get(acc_cfg.accuracy_config.extractor),
+                scorer_cls,
+                extractor_cls,
                 acc_cfg.name,
                 ds,
                 report_dir,
                 acc_cfg.accuracy_config.ground_truth,
                 acc_cfg.accuracy_config.num_repeats,
+                acc_cfg.accuracy_config.extras or {},
             )
         )
         ds.load(
@@ -890,13 +903,16 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
             eval_cfg.report_dir,
             extractor=eval_cfg.extractor,
             ground_truth_column=eval_cfg.ground_truth_column,
+            **eval_cfg.extras,
         )
         score, n_repeats = scorer_instance.score()
         assert eval_cfg.dataset.data is not None
         accuracy_scores[eval_cfg.dataset_name] = {
             "dataset_name": eval_cfg.dataset_name,
             "num_samples": len(eval_cfg.dataset.data),
-            "extractor": eval_cfg.extractor.__name__,
+            "extractor": (
+                eval_cfg.extractor.__name__ if eval_cfg.extractor is not None else None
+            ),
             "ground_truth_column": eval_cfg.ground_truth_column,
             "score": score,
             "n_repeats": n_repeats,

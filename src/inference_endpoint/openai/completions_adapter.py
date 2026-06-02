@@ -60,13 +60,14 @@ class OpenAITextCompletionsAdapter(HttpRequestAdapter):
             "top_p": model_params.top_p,
             "top_k": model_params.top_k,
             "repetition_penalty": model_params.repetition_penalty,
+            "presence_penalty": model_params.presence_penalty,
+            "frequency_penalty": model_params.frequency_penalty,
         }
         return [
             Harmonize(),
             ColumnFilter(
                 required_columns=["input_tokens"],
-                optional_columns=["n", "presence_penalty", "frequency_penalty", "stop"]
-                + list(metadata.keys()),
+                optional_columns=["n", "stop"] + list(metadata.keys()),
             ),
             AddStaticColumns(metadata),
         ]

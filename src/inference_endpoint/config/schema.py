@@ -97,6 +97,7 @@ class ScorerMethod(str, Enum):
     ROUGE = "rouge"
     CODE_BENCH = "code_bench_scorer"
     SHOPIFY_CATEGORY_F1 = "shopify_category_f1"
+    VBENCH = "vbench"
 
 
 class TestMode(str, Enum):
@@ -187,6 +188,8 @@ class ModelParams(BaseModel):
     top_k: int | None = Field(None, description="Top-K sampling")
     top_p: float | None = Field(None, description="Top-P (nucleus) sampling")
     repetition_penalty: float | None = Field(None, description="Repetition penalty")
+    presence_penalty: float | None = Field(None, description="Presence penalty")
+    frequency_penalty: float | None = Field(None, description="Frequency penalty")
     max_new_tokens: Annotated[
         int, cyclopts.Parameter(alias="--max-output-tokens", help="Max output tokens")
     ] = 1024
@@ -301,7 +304,11 @@ class AccuracyConfig(BaseModel):
     ground_truth: Column in the dataset containing ground truth. Defaults to "ground_truth".
     extractor: Post-processor to extract answers from model output
         (abcd_extractor, boxed_math_extractor, identity_extractor, python_code_extractor).
+        Optional for scorers that declare REQUIRES_EXTRACTOR = False (e.g. vbench).
     num_repeats: Number of times to repeat the dataset for evaluation. Defaults to 1.
+    extras: Free-form keyword args forwarded to the scorer's ``__init__`` —
+        used for scorer-specific knobs that don't warrant a top-level field
+        (e.g. ``vbench_project_path``, ``subprocess_timeout_s`` for VBench).
 
     Example:
         accuracy_config:
@@ -309,6 +316,8 @@ class AccuracyConfig(BaseModel):
           ground_truth: "answer"
           extractor: "boxed_math_extractor"
           num_repeats: 5
+          extras:
+            vbench_project_path: "/path/to/accuracy"
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -321,6 +330,10 @@ class AccuracyConfig(BaseModel):
     )
     num_repeats: int = Field(
         1, ge=1, description="Repeat dataset N times for evaluation"
+    )
+    extras: dict[str, Any] | None = Field(
+        None,
+        description="Free-form scorer kwargs (e.g. vbench_project_path, subprocess_timeout_s)",
     )
 
 

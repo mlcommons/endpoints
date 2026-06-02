@@ -58,6 +58,18 @@ class VideoPathRequest(BaseModel):
         description="Secondary guidance scale for null-text CFG (MLPerf: 3.0).",
     )
     seed: int = Field(default=42, description="Random seed (MLPerf: 42).")
+    num_frames: int = Field(
+        default=81,
+        description="Total video frames. 81 frames @ ~16.2 fps = 5 s (MLPerf: 81).",
+    )
+    boundary_ratio: float = Field(
+        default=0.875,
+        description=(
+            "Boundary ratio in [0, 1] that switches CFG from guidance_scale to "
+            "guidance_scale_2 once the timestep crosses boundary_ratio * "
+            "num_train_timesteps (MLPerf: 0.875)."
+        ),
+    )
     latent_path: str | None = Field(
         default=None,
         description=(
