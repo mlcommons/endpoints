@@ -55,6 +55,7 @@ def _chat_message_from_dict(msg: dict) -> "ChatMessage":
         name=msg.get("name"),
         tool_calls=msg.get("tool_calls"),
         tool_call_id=msg.get("tool_call_id"),
+        reasoning_content=msg.get("reasoning_content"),
     )
 
 
@@ -81,6 +82,7 @@ class OpenAIMsgspecAdapter(HttpRequestAdapter):
             "repetition_penalty": model_params.repetition_penalty,
             "presence_penalty": model_params.presence_penalty,
             "frequency_penalty": model_params.frequency_penalty,
+            "chat_template_kwargs": model_params.chat_template_kwargs,
         }
 
         # These fields are used in .to_endpoint_request() but don't exist in ModelParams,
@@ -183,6 +185,7 @@ class OpenAIMsgspecAdapter(HttpRequestAdapter):
             logit_bias=query.data.get("logit_bias"),
             user=query.data.get("user"),
             chat_template=query.data.get("chat_template"),
+            chat_template_kwargs=query.data.get("chat_template_kwargs"),
             tools=query.data.get("tools"),
         )
 

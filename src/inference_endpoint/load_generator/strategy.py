@@ -80,6 +80,10 @@ class PhaseIssuerProtocol(Protocol):
         minus the HTTP request and the ``inflight`` increment."""
         ...
 
+    def mark_inflight_complete(self) -> None:
+        """Record completion of one HTTP-issued sample."""
+        ...
+
     issued_count: int
 
 

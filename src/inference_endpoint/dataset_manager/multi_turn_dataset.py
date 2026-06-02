@@ -15,6 +15,7 @@
 
 """Multi-turn conversation dataset for conversational AI benchmarking."""
 
+import hashlib
 import logging
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -66,6 +67,7 @@ class ConversationMetadata:
         default_factory=dict
     )
     system_prompts_by_conv: dict[str, str | None] = field(default_factory=dict)
+    delay_seconds_by_key: dict[tuple[str, int], float] = field(default_factory=dict)
 
 
 def _expand_tool_results(row: dict) -> list[dict]:
@@ -154,6 +156,13 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
         """
         super().__init__(dataframe, **kwargs)
         assert self.dataframe is not None, "Dataframe must be initialized"
+        if "_type" in self.dataframe.columns:
+            metadata_rows = self.dataframe["_type"] == "dataset_metadata"
+            if metadata_rows.any():
+                self.dataframe = self.dataframe.loc[~metadata_rows].reset_index(
+                    drop=True
+                )
+        self._enable_salt = False
         self._conv_groups = dict(
             list(self.dataframe.groupby("conversation_id", sort=False, dropna=False))
         )
@@ -162,6 +171,9 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
         self._validate_turn_numbering()
         # Populated by load() after transforms; None until then.
         self.conversation_metadata: ConversationMetadata | None = None
+
+    def enable_salt(self) -> None:
+        self._enable_salt = True
 
     def _validate_conversation_grouping(self) -> None:
         """Validate that all rows for each conversation_id appear consecutively in file order.
@@ -172,8 +184,7 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
         assert self.dataframe is not None, "Dataframe must be initialized"
         seen: set[str] = set()
         last_conv: str | None = None
-        for row_idx, row in enumerate(self.dataframe.to_dict(orient="records")):
-            raw_id = row["conversation_id"]
+        for row_idx, raw_id in enumerate(self.dataframe["conversation_id"]):
             if (
                 raw_id is None
                 or (isinstance(raw_id, float) and pd.isna(raw_id))
@@ -183,6 +194,11 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
                     f"Row {row_idx}: 'conversation_id' must be a non-empty string"
                 )
             conv_id = str(raw_id)
+            if any(ord(char) < 32 or ord(char) > 126 for char in conv_id):
+                raise InputValidationError(
+                    f"Row {row_idx}: 'conversation_id' must not contain "
+                    "non-printable or non-ASCII characters"
+                )
             if conv_id != last_conv:
                 if conv_id in seen:
                     raise InputValidationError(
@@ -384,6 +400,7 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
         pre_built_messages_by_key: dict[tuple, list[dict]] = {}
         current_turn_messages_by_key: dict[tuple, list[dict]] = {}
         system_prompts_by_conv: dict[str, str | None] = {}
+        delay_seconds_by_key: dict[tuple, float] = {}
 
         assert self.dataframe is not None, "Dataframe must be initialized"
         for conv_id, group in self._conv_groups.items():
@@ -397,6 +414,17 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
                 if val and isinstance(val, str):
                     system_content = val
                     break
+            if self._enable_salt and system_content:
+                salt_hex = hashlib.blake2b(
+                    str(conv_id).encode("utf-8"), digest_size=8
+                ).hexdigest()
+                system_content = f"{system_content}\n\n[cache_salt: {salt_hex}]"
+            elif self._enable_salt:
+                logger.warning(
+                    "multi_turn.enable_salt requested but conversation %s has no "
+                    "system prompt; cache salt not applied",
+                    conv_id,
+                )
             system_prompts_by_conv[str(conv_id)] = system_content
 
             for _, row in client_rows.iterrows():
@@ -417,6 +445,7 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
                         "name",
                         "tool_calls",
                         "tool_results",
+                        "reasoning_content",
                     ):
                         val = prior_row.get(key)
                         if val is not None and not (
@@ -461,6 +490,17 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
                 pre_built_messages_by_key[(str_conv_id, t_n)] = messages
                 current_turn_messages_by_key[(str_conv_id, t_n)] = current_turn_msgs
 
+                delay_val = row.get("delay_seconds")
+                if delay_val is not None and not (
+                    isinstance(delay_val, float) and pd.isna(delay_val)
+                ):
+                    try:
+                        delay_f = float(delay_val)
+                    except (TypeError, ValueError):
+                        delay_f = 0.0
+                    if delay_f > 0.0:
+                        delay_seconds_by_key[(str_conv_id, t_n)] = delay_f
+
                 samples.append(
                     ConversationSampleEntry(
                         conversation_id=str_conv_id,
@@ -476,6 +516,7 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
             pre_built_messages_by_key=pre_built_messages_by_key,
             current_turn_messages_by_key=current_turn_messages_by_key,
             system_prompts_by_conv=system_prompts_by_conv,
+            delay_seconds_by_key=delay_seconds_by_key,
         )
 
     def load(
@@ -583,6 +624,7 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
             # Strip dataset-internal fields that must not reach the endpoint.
             sample.pop("tool_results", None)
             sample.pop("tool_calls", None)
+            sample.pop("delay_seconds", None)
 
             # Fill missing propagated fields from the first user row of this conversation.
             for k, v in conv_defaults.get(row.get("conversation_id"), {}).items():

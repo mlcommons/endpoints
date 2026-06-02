@@ -125,18 +125,26 @@ class AddStaticColumns(Transform):
         self.data = data
         self.overwrite = overwrite
 
+    @staticmethod
+    def _static_value(value: Any, rows: int) -> Any:
+        if isinstance(value, dict):
+            return [value] * rows
+        return value
+
     def __call__(self, df: pd.DataFrame) -> pd.DataFrame:
         """Add the static columns to the dataframe."""
+        rows = len(df)
         for key, value in self.data.items():
+            static_value = self._static_value(value, rows)
             if self.overwrite:
-                df[key] = value
+                df[key] = static_value
             else:
                 if value is None:
                     continue
                 if key in df.columns:
-                    df[key] = df[key].where(pd.notna(df[key]), value)
+                    df[key] = df[key].where(pd.notna(df[key]), static_value)
                 else:
-                    df[key] = value
+                    df[key] = static_value
         return df
 
 

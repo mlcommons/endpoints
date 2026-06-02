@@ -1,0 +1,44 @@
+name: "kimi-agentic-benchmark"
+version: "1.0"
+type: "online"
+
+model_params:
+  name: "/model"
+  temperature: 1.0
+  top_p: 0.95
+  max_new_tokens: 20000 # covers longest observed assistant turn (~18k tokens)
+  chat_template_kwargs:
+    thinking: true
+    preserve_thinking: true
+
+datasets:
+  # Select the dataset to run by updating both `name` and `path`.
+  # Use agentic_coding for coding traces or agentic_workflow for workflow traces.
+  - name: agentic_coding
+    type: performance
+    path: /path/to/agentic_dataset.jsonl
+    multi_turn:
+      turn_timeout_s: 600.0
+      enable_salt: true # add salt after system prompt to prevent cache reuse across trajectories
+      inject_tool_delay: true # add delay before user/tool turns
+
+settings:
+  runtime:
+    min_duration_ms: 0
+
+  load_pattern:
+    type: multi_turn
+    target_concurrency: 8
+
+  # Mandatory: with the default warmup behaviour, every request fails with
+  # ConnectionResetError because uvicorn closes pre-warmed idle sockets after 5s.
+  client:
+    warmup_connections: 0
+    max_idle_time: 0.5
+
+endpoint_config:
+  endpoints:
+    - "http://localhost:8000"
+  api_type: openai
+
+report_dir: logs/kimi_agentic

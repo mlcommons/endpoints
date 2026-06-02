@@ -22,7 +22,6 @@ numbering or role sequences — those are enforced by MultiTurnDataset at load t
 
 Usage:
     python scripts/validate_jsonl_schema.py FILE [FILE ...]
-    python scripts/validate_jsonl_schema.py examples/09_MultiTurn/datasets/agentic_coding_flat.jsonl
 """
 
 import argparse
