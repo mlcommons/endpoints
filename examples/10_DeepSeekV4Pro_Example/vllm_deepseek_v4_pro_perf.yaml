@@ -1,0 +1,41 @@
+name: "deepseek-v4-pro-benchmark"
+version: "1.0"
+type: "online"
+timeout: 60
+
+model_params:
+  name: "/models/deepseek-ai/DeepSeek-V4-Pro"
+  temperature: 1.0
+  max_new_tokens: 32768
+  top_k: -1
+  top_p: 1.0
+  streaming: "on"
+
+datasets:
+  - name: "perf-test"
+    type: "performance"
+    path: "examples/04_GPTOSS120B_Example/data/perf_eval_ref.parquet"
+    parser:
+      prompt: "text_input"
+
+settings:
+  runtime:
+    min_duration_ms: 3000
+    max_duration_ms: 60000
+    scheduler_random_seed: 42
+    dataloader_random_seed: 42
+
+  load_pattern:
+    type: "concurrency"
+    target_concurrency: 512
+
+  client:
+    num_workers: 8
+
+endpoint_config:
+  endpoints:
+    - "http://localhost:8000"
+  api_key: null
+  api_type: "openai"
+
+report_dir: "results/vllm_deepseek_v4_pro_benchmark_perf/"

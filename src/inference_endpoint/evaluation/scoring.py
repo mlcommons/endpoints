@@ -521,12 +521,15 @@ class LiveCodeBenchScorer(Scorer, scorer_id="code_bench_scorer"):
             cmd = [
                 sys.executable,
                 "-m",
-                "inference_endpoint.dataset_manager.predefined.livecodebench.lcb_serve",
+                "inference_endpoint.evaluation.livecodebench.lcb_serve",
                 str(parquet_path),
                 "--version-tag",
                 self.lcb_version,
                 "--datasets-dir",
-                f"datasets/livecodebench/{self.lcb_version}",
+                os.environ.get(
+                    "LCB_DATASETS_DIR",
+                    f"datasets/livecodebench/{self.lcb_version}",
+                ),
                 "--timeout",
                 str(self.timeout),
             ]
@@ -631,22 +634,31 @@ class LiveCodeBenchScorer(Scorer, scorer_id="code_bench_scorer"):
             for _, row in df.iterrows():
                 codes_dict[row["question_id"]].append(row["extracted_code"])
 
-            # Attempt WebSocket evaluation (synchronous)
-            result = self._evaluate_via_websocket(codes_dict)
+            # WebSocket API requires equal-length code lists; batch by repeat count
+            # when some samples were lost (e.g. drain timeout during inference).
+            length_groups: dict[int, dict[str, list[str]]] = defaultdict(dict)
+            for qid, codes in codes_dict.items():
+                length_groups[len(codes)][qid] = codes
 
-            if result is not None:
-                # Successfully evaluated via WebSocket
-                total_samples = result.get("total_samples", 0)
+            merged_results: dict[str, list[bool]] = {}
+            total_samples = 0
+            total_passed = 0
+            ws_failed = False
+            for subset in length_groups.values():
+                if not subset:
+                    continue
+                result = self._evaluate_via_websocket(subset)
+                if result is None:
+                    ws_failed = True
+                    break
                 per_problem_results = result.get("results", {})
-                if not per_problem_results and total_samples:
-                    print(
-                        f"Server evaluated {total_samples} samples but returned an empty summary"
-                    )
-                    return None, n_repeats
-
-                total_passed = sum(
+                merged_results.update(per_problem_results)
+                total_samples += result.get("total_samples", 0)
+                total_passed += sum(
                     sum(code_passed) for code_passed in per_problem_results.values()
                 )
+
+            if not ws_failed and merged_results:
                 pass_at_1 = total_passed / total_samples if total_samples > 0 else 0.0
                 return pass_at_1, n_repeats
 

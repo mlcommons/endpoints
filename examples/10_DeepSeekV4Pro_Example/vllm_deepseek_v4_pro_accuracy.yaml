@@ -1,0 +1,65 @@
+name: "deepseek-v4-pro-accuracy"
+version: "1.0"
+type: "offline"
+timeout: 600
+
+model_params:
+  # Served model id (must match vLLM --model). Use TOKENIZER_MODEL_PATH on host for ISL/OSL/TPOT.
+  name: "/models/deepseek-ai/DeepSeek-V4-Pro"
+  temperature: 1.0
+  max_new_tokens: 32768
+  top_k: -1
+  top_p: 1.0
+  streaming: "on"  # required for TTFT/TPOT
+
+datasets:
+  - name: "perf-stub"
+    type: "performance"
+    path: "examples/10_DeepSeekV4Pro_Example/data/perf_stub.jsonl"
+    samples: 1
+    parser:
+      prompt: "text_input"
+  - name: "livecodebench::deepseek_v4"
+    type: "accuracy"
+    accuracy_config:
+      eval_method: "code_bench_scorer"
+      extractor: "python_code_extractor"
+      num_repeats: 3
+  - name: "aime25::deepseek_v4"
+    type: "accuracy"
+    accuracy_config:
+      eval_method: "pass_at_1"
+      ground_truth: "answer"
+      extractor: "boxed_math_extractor"
+      num_repeats: 8
+  - name: "gpqa::deepseek_v4"
+    type: "accuracy"
+    accuracy_config:
+      eval_method: "pass_at_1"
+      extractor: "abcd_extractor"
+      ground_truth: "ground_truth"
+      num_repeats: 5
+
+settings:
+  runtime:
+    min_duration_ms: 100
+    max_duration_ms: 0
+    scheduler_random_seed: 42
+    dataloader_random_seed: 42
+
+  load_pattern:
+    type: "max_throughput"
+
+  client:
+    num_workers: 8
+
+  warmup:
+    enabled: false
+
+endpoint_config:
+  endpoints:
+    - "http://127.0.0.1:8000"
+  api_key: null
+  api_type: "openai"
+
+report_dir: "results/vllm_deepseek_v4_pro_accuracy/"

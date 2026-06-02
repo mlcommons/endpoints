@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import random
 import shutil
 import signal
@@ -232,6 +233,36 @@ def _check_tokenizer_exists(model_name: str) -> bool:
         return False
 
 
+def _resolve_tokenizer_name(model_name: str) -> str | None:
+    """Resolve a tokenizer path/repo for ISL/OSL/TPOT metrics.
+
+    ``model_params.name`` may be a container-only path (e.g. ``/models/...``) that
+    does not exist on the host running the benchmark client. Prefer
+    ``TOKENIZER_MODEL_PATH`` when set, then probe ``model_name`` and common fallbacks.
+    """
+    candidates: list[str] = []
+    env_path = os.environ.get("TOKENIZER_MODEL_PATH")
+    if env_path:
+        candidates.append(env_path)
+    candidates.append(model_name)
+    if model_name.startswith("/models/"):
+        hf_id = model_name.removeprefix("/models/").lstrip("/")
+        if hf_id:
+            candidates.append(hf_id)
+        default_host = Path(f"/data/workloads-inference/models/{hf_id}")
+        if default_host.is_dir():
+            candidates.append(str(default_host))
+
+    seen: set[str] = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        if _check_tokenizer_exists(candidate):
+            return candidate
+    return None
+
+
 def _load_datasets(
     config: BenchmarkConfig, report_dir: Path
 ) -> tuple[Dataset, list[Dataset], list[AccuracyConfiguration]]:
@@ -399,9 +430,9 @@ def setup_benchmark(config: BenchmarkConfig, test_mode: TestMode) -> BenchmarkCo
     report_dir.mkdir(parents=True, exist_ok=True)
     config.to_yaml_file(report_dir / "config.yaml")
 
-    # Tokenizer check (light API call, no download)
+    # Tokenizer for metrics aggregator (ISL/OSL/TPOT). API model name may differ.
     model_name = config.model_params.name
-    tokenizer_name = model_name if _check_tokenizer_exists(model_name) else None
+    tokenizer_name = _resolve_tokenizer_name(model_name)
 
     # Streaming
     logger.info(
@@ -739,10 +770,10 @@ async def _run_benchmark_async(
         def _on_global_timeout() -> None:
             if not _timeout_done:
                 logger.warning(
-                    "Global experiment timeout reached (%d ms); stopping session.",
+                    "Performance phase duration limit reached (%d ms); stopping performance phase.",
                     max_duration_ms,
                 )
-                session.stop()
+                session.cancel_current_strategy()
 
         def _on_phase_start(phase: PhaseConfig) -> None:
             nonlocal global_timeout_handle
