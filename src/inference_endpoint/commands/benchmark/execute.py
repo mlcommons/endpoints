@@ -335,7 +335,15 @@ def _precompute_isl_for_multi_turn(
         return
     skipped = 0
     first_failure_logged = False
-    for sample in dataloader.data or []:
+    samples = dataloader.data or []
+    for sample in tqdm(
+        samples,
+        total=len(samples),
+        desc="Pre-computing ISL token counts",
+        unit="turn",
+        smoothing=0,
+        mininterval=2.0,
+    ):
         messages = sample.get("messages")
         if not messages:
             continue
