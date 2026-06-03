@@ -16,9 +16,10 @@
 """Async multi-turn load strategy implementing the LoadStrategy protocol."""
 
 import asyncio
+import hashlib
 import logging
 import time
-from collections import defaultdict, deque
+from collections import defaultdict
 from typing import Any
 
 from ..config.schema import MultiTurnConfig
@@ -32,12 +33,12 @@ from .strategy import PhaseIssuerProtocol
 logger = logging.getLogger(__name__)
 
 # Default turn timeout when no MultiTurnConfig is provided.
-_DEFAULT_TURN_TIMEOUT_S = 300.0
+_DEFAULT_TURN_TIMEOUT_S = 86400.0
 
 ConversationTurn = tuple[int, int]
 ConversationTurns = list[ConversationTurn]
-PendingConversation = tuple[str, ConversationTurns]
-ActiveConversationState = tuple[ConversationTurns, int]
+ActiveConversationState = tuple[str, ConversationTurns, int]
+ConversationInstance = tuple[str, str, ConversationTurns]
 
 
 class MultiTurnStrategy:
@@ -75,6 +76,9 @@ class MultiTurnStrategy:
         dataset_metadata: ConversationMetadata,
         multi_turn_config: MultiTurnConfig | None = None,
         target_concurrency: int | None = None,
+        sample_budget: int | None = None,
+        num_trajectories_to_issue: int | None = None,
+        stop_issuing_on_first_user_complete: bool | None = None,
     ):
         """Initialize multi-turn strategy.
 
@@ -84,10 +88,27 @@ class MultiTurnStrategy:
             multi_turn_config: Multi-turn conversation configuration.
             target_concurrency: Maximum number of simultaneously active conversations.
                 None means all conversations run concurrently.
+            sample_budget: Maximum number of turns to issue. None means no explicit
+                turn budget.
+            num_trajectories_to_issue: Number of complete conversation trajectories
+                to run. Defaults to one pass over the dataset conversations.
+            stop_issuing_on_first_user_complete: If True, stop issuing new work
+                as soon as a finished conversation slot cannot be refilled.
         """
         self._conv_manager = conversation_manager
         self._dataset_metadata = dataset_metadata
         self._multi_turn_config = multi_turn_config
+        self._sample_budget = sample_budget
+        self._num_trajectories_to_issue = num_trajectories_to_issue
+        self._stop_issuing_on_first_user_complete = (
+            stop_issuing_on_first_user_complete
+            if stop_issuing_on_first_user_complete is not None
+            else (
+                multi_turn_config.stop_issuing_on_first_user_complete
+                if multi_turn_config is not None
+                else False
+            )
+        )
         self._turn_timeout_s = (
             multi_turn_config.turn_timeout_s
             if multi_turn_config is not None
@@ -98,6 +119,9 @@ class MultiTurnStrategy:
             not multi_turn_config.use_dataset_history
             if multi_turn_config is not None
             else False
+        )
+        self._enable_salt = (
+            multi_turn_config.enable_salt if multi_turn_config is not None else False
         )
 
         # Dataset-supplied `role: tool` turns carry baked tool_call_ids that
@@ -135,7 +159,7 @@ class MultiTurnStrategy:
         self._conv_states: dict[str, ConversationState] = {}
 
         # Event-driven state — populated in execute().
-        self._pending_convs: deque[PendingConversation] = deque()
+        self._base_convs: list[tuple[str, ConversationTurns]] = []
         self._active_iters: dict[str, ActiveConversationState] = {}
         self._timeout_handles: dict[str, asyncio.TimerHandle] = {}
         self._delay_handles: dict[str, asyncio.TimerHandle] = {}
@@ -143,6 +167,9 @@ class MultiTurnStrategy:
         self._all_done: asyncio.Event | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._phase_issuer: PhaseIssuerProtocol | None = None
+        self._stopping = False
+        self._started_trajectory_count = 0
+        self._performance_tracking_stopped = False
 
     async def execute(self, phase_issuer: PhaseIssuerProtocol) -> int:
         """Drive multi-turn sample issuance.
@@ -157,6 +184,12 @@ class MultiTurnStrategy:
         self._loop = asyncio.get_running_loop()
         self._all_done = asyncio.Event()
         self._error = None
+        self._stopping = False
+        self._conv_states.clear()
+        self._active_iters.clear()
+        self._inflight.clear()
+        self._started_trajectory_count = 0
+        self._performance_tracking_stopped = False
 
         conv_samples: dict[str, ConversationTurns] = defaultdict(list)
         for sample_meta in self._dataset_metadata.samples:
@@ -164,31 +197,11 @@ class MultiTurnStrategy:
             assert sample_meta.sample_index is not None
             conv_samples[conv_id].append((sample_meta.sample_index, sample_meta.turn))
 
-        # Pre-create all conversation states before issuing any turns (no locking needed).
-        sys_prompts = self._dataset_metadata.system_prompts_by_conv
-        for conv_id, turns in conv_samples.items():
-            sys_content = sys_prompts.get(conv_id) if self._store_in_history else None
-            system_message = (
-                {"role": "system", "content": sys_content}
-                if sys_content is not None
-                else None
-            )
-            state = self._conv_manager.get_or_create(
-                conv_id,
-                expected_client_turns=len(turns),
-                system_message=system_message,
-            )
-            self._conv_states[conv_id] = state
-
-        # Build pending queue (sorted turns per conversation).
-        for conv_id, turns in conv_samples.items():
-            self._pending_convs.append((conv_id, sorted(turns, key=lambda x: x[1])))
-
-        n_to_start = (
-            min(self._target_concurrency, len(self._pending_convs))
-            if self._target_concurrency is not None and self._target_concurrency > 0
-            else len(self._pending_convs)
-        )
+        self._base_convs = [
+            (conv_id, sorted(turns, key=lambda x: x[1]))
+            for conv_id, turns in conv_samples.items()
+        ]
+        n_to_start = self._initial_conversations_to_start()
         try:
             for _ in range(n_to_start):
                 self._start_conversation()
@@ -215,30 +228,122 @@ class MultiTurnStrategy:
                 )
                 self._inflight.clear()
 
-    def _has_work_remaining(self) -> bool:
+    def _initial_conversations_to_start(self) -> int:
+        if not self._base_convs or not self._has_trajectory_budget():
+            return 0
+        trajectory_budget = self._trajectory_budget()
+        if self._target_concurrency is not None and self._target_concurrency > 0:
+            n_to_start = self._target_concurrency
+        else:
+            n_to_start = len(self._base_convs)
+        sample_budget = self._sample_budget or n_to_start
+        return min(n_to_start, trajectory_budget, sample_budget)
+
+    def _trajectory_budget(self) -> int:
+        if self._num_trajectories_to_issue is not None:
+            return self._num_trajectories_to_issue
+        if self._sample_budget is not None:
+            return self._sample_budget
+        return len(self._base_convs)
+
+    def _has_trajectory_budget(self) -> bool:
+        return self._started_trajectory_count < self._trajectory_budget()
+
+    def _has_sample_budget(self) -> bool:
+        if self._sample_budget is None:
+            return True
+        if self._phase_issuer is None:
+            return True
+        return self._phase_issuer.issued_count < self._sample_budget
+
+    def _has_more_conversation_instances(self) -> bool:
         return bool(
-            self._pending_convs
-            or self._active_iters
+            self._base_convs
+            and self._has_trajectory_budget()
+            and self._has_sample_budget()
+        )
+
+    def _next_conversation_instance(self) -> ConversationInstance | None:
+        if not self._has_more_conversation_instances():
+            return None
+
+        source_index = self._started_trajectory_count % len(self._base_convs)
+        source_id, turns = self._base_convs[source_index]
+        instance_id = self._started_trajectory_count // len(self._base_convs) + 1
+        logical_id = (
+            source_id if instance_id == 1 else f"{source_id}__repeat_{instance_id}"
+        )
+        self._started_trajectory_count += 1
+        return logical_id, source_id, turns
+
+    def _has_work_remaining(self) -> bool:
+        if self._stopping:
+            return bool(self._inflight or self._delay_handles)
+        return bool(
+            self._active_iters
             or self._inflight
             or self._delay_handles
+            or self._has_more_conversation_instances()
         )
 
     def _start_conversation(self) -> None:
         """Pop the next conversation from the pending queue and issue its first turn."""
-        conv_id, turns = self._pending_convs.popleft()
-        self._active_iters[conv_id] = (turns, 0)
-        self._issue_next_turn(conv_id)
+        if self._stopping:
+            return
+        instance = self._next_conversation_instance()
+        if instance is None:
+            self._fill_slot()
+            return
+        logical_id, source_id, turns = instance
+        self._create_conversation_state(logical_id, source_id, turns)
+        self._active_iters[logical_id] = (source_id, turns, 0)
+        self._issue_next_turn(logical_id)
+
+    def _create_conversation_state(
+        self, logical_id: str, source_id: str, turns: ConversationTurns
+    ) -> None:
+        sys_content = None
+        if self._store_in_history:
+            sys_content = self._dataset_metadata.system_prompts_by_conv.get(source_id)
+            if (
+                sys_content is not None
+                and self._enable_salt
+                and logical_id != source_id
+            ):
+                salt_hex = hashlib.blake2b(
+                    logical_id.encode(),
+                    digest_size=8,
+                ).hexdigest()
+                salt_start = sys_content.rfind("\n\n[cache_salt: ")
+                if salt_start >= 0:
+                    sys_content = sys_content[:salt_start]
+                sys_content = f"{sys_content}\n\n[cache_salt: {salt_hex}]"
+        system_message = (
+            {"role": "system", "content": sys_content}
+            if sys_content is not None
+            else None
+        )
+        state = self._conv_manager.get_or_create(
+            logical_id,
+            expected_client_turns=len(turns),
+            system_message=system_message,
+        )
+        self._conv_states[logical_id] = state
 
     def _issue_next_turn(self, conv_id: str) -> None:
         """Schedule the next turn for conv_id, applying inter-turn delay if set."""
+        if self._stopping:
+            return
         state = self._active_iters.get(conv_id)
         if state is None:
             return
+        if not self._has_sample_budget():
+            self._finish_conversation(conv_id)
+            return
 
-        turns, cursor = state
+        source_id, turns, cursor = state
         if cursor >= len(turns):
-            del self._active_iters[conv_id]
-            self._fill_slot()
+            self._finish_conversation(conv_id)
             return
 
         idx, turn = turns[cursor]
@@ -249,7 +354,7 @@ class MultiTurnStrategy:
             and self._multi_turn_config.inject_tool_delay
         ):
             delay_map = self._dataset_metadata.delay_seconds_by_key
-            delay = float(delay_map.get((conv_id, turn), 0.0))
+            delay = float(delay_map.get((source_id, turn), 0.0))
 
         if delay > 0.0:
             assert self._loop is not None
@@ -263,11 +368,13 @@ class MultiTurnStrategy:
     def _issue_turn_now(self, conv_id: str, idx: int, turn: int) -> None:
         """Issue a single turn to the phase issuer."""
         self._delay_handles.pop(conv_id, None)
+        if self._stopping:
+            return
 
         active_iter = self._active_iters.get(conv_id)
         if active_iter is None:
             return
-        turns, cursor = active_iter
+        source_id, turns, cursor = active_iter
         if cursor >= len(turns):
             return
         expected_idx, expected_turn = turns[cursor]
@@ -279,23 +386,16 @@ class MultiTurnStrategy:
                 turn,
             )
             return
-        self._active_iters[conv_id] = (turns, cursor + 1)
+        self._active_iters[conv_id] = (source_id, turns, cursor + 1)
 
         state = self._conv_states[conv_id]
 
-        data_override: dict[str, Any] | None = None
-        current_turn_messages: list[dict[str, Any]] | None = None
-        if self._store_in_history:
-            current_turn_messages = (
-                self._dataset_metadata.current_turn_messages_by_key.get((conv_id, turn))
-            )
-            if current_turn_messages:
-                live_messages = state.message_history.copy() + current_turn_messages
-                data_override = {
-                    "messages": live_messages,
-                    "input_tokens": None,
-                    "token_ids": None,
-                }
+        data_override, current_turn_messages = self._build_data_override(
+            conv_id=conv_id,
+            source_id=source_id,
+            turn=turn,
+            state=state,
+        )
 
         assert self._phase_issuer is not None
         query_id = self._phase_issuer.issue(
@@ -305,9 +405,9 @@ class MultiTurnStrategy:
             turn=turn,
         )
         if query_id is None:
-            # Session stopping — signal done.
-            assert self._all_done is not None
-            self._all_done.set()
+            # Session stopping due to wall-clock limit, signal, or a generic
+            # stop check. Do not synthesize failures for unissued turns.
+            self._request_stop_issuing()
             return
 
         self._inflight[query_id] = conv_id
@@ -321,11 +421,79 @@ class MultiTurnStrategy:
         )
         self._timeout_handles[query_id] = handle
 
+    def _build_data_override(
+        self,
+        conv_id: str,
+        source_id: str,
+        turn: int,
+        state: ConversationState,
+    ) -> tuple[dict[str, Any] | None, list[dict[str, Any]] | None]:
+        current_turn_messages: list[dict[str, Any]] | None = None
+        if self._store_in_history:
+            current_turn_messages = (
+                self._dataset_metadata.current_turn_messages_by_key.get(
+                    (source_id, turn)
+                )
+            )
+            if current_turn_messages:
+                live_messages = state.message_history.copy() + current_turn_messages
+                return (
+                    {
+                        "messages": live_messages,
+                        "input_tokens": None,
+                        "token_ids": None,
+                    },
+                    current_turn_messages,
+                )
+            return None, None
+
+        if self._enable_salt and conv_id != source_id:
+            messages = self._dataset_metadata.pre_built_messages_by_key.get(
+                (source_id, turn)
+            )
+            if messages:
+                return (
+                    {
+                        "messages": self._messages_with_logical_id_salt(
+                            messages, conv_id
+                        ),
+                        "input_tokens": None,
+                        "token_ids": None,
+                    },
+                    None,
+                )
+        return None, None
+
+    def _messages_with_logical_id_salt(
+        self,
+        messages: list[dict],
+        logical_id: str,
+    ) -> list[dict]:
+        salted_messages = [dict(message) for message in messages]
+        for message in salted_messages:
+            if message.get("role") != "system":
+                continue
+            content = message.get("content")
+            if isinstance(content, str):
+                salt_hex = hashlib.blake2b(
+                    logical_id.encode(),
+                    digest_size=8,
+                ).hexdigest()
+                salt_start = content.rfind("\n\n[cache_salt: ")
+                if salt_start >= 0:
+                    content = content[:salt_start]
+                message["content"] = f"{content}\n\n[cache_salt: {salt_hex}]"
+            break
+        return salted_messages
+
     def _fill_slot(self) -> None:
         """Start a new conversation from the pending queue, or signal all done."""
         # Errors here must not leave _all_done unset — that would hang execute().
         try:
-            if self._pending_convs:
+            if self._stopping:
+                self._signal_done_if_no_inflight()
+                return
+            if self._has_more_conversation_instances():
                 self._start_conversation()
             elif not self._has_work_remaining():
                 assert self._all_done is not None
@@ -335,6 +503,42 @@ class MultiTurnStrategy:
             self._error = exc
             if self._all_done is not None:
                 self._all_done.set()
+
+    def _finish_conversation(self, conv_id: str) -> None:
+        """Mark one trajectory done and optionally stop tracking/issuing."""
+        self._active_iters.pop(conv_id, None)
+        if not self._has_more_conversation_instances():
+            self._stop_performance_tracking_once()
+            if self._stop_issuing_on_first_user_complete:
+                self._request_stop_issuing()
+                return
+        self._fill_slot()
+
+    def _stop_performance_tracking_once(self) -> None:
+        if self._performance_tracking_stopped:
+            return
+        self._performance_tracking_stopped = True
+        if self._phase_issuer is None:
+            return
+        stop_tracking = getattr(self._phase_issuer, "stop_performance_tracking", None)
+        if stop_tracking is not None:
+            stop_tracking()
+
+    def _request_stop_issuing(self) -> None:
+        """Stop issuing future turns and wait only for already in-flight work."""
+        if self._stopping:
+            self._signal_done_if_no_inflight()
+            return
+        self._stopping = True
+        for handle in self._delay_handles.values():
+            handle.cancel()
+        self._delay_handles.clear()
+        self._active_iters.clear()
+        self._signal_done_if_no_inflight()
+
+    def _signal_done_if_no_inflight(self) -> None:
+        if not self._inflight and self._all_done is not None:
+            self._all_done.set()
 
     def _handle_timeout(self, query_id: str, conv_id: str) -> None:
         """Called by the event loop when a turn response does not arrive in time."""
@@ -383,7 +587,7 @@ class MultiTurnStrategy:
                 dropped,
             )
 
-        self._fill_slot()
+        self._finish_conversation(conv_id)
 
     def _publish_synthetic_failure(
         self,
@@ -440,7 +644,7 @@ class MultiTurnStrategy:
         state = self._active_iters.pop(conv_id, None)
         if state is None:
             return 0
-        turns, cursor = state
+        _source_id, turns, cursor = state
         assert self._phase_issuer is not None
         dropped = 0
         for idx, turn in turns[cursor:]:
@@ -536,7 +740,11 @@ class MultiTurnStrategy:
                     conv_id,
                     dropped,
                 )
-            self._fill_slot()
+            self._finish_conversation(conv_id)
+            return
+
+        if self._stopping:
+            self._signal_done_if_no_inflight()
             return
 
         try:

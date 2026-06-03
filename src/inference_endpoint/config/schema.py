@@ -262,7 +262,7 @@ class MultiTurnConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    turn_timeout_s: float = Field(default=300.0, gt=0)
+    turn_timeout_s: float = Field(default=86400.0, gt=0)
     use_dataset_history: bool = True
     enable_salt: bool = Field(
         False,
@@ -278,6 +278,9 @@ class MultiTurnConfig(BaseModel):
             "in dataset."
         ),
     )
+    inline_accuracy: bool = False
+    num_trajectories_to_issue: int | None = Field(default=None, gt=0)
+    stop_issuing_on_first_user_complete: bool = False
 
 
 class Dataset(BaseModel):

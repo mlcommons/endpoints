@@ -16,9 +16,11 @@
 """Unit tests for MultiTurnStrategy."""
 
 import asyncio
+import hashlib
 from unittest.mock import MagicMock
 
 import pytest
+from inference_endpoint.config.schema import MultiTurnConfig
 from inference_endpoint.core.record import ErrorEventType, SampleEventType
 from inference_endpoint.core.types import ErrorData, QueryResult, TextModelOutput
 from inference_endpoint.dataset_manager.multi_turn_dataset import (
@@ -78,6 +80,50 @@ class FakePhaseIssuer:
             self.drained = True
 
 
+class RecordingPhaseIssuer:
+    """Phase issuer with unique query IDs for repeated sample indices."""
+
+    def __init__(self):
+        self.issued_count = 0
+        self.issued: list[int] = []
+        self.records: list[tuple[str, int, str, int | None, dict | None]] = []
+        self.uuid_to_conv_info: dict[str, tuple[str, int | None]] = {}
+        self.uuid_to_index: dict[str, int] = {}
+        self.completed_uuids: set[str] = set()
+        self.stop_tracking_count = 0
+
+    def issue(
+        self,
+        sample_index: int,
+        data_override: dict | None = None,
+        conversation_id: str = "",
+        turn: int | None = None,
+    ) -> str | None:
+        query_id = f"q{self.issued_count:04d}"
+        self.issued_count += 1
+        self.issued.append(sample_index)
+        self.records.append(
+            (query_id, sample_index, conversation_id, turn, data_override)
+        )
+        self.uuid_to_index[query_id] = sample_index
+        self.uuid_to_conv_info[query_id] = (conversation_id, turn)
+        return query_id
+
+    def register_skipped(
+        self,
+        sample_index: int,
+        conversation_id: str = "",
+        turn: int | None = None,
+    ) -> str | None:
+        raise AssertionError("budget stops must not register skipped turns")
+
+    def mark_inflight_complete(self) -> None:
+        pass
+
+    def stop_performance_tracking(self) -> None:
+        self.stop_tracking_count += 1
+
+
 def _make_dataset_metadata(conversations: dict[str, list[int]]) -> ConversationMetadata:
     """Build ConversationMetadata from {conv_id: [turn_numbers]} mapping."""
     samples = []
@@ -98,6 +144,286 @@ def _make_dataset_metadata(conversations: dict[str, list[int]]) -> ConversationM
         max_turns_per_conv=max((max(t) for t in conversations.values()), default=0),
         client_turns_per_conversation={c: len(t) for c, t in conversations.items()},
     )
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_first_user_complete_stops_tracking_but_can_continue_for_accuracy():
+    conv_manager = ConversationManager()
+    metadata = _make_dataset_metadata({"conv1": [1], "conv2": [1, 2]})
+    strategy = MultiTurnStrategy(
+        conv_manager,
+        metadata,
+        target_concurrency=2,
+        num_trajectories_to_issue=2,
+    )
+    issuer = RecordingPhaseIssuer()
+
+    execute_task = asyncio.create_task(strategy.execute(issuer))
+    await asyncio.sleep(0.01)
+
+    assert [(idx, conv, turn) for _, idx, conv, turn, _ in issuer.records] == [
+        (0, "conv1", 1),
+        (1, "conv2", 1),
+    ]
+
+    strategy.on_sample_complete(
+        QueryResult(id="q0000", response_output=TextModelOutput(output="conv1"))
+    )
+    await asyncio.sleep(0.01)
+
+    assert issuer.stop_tracking_count == 1
+    assert not execute_task.done()
+
+    strategy.on_sample_complete(
+        QueryResult(id="q0001", response_output=TextModelOutput(output="conv2-turn1"))
+    )
+    await asyncio.sleep(0.01)
+
+    assert [(idx, conv, turn) for _, idx, conv, turn, _ in issuer.records] == [
+        (0, "conv1", 1),
+        (1, "conv2", 1),
+        (2, "conv2", 2),
+    ]
+
+    strategy.on_sample_complete(
+        QueryResult(id="q0002", response_output=TextModelOutput(output="conv2-turn2"))
+    )
+    count = await asyncio.wait_for(execute_task, timeout=1.0)
+
+    assert count == 3
+    assert issuer.stop_tracking_count == 1
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_stop_on_first_user_complete_refills_until_budget_exhausted():
+    conv_manager = ConversationManager()
+    metadata = _make_dataset_metadata({"conv1": [1], "conv2": [1], "conv3": [1]})
+    cfg = MultiTurnConfig(stop_issuing_on_first_user_complete=True)
+    strategy = MultiTurnStrategy(
+        conv_manager,
+        metadata,
+        multi_turn_config=cfg,
+        target_concurrency=2,
+        num_trajectories_to_issue=3,
+    )
+    issuer = RecordingPhaseIssuer()
+
+    execute_task = asyncio.create_task(strategy.execute(issuer))
+    await asyncio.sleep(0.01)
+
+    assert [(idx, conv, turn) for _, idx, conv, turn, _ in issuer.records] == [
+        (0, "conv1", 1),
+        (1, "conv2", 1),
+    ]
+
+    strategy.on_sample_complete(
+        QueryResult(id="q0000", response_output=TextModelOutput(output="conv1"))
+    )
+    await asyncio.sleep(0.01)
+
+    assert issuer.stop_tracking_count == 0
+    assert [(idx, conv, turn) for _, idx, conv, turn, _ in issuer.records] == [
+        (0, "conv1", 1),
+        (1, "conv2", 1),
+        (2, "conv3", 1),
+    ]
+
+    strategy.on_sample_complete(
+        QueryResult(id="q0001", response_output=TextModelOutput(output="conv2"))
+    )
+    await asyncio.sleep(0.01)
+
+    assert issuer.stop_tracking_count == 1
+    assert not execute_task.done()
+
+    strategy.on_sample_complete(
+        QueryResult(id="q0002", response_output=TextModelOutput(output="conv3"))
+    )
+    count = await asyncio.wait_for(execute_task, timeout=1.0)
+
+    assert count == 3
+    assert issuer.stop_tracking_count == 1
+    assert [(idx, conv, turn) for _, idx, conv, turn, _ in issuer.records] == [
+        (0, "conv1", 1),
+        (1, "conv2", 1),
+        (2, "conv3", 1),
+    ]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_sample_budget_stops_mid_trajectory_without_skipped_turns():
+    """A performance sample budget may cut an active trajectory mid-stream."""
+    conv_manager = ConversationManager()
+    metadata = _make_dataset_metadata({"conv1": [1, 2, 3]})
+    strategy = MultiTurnStrategy(conv_manager, metadata, sample_budget=2)
+    issuer = RecordingPhaseIssuer()
+
+    execute_task = asyncio.create_task(strategy.execute(issuer))
+    await asyncio.sleep(0.01)
+
+    strategy.on_sample_complete(
+        QueryResult(id="q0000", response_output=TextModelOutput(output="turn-1"))
+    )
+    await asyncio.sleep(0.01)
+
+    assert issuer.issued == [0, 1]
+    strategy.on_sample_complete(
+        QueryResult(id="q0001", response_output=TextModelOutput(output="turn-2"))
+    )
+    count = await asyncio.wait_for(execute_task, timeout=1.0)
+
+    assert count == 2
+    assert issuer.issued == [0, 1]
+
+    state = conv_manager.get_state("conv1")
+    assert state is not None
+    assert state.completed_turns == 2
+    assert state.failed_turns == 0
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_sample_budget_repeats_conversations_with_unique_logical_ids():
+    """When the budget exceeds dataset turns, trajectory instances repeat lazily."""
+    conv_manager = ConversationManager()
+    metadata = _make_dataset_metadata({"conv1": [1, 2], "conv2": [1]})
+    strategy = MultiTurnStrategy(
+        conv_manager,
+        metadata,
+        target_concurrency=2,
+        sample_budget=5,
+    )
+    issuer = RecordingPhaseIssuer()
+
+    execute_task = asyncio.create_task(strategy.execute(issuer))
+    await asyncio.sleep(0.01)
+
+    assert [(idx, conv, turn) for _, idx, conv, turn, _ in issuer.records] == [
+        (0, "conv1", 1),
+        (2, "conv2", 1),
+    ]
+
+    strategy.on_sample_complete(
+        QueryResult(id="q0000", response_output=TextModelOutput(output="c1-t1"))
+    )
+    strategy.on_sample_complete(
+        QueryResult(id="q0001", response_output=TextModelOutput(output="c2-t1"))
+    )
+    await asyncio.sleep(0.01)
+
+    assert [(idx, conv, turn) for _, idx, conv, turn, _ in issuer.records] == [
+        (0, "conv1", 1),
+        (2, "conv2", 1),
+        (1, "conv1", 2),
+        (0, "conv1__repeat_2", 1),
+    ]
+
+    strategy.on_sample_complete(
+        QueryResult(id="q0002", response_output=TextModelOutput(output="c1-t2"))
+    )
+    await asyncio.sleep(0.01)
+
+    assert [(idx, conv, turn) for _, idx, conv, turn, _ in issuer.records] == [
+        (0, "conv1", 1),
+        (2, "conv2", 1),
+        (1, "conv1", 2),
+        (0, "conv1__repeat_2", 1),
+        (2, "conv2__repeat_2", 1),
+    ]
+
+    strategy.on_sample_complete(
+        QueryResult(id="q0003", response_output=TextModelOutput(output="repeat-c1"))
+    )
+    assert not execute_task.done()
+
+    strategy.on_sample_complete(
+        QueryResult(id="q0004", response_output=TextModelOutput(output="repeat-c2"))
+    )
+    count = await asyncio.wait_for(execute_task, timeout=1.0)
+
+    assert count == 5
+    assert issuer.issued == [0, 2, 1, 0, 2]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_sample_budget_repeats_can_fill_target_concurrency():
+    """Sample-budget repeats can fill slots beyond the source trajectory count."""
+    conv_manager = ConversationManager()
+    metadata = _make_dataset_metadata({"conv1": [1, 2]})
+    strategy = MultiTurnStrategy(
+        conv_manager,
+        metadata,
+        target_concurrency=3,
+        sample_budget=3,
+    )
+    issuer = RecordingPhaseIssuer()
+
+    execute_task = asyncio.create_task(strategy.execute(issuer))
+    await asyncio.sleep(0.01)
+
+    assert [(idx, conv, turn) for _, idx, conv, turn, _ in issuer.records] == [
+        (0, "conv1", 1),
+        (0, "conv1__repeat_2", 1),
+        (0, "conv1__repeat_3", 1),
+    ]
+
+    for query_id, _, _, _, _ in issuer.records:
+        strategy.on_sample_complete(
+            QueryResult(id=query_id, response_output=TextModelOutput(output="ok"))
+        )
+    count = await asyncio.wait_for(execute_task, timeout=1.0)
+
+    assert count == 3
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_repeated_dataset_history_turn_uses_repeat_specific_cache_salt():
+    """Repeated prebuilt-history prompts get a distinct per-repeat salt."""
+    conv_manager = ConversationManager()
+    metadata = _make_dataset_metadata({"conv1": [1]})
+    base_messages = [
+        {"role": "system", "content": "Be helpful\n\n[cache_salt: base]"},
+        {"role": "user", "content": "hello"},
+    ]
+    metadata.pre_built_messages_by_key = {("conv1", 1): base_messages}
+    cfg = MultiTurnConfig(enable_salt=True)
+    strategy = MultiTurnStrategy(
+        conv_manager,
+        metadata,
+        target_concurrency=1,
+        sample_budget=2,
+        multi_turn_config=cfg,
+    )
+    issuer = RecordingPhaseIssuer()
+
+    execute_task = asyncio.create_task(strategy.execute(issuer))
+    await asyncio.sleep(0.01)
+    strategy.on_sample_complete(
+        QueryResult(id="q0000", response_output=TextModelOutput(output="first"))
+    )
+    await asyncio.sleep(0.01)
+    strategy.on_sample_complete(
+        QueryResult(id="q0001", response_output=TextModelOutput(output="repeat"))
+    )
+    await asyncio.wait_for(execute_task, timeout=1.0)
+
+    first_override = issuer.records[0][4]
+    repeat_override = issuer.records[1][4]
+    assert first_override is None
+    assert repeat_override is not None
+    repeat_messages = repeat_override["messages"]
+    repeat_system = repeat_messages[0]["content"]
+    expected_salt = hashlib.blake2b(b"conv1__repeat_2", digest_size=8).hexdigest()
+    assert repeat_system.startswith("Be helpful\n\n[cache_salt: ")
+    assert repeat_system == f"Be helpful\n\n[cache_salt: {expected_salt}]"
+    assert repeat_system != base_messages[0]["content"]
+    assert "base" not in repeat_system
+    assert base_messages[0]["content"] == "Be helpful\n\n[cache_salt: base]"
 
 
 @pytest.mark.unit
@@ -645,7 +971,7 @@ async def test_timeout_publishes_error_and_complete_events():
 
     # Seed: turn 1 in-flight, turns 2+3 still pending
     strategy._inflight["q-x"] = "conv-x"
-    strategy._active_iters["conv-x"] = ([(1, 2), (2, 3)], 0)
+    strategy._active_iters["conv-x"] = ("conv-x", [(1, 2), (2, 3)], 0)
 
     issuer = FakePhaseIssuer()
     issuer.uuid_to_index["q-x"] = 0
@@ -742,7 +1068,7 @@ async def test_abort_remaining_turns_includes_pending_delayed_turn():
     strategy._phase_issuer = issuer
     strategy._session_publisher = publisher
     strategy._session_on_sample_complete = on_sample_complete
-    strategy._active_iters["c1"] = ([(0, 1), (1, 2), (2, 3)], 1)
+    strategy._active_iters["c1"] = ("c1", [(0, 1), (1, 2), (2, 3)], 1)
 
     strategy._issue_next_turn("c1")
 
@@ -918,7 +1244,7 @@ async def test_error_turn_aborts_remaining_turns():
     strategy._phase_issuer = issuer
 
     # Seed: conv1 is active with turns 2 and 3 still pending
-    remaining_turns = ([(1, 2), (2, 3)], 0)
+    remaining_turns = ("conv1", [(1, 2), (2, 3)], 0)
     strategy._active_iters["conv1"] = remaining_turns
     strategy._inflight["q0001"] = "conv1"
     strategy._conv_states["conv1"] = conv_manager.get_state("conv1")

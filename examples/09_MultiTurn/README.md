@@ -51,36 +51,67 @@ clients; set `model_params.name` in the YAML to the same value.
 The runnable config is
 `examples/09_MultiTurn/kimi_agentic_benchmark.yaml`.
 
-Key fields:
+Fields:
 
-- `type: online`: runs the benchmark through the online scheduler.
+- `name`: human-readable run name written to reports and logs.
+- `version`: config version label for this example.
+- `type: online`: runs through the online scheduler. Final submission: do not
+  modify.
 - `model_params.name`: model name sent in each OpenAI request. Keep it aligned
   with the served model name.
-- `model_params.temperature`, `top_p`, `max_new_tokens`: sampling settings sent
-  to the server. `max_new_tokens` is large because agent turns can be long.
-- `model_params.chat_template_kwargs`: Kimi-specific template options for
-  reasoning preservation.
-- First `datasets` entry `name`: label used in benchmark outputs.
-- First `datasets` entry `type: performance`: multi-turn datasets are replayed as
-  performance datasets.
-- First `datasets` entry `path`: JSONL dataset path to run.
-- First `datasets` entry `multi_turn.turn_timeout_s`: per-turn deadline. A
-  timeout aborts the remaining turns in that conversation.
-- First `datasets` entry `multi_turn.enable_salt`: appends a deterministic cache
-  salt to each conversation system prompt.
-- First `datasets` entry `multi_turn.inject_tool_delay`: honors positive
-  `delay_seconds` values from client turns before issuing those turns.
-- `settings.runtime.min_duration_ms`: minimum run duration. With no max duration
-  override, the run finishes when the dataset is exhausted.
+- `model_params.temperature`: sampling temperature sent to the server. Final
+  submission: do not modify.
+- `model_params.top_p`: nucleus sampling value sent to the server. Final
+  submission: do not modify.
+- `model_params.max_new_tokens`: per-turn generation cap. Final submission: do
+  not modify.
+- `model_params.chat_template_kwargs.thinking`: Kimi chat-template option.
+  Final submission: do not modify.
+- `model_params.chat_template_kwargs.preserve_thinking`: Kimi chat-template
+  option that preserves reasoning content in the rendered prompt. Final
+  submission: do not modify.
+- First dataset `name`: label used in benchmark outputs.
+- First dataset `type: performance`: multi-turn replay is the performance
+  dataset. Final submission: do not modify.
+- First dataset `path`: JSONL dataset path to run.
+- First dataset `multi_turn.turn_timeout_s`: per-turn deadline in seconds. A
+  timeout aborts remaining turns in that conversation.
+- First dataset `multi_turn.enable_salt`: appends a deterministic cache salt to
+  repeated conversation instances so repeats do not reuse KV cache by accident.
+  Final submission: do not modify.
+- First dataset `multi_turn.inject_tool_delay`: when true, honors positive
+  `delay_seconds` values from the dataset before issuing user/tool turns. Final
+  submission: do not modify.
+- First dataset `multi_turn.inline_accuracy`: when true, scores the generated
+  `events.jsonl` inline after the run. Final submission: do not modify.
+- First dataset `multi_turn.num_trajectories_to_issue`: total number of
+  trajectories to start. If it is larger than the dataset trajectory count, the
+  dataset is repeated in order with repeat-specific logical conversation ids.
+- First dataset `multi_turn.stop_issuing_on_first_user_complete`: controls only
+  whether the client keeps issuing after the measurement window ends. Performance
+  tracking always stops when the first concurrency slot finishes a trajectory and
+  there is no next trajectory left to assign. If this field is `true`, the client
+  stops issuing future turns at that point and drains already in-flight turns. If
+  this field is `false`, the client keeps replaying already-started active
+  trajectories to completion for accuracy/log coverage, but those later-issued
+  turns are outside the performance measurement window. Final submission: set to
+  `false` for valid accuracy; use `true` only for faster optimization/debug runs.
+- `settings.runtime.min_duration_ms`: minimum run duration. For multi-turn
+  replay, completion is primarily controlled by trajectory budget and active
+  conversation drain.
 - `settings.load_pattern.type: multi_turn`: enables conversation-aware issuing.
 - `settings.load_pattern.target_concurrency`: maximum active conversations.
   Each active conversation has at most one in-flight request.
-- `settings.client.warmup_connections: 0`: avoids stale pre-warmed sockets with
-  servers that close idle connections quickly.
-- `settings.client.max_idle_time`: connection idle lifetime.
+- `settings.client.warmup_connections: 0`: disables pre-warmed HTTP sockets.
+- `settings.client.max_idle_time`: connection idle lifetime in seconds.
 - `endpoint_config.endpoints`: server URL list.
-- `endpoint_config.api_type: openai`: use `/v1/chat/completions`.
-- `report_dir`: output directory for events, snapshots, and reports.
+- `endpoint_config.api_type: openai`: use `/v1/chat/completions`. Final
+  submission: do not modify.
+- `report_dir`: output directory for events, snapshots, scores, and reports.
+
+Performance measurement is based on issue time. A turn issued before
+`STOP_PERFORMANCE_TRACKING` is counted even if it completes after the stop event.
+A turn issued after that event is not counted in performance metrics.
 
 ## Run The Client
 

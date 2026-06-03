@@ -84,6 +84,10 @@ class PhaseIssuerProtocol(Protocol):
         """Record completion of one HTTP-issued sample."""
         ...
 
+    def stop_performance_tracking(self) -> None:
+        """Stop counting subsequently issued samples in tracked metrics."""
+        ...
+
     issued_count: int
 
 
