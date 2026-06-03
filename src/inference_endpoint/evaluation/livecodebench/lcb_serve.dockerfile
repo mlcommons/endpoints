@@ -40,6 +40,14 @@ ENV PATH="/app/venv/bin:$PATH"
 
 WORKDIR /app
 
+# enroot/pyxis (no-Docker SLURM clusters) start every container through
+# `/bin/sh`; this distroless runtime has none, so the container fails with
+# "enroot-switchroot: failed to execute: /bin/sh: No such file or directory".
+# Add a static (musl) busybox as /bin/sh so the image also runs under pyxis;
+# `docker run` is unaffected. COPY-only — there is no shell here to RUN with.
+# busybox:*-musl is multi-arch, so the buildx --platform builds still resolve.
+COPY --from=busybox:1.37.0-musl /bin/busybox /bin/sh
+
 COPY --from=build-stage --chmod=0555 /app/venv /app/venv
 COPY --from=build-stage --chmod=0555 /opt/LiveCodeBench_Datasets /opt/LiveCodeBench_Datasets
 COPY lcb_serve.py /app/lib/lcb_serve.py
