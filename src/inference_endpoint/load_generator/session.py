@@ -90,7 +90,7 @@ class PhaseConfig:
     dataset: Dataset
     phase_type: PhaseType = PhaseType.PERFORMANCE
     drain_after: bool = True
-    drain_timeout: float | None = 240.0
+    drain_timeout: float | None = None
     strategy: LoadStrategy | None = field(default=None, compare=False)
 
 
@@ -444,7 +444,7 @@ class BenchmarkSession:
         )
 
     async def _drain_inflight(
-        self, phase_issuer: PhaseIssuer, timeout: float | None = 240.0
+        self, phase_issuer: PhaseIssuer, timeout: float | None
     ) -> None:
         """Wait for all in-flight responses from this phase to complete.
 
