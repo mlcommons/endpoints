@@ -644,7 +644,6 @@ async def _run_benchmark_async(
                 dataset_metadata=ctx.dataloader.conversation_metadata,
                 multi_turn_config=mt_cfg,
                 target_concurrency=ctx.config.settings.load_pattern.target_concurrency,
-                sample_budget=ctx.rt_settings.n_samples_to_issue,
                 num_trajectories_to_issue=(
                     mt_cfg.num_trajectories_to_issue if mt_cfg is not None else None
                 ),
@@ -844,13 +843,15 @@ def _inline_score_multi_turn_if_enabled(
         (ds for ds in ctx.config.datasets if ds.type == DatasetType.PERFORMANCE),
         None,
     )
-    if perf_cfg is None or perf_cfg.multi_turn is None:
-        return None
-    if not perf_cfg.multi_turn.inline_accuracy:
-        return None
-    if perf_cfg.path is None:
+    if (
+        perf_cfg is None
+        or perf_cfg.multi_turn is None
+        or not perf_cfg.multi_turn.inline_accuracy
+        or perf_cfg.path is None
+    ):
         raise InputValidationError(
-            "multi_turn.inline_accuracy requires a performance dataset path"
+            "Multi-turn inline accuracy requires a performance dataset with "
+            "multi_turn.inline_accuracy: true and a dataset path"
         )
 
     from inference_endpoint.evaluation.multi_turn_inline_accuracy import score_report

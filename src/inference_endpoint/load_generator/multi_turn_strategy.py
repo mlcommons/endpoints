@@ -37,8 +37,8 @@ _DEFAULT_TURN_TIMEOUT_S = 86400.0
 
 ConversationTurn = tuple[int, int]
 ConversationTurns = list[ConversationTurn]
-ActiveConversationState = tuple[str, ConversationTurns, int]
-ConversationInstance = tuple[str, str, ConversationTurns]
+ActiveConversationState = tuple[str, ConversationTurns, int, int]
+ConversationInstance = tuple[str, str, ConversationTurns, int]
 
 
 class MultiTurnStrategy:
@@ -76,7 +76,6 @@ class MultiTurnStrategy:
         dataset_metadata: ConversationMetadata,
         multi_turn_config: MultiTurnConfig | None = None,
         target_concurrency: int | None = None,
-        sample_budget: int | None = None,
         num_trajectories_to_issue: int | None = None,
         stop_issuing_on_first_user_complete: bool | None = None,
     ):
@@ -88,8 +87,6 @@ class MultiTurnStrategy:
             multi_turn_config: Multi-turn conversation configuration.
             target_concurrency: Maximum number of simultaneously active conversations.
                 None means all conversations run concurrently.
-            sample_budget: Maximum number of turns to issue. None means no explicit
-                turn budget.
             num_trajectories_to_issue: Number of complete conversation trajectories
                 to run. Defaults to one pass over the dataset conversations.
             stop_issuing_on_first_user_complete: If True, stop issuing new work
@@ -98,7 +95,6 @@ class MultiTurnStrategy:
         self._conv_manager = conversation_manager
         self._dataset_metadata = dataset_metadata
         self._multi_turn_config = multi_turn_config
-        self._sample_budget = sample_budget
         self._num_trajectories_to_issue = num_trajectories_to_issue
         self._stop_issuing_on_first_user_complete = (
             stop_issuing_on_first_user_complete
@@ -236,32 +232,18 @@ class MultiTurnStrategy:
             n_to_start = self._target_concurrency
         else:
             n_to_start = len(self._base_convs)
-        sample_budget = self._sample_budget or n_to_start
-        return min(n_to_start, trajectory_budget, sample_budget)
+        return min(n_to_start, trajectory_budget)
 
     def _trajectory_budget(self) -> int:
         if self._num_trajectories_to_issue is not None:
             return self._num_trajectories_to_issue
-        if self._sample_budget is not None:
-            return self._sample_budget
         return len(self._base_convs)
 
     def _has_trajectory_budget(self) -> bool:
         return self._started_trajectory_count < self._trajectory_budget()
 
-    def _has_sample_budget(self) -> bool:
-        if self._sample_budget is None:
-            return True
-        if self._phase_issuer is None:
-            return True
-        return self._phase_issuer.issued_count < self._sample_budget
-
     def _has_more_conversation_instances(self) -> bool:
-        return bool(
-            self._base_convs
-            and self._has_trajectory_budget()
-            and self._has_sample_budget()
-        )
+        return bool(self._base_convs and self._has_trajectory_budget())
 
     def _next_conversation_instance(self) -> ConversationInstance | None:
         if not self._has_more_conversation_instances():
@@ -274,7 +256,7 @@ class MultiTurnStrategy:
             source_id if instance_id == 1 else f"{source_id}__repeat_{instance_id}"
         )
         self._started_trajectory_count += 1
-        return logical_id, source_id, turns
+        return logical_id, source_id, turns, instance_id
 
     def _has_work_remaining(self) -> bool:
         if self._stopping:
@@ -294,30 +276,40 @@ class MultiTurnStrategy:
         if instance is None:
             self._fill_slot()
             return
-        logical_id, source_id, turns = instance
-        self._create_conversation_state(logical_id, source_id, turns)
-        self._active_iters[logical_id] = (source_id, turns, 0)
+        logical_id, source_id, turns, repeat_id = instance
+        self._create_conversation_state(logical_id, source_id, turns, repeat_id)
+        self._active_iters[logical_id] = (source_id, turns, 0, repeat_id)
         self._issue_next_turn(logical_id)
 
     def _create_conversation_state(
-        self, logical_id: str, source_id: str, turns: ConversationTurns
+        self,
+        logical_id: str,
+        source_id: str,
+        turns: ConversationTurns,
+        repeat_id: int,
     ) -> None:
         sys_content = None
         if self._store_in_history:
             sys_content = self._dataset_metadata.system_prompts_by_conv.get(source_id)
-            if (
-                sys_content is not None
-                and self._enable_salt
-                and logical_id != source_id
-            ):
-                salt_hex = hashlib.blake2b(
-                    logical_id.encode(),
-                    digest_size=8,
-                ).hexdigest()
-                salt_start = sys_content.rfind("\n\n[cache_salt: ")
+            if sys_content is not None and self._enable_salt:
+                if sys_content.startswith("[salt: "):
+                    marker_end = sys_content.find("]\n\n")
+                    if marker_end >= 0:
+                        sys_content = sys_content[marker_end + 3 :]
+                salt_start = sys_content.rfind("\n\n[salt: ")
                 if salt_start >= 0:
                     sys_content = sys_content[:salt_start]
-                sys_content = f"{sys_content}\n\n[cache_salt: {salt_hex}]"
+                repeat_salt = hashlib.blake2b(
+                    str(repeat_id).encode("utf-8"), digest_size=2
+                ).hexdigest()
+                conv_salt = hashlib.blake2b(
+                    source_id.encode("utf-8"), digest_size=2
+                ).hexdigest()
+                sys_content = (
+                    f"[salt: {repeat_salt}]\n\n"
+                    f"{sys_content}\n\n"
+                    f"[salt: {conv_salt}]"
+                )
         system_message = (
             {"role": "system", "content": sys_content}
             if sys_content is not None
@@ -337,11 +329,8 @@ class MultiTurnStrategy:
         state = self._active_iters.get(conv_id)
         if state is None:
             return
-        if not self._has_sample_budget():
-            self._finish_conversation(conv_id)
-            return
 
-        source_id, turns, cursor = state
+        source_id, turns, cursor, repeat_id = state
         if cursor >= len(turns):
             self._finish_conversation(conv_id)
             return
@@ -374,7 +363,7 @@ class MultiTurnStrategy:
         active_iter = self._active_iters.get(conv_id)
         if active_iter is None:
             return
-        source_id, turns, cursor = active_iter
+        source_id, turns, cursor, repeat_id = active_iter
         if cursor >= len(turns):
             return
         expected_idx, expected_turn = turns[cursor]
@@ -386,7 +375,7 @@ class MultiTurnStrategy:
                 turn,
             )
             return
-        self._active_iters[conv_id] = (source_id, turns, cursor + 1)
+        self._active_iters[conv_id] = (source_id, turns, cursor + 1, repeat_id)
 
         state = self._conv_states[conv_id]
 
@@ -395,6 +384,7 @@ class MultiTurnStrategy:
             source_id=source_id,
             turn=turn,
             state=state,
+            repeat_id=repeat_id,
         )
 
         assert self._phase_issuer is not None
@@ -427,6 +417,7 @@ class MultiTurnStrategy:
         source_id: str,
         turn: int,
         state: ConversationState,
+        repeat_id: int,
     ) -> tuple[dict[str, Any] | None, list[dict[str, Any]] | None]:
         current_turn_messages: list[dict[str, Any]] | None = None
         if self._store_in_history:
@@ -455,7 +446,9 @@ class MultiTurnStrategy:
                 return (
                     {
                         "messages": self._messages_with_logical_id_salt(
-                            messages, conv_id
+                            messages,
+                            repeat_id=repeat_id,
+                            conversation_id=source_id,
                         ),
                         "input_tokens": None,
                         "token_ids": None,
@@ -467,7 +460,8 @@ class MultiTurnStrategy:
     def _messages_with_logical_id_salt(
         self,
         messages: list[dict],
-        logical_id: str,
+        repeat_id: int,
+        conversation_id: str,
     ) -> list[dict]:
         salted_messages = [dict(message) for message in messages]
         for message in salted_messages:
@@ -475,14 +469,28 @@ class MultiTurnStrategy:
                 continue
             content = message.get("content")
             if isinstance(content, str):
-                salt_hex = hashlib.blake2b(
-                    logical_id.encode(),
-                    digest_size=8,
+                for prefix in ("[salt: ", "[cache_salt: "):
+                    if content.startswith(prefix):
+                        marker_end = content.find("]\n\n")
+                        if marker_end >= 0:
+                            content = content[marker_end + 3 :]
+                        break
+                for marker in ("\n\n[salt: ", "\n\n[cache_salt: "):
+                    salt_start = content.rfind(marker)
+                    if salt_start >= 0:
+                        salt_end = content.find("]", salt_start)
+                        if salt_end == len(content) - 1:
+                            content = content[:salt_start]
+                            break
+                repeat_salt = hashlib.blake2b(
+                    str(repeat_id).encode("utf-8"), digest_size=2
                 ).hexdigest()
-                salt_start = content.rfind("\n\n[cache_salt: ")
-                if salt_start >= 0:
-                    content = content[:salt_start]
-                message["content"] = f"{content}\n\n[cache_salt: {salt_hex}]"
+                conv_salt = hashlib.blake2b(
+                    conversation_id.encode("utf-8"), digest_size=2
+                ).hexdigest()
+                message["content"] = (
+                    f"[salt: {repeat_salt}]\n\n" f"{content}\n\n" f"[salt: {conv_salt}]"
+                )
             break
         return salted_messages
 
@@ -644,7 +652,7 @@ class MultiTurnStrategy:
         state = self._active_iters.pop(conv_id, None)
         if state is None:
             return 0
-        _source_id, turns, cursor = state
+        _source_id, turns, cursor, _repeat_id = state
         assert self._phase_issuer is not None
         dropped = 0
         for idx, turn in turns[cursor:]:

@@ -14,9 +14,8 @@ model_params:
 datasets:
   - name: agentic_combined
     type: performance # do not change.
-    path: examples/09_MultiTurn/datasets/agentic_combined_v3_shuffled_seed42.jsonl
+    path: <path-to-agentic-combined-jsonl>
     multi_turn:
-      turn_timeout_s: 86400.0
       enable_salt: true # do not change.
       inject_tool_delay: true # do not change.
       inline_accuracy: true # do not change.

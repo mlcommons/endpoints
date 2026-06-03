@@ -142,14 +142,19 @@ def _build_conversation_metadata(
             system_content = val
             break
     if enable_salt and system_content:
-        salt_hex = hashlib.blake2b(
-            str_conv_id.encode("utf-8"), digest_size=8
+        repeat_salt = hashlib.blake2b(b"1", digest_size=2).hexdigest()
+        conv_salt = hashlib.blake2b(
+            str_conv_id.encode("utf-8"), digest_size=2
         ).hexdigest()
-        system_content = f"{system_content}\n\n[cache_salt: {salt_hex}]"
+        system_content = (
+            f"[salt: {repeat_salt}]\n\n"
+            f"{system_content}\n\n"
+            f"[salt: {conv_salt}]"
+        )
     elif enable_salt:
         logger.warning(
             "multi_turn.enable_salt requested but conversation %s has no "
-            "system prompt; cache salt not applied",
+            "system prompt; salt not applied",
             conv_id,
         )
 

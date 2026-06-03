@@ -254,136 +254,8 @@ async def test_stop_on_first_user_complete_refills_until_budget_exhausted():
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_sample_budget_stops_mid_trajectory_without_skipped_turns():
-    """A performance sample budget may cut an active trajectory mid-stream."""
-    conv_manager = ConversationManager()
-    metadata = _make_dataset_metadata({"conv1": [1, 2, 3]})
-    strategy = MultiTurnStrategy(conv_manager, metadata, sample_budget=2)
-    issuer = RecordingPhaseIssuer()
-
-    execute_task = asyncio.create_task(strategy.execute(issuer))
-    await asyncio.sleep(0.01)
-
-    strategy.on_sample_complete(
-        QueryResult(id="q0000", response_output=TextModelOutput(output="turn-1"))
-    )
-    await asyncio.sleep(0.01)
-
-    assert issuer.issued == [0, 1]
-    strategy.on_sample_complete(
-        QueryResult(id="q0001", response_output=TextModelOutput(output="turn-2"))
-    )
-    count = await asyncio.wait_for(execute_task, timeout=1.0)
-
-    assert count == 2
-    assert issuer.issued == [0, 1]
-
-    state = conv_manager.get_state("conv1")
-    assert state is not None
-    assert state.completed_turns == 2
-    assert state.failed_turns == 0
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_sample_budget_repeats_conversations_with_unique_logical_ids():
-    """When the budget exceeds dataset turns, trajectory instances repeat lazily."""
-    conv_manager = ConversationManager()
-    metadata = _make_dataset_metadata({"conv1": [1, 2], "conv2": [1]})
-    strategy = MultiTurnStrategy(
-        conv_manager,
-        metadata,
-        target_concurrency=2,
-        sample_budget=5,
-    )
-    issuer = RecordingPhaseIssuer()
-
-    execute_task = asyncio.create_task(strategy.execute(issuer))
-    await asyncio.sleep(0.01)
-
-    assert [(idx, conv, turn) for _, idx, conv, turn, _ in issuer.records] == [
-        (0, "conv1", 1),
-        (2, "conv2", 1),
-    ]
-
-    strategy.on_sample_complete(
-        QueryResult(id="q0000", response_output=TextModelOutput(output="c1-t1"))
-    )
-    strategy.on_sample_complete(
-        QueryResult(id="q0001", response_output=TextModelOutput(output="c2-t1"))
-    )
-    await asyncio.sleep(0.01)
-
-    assert [(idx, conv, turn) for _, idx, conv, turn, _ in issuer.records] == [
-        (0, "conv1", 1),
-        (2, "conv2", 1),
-        (1, "conv1", 2),
-        (0, "conv1__repeat_2", 1),
-    ]
-
-    strategy.on_sample_complete(
-        QueryResult(id="q0002", response_output=TextModelOutput(output="c1-t2"))
-    )
-    await asyncio.sleep(0.01)
-
-    assert [(idx, conv, turn) for _, idx, conv, turn, _ in issuer.records] == [
-        (0, "conv1", 1),
-        (2, "conv2", 1),
-        (1, "conv1", 2),
-        (0, "conv1__repeat_2", 1),
-        (2, "conv2__repeat_2", 1),
-    ]
-
-    strategy.on_sample_complete(
-        QueryResult(id="q0003", response_output=TextModelOutput(output="repeat-c1"))
-    )
-    assert not execute_task.done()
-
-    strategy.on_sample_complete(
-        QueryResult(id="q0004", response_output=TextModelOutput(output="repeat-c2"))
-    )
-    count = await asyncio.wait_for(execute_task, timeout=1.0)
-
-    assert count == 5
-    assert issuer.issued == [0, 2, 1, 0, 2]
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_sample_budget_repeats_can_fill_target_concurrency():
-    """Sample-budget repeats can fill slots beyond the source trajectory count."""
-    conv_manager = ConversationManager()
-    metadata = _make_dataset_metadata({"conv1": [1, 2]})
-    strategy = MultiTurnStrategy(
-        conv_manager,
-        metadata,
-        target_concurrency=3,
-        sample_budget=3,
-    )
-    issuer = RecordingPhaseIssuer()
-
-    execute_task = asyncio.create_task(strategy.execute(issuer))
-    await asyncio.sleep(0.01)
-
-    assert [(idx, conv, turn) for _, idx, conv, turn, _ in issuer.records] == [
-        (0, "conv1", 1),
-        (0, "conv1__repeat_2", 1),
-        (0, "conv1__repeat_3", 1),
-    ]
-
-    for query_id, _, _, _, _ in issuer.records:
-        strategy.on_sample_complete(
-            QueryResult(id=query_id, response_output=TextModelOutput(output="ok"))
-        )
-    count = await asyncio.wait_for(execute_task, timeout=1.0)
-
-    assert count == 3
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_repeated_dataset_history_turn_uses_repeat_specific_cache_salt():
-    """Repeated prebuilt-history prompts get a distinct per-repeat salt."""
+async def test_repeated_dataset_history_turn_uses_repeat_and_conversation_salts():
+    """Prebuilt-history prompts get repeat and conversation salt markers."""
     conv_manager = ConversationManager()
     metadata = _make_dataset_metadata({"conv1": [1]})
     base_messages = [
@@ -396,7 +268,7 @@ async def test_repeated_dataset_history_turn_uses_repeat_specific_cache_salt():
         conv_manager,
         metadata,
         target_concurrency=1,
-        sample_budget=2,
+        num_trajectories_to_issue=2,
         multi_turn_config=cfg,
     )
     issuer = RecordingPhaseIssuer()
@@ -418,11 +290,15 @@ async def test_repeated_dataset_history_turn_uses_repeat_specific_cache_salt():
     assert repeat_override is not None
     repeat_messages = repeat_override["messages"]
     repeat_system = repeat_messages[0]["content"]
-    expected_salt = hashlib.blake2b(b"conv1__repeat_2", digest_size=8).hexdigest()
-    assert repeat_system.startswith("Be helpful\n\n[cache_salt: ")
-    assert repeat_system == f"Be helpful\n\n[cache_salt: {expected_salt}]"
+
+    repeat2_salt = hashlib.blake2b(b"2", digest_size=2).hexdigest()
+    conversation_salt = hashlib.blake2b(b"conv1", digest_size=2).hexdigest()
+    assert repeat_system == (
+        f"[salt: {repeat2_salt}]\n\n" f"Be helpful\n\n" f"[salt: {conversation_salt}]"
+    )
     assert repeat_system != base_messages[0]["content"]
     assert "base" not in repeat_system
+    assert "cache_salt" not in repeat_system
     assert base_messages[0]["content"] == "Be helpful\n\n[cache_salt: base]"
 
 
@@ -971,7 +847,7 @@ async def test_timeout_publishes_error_and_complete_events():
 
     # Seed: turn 1 in-flight, turns 2+3 still pending
     strategy._inflight["q-x"] = "conv-x"
-    strategy._active_iters["conv-x"] = ("conv-x", [(1, 2), (2, 3)], 0)
+    strategy._active_iters["conv-x"] = ("conv-x", [(1, 2), (2, 3)], 0, 1)
 
     issuer = FakePhaseIssuer()
     issuer.uuid_to_index["q-x"] = 0
@@ -1068,7 +944,7 @@ async def test_abort_remaining_turns_includes_pending_delayed_turn():
     strategy._phase_issuer = issuer
     strategy._session_publisher = publisher
     strategy._session_on_sample_complete = on_sample_complete
-    strategy._active_iters["c1"] = ("c1", [(0, 1), (1, 2), (2, 3)], 1)
+    strategy._active_iters["c1"] = ("c1", [(0, 1), (1, 2), (2, 3)], 1, 1)
 
     strategy._issue_next_turn("c1")
 
@@ -1244,7 +1120,7 @@ async def test_error_turn_aborts_remaining_turns():
     strategy._phase_issuer = issuer
 
     # Seed: conv1 is active with turns 2 and 3 still pending
-    remaining_turns = ("conv1", [(1, 2), (2, 3)], 0)
+    remaining_turns = ("conv1", [(1, 2), (2, 3)], 0, 1)
     strategy._active_iters["conv1"] = remaining_turns
     strategy._inflight["q0001"] = "conv1"
     strategy._conv_states["conv1"] = conv_manager.get_state("conv1")

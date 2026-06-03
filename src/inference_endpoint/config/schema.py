@@ -262,13 +262,26 @@ class MultiTurnConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    turn_timeout_s: float = Field(default=86400.0, gt=0)
-    use_dataset_history: bool = True
+    turn_timeout_s: float = Field(
+        default=86400.0,
+        gt=0,
+        description=(
+            "Per-turn timeout in seconds. A timeout aborts that turn and all "
+            "remaining turns in the same conversation."
+        ),
+    )
+    use_dataset_history: bool = Field(
+        True,
+        description=(
+            "Use dataset-provided message history for each turn instead of "
+            "reconstructing history from prior generated responses."
+        ),
+    )
     enable_salt: bool = Field(
         False,
         description=(
-            "Enable salt addition after system prompt to prevent KV cache reuse "
-            "across trajectories in multi-turn setting."
+            "Add deterministic salt markers before and after the system prompt "
+            "to prevent KV cache reuse across trajectories in multi-turn setting."
         ),
     )
     inject_tool_delay: bool = Field(
@@ -278,9 +291,31 @@ class MultiTurnConfig(BaseModel):
             "in dataset."
         ),
     )
-    inline_accuracy: bool = False
-    num_trajectories_to_issue: int | None = Field(default=None, gt=0)
-    stop_issuing_on_first_user_complete: bool = False
+    inline_accuracy: bool = Field(
+        False,
+        description=(
+            "Score multi-turn inline accuracy from the performance dataset after "
+            "the benchmark run."
+        ),
+    )
+    num_trajectories_to_issue: int | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Number of conversation trajectories to start. Defaults to one pass "
+            "over the dataset; values above the dataset size repeat trajectories "
+            "with unique logical conversation ids."
+        ),
+    )
+    stop_issuing_on_first_user_complete: bool = Field(
+        False,
+        description=(
+            "When performance tracking stops because the first concurrency slot "
+            "has no next trajectory left to assign, also stop issuing future "
+            "turns. If false, replay continues outside the performance window "
+            "for accuracy/log coverage."
+        ),
+    )
 
 
 class Dataset(BaseModel):

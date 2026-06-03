@@ -19,15 +19,19 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import re
 from collections import Counter
 from pathlib import Path
 from typing import Any
 
+import msgspec
 import msgspec.json
 
 from inference_endpoint.core.record import EventRecord, EventType, SampleEventType
 from inference_endpoint.core.types import TextModelOutput
+
+logger = logging.getLogger(__name__)
 
 EXE_MAP: dict[str, str] = {
     "python": "python",
@@ -275,10 +279,15 @@ def _build_expected_assistants(
                 continue
             next_row = rows[idx + 1]
             if next_row.get("role") == "assistant":
-                expected[(conv_id, int(row["turn"]))] = {
+                try:
+                    client_turn = int(row.get("turn") or 0)
+                    assistant_turn = int(next_row.get("turn") or 0)
+                except (TypeError, ValueError):
+                    continue
+                expected[(conv_id, client_turn)] = {
                     **next_row,
-                    "_client_turn": int(row["turn"]),
-                    "_assistant_turn": int(next_row["turn"]),
+                    "_client_turn": client_turn,
+                    "_assistant_turn": assistant_turn,
                 }
     return expected
 
@@ -323,11 +332,20 @@ def _iter_complete_records(events_path: Path):
     """Yield COMPLETE sample events from an event log."""
     decoder = msgspec.json.Decoder(type=EventRecord, dec_hook=EventType.decode_hook)
     with events_path.open() as f:
-        for line in f:
+        for line_no, line in enumerate(f, 1):
             line = line.strip()
             if not line:
                 continue
-            record = decoder.decode(line)
+            try:
+                record = decoder.decode(line)
+            except msgspec.DecodeError as exc:
+                logger.warning(
+                    "Skipping malformed event log line %d in %s: %s",
+                    line_no,
+                    events_path,
+                    exc,
+                )
+                continue
             if record.event_type == SampleEventType.COMPLETE:
                 yield record
 
