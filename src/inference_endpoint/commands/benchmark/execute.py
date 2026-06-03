@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import random
 import shutil
 import signal
@@ -643,7 +644,11 @@ async def _run_benchmark_async(
                     args=event_logger_args,
                 ),
             ],
-            timeout=30.0,
+            # Service startup imports off a shared/Lustre FS can exceed 30 s
+            # under heavy login-node I/O contention; allow an override.
+            timeout=float(
+                os.environ.get("INFERENCE_ENDPOINT_SERVICE_READY_TIMEOUT_S", "30")
+            ),
         )
 
         # Create endpoint client on the shared loop

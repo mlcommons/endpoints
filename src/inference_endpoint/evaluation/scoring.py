@@ -716,7 +716,7 @@ def _match_hierarchical_paths(
         # Pair 1: intersection=3, pred_len=3, true_len=3
         # Pair 2: intersection=2 (stops at "Dress" != "Polo"), pred_len=3, true_len=3
         # HP = (3+2)/(3+3) = 5/6,  HR = (3+2)/(3+3) = 5/6
-        # F1 = 2*(5/6)*(5/6) / (5/6+5/6) = 5/6 ≈ 0.833
+        # F1 = 2*(5/6)*(5/6) / (5/6+5/6) = 5/6 ~ 0.833
 
     Args:
         predicted_path: Categories predicted by the VLM.
@@ -868,7 +868,7 @@ _DEFAULT_VBENCH_PROJECT_PATH = (
 
 _VBENCH_PROJECT_PATH_ENV = "VBENCH_PROJECT_PATH"
 
-# Filenames in `vbench_standard` mode key on the prompt verbatim — VBench looks
+# Filenames in `vbench_standard` mode key on the prompt verbatim - VBench looks
 # the filename's prompt-prefix up in vbench_full_info.json. We can therefore
 # only reshape unsafe characters, not replace the prompt with a UUID. Slashes
 # and `..` are turned into `_`; null bytes / control chars are rejected.
@@ -910,17 +910,17 @@ class VBenchScorer(Scorer, scorer_id="vbench"):
     `{prompt}-{index}.mp4`, and VBench looks each prompt up in its
     bundled `vbench_full_info.json`. Prompts are passed through
     `_sanitize_prompt_for_filename` first to keep the staged path inside
-    `staged_dir`; VBench's prompt lookup tolerates the same `/`→`_`
+    `staged_dir`; VBench's prompt lookup tolerates the same `/`->`_`
     replacement applied here.
 
     The scorer reads each sample's video path from response_output (the
     VideoGenAdapter mirrors `video_path` into `TextModelOutput.output`)
-    and the prompt from `dataset.dataframe[ground_truth_column]` — the
+    and the prompt from `dataset.dataframe[ground_truth_column]` - the
     prompt is the VBench input, not a comparison target, so callers should
     set `ground_truth_column: prompt` in `accuracy_config`.
 
     Returns `(None, n_repeats)` when no successful video was produced or
-    when scoring fails to yield a usable per-dimension number — matching
+    when scoring fails to yield a usable per-dimension number - matching
     `LiveCodeBenchScorer` and the `Scorer.score()` contract.
     """
 
@@ -971,7 +971,7 @@ class VBenchScorer(Scorer, scorer_id="vbench"):
     ) -> Path:
         """Resolve the VBench subproject path.
 
-        Lookup order: explicit ctor arg → ``$VBENCH_PROJECT_PATH`` env var →
+        Lookup order: explicit ctor arg -> ``$VBENCH_PROJECT_PATH`` env var ->
         editable-checkout fallback. The env var lets wheel-installed users
         point at a synced subproject without patching source.
         """
@@ -1103,7 +1103,7 @@ class VBenchScorer(Scorer, scorer_id="vbench"):
         df = df[df["sample_uuid"].isin(valid_uuids)]
         # Drop failed queries: Scorer.get_outputs() emits "" when record.data
         # is None (workers set response_output=None on error). Passing "" to
-        # _stage_videos would Path("").resolve() → cwd and symlink the repo
+        # _stage_videos would Path("").resolve() -> cwd and symlink the repo
         # root as a "video", corrupting the entire VBench run. Failed samples
         # still count toward the denominator via n_total below.
         n_total = len(df)
@@ -1157,3 +1157,222 @@ class VBenchScorer(Scorer, scorer_id="vbench"):
         per_dim_scores = self._extract_per_dim_scores(results)
         mean_score = float(np.mean(per_dim_scores))
         return mean_score, n_repeats
+
+
+_DEFAULT_DEEPSEEK_EVAL_PROJECT_PATH = (
+    Path(__file__).resolve().parents[3]
+    / "examples"
+    / "10_DeepSeekR1_Example"
+    / "accuracy"
+)
+
+_DEEPSEEK_EVAL_PROJECT_PATH_ENV = "DEEPSEEK_EVAL_PROJECT_PATH"
+
+
+class DeepSeekR1Scorer(Scorer, scorer_id="deepseek_r1"):
+    """MLPerf DeepSeek-R1 combined-subset accuracy scorer.
+
+    The MLPerf DeepSeek-R1 accuracy dataset is an ensemble of five subsets
+    (``aime``, ``math500``, ``gpqa``, ``mmlu_pro``, ``livecodebench``), each
+    parsed and graded differently. The official MLCommons ``eval_accuracy.py``
+    routes each sample by its ``dataset`` column, then reports an aggregate
+    ``exact_match`` (mean per-sample 100/0) plus ``tokens_per_sample``.
+
+    That evaluator pulls in pinned/heavy deps (``transformers`` plus the
+    ``prm800k`` math grader and ``LiveCodeBench`` code executor submodules)
+    that are incompatible with the parent benchmark env, so - exactly like
+    ``VBenchScorer`` - it runs out-of-process via ``uv run --project`` against
+    the isolated subproject at ``examples/10_DeepSeekR1_Example/accuracy/``.
+    The parent process never imports the evaluator.
+
+    This scorer builds the DataFrame the evaluator expects - ``model_output``
+    (the full raw generation, including the ``<think>`` trace, taken verbatim
+    from the COMPLETE event), ``ground_truth``, ``dataset`` (the subset id),
+    and ``question`` - writes it to a temp parquet, and shells out to
+    ``deepseek_eval_runner.py``. Output token lengths are computed inside the
+    subproject with the DeepSeek tokenizer so ``tokens_per_sample`` matches the
+    MLPerf token accounting.
+
+    Returns ``(exact_match, n_repeats)`` where ``exact_match`` is on the same
+    0-100 scale as the MLPerf golden accuracy (81.3582), or ``(None, n)`` if
+    no successful output was produced or the subprocess fails to yield a
+    usable number - matching the ``Scorer.score()`` contract.
+
+    Reads the subset id from ``dataset.dataframe[subset_column]`` (default
+    column ``dataset``) and the per-sample question from ``question_column``
+    (default ``question``); both are passed through ``accuracy_config.extras``.
+    """
+
+    REQUIRES_EXTRACTOR: ClassVar[bool] = False
+    DEFAULT_SUBPROCESS_TIMEOUT_S: ClassVar[int] = 4 * 60 * 60
+
+    def __init__(
+        self,
+        dataset_name: str,
+        dataset: Dataset,
+        report_dir: os.PathLike,
+        extractor: type[Extractor] | None = None,
+        ground_truth_column: str | None = "ground_truth",
+        subset_column: str = "dataset",
+        question_column: str = "question",
+        tokenizer_path: str = "deepseek-ai/DeepSeek-R1",
+        deepseek_eval_project_path: os.PathLike | None = None,
+        uv_executable: str = "uv",
+        subprocess_timeout_s: int | None = None,
+    ):
+        super().__init__(
+            dataset_name=dataset_name,
+            dataset=dataset,
+            report_dir=report_dir,
+            extractor=extractor,
+            ground_truth_column=ground_truth_column,
+        )
+        self.subset_column = subset_column
+        self.question_column = question_column
+        self.tokenizer_path = tokenizer_path
+        self.uv_executable = uv_executable
+        self.project_path = self._resolve_project_path(deepseek_eval_project_path)
+        self.subprocess_timeout_s = (
+            subprocess_timeout_s
+            if subprocess_timeout_s is not None
+            else self.DEFAULT_SUBPROCESS_TIMEOUT_S
+        )
+        runner = self.project_path / "deepseek_eval_runner.py"
+        if not runner.exists():
+            raise FileNotFoundError(
+                f"deepseek_eval_runner.py not found at {runner}. "
+                f"Run `uv sync` and `bash setup_eval.sh` in the accuracy "
+                f"subproject, or set ${_DEEPSEEK_EVAL_PROJECT_PATH_ENV} to the "
+                f"synced subproject path."
+            )
+
+    @staticmethod
+    def _resolve_project_path(explicit: os.PathLike | None) -> Path:
+        """Resolve the DeepSeek eval subproject path.
+
+        Lookup order: explicit ctor arg -> ``$DEEPSEEK_EVAL_PROJECT_PATH`` env
+        var -> editable-checkout fallback. The env var lets wheel-installed
+        users point at a synced subproject without patching source.
+        """
+        if explicit is not None:
+            return Path(explicit)
+        from_env = os.environ.get(_DEEPSEEK_EVAL_PROJECT_PATH_ENV)
+        if from_env:
+            return Path(from_env)
+        return Path(_DEFAULT_DEEPSEEK_EVAL_PROJECT_PATH)
+
+    def score_single_sample(self, value: str, ground_truth: str) -> float:
+        raise RuntimeError(
+            "DeepSeek-R1 scoring requires batch processing; call score() instead."
+        )
+
+    def _run_eval_subprocess(self, input_parquet: Path, out_json: Path) -> None:
+        """Invoke deepseek_eval_runner.py via ``uv run --project <subproject>``.
+
+        Captures stdout+stderr into ``report_dir/deepseek_eval_subprocess.log``
+        and, on non-zero exit, raises with the tail of the captured log so the
+        real failure (missing submodule, tokenizer download, code-exec error)
+        isn't lost.
+        """
+        cmd = [
+            self.uv_executable,
+            "run",
+            "--project",
+            str(self.project_path),
+            "python",
+            str(self.project_path / "deepseek_eval_runner.py"),
+            "--input",
+            str(input_parquet),
+            "--output",
+            str(out_json),
+            "--tokenizer",
+            self.tokenizer_path,
+        ]
+        log_path = self.report_dir / "deepseek_eval_subprocess.log"
+        try:
+            completed = subprocess.run(
+                cmd,
+                check=False,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=self.subprocess_timeout_s,
+            )
+        except subprocess.TimeoutExpired as e:
+            partial = (
+                e.stdout
+                if isinstance(e.stdout, str)
+                else (e.stdout or b"").decode("utf-8", errors="replace")
+            )
+            log_path.write_text(partial)
+            raise RuntimeError(
+                f"DeepSeek eval subprocess timed out after "
+                f"{self.subprocess_timeout_s}s; see {log_path} for partial output."
+            ) from e
+
+        log_path.write_text(completed.stdout or "")
+        if completed.returncode != 0:
+            tail = "\n".join((completed.stdout or "").splitlines()[-50:])
+            raise RuntimeError(
+                f"DeepSeek eval subprocess exited with code "
+                f"{completed.returncode}; full log at {log_path}. "
+                f"Last 50 lines:\n{tail}"
+            )
+
+    def score(self) -> tuple[float | None, int]:
+        df = self.get_outputs()
+        valid_uuids = self.sample_index_map.keys()
+        df = df[df["sample_uuid"].isin(valid_uuids)]
+
+        n_total = len(df)
+        num_samples = self.dataset.num_samples()
+        n_repeats = n_total // num_samples if num_samples else 0
+
+        # Failed queries log "" (Scorer.get_outputs() emits "" when
+        # record.data is None). They are graded as incorrect by the evaluator
+        # but still count toward the denominator, so keep them in.
+        if df.empty:
+            logger.warning(
+                "DeepSeekR1Scorer: no outputs to score; returning None score."
+            )
+            return None, n_repeats
+
+        df = df.apply(self.match_sample_index, axis=1)
+        order = df["sample_index"].to_numpy().astype(int)
+
+        ref = self.dataset.dataframe
+        assert ref is not None, f"Dataset {self.dataset} has no dataframe loaded"
+        for col in (self.ground_truth_column, self.subset_column, self.question_column):
+            assert col in ref.columns, (
+                f"Column {col!r} not found in dataset {self.dataset}; "
+                f"available: {list(ref.columns)}"
+            )
+
+        eval_df = pd.DataFrame(
+            {
+                "model_output": df["output"].astype(str).to_numpy(),
+                "ground_truth": ref[self.ground_truth_column].to_numpy()[order],
+                "dataset": ref[self.subset_column].to_numpy()[order],
+                "question": ref[self.question_column].to_numpy()[order],
+            }
+        )
+
+        scratch = self.report_dir / "deepseek_eval"
+        scratch.mkdir(parents=True, exist_ok=True)
+        input_parquet = scratch / f"{self.dataset_name}_outputs.parquet"
+        out_json = scratch / f"{self.dataset_name}_results.json"
+        eval_df.to_parquet(input_parquet, index=False)
+
+        self._run_eval_subprocess(input_parquet, out_json)
+
+        results = msgspec.json.decode(out_json.read_bytes())
+        exact_match = results.get("exact_match")
+        if exact_match is None:
+            logger.warning(
+                "DeepSeekR1Scorer: subprocess produced no exact_match; "
+                "returning None score. See %s",
+                out_json,
+            )
+            return None, n_repeats
+        return float(exact_match), n_repeats

@@ -98,6 +98,7 @@ class ScorerMethod(str, Enum):
     CODE_BENCH = "code_bench_scorer"
     SHOPIFY_CATEGORY_F1 = "shopify_category_f1"
     VBENCH = "vbench"
+    DEEPSEEK_R1 = "deepseek_r1"
 
 
 class TestMode(str, Enum):
