@@ -134,7 +134,7 @@ If inference completed but scoring failed (e.g. `lcb-service` was not running), 
 `events.jsonl` without re-running inference:
 
 ```bash
-cd /home/karverma/endpoints
+cd endpoints
 uv run python examples/10_DeepSeekV4Pro_Example/rescore_accuracy.py \
   --report-dir results/vllm_deepseek_v4_pro_accuracy \
   --write-results-json
