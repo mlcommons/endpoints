@@ -20,6 +20,7 @@ import random
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
@@ -34,6 +35,7 @@ from inference_endpoint.commands.benchmark.execute import (
     BenchmarkContext,
     ResponseCollector,
     _build_phases,
+    _inline_score_multi_turn_if_enabled,
     _run_benchmark_async,
     setup_benchmark,
 )
@@ -62,6 +64,7 @@ from inference_endpoint.config.schema import (
 from inference_endpoint.config.utils import cli_error_formatter as _error_formatter
 from inference_endpoint.core.types import QueryResult
 from inference_endpoint.dataset_manager.dataset import Dataset
+from inference_endpoint.dataset_manager.multi_turn_dataset import MultiTurnDataset
 from inference_endpoint.endpoint_client.config import HTTPClientConfig
 from inference_endpoint.evaluation.scoring import Scorer
 from inference_endpoint.exceptions import InputValidationError, SetupError
@@ -131,6 +134,54 @@ class TestCLIConfigModels:
                 endpoint_config={"endpoints": ["http://x"]},
                 datasets=[{"path": "test.jsonl"}],
             )
+
+
+@pytest.mark.unit
+def test_inline_multi_turn_accuracy_disabled_is_noop(tmp_path: Path):
+    dataframe = pd.DataFrame(
+        [
+            {
+                "conversation_id": "conv1",
+                "turn": 1,
+                "role": "user",
+                "content": "hello",
+            },
+            {
+                "conversation_id": "conv1",
+                "turn": 2,
+                "role": "assistant",
+                "content": "hi",
+            },
+        ]
+    )
+    config = OnlineConfig(
+        endpoint_config={"endpoints": ["http://test:8000"]},
+        model_params={"name": "test-model"},
+        datasets=[
+            {
+                "name": "multi-turn",
+                "type": DatasetType.PERFORMANCE,
+                "multi_turn": {"inline_accuracy": False},
+            }
+        ],
+        settings=OnlineSettings(
+            runtime=RuntimeConfig(min_duration_ms=0),
+            load_pattern=LoadPattern(
+                type=LoadPatternType.MULTI_TURN,
+                target_concurrency=1,
+            ),
+        ),
+    )
+    ctx = cast(
+        BenchmarkContext,
+        SimpleNamespace(
+            dataloader=MultiTurnDataset(dataframe),
+            config=config,
+            report_dir=tmp_path,
+        ),
+    )
+
+    assert _inline_score_multi_turn_if_enabled(ctx) is None
 
 
 class TestDurationSuffix:

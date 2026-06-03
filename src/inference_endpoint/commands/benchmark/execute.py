@@ -843,12 +843,11 @@ def _inline_score_multi_turn_if_enabled(
         (ds for ds in ctx.config.datasets if ds.type == DatasetType.PERFORMANCE),
         None,
     )
-    if (
-        perf_cfg is None
-        or perf_cfg.multi_turn is None
-        or not perf_cfg.multi_turn.inline_accuracy
-        or perf_cfg.path is None
-    ):
+    if perf_cfg is None or perf_cfg.multi_turn is None:
+        return None
+    if not perf_cfg.multi_turn.inline_accuracy:
+        return None
+    if perf_cfg.path is None:
         raise InputValidationError(
             "Multi-turn inline accuracy requires a performance dataset with "
             "multi_turn.inline_accuracy: true and a dataset path"
