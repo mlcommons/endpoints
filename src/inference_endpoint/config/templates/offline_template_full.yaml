@@ -11,6 +11,7 @@ model_params:
   repetition_penalty: null  # Repetition penalty
   presence_penalty: null  # Presence penalty
   frequency_penalty: null  # Frequency penalty
+  chat_template_kwargs: null  # Per-request chat-template kwargs forwarded to compatible servers.
   max_new_tokens: 1024  # Max output tokens
   osl_distribution: null  # Output sequence length distribution
   streaming: 'off'  # Streaming mode: auto/on/off | options: auto, on, off

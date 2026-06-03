@@ -30,7 +30,7 @@ class OpenAISSEAccumulator(SSEAccumulatorProtocol):
     def __init__(self, query_id: str, stream_all_chunks: bool):
         self.output_chunks: list[str] = []
         self.reasoning_chunks: list[str] = []
-        self._tool_calls: dict[int, dict[str, Any]] = {}
+        self.tool_call_chunks: list[tuple[dict[str, Any], ...]] = []
         self._finish_reason: str | None = None
 
         self.first_chunk_sent = False
@@ -48,22 +48,8 @@ class OpenAISSEAccumulator(SSEAccumulatorProtocol):
         if delta is None:
             return None
 
-        # Accumulate tool_calls partials (streamed as incremental JSON fragments)
         if delta.tool_calls:
-            for partial in delta.tool_calls:
-                idx = partial.get("index", 0)
-                tc = self._tool_calls.setdefault(
-                    idx, {"type": "function", "function": {"arguments": ""}}
-                )
-                if partial.get("id"):
-                    tc["id"] = partial["id"]
-                if partial.get("type"):
-                    tc["type"] = partial["type"]
-                fn = partial.get("function") or {}
-                if fn.get("name"):
-                    tc["function"]["name"] = fn["name"]
-                if fn.get("arguments"):
-                    tc["function"]["arguments"] += fn["arguments"]
+            self.tool_call_chunks.append(tuple(delta.tool_calls))
 
         content = None
         if delta.content:
@@ -102,11 +88,7 @@ class OpenAISSEAccumulator(SSEAccumulatorProtocol):
             return None
 
     def get_final_output(self) -> QueryResult:
-        tool_calls_tuple: tuple[dict[str, Any], ...] | None = (
-            tuple(self._tool_calls[i] for i in sorted(self._tool_calls))
-            if self._tool_calls
-            else None
-        )
+        tool_calls = tuple(self.tool_call_chunks) if self.tool_call_chunks else None
 
         if self.reasoning_chunks:
             resp_reasoning: list[str] = [self.reasoning_chunks[0]]
@@ -115,18 +97,22 @@ class OpenAISSEAccumulator(SSEAccumulatorProtocol):
             text_output = TextModelOutput(
                 output="".join(self.output_chunks),
                 reasoning=resp_reasoning,
-                tool_calls=tool_calls_tuple,
+                tool_calls=tool_calls,
             )
         elif self.output_chunks:
             resp_output: list[str] = [self.output_chunks[0]]
             if len(self.output_chunks) > 1:
                 resp_output.append("".join(self.output_chunks[1:]))
             text_output = TextModelOutput(
-                output=resp_output, reasoning=None, tool_calls=tool_calls_tuple
+                output=resp_output,
+                reasoning=None,
+                tool_calls=tool_calls,
             )
         else:
             text_output = TextModelOutput(
-                output=[], reasoning=None, tool_calls=tool_calls_tuple
+                output=[],
+                reasoning=None,
+                tool_calls=tool_calls,
             )
 
         metadata: dict[str, Any] = {
@@ -135,8 +121,9 @@ class OpenAISSEAccumulator(SSEAccumulatorProtocol):
         }
         if self._finish_reason:
             metadata["finish_reason"] = self._finish_reason
-        if tool_calls_tuple:
-            metadata["tool_calls"] = list(tool_calls_tuple)
+        _content, _reasoning, merged_tool_calls = text_output.as_message_parts()
+        if merged_tool_calls:
+            metadata["tool_calls"] = list(merged_tool_calls)
 
         return QueryResult(
             id=self.query_id,

@@ -100,17 +100,19 @@ class ChatMessage(
     name: str | None = None
     tool_calls: list[dict[str, Any]] | None = None
     tool_call_id: str | None = None
+    reasoning_content: str | None = None
 
 
-# gc=False: audit 2026-05: messages/tools set at construction; frozen=True blocks field reassignment.
+# gc=False: audit 2026-05: request containers set at construction; frozen=True blocks field reassignment.
 class ChatCompletionRequest(
     msgspec.Struct, frozen=True, kw_only=True, omit_defaults=True, gc=False
 ):  # type: ignore[call-arg]
     """OpenAI chat completion request.
 
-    AT-RISK (gc=False): Has mutable container fields `messages`, `tools`, and `logit_bias`.
-    Any change that mutates these after construction or stores cyclic references in them
-    must be audited; if so, remove gc=False.
+    AT-RISK (gc=False): Has mutable container fields `messages`, `tools`,
+    `logit_bias`, and `chat_template_kwargs`. Any change that mutates these
+    after construction or stores cyclic references in them must be audited; if
+    so, remove gc=False.
     """
 
     model: str
@@ -128,6 +130,7 @@ class ChatCompletionRequest(
     logit_bias: dict[str, float] | None = None
     user: str | None = None
     chat_template: str | None = None
+    chat_template_kwargs: dict[str, Any] | None = None
     tools: list[dict[str, Any]] | None = None
 
 

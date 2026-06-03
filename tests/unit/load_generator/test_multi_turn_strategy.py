@@ -41,6 +41,7 @@ class FakePhaseIssuer:
         self.uuid_to_index: dict[str, int] = {}
         self.uuid_to_conv_info: dict[str, tuple[str, int | None]] = {}
         self.completed_uuids: set[str] = set()
+        self.drained = False
 
     def issue(
         self,
@@ -70,6 +71,11 @@ class FakePhaseIssuer:
         self.uuid_to_conv_info[query_id] = (conversation_id, turn)
         self.completed_uuids.add(query_id)
         return query_id
+
+    def mark_inflight_complete(self) -> None:
+        self.inflight -= 1
+        if self.inflight <= 0:
+            self.drained = True
 
 
 def _make_dataset_metadata(conversations: dict[str, list[int]]) -> ConversationMetadata:
@@ -639,7 +645,7 @@ async def test_timeout_publishes_error_and_complete_events():
 
     # Seed: turn 1 in-flight, turns 2+3 still pending
     strategy._inflight["q-x"] = "conv-x"
-    strategy._active_iters["conv-x"] = iter([(1, 2), (2, 3)])
+    strategy._active_iters["conv-x"] = ([(1, 2), (2, 3)], 0)
 
     issuer = FakePhaseIssuer()
     issuer.uuid_to_index["q-x"] = 0
@@ -655,6 +661,7 @@ async def test_timeout_publishes_error_and_complete_events():
     # 2 events for the timed-out turn + 2 per dropped turn (ERROR + COMPLETE each)
     assert publisher.publish.call_count == 6
     assert issuer.inflight == 0
+    assert issuer.drained is True
     assert "q-x" in issuer.completed_uuids
     # Conv info cleared so a late real response can't reuse stale state.
     assert "q-x" not in issuer.uuid_to_conv_info
@@ -707,6 +714,147 @@ async def test_issue_passes_conversation_id_and_turn_to_phase_issuer():
     await strategy.execute(issuer)
 
     assert issuer.uuid_to_conv_info == expected
+
+
+def _metadata_with_delay(
+    conv_id: str, turns: list[int], delay_turn: int, delay: float
+) -> ConversationMetadata:
+    md = _make_dataset_metadata({conv_id: turns})
+    md.delay_seconds_by_key = {(conv_id, delay_turn): delay}
+    return md
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_abort_remaining_turns_includes_pending_delayed_turn():
+    from inference_endpoint.config.schema import MultiTurnConfig
+
+    conv_manager = ConversationManager()
+    conv_manager.get_or_create("c1", expected_client_turns=3)
+    metadata = _metadata_with_delay("c1", [1, 2, 3], delay_turn=2, delay=60.0)
+    cfg = MultiTurnConfig(turn_timeout_s=5.0, inject_tool_delay=True)
+    strategy = MultiTurnStrategy(conv_manager, metadata, multi_turn_config=cfg)
+    issuer = FakePhaseIssuer()
+    publisher = MagicMock()
+    on_sample_complete = MagicMock()
+
+    strategy._loop = asyncio.get_running_loop()
+    strategy._phase_issuer = issuer
+    strategy._session_publisher = publisher
+    strategy._session_on_sample_complete = on_sample_complete
+    strategy._active_iters["c1"] = ([(0, 1), (1, 2), (2, 3)], 1)
+
+    strategy._issue_next_turn("c1")
+
+    assert issuer.issued == []
+    delay_handle = strategy._delay_handles["c1"]
+
+    dropped = strategy._abort_remaining_turns("c1", reason="prior turn failed")
+
+    assert dropped == 2
+    assert delay_handle.cancelled()
+    assert "c1" not in strategy._delay_handles
+    assert "c1" not in strategy._active_iters
+    assert "q-skip-0001" in issuer.uuid_to_index
+    assert "q-skip-0002" in issuer.uuid_to_index
+    assert issuer.completed_uuids == {"q-skip-0001", "q-skip-0002"}
+    assert on_sample_complete.call_count == 2
+
+    published_records = [call.args[0] for call in publisher.publish.call_args_list]
+    event_turn_pairs = {(r.event_type, r.turn) for r in published_records}
+    assert event_turn_pairs == {
+        (ErrorEventType.GENERIC, 2),
+        (SampleEventType.COMPLETE, 2),
+        (ErrorEventType.GENERIC, 3),
+        (SampleEventType.COMPLETE, 3),
+    }
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_execute_waits_for_delayed_first_turns():
+    from inference_endpoint.config.schema import MultiTurnConfig
+
+    conv_manager = ConversationManager()
+    metadata = _make_dataset_metadata({"c1": [1], "c2": [1]})
+    metadata.delay_seconds_by_key = {("c1", 1): 0.02, ("c2", 1): 0.02}
+    cfg = MultiTurnConfig(turn_timeout_s=5.0, inject_tool_delay=True)
+    strategy = MultiTurnStrategy(
+        conv_manager,
+        metadata,
+        multi_turn_config=cfg,
+        target_concurrency=2,
+    )
+    issuer = FakePhaseIssuer()
+
+    async def auto_respond():
+        already_done = 0
+        while True:
+            while already_done < len(issuer.issued):
+                idx = issuer.issued[already_done]
+                strategy.on_sample_complete(
+                    QueryResult(
+                        id=f"q{idx:04d}", response_output=TextModelOutput(output="r")
+                    )
+                )
+                already_done += 1
+            await asyncio.sleep(0.005)
+
+    responder = asyncio.create_task(auto_respond())
+    count = await asyncio.wait_for(strategy.execute(issuer), timeout=1.0)
+    responder.cancel()
+
+    assert count == 2
+    assert issuer.issued == [0, 1]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_inject_tool_delay_defers_issue_via_call_later():
+    from inference_endpoint.config.schema import MultiTurnConfig
+
+    conv_manager = ConversationManager()
+    metadata = _metadata_with_delay("c1", [1, 2], delay_turn=2, delay=0.05)
+    cfg = MultiTurnConfig(turn_timeout_s=5.0, inject_tool_delay=True)
+    strategy = MultiTurnStrategy(conv_manager, metadata, multi_turn_config=cfg)
+    issuer = FakePhaseIssuer()
+
+    issue_times: dict[int, float] = {}
+    original_issue = issuer.issue
+
+    def timing_issue(idx, data_override=None, conversation_id="", turn=None):
+        q = original_issue(
+            idx,
+            data_override=data_override,
+            conversation_id=conversation_id,
+            turn=turn,
+        )
+        if q:
+            issue_times[idx] = asyncio.get_running_loop().time()
+        return q
+
+    issuer.issue = timing_issue  # type: ignore[method-assign]
+
+    async def auto_respond():
+        already_done = 0
+        while True:
+            while already_done < len(issuer.issued):
+                idx = issuer.issued[already_done]
+                strategy.on_sample_complete(
+                    QueryResult(
+                        id=f"q{idx:04d}", response_output=TextModelOutput(output="r")
+                    )
+                )
+                already_done += 1
+            await asyncio.sleep(0.005)
+
+    responder = asyncio.create_task(auto_respond())
+    await strategy.execute(issuer)
+    responder.cancel()
+
+    assert issuer.issued == [0, 1]
+    gap = issue_times[1] - issue_times[0]
+    assert gap >= 0.04, f"expected >=0.04s gap between issues, got {gap:.4f}s"
 
 
 @pytest.mark.unit
@@ -770,7 +918,7 @@ async def test_error_turn_aborts_remaining_turns():
     strategy._phase_issuer = issuer
 
     # Seed: conv1 is active with turns 2 and 3 still pending
-    remaining_turns = iter([(1, 2), (2, 3)])
+    remaining_turns = ([(1, 2), (2, 3)], 0)
     strategy._active_iters["conv1"] = remaining_turns
     strategy._inflight["q0001"] = "conv1"
     strategy._conv_states["conv1"] = conv_manager.get_state("conv1")
@@ -801,3 +949,111 @@ async def test_error_turn_aborts_remaining_turns():
     for call in on_sample_complete.call_args_list:
         dropped_result = call.args[0]
         assert dropped_result.error is not None
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_inject_tool_delay_disabled_issues_immediately():
+    from inference_endpoint.config.schema import MultiTurnConfig
+
+    conv_manager = ConversationManager()
+    metadata = _metadata_with_delay("c1", [1, 2], delay_turn=2, delay=2.0)
+    cfg = MultiTurnConfig(turn_timeout_s=5.0, inject_tool_delay=False)
+    strategy = MultiTurnStrategy(conv_manager, metadata, multi_turn_config=cfg)
+    issuer = FakePhaseIssuer()
+
+    issue_times: dict[int, float] = {}
+    original_issue = issuer.issue
+
+    def timing_issue(idx, data_override=None, conversation_id="", turn=None):
+        q = original_issue(
+            idx,
+            data_override=data_override,
+            conversation_id=conversation_id,
+            turn=turn,
+        )
+        if q:
+            issue_times[idx] = asyncio.get_running_loop().time()
+        return q
+
+    issuer.issue = timing_issue  # type: ignore[method-assign]
+
+    async def auto_respond():
+        already_done = 0
+        while True:
+            while already_done < len(issuer.issued):
+                idx = issuer.issued[already_done]
+                strategy.on_sample_complete(
+                    QueryResult(
+                        id=f"q{idx:04d}", response_output=TextModelOutput(output="r")
+                    )
+                )
+                already_done += 1
+            await asyncio.sleep(0.005)
+
+    responder = asyncio.create_task(auto_respond())
+    await asyncio.wait_for(strategy.execute(issuer), timeout=1.0)
+    responder.cancel()
+
+    assert issuer.issued == [0, 1]
+    gap = issue_times[1] - issue_times[0]
+    assert gap < 0.5, f"delay should be ignored, observed {gap:.3f}s gap"
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_inject_tool_delay_no_dataset_field_back_compat():
+    from inference_endpoint.config.schema import MultiTurnConfig
+
+    conv_manager = ConversationManager()
+    metadata = _make_dataset_metadata({"c1": [1, 2]})
+    cfg = MultiTurnConfig(turn_timeout_s=5.0, inject_tool_delay=True)
+    strategy = MultiTurnStrategy(conv_manager, metadata, multi_turn_config=cfg)
+    issuer = FakePhaseIssuer()
+
+    async def auto_respond():
+        already_done = 0
+        while True:
+            while already_done < len(issuer.issued):
+                idx = issuer.issued[already_done]
+                strategy.on_sample_complete(
+                    QueryResult(
+                        id=f"q{idx:04d}", response_output=TextModelOutput(output="r")
+                    )
+                )
+                already_done += 1
+            await asyncio.sleep(0.005)
+
+    responder = asyncio.create_task(auto_respond())
+    await asyncio.wait_for(strategy.execute(issuer), timeout=1.0)
+    responder.cancel()
+
+    assert issuer.issued == [0, 1]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_inject_tool_delay_cancels_on_timeout():
+    from inference_endpoint.config.schema import MultiTurnConfig
+
+    conv_manager = ConversationManager()
+    metadata = _metadata_with_delay("c1", [1, 2, 3], delay_turn=3, delay=1.0)
+    cfg = MultiTurnConfig(turn_timeout_s=0.1, inject_tool_delay=True)
+    strategy = MultiTurnStrategy(conv_manager, metadata, multi_turn_config=cfg)
+    issuer = FakePhaseIssuer()
+
+    async def respond_first_only():
+        while not issuer.issued:
+            await asyncio.sleep(0.005)
+        strategy.on_sample_complete(
+            QueryResult(id="q0000", response_output=TextModelOutput(output="r"))
+        )
+
+    responder = asyncio.create_task(respond_first_only())
+    await asyncio.wait_for(strategy.execute(issuer), timeout=2.0)
+    responder.cancel()
+
+    assert issuer.issued == [
+        0,
+        1,
+    ], f"turn 3 should not have been issued after timeout; issued={issuer.issued}"
