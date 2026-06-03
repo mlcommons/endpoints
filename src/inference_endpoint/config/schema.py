@@ -532,7 +532,10 @@ class Settings(BaseModel):
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
     load_pattern: LoadPattern = Field(default_factory=LoadPattern)
     client: HTTPClientConfig = Field(default_factory=HTTPClientConfig)
-    drain: DrainConfig = Field(default_factory=DrainConfig)
+    drain: DrainConfig = Field(
+        default_factory=DrainConfig,
+        description="Per-phase in-flight response drain timeout configuration",
+    )
     warmup: WarmupConfig = Field(default_factory=WarmupConfig)
 
 
