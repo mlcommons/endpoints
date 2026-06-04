@@ -94,6 +94,33 @@ class TestSshTargetParsing:
         with pytest.raises(ValidationError, match="non-empty"):
             _make_config(ssh_ids=[])
 
+    # 4. serving_node validation
+    @pytest.mark.unit
+    def test_serving_node_valid_no_port(self) -> None:
+        cfg = _make_config(serving_node="alice@10.0.0.1")
+        assert cfg.serving_node == "alice@10.0.0.1"
+
+    @pytest.mark.unit
+    def test_serving_node_valid_with_port(self) -> None:
+        cfg = _make_config(serving_node="alice@10.0.0.1:2222")
+        assert cfg.serving_node == "alice@10.0.0.1:2222"
+
+    @pytest.mark.unit
+    def test_serving_node_port_out_of_range_raises(self) -> None:
+        with pytest.raises(ValidationError, match="1-65535"):
+            _make_config(serving_node="alice@10.0.0.1:99999")
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("port", [0, 65536, 100000])
+    def test_serving_node_invalid_ports_raise(self, port: int) -> None:
+        with pytest.raises(ValidationError, match="1-65535"):
+            _make_config(serving_node=f"alice@10.0.0.1:{port}")
+
+    @pytest.mark.unit
+    def test_serving_node_invalid_format_raises(self) -> None:
+        with pytest.raises(ValidationError):
+            _make_config(serving_node="notvalid")
+
 
 # ---------------------------------------------------------------------------
 # 4. Variation tags — cuda, include current

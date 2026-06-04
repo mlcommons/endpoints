@@ -34,7 +34,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from dataclasses import replace as dataclass_replace
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin
@@ -900,8 +900,6 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
             report.display(fn=lambda s: print(s, file=f))
         logger.info(f"Report written to {report_txt}")
 
-    run_metadata = _build_run_metadata(ctx, report)
-
     # Write scoring artifacts + copy event log from tmpfs to disk
     _write_scoring_artifacts(ctx, result, bench.tmpfs_dir)
 
@@ -991,10 +989,14 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
 
     # Write run_metadata.json before sys_info capture so mlcflow's postprocess
     # can read and patch it in-place with serving config values.
-    metadata_path = ctx.report_dir / "run_metadata.json"
-    with metadata_path.open("w") as f:
-        json.dump(run_metadata, f, indent=2)
-    logger.info("Run metadata written to %s", metadata_path)
+    try:
+        metadata_path = ctx.report_dir / "run_metadata.json"
+        run_metadata = _build_run_metadata(ctx, report)
+        with open(metadata_path, "w") as f:
+            json.dump(run_metadata, f, indent=2)
+        logger.info("Run metadata written to %s", metadata_path)
+    except Exception as e:
+        logger.error("Failed to write run_metadata.json: %s", e)
 
     if ctx.config.system_info is not None:
         try:
@@ -1076,14 +1078,14 @@ def _build_run_metadata(ctx: BenchmarkContext, report: Report | None) -> dict[st
             total_tokens = osl.get("total")
             if total_tokens is not None:
                 measured_total_output_tokens = int(total_tokens)
-        if concurrency is not None and system_tps is not None:
+        if concurrency is not None and concurrency > 0 and system_tps is not None:
             tps_per_user = system_tps / concurrency
         ttft = report.ttft or {}
         tpot = report.tpot or {}
         latency = report.latency or {}
 
     metadata: dict[str, Any] = {
-        "run_date": datetime.now().isoformat(),
+        "run_date": datetime.now(UTC).isoformat(),
         "node_config": node_config,
         "config_summary": {
             "disaggregated": disaggregated,
@@ -1097,7 +1099,7 @@ def _build_run_metadata(ctx: BenchmarkContext, report: Report | None) -> dict[st
         "concurrency": concurrency,
         "system_tps": system_tps,
         "tps_per_user": tps_per_user,
-        "ttft": _pct(ttft, "99"),
+        "ttft": _pct(ttft, "99.0"),
         "qps": qps,
         "tps_utilization": None,
         "measured_total_output_tokens": measured_total_output_tokens,
@@ -1107,26 +1109,26 @@ def _build_run_metadata(ctx: BenchmarkContext, report: Report | None) -> dict[st
         "link_logs": None,
         "measured_latency_ttft_min": _stat(ttft, "min"),
         "measured_latency_ttft_average": _stat(ttft, "avg"),
-        "measured_latency_ttft_p50": _pct(ttft, "50"),
-        "measured_latency_ttft_p90": _pct(ttft, "90"),
-        "measured_latency_ttft_p95": _pct(ttft, "95"),
-        "measured_latency_ttft_p99": _pct(ttft, "99"),
+        "measured_latency_ttft_p50": _pct(ttft, "50.0"),
+        "measured_latency_ttft_p90": _pct(ttft, "90.0"),
+        "measured_latency_ttft_p95": _pct(ttft, "95.0"),
+        "measured_latency_ttft_p99": _pct(ttft, "99.0"),
         "measured_latency_ttft_p999": _pct(ttft, "99.9"),
         "measured_latency_ttft_max": _stat(ttft, "max"),
         "measured_latency_tpot_min": _stat(tpot, "min"),
         "measured_latency_tpot_average": _stat(tpot, "avg"),
-        "measured_latency_tpot_p50": _pct(tpot, "50"),
-        "measured_latency_tpot_p90": _pct(tpot, "90"),
-        "measured_latency_tpot_p95": _pct(tpot, "95"),
-        "measured_latency_tpot_p99": _pct(tpot, "99"),
+        "measured_latency_tpot_p50": _pct(tpot, "50.0"),
+        "measured_latency_tpot_p90": _pct(tpot, "90.0"),
+        "measured_latency_tpot_p95": _pct(tpot, "95.0"),
+        "measured_latency_tpot_p99": _pct(tpot, "99.0"),
         "measured_latency_tpot_p999": _pct(tpot, "99.9"),
         "measured_latency_tpot_max": _stat(tpot, "max"),
         "measured_latency_request_min": _stat(latency, "min"),
         "measured_latency_request_average": _stat(latency, "avg"),
-        "measured_latency_request_p50": _pct(latency, "50"),
-        "measured_latency_request_p90": _pct(latency, "90"),
-        "measured_latency_request_p95": _pct(latency, "95"),
-        "measured_latency_request_p99": _pct(latency, "99"),
+        "measured_latency_request_p50": _pct(latency, "50.0"),
+        "measured_latency_request_p90": _pct(latency, "90.0"),
+        "measured_latency_request_p95": _pct(latency, "95.0"),
+        "measured_latency_request_p99": _pct(latency, "99.0"),
         "measured_latency_request_p999": _pct(latency, "99.9"),
         "measured_latency_request_max": _stat(latency, "max"),
     }

@@ -240,6 +240,55 @@ class TestSysInfoFileConfig:
         assert cfg.system_info.accelerator_backend == "cuda"
 
     @pytest.mark.unit
+    def test_endpoint_config_not_propagated_to_endpoint_url(
+        self, tmp_path: Path
+    ) -> None:
+        """endpoint_config in a shared YAML does not populate system_info.endpoint_url.
+
+        The load target (endpoint_config.endpoints[0]) is not necessarily the
+        serving node, so endpoint_url is never inferred automatically.  Users
+        must set system_info.endpoint_url explicitly when they want the HTTP
+        serving-framework probe to run.
+        """
+        config_path = tmp_path / "shared.yaml"
+        config_path.write_text(
+            textwrap.dedent(
+                """\
+                endpoint_config:
+                  endpoints:
+                    - http://10.0.0.1:8000
+                system_info:
+                  ssh_ids:
+                    - user@10.0.0.1
+                  accelerator_backend: cuda
+                """
+            )
+        )
+        cfg = SysInfoFileConfig.from_yaml_file(config_path)
+        # endpoint_config is ignored (extra="ignore"); endpoint_url stays None.
+        assert cfg.system_info.endpoint_url is None
+
+    @pytest.mark.unit
+    def test_endpoint_url_explicit_in_system_info_is_preserved(
+        self, tmp_path: Path
+    ) -> None:
+        """An explicit system_info.endpoint_url is honoured by SysInfoFileConfig."""
+        config_path = tmp_path / "sysinfo.yaml"
+        config_path.write_text(
+            textwrap.dedent(
+                """\
+                system_info:
+                  ssh_ids:
+                    - user@10.0.0.1
+                  accelerator_backend: cuda
+                  endpoint_url: http://10.0.0.2:8000
+                """
+            )
+        )
+        cfg = SysInfoFileConfig.from_yaml_file(config_path)
+        assert cfg.system_info.endpoint_url == "http://10.0.0.2:8000"
+
+    @pytest.mark.unit
     def test_file_not_found_raises(self, tmp_path: Path) -> None:
         with pytest.raises(FileNotFoundError):
             SysInfoFileConfig.from_yaml_file(tmp_path / "nonexistent.yaml")

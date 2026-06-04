@@ -667,8 +667,9 @@ class SysInfoCaptureConfig(BaseModel):
         default=None,
         description=(
             "Endpoint URL to probe for serving framework detection "
-            "(e.g. 'http://host:8000'). Auto-populated from endpoint_config when "
-            "used inside BenchmarkConfig."
+            "(e.g. 'http://host:8000'). Must be set explicitly."
+            "Omitting it skips the HTTP "
+            "serving-framework probe and reduces collected metadata."
         ),
     )
     serving_node: str | None = Field(
@@ -713,6 +714,13 @@ class SysInfoCaptureConfig(BaseModel):
                 raise ValueError(
                     f"Invalid serving_node {v!r}: expected 'username@host' or 'username@host:port'"
                 )
+            port_str = m.group("port")
+            if port_str is not None:
+                port = int(port_str)
+                if not (1 <= port <= 65535):
+                    raise ValueError(
+                        f"Invalid port in serving_node {v!r}: {port} is not in range 1-65535"
+                    )
         return v
 
     @field_validator("output_path", mode="after")
@@ -767,6 +775,10 @@ class SysInfoFileConfig(BaseModel):
 
     ``report_dir`` mirrors the same field in ``BenchmarkConfig`` and takes
     priority over ``system_info.output_path`` when set.
+
+    ``system_info.endpoint_url`` Set it explicitly in
+    ``system_info`` when you want the HTTP serving-framework probe to run;
+    omitting it means less metadata is collected.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -962,20 +974,6 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
                 f"got '{lp.type}'"
             )
 
-        return self
-
-    @model_validator(mode="after")
-    def _propagate_endpoint_url_to_sysinfo(self) -> Self:
-        """Copy endpoint_config.endpoints[0] into system_info.endpoint_url if unset."""
-        if (
-            self.system_info is not None
-            and self.system_info.endpoint_url is None
-            and self.endpoint_config.endpoints
-        ):
-            new_sic = self.system_info.model_copy(
-                update={"endpoint_url": self.endpoint_config.endpoints[0]}
-            )
-            object.__setattr__(self, "system_info", new_sic)
         return self
 
     @model_validator(mode="after")
