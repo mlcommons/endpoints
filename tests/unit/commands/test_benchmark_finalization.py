@@ -36,7 +36,7 @@ _OFFLINE_KWARGS = {
     "endpoint_config": {"endpoints": ["http://localhost:8000"]},
     "model_params": {"name": "test-model"},
     "datasets": [{"path": "test.jsonl"}],
-    "sys_info_capture": {
+    "system_info": {
         "ssh_ids": ["alice@10.0.0.1"],
         "accelerator_backend": "cuda",
     },

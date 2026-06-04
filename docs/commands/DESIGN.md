@@ -98,7 +98,7 @@ commands/benchmark/execute.py::run_benchmark()
   +-- construct endpoint client + sample issuer
   +-- run BenchmarkSession in threaded wrapper
   +-- finalize metrics and optional accuracy scoring
-  +-- if sys_info_capture is configured:
+  +-- if system_info is configured:
         write run_metadata.json
         capture_system_info() → mlcflow (hardware + serving config)
         patch run_metadata.json with serving config values
@@ -109,7 +109,7 @@ commands/benchmark/execute.py::run_benchmark()
 System info capture collects hardware/software details from one or more nodes and writes a structured JSON file for MLPerf inference submissions. It runs in two contexts:
 
 - **Standalone** (`sysinfo from-config`): triggered manually, independent of any benchmark run.
-- **Integrated** (`benchmark` finalization): triggered automatically after a benchmark if `sys_info_capture` is present in the config.
+- **Integrated** (`benchmark` finalization): triggered automatically after a benchmark if `system_info` is present in the config.
 
 Both paths call `sys_info/capture.py::capture_system_info()` and produce the same output JSON. The integrated path additionally patches `run_metadata.json` with serving configuration values extracted from the inference server's startup log.
 
@@ -222,7 +222,7 @@ When `node_config` is provided, the automations script enforces:
 | `node_name` unmatched or count exceeds probed | `ExecutionError`                                    | `ExecutionError` → logged as `error`                     |
 | `serving_config.json` absent or unreadable    | Logged as error; `run_metadata.json` left unchanged | Same                                                     |
 
-In the integrated path, `sys_info_capture` failures never abort the benchmark. `results.json` and `run_metadata.json` are written before the capture call, so the benchmark output is complete regardless of capture outcome. The error log includes `report_dir` and a command to re-run capture manually.
+In the integrated path, `system_info` failures never abort the benchmark. `results.json` and `run_metadata.json` are written before the capture call, so the benchmark output is complete regardless of capture outcome. The error log includes `report_dir` and a command to re-run capture manually.
 
 ---
 

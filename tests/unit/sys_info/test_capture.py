@@ -290,7 +290,7 @@ class TestCaptureSystemInfo:
 
 class TestYamlRoundTrip:
     @pytest.mark.unit
-    def test_sys_info_capture_from_yaml(self, tmp_path: Path) -> None:
+    def test_system_info_from_yaml(self, tmp_path: Path) -> None:
         yaml_content = textwrap.dedent(
             """\
             type: offline
@@ -301,7 +301,7 @@ class TestYamlRoundTrip:
                 - http://localhost:8000
             datasets:
               - path: dummy.jsonl
-            sys_info_capture:
+            system_info:
               accelerator_backend: cuda
               output_path: /tmp/sys_info
               ssh_ids:
@@ -316,8 +316,8 @@ class TestYamlRoundTrip:
 
         config = BenchmarkConfig.from_yaml_file(config_path)
 
-        assert config.sys_info_capture is not None
-        sic = config.sys_info_capture
+        assert config.system_info is not None
+        sic = config.system_info
         assert sic.accelerator_backend == "cuda"
         assert sic.output_path == "/tmp/sys_info"
         assert sic.exclude_current_system is True
@@ -330,7 +330,7 @@ class TestYamlRoundTrip:
 
     # 12. Backward compatibility
     @pytest.mark.unit
-    def test_yaml_without_sys_info_capture_is_none(self, tmp_path: Path) -> None:
+    def test_yaml_without_system_info_is_none(self, tmp_path: Path) -> None:
         yaml_content = textwrap.dedent(
             """\
             type: offline
@@ -347,4 +347,4 @@ class TestYamlRoundTrip:
         config_path.write_text(yaml_content)
 
         config = BenchmarkConfig.from_yaml_file(config_path)
-        assert config.sys_info_capture is None
+        assert config.system_info is None

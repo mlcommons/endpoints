@@ -11,7 +11,6 @@ model_params:
   repetition_penalty: null  # Repetition penalty
   presence_penalty: null  # Presence penalty
   frequency_penalty: null  # Frequency penalty
-  chat_template_kwargs: null  # Per-request chat-template kwargs forwarded to compatible servers.
   max_new_tokens: 1024  # Max output tokens
   osl_distribution: null  # Output sequence length distribution
   streaming: 'off'  # Streaming mode: auto/on/off | options: auto, on, off
@@ -70,7 +69,6 @@ settings:
     worker_initialization_timeout: 60.0  # Worker init timeout (seconds)
     worker_graceful_shutdown_wait: 0.5  # Post-run graceful shutdown wait (seconds)
     worker_force_kill_timeout: 0.5  # Force kill timeout after graceful wait (seconds)
-    insecure: false  # Skip TLS certificate verification
     max_idle_time: 4.0  # Discard connections idle longer than this (seconds)
     min_required_connections: -1  # Min connections to initialize (-1=auto, 0=disabled)
     worker_gc_mode: relaxed  # Worker GC strategy | options: disabled, relaxed, system
@@ -89,4 +87,4 @@ report_dir: null  # Report output directory
 timeout: null  # Global timeout in seconds
 verbose: false  # Enable verbose logging
 enable_cpu_affinity: true  # NUMA-aware CPU pinning
-sys_info_capture: null
+system_info: null

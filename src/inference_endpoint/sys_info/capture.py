@@ -75,7 +75,7 @@ def capture_system_info(
         import mlc  # noqa: PLC0415
     except ImportError as exc:
         raise SetupError(
-            "mlc-scripts is required for sys_info_capture. "
+            "mlc-scripts is required for system_info. "
             "Install it with: pip install mlc-scripts"
         ) from exc
 
