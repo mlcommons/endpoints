@@ -314,6 +314,65 @@ class RougeScorer(Scorer, scorer_id="rouge"):
         return result, 1
 
 
+def _lcb_ws_evaluate(
+    url: str, codes_dict: dict[str, list[str]], timeout_sec: int
+) -> dict | None:
+    """Evaluate extracted code via the lcb-service WebSocket (synchronous).
+
+    Sends ``{codes_dict, timeout_sec}`` and consumes progress frames until a
+    terminal ``completed`` (returns ``result`` = ``{total_samples, results}``)
+    or ``error``. Returns None on any failure so callers can fall back. Kept as
+    a module function so both LiveCodeBenchScorer and DeepSeekR1Scorer (which
+    grades its livecodebench subset out-of-band) share one client.
+    """
+    if websocket is None:
+        logger.warning(
+            "websocket-client not installed; cannot reach lcb-service. "
+            "Install with: pip install websocket-client"
+        )
+        return None
+    try:
+        ws = websocket.create_connection(
+            url, timeout=7200, ping_interval=30, ping_timeout=10
+        )
+    except (ConnectionRefusedError, OSError, Exception) as e:  # noqa: BLE001
+        logger.warning("lcb-service WebSocket connect failed (%s): %s", url, e)
+        return None
+    total = sum(len(c) for c in codes_dict.values())
+    pbar = tqdm(total=total, desc="LCB Evaluation", unit="sample")
+    try:
+        ws.send(
+            msgspec.json.encode(
+                {"codes_dict": codes_dict, "timeout_sec": timeout_sec}
+            ).decode("utf-8")
+        )
+        while True:
+            message = ws.recv()
+            if not message:
+                return None
+            data = msgspec.json.decode(message)
+            status = data.get("status")
+            if status == "progress":
+                pbar.n = data.get("completed_samples", 0)
+                pbar.refresh()
+            elif status == "completed":
+                pbar.n = total
+                pbar.refresh()
+                return data.get("result")
+            elif status == "error":
+                logger.error("lcb-service evaluation error: %s", data.get("error"))
+                return None
+    except Exception as e:  # noqa: BLE001 - network/protocol failure -> fall back
+        logger.warning("lcb-service WebSocket evaluation failed: %s", e)
+        return None
+    finally:
+        pbar.close()
+        try:
+            ws.close()
+        except Exception:  # noqa: BLE001 - ignore close errors
+            pass
+
+
 class LiveCodeBenchScorer(Scorer, scorer_id="code_bench_scorer"):
     """Scorer for LiveCodeBench code generation tasks.
 
@@ -1219,6 +1278,9 @@ class DeepSeekR1Scorer(Scorer, scorer_id="deepseek_r1"):
         deepseek_eval_project_path: os.PathLike | None = None,
         uv_executable: str = "uv",
         subprocess_timeout_s: int | None = None,
+        lcb_subset: str = "livecodebench",
+        lcb_websocket_port: int | None = 13835,
+        lcb_timeout: int = 60,
     ):
         super().__init__(
             dataset_name=dataset_name,
@@ -1231,6 +1293,19 @@ class DeepSeekR1Scorer(Scorer, scorer_id="deepseek_r1"):
         self.question_column = question_column
         self.tokenizer_path = tokenizer_path
         self.uv_executable = uv_executable
+        # LiveCodeBench executes untrusted code, which the in-process MLCommons
+        # executor can't sandbox. When a port is set, the livecodebench subset
+        # is graded out-of-band against the lcb-service WebSocket container
+        # (ws://localhost:<port>/evaluate); the rest go through the subprocess.
+        # If the socket is unreachable, score() falls back to grading all
+        # subsets in the subprocess (prior behavior).
+        self.lcb_subset = lcb_subset
+        self.lcb_timeout = lcb_timeout
+        self.lcb_websocket_url = (
+            f"ws://localhost:{lcb_websocket_port}/evaluate"
+            if lcb_websocket_port is not None
+            else None
+        )
         self.project_path = self._resolve_project_path(deepseek_eval_project_path)
         self.subprocess_timeout_s = (
             subprocess_timeout_s
@@ -1266,13 +1341,16 @@ class DeepSeekR1Scorer(Scorer, scorer_id="deepseek_r1"):
             "DeepSeek-R1 scoring requires batch processing; call score() instead."
         )
 
-    def _run_eval_subprocess(self, input_parquet: Path, out_json: Path) -> None:
+    def _run_eval_subprocess(
+        self, input_parquet: Path, out_json: Path, external_subsets: str = ""
+    ) -> None:
         """Invoke deepseek_eval_runner.py via ``uv run --project <subproject>``.
 
         Captures stdout+stderr into ``report_dir/deepseek_eval_subprocess.log``
         and, on non-zero exit, raises with the tail of the captured log so the
         real failure (missing submodule, tokenizer download, code-exec error)
-        isn't lost.
+        isn't lost. ``external_subsets`` (comma-separated) are tokenized but not
+        graded by the runner - the caller grades them out-of-band.
         """
         cmd = [
             self.uv_executable,
@@ -1288,6 +1366,8 @@ class DeepSeekR1Scorer(Scorer, scorer_id="deepseek_r1"):
             "--tokenizer",
             self.tokenizer_path,
         ]
+        if external_subsets:
+            cmd += ["--external-subsets", external_subsets]
         log_path = self.report_dir / "deepseek_eval_subprocess.log"
         try:
             completed = subprocess.run(
@@ -1319,6 +1399,39 @@ class DeepSeekR1Scorer(Scorer, scorer_id="deepseek_r1"):
                 f"{completed.returncode}; full log at {log_path}. "
                 f"Last 50 lines:\n{tail}"
             )
+
+    def _score_lcb_via_container(self, lcb_df: pd.DataFrame) -> tuple[int, int] | None:
+        """Grade the livecodebench rows against the lcb-service WebSocket.
+
+        Extracts the python block from each ``model_output`` and keys it by
+        question id (the ``ground_truth``), then evaluates via the container.
+        Returns ``(passed, total)`` or None if the service is unreachable (so
+        score() can fall back to the in-process path).
+        """
+        assert self.lcb_websocket_url is not None
+        codes_dict: dict[str, list[str]] = defaultdict(list)
+        for _, row in lcb_df.iterrows():
+            code = PythonCodeExtractor.extract(
+                str(row["model_output"]), default="# FAILED TO EXTRACT CODE"
+            )
+            codes_dict[str(row["ground_truth"])].append(
+                code or "# FAILED TO EXTRACT CODE"
+            )
+        result = _lcb_ws_evaluate(
+            self.lcb_websocket_url, dict(codes_dict), self.lcb_timeout
+        )
+        if result is None:
+            return None
+        total_samples = int(result.get("total_samples", 0))
+        per_problem = result.get("results", {})
+        if not per_problem and total_samples:
+            logger.error(
+                "lcb-service evaluated %d samples but returned an empty summary",
+                total_samples,
+            )
+            return None
+        passed = sum(sum(code_passed) for code_passed in per_problem.values())
+        return int(passed), total_samples
 
     def score(self) -> tuple[float | None, int]:
         df = self.get_outputs()
@@ -1364,15 +1477,82 @@ class DeepSeekR1Scorer(Scorer, scorer_id="deepseek_r1"):
         out_json = scratch / f"{self.dataset_name}_results.json"
         eval_df.to_parquet(input_parquet, index=False)
 
-        self._run_eval_subprocess(input_parquet, out_json)
+        n_lcb = int((eval_df["dataset"].astype(str) == self.lcb_subset).sum())
+        use_container = self.lcb_websocket_url is not None and n_lcb > 0
 
+        if not use_container:
+            # No container (or no LCB rows): grade every subset in-process.
+            self._run_eval_subprocess(input_parquet, out_json)
+            results = msgspec.json.decode(out_json.read_bytes())
+            exact_match = results.get("exact_match")
+            if exact_match is None:
+                logger.warning(
+                    "DeepSeekR1Scorer: subprocess produced no exact_match; "
+                    "returning None score. See %s",
+                    out_json,
+                )
+                return None, n_repeats
+            return float(exact_match), n_repeats
+
+        # Grade the text subsets in the subprocess and the livecodebench subset
+        # against the lcb-service container, then merge into one 5-subset number
+        # so no follow-up scorer is needed.
+        self._run_eval_subprocess(
+            input_parquet, out_json, external_subsets=self.lcb_subset
+        )
         results = msgspec.json.decode(out_json.read_bytes())
-        exact_match = results.get("exact_match")
-        if exact_match is None:
+
+        lcb_scored = self._score_lcb_via_container(
+            eval_df[eval_df["dataset"].astype(str) == self.lcb_subset]
+        )
+        if lcb_scored is None:
             logger.warning(
-                "DeepSeekR1Scorer: subprocess produced no exact_match; "
-                "returning None score. See %s",
-                out_json,
+                "DeepSeekR1Scorer: lcb-service unreachable at %s; re-grading all "
+                "subsets in-process (prior behavior).",
+                self.lcb_websocket_url,
             )
+            self._run_eval_subprocess(input_parquet, out_json)
+            results = msgspec.json.decode(out_json.read_bytes())
+            exact_match = results.get("exact_match")
+            return (float(exact_match) if exact_match is not None else None), n_repeats
+
+        lcb_passed, lcb_total = lcb_scored
+        per_dataset = results.get("per_dataset", {})
+        text_correct = 0
+        text_n = 0
+        for sub, d in per_dataset.items():
+            if sub == self.lcb_subset:
+                continue
+            em = d.get("exact_match")
+            n = int(d.get("num_samples", 0))
+            if em is None:
+                continue
+            text_correct += round(em / 100.0 * n)
+            text_n += n
+
+        total_n = text_n + lcb_total
+        combined = 100.0 * (text_correct + lcb_passed) / total_n if total_n else None
+
+        # Persist the real 5-subset result (LCB from the container).
+        per_dataset[self.lcb_subset] = {
+            "exact_match": (100.0 * lcb_passed / lcb_total) if lcb_total else None,
+            "num_samples": lcb_total,
+            "status": "lcb-service",
+        }
+        results["per_dataset"] = per_dataset
+        results["exact_match"] = combined
+        results["evaluated_samples"] = total_n
+        results["complete"] = combined is not None
+        out_json.write_bytes(msgspec.json.encode(results))
+        logger.info(
+            "DeepSeekR1Scorer: combined exact_match=%.4f (text %d/%d + LCB %d/%d)",
+            combined if combined is not None else float("nan"),
+            text_correct,
+            text_n,
+            lcb_passed,
+            lcb_total,
+        )
+
+        if combined is None:
             return None, n_repeats
-        return float(exact_match), n_repeats
+        return float(combined), n_repeats

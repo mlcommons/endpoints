@@ -82,7 +82,20 @@ def main() -> None:
         default=str(Path(__file__).resolve().parent / "mlperf_eval"),
         help="Directory holding the fetched eval_accuracy.py + submodules",
     )
+    ap.add_argument(
+        "--external-subsets",
+        default="",
+        help=(
+            "Comma-separated subset ids to tokenize but NOT grade here (the "
+            "caller scores them out-of-band, e.g. livecodebench via the "
+            "lcb-service container). Each is reported with exact_match=null and "
+            "status='external' and excluded from the in-process aggregate."
+        ),
+    )
     args = ap.parse_args()
+    external_subsets = {
+        s.strip() for s in args.external_subsets.split(",") if s.strip()
+    }
 
     eval_accuracy = _load_evaluator(Path(args.eval_dir))
 
@@ -105,6 +118,19 @@ def main() -> None:
 
     for subset, group in df.groupby("dataset"):
         group = group.copy()
+        if str(subset) in external_subsets:
+            # Tokenized above (tokens_per_sample stays correct) but graded
+            # out-of-band by the caller; do not run the in-process executor.
+            per_dataset[str(subset)] = {
+                "exact_match": None,
+                "tokens_per_sample": float(group["tok_model_output_len"].mean()),
+                "num_samples": int(len(group)),
+                "status": "external",
+            }
+            logger.info(
+                "subset=%s external (graded out-of-band) n=%d", subset, len(group)
+            )
+            continue
         try:
             evaluated = eval_accuracy.process_dataframe(group)
             scored_frames.append(evaluated)

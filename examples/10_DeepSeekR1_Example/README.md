@@ -42,9 +42,8 @@ These are baked into the scripts/configs already; listed so you know _why_.
 2. **Image:** use **`nvcr.io#nvidia/tensorrt-llm/release:1.3.0rc14`** (has
    `trtllm-serve` + `trtllm-llmapi-launch`). `ai-dynamo:0.8.1.post2` hits the
    same loader issue.
-3. **Multi-GPU launch:** `srun --ntasks=4 --ntasks-per-node=4 --mpi=pmix ...
-trtllm-llmapi-launch trtllm-serve ...`. Plain `trtllm-serve` under `srun` dies
-   with `MPI_ERR_SPAWN`.
+3. **Multi-GPU launch:** `srun --ntasks=4 --ntasks-per-node=4 --mpi=pmix ... trtllm-llmapi-launch trtllm-serve ...`.
+   Plain `trtllm-serve` under `srun` dies with `MPI_ERR_SPAWN`.
 4. **Whole-node alloc:** if GPUs aren't a SLURM gres on your cluster, request
    `--exclusive` (one node = 1x GB200x4), not `--gres=gpu:4`. enroot also needs
    `TMPDIR=/tmp`.
@@ -101,6 +100,11 @@ sbatch examples/10_DeepSeekR1_Example/launch_and_run.sh
 ## Workflow B - heterogeneous cluster (x86 login + aarch64 GB200 compute) (PASS) verified
 
 ```bash
+# MODEL_DIR points at the DeepSeek-R1 FP4 checkpoint dir; the server serves it and
+# the client uses it as the tokenizer for tokens_per_sample (the configs read it
+# via ${MODEL_DIR}). Export it for both steps.
+export MODEL_DIR=/path/to/deepseek_r1-torch-fp4
+
 # 1. Start the server only (holds the node, writes logs/dsr1_server_ready):
 SERVER_ONLY=1 sbatch examples/10_DeepSeekR1_Example/launch_and_run.sh
 
@@ -117,9 +121,42 @@ bash examples/10_DeepSeekR1_Example/run_client.sh
 # BENCH_CONFIG=.../offline_deepseek_r1_accuracy.yaml bash run_client.sh
 ```
 
-`run_client.sh` reads the server host from `logs/dsr1_server_ready`, substitutes
-it into the chosen config, runs the benchmark, prints the score, and (with
-`RELEASE_SERVER=1`) releases the node.
+`run_client.sh` takes the server as its first argument (`<host>:<port>`, or a
+bare host that defaults to `:8000`); with no argument it reads
+`logs/dsr1_server_ready`. It substitutes that endpoint into a rendered copy of
+the chosen config (the YAML is not modified), runs the benchmark, prints the
+score, and (with `RELEASE_SERVER=1`) releases the node. It requires `MODEL_DIR`
+to be exported.
+
+## Workflow C - server already running (just point the client at it)
+
+If a trtllm-serve (or any OpenAI-compatible `/v1/completions` endpoint serving
+the model) is **already up** - started outside this example - skip
+`launch_and_run.sh` entirely and run only the client. Two equivalent ways:
+
+**(i) `run_client.sh` with an explicit host** (no YAML edit; it renders a copy
+with the endpoint substituted):
+
+```bash
+export MODEL_DIR=/path/to/deepseek_r1-torch-fp4   # tokenizer for tokens_per_sample
+BENCH_CONFIG=examples/10_DeepSeekR1_Example/offline_deepseek_r1_accuracy.yaml \
+bash examples/10_DeepSeekR1_Example/run_client.sh my-server-host:8000
+```
+
+**(ii) Edit the client's config and run `from-config` yourself** - set
+`endpoints:` (and confirm `model_params.name` matches the server's registered
+model id) in the chosen YAML, then:
+
+```bash
+export MODEL_DIR=/path/to/deepseek_r1-torch-fp4
+export DEEPSEEK_EVAL_PROJECT_PATH=examples/10_DeepSeekR1_Example/accuracy  # only if not running from the repo root
+inference-endpoint benchmark from-config \
+  --config examples/10_DeepSeekR1_Example/offline_deepseek_r1_accuracy.yaml --mode acc
+```
+
+Either way the accuracy score is written under `report_dir` (see Results). The
+parent env must be synced (`uv sync --extra dev`) and the accuracy subproject set
+up once (Prerequisites).
 
 ## Results
 
