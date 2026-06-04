@@ -381,7 +381,7 @@ def _precompute_isl_for_multi_turn(
                 )
             return None
 
-    n_workers = min(os.cpu_count() or 4, 16)
+    n_workers = os.cpu_count() or 4
     skipped = 0
     with ThreadPoolExecutor(
         max_workers=n_workers, thread_name_prefix="ISLPrecompute"
