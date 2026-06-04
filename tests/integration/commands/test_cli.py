@@ -20,10 +20,15 @@ Hypothesis fuzzing: auto-discovers all CLI flags from cyclopts
 the parser. E2E tests verify all three execution modes against echo server.
 """
 
+# ruff: noqa: I001 — pinned pre-commit ruff (v0.3.3) and local ruff disagree
+# on inference_endpoint first-party import ordering.
 from __future__ import annotations
 
 import enum
 import json
+import subprocess
+import sys
+from pathlib import Path
 from typing import Literal, get_args, get_origin
 
 import pytest
@@ -289,3 +294,77 @@ class TestE2E:
             "2000",
         )
         assert r["results"]["total"] > 0
+
+    # Verbosity dimension across every load pattern. -vvv runs as a subprocess
+    # because its bootstrap redirects the process's own stdout/stderr to a
+    # logfile and spawns the dashboard reader — disruptive to run in-process.
+    @pytest.mark.integration
+    @pytest.mark.slow
+    @pytest.mark.parametrize("verbose", ["-v", "-vv", "-vvv"])
+    @pytest.mark.parametrize(
+        "mode",
+        [
+            pytest.param(
+                ["offline", "--duration", "0", "--streaming", "off"], id="offline"
+            ),
+            pytest.param(
+                [
+                    "online",
+                    "--load-pattern",
+                    "poisson",
+                    "--target-qps",
+                    "50",
+                    "--duration",
+                    "2000",
+                ],
+                id="poisson",
+            ),
+            pytest.param(
+                [
+                    "online",
+                    "--load-pattern",
+                    "concurrency",
+                    "--concurrency",
+                    "4",
+                    "--duration",
+                    "2000",
+                ],
+                id="concurrency",
+            ),
+        ],
+    )
+    def test_runs_under_each_verbosity(
+        self, mock_http_echo_server, ds_dataset_path, tmp_path, verbose, mode
+    ):
+        """Every load pattern runs cleanly under -v / -vv / -vvv; only -vvv
+        stands up the trace channel."""
+        cmd = [
+            sys.executable,
+            "-m",
+            "inference_endpoint.main",
+            verbose,
+            "benchmark",
+            *mode,
+            "--endpoints",
+            mock_http_echo_server.url,
+            "--model",
+            "test-model",
+            "--dataset",
+            ds_dataset_path,
+            "--report-dir",
+            str(tmp_path),
+            *_FAST,
+        ]
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=180,
+            cwd=Path(__file__).resolve().parents[3],
+        )
+        assert proc.returncode == 0, proc.stderr[-3000:]
+        # results.json is written regardless of the -vvv stdout redirect.
+        results = json.loads((tmp_path / "results.json").read_text())
+        assert results["results"]["total"] > 0
+        # Bootstrap announces the trace channel on the pre-redirect stderr.
+        assert ("trace:" in proc.stderr) == (verbose == "-vvv")

@@ -26,6 +26,7 @@ from ..core.record import ErrorEventType, EventRecord, SampleEventType
 from ..core.types import ErrorData, QueryResult, TextModelOutput
 from ..dataset_manager.multi_turn_dataset import ConversationMetadata
 from ..exceptions import InputValidationError
+from ..utils.trace import Event, emit_trace_id
 from .conversation_manager import ConversationManager, ConversationState
 from .strategy import PhaseIssuerProtocol
 
@@ -372,6 +373,13 @@ class MultiTurnStrategy:
             error_type="TurnTimeout",
             error_message=f"turn timeout after {self._turn_timeout_s}s",
         )
+        # Mirror the trace COMPLETE here — _handle_response is bypassed
+        # for the timed-out turn, so without this the dashboard's
+        # in-flight count stays permanently inflated. Only fire on the
+        # timeout path: the abort path below uses register_skipped(),
+        # which never emits trace ISSUED, so emitting COMPLETE there
+        # would unmatched-inflate the dashboard's complete counter.
+        emit_trace_id(Event.COMPLETE, query_id)
 
         dropped = self._abort_remaining_turns(
             conv_id, reason=f"prior turn timed out (query={query_id})"
