@@ -22,7 +22,7 @@ This module defines the basic data structures used throughout the system.
 import time
 import uuid
 from enum import Enum
-from typing import Any
+from typing import Any, cast
 
 import msgspec
 
@@ -40,16 +40,16 @@ class APIType(str, Enum):
     VIDEOGEN = "videogen"
 
     def default_route(self) -> str:
-        """Return the default HTTP path for this API type."""
+        """Return the default relative URL path for this API type."""
         match self:
             case APIType.OPENAI:
-                return "/v1/chat/completions"
+                return "v1/chat/completions"
             case APIType.OPENAI_COMPLETIONS:
-                return "/v1/completions"
+                return "v1/completions"
             case APIType.SGLANG:
-                return "/generate"
+                return "generate"
             case APIType.VIDEOGEN:
-                return "/v1/videos/generations"
+                return "v1/videos/generations"
             case _:
                 raise ValueError(f"Invalid API type: {self}")
 
@@ -78,6 +78,37 @@ class QueryStatus(Enum):
 OUTPUT_ELEM_TYPE = str | tuple[str, ...]
 """Type for a single output or reasoning value: string (non-streaming) or tuple of strings (streaming)."""
 
+TOOL_CALL_TYPE = dict[str, Any]
+TOOL_CALLS_TYPE = tuple[TOOL_CALL_TYPE, ...]
+_TOOL_CALL_CHUNKS_TYPE = tuple[TOOL_CALLS_TYPE, ...]
+_TOOL_CALL_ELEM_TYPE = tuple[Any, ...]
+
+
+def merge_tool_calls(tool_calls: _TOOL_CALL_ELEM_TYPE | None) -> TOOL_CALLS_TYPE | None:
+    if not tool_calls:
+        return None
+    if not isinstance(tool_calls[0], list | tuple):
+        return cast(TOOL_CALLS_TYPE, tool_calls)
+
+    tool_call_chunks = cast(_TOOL_CALL_CHUNKS_TYPE, tool_calls)
+    merged: dict[int, TOOL_CALL_TYPE] = {}
+    for chunk in tool_call_chunks:
+        for partial in chunk:
+            idx = partial.get("index", 0)
+            tool_call = merged.setdefault(
+                idx, {"type": "function", "function": {"arguments": ""}}
+            )
+            if partial.get("id"):
+                tool_call["id"] = partial["id"]
+            if partial.get("type"):
+                tool_call["type"] = partial["type"]
+            fn = partial.get("function") or {}
+            if fn.get("name"):
+                tool_call["function"]["name"] = fn["name"]
+            if fn.get("arguments"):
+                tool_call["function"]["arguments"] += fn["arguments"]
+    return tuple(merged[i] for i in sorted(merged))
+
 
 class TextModelOutput(
     msgspec.Struct,
@@ -90,23 +121,33 @@ class TextModelOutput(
 ):  # type: ignore[call-arg]
     """Structured output from a text model.
 
-    Supports main output and optional reasoning (e.g. chain-of-thought).
+    Supports main output, optional reasoning (e.g. chain-of-thought), and tool calls.
     Each field may be a string (non-streaming) or tuple of strings (streaming chunks).
+
+    AT-RISK (gc=False): Has mutable container field `tool_calls`. Any change that
+    mutates `tool_calls` after construction or stores cyclic references in it
+    must be audited; if so, remove gc=False.
 
     Attributes:
         output: Main model output. Defaults to empty string.
         reasoning: Optional reasoning trace. Defaults to None.
+        tool_calls: Optional structured tool calls. Defaults to None.
+                    Placed after reasoning so wire-format with array_like=True is
+                    backward compatible (missing trailing elements decode as default).
     """
 
     output: OUTPUT_ELEM_TYPE = ""
     reasoning: OUTPUT_ELEM_TYPE | None = None
+    tool_calls: _TOOL_CALL_ELEM_TYPE | None = None
 
     def __post_init__(self):
-        """Convert list to tuple for output and reasoning to preserve immutability."""
+        """Convert list to tuple for output, reasoning, and tool_calls to preserve immutability."""
         if isinstance(self.output, list):
             msgspec.structs.force_setattr(self, "output", tuple(self.output))
         if self.reasoning is not None and isinstance(self.reasoning, list):
             msgspec.structs.force_setattr(self, "reasoning", tuple(self.reasoning))
+        if self.tool_calls is not None and isinstance(self.tool_calls, list):
+            msgspec.structs.force_setattr(self, "tool_calls", tuple(self.tool_calls))
 
     def __str__(self) -> str:
         """Return the full output as a single string (joins tuple chunks if streaming)."""
@@ -123,6 +164,10 @@ class TextModelOutput(
             elif isinstance(self.output, tuple):
                 parts.extend(self.output)
 
+        tool_calls = merge_tool_calls(self.tool_calls)
+        if tool_calls:
+            parts.append(msgspec.json.encode(list(tool_calls)).decode())
+
         # NOTE: Not sure how output is formatted - there *might* need to be a space or separator between
         # reasoning and output depending on the accumulator / API.
         return "".join(parts)
@@ -136,6 +181,9 @@ class TextModelOutput(
 
         For non-streaming (str fields), there is no "first chunk" concept so
         this returns an empty string.
+
+        Streamed tool-call chunks are merged after dropping the first tool-call
+        chunk when the response starts with a pure tool-call delta.
         """
         parts: list[str] = []
         if self.reasoning:
@@ -155,7 +203,71 @@ class TextModelOutput(
                 elif len(self.output) > 1:
                     # No reasoning; first chunk is output[0], skip it.
                     parts.extend(self.output[1:])
+        tool_calls = self.tool_calls
+        if (
+            tool_calls
+            and isinstance(tool_calls[0], list | tuple)
+            and not (self.output or self.reasoning)
+        ):
+            tool_calls = tool_calls[1:]
+        merged_tool_calls = merge_tool_calls(tool_calls)
+        if merged_tool_calls:
+            parts.append(msgspec.json.encode(list(merged_tool_calls)).decode())
         return "".join(parts)
+
+    def as_message_parts(
+        self,
+    ) -> tuple[str, str | None, TOOL_CALLS_TYPE | None]:
+        """Return (content, reasoning, tool_calls) for chat-template tokenization."""
+        if isinstance(self.output, str):
+            content = self.output
+        else:
+            content = "".join(self.output)
+
+        reasoning_str: str | None = None
+        if self.reasoning:
+            if isinstance(self.reasoning, str):
+                reasoning_str = self.reasoning
+            else:
+                reasoning_str = "".join(self.reasoning)
+
+        return content, reasoning_str, merge_tool_calls(self.tool_calls)
+
+    def as_message_parts_after_first_chunk(
+        self,
+    ) -> tuple[str, str | None, TOOL_CALLS_TYPE | None]:
+        """Return message parts emitted after the first stream chunk."""
+        reasoning_after: str | None = None
+        if isinstance(self.reasoning, tuple) and len(self.reasoning) > 1:
+            reasoning_after = "".join(self.reasoning[1:])
+
+        # has_reasoning_tail: reasoning[1:] is non-empty (mirrors `parts` logic in text_after_first_chunk)
+        has_reasoning_tail = reasoning_after is not None
+
+        content_after = ""
+        if self.output:
+            if isinstance(self.output, str):
+                # Include if reasoning is any non-empty tuple (it was the first chunk)
+                if has_reasoning_tail or (
+                    self.reasoning and isinstance(self.reasoning, tuple)
+                ):
+                    content_after = self.output
+            elif isinstance(self.output, tuple):
+                if has_reasoning_tail or self.reasoning:
+                    # First chunk was in reasoning; include all output chunks.
+                    content_after = "".join(self.output)
+                elif len(self.output) > 1:
+                    # No reasoning; first chunk is output[0], skip it.
+                    content_after = "".join(self.output[1:])
+
+        tool_calls = self.tool_calls
+        if (
+            tool_calls
+            and isinstance(tool_calls[0], list | tuple)
+            and not (self.output or self.reasoning)
+        ):
+            tool_calls = tool_calls[1:]
+        return content_after, reasoning_after, merge_tool_calls(tool_calls)
 
 
 OUTPUT_TYPE = TextModelOutput
@@ -245,7 +357,7 @@ class Query(
         gc=False: Safe because data/headers are simple key-value pairs without cycles.
         Do NOT store self-referential or cyclic structures in data/headers fields.
 
-        array_like=True: Encodes as array instead of object (e.g., ["id", {...}, {...}, 0.0]
+        array_like=True: Encodes as array instead of object (e.g., ["id", {...}, 0.0]
         instead of {"id": ..., "data": ..., ...}). Provides ~6-50% size reduction and
         ~6-29% ser/des speedup for ZMQ transport depending on payload size.
 

@@ -9,22 +9,26 @@ model_params:
   top_k: null  # Top-K sampling
   top_p: null  # Top-P (nucleus) sampling
   repetition_penalty: null  # Repetition penalty
+  presence_penalty: null  # Presence penalty
+  frequency_penalty: null  # Frequency penalty
+  chat_template_kwargs: null  # Per-request chat-template kwargs forwarded to compatible servers.
   max_new_tokens: 1024  # Max output tokens
   osl_distribution: null  # Output sequence length distribution
   streaming: 'on'  # Streaming mode: auto/on/off | options: auto, on, off
 datasets:  # Dataset configs
 - name: perf
   type: performance  # Dataset purpose: performance or accuracy | options: performance, accuracy
-  path: '<DATASET_PATH eg: tests/datasets/dummy_1k.jsonl>'  # Dataset file path
+  path: '<DATASET_PATH eg: tests/assets/datasets/dummy_1k.jsonl>'  # Dataset file path
   format: null  # Dataset format (auto-detected)
   samples: null  # Number of samples to use
   eval_method: null
   parser:  # Column remapping: {prompt: <col>, system: <col>}
     prompt: text_input
   accuracy_config: null  # Accuracy evaluation settings
+  multi_turn: null  # Multi-turn conversation configuration
 - name: accuracy
   type: accuracy  # Dataset purpose: performance or accuracy | options: performance, accuracy
-  path: '<DATASET_PATH eg: tests/datasets/ds_samples.jsonl>'  # Dataset file path
+  path: '<DATASET_PATH eg: tests/assets/datasets/ds_samples.jsonl>'  # Dataset file path
   format: null  # Dataset format (auto-detected)
   samples: null  # Number of samples to use
   eval_method: exact_match  # Accuracy evaluation method | options: exact_match, contains, judge
@@ -32,10 +36,11 @@ datasets:  # Dataset configs
     prompt: question
     system: system_prompt
   accuracy_config:  # Accuracy evaluation settings
-    eval_method: pass_at_1  # Scorer method | options: pass_at_1, string_match, rouge, code_bench_scorer, shopify_category_f1
+    eval_method: pass_at_1  # Scorer method | options: pass_at_1, string_match, rouge, code_bench_scorer, shopify_category_f1, vbench
     ground_truth: ground_truth  # Ground truth column name
     extractor: boxed_math_extractor  # Answer extractor (abcd_extractor, boxed_math_extractor, identity_extractor, python_code_extractor)
     num_repeats: 1  # Repeat dataset N times for evaluation
+  multi_turn: null  # Multi-turn conversation configuration
 settings:
   runtime:
     min_duration_ms: 600000  # Min duration (ms, or with suffix: 600s, 10m)
@@ -44,7 +49,7 @@ settings:
     scheduler_random_seed: 42  # Scheduler RNG seed
     dataloader_random_seed: 42  # Dataloader RNG seed
   load_pattern:
-    type: poisson  # Load pattern type | options: max_throughput, poisson, concurrency, burst, step
+    type: poisson  # Load pattern type | options: max_throughput, poisson, concurrency, multi_turn, burst, step
     target_qps: 10.0  # Target QPS
     target_concurrency: null  # Concurrent requests
   client:
@@ -65,9 +70,20 @@ settings:
     worker_initialization_timeout: 60.0  # Worker init timeout (seconds)
     worker_graceful_shutdown_wait: 0.5  # Post-run graceful shutdown wait (seconds)
     worker_force_kill_timeout: 0.5  # Force kill timeout after graceful wait (seconds)
+    insecure: false  # Skip TLS certificate verification
     max_idle_time: 4.0  # Discard connections idle longer than this (seconds)
     min_required_connections: -1  # Min connections to initialize (-1=auto, 0=disabled)
     worker_gc_mode: relaxed  # Worker GC strategy | options: disabled, relaxed, system
+  drain:
+    warmup_timeout_s: 240.0  # Warmup drain timeout in seconds (None = wait indefinitely)
+    performance_timeout_s: 240.0  # Performance drain timeout in seconds (None = wait indefinitely)
+    accuracy_timeout_s: null  # Accuracy drain timeout in seconds (None = wait indefinitely)
+  warmup:
+    enabled: false  # Enable warmup phase before performance run
+    n_requests: null  # Warmup request count (None = full dataset once)
+    salt: false  # Prepend a unique random hex salt to each warmup prompt
+    drain: false
+    warmup_random_seed: 42  # RNG seed for warmup scheduling and sample ordering
 endpoint_config:
   endpoints:  # Endpoint URL(s). Must include scheme, e.g. 'http://host:port'.
   - http://localhost:8000

@@ -20,7 +20,6 @@ from __future__ import annotations
 import asyncio
 import random
 
-import inference_endpoint.load_generator.session as _session_mod
 import pytest
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import LoadPattern, LoadPatternType
@@ -39,15 +38,9 @@ from inference_endpoint.load_generator.session import (
     PhaseResult,
     PhaseType,
     SessionResult,
+    _extract_prompt_text,
 )
 from inference_endpoint.metrics.metric import Throughput
-
-
-@pytest.fixture(autouse=False)
-def enable_warmup(monkeypatch):
-    """Enable warmup phases for tests that use PhaseType.WARMUP."""
-    monkeypatch.setattr(_session_mod, "_WARMUP_ENABLED", True)
-
 
 # ---------------------------------------------------------------------------
 # Test doubles
@@ -160,11 +153,15 @@ class TestPhaseIssuer:
         assert len(issuer.issued_queries) == 1
         assert issuer.issued_queries[0].id == result
         assert 3 in phase_issuer.uuid_to_index.values()
+        # Single-turn callers omit conv_id/turn — defaults flow through.
+        assert phase_issuer.uuid_to_conv_info[result] == ("", None)
 
         # Should have published ISSUED event
         issued_events = publisher.events_of_type(SampleEventType.ISSUED)
         assert len(issued_events) == 1
         assert issued_events[0].sample_uuid == result
+        assert issued_events[0].conversation_id == ""
+        assert issued_events[0].turn is None
 
     def test_issue_returns_none_when_stopped(self):
         dataset = FakeDataset(5)
@@ -186,6 +183,73 @@ class TestPhaseIssuer:
 
         ids = [phase_issuer.issue(i % 5) for i in range(10)]
         assert len(set(ids)) == 10
+
+    def test_issue_stamps_conversation_id_and_turn_on_issued_event(self):
+        dataset = FakeDataset(5)
+        issuer = FakeIssuer()
+        issuer._auto_respond = False
+        publisher = FakePublisher()
+        phase_issuer = PhaseIssuer(dataset, issuer, publisher, lambda: False)
+
+        query_id = phase_issuer.issue(2, conversation_id="conv-1", turn=3)
+        assert query_id is not None
+        assert issuer.issued_queries[0].headers == {"X-Session-ID": "conv-1"}
+        assert phase_issuer.uuid_to_conv_info[query_id] == ("conv-1", 3)
+
+        issued = publisher.events_of_type(SampleEventType.ISSUED)
+        assert len(issued) == 1
+        assert issued[0].sample_uuid == query_id
+        assert issued[0].conversation_id == "conv-1"
+        assert issued[0].turn == 3
+
+    def test_register_skipped_populates_state_without_issuing_http(self):
+        dataset = FakeDataset(5)
+        issuer = FakeIssuer()
+        issuer._auto_respond = False
+        publisher = FakePublisher()
+        phase_issuer = PhaseIssuer(dataset, issuer, publisher, lambda: False)
+
+        qid = phase_issuer.register_skipped(2, conversation_id="c1", turn=4)
+
+        assert qid is not None
+        assert phase_issuer.uuid_to_index[qid] == 2
+        assert phase_issuer.uuid_to_conv_info[qid] == ("c1", 4)
+        assert qid in phase_issuer.completed_uuids
+        assert phase_issuer.issued_count == 1
+        assert phase_issuer.inflight == 0
+        assert issuer.issued_queries == []
+
+        issued = publisher.events_of_type(SampleEventType.ISSUED)
+        assert len(issued) == 1
+        assert issued[0].sample_uuid == qid
+        assert issued[0].conversation_id == "c1"
+        assert issued[0].turn == 4
+
+    def test_mark_inflight_complete_invokes_callback_when_drained(self):
+        dataset = FakeDataset(5)
+        issuer = FakeIssuer()
+        publisher = FakePublisher()
+        drained: list[bool] = []
+        phase_issuer = PhaseIssuer(
+            dataset,
+            issuer,
+            publisher,
+            lambda: False,
+            on_inflight_drained=lambda: drained.append(True),
+        )
+
+        phase_issuer.inflight = 1
+        phase_issuer.mark_inflight_complete()
+
+        assert phase_issuer.inflight == 0
+        assert drained == [True]
+
+    def test_register_skipped_returns_none_when_stopped(self):
+        phase_issuer = PhaseIssuer(
+            FakeDataset(5), FakeIssuer(), FakePublisher(), lambda: True
+        )
+        assert phase_issuer.register_skipped(0) is None
+        assert phase_issuer.issued_count == 0
 
 
 # ---------------------------------------------------------------------------
@@ -251,7 +315,7 @@ class TestBenchmarkSession:
         )
 
     @pytest.mark.asyncio
-    async def test_warmup_produces_no_result(self, enable_warmup):
+    async def test_warmup_produces_no_result(self):
         loop = asyncio.get_running_loop()
         issuer = FakeIssuer()
         issuer._loop = loop
@@ -270,7 +334,7 @@ class TestBenchmarkSession:
         assert len(result.phase_results) == 0
 
     @pytest.mark.asyncio
-    async def test_multi_phase(self, enable_warmup):
+    async def test_multi_phase(self):
         loop = asyncio.get_running_loop()
         issuer = FakeIssuer()
         issuer._loop = loop
@@ -346,7 +410,7 @@ class TestBenchmarkSession:
         assert len(completed) == 5
 
     @pytest.mark.asyncio
-    async def test_stale_completions_ignored_by_strategy(self, enable_warmup):
+    async def test_stale_completions_ignored_by_strategy(self):
         """Responses from warmup phase should not affect perf phase strategy."""
         loop = asyncio.get_running_loop()
         publisher = FakePublisher()
@@ -558,6 +622,76 @@ class TestBenchmarkSession:
         # Bug #5: error event should also be published
         assert len(error_events) == 1
 
+        # ERROR must be emitted BEFORE COMPLETE so the metrics aggregator can
+        # observe the in-flight tracked row before set_field(...COMPLETE...)
+        # removes it. Reverting this order would silently zero
+        # tracked_samples_failed.
+        error_idx = publisher.events.index(error_events[0])
+        complete_idx = publisher.events.index(complete_events[0])
+        assert error_idx < complete_idx, (
+            f"ERROR event must be emitted before COMPLETE for metrics "
+            f"aggregator correctness; got error at idx {error_idx}, "
+            f"complete at idx {complete_idx}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_handle_response_stamps_conversation_id_and_turn(self):
+        """All event types inherit (conv_id, turn) seeded at issue time; streaming
+        events use .get() so the entry survives for the terminal QueryResult pop."""
+        loop = asyncio.get_running_loop()
+        issuer = FakeIssuer()
+        publisher = FakePublisher()
+        session = BenchmarkSession(issuer, publisher, loop)
+
+        phase_issuer = PhaseIssuer(FakeDataset(3), issuer, publisher, lambda: False)
+        session._current_phase_issuer = phase_issuer
+
+        # Streaming path: entry stays available for the terminal COMPLETE pop.
+        phase_issuer.uuid_to_conv_info["q-stream"] = ("conv-s", 7)
+        session._handle_response(
+            StreamChunk(id="q-stream", metadata={"first_chunk": True})
+        )
+        session._handle_response(StreamChunk(id="q-stream", response_chunk="delta"))
+        assert (
+            publisher.events_of_type(SampleEventType.RECV_FIRST)[0].conversation_id,
+            publisher.events_of_type(SampleEventType.RECV_FIRST)[0].turn,
+        ) == ("conv-s", 7)
+        assert (
+            publisher.events_of_type(SampleEventType.RECV_NON_FIRST)[0].conversation_id,
+            publisher.events_of_type(SampleEventType.RECV_NON_FIRST)[0].turn,
+        ) == ("conv-s", 7)
+        assert "q-stream" in phase_issuer.uuid_to_conv_info
+
+        # Success path: COMPLETE inherits conv info, entry is popped.
+        phase_issuer.uuid_to_index["q-ok"] = 0
+        phase_issuer.uuid_to_conv_info["q-ok"] = ("conv-9", 5)
+        phase_issuer.inflight = 1
+        session._handle_response(
+            QueryResult(id="q-ok", response_output="ok", completed_at=12345)
+        )
+        complete = publisher.events_of_type(SampleEventType.COMPLETE)
+        assert [(e.conversation_id, e.turn) for e in complete] == [("conv-9", 5)]
+        assert "q-ok" not in phase_issuer.uuid_to_conv_info
+        assert "q-ok" not in phase_issuer.completed_uuids
+
+        # Error path: ERROR (emitted before COMPLETE) also carries conv info.
+        phase_issuer.uuid_to_index["q-err"] = 1
+        phase_issuer.uuid_to_conv_info["q-err"] = ("conv-err", 2)
+        phase_issuer.inflight = 1
+        session._handle_response(
+            QueryResult(
+                id="q-err",
+                error=ErrorData(error_type="boom", error_message="x"),
+            )
+        )
+        error_events = [
+            e for e in publisher.events if isinstance(e.event_type, ErrorEventType)
+        ]
+        assert [(e.conversation_id, e.turn) for e in error_events] == [("conv-err", 2)]
+        complete = publisher.events_of_type(SampleEventType.COMPLETE)
+        assert (complete[-1].conversation_id, complete[-1].turn) == ("conv-err", 2)
+        assert "q-err" not in phase_issuer.completed_uuids
+
 
 @pytest.mark.unit
 class TestBenchmarkSessionPoissonIntegration:
@@ -737,7 +871,7 @@ class TestBenchmarkSessionMultiPhaseSatPerfSequence:
     """Multi-perf + warmup sequence (sat -> perf -> sat -> perf)."""
 
     @pytest.mark.asyncio
-    async def test_sat_perf_sat_perf(self, enable_warmup):
+    async def test_sat_perf_sat_perf(self):
         loop = asyncio.get_running_loop()
         issuer = FakeIssuer()
         issuer._loop = loop
@@ -798,7 +932,7 @@ class TestBenchmarkSessionStaleStreamChunk:
     """Stale StreamChunk from previous phase is ignored."""
 
     @pytest.mark.asyncio
-    async def test_stale_stream_chunk_ignored(self, enable_warmup):
+    async def test_stale_stream_chunk_ignored(self):
         """StreamChunk from warmup phase should not affect perf phase counts."""
         loop = asyncio.get_running_loop()
         publisher = FakePublisher()
@@ -826,7 +960,9 @@ class TestBenchmarkSessionStaleStreamChunk:
         )
 
         phases = [
-            PhaseConfig("sat", sat_settings, FakeDataset(2), PhaseType.WARMUP),
+            PhaseConfig(
+                "sat", sat_settings, FakeDataset(2), PhaseType.WARMUP, drain_after=False
+            ),
             PhaseConfig("perf", perf_settings, FakeDataset(2), PhaseType.PERFORMANCE),
         ]
 
@@ -871,7 +1007,7 @@ class TestBenchmarkSessionStaleStreamChunk:
 
 @pytest.mark.unit
 class TestSessionResult:
-    def test_perf_results_filter(self, enable_warmup):
+    def test_perf_results_filter(self):
         results = [
             PhaseResult("sat", PhaseType.WARMUP, {}, 0, 0, 0),
             PhaseResult("perf1", PhaseType.PERFORMANCE, {"a": 1}, 10, 0, 100),
@@ -882,3 +1018,104 @@ class TestSessionResult:
         assert len(sr.perf_results) == 2
         assert len(sr.accuracy_results) == 1
         assert sr.perf_results[0].name == "perf1"
+
+
+@pytest.mark.unit
+class TestExtractPromptText:
+    def test_string_content_extracted(self):
+        messages = [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "Hi"},
+        ]
+        assert _extract_prompt_text(messages) == "Hello\nHi"
+
+    def test_multimodal_list_content_text_parts_extracted(self):
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Describe this image"},
+                    {"type": "image_url"},
+                ],
+            }
+        ]
+        assert _extract_prompt_text(messages) == "Describe this image"
+
+    def test_mixed_string_and_list_content(self):
+        messages = [
+            {"role": "system", "content": "You are helpful"},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "What is this?"},
+                    {"type": "image_url"},
+                ],
+            },
+        ]
+        assert _extract_prompt_text(messages) == "You are helpful\nWhat is this?"
+
+    def test_none_content_skipped(self):
+        messages = [
+            {"role": "assistant", "content": None},
+            {"role": "user", "content": "Hello"},
+        ]
+        assert _extract_prompt_text(messages) == "Hello"
+
+    def test_list_content_with_no_text_parts_returns_none(self):
+        messages = [{"role": "user", "content": [{"type": "image_url"}]}]
+        assert _extract_prompt_text(messages) is None
+
+    def test_non_dict_messages_skipped(self):
+        messages = ["not a dict", {"role": "user", "content": "Valid"}]
+        assert _extract_prompt_text(messages) == "Valid"
+
+    def test_tool_calls_included(self):
+        messages = [
+            {"role": "user", "content": "What's the weather?"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "c1",
+                        "type": "function",
+                        "function": {"name": "get_weather", "arguments": "{}"},
+                    }
+                ],
+            },
+        ]
+        result = _extract_prompt_text(messages)
+        assert result is not None
+        assert "What's the weather?" in result
+        assert "get_weather" in result
+
+
+@pytest.mark.unit
+class TestBenchmarkSessionHandleResponse:
+    """Direct invocation of BenchmarkSession._handle_response (no session.run)."""
+
+    @pytest.mark.asyncio
+    async def test_drops_late_response_after_timeout(self):
+        """A late QueryResult for a query already in completed_uuids must be a no-op:
+        no duplicate ERROR/COMPLETE publish and no second inflight decrement."""
+        loop = asyncio.get_running_loop()
+        dataset = FakeDataset(1)
+        issuer = FakeIssuer()
+        publisher = FakePublisher()
+        phase_issuer = PhaseIssuer(dataset, issuer, publisher, lambda: False)
+
+        phase_issuer.uuid_to_index["q-late"] = 0
+        phase_issuer.completed_uuids.add("q-late")
+        phase_issuer.inflight = 1
+
+        session = BenchmarkSession(issuer, publisher, loop)
+        session._current_phase_issuer = phase_issuer
+
+        late_resp = QueryResult(
+            id="q-late",
+            error=ErrorData(error_type="late", error_message="late arrival"),
+        )
+        session._handle_response(late_resp)
+
+        assert publisher.events == []
+        assert phase_issuer.inflight == 1

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import random
 from abc import ABC, abstractmethod
+from collections.abc import Iterator
 
 from ..config.runtime_settings import RuntimeSettings
 
@@ -50,7 +51,7 @@ class SampleOrder(ABC):
         self.n_samples_in_dataset = n_samples_in_dataset
         self.rng = rng
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[int]:
         return self
 
     def __next__(self) -> int:
@@ -79,7 +80,7 @@ class WithoutReplacementSampleOrder(SampleOrder):
         # Force initial shuffle on first call
         self._curr_idx = self.n_samples_in_dataset + 1
 
-    def _reset(self):
+    def _reset(self) -> None:
         self.rng.shuffle(self.index_order)
         self._curr_idx = 0
 

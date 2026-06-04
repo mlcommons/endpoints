@@ -114,16 +114,37 @@ class UserPromptFormatter(RowProcessor):
 
 
 class AddStaticColumns(Transform):
-    """Transform that adds columns with constant values to a DataFrame."""
+    """Transform that adds columns with constant values to a DataFrame.
 
-    def __init__(self, data: dict[str, Any]):
+    When overwrite=False, existing non-null values are preserved — dataset
+    per-row overrides take precedence over the supplied defaults.
+    """
+
+    def __init__(self, data: dict[str, Any], overwrite: bool = True):
         """Initialize the AddStaticColumns transform."""
         self.data = data
+        self.overwrite = overwrite
+
+    @staticmethod
+    def _static_value(value: Any, rows: int) -> Any:
+        if isinstance(value, dict):
+            return [value] * rows
+        return value
 
     def __call__(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Add the static columns to the row."""
+        """Add the static columns to the dataframe."""
+        rows = len(df)
         for key, value in self.data.items():
-            df[key] = value
+            static_value = self._static_value(value, rows)
+            if self.overwrite:
+                df[key] = static_value
+            else:
+                if value is None:
+                    continue
+                if key in df.columns:
+                    df[key] = df[key].where(pd.notna(df[key]), static_value)
+                else:
+                    df[key] = static_value
         return df
 
 

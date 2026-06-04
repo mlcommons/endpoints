@@ -153,6 +153,8 @@ class EventRecord(msgspec.Struct, kw_only=True, frozen=True, gc=False):  # type:
     event_type: EventType
     timestamp_ns: int = msgspec.field(default_factory=time.monotonic_ns)
     sample_uuid: str = ""
+    conversation_id: str = ""
+    turn: int | None = None
     data: OUTPUT_TYPE | PromptData | ErrorData | None = None
 
 

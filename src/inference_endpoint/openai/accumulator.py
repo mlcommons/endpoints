@@ -15,15 +15,13 @@
 
 """OpenAI SSE stream accumulator implementation."""
 
-import logging
+from typing import Any
 
 from inference_endpoint.core.types import QueryResult, StreamChunk, TextModelOutput
 from inference_endpoint.endpoint_client.accumulator_protocol import (
     SSEAccumulatorProtocol,
 )
-from inference_endpoint.openai.types import SSEDelta as OpenAISSEDelta
-
-logger = logging.getLogger(__name__)
+from inference_endpoint.openai.types import SSEChoice
 
 
 class OpenAISSEAccumulator(SSEAccumulatorProtocol):
@@ -32,22 +30,45 @@ class OpenAISSEAccumulator(SSEAccumulatorProtocol):
     def __init__(self, query_id: str, stream_all_chunks: bool):
         self.output_chunks: list[str] = []
         self.reasoning_chunks: list[str] = []
+        self.tool_call_chunks: list[tuple[dict[str, Any], ...]] = []
+        self._finish_reason: str | None = None
 
         self.first_chunk_sent = False
         self.query_id = query_id
         self.stream_all_chunks = stream_all_chunks
 
-    def add_chunk(self, delta: OpenAISSEDelta) -> StreamChunk | None:
-        if not isinstance(delta, OpenAISSEDelta):
+    def add_chunk(self, choice: SSEChoice | None) -> StreamChunk | None:
+        if not isinstance(choice, SSEChoice):
             return None
+
+        if choice.finish_reason:
+            self._finish_reason = choice.finish_reason
+
+        delta = choice.delta
+        if delta is None:
+            return None
+
+        if delta.tool_calls:
+            self.tool_call_chunks.append(tuple(delta.tool_calls))
 
         content = None
         if delta.content:
             self.output_chunks.append(delta.content)
             content = delta.content
-        elif delta.reasoning:
-            self.reasoning_chunks.append(delta.reasoning)
-            content = delta.reasoning
+        elif delta.reasoning_content or delta.reasoning:
+            rc = delta.reasoning_content or delta.reasoning
+            self.reasoning_chunks.append(rc)  # type: ignore[arg-type]
+            content = rc
+        elif delta.tool_calls and not self.first_chunk_sent:
+            # Pure tool-call delta with no text: emit a zero-length sentinel so
+            # RECV_FIRST / TTFT fires for agentic responses that have no content.
+            sentinel = StreamChunk(
+                id=self.query_id,
+                response_chunk="",
+                metadata={"first_chunk": True},
+            )
+            self.first_chunk_sent = True
+            return sentinel
         else:
             return None
 
@@ -67,31 +88,45 @@ class OpenAISSEAccumulator(SSEAccumulatorProtocol):
             return None
 
     def get_final_output(self) -> QueryResult:
+        tool_calls = tuple(self.tool_call_chunks) if self.tool_call_chunks else None
+
         if self.reasoning_chunks:
-            # If there are reasoning chunks, then the first chunk received
-            # is the first reasoning chunk. The rest of the reasoning chunks,
-            # as well as the output chunks can be joined together.
             resp_reasoning: list[str] = [self.reasoning_chunks[0]]
             if len(self.reasoning_chunks) > 1:
                 resp_reasoning.append("".join(self.reasoning_chunks[1:]))
             text_output = TextModelOutput(
                 output="".join(self.output_chunks),
                 reasoning=resp_reasoning,
+                tool_calls=tool_calls,
             )
         elif self.output_chunks:
-            # If there are only output chunks, the first chunk is used for
-            # TTFT calculations. The rest are joined together.
             resp_output: list[str] = [self.output_chunks[0]]
             if len(self.output_chunks) > 1:
                 resp_output.append("".join(self.output_chunks[1:]))
-            text_output = TextModelOutput(output=resp_output, reasoning=None)
+            text_output = TextModelOutput(
+                output=resp_output,
+                reasoning=None,
+                tool_calls=tool_calls,
+            )
         else:
-            text_output = TextModelOutput(output=[], reasoning=None)
+            text_output = TextModelOutput(
+                output=[],
+                reasoning=None,
+                tool_calls=tool_calls,
+            )
+
+        metadata: dict[str, Any] = {
+            "first_chunk": not self.first_chunk_sent,
+            "final_chunk": True,
+        }
+        if self._finish_reason:
+            metadata["finish_reason"] = self._finish_reason
+        _content, _reasoning, merged_tool_calls = text_output.as_message_parts()
+        if merged_tool_calls:
+            metadata["tool_calls"] = list(merged_tool_calls)
+
         return QueryResult(
             id=self.query_id,
             response_output=text_output,
-            metadata={
-                "first_chunk": not self.first_chunk_sent,
-                "final_chunk": True,
-            },
+            metadata=metadata,
         )

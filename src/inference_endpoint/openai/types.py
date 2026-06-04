@@ -36,16 +36,25 @@ ChatMessageContent = str | list[dict[str, Any]]
 
 # NOTE(vir): msgspec usage
 # omit_defaults=True: Fields with static defaults are omitted if value equals default (ie those not using default_factory)
-# gc=False: Safe for request/response structs with scalar and nested struct fields only.
+# gc=False: audit 2026-05: all container fields are populated at construction and never mutated.
 # frozen=True: Makes structs immutable and hashable, also enables faster struct decoding
 #              (direct attribute access via fixed memory offset vs hash table lookup)
 
 
+# gc=False: audit 2026-05: tool_calls is set at construction; frozen=True blocks field reassignment.
 class SSEDelta(msgspec.Struct, frozen=True, kw_only=True, omit_defaults=True, gc=False):  # type: ignore[call-arg]
-    """SSE delta object containing content."""
+    """SSE delta object containing content.
 
-    content: str = ""
-    reasoning: str = ""
+    AT-RISK (gc=False): Has mutable container field `tool_calls`. Any change that
+    mutates `tool_calls` after construction or stores cyclic references in it
+    must be audited; if so, remove gc=False.
+    """
+
+    role: str | None = None
+    content: str | None = None
+    reasoning_content: str | None = None  # SGLang / DeepSeek field name
+    reasoning: str | None = None  # vLLM field name
+    tool_calls: list[dict[str, Any]] | None = None
 
 
 class SSEChoice(
@@ -70,23 +79,41 @@ class SSEMessage(
 # ============================================================================
 
 
+# gc=False: audit 2026-05: content/tool_calls set at construction; frozen=True blocks field reassignment.
 class ChatMessage(
     msgspec.Struct, frozen=True, kw_only=True, omit_defaults=True, gc=False
 ):  # type: ignore[call-arg]
     """Chat message in OpenAI format.
 
-    content: str for text-only messages; list[dict] for multimodal (vision).
+    AT-RISK (gc=False): Has mutable container fields `content` (list[dict] for multimodal)
+    and `tool_calls`. Any change that mutates these after construction or stores cyclic
+    references in them must be audited; if so, remove gc=False.
+
+    content: str for text-only messages; list[dict] for multimodal (vision);
+             None for tool-dispatching assistant messages.
+    tool_calls: list of tool call objects for assistant messages that invoke tools.
+    tool_call_id: correlates a tool result message to its tool call.
     """
 
     role: str
-    content: ChatMessageContent
+    content: ChatMessageContent | None = None
     name: str | None = None
+    tool_calls: list[dict[str, Any]] | None = None
+    tool_call_id: str | None = None
+    reasoning_content: str | None = None
 
 
+# gc=False: audit 2026-05: request containers set at construction; frozen=True blocks field reassignment.
 class ChatCompletionRequest(
     msgspec.Struct, frozen=True, kw_only=True, omit_defaults=True, gc=False
 ):  # type: ignore[call-arg]
-    """OpenAI chat completion request."""
+    """OpenAI chat completion request.
+
+    AT-RISK (gc=False): Has mutable container fields `messages`, `tools`,
+    `logit_bias`, and `chat_template_kwargs`. Any change that mutates these
+    after construction or stores cyclic references in them must be audited; if
+    so, remove gc=False.
+    """
 
     model: str
     messages: list[ChatMessage]
@@ -103,26 +130,40 @@ class ChatCompletionRequest(
     logit_bias: dict[str, float] | None = None
     user: str | None = None
     chat_template: str | None = None
+    chat_template_kwargs: dict[str, Any] | None = None
+    tools: list[dict[str, Any]] | None = None
 
 
+# gc=False: audit 2026-05: tool_calls set at construction; frozen=True blocks field reassignment.
 class ChatCompletionResponseMessage(
     msgspec.Struct, frozen=True, kw_only=True, omit_defaults=True, gc=False
 ):  # type: ignore[call-arg]
-    """Response message from OpenAI."""
+    """Response message from OpenAI.
+
+    ``content`` and ``refusal`` are nullable per the OpenAI spec and vLLM
+    routinely omits them (e.g. when the model returns no text or no refusal
+    block), so they default to ``None`` to allow successful decoding.
+    """
 
     role: str
-    content: str | None
-    refusal: str | None
+    content: str | None = None
+    refusal: str | None = None
+    tool_calls: list[dict[str, Any]] | None = None
+    reasoning_content: str | None = None
 
 
 class ChatCompletionChoice(
     msgspec.Struct, frozen=True, kw_only=True, omit_defaults=True, gc=False
 ):  # type: ignore[call-arg]
-    """A single choice in the completion response."""
+    """A single choice in the completion response.
+
+    ``finish_reason`` may be omitted in non-final SSE chunks; default to
+    ``None`` so decoding intermediate frames does not fail.
+    """
 
     index: int
     message: ChatCompletionResponseMessage
-    finish_reason: str | None
+    finish_reason: str | None = None
 
 
 class CompletionUsage(
@@ -135,6 +176,7 @@ class CompletionUsage(
     total_tokens: int
 
 
+# gc=False: audit 2026-05: choices set at construction; frozen=True blocks field reassignment.
 class ChatCompletionResponse(
     msgspec.Struct,
     frozen=True,
@@ -142,15 +184,22 @@ class ChatCompletionResponse(
     omit_defaults=False,
     gc=False,
 ):  # type: ignore[call-arg]
-    """OpenAI chat completion response."""
+    """OpenAI chat completion response.
+
+    Most servers (vLLM, Dynamo, etc.) legitimately omit a number of these
+    fields — e.g. ``usage`` is only emitted on the final SSE chunk,
+    ``system_fingerprint`` is rarely populated, and ``created``/``model``
+    can be missing in some response variants. All of these get safe
+    defaults so the decoder accepts whatever the server sends.
+    """
 
     id: str
     object: str = "chat.completion"
-    created: int
-    model: str
+    created: int = 0
+    model: str = ""
     choices: list[ChatCompletionChoice]
-    usage: CompletionUsage | None
-    system_fingerprint: str | None
+    usage: CompletionUsage | None = None
+    system_fingerprint: str | None = None
 
 
 # ============================================================================

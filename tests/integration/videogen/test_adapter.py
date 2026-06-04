@@ -66,7 +66,9 @@ class TestVideoGenAdapterRoundTrip:
         result = VideoGenAdapter.decode_response(content, query.id)
         assert result.id == "q1"
         assert result.error is None
-        assert result.response_output is None
+        # video_path is mirrored into response_output for the accuracy scorer.
+        assert result.response_output is not None
+        assert str(result.response_output) == mock_trtllm_serve.video_path
         assert result.metadata["video_path"] == mock_trtllm_serve.video_path
         assert isinstance(result.metadata["video_id"], str)
 

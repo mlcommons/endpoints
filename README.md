@@ -40,13 +40,13 @@ uv run inference-endpoint probe \
 uv run inference-endpoint benchmark offline \
   --endpoints http://your-endpoint:8000 \
   --model Qwen/Qwen3-8B \
-  --dataset tests/datasets/dummy_1k.jsonl
+  --dataset tests/assets/datasets/dummy_1k.jsonl
 
 # Run online benchmark (sustained QPS)
 uv run inference-endpoint benchmark online \
   --endpoints http://your-endpoint:8000 \
   --model Qwen/Qwen3-8B \
-  --dataset tests/datasets/dummy_1k.jsonl \
+  --dataset tests/assets/datasets/dummy_1k.jsonl \
   --load-pattern poisson \
   --target-qps 100
 ```
@@ -59,7 +59,7 @@ uv run python -m inference_endpoint.testing.echo_server --port 8765 &
 uv run inference-endpoint benchmark offline \
   --endpoints http://localhost:8765 \
   --model test-model \
-  --dataset tests/datasets/dummy_1k.jsonl
+  --dataset tests/assets/datasets/dummy_1k.jsonl
 pkill -f echo_server
 ```
 
@@ -136,6 +136,7 @@ This project draws inspiration from:
 - [AIPerf](https://github.com/ai-dynamo/aiperf) — AI model performance profiling
 - [SGLang GenAI-Bench](https://github.com/sgl-project/genai-bench) — Token-level performance evaluation
 - [vLLM Benchmarks](https://github.com/vllm-project/vllm/tree/main/benchmarks) — Performance benchmarking for vLLM
+- [InferenceX](https://github.com/SemiAnalysisAI/InferenceX) - LLM inference optimization toolkit
 
 ## License
 

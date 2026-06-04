@@ -57,12 +57,17 @@ dependencies = [
     "rich==14.3.3",
     # Needed for tokenization and OSL reporting
     "transformers==5.5.0",
+    # Required by transformers' apply_chat_template
+    "jinja2==3.1.6",
     "numpy==2.4.4",
     "datasets==4.8.4",
     "Pillow==12.2.0",
     "sentencepiece==0.2.1",
     "protobuf==7.34.1",
     "openai_harmony==0.0.8",
+    # HDR Histogram for live percentile/histogram approximations in the
+    # metrics aggregator (PyPI: hdrhistogram, importable as hdrh.histogram).
+    "hdrhistogram==0.10.3",
     # Color support for cross-platform terminals
     "colorama==0.4.6",
     # Fix pytz-2024 import warning
@@ -107,7 +112,7 @@ test = [
     "Pympler==1.1",
     "scipy==1.17.1",
     # HTTP server and client for mock server fixture
-    "aiohttp==3.13.5",
+    "aiohttp==3.14.0",
     # Plotting for benchmark sweep mode
     "matplotlib==3.10.8",
     # Property-based testing (CLI fuzz)
@@ -131,7 +136,7 @@ Issues = "https://github.com/mlperf/inference-endpoint/issues"
 target-version = "py312"
 line-length = 88
 exclude = [
-    "tests/datasets/*",
+    "tests/assets/datasets/*",
     "src/inference_endpoint/openai/openai_types_gen.py",
     "src/inference_endpoint/openai/openapi.yaml",
     "datasets/*",

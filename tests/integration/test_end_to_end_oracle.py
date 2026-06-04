@@ -68,7 +68,7 @@ async def _run_oracle_test(url: str, dataloader: Dataset, rt_settings: RuntimeSe
 
     # Create HTTP client with warmup disabled (test server)
     http_config = HTTPClientConfig(
-        endpoint_urls=[urljoin(url, "/v1/chat/completions")],
+        endpoint_urls=[urljoin(url.rstrip("/") + "/", "v1/chat/completions")],
         warmup_connections=0,
         num_workers=2,
     )

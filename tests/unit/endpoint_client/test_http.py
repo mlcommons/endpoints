@@ -329,7 +329,9 @@ class TestHttpResponseProtocol:
         assert not protocol2._connection_lost
         result = protocol2.eof_received()
         assert protocol2._connection_lost is True
-        assert result is True
+        # Returns False so asyncio closes the transport itself; required for
+        # SSL transports (which don't support TCP half-close).
+        assert result is False
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(

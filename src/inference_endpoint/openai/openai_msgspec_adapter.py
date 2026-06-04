@@ -18,6 +18,7 @@ Msgspec-based OpenAI adapter for fast serialization/deserialization.
 """
 
 import time
+from typing import Any
 
 import msgspec
 from inference_endpoint.config.schema import ModelParams, StreamingMode
@@ -37,12 +38,25 @@ from .types import (
     ChatCompletionResponse,
     ChatCompletionResponseMessage,
     ChatMessage,
+    SSEChoice,
     SSEMessage,
 )
 
 # ============================================================================
 # msgspec-based OpenAI Adapter
 # ============================================================================
+
+
+def _chat_message_from_dict(msg: dict) -> "ChatMessage":
+    """Build a ChatMessage from a dict, forwarding all supported fields."""
+    return ChatMessage(
+        role=msg["role"],
+        content=msg.get("content"),
+        name=msg.get("name"),
+        tool_calls=msg.get("tool_calls"),
+        tool_call_id=msg.get("tool_call_id"),
+        reasoning_content=msg.get("reasoning_content"),
+    )
 
 
 class OpenAIMsgspecAdapter(HttpRequestAdapter):
@@ -66,6 +80,9 @@ class OpenAIMsgspecAdapter(HttpRequestAdapter):
             "top_p": model_params.top_p,
             "top_k": model_params.top_k,
             "repetition_penalty": model_params.repetition_penalty,
+            "presence_penalty": model_params.presence_penalty,
+            "frequency_penalty": model_params.frequency_penalty,
+            "chat_template_kwargs": model_params.chat_template_kwargs,
         }
 
         # These fields are used in .to_endpoint_request() but don't exist in ModelParams,
@@ -76,12 +93,11 @@ class OpenAIMsgspecAdapter(HttpRequestAdapter):
         allowed = [
             "name",  # NOT the model name, but rather a proper noun like 'Bob' for the LLM to keep track of entities
             "n",
-            "presence_penalty",
-            "frequency_penalty",
             "stop",
             "logit_bias",
             "user",
             "chat_template",
+            "tools",
         ]
         return [
             ColumnFilter(
@@ -105,10 +121,12 @@ class OpenAIMsgspecAdapter(HttpRequestAdapter):
         return cls.from_endpoint_response(openai_response, result_id=query_id)
 
     @classmethod
-    def decode_sse_message(cls, json_bytes: bytes) -> str:
-        """Decode SSE message and extract content string."""
+    def decode_sse_message(cls, json_bytes: bytes) -> SSEChoice | None:
+        """Decode SSE message and return the SSEChoice (delta + finish_reason)."""
         msg = cls._sse_decoder.decode(json_bytes)
-        return msg.choices[0].delta
+        if not msg.choices:
+            return None
+        return msg.choices[0]
 
     # ========================================================================
     # Internal APIs
@@ -129,24 +147,27 @@ class OpenAIMsgspecAdapter(HttpRequestAdapter):
         Returns:
             msgspec.Struct ChatCompletionRequest
         """
-        if "prompt" not in query.data:
-            raise ValueError("prompt not found in query.data")
+        if "messages" in query.data:
+            messages = [_chat_message_from_dict(m) for m in query.data["messages"]]
+        else:
+            if "prompt" not in query.data:
+                raise ValueError("prompt not found in query.data")
 
-        messages = [
-            ChatMessage(
-                role="user",
-                content=query.data["prompt"],
-                name=query.data.get("name"),
-            ),
-        ]
-        if "system" in query.data:
-            messages.insert(
-                0,
+            messages = [
                 ChatMessage(
-                    role="system",
-                    content=query.data["system"],
+                    role="user",
+                    content=query.data["prompt"],
+                    name=query.data.get("name"),
                 ),
-            )
+            ]
+            if "system" in query.data:
+                messages.insert(
+                    0,
+                    ChatMessage(
+                        role="system",
+                        content=query.data["system"],
+                    ),
+                )
 
         return ChatCompletionRequest(
             model=query.data.get("model", "no-model-name"),
@@ -164,6 +185,8 @@ class OpenAIMsgspecAdapter(HttpRequestAdapter):
             logit_bias=query.data.get("logit_bias"),
             user=query.data.get("user"),
             chat_template=query.data.get("chat_template"),
+            chat_template_kwargs=query.data.get("chat_template_kwargs"),
+            tools=query.data.get("tools"),
         )
 
     @classmethod
@@ -184,9 +207,26 @@ class OpenAIMsgspecAdapter(HttpRequestAdapter):
         if not response.choices:
             raise ValueError("Response must contain at least one choice")
 
+        choice = response.choices[0]
+        metadata: dict[str, Any] = {}
+        if choice.finish_reason:
+            metadata["finish_reason"] = choice.finish_reason
+        if choice.message.tool_calls:
+            metadata["tool_calls"] = choice.message.tool_calls
+        if choice.message.reasoning_content:
+            metadata["reasoning_content"] = choice.message.reasoning_content
+
+        tool_calls_tuple = (
+            tuple(choice.message.tool_calls) if choice.message.tool_calls else None
+        )
         return QueryResult(
             id=result_id or response.id,
-            response_output=TextModelOutput(output=response.choices[0].message.content),
+            response_output=TextModelOutput(
+                output=choice.message.content or "",
+                reasoning=choice.message.reasoning_content,
+                tool_calls=tool_calls_tuple,
+            ),
+            metadata=metadata,
         )
 
     @classmethod

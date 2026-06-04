@@ -16,17 +16,22 @@
 """Adapter for trtllm-serve's POST /v1/videos/generations endpoint."""
 
 import json
+import os
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from inference_endpoint.core.types import (
     Query,
     QueryResult,
     StreamChunk,
+    TextModelOutput,
 )
 from inference_endpoint.dataset_manager.transforms import ColumnFilter
 from inference_endpoint.endpoint_client.adapter_protocol import HttpRequestAdapter
 
 from .types import VideoPathRequest, VideoPathResponse, VideoPayloadResponse
+
+_BINARY_FALLBACK_ENV = "INFERENCE_ENDPOINT_VIDEOGEN_FALLBACK_DIR"
 
 if TYPE_CHECKING:
     from inference_endpoint.config.schema import ModelParams
@@ -81,12 +86,27 @@ class VideoGenAdapter(HttpRequestAdapter):
 
     @classmethod
     def decode_response(cls, response_bytes: bytes, query_id: str) -> QueryResult:
-        """Deserialise trtllm-serve response JSON bytes to QueryResult.
+        """Deserialise trtllm-serve response to QueryResult.
 
-        Dispatches on the response shape:
-        - video_bytes response (str payload): metadata["video_bytes"].
-        - video_path response: metadata["video_path"].
+        Dispatches by sniffing the first byte:
+        - JSON (`{` / `[`): parse as VideoPath/VideoPayload response.
+        - Otherwise: treat as raw video bytes. Some trtllm-serve builds return
+          binary `video/mp4` regardless of `response_format=video_path`. The
+          adapter persists the bytes itself to `$INFERENCE_ENDPOINT_VIDEOGEN_FALLBACK_DIR`
+          (must be set; expected to be a shared filesystem path) and returns
+          a QueryResult carrying only that path so the QueryResult stays small
+          enough to fit in the IPC transport frame.
         """
+        # mp4 files start with an ISO BMFF `ftyp` box at offset 4. Only divert
+        # to the binary path on that specific signature; everything else
+        # (HTTP error bodies, malformed JSON) flows through json.loads and
+        # raises as before.
+        if len(response_bytes) >= 8 and response_bytes[4:8] == b"ftyp":
+            return cls._decode_binary_response(response_bytes, query_id)
+        return cls._decode_json_response(response_bytes, query_id)
+
+    @classmethod
+    def _decode_json_response(cls, response_bytes: bytes, query_id: str) -> QueryResult:
         raw = json.loads(response_bytes)
         # Truthiness check, not key presence: a server that returns
         # `"video_bytes": null` belongs in the video_path branch.
@@ -100,12 +120,36 @@ class VideoGenAdapter(HttpRequestAdapter):
                 },
             )
         resp_path = VideoPathResponse.model_validate(raw)
+        # Mirror video_path into response_output so the event log carries it
+        # to the accuracy scorer (VBench reads videos by path).
         return QueryResult(
             id=query_id,
+            response_output=TextModelOutput(output=resp_path.video_path),
             metadata={
                 "video_id": resp_path.video_id,
                 "video_path": resp_path.video_path,
             },
+        )
+
+    @classmethod
+    def _decode_binary_response(
+        cls, response_bytes: bytes, query_id: str
+    ) -> QueryResult:
+        fallback_dir = os.environ.get(_BINARY_FALLBACK_ENV)
+        if not fallback_dir:
+            raise RuntimeError(
+                f"trtllm-serve returned binary video bytes "
+                f"({len(response_bytes)} B), but {_BINARY_FALLBACK_ENV} is not "
+                "set. Point it at a shared-filesystem directory so the adapter "
+                "can persist responses for downstream scoring."
+            )
+        out_path = Path(fallback_dir) / f"{query_id}.mp4"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_bytes(response_bytes)
+        return QueryResult(
+            id=query_id,
+            response_output=TextModelOutput(output=str(out_path)),
+            metadata={"video_id": query_id, "video_path": str(out_path)},
         )
 
     @classmethod

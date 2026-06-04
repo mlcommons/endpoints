@@ -13,139 +13,143 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for report.py and report_builder.py."""
+"""Tests for ``Report.from_snapshot`` and display helpers.
+
+Reports are built from a ``MetricsSnapshot`` produced by a populated
+``MetricsRegistry``.
+"""
+
+from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 import pytest
-from inference_endpoint.async_utils.services.metrics_aggregator.kv_store import (
-    BasicKVStore,
-    BasicKVStoreReader,
-    SeriesStats,
+from inference_endpoint.async_utils.services.metrics_aggregator.aggregator import (
+    MetricCounterKey,
 )
-from inference_endpoint.metrics.report import Report, compute_summary
+from inference_endpoint.async_utils.services.metrics_aggregator.metrics_table import (
+    MetricSeriesKey,
+)
+from inference_endpoint.async_utils.services.metrics_aggregator.registry import (
+    MetricsRegistry,
+)
+from inference_endpoint.async_utils.services.metrics_aggregator.snapshot import (
+    MetricsSnapshot,
+    SeriesStat,
+    SessionState,
+    snapshot_to_dict,
+)
+from inference_endpoint.metrics.report import Report
 
-# ---------------------------------------------------------------------------
-# compute_summary
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.unit
-class TestComputeSummary:
-    def test_empty(self):
-        s = compute_summary(SeriesStats())
-        assert s["total"] == 0
-        assert s["min"] == 0
-        assert s["max"] == 0
-        assert s["std_dev"] == 0
-        assert s["histogram"]["buckets"] == []
-
-    def test_single_value(self):
-        s = compute_summary(SeriesStats([42.0], dtype=float))
-        assert s["min"] == 42.0
-        assert s["max"] == 42.0
-        assert s["avg"] == 42.0
-        assert s["std_dev"] == 0.0
-
-    def test_multiple_values(self):
-        s = compute_summary(SeriesStats([1.0, 2.0, 3.0, 4.0, 5.0], dtype=float))
-        assert s["min"] == 1.0
-        assert s["max"] == 5.0
-        assert s["total"] == 15.0
-        assert s["avg"] == 3.0
-        assert s["median"] == 3.0
-        assert len(s["histogram"]["buckets"]) > 0
-        assert len(s["percentiles"]) > 0
-
-    def test_percentiles(self):
-        values = list(range(1, 101))  # 1..100
-        s = compute_summary(
-            SeriesStats([float(v) for v in values], dtype=float),
-            percentiles=(50, 90, 99),
-        )
-        assert s["percentiles"]["50"] == pytest.approx(50.5, abs=1)
-        assert s["percentiles"]["90"] == pytest.approx(90.1, abs=1)
-        assert s["percentiles"]["99"] == pytest.approx(99.01, abs=1)
+# 1 hour in ns — same as the aggregator's default bound for time-series.
+_NS_HIGH = 3_600_000_000_000
 
 
-# ---------------------------------------------------------------------------
-# Helper: create a populated KVStore writer + reader
-# ---------------------------------------------------------------------------
+def _make_registry(n_samples: int = 50) -> MetricsRegistry:
+    """A registry populated with the metrics ``Report.from_snapshot`` reads.
 
+    Only the metrics consumed by ``Report.from_snapshot`` are registered:
+    the tracked counters (issued/completed/failed/duration) and the four
+    series surfaced on the report (ttft_ns, sample_latency_ns, osl,
+    tpot_ns). ISL/chunk_delta_ns are intentionally not registered to
+    keep the test data minimal — ``Report.from_snapshot`` ignores them.
+    """
+    registry = MetricsRegistry()
+    for key in MetricCounterKey.__members__.values():
+        registry.register_counter(key.value)
+    registry.register_series(
+        MetricSeriesKey.SAMPLE_LATENCY_NS.value,
+        hdr_low=1,
+        hdr_high=_NS_HIGH,
+        sig_figs=3,
+        n_histogram_buckets=10,
+        percentiles=(50.0, 90.0, 99.0),
+    )
+    registry.register_series(
+        MetricSeriesKey.TTFT_NS.value,
+        hdr_low=1,
+        hdr_high=_NS_HIGH,
+        sig_figs=3,
+        n_histogram_buckets=10,
+        percentiles=(50.0, 90.0, 99.0),
+    )
+    registry.register_series(
+        MetricSeriesKey.OSL.value,
+        hdr_low=1,
+        hdr_high=10_000_000,
+        sig_figs=3,
+        n_histogram_buckets=10,
+        percentiles=(50.0, 90.0, 99.0),
+    )
+    registry.register_series(
+        MetricSeriesKey.TPOT_NS.value,
+        hdr_low=1,
+        hdr_high=_NS_HIGH,
+        sig_figs=3,
+        n_histogram_buckets=10,
+        percentiles=(50.0, 90.0, 99.0),
+        dtype=float,
+    )
 
-def _make_store(tmp_path: Path, n_samples: int = 50):
-    """Create a writer with typical benchmark data and return (writer, reader)."""
-    store_dir = tmp_path / "kv"
-    w = BasicKVStore(store_dir)
-
-    # Counter keys matching MetricCounterKey enum
-    for key in [
-        "total_samples_issued",
-        "total_samples_completed",
-        "total_samples_failed",
-        "tracked_samples_issued",
-        "tracked_samples_completed",
-        "tracked_duration_ns",
-        "total_duration_ns",
-    ]:
-        w.create_key(key, "counter")
-    for key in ["ttft_ns", "sample_latency_ns", "osl", "isl", "chunk_delta_ns"]:
-        w.create_key(key, "series")
-    w.create_key("tpot_ns", "series", dtype=float)
-
-    w.update("tracked_samples_issued", n_samples)
-    w.update("tracked_samples_completed", n_samples)
-    w.update("total_samples_failed", 0)
     if n_samples > 0:
-        w.update("tracked_duration_ns", 10_000_000_000)
+        registry.increment(MetricCounterKey.TRACKED_SAMPLES_ISSUED.value, n_samples)
+        registry.increment(MetricCounterKey.TRACKED_SAMPLES_COMPLETED.value, n_samples)
+        registry.set_counter(MetricCounterKey.TRACKED_DURATION_NS.value, 10_000_000_000)
+        for i in range(n_samples):
+            registry.record(MetricSeriesKey.TTFT_NS.value, 1_000_000 + i * 10_000)
+            registry.record(
+                MetricSeriesKey.SAMPLE_LATENCY_NS.value, 5_000_000 + i * 50_000
+            )
+            registry.record(MetricSeriesKey.OSL.value, 100 + i)
 
-    for i in range(n_samples):
-        w.update("ttft_ns", 1_000_000 + i * 10_000)
-        w.update("sample_latency_ns", 5_000_000 + i * 50_000)
-        w.update("osl", 100 + i)
+    return registry
 
-    r = BasicKVStoreReader(store_dir)
-    for key in [
-        "total_samples_issued",
-        "total_samples_completed",
-        "total_samples_failed",
-        "tracked_samples_issued",
-        "tracked_samples_completed",
-        "tracked_duration_ns",
-        "total_duration_ns",
-    ]:
-        r.register_key(key, "counter")
-    for key in ["ttft_ns", "sample_latency_ns", "osl", "isl", "chunk_delta_ns"]:
-        r.register_key(key, "series")
-    r.register_key("tpot_ns", "series", dtype=float)
 
-    return w, r
+def _build_report(
+    registry: MetricsRegistry,
+    *,
+    state: SessionState = SessionState.COMPLETE,
+    n_pending_tasks: int = 0,
+) -> Report:
+    """Build a Report from a snapshot dict (matches the consumer contract).
+
+    ``Report.from_snapshot`` consumes the dict form produced by
+    ``snapshot_to_dict``; that's also the shape persisted to
+    ``final_snapshot.json``. We deliberately route through the dict
+    here so the tests exercise the same path the production consumer
+    does (loaded JSON file → Report).
+    """
+    snap = registry.build_snapshot(state=state, n_pending_tasks=n_pending_tasks)
+    return Report.from_snapshot(snapshot_to_dict(snap))
 
 
 # ---------------------------------------------------------------------------
-# build_report
+# from_snapshot — happy paths
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
-class TestBuildReport:
-    def test_empty_store(self, tmp_path: Path):
-        w, r = _make_store(tmp_path, n_samples=0)
-        report = Report.from_kv_reader(r)
+class TestFromSnapshot:
+    def test_empty_registry(self):
+        registry = _make_registry(n_samples=0)
+        report = _build_report(registry)
 
         assert report.n_samples_issued == 0
+        assert report.n_samples_completed == 0
+        assert report.n_samples_failed == 0
         assert report.duration_ns is None
         assert report.qps() is None
+        # Series with count==0 should produce empty dicts.
         assert report.ttft == {}
         assert report.latency == {}
+        assert report.output_sequence_lengths == {}
+        assert report.tpot == {}
 
-        r.close()
-        w.close()
-
-    def test_with_metrics(self, tmp_path: Path):
-        w, r = _make_store(tmp_path, n_samples=50)
-        report = Report.from_kv_reader(r)
+    def test_with_metrics(self):
+        registry = _make_registry(n_samples=50)
+        report = _build_report(registry)
 
         assert report.n_samples_issued == 50
         assert report.n_samples_completed == 50
@@ -157,23 +161,53 @@ class TestBuildReport:
         assert "histogram" in report.ttft
         assert report.ttft["min"] > 0
         assert report.latency["min"] > 0
-        assert report.tpot == {}  # No TPOT values written
-        assert report.tps() is not None  # OSL data present
+        # No TPOT recordings in the registry → empty dict.
+        assert report.tpot == {}
+        # OSL data was written → tps() is computable.
+        assert report.tps() is not None
 
-        r.close()
-        w.close()
+    def test_failed_uses_tracked_counter(self):
+        """``n_samples_failed`` reads from ``tracked_samples_failed``, not
+        ``total_samples_failed``. The two diverge when an ERROR fires for
+        an untracked sample (warmup window) — only the tracked count
+        flows into the Report.
+        """
+        registry = _make_registry(n_samples=10)
+        registry.increment(MetricCounterKey.TOTAL_SAMPLES_FAILED.value, 3)
+        registry.increment(MetricCounterKey.TRACKED_SAMPLES_FAILED.value, 1)
+        report = _build_report(registry)
+        assert report.n_samples_failed == 1
+
+    def test_complete_flag_true_when_state_complete_and_no_pending(self):
+        registry = _make_registry(n_samples=5)
+        report = _build_report(registry, state=SessionState.COMPLETE, n_pending_tasks=0)
+        assert report.complete is True
+
+    def test_complete_flag_false_when_drain_timeout(self):
+        """COMPLETE state but n_pending_tasks > 0 → drain timed out, report
+        is partial.
+        """
+        registry = _make_registry(n_samples=5)
+        report = _build_report(registry, state=SessionState.COMPLETE, n_pending_tasks=2)
+        assert report.complete is False
+
+    def test_complete_flag_false_when_state_live(self):
+        """LIVE/DRAINING snapshots produce reports with ``complete=False``."""
+        registry = _make_registry(n_samples=5)
+        report = _build_report(registry, state=SessionState.LIVE, n_pending_tasks=0)
+        assert report.complete is False
 
 
 # ---------------------------------------------------------------------------
-# Report display and serialization
+# Display + JSON serialization
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
-class TestReport:
-    def test_display_summary(self, tmp_path: Path):
-        w, r = _make_store(tmp_path, n_samples=10)
-        report = Report.from_kv_reader(r)
+class TestReportDisplayAndSerialize:
+    def test_display_summary(self):
+        registry = _make_registry(n_samples=10)
+        report = _build_report(registry)
 
         lines: list[str] = []
         report.display(fn=lines.append, summary_only=True)
@@ -183,12 +217,9 @@ class TestReport:
         assert "QPS:" in output
         assert "End of Summary" in output
 
-        r.close()
-        w.close()
-
-    def test_display_full(self, tmp_path: Path):
-        w, r = _make_store(tmp_path, n_samples=10)
-        report = Report.from_kv_reader(r)
+    def test_display_full(self):
+        registry = _make_registry(n_samples=10)
+        report = _build_report(registry)
 
         lines: list[str] = []
         report.display(fn=lines.append, summary_only=False)
@@ -199,32 +230,23 @@ class TestReport:
         assert "Histogram" in output
         assert "Percentiles" in output
 
-        r.close()
-        w.close()
-
-    def test_to_json(self, tmp_path: Path):
-        w, r = _make_store(tmp_path, n_samples=5)
-        report = Report.from_kv_reader(r)
+    def test_to_json(self):
+        registry = _make_registry(n_samples=5)
+        report = _build_report(registry)
 
         data = json.loads(report.to_json())
         assert data["n_samples_completed"] == 5
         assert "ttft" in data
 
-        r.close()
-        w.close()
-
     def test_to_json_save(self, tmp_path: Path):
-        w, r = _make_store(tmp_path, n_samples=5)
-        report = Report.from_kv_reader(r)
+        registry = _make_registry(n_samples=5)
+        report = _build_report(registry)
 
         out_path = tmp_path / "report.json"
         report.to_json(save_to=out_path)
         assert out_path.exists()
         data = json.loads(out_path.read_bytes())
         assert data["n_samples_completed"] == 5
-
-        r.close()
-        w.close()
 
     def test_qps_none_without_duration(self):
         report = Report(
@@ -235,6 +257,8 @@ class TestReport:
             n_samples_completed=100,
             n_samples_failed=0,
             duration_ns=None,
+            state="complete",
+            complete=True,
             ttft={},
             tpot={},
             latency={},
@@ -253,6 +277,8 @@ class TestReport:
             n_samples_completed=0,
             n_samples_failed=0,
             duration_ns=None,
+            state="complete",
+            complete=True,
             ttft={},
             tpot={},
             latency={},
@@ -262,3 +288,214 @@ class TestReport:
         report.display(fn=lines.append, summary_only=True)
         output = "\n".join(lines)
         assert "Test started at" not in output
+
+    def test_display_warns_when_incomplete(self):
+        """Reports with ``complete=False`` surface a WARNING in display()."""
+        report = Report(
+            version="test",
+            git_sha=None,
+            test_started_at=0,
+            n_samples_issued=10,
+            n_samples_completed=10,
+            n_samples_failed=0,
+            duration_ns=1_000_000_000,
+            state="complete",  # drain-timeout case: complete state, n_pending>0
+            complete=False,
+            ttft={},
+            tpot={},
+            latency={},
+            output_sequence_lengths={},
+        )
+        lines: list[str] = []
+        report.display(fn=lines.append, summary_only=True)
+        output = "\n".join(lines)
+        assert "WARNING" in output or "incomplete" in output.lower()
+
+    def test_display_warns_when_interrupted(self):
+        """Reports with ``state == "interrupted"`` surface a distinct WARNING."""
+        report = Report(
+            version="test",
+            git_sha=None,
+            test_started_at=0,
+            n_samples_issued=10,
+            n_samples_completed=5,
+            n_samples_failed=0,
+            duration_ns=1_000_000_000,
+            state="interrupted",
+            complete=False,
+            ttft={},
+            tpot={},
+            latency={},
+            output_sequence_lengths={},
+        )
+        lines: list[str] = []
+        report.display(fn=lines.append, summary_only=True)
+        output = "\n".join(lines)
+        assert "interrupted" in output.lower()
+        assert "SIGTERM" in output or "signal" in output.lower()
+
+
+# ---------------------------------------------------------------------------
+# Direct dict construction — Report.from_snapshot accepts arbitrary dicts
+# (matches the JSON-file → consumer path; defaults absorb partial input).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestFromSnapshotDict:
+    def test_minimal_dict_yields_empty_report(self):
+        """A snapshot dict with no metrics produces a Report whose counters
+        are 0 and whose series dicts are empty. ``duration_ns`` is None
+        because ``tracked_duration_ns`` is missing.
+        """
+        snap = {
+            "counter": 1,
+            "timestamp_ns": 0,
+            "state": "complete",
+            "n_pending_tasks": 0,
+            "metrics": [],
+        }
+        report = Report.from_snapshot(snap)
+        assert report.n_samples_issued == 0
+        assert report.n_samples_completed == 0
+        assert report.n_samples_failed == 0
+        assert report.duration_ns is None
+        assert report.state == "complete"
+        assert report.complete is True
+        assert report.ttft == {}
+
+    def test_empty_dict_defaults_to_interrupted_incomplete(self):
+        """A dict missing every key (e.g. corrupt file, truncated read)
+        produces a non-crashing Report tagged interrupted and incomplete.
+        Defaults: state→interrupted, counters→0, series→empty.
+        """
+        report = Report.from_snapshot({})
+        assert report.state == "interrupted"
+        assert report.complete is False
+        assert report.n_samples_issued == 0
+        assert report.ttft == {}
+
+    def test_interrupted_state_round_trips_to_report(self):
+        """An INTERRUPTED snapshot dict produces a Report flagged as such."""
+        snap = {
+            "counter": 1,
+            "timestamp_ns": 0,
+            "state": "interrupted",
+            "n_pending_tasks": 5,
+            "metrics": [
+                {"type": "counter", "name": "tracked_samples_issued", "value": 100},
+                {"type": "counter", "name": "tracked_samples_completed", "value": 80},
+            ],
+        }
+        report = Report.from_snapshot(snap)
+        assert report.state == "interrupted"
+        assert report.complete is False
+        # Partial counters still surface through.
+        assert report.n_samples_issued == 100
+        assert report.n_samples_completed == 80
+
+    def test_missing_metric_type_is_skipped_not_crashed(self):
+        """A malformed metric entry (no 'type' field) is skipped rather
+        than crashing the whole report build.
+        """
+        snap = {
+            "state": "complete",
+            "n_pending_tasks": 0,
+            "metrics": [
+                {"name": "orphan_no_type", "value": 99},  # missing 'type'
+                {"type": "counter", "name": "tracked_samples_issued", "value": 5},
+            ],
+        }
+        report = Report.from_snapshot(snap)
+        assert report.n_samples_issued == 5
+
+    def test_display_handles_scrubbed_nan_percentiles(self):
+        """``_scrub_nonfinite`` maps producer-side NaN/Inf to ``None`` so the
+        snapshot JSON stays strict. ``Report.display()`` is called from
+        ``finalize_benchmark`` outside the report-build try/except — a
+        ``None * scale_factor`` crash there takes down the whole run.
+
+        Asserts: display() does not raise and renders an N/A indicator
+        for the scrubbed values.
+        """
+        snap = {
+            "counter": 1,
+            "timestamp_ns": 0,
+            "state": "complete",
+            "n_pending_tasks": 0,
+            "metrics": [
+                {
+                    "type": "counter",
+                    "name": "tracked_samples_issued",
+                    "value": 5,
+                },
+                {
+                    "type": "counter",
+                    "name": "tracked_samples_completed",
+                    "value": 5,
+                },
+                {
+                    "type": "counter",
+                    "name": "tracked_duration_ns",
+                    "value": 1_000_000_000,
+                },
+                {
+                    "type": "series",
+                    "name": "ttft_ns",
+                    "count": 5,
+                    "total": 5_000_000,
+                    "min": 1_000_000,
+                    "max": 1_500_000,
+                    "sum_sq": 5_005_000_000_000,
+                    # All percentile values scrubbed from NaN → None.
+                    "percentiles": {"50.0": None, "90.0": None, "99.0": None},
+                    "histogram": [[[1_000_000.0, 1_500_000.0], 5]],
+                },
+            ],
+        }
+        report = Report.from_snapshot(snap)
+
+        lines: list[str] = []
+        # Currently crashes with TypeError on val * scale_factor.
+        report.display(fn=lines.append, summary_only=False)
+        output = "\n".join(lines)
+        assert "TTFT" in output
+        # Scrubbed values surface as a sentinel rather than crashing.
+        assert "N/A" in output
+
+
+@pytest.mark.unit
+def test_scrub_nonfinite_round_trip_yields_none():
+    """End-to-end: a registry that records a non-finite series value
+    produces a snapshot dict whose percentile entries are ``None`` (not
+    NaN literals). Anchors the producer-side invariant the display-time
+    None-guard depends on.
+    """
+    series = SeriesStat(
+        name="ttft_ns",
+        count=1,
+        total=0.0,
+        min=0.0,
+        max=0.0,
+        sum_sq=0.0,
+        percentiles={
+            "50.0": float("nan"),
+            "90.0": float("inf"),
+            "99.0": float("-inf"),
+        },
+        histogram=[],
+    )
+    snap = MetricsSnapshot(
+        counter=1,
+        timestamp_ns=0,
+        state=SessionState.COMPLETE,
+        n_pending_tasks=0,
+        metrics=[series],
+    )
+    d = snapshot_to_dict(snap)
+    perc = d["metrics"][0]["percentiles"]
+    assert perc == {"50.0": None, "90.0": None, "99.0": None}
+    # And the result must be strict-JSON serializable.
+    json.dumps(d, allow_nan=False)
+    # Sanity: original NaN was indeed non-finite.
+    assert not math.isfinite(float("nan"))

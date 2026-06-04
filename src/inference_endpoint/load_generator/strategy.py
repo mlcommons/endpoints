@@ -29,7 +29,7 @@ import asyncio
 import logging
 from collections.abc import Callable, Iterator
 from time import monotonic_ns
-from typing import Protocol
+from typing import Any, Protocol
 
 from ..config.runtime_settings import RuntimeSettings
 from ..config.schema import LoadPatternType
@@ -47,8 +47,41 @@ logger = logging.getLogger(__name__)
 class PhaseIssuerProtocol(Protocol):
     """Minimal interface that strategies see for issuing samples."""
 
-    def issue(self, sample_index: int) -> str | None:
-        """Issue a sample. Returns query_id, or None if the session is stopping."""
+    def issue(
+        self,
+        sample_index: int,
+        data_override: dict[str, Any] | None = None,
+        conversation_id: str = "",
+        turn: int | None = None,
+    ) -> str | None:
+        """Issue a sample. Returns query_id, or None if the session is stopping.
+
+        Args:
+            sample_index: Index into the dataset.
+            data_override: If provided, merged over the loaded sample — keys in
+                data_override take precedence. Used by MultiTurnStrategy to inject
+                a runtime-assembled `messages` array while still inheriting
+                `model`/`max_completion_tokens`/`tools`/`stream` from the dataset row.
+            conversation_id: Conversation identifier (multi-turn). Empty string
+                for single-turn issues; propagated onto the published EventRecords
+                so downstream consumers can group by conversation.
+            turn: Turn number within a conversation (multi-turn), or None.
+        """
+        ...
+
+    def register_skipped(
+        self,
+        sample_index: int,
+        conversation_id: str = "",
+        turn: int | None = None,
+    ) -> str | None:
+        """Register an event-only sample (no HTTP issuance). Returns query_id,
+        or None if the session is stopping. Mirrors ``issue()`` bookkeeping
+        minus the HTTP request and the ``inflight`` increment."""
+        ...
+
+    def mark_inflight_complete(self) -> None:
+        """Record completion of one HTTP-issued sample."""
         ...
 
     issued_count: int
@@ -296,6 +329,12 @@ def create_load_strategy(
                     "Concurrency load pattern requires target_concurrency > 0"
                 )
             return ConcurrencyStrategy(lp.target_concurrency, sample_order)
+
+        case LoadPatternType.MULTI_TURN:
+            raise ValueError(
+                "MULTI_TURN load pattern requires a MultiTurnDataset — "
+                "use 'inference-endpoint benchmark from-config' with a multi-turn dataset"
+            )
 
         case _:
             raise ValueError(f"Unsupported load pattern type: {lp.type}")

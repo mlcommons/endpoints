@@ -17,12 +17,14 @@
 
 import argparse
 import asyncio
+import inspect
 import json
 import logging
 import threading
 import time
 import uuid
 from abc import abstractmethod
+from collections.abc import Awaitable, Callable
 
 from aiohttp import web
 
@@ -30,6 +32,8 @@ from inference_endpoint.core.types import QueryResult, TextModelOutput
 from inference_endpoint.openai.openai_adapter import OpenAIAdapter
 from inference_endpoint.openai.openai_types_gen import CreateChatCompletionRequest
 from inference_endpoint.utils.logging import setup_logging
+
+RequestHandler = Callable[[web.Request], web.Response | Awaitable[web.Response]]
 
 
 class HTTPServer:
@@ -49,11 +53,17 @@ class HTTPServer:
 
 class EchoServer(HTTPServer):
     def __init__(
-        self, *, host: str = "127.0.0.1", port: int = 0, max_osl: int | None = None
+        self,
+        *,
+        host: str = "127.0.0.1",
+        port: int = 0,
+        max_osl: int | None = None,
+        request_handler: RequestHandler | None = None,
     ):
         self.host = host
         self.port = port  # If 0, will auto-assign available port
         self.max_osl = max_osl
+        self._request_handler = request_handler
         self._actual_port = None  # Store the actual port after binding
 
         self.app = None
@@ -97,6 +107,15 @@ class EchoServer(HTTPServer):
         """
         return request
 
+    async def _dispatch(self, request: web.Request) -> web.Response | None:
+        """Call the custom request_handler if set; return None to fall through to defaults."""
+        if self._request_handler is None:
+            return None
+        result = self._request_handler(request)
+        if inspect.isawaitable(result):
+            result = await result
+        return result
+
     async def _handle_echo_request(self, request: web.Request) -> web.Response:
         """
         Handle a generic HTTP request and return a JSON response that echoes all request details.
@@ -105,6 +124,10 @@ class EchoServer(HTTPServer):
 
         Returns a standardized JSON response containing the full request details and a success message.
         """
+        custom = await self._dispatch(request)
+        if custom is not None:
+            return custom
+
         # Extract request data
         endpoint = request.path
         query_params = dict(request.query)
@@ -241,6 +264,9 @@ class EchoServer(HTTPServer):
         Raises:
             ValueError: If no messages are present in the request payload.
         """
+        custom = await self._dispatch(request)
+        if custom is not None:
+            return custom
 
         # Get request body
         try:

@@ -60,6 +60,7 @@ class LoadPatternType(str, Enum):
     MAX_THROUGHPUT = "max_throughput"  # Offline: all queries at t=0
     POISSON = "poisson"  # Online: fixed QPS with Poisson distribution
     CONCURRENCY = "concurrency"  # Online: fixed concurrent requests
+    MULTI_TURN = "multi_turn"  # Multi-turn conversations with turn sequencing
     BURST = "burst"  # Burst pattern (TODO)
     STEP = "step"  # Step pattern (TODO)
 
@@ -96,6 +97,7 @@ class ScorerMethod(str, Enum):
     ROUGE = "rouge"
     CODE_BENCH = "code_bench_scorer"
     SHOPIFY_CATEGORY_F1 = "shopify_category_f1"
+    VBENCH = "vbench"
 
 
 class TestMode(str, Enum):
@@ -186,6 +188,12 @@ class ModelParams(BaseModel):
     top_k: int | None = Field(None, description="Top-K sampling")
     top_p: float | None = Field(None, description="Top-P (nucleus) sampling")
     repetition_penalty: float | None = Field(None, description="Repetition penalty")
+    presence_penalty: float | None = Field(None, description="Presence penalty")
+    frequency_penalty: float | None = Field(None, description="Frequency penalty")
+    chat_template_kwargs: dict[str, Any] | None = Field(
+        None,
+        description="Per-request chat-template kwargs forwarded to compatible servers.",
+    )
     max_new_tokens: Annotated[
         int, cyclopts.Parameter(alias="--max-output-tokens", help="Max output tokens")
     ] = 1024
@@ -230,6 +238,41 @@ class SubmissionReference(BaseModel):
         return get_ruleset(self.ruleset)
 
 
+class MultiTurnConfig(BaseModel):
+    """Multi-turn conversation configuration.
+
+    Configuration for benchmarking conversational AI workloads with turn sequencing.
+    Enables testing multi-turn conversations where each turn depends on previous responses.
+    Presence of this block in the dataset config enables multi-turn mode.
+
+    Attributes:
+        turn_timeout_s: Deadline between issuing a turn and receiving its
+            response. A timeout aborts that turn and all remaining client
+            turns of the same conversation because subsequent turns depend
+            on the timed-out response.
+        use_dataset_history: If True, use pre-built message history from dataset.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    turn_timeout_s: float = Field(default=300.0, gt=0)
+    use_dataset_history: bool = True
+    enable_salt: bool = Field(
+        False,
+        description=(
+            "Enable salt addition after system prompt to prevent KV cache reuse "
+            "across trajectories in multi-turn setting."
+        ),
+    )
+    inject_tool_delay: bool = Field(
+        False,
+        description=(
+            "Pause for a predefined duration between turns. Duration is defined "
+            "in dataset."
+        ),
+    )
+
+
 class Dataset(BaseModel):
     """Dataset configuration.
 
@@ -260,6 +303,9 @@ class Dataset(BaseModel):
     accuracy_config: AccuracyConfig | None = Field(
         None, description="Accuracy evaluation settings"
     )
+    multi_turn: MultiTurnConfig | None = Field(
+        None, description="Multi-turn conversation configuration"
+    )
 
     @model_validator(mode="after")
     def _auto_derive_name(self) -> Self:
@@ -276,7 +322,11 @@ class AccuracyConfig(BaseModel):
     ground_truth: Column in the dataset containing ground truth. Defaults to "ground_truth".
     extractor: Post-processor to extract answers from model output
         (abcd_extractor, boxed_math_extractor, identity_extractor, python_code_extractor).
+        Optional for scorers that declare REQUIRES_EXTRACTOR = False (e.g. vbench).
     num_repeats: Number of times to repeat the dataset for evaluation. Defaults to 1.
+    extras: Free-form keyword args forwarded to the scorer's ``__init__`` —
+        used for scorer-specific knobs that don't warrant a top-level field
+        (e.g. ``vbench_project_path``, ``subprocess_timeout_s`` for VBench).
 
     Example:
         accuracy_config:
@@ -284,6 +334,8 @@ class AccuracyConfig(BaseModel):
           ground_truth: "answer"
           extractor: "boxed_math_extractor"
           num_repeats: 5
+          extras:
+            vbench_project_path: "/path/to/accuracy"
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -296,6 +348,10 @@ class AccuracyConfig(BaseModel):
     )
     num_repeats: int = Field(
         1, ge=1, description="Repeat dataset N times for evaluation"
+    )
+    extras: dict[str, Any] | None = Field(
+        None,
+        description="Free-form scorer kwargs (e.g. vbench_project_path, subprocess_timeout_s)",
     )
 
 
@@ -389,7 +445,100 @@ class LoadPattern(BaseModel):
             raise ValueError(
                 "Concurrency requires --concurrency (e.g., --concurrency 10)"
             )
+        if self.type == LoadPatternType.MULTI_TURN and (
+            not self.target_concurrency or self.target_concurrency <= 0
+        ):
+            raise ValueError(
+                "Multi-turn requires --concurrency (e.g., --concurrency 96)"
+            )
         return self
+
+
+@cyclopts.Parameter(name="*")
+class WarmupConfig(BaseModel):
+    """Warmup phase configuration. Runs before the performance phase; results are not recorded."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    enabled: Annotated[
+        bool,
+        cyclopts.Parameter(
+            alias="--warmup", help="Enable warmup phase before performance run"
+        ),
+    ] = Field(False, description="Enable warmup phase before performance run")
+    n_requests: Annotated[
+        int | None,
+        cyclopts.Parameter(
+            alias="--warmup-requests",
+            help="Warmup request count (None = full dataset once)",
+        ),
+    ] = Field(None, gt=0, description="Warmup request count (None = full dataset once)")
+    salt: Annotated[
+        bool,
+        cyclopts.Parameter(
+            alias="--warmup-salt",
+            help="Prepend a unique random hex salt to each warmup prompt",
+        ),
+    ] = Field(
+        False, description="Prepend a unique random hex salt to each warmup prompt"
+    )
+    drain: Annotated[
+        bool,
+        cyclopts.Parameter(
+            alias="--warmup-drain",
+            help="Drain in-flight warmup requests before starting the performance phase",
+        ),
+    ] = Field(
+        False,
+        description="Drain in-flight warmup requests before starting the performance phase",
+    )
+    warmup_random_seed: Annotated[
+        int,
+        cyclopts.Parameter(
+            alias="--warmup-seed",
+            help="RNG seed for warmup scheduling and sample ordering",
+        ),
+    ] = Field(42, description="RNG seed for warmup scheduling and sample ordering")
+
+
+class DrainConfig(BaseModel):
+    """Per-phase in-flight response drain timeout configuration."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    warmup_timeout_s: Annotated[
+        float | None,
+        cyclopts.Parameter(
+            alias="--warmup-drain-timeout",
+            help="Warmup drain timeout in seconds (None = wait indefinitely)",
+        ),
+    ] = Field(
+        240.0,
+        gt=0,
+        description="Warmup drain timeout in seconds (None = wait indefinitely)",
+    )
+    performance_timeout_s: Annotated[
+        float | None,
+        cyclopts.Parameter(
+            alias="--performance-drain-timeout",
+            help="Performance drain timeout in seconds (None = wait indefinitely)",
+        ),
+    ] = Field(
+        240.0,
+        gt=0,
+        description="Performance drain timeout in seconds (None = wait indefinitely)",
+    )
+    accuracy_timeout_s: Annotated[
+        float | None,
+        cyclopts.Parameter(
+            alias="--accuracy-drain-timeout",
+            help="Accuracy drain timeout in seconds (None = wait indefinitely)",
+        ),
+    ] = Field(
+        None,
+        gt=0,
+        description="Accuracy drain timeout in seconds (None = wait indefinitely)",
+    )
 
 
 @cyclopts.Parameter(name="*")
@@ -401,6 +550,11 @@ class Settings(BaseModel):
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
     load_pattern: LoadPattern = Field(default_factory=LoadPattern)
     client: HTTPClientConfig = Field(default_factory=HTTPClientConfig)
+    drain: DrainConfig = Field(
+        default_factory=DrainConfig,
+        description="Per-phase in-flight response drain timeout configuration",
+    )
+    warmup: WarmupConfig = Field(default_factory=WarmupConfig)
 
 
 class OfflineSettings(Settings):
@@ -586,10 +740,40 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
                     f"Offline benchmarks must use 'max_throughput', got '{lp.type}'"
                 )
         elif effective_mode == TestType.ONLINE:
-            if lp.type not in (LoadPatternType.POISSON, LoadPatternType.CONCURRENCY):
+            if lp.type not in (
+                LoadPatternType.POISSON,
+                LoadPatternType.CONCURRENCY,
+                LoadPatternType.MULTI_TURN,
+            ):
                 raise ValueError(
-                    "Online mode requires --load-pattern (poisson or concurrency)"
+                    "Online mode requires --load-pattern (poisson, concurrency, or multi_turn)"
                 )
+
+        # Cross-validate load_pattern.type=multi_turn ↔ performance dataset.multi_turn config
+        has_multi_turn_perf_dataset = any(
+            d.multi_turn is not None
+            for d in (self.datasets or [])
+            if d.type == DatasetType.PERFORMANCE
+        )
+        has_multi_turn_non_perf_dataset = any(
+            d.multi_turn is not None
+            for d in (self.datasets or [])
+            if d.type != DatasetType.PERFORMANCE
+        )
+        if has_multi_turn_non_perf_dataset:
+            raise ValueError(
+                "multi_turn config is only supported on performance datasets; "
+                "accuracy datasets with multi_turn are not supported"
+            )
+        if lp.type == LoadPatternType.MULTI_TURN and not has_multi_turn_perf_dataset:
+            raise ValueError(
+                "load_pattern.type=multi_turn requires the performance dataset to have multi_turn config"
+            )
+        if has_multi_turn_perf_dataset and lp.type != LoadPatternType.MULTI_TURN:
+            raise ValueError(
+                f"Performance dataset with multi_turn config requires load_pattern.type=multi_turn, "
+                f"got '{lp.type}'"
+            )
 
         return self
 
