@@ -62,12 +62,12 @@ These are baked into the scripts/configs already; listed so you know _why_.
    `feat/make-configurable-drain-timeout`; until it merges, the drain is fixed
    at 240 s and a long full run must be split or driven against an already
    warmed-up batch.
-9. **LiveCodeBench scoring is separate** (see below). The `deepseek_r1` scorer
-   grades the four text subsets in-process, but LCB needs (a) a ~21 GB dataset
-   load that the **login node's per-user cgroup OOM-kills**, and (b) a sandbox
-   that **kills runaway generated code** (the MLCommons in-process executor
-   hangs - `N of M futures unfinished`). Score LCB on a compute node with
-   `score_livecodebench.sh`.
+9. **LiveCodeBench runs in a sandbox** (see "LiveCodeBench scoring"). It executes
+   untrusted model code, so the `deepseek_r1` scorer grades it via the `lcb_serve`
+   container over a WebSocket (in-run, port 13835) instead of in-process. If no
+   container is available, score it afterward with `score_livecodebench.sh` - the
+   MLCommons in-process executor can't kill runaway code (hangs, `N of M futures
+unfinished`) and needs a ~21 GB dataset load that OOMs the login cgroup.
 
 ## Prerequisites
 
@@ -158,6 +158,38 @@ Either way the accuracy score is written under `report_dir` (see Results). The
 parent env must be synced (`uv sync --extra dev`) and the accuracy subproject set
 up once (Prerequisites).
 
+## Accuracy config (the single YAML)
+
+One config drives everything: a tiny `performance` dataset for the perf phase and
+the full 4388-sample `accuracy` dataset scored by the `deepseek_r1` scorer. The
+accuracy entry:
+
+```yaml
+- name: deepseek_r1_accuracy
+  type: "accuracy"
+  path: examples/10_DeepSeekR1_Example/data/deepseek_r1_eval.parquet
+  accuracy_config:
+    eval_method: deepseek_r1 # combined 5-subset MLPerf scorer
+    ground_truth: ground_truth
+    num_repeats: 1
+    extras:
+      subset_column: dataset
+      question_column: question
+      tokenizer_path: "${MODEL_DIR}" # tokenizer for tokens_per_sample
+      # LiveCodeBench via the lcb_serve container (optional; defaults shown):
+      lcb_websocket_port: 13835 # ws://localhost:13835; null = in-process
+      lcb_subset: livecodebench # graded out-of-band via the container
+      lcb_timeout: 60 # per-sample code-exec timeout (s)
+```
+
+`extras` are forwarded to the scorer. **`lcb_websocket_port` defaults to 13835**,
+so if the `lcb_serve` container is reachable on the client node the livecodebench
+subset is scored **in-run** (one number, no follow-up job); if it's unreachable
+the scorer logs and falls back to grading LCB in-process. The LCB keys are
+optional - the minimal block (just `subset_column`/`question_column`/
+`tokenizer_path`) already uses the 13835 default. Other `extras`:
+`deepseek_eval_project_path`, `uv_executable`, `subprocess_timeout_s`.
+
 ## Results
 
 ```bash
@@ -166,28 +198,52 @@ cat logs/deepseek_r1_fp4_accuracy_subset/deepseek_eval/*_results.json  # per-sub
 ```
 
 `accuracy_scores["deepseek_r1_accuracy"].score` is the aggregate `exact_match`
-(0-100) over the **four text subsets** (math500/aime/gpqa/mmlu_pro); the
-`deepseek_r1` scorer reports `complete: false` and `livecodebench: failed`
-because LCB code execution can't run in-process (see gotcha #9). Score LCB
-separately and fold it in.
+(0-100). With the `lcb_serve` container reachable, it covers **all five subsets**
+in one run - `deepseek_eval/*_results.json` shows `livecodebench` with
+`status: lcb-service` and `complete: true`. Without a container, the scorer grades
+the four text subsets and marks `livecodebench` unscored (`complete: false`);
+score LCB separately (option B below) and fold it in.
 
-## Scoring LiveCodeBench (separate compute-node job)
+## LiveCodeBench scoring
+
+LiveCodeBench executes untrusted model-generated code, so it is graded in a
+sandboxed `lcb_serve` WebSocket service (`src/inference_endpoint/evaluation/livecodebench/`,
+port 13835) rather than in the benchmark process. Two ways:
+
+### (A) In-run, via the container (no follow-up scorer) - recommended
+
+Run the `lcb_serve` WebSocket container on the **same node** as the client (build
+from `src/inference_endpoint/evaluation/livecodebench/lcb_serve.dockerfile`, or
+pull a prebuilt image), exposing port 13835:
 
 ```bash
-# Run on a compute node (clean CPUs + 940GB RAM, hardened kill-on-timeout exec):
-sbatch examples/10_DeepSeekR1_Example/score_livecodebench.sh
-# -> examples/10_DeepSeekR1_Example/accuracy/lcb_datasets/lcb_results.json
-#    {"total_samples": 349, "passed_samples": P, "pass_at_1": P/349}
+# inside the container (docker run, or a pyxis srun step on the client node):
+uvicorn server:app --host 0.0.0.0 --port 13835 \
+  --timeout-keep-alive 7200 --ws-ping-interval 30 --ws-ping-timeout 10
 ```
 
-It generates the LCB test cases (release_v6 superset -> all question_ids resolve;
-`question_id` = the dataset's `ground_truth`), extracts the ` ```python `
-block from each model output, and runs the repo's hardened `lcb_serve`
-(`evaluation/livecodebench/`, kill-on-timeout per execution - the same engine
-behind the optional Docker WebSocket service, run directly here since this
-cluster has no Docker).
+The `deepseek_r1` scorer auto-connects to `ws://localhost:13835/evaluate`
+(`extras.lcb_websocket_port`, default 13835) and grades livecodebench there during
+`--mode acc` finalize, so `results.json` carries the **full 5-subset
+`exact_match` in one run** - no follow-up job. The `release_v6` LCB test cases are
+baked into the image, so the sandbox needs no network while running.
 
-**Fold LCB into the official 5-subset number:**
+> No-Docker SLURM clusters: `enroot import` the image to a `.sqsh` and run it as a
+> pyxis `srun` step on the client node. The image must be enroot-compatible -
+> shell-bearing (`/bin/sh`) and **gzip** layers (enroot can't extract zstd).
+
+### (B) Separate compute-node job (no container)
+
+If you can't run the container in-run, leave LCB unscored in the main run and
+score it afterward on a clean compute node:
+
+```bash
+sbatch examples/10_DeepSeekR1_Example/score_livecodebench.sh
+# -> accuracy/lcb_datasets/lcb_results.json  {"total_samples": 349, "passed_samples": P, ...}
+```
+
+It runs the same hardened `lcb_serve` (kill-on-timeout) directly on the node.
+Fold it into the 5-subset number:
 
 ```
 full_exact_match = (sum of per-subset correct over math500/aime/gpqa/mmlu_pro
@@ -196,12 +252,6 @@ full_exact_match = (sum of per-subset correct over math500/aime/gpqa/mmlu_pro
 
 where each text subset's correct count = `round(exact_match/100 * num_samples)`
 from `deepseek_eval/deepseek_r1_accuracy_results.json`.
-
-> Security note: `lcb_serve` executes model-generated code. The repo's
-> `evaluation/livecodebench/lcb_serve.dockerfile` provides a hardened Docker
-> sandbox; this script runs the same executor directly on an isolated,
-> exclusive compute node - acceptable for a controlled in-house model, but use
-> the container for untrusted endpoints.
 
 ## Throughput note
 
