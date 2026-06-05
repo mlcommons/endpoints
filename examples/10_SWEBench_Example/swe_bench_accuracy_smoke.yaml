@@ -1,0 +1,42 @@
+type: "offline"
+
+model_params:
+  name: "Qwen/Qwen3.6-35B-A3B"
+  temperature: 1.0
+  top_p: 0.95
+  top_k: 20
+  repetition_penalty: 1.0
+  presence_penalty: 1.5
+  max_new_tokens: 16
+  streaming: "off"
+
+datasets:
+  - name: swe_bench
+    type: "performance"
+    samples: 5
+
+  - name: swe_bench_smoke
+    type: "accuracy"
+    path: "examples/10_SWEBench_Example/smoke_1instance.jsonl"
+    accuracy_config:
+      eval_method: "swe_bench_scorer"
+      num_repeats: 1
+      extras:
+        num_instances: 1
+        subset: "verified"
+        workers: 1
+        max_eval_workers: 4
+
+settings:
+  runtime:
+    min_duration_ms: 0
+    n_samples_to_issue: 5
+  load_pattern:
+    type: "max_throughput"
+  client:
+    num_workers: 1
+
+endpoint_config:
+  endpoints:
+    - "http://localhost:30000"
+  api_type: "openai"
