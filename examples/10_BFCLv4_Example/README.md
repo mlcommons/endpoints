@@ -11,8 +11,8 @@ covering single-turn requests (one prompt → one structured tool call) and
 agentic multi-turn conversations (parse call → execute locally → feed result
 back → repeat).
 
-The sampling rates here are tuned so the full four-category run finishes on an
-edge device in **under 3 hours**.
+The sampling rates here are tuned so single-turn (3 categories) plus a sampled
+multi-turn run finish on an edge device in **~2.5–3 hours**.
 
 ---
 
@@ -33,25 +33,43 @@ CLI that comes with it.
 | Python 3.12+ | Earlier versions not supported |
 | Git | To clone the repo |
 | A running model server | Any OpenAI-compatible endpoint. Validated with `Qwen3.6-27B-Q4_K_M` via llama.cpp (see below) |
-| ~16 GB RAM (GPU or CPU) | For the 27B Q4 model |
-| ~3 hours wall-clock | For the sampled four-category run |
+| ~24 GB memory (GPU/VRAM or unified) | The Q4 GGUF is ~16.8 GB on disk; the rest is KV cache at `--ctx-size 32768`. 16 GB is **not** enough. |
+| ~2.5–3 hours wall-clock | Single-turn (3 categories) + sampled multi-turn |
 
-### Starting a model server (llama.cpp example)
+### Starting a model server
 
 If you already have an OpenAI-compatible server running, skip this section.
-The commands below use llama.cpp's Docker image as a quick-start:
+
+This example was validated on an **NVIDIA Jetson Thor** (aarch64, Blackwell GPU,
+JetPack 7 / CUDA 13) using a **natively-built llama.cpp `llama-server`**.
+
+> ⚠️ The prebuilt `ghcr.io/ggerganov/llama.cpp` Docker images do **not** work for
+> GPU inference on Thor: the plain `:server` tag is CPU-only (so `-ngl` is a
+> no-op and the 27B model runs entirely on CPU), and the CUDA tags are `x86_64`
+> builds that do not target Thor's `sm_110` / aarch64-SBSA. On Thor, build
+> llama.cpp from source.
+
+**Build llama.cpp with CUDA on Thor (one time):**
 
 ```bash
-# Pull the model (adjust path/model name for your setup)
-# Example: Qwen3-27B-Q4_K_M in GGUF format from HuggingFace
-docker run --rm -it \
-  -p 8080:8080 \
-  -v /path/to/your/models:/models \
-  ghcr.io/ggerganov/llama.cpp:server \
-  -m /models/Qwen3-27B-Q4_K_M.gguf \
+git clone https://github.com/ggml-org/llama.cpp && cd llama.cpp
+# CUDA toolkit ships with JetPack at /usr/local/cuda (CUDA 13 on R38)
+cmake -B build -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=110   # Thor = sm_110 (cc 11.0)
+cmake --build build --config Release -j --target llama-server
+```
+
+**Start the server (matches the validated reproducibility runs):**
+
+```bash
+./build/bin/llama-server \
+  --model /path/to/Qwen3.6-27B-Q4_K_M.gguf \
   --host 0.0.0.0 --port 8080 \
-  --ctx-size 8192 \
-  -ngl 99          # layers to offload to GPU; set 0 for CPU-only
+  --ctx-size 32768 \
+  -np 1 \
+  --reasoning off \
+  --flash-attn on \
+  --n-gpu-layers 99 \
+  --seed 42
 ```
 
 Verify it is up:
@@ -59,6 +77,24 @@ Verify it is up:
 ```bash
 curl -s http://localhost:8080/v1/models | python3 -m json.tool
 ```
+
+<details><summary>x86_64 / discrete-GPU users (Docker quick-start)</summary>
+
+On a workstation or server with a CUDA dGPU you can use llama.cpp's Docker image
+instead of building from source. Use a CUDA image tag and expose the GPU with
+`--gpus all`:
+
+```bash
+docker run --rm -it --gpus all \
+  -p 8080:8080 \
+  -v /path/to/your/models:/models \
+  ghcr.io/ggerganov/llama.cpp:server-cuda \
+  -m /models/Qwen3.6-27B-Q4_K_M.gguf \
+  --host 0.0.0.0 --port 8080 \
+  --ctx-size 32768 \
+  -ngl 99
+```
+</details>
 
 ---
 
@@ -87,7 +123,7 @@ pip install -e ".[bfcl]"
 
 # 4. Confirm the install resolved without conflict
 pip show bfcl-eval numpy | grep -E "^(Name|Version)"
-# Expected: bfcl-eval present, numpy 1.26.x
+# Expected: bfcl-eval present, numpy >= 1.26.4 (bfcl-eval may cap it < 2)
 
 # 5. Confirm the CLI is available
 inference-endpoint --help
@@ -118,7 +154,7 @@ Before running, open `offline_bfcl_v4_single_turn.yaml` and set
 `Qwen3.6-27B-Q4_K_M`). The `endpoint_config.endpoints` list defaults to
 `http://localhost:8080`.
 
-**Sampling rates** (validated for <3 h on an edge device):
+**Sampling rates** (validated for ~82 min single-turn on an edge device):
 
 | Category | Sample rate | Notes |
 | --- | --- | --- |
@@ -126,7 +162,8 @@ Before running, open `offline_bfcl_v4_single_turn.yaml` and set
 | live | 10% (tiny subsets → 100%) | ~171 samples |
 | hallucination | 5% | ~56 samples |
 
-Results are written to `results/bfcl_v4_single_turn_accuracy/`.
+Total ≈ 456 single-turn samples. Results are written to
+`results/bfcl_v4_single_turn_accuracy/`.
 
 ---
 
@@ -146,8 +183,12 @@ python -m inference_endpoint.evaluation.bfcl_v4_multi_turn_cli \
   --report-dir results/bfcl_v4_multi_turn/
 ```
 
-`--sample-pct 3` takes ~3% of each subset (~24 entries total). Omit it to run
-all ~200 entries in `multi_turn_base` (expect ~80 min on an edge device).
+`--sample-pct 3` takes ~3% of each multi-turn subset (~24 entries total across
+`multi_turn_base`, `multi_turn_miss_func`, `multi_turn_miss_param`, and
+`multi_turn_long_context`). Omit it to run the full set (the ~200-entry
+`multi_turn_base` plus the other subsets; expect ~80 min for `multi_turn_base`
+alone on an edge device), or pass `--subsets multi_turn_base` to restrict to one
+subset.
 
 Results are written to `results/bfcl_v4_multi_turn/`.
 
@@ -159,24 +200,31 @@ Results are written to `results/bfcl_v4_multi_turn/`.
 # Single-turn overall accuracy
 python3 -c "
 import json, pathlib
-s = json.loads(pathlib.Path('results/bfcl_v4_single_turn_accuracy/accuracy_scores.json').read_text())
-print(s)
+r = json.loads(pathlib.Path('results/bfcl_v4_single_turn_accuracy/results.json').read_text())
+print('Overall ST accuracy:',
+      r['accuracy_scores']['bfcl_v4::function_calling']['score']['overall_accuracy'], '%')
 "
 
 # Multi-turn overall accuracy
 python3 -c "
 import json, pathlib
 r = json.loads(pathlib.Path('results/bfcl_v4_multi_turn/results.json').read_text())
-print('Overall MT accuracy:', r['accuracy_scores']['bfcl_v4::multi_turn']['score']['overall_accuracy'], '%')
+print('Overall MT accuracy:',
+      r['accuracy_scores']['bfcl_v4::multi_turn']['score']['overall_accuracy'], '%')
 "
 ```
+
+> Note: the single-turn pipeline writes `results.json` (accuracy nested under
+> `accuracy_scores['bfcl_v4::function_calling']`). There is no separate
+> `accuracy_scores.json`. A human-readable summary is also written to
+> `results/bfcl_v4_single_turn_accuracy/report.txt`.
 
 ---
 
 ## Reproducible runs with `--seed`
 
-Pass `--seed <N>` to fix the server-side RNG. The same seed + same model +
-deterministic server will produce identical outputs across runs.
+Pass `--seed <N>` to fix the RNG used for sampling. The same seed + same model +
+a deterministic server produce identical outputs across runs.
 
 ```bash
 # Single-turn with seed
@@ -198,23 +246,45 @@ python -m inference_endpoint.evaluation.bfcl_v4_multi_turn_cli \
 `seed` is sent as the `seed` field in the `/v1/chat/completions` request body.
 Servers that do not support it ignore it silently.
 
+**Server-side determinism also matters.** The validated runs launched
+`llama-server` with `--seed 42` and a single slot (`-np 1`) — see the server
+command in Step 0. A multi-slot / dynamically-batched server can still produce
+run-to-run variation even with a fixed client seed.
+
 ---
 
 ## Reference results (Thor edge device)
 
-Validated on Thor (`Qwen3.6-27B-Q4_K_M`, `temperature=0`). Two independent
-seed runs were executed to confirm determinism:
+Validated on Thor (`Qwen3.6-27B-Q4_K_M`, `temperature=0`, `seed=42`).
 
-| Category | Run 1 | Run 2 | Match? |
+### Determinism — two independent seed runs
+
+The full sampled suite (single-turn + `--sample-pct 3` multi-turn) was run twice,
+end to end, with a freshly restarted server each pass. Every score was identical.
+
+| Metric | Run 1 | Run 2 | Match? |
 | --- | --- | --- | --- |
-| Single-turn `non_live` (AST, 456 samples) | 86.98% | 86.98% | ✓ |
-| Single-turn `live` | 84.12% | 84.12% | ✓ |
-| Single-turn `hallucination` | 94.32% | 94.32% | ✓ |
-| **Single-turn overall** | **87.50%** | **87.50%** | ✓ |
-| Multi-turn `multi_turn_base` (200/200 entries) | 70.00% (140/200) | — | exact parity with evalscope |
+| Single-turn `non_live` (AST, ~230 samples) | 86.98% | 86.98% | ✓ |
+| Single-turn `live` (~171 samples) | 84.12% | 84.12% | ✓ |
+| Single-turn `hallucination` (~56 samples) | 94.32% | 94.32% | ✓ |
+| **Single-turn overall (456 samples)** | **87.50%** | **87.50%** | ✓ |
+| Multi-turn `multi_turn_base` | 66.67% (4/6) | 66.67% (4/6) | ✓ |
+| Multi-turn `multi_turn_miss_func` | 33.33% (2/6) | 33.33% (2/6) | ✓ |
+| Multi-turn `multi_turn_miss_param` | 16.67% (1/6) | 16.67% (1/6) | ✓ |
+| Multi-turn `multi_turn_long_context` | 66.67% (4/6) | 66.67% (4/6) | ✓ |
+| **Multi-turn overall (24 sampled entries)** | **45.84%** | **45.84%** | ✓ |
 
-Wall-clock: ~82 min single-turn (~10.8 s/sample), ~80 min multi-turn for the
-full `multi_turn_base`.
+Wall-clock per pass: ~82 min single-turn (~10.8 s/sample) + ~64 min multi-turn
+(~159 s/entry) ≈ **2.4–2.5 h**. Run-to-run timing varied < 1.1%; accuracy did
+not vary at all.
 
-Excluded from aggregates: `live_relevance` (not part of any reported category)
-and `memory` (not implemented on this branch).
+### Accuracy parity — full `multi_turn_base`
+
+A separate single run of the full 200-entry `multi_turn_base` (no sampling)
+scored **140/200 = 70.00%**, in exact parity with evalscope. This run takes
+~80 min on an edge device and is not part of the determinism check above.
+
+### Notes
+
+Excluded from the reported aggregates: `live_relevance` (not part of any
+reported category) and `memory` (not implemented on this branch).
