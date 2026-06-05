@@ -55,6 +55,7 @@ from ..core.types import TextModelOutput
 from ..dataset_manager.agentic_inference_dataset import AgenticInferenceDataset
 from ..dataset_manager.dataset import Dataset
 from ..dataset_manager.predefined.shopify_product_catalogue import ProductMetadata
+from ..exceptions import SetupError
 from .extractor import Extractor, PythonCodeExtractor
 
 logger = logging.getLogger(__name__)
@@ -107,6 +108,14 @@ class Scorer(ABC):
     def available_scorers(cls) -> list[str]:
         """Return the list of registered scorer names."""
         return list(Scorer.PREDEFINED.keys())
+
+    @classmethod  # noqa: B027
+    def preflight(cls, extras: dict[str, Any]) -> None:
+        """Verify external dependencies before the benchmark starts.
+
+        Subclasses that depend on external tools (Docker, uv, binaries) should
+        override this to raise SetupError if a required tool is unavailable.
+        """
 
     def __init__(
         self,
@@ -1792,6 +1801,70 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
         if from_env:
             return Path(from_env)
         return Path(_DEFAULT_SWE_BENCH_PROJECT_PATH)
+
+    @classmethod
+    def preflight(cls, extras: dict[str, Any]) -> None:
+        """Check uv, mini-extra, swebench, and Docker before the benchmark starts."""
+        swe_bench_project_path = cls._resolve_project_path(
+            extras.get("swe_bench_project_path")
+        )
+
+        if shutil.which("uv") is None:
+            raise SetupError(
+                "uv is not on PATH; install it with: "
+                "curl -LsSf https://astral.sh/uv/install.sh | sh"
+            )
+
+        result = subprocess.run(
+            [
+                "uv",
+                "run",
+                "--project",
+                str(swe_bench_project_path),
+                "mini-extra",
+                "--help",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            raise SetupError(
+                f"mini-extra is not available in the SWE-bench subproject at "
+                f"{swe_bench_project_path}. Run: cd {swe_bench_project_path} && uv sync"
+            )
+
+        swebench_result = subprocess.run(
+            [
+                "uv",
+                "run",
+                "--project",
+                str(swe_bench_project_path),
+                "python",
+                "-c",
+                "import swebench",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            timeout=30,
+        )
+        if swebench_result.returncode != 0:
+            raise SetupError(
+                f"swebench is not available in the SWE-bench subproject at "
+                f"{swe_bench_project_path}. Run: cd {swe_bench_project_path} && uv sync"
+            )
+
+        docker_result = subprocess.run(
+            ["docker", "version"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            timeout=10,
+        )
+        if docker_result.returncode != 0:
+            raise SetupError(
+                "Docker daemon is not running or docker is not on PATH. "
+                "Start Docker and retry."
+            )
 
     def score_single_sample(self, value: str, ground_truth: str) -> float:
         raise RuntimeError(

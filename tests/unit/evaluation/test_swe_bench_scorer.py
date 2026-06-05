@@ -28,6 +28,7 @@ from inference_endpoint.evaluation.scoring import (
     Scorer,
     SWEBenchScorer,
 )
+from inference_endpoint.exceptions import SetupError
 
 pytestmark = pytest.mark.unit
 
@@ -411,3 +412,66 @@ class TestSWEBenchScorer:
         )
         with pytest.raises(msgspec.DecodeError):
             scorer.score()
+
+
+class TestSWEBenchScorerPreflight:
+    def _extras(self, swe_bench_project: Path) -> dict:
+        return {"swe_bench_project_path": str(swe_bench_project)}
+
+    def test_preflight_passes(self, swe_bench_project, monkeypatch):
+        monkeypatch.setattr(
+            scoring_mod.shutil, "which", lambda name: f"/usr/bin/{name}"
+        )
+        monkeypatch.setattr(
+            scoring_mod.subprocess, "run", lambda *a, **kw: MagicMock(returncode=0)
+        )
+        SWEBenchScorer.preflight(self._extras(swe_bench_project))
+
+    def test_preflight_fails_uv_missing(self, swe_bench_project, monkeypatch):
+        monkeypatch.setattr(scoring_mod.shutil, "which", lambda name: None)
+        with pytest.raises(SetupError, match="uv is not on PATH"):
+            SWEBenchScorer.preflight(self._extras(swe_bench_project))
+
+    def test_preflight_fails_mini_extra_missing(self, swe_bench_project, monkeypatch):
+        monkeypatch.setattr(
+            scoring_mod.shutil, "which", lambda name: f"/usr/bin/{name}"
+        )
+
+        def fake_run(cmd, **kw):
+            if "mini-extra" in cmd:
+                return MagicMock(returncode=1, stderr=b"not found")
+            return MagicMock(returncode=0)
+
+        monkeypatch.setattr(scoring_mod.subprocess, "run", fake_run)
+        with pytest.raises(SetupError, match="mini-extra is not available"):
+            SWEBenchScorer.preflight(self._extras(swe_bench_project))
+
+    def test_preflight_fails_swebench_missing(self, swe_bench_project, monkeypatch):
+        monkeypatch.setattr(
+            scoring_mod.shutil, "which", lambda name: f"/usr/bin/{name}"
+        )
+
+        def fake_run(cmd, **kw):
+            if "import swebench" in " ".join(cmd):
+                return MagicMock(returncode=1, stderr=b"ModuleNotFoundError")
+            return MagicMock(returncode=0)
+
+        monkeypatch.setattr(scoring_mod.subprocess, "run", fake_run)
+        with pytest.raises(SetupError, match="swebench is not available"):
+            SWEBenchScorer.preflight(self._extras(swe_bench_project))
+
+    def test_preflight_fails_docker_not_running(self, swe_bench_project, monkeypatch):
+        monkeypatch.setattr(
+            scoring_mod.shutil, "which", lambda name: f"/usr/bin/{name}"
+        )
+
+        def fake_run(cmd, **kw):
+            if "docker" in cmd:
+                return MagicMock(
+                    returncode=1, stderr=b"Cannot connect to Docker daemon"
+                )
+            return MagicMock(returncode=0)
+
+        monkeypatch.setattr(scoring_mod.subprocess, "run", fake_run)
+        with pytest.raises(SetupError, match="Docker daemon is not running"):
+            SWEBenchScorer.preflight(self._extras(swe_bench_project))
