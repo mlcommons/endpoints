@@ -15,6 +15,7 @@
 
 """Tests for benchmark CLI models, config building, and command handlers."""
 
+import asyncio
 import random
 import tempfile
 from pathlib import Path
@@ -33,6 +34,7 @@ from inference_endpoint.commands.benchmark.execute import (
     BenchmarkContext,
     ResponseCollector,
     _build_phases,
+    _run_benchmark_async,
 )
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import (
@@ -486,6 +488,8 @@ class TestDrainConfig:
         assert cfg.warmup_timeout_s == 240.0
         assert cfg.performance_timeout_s == 240.0
         assert cfg.accuracy_timeout_s is None
+        assert cfg.metrics_drain_timeout_s == 60.0
+        assert cfg.metrics_tokenizer_workers == 2
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
@@ -496,6 +500,21 @@ class TestDrainConfig:
     def test_timeout_must_be_positive_or_none(self, field, value):
         with pytest.raises(ValidationError):
             DrainConfig(**{field: value})
+
+    @pytest.mark.unit
+    def test_metrics_drain_timeout_zero_is_valid(self):
+        cfg = DrainConfig(metrics_drain_timeout_s=0)
+        assert cfg.metrics_drain_timeout_s == 0.0
+
+    @pytest.mark.unit
+    def test_metrics_drain_timeout_negative_rejected(self):
+        with pytest.raises(ValidationError):
+            DrainConfig(metrics_drain_timeout_s=-1.0)
+
+    @pytest.mark.unit
+    def test_metrics_tokenizer_workers_must_be_at_least_one(self):
+        with pytest.raises(ValidationError):
+            DrainConfig(metrics_tokenizer_workers=0)
 
     @pytest.mark.unit
     def test_extra_fields_rejected(self):
@@ -517,6 +536,8 @@ settings:
     warmup_timeout_s: 12.5
     performance_timeout_s: 30.0
     accuracy_timeout_s: null
+    metrics_drain_timeout_s: 300.0
+    metrics_tokenizer_workers: 8
 """
         config_file = tmp_path / "drain.yaml"
         config_file.write_text(yaml_content)
@@ -525,6 +546,153 @@ settings:
         assert drain.warmup_timeout_s == 12.5
         assert drain.performance_timeout_s == 30.0
         assert drain.accuracy_timeout_s is None
+        assert drain.metrics_drain_timeout_s == 300.0
+        assert drain.metrics_tokenizer_workers == 8
+
+
+class TestAggregatorArgs:
+    """Tests that metrics aggregator subprocess args are correctly forwarded."""
+
+    def _make_ctx(self, config, tmp_path):
+        import random
+
+        rt = RuntimeSettings(
+            metric_target=Throughput(10.0),
+            reported_metrics=[Throughput(10.0)],
+            min_duration_ms=0,
+            max_duration_ms=None,
+            n_samples_from_dataset=1,
+            n_samples_to_issue=None,
+            min_sample_count=1,
+            rng_sched=random.Random(0),
+            rng_sample_index=random.Random(0),
+            load_pattern=LoadPattern(type=LoadPatternType.MAX_THROUGHPUT),
+        )
+        df = pd.DataFrame({"prompt": ["q0"]})
+        ds = Dataset(df)
+        ds.load()
+        return BenchmarkContext(
+            config=config,
+            test_mode=TestMode.PERF,
+            report_dir=tmp_path,
+            tokenizer_name=None,
+            dataloader=ds,
+            rt_settings=rt,
+            total_samples=1,
+        )
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "timeout_s, expected_flag",
+        [(120.0, "120.0"), (0.0, "0.0"), (60.0, "60.0")],
+    )
+    async def test_drain_timeout_forwarded_to_aggregator_args(
+        self, tmp_path, timeout_s, expected_flag
+    ):
+        config = OfflineConfig(
+            **_OFFLINE_KWARGS,
+            settings=OfflineSettings(
+                drain=DrainConfig(metrics_drain_timeout_s=timeout_s)
+            ),
+        )
+        ctx = self._make_ctx(config, tmp_path)
+
+        captured: list = []
+
+        async def _capture_launch(service_configs, *, timeout):
+            captured.extend(service_configs)
+            raise KeyboardInterrupt("stop after launch")
+
+        mock_zmq = MagicMock()
+        mock_zmq.socket_dir = str(tmp_path / "sockets")
+
+        with (
+            patch(
+                "inference_endpoint.commands.benchmark.execute.ManagedZMQContext"
+            ) as MockZMQ,
+            patch(
+                "inference_endpoint.commands.benchmark.execute.EventPublisherService"
+            ) as MockPub,
+            patch(
+                "inference_endpoint.commands.benchmark.execute.MetricsSnapshotSubscriber"
+            ) as MockSub,
+            patch(
+                "inference_endpoint.commands.benchmark.execute.ServiceLauncher"
+            ) as MockLauncher,
+            patch("inference_endpoint.commands.benchmark.execute.trace"),
+            patch("inference_endpoint.commands.benchmark.execute.tqdm"),
+        ):
+            MockZMQ.scoped.return_value.__enter__ = MagicMock(return_value=mock_zmq)
+            MockZMQ.scoped.return_value.__exit__ = MagicMock(return_value=False)
+            MockPub.return_value.socket_name = "test_pub"
+            MockSub.return_value.start = MagicMock()
+            MockLauncher.return_value.launch = _capture_launch
+
+            loop = asyncio.get_event_loop()
+            with pytest.raises(KeyboardInterrupt):
+                await _run_benchmark_async(ctx, loop)
+
+        aggregator_cfg = next(c for c in captured if "metrics_aggregator" in c.module)
+        args = aggregator_cfg.args
+        assert "--drain-timeout" in args
+        idx = args.index("--drain-timeout")
+        assert args[idx + 1] == expected_flag
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("workers, expected_flag", [(4, "4"), (8, "8"), (2, "2")])
+    async def test_tokenizer_workers_forwarded_to_aggregator_args(
+        self, tmp_path, workers, expected_flag
+    ):
+        config = OfflineConfig(
+            **_OFFLINE_KWARGS,
+            settings=OfflineSettings(
+                drain=DrainConfig(metrics_tokenizer_workers=workers)
+            ),
+        )
+        ctx = self._make_ctx(config, tmp_path)
+
+        captured: list = []
+
+        async def _capture_launch(service_configs, *, timeout):
+            captured.extend(service_configs)
+            raise KeyboardInterrupt("stop after launch")
+
+        mock_zmq = MagicMock()
+        mock_zmq.socket_dir = str(tmp_path / "sockets")
+
+        with (
+            patch(
+                "inference_endpoint.commands.benchmark.execute.ManagedZMQContext"
+            ) as MockZMQ,
+            patch(
+                "inference_endpoint.commands.benchmark.execute.EventPublisherService"
+            ) as MockPub,
+            patch(
+                "inference_endpoint.commands.benchmark.execute.MetricsSnapshotSubscriber"
+            ) as MockSub,
+            patch(
+                "inference_endpoint.commands.benchmark.execute.ServiceLauncher"
+            ) as MockLauncher,
+            patch("inference_endpoint.commands.benchmark.execute.trace"),
+            patch("inference_endpoint.commands.benchmark.execute.tqdm"),
+        ):
+            MockZMQ.scoped.return_value.__enter__ = MagicMock(return_value=mock_zmq)
+            MockZMQ.scoped.return_value.__exit__ = MagicMock(return_value=False)
+            MockPub.return_value.socket_name = "test_pub"
+            MockSub.return_value.start = MagicMock()
+            MockLauncher.return_value.launch = _capture_launch
+
+            loop = asyncio.get_event_loop()
+            with pytest.raises(KeyboardInterrupt):
+                await _run_benchmark_async(ctx, loop)
+
+        aggregator_cfg = next(c for c in captured if "metrics_aggregator" in c.module)
+        args = aggregator_cfg.args
+        assert "--tokenizer-workers" in args
+        idx = args.index("--tokenizer-workers")
+        assert args[idx + 1] == expected_flag
 
 
 class TestBuildPhases:

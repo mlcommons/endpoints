@@ -78,6 +78,8 @@ settings:
     warmup_timeout_s: 240.0  # Warmup drain timeout in seconds (None = wait indefinitely)
     performance_timeout_s: 240.0  # Performance drain timeout in seconds (None = wait indefinitely)
     accuracy_timeout_s: null  # Accuracy drain timeout in seconds (None = wait indefinitely)
+    metrics_drain_timeout_s: 60.0  # Wall-clock budget (seconds) for the metrics aggregator to drain in-flight tokenize tasks after ENDED (default: 60.0; 0 = unlimited).
+    metrics_tokenizer_workers: 2  # Number of tokenizer worker threads in the metrics aggregator (default: 2).
   warmup:
     enabled: false  # Enable warmup phase before performance run
     n_requests: null  # Warmup request count (None = full dataset once)
