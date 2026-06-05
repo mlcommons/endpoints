@@ -136,7 +136,7 @@ This project draws inspiration from:
 - [AIPerf](https://github.com/ai-dynamo/aiperf) — AI model performance profiling
 - [SGLang GenAI-Bench](https://github.com/sgl-project/genai-bench) — Token-level performance evaluation
 - [vLLM Benchmarks](https://github.com/vllm-project/vllm/tree/main/benchmarks) — Performance benchmarking for vLLM
-- [InferenceMAX](https://github.com/InferenceMAX/InferenceMAX) - LLM inference optimization toolkit
+- [InferenceX](https://github.com/SemiAnalysisAI/InferenceX) - LLM inference optimization toolkit
 
 ## License
 
