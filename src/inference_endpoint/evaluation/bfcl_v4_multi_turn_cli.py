@@ -89,6 +89,12 @@ def main() -> None:
         help="Sampling temperature (default: 0.0 for determinism)",
     )
     parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Random seed for reproducible sampling (default: None)",
+    )
+    parser.add_argument(
         "--max-steps-per-turn",
         type=int,
         default=25,
@@ -151,10 +157,11 @@ def main() -> None:
 
     # Run conversations
     logger.info(
-        "Starting evaluation against %s (model=%s, temperature=%s)",
+        "Starting evaluation against %s (model=%s, temperature=%s, seed=%s)",
         args.endpoint,
         args.model,
         args.temperature,
+        args.seed,
     )
     t0 = time.time()
 
@@ -163,6 +170,7 @@ def main() -> None:
         model_name=args.model,
         api_key=args.api_key,
         temperature=args.temperature,
+        seed=args.seed,
         max_steps_per_turn=args.max_steps_per_turn,
         timeout_s=args.timeout,
     ) as runner:

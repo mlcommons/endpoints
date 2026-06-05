@@ -50,6 +50,7 @@ class OpenAIAdapter(HttpRequestAdapter):
             "stream": (model_params.streaming == StreamingMode.ON),
             "max_completion_tokens": model_params.max_new_tokens,
             "temperature": model_params.temperature,
+            "seed": model_params.seed,
             "top_p": model_params.top_p,
             "top_k": model_params.top_k,
             "repetition_penalty": model_params.repetition_penalty,

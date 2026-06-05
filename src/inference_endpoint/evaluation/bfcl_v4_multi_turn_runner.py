@@ -58,6 +58,7 @@ class BFCLMultiTurnRunner:
         model_name: str,
         api_key: str = "not-needed",
         temperature: float = 0.0,
+        seed: int | None = None,
         max_steps_per_turn: int = DEFAULT_MAX_STEPS_PER_TURN,
         timeout_s: float = DEFAULT_TIMEOUT_S,
     ):
@@ -67,6 +68,7 @@ class BFCLMultiTurnRunner:
         self._model_name = model_name
         self._api_key = api_key
         self._temperature = temperature
+        self._seed = seed
         self._timeout_s = timeout_s
         self._bridge = BFCLExecutionBridge(max_steps_per_turn=max_steps_per_turn)
         self._client: httpx.Client | None = None
@@ -197,6 +199,8 @@ class BFCLMultiTurnRunner:
             "tools": tools,
             "tool_choice": "auto",
         }
+        if self._seed is not None:
+            payload["seed"] = self._seed
 
         try:
             client = self._get_client()

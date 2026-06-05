@@ -120,6 +120,7 @@ class ChatCompletionRequest(
     temperature: float | None = None
     max_completion_tokens: int | None = None
     stream: bool | None = None
+    seed: int | None = None
     top_p: float | None = None
     top_k: int | None = None
     repetition_penalty: float | None = None

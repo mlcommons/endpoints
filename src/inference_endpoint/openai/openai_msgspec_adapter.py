@@ -79,6 +79,7 @@ class OpenAIMsgspecAdapter(HttpRequestAdapter):
         metadata: dict[str, Any] = {
             "model": model_params.name,
             "temperature": temp,
+            "seed": model_params.seed,
             "top_p": model_params.top_p,
             "top_k": model_params.top_k,
             "repetition_penalty": model_params.repetition_penalty,
@@ -181,6 +182,7 @@ class OpenAIMsgspecAdapter(HttpRequestAdapter):
             stream=query.data.get("stream"),
             max_completion_tokens=query.data.get("max_completion_tokens"),
             temperature=query.data.get("temperature"),
+            seed=query.data.get("seed"),
             top_p=query.data.get("top_p"),
             top_k=query.data.get("top_k"),
             repetition_penalty=query.data.get("repetition_penalty"),

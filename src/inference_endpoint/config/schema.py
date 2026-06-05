@@ -186,6 +186,7 @@ class ModelParams(BaseModel):
         cyclopts.Parameter(alias="--model", help="Model name", required=True),
     ] = ""
     temperature: float | None = Field(None, description="Sampling temperature")
+    seed: int | None = Field(None, description="Random seed for reproducible sampling")
     top_k: int | None = Field(None, description="Top-K sampling")
     top_p: float | None = Field(None, description="Top-P (nucleus) sampling")
     repetition_penalty: float | None = Field(None, description="Repetition penalty")

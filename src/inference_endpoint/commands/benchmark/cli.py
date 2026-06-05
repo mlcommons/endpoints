@@ -126,6 +126,20 @@ def from_config(
             help="Run only accuracy evaluation, skip the performance phase entirely",
         ),
     ] = False,
+    seed: Annotated[
+        int | None,
+        cyclopts.Parameter(
+            name="--seed",
+            help="Override model_params.seed from config (random seed for sampling)",
+        ),
+    ] = None,
+    report_dir: Annotated[
+        Path | None,
+        cyclopts.Parameter(
+            name="--report-dir",
+            help="Override report_dir from config",
+        ),
+    ] = None,
 ):
     """Run benchmark from YAML config file."""
     try:
@@ -134,6 +148,11 @@ def from_config(
         raise InputValidationError(f"Config error: {e}") from e
     if timeout is not None:
         resolved = resolved.with_updates(timeout=timeout)
+    if seed is not None:
+        new_model_params = resolved.model_params.model_copy(update={"seed": seed})
+        resolved = resolved.with_updates(model_params=new_model_params)
+    if report_dir is not None:
+        resolved = resolved.with_updates(report_dir=report_dir)
     test_mode = mode or (
         TestMode.BOTH if resolved.type == TestType.SUBMISSION else TestMode.PERF
     )
