@@ -61,6 +61,7 @@ def _write_node_config_tmp(config: SysInfoCaptureConfig) -> str:
 
 def capture_system_info(
     config: SysInfoCaptureConfig,
+    output_dir: Path,
     run_metadata_path: Path | None = None,
 ) -> Path:
     """Invoke the get-mlperf-multi-node-system-info mlcflow script.
@@ -88,10 +89,10 @@ def capture_system_info(
 
     ssh_ids_str = ",".join(t.to_mlcflow_str() for t in config.parsed_ssh_ids)
 
-    # CM/mlcflow scripts use "yes"/"" string convention for boolean env vars.
+    # mlcflow scripts use "yes"/"" string convention for boolean env vars.
     skip_ssh_key_file_value = "yes" if config.skip_ssh_key_file else ""
 
-    Path(config.output_path).mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     logger.info("Capturing system info from %d node(s)...", len(config.parsed_ssh_ids))
 
@@ -100,7 +101,7 @@ def capture_system_info(
         "automation": "script",
         "tags": tags_str,
         "ssh_ids": ssh_ids_str,
-        "out_dir_path": config.output_path,
+        "out_dir_path": str(output_dir),
         "out_file_name": _OUT_FILE_NAME,
         "skip_ssh_key_file": skip_ssh_key_file_value,
         "serving_framework_type": config.serving_framework,

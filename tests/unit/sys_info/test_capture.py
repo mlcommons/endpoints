@@ -22,13 +22,14 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from pydantic import ValidationError
+
 from inference_endpoint.config.schema import (
     BenchmarkConfig,
     SshTarget,
     SysInfoCaptureConfig,
 )
 from inference_endpoint.exceptions import ExecutionError, SetupError
-from pydantic import ValidationError
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -36,7 +37,6 @@ from pydantic import ValidationError
 
 _MINIMAL_SYS_INFO = {
     "accelerator_backend": "cuda",
-    "output_path": "/tmp/sys_info",
     "ssh_ids": ["alice@192.168.1.1"],
 }
 
@@ -185,7 +185,7 @@ def _encode_skip_ssh(cfg: SysInfoCaptureConfig) -> str:
 class TestCaptureSystemInfo:
     @pytest.mark.unit
     def test_mlcflow_not_installed_raises_setup_error(self, tmp_path: Path) -> None:
-        cfg = _make_config(output_path=str(tmp_path))
+        cfg = _make_config()
         with patch.dict("sys.modules", {"mlc": None}):
             import importlib
 
@@ -193,13 +193,13 @@ class TestCaptureSystemInfo:
 
             importlib.reload(capture_mod)
             with pytest.raises(SetupError, match="pip install mlc-scripts"):
-                capture_mod.capture_system_info(cfg)
+                capture_mod.capture_system_info(cfg, output_dir=tmp_path)
 
     @pytest.mark.unit
     def test_mlcflow_nonzero_return_raises_execution_error(
         self, tmp_path: Path
     ) -> None:
-        cfg = _make_config(output_path=str(tmp_path))
+        cfg = _make_config()
         mock_mlcflow = MagicMock()
         mock_mlcflow.access.return_value = {
             "return": 1,
@@ -212,11 +212,11 @@ class TestCaptureSystemInfo:
 
             importlib.reload(capture_mod)
             with pytest.raises(ExecutionError, match="ssh connection refused"):
-                capture_mod.capture_system_info(cfg)
+                capture_mod.capture_system_info(cfg, output_dir=tmp_path)
 
     @pytest.mark.unit
     def test_happy_path_output_path_from_new_env(self, tmp_path: Path) -> None:
-        cfg = _make_config(output_path=str(tmp_path))
+        cfg = _make_config()
         mock_mlcflow = MagicMock()
         mock_mlcflow.access.return_value = {
             "return": 0,
@@ -230,13 +230,13 @@ class TestCaptureSystemInfo:
             from inference_endpoint.sys_info import capture as capture_mod
 
             importlib.reload(capture_mod)
-            result = capture_mod.capture_system_info(cfg)
+            result = capture_mod.capture_system_info(cfg, output_dir=tmp_path)
         assert result == Path("/tmp/out.json")
 
     @pytest.mark.unit
     def test_missing_env_path_raises_execution_error(self, tmp_path: Path) -> None:
         """Return code 0 without MLC_MULTI_NODE_SYSTEM_INFO_FILE_PATH raises ExecutionError."""
-        cfg = _make_config(output_path=str(tmp_path))
+        cfg = _make_config()
         mock_mlcflow = MagicMock()
         mock_mlcflow.access.return_value = {
             "return": 0,
@@ -251,12 +251,12 @@ class TestCaptureSystemInfo:
             with pytest.raises(
                 ExecutionError, match="MLC_MULTI_NODE_SYSTEM_INFO_FILE_PATH"
             ):
-                capture_mod.capture_system_info(cfg)
+                capture_mod.capture_system_info(cfg, output_dir=tmp_path)
 
     @pytest.mark.unit
     def test_unreachable_node_no_node_config_succeeds(self, tmp_path: Path) -> None:
         """mlcflow returning 0 (one node internally unreachable, no node_config) is non-fatal."""
-        cfg = _make_config(output_path=str(tmp_path))
+        cfg = _make_config()
         mock_mlcflow = MagicMock()
         mock_mlcflow.access.return_value = {
             "return": 0,
@@ -272,7 +272,7 @@ class TestCaptureSystemInfo:
             from inference_endpoint.sys_info import capture as capture_mod
 
             importlib.reload(capture_mod)
-            result = capture_mod.capture_system_info(cfg)
+            result = capture_mod.capture_system_info(cfg, output_dir=tmp_path)
         assert result == tmp_path / "system_desc.json"
 
     @pytest.mark.unit
@@ -280,7 +280,6 @@ class TestCaptureSystemInfo:
         cfg = SysInfoCaptureConfig(
             accelerator_backend="cuda",
             exclude_current_system=True,
-            output_path=str(tmp_path),
             skip_ssh_key_file=True,
             ssh_ids=["alice@10.0.0.1:2222", "bob@10.0.0.2"],
         )
@@ -295,7 +294,7 @@ class TestCaptureSystemInfo:
             from inference_endpoint.sys_info import capture as capture_mod
 
             importlib.reload(capture_mod)
-            capture_mod.capture_system_info(cfg)
+            capture_mod.capture_system_info(cfg, output_dir=tmp_path)
 
         call_args = mock_mlcflow.access.call_args[0][0]
         assert (
@@ -330,7 +329,6 @@ class TestYamlRoundTrip:
               - path: dummy.jsonl
             system_info:
               accelerator_backend: cuda
-              output_path: /tmp/sys_info
               ssh_ids:
                 - alice@192.168.1.1
                 - bob@192.168.1.2:2222
@@ -346,7 +344,6 @@ class TestYamlRoundTrip:
         assert config.system_info is not None
         sic = config.system_info
         assert sic.accelerator_backend == "cuda"
-        assert sic.output_path == "/tmp/sys_info"
         assert sic.exclude_current_system is True
         assert sic.skip_ssh_key_file is False
         assert len(sic.ssh_ids) == 2

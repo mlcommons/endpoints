@@ -652,8 +652,7 @@ class SysInfoCaptureConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     exclude_current_system: bool = False
-    accelerator_backend: Literal["cuda", "rocm", "none"] = "none"
-    output_path: str = "."
+    accelerator_backend: Literal["cuda", "rocm", "xpu", "none"] = "none"
     skip_ssh_key_file: bool = False
     ssh_ids: list[str]
     node_config: dict[str, list[NodeEntry]] | None = Field(
@@ -688,10 +687,10 @@ class SysInfoCaptureConfig(BaseModel):
             "serving framework detection."
         ),
     )
-    serving_framework: Literal["auto", "vllm", "sglang"] = Field(
+    serving_framework: Literal["auto", "vllm", "sglang", "trtllm"] = Field(
         default="auto",
         description=(
-            "Serving engine type for log parsing: 'vllm', 'sglang', or 'auto' "
+            "Serving engine type for log parsing: 'vllm', 'sglang', 'trtllm', or 'auto' "
             "(auto-detects from log keywords)."
         ),
     )
@@ -721,13 +720,6 @@ class SysInfoCaptureConfig(BaseModel):
                     raise ValueError(
                         f"Invalid port in serving_node {v!r}: {port} is not in range 1-65535"
                     )
-        return v
-
-    @field_validator("output_path", mode="after")
-    @classmethod
-    def _validate_output_path(cls, v: str) -> str:
-        if not v.strip():
-            raise ValueError("output_path must be a non-empty string")
         return v
 
     @field_validator("ssh_ids", mode="after")
@@ -773,8 +765,7 @@ class SysInfoFileConfig(BaseModel):
     The file must have a ``system_info`` key. Extra top-level keys are allowed
     so the same YAML can be shared with benchmark configs.
 
-    ``report_dir`` mirrors the same field in ``BenchmarkConfig`` and takes
-    priority over ``system_info.output_path`` when set.
+    ``report_dir`` is required and controls where all outputs are written.
 
     ``system_info.endpoint_url`` Set it explicitly in
     ``system_info`` when you want the HTTP serving-framework probe to run;
@@ -784,7 +775,7 @@ class SysInfoFileConfig(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     system_info: SysInfoCaptureConfig
-    report_dir: Path | None = None
+    report_dir: Path
 
     @classmethod
     def from_yaml_file(cls, path: Path) -> SysInfoFileConfig:

@@ -1005,11 +1005,9 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
                 capture_system_info,
             )
 
-            sic = ctx.config.system_info.model_copy(
-                update={"output_path": str(ctx.report_dir)}
-            )
             output_path = capture_system_info(
-                sic,
+                ctx.config.system_info,
+                output_dir=ctx.report_dir,
                 run_metadata_path=ctx.report_dir / "run_metadata.json",
             )
             logger.info("System info captured at: %s", output_path)

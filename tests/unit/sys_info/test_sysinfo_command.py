@@ -23,13 +23,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import yaml
+from pydantic import ValidationError
+
 from inference_endpoint.config.schema import (
     NodeEntry,
     SysInfoCaptureConfig,
     SysInfoFileConfig,
 )
 from inference_endpoint.exceptions import InputValidationError
-from pydantic import ValidationError
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -81,18 +82,6 @@ class TestNodeEntry:
 # ---------------------------------------------------------------------------
 # SysInfoCaptureConfig with node_config
 # ---------------------------------------------------------------------------
-
-
-class TestSysInfoCaptureConfigOutputPath:
-    @pytest.mark.unit
-    def test_default_output_path_is_cwd(self) -> None:
-        cfg = _make_capture_config()
-        assert cfg.output_path == "."
-
-    @pytest.mark.unit
-    def test_explicit_output_path_overrides_default(self) -> None:
-        cfg = _make_capture_config(output_path="/custom/out")
-        assert cfg.output_path == "/custom/out"
 
 
 class TestSysInfoCaptureConfigNodeConfig:
@@ -159,7 +148,8 @@ class TestSysInfoFileConfig:
         config_path = tmp_path / "sysinfo.yaml"
         config_path.write_text(
             textwrap.dedent(
-                """\
+                f"""\
+                report_dir: {tmp_path}/results/
                 system_info:
                   ssh_ids:
                     - user@10.0.0.1
@@ -169,8 +159,24 @@ class TestSysInfoFileConfig:
         )
         cfg = SysInfoFileConfig.from_yaml_file(config_path)
         assert cfg.system_info.accelerator_backend == "cuda"
-        assert cfg.report_dir is None
+        assert cfg.report_dir == tmp_path / "results"
         assert cfg.system_info.node_config is None
+
+    @pytest.mark.unit
+    def test_missing_report_dir_raises(self, tmp_path: Path) -> None:
+        config_path = tmp_path / "sysinfo.yaml"
+        config_path.write_text(
+            textwrap.dedent(
+                """\
+                system_info:
+                  ssh_ids:
+                    - user@10.0.0.1
+                  accelerator_backend: cuda
+                """
+            )
+        )
+        with pytest.raises(ValidationError):
+            SysInfoFileConfig.from_yaml_file(config_path)
 
     @pytest.mark.unit
     def test_report_dir_parsed(self, tmp_path: Path) -> None:
@@ -196,12 +202,12 @@ class TestSysInfoFileConfig:
         config_path = tmp_path / "sysinfo.yaml"
         config_path.write_text(
             textwrap.dedent(
-                """\
+                f"""\
+                report_dir: {tmp_path}/results/
                 system_info:
                   ssh_ids:
                     - user@10.0.0.1
                   accelerator_backend: cuda
-                  output_path: /tmp/sys_info
                   node_config:
                     Prefill:
                       - node_name: H100
@@ -225,12 +231,12 @@ class TestSysInfoFileConfig:
         config_path = tmp_path / "sysinfo.yaml"
         config_path.write_text(
             textwrap.dedent(
-                """\
+                f"""\
+                report_dir: {tmp_path}/results/
                 system_info:
                   ssh_ids:
                     - user@10.0.0.1
                   accelerator_backend: cuda
-                  output_path: /tmp/sys_info
                 some_other_section:
                   foo: bar
                 """
@@ -253,7 +259,8 @@ class TestSysInfoFileConfig:
         config_path = tmp_path / "shared.yaml"
         config_path.write_text(
             textwrap.dedent(
-                """\
+                f"""\
+                report_dir: {tmp_path}/results/
                 endpoint_config:
                   endpoints:
                     - http://10.0.0.1:8000
@@ -276,7 +283,8 @@ class TestSysInfoFileConfig:
         config_path = tmp_path / "sysinfo.yaml"
         config_path.write_text(
             textwrap.dedent(
-                """\
+                f"""\
+                report_dir: {tmp_path}/results/
                 system_info:
                   ssh_ids:
                     - user@10.0.0.1
@@ -318,7 +326,6 @@ class TestCaptureWithNodeConfig:
     def test_node_config_file_passed_to_mlcflow(self, tmp_path: Path) -> None:
         """When node_config is set, mlcflow.access must receive node_config_file."""
         cfg = _make_capture_config(
-            output_path=str(tmp_path),
             node_config={
                 "Prefill": [{"node_name": "H100", "no_of_nodes": 1}],
             },
@@ -336,7 +343,7 @@ class TestCaptureWithNodeConfig:
             from inference_endpoint.sys_info import capture as capture_mod
 
             importlib.reload(capture_mod)
-            capture_mod.capture_system_info(cfg)
+            capture_mod.capture_system_info(cfg, output_dir=tmp_path)
 
         call_args = mock_mlcflow.access.call_args[0][0]
         assert "node_config_file" in call_args
@@ -345,7 +352,6 @@ class TestCaptureWithNodeConfig:
     def test_node_config_temp_file_content(self, tmp_path: Path) -> None:
         """The temp file must contain system_info.node_config in the expected structure."""
         cfg = _make_capture_config(
-            output_path=str(tmp_path),
             node_config={
                 "Decode": [
                     {"node_name": "GB300", "no_of_nodes": 12},
@@ -377,7 +383,7 @@ class TestCaptureWithNodeConfig:
             from inference_endpoint.sys_info import capture as capture_mod
 
             importlib.reload(capture_mod)
-            capture_mod.capture_system_info(cfg)
+            capture_mod.capture_system_info(cfg, output_dir=tmp_path)
 
         assert len(captured_content) == 1
         data = captured_content[0]
@@ -391,7 +397,6 @@ class TestCaptureWithNodeConfig:
     def test_temp_file_deleted_after_success(self, tmp_path: Path) -> None:
         """The temp node_config file must be cleaned up after mlcflow returns."""
         cfg = _make_capture_config(
-            output_path=str(tmp_path),
             node_config={"Prefill": [{"node_name": "H100", "no_of_nodes": 1}]},
         )
         recorded_tmp: list[str] = []
@@ -413,7 +418,7 @@ class TestCaptureWithNodeConfig:
             from inference_endpoint.sys_info import capture as capture_mod
 
             importlib.reload(capture_mod)
-            capture_mod.capture_system_info(cfg)
+            capture_mod.capture_system_info(cfg, output_dir=tmp_path)
 
         assert recorded_tmp[0], "temp file path was recorded"
         assert not Path(recorded_tmp[0]).exists(), "temp file was deleted after use"
@@ -424,7 +429,6 @@ class TestCaptureWithNodeConfig:
         from inference_endpoint.exceptions import ExecutionError
 
         cfg = _make_capture_config(
-            output_path=str(tmp_path),
             node_config={"Prefill": [{"node_name": "H100", "no_of_nodes": 1}]},
         )
         recorded_tmp: list[str] = []
@@ -442,7 +446,7 @@ class TestCaptureWithNodeConfig:
 
             importlib.reload(capture_mod)
             with pytest.raises(ExecutionError):
-                capture_mod.capture_system_info(cfg)
+                capture_mod.capture_system_info(cfg, output_dir=tmp_path)
 
         assert not Path(recorded_tmp[0]).exists(), "temp file cleaned up on failure"
 
@@ -451,7 +455,7 @@ class TestCaptureWithNodeConfig:
         self, tmp_path: Path
     ) -> None:
         """Without node_config, node_config_file must NOT be in the mlcflow call."""
-        cfg = _make_capture_config(output_path=str(tmp_path))
+        cfg = _make_capture_config()
         mock_mlcflow = MagicMock()
         mock_mlcflow.access.return_value = {
             "return": 0,
@@ -465,7 +469,7 @@ class TestCaptureWithNodeConfig:
             from inference_endpoint.sys_info import capture as capture_mod
 
             importlib.reload(capture_mod)
-            capture_mod.capture_system_info(cfg)
+            capture_mod.capture_system_info(cfg, output_dir=tmp_path)
 
         call_args = mock_mlcflow.access.call_args[0][0]
         assert "node_config_file" not in call_args
@@ -478,8 +482,8 @@ class TestCaptureWithNodeConfig:
 
 class TestReportDirResolution:
     @pytest.mark.unit
-    def test_report_dir_overrides_output_path(self, tmp_path: Path) -> None:
-        """When report_dir is set, capture_system_info must receive it as output_path."""
+    def test_report_dir_passed_as_output_dir(self, tmp_path: Path) -> None:
+        """When report_dir is set, capture_system_info must receive it as output_dir."""
         config_path = tmp_path / "sysinfo.yaml"
         config_path.write_text(
             textwrap.dedent(
@@ -489,14 +493,17 @@ class TestReportDirResolution:
                   ssh_ids:
                     - user@10.0.0.1
                   accelerator_backend: cuda
-                  output_path: /should/be/ignored
                 """
             )
         )
-        captured_configs: list[SysInfoCaptureConfig] = []
+        captured_dirs: list[Path] = []
 
-        def fake_capture(cfg: SysInfoCaptureConfig, run_metadata_path=None) -> Path:
-            captured_configs.append(cfg)
+        def fake_capture(
+            cfg: SysInfoCaptureConfig,
+            output_dir: Path = Path("."),
+            run_metadata_path=None,
+        ) -> Path:
+            captured_dirs.append(output_dir)
             return tmp_path / "out.json"
 
         with patch(
@@ -507,45 +514,35 @@ class TestReportDirResolution:
 
             from_config(config=config_path)
 
-        assert str(captured_configs[0].output_path) == str(tmp_path / "results")
+        assert captured_dirs[0] == tmp_path / "results"
 
     @pytest.mark.unit
-    def test_no_report_dir_uses_output_path(self, tmp_path: Path) -> None:
-        """Without report_dir, output_path in system_info is used unchanged."""
+    def test_no_report_dir_raises_validation_error(self, tmp_path: Path) -> None:
+        """Without report_dir, loading the config raises a ValidationError."""
         config_path = tmp_path / "sysinfo.yaml"
         config_path.write_text(
             textwrap.dedent(
-                f"""\
+                """\
                 system_info:
                   ssh_ids:
                     - user@10.0.0.1
                   accelerator_backend: cuda
-                  output_path: {tmp_path}/custom/
                 """
             )
         )
-        captured_configs: list[SysInfoCaptureConfig] = []
-
-        def fake_capture(cfg: SysInfoCaptureConfig, run_metadata_path=None) -> Path:
-            captured_configs.append(cfg)
-            return tmp_path / "out.json"
-
-        with patch(
-            "inference_endpoint.commands.sysinfo.cli.capture_system_info",
-            side_effect=fake_capture,
-        ):
+        with pytest.raises(InputValidationError):
             from inference_endpoint.commands.sysinfo.cli import from_config
 
             from_config(config=config_path)
-
-        assert Path(captured_configs[0].output_path) == tmp_path / "custom"
 
 
 class TestMissingSshIds:
     @pytest.mark.unit
     def test_missing_ssh_ids_raises_validation_error(self, tmp_path: Path) -> None:
         config_path = tmp_path / "sysinfo.yaml"
-        config_path.write_text("system_info:\n  accelerator_backend: cuda\n")
+        config_path.write_text(
+            f"report_dir: {tmp_path}/results/\nsystem_info:\n  accelerator_backend: cuda\n"
+        )
         with pytest.raises(ValidationError):
             SysInfoFileConfig.from_yaml_file(config_path)
 
@@ -556,7 +553,7 @@ class TestMissingSshIds:
         """exclude_current_system=False does not relax the ssh_ids requirement."""
         config_path = tmp_path / "sysinfo.yaml"
         config_path.write_text(
-            "system_info:\n  accelerator_backend: cuda\n  exclude_current_system: false\n"
+            f"report_dir: {tmp_path}/results/\nsystem_info:\n  accelerator_backend: cuda\n  exclude_current_system: false\n"
         )
         with pytest.raises(ValidationError):
             SysInfoFileConfig.from_yaml_file(config_path)
@@ -566,7 +563,9 @@ class TestMissingSshIds:
         self, tmp_path: Path
     ) -> None:
         config_path = tmp_path / "sysinfo.yaml"
-        config_path.write_text("system_info:\n  accelerator_backend: cuda\n")
+        config_path.write_text(
+            f"report_dir: {tmp_path}/results/\nsystem_info:\n  accelerator_backend: cuda\n"
+        )
         with patch(
             "inference_endpoint.commands.sysinfo.cli.capture_system_info"
         ) as mock_cap:
@@ -583,12 +582,12 @@ class TestFromConfigCLI:
         config_path = tmp_path / "sysinfo.yaml"
         config_path.write_text(
             textwrap.dedent(
-                """\
+                f"""\
+                report_dir: {tmp_path}/results/
                 system_info:
                   ssh_ids:
                     - user@10.0.0.1
                   accelerator_backend: cuda
-                  output_path: /tmp/sys_info
                   node_config:
                     Prefill:
                       - node_name: H100
@@ -598,7 +597,11 @@ class TestFromConfigCLI:
         )
         captured_configs: list[SysInfoCaptureConfig] = []
 
-        def fake_capture(cfg: SysInfoCaptureConfig, run_metadata_path=None) -> Path:
+        def fake_capture(
+            cfg: SysInfoCaptureConfig,
+            output_dir: Path = Path("."),
+            run_metadata_path=None,
+        ) -> Path:
             captured_configs.append(cfg)
             return tmp_path / "out.json"
 
