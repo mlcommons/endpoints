@@ -489,6 +489,7 @@ class TestDrainConfig:
         assert cfg.performance_timeout_s == 240.0
         assert cfg.accuracy_timeout_s is None
         assert cfg.metrics_drain_timeout_s == 60.0
+        assert cfg.metrics_tokenizer_workers == 2
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
@@ -511,6 +512,11 @@ class TestDrainConfig:
             DrainConfig(metrics_drain_timeout_s=-1.0)
 
     @pytest.mark.unit
+    def test_metrics_tokenizer_workers_must_be_at_least_one(self):
+        with pytest.raises(ValidationError):
+            DrainConfig(metrics_tokenizer_workers=0)
+
+    @pytest.mark.unit
     def test_extra_fields_rejected(self):
         with pytest.raises(ValidationError):
             DrainConfig(unknown_field=1)
@@ -531,6 +537,7 @@ settings:
     performance_timeout_s: 30.0
     accuracy_timeout_s: null
     metrics_drain_timeout_s: 300.0
+    metrics_tokenizer_workers: 8
 """
         config_file = tmp_path / "drain.yaml"
         config_file.write_text(yaml_content)
@@ -540,10 +547,11 @@ settings:
         assert drain.performance_timeout_s == 30.0
         assert drain.accuracy_timeout_s is None
         assert drain.metrics_drain_timeout_s == 300.0
+        assert drain.metrics_tokenizer_workers == 8
 
 
-class TestAggregatorArgsDrainTimeout:
-    """Tests that metrics_drain_timeout_s is forwarded to the aggregator subprocess."""
+class TestAggregatorArgs:
+    """Tests that metrics aggregator subprocess args are correctly forwarded."""
 
     def _make_ctx(self, config, tmp_path):
         import random
@@ -629,6 +637,61 @@ class TestAggregatorArgsDrainTimeout:
         args = aggregator_cfg.args
         assert "--drain-timeout" in args
         idx = args.index("--drain-timeout")
+        assert args[idx + 1] == expected_flag
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("workers, expected_flag", [(4, "4"), (8, "8"), (2, "2")])
+    async def test_tokenizer_workers_forwarded_to_aggregator_args(
+        self, tmp_path, workers, expected_flag
+    ):
+        config = OfflineConfig(
+            **_OFFLINE_KWARGS,
+            settings=OfflineSettings(
+                drain=DrainConfig(metrics_tokenizer_workers=workers)
+            ),
+        )
+        ctx = self._make_ctx(config, tmp_path)
+
+        captured: list = []
+
+        async def _capture_launch(service_configs, *, timeout):
+            captured.extend(service_configs)
+            raise KeyboardInterrupt("stop after launch")
+
+        mock_zmq = MagicMock()
+        mock_zmq.socket_dir = str(tmp_path / "sockets")
+
+        with (
+            patch(
+                "inference_endpoint.commands.benchmark.execute.ManagedZMQContext"
+            ) as MockZMQ,
+            patch(
+                "inference_endpoint.commands.benchmark.execute.EventPublisherService"
+            ) as MockPub,
+            patch(
+                "inference_endpoint.commands.benchmark.execute.MetricsSnapshotSubscriber"
+            ) as MockSub,
+            patch(
+                "inference_endpoint.commands.benchmark.execute.ServiceLauncher"
+            ) as MockLauncher,
+            patch("inference_endpoint.commands.benchmark.execute.trace"),
+            patch("inference_endpoint.commands.benchmark.execute.tqdm"),
+        ):
+            MockZMQ.scoped.return_value.__enter__ = MagicMock(return_value=mock_zmq)
+            MockZMQ.scoped.return_value.__exit__ = MagicMock(return_value=False)
+            MockPub.return_value.socket_name = "test_pub"
+            MockSub.return_value.start = MagicMock()
+            MockLauncher.return_value.launch = _capture_launch
+
+            loop = asyncio.get_event_loop()
+            with pytest.raises(KeyboardInterrupt):
+                await _run_benchmark_async(ctx, loop)
+
+        aggregator_cfg = next(c for c in captured if "metrics_aggregator" in c.module)
+        args = aggregator_cfg.args
+        assert "--tokenizer-workers" in args
+        idx = args.index("--tokenizer-workers")
         assert args[idx + 1] == expected_flag
 
 
