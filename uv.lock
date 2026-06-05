@@ -883,7 +883,7 @@ requires-dist = [
     { name = "line-profiler", marker = "extra == 'test'", specifier = "==5.0.2" },
     { name = "matplotlib", marker = "extra == 'test'", specifier = "==3.10.8" },
     { name = "memory-profiler", marker = "extra == 'performance'", specifier = "==0.61.0" },
-    { name = "mlc-scripts" },
+    { name = "mlc-scripts", specifier = "==1.1.0" },
     { name = "msgspec", specifier = "==0.20.0" },
     { name = "myst-parser", marker = "extra == 'dev'", specifier = "==5.0.0" },
     { name = "numpy", specifier = "==2.4.4" },

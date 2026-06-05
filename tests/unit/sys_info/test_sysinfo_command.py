@@ -23,14 +23,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import yaml
-from pydantic import ValidationError
-
 from inference_endpoint.config.schema import (
     NodeEntry,
     SysInfoCaptureConfig,
     SysInfoFileConfig,
 )
 from inference_endpoint.exceptions import InputValidationError
+from pydantic import ValidationError
 
 # ---------------------------------------------------------------------------
 # Helpers

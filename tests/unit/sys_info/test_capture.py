@@ -22,14 +22,13 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from pydantic import ValidationError
-
 from inference_endpoint.config.schema import (
     BenchmarkConfig,
     SshTarget,
     SysInfoCaptureConfig,
 )
 from inference_endpoint.exceptions import ExecutionError, SetupError
+from pydantic import ValidationError
 
 # ---------------------------------------------------------------------------
 # Helpers
