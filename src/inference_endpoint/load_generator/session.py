@@ -39,6 +39,7 @@ from ..core.record import (
 )
 from ..core.types import PromptData, Query, QueryResult, StreamChunk
 from ..dataset_manager.dataset import Dataset
+from ..utils.trace import Event, emit_trace_id
 from .sample_order import create_sample_order
 from .strategy import LoadStrategy, create_load_strategy
 
@@ -75,7 +76,7 @@ def _extract_prompt_text(messages: list[Any]) -> str | None:
 # ---------------------------------------------------------------------------
 
 
-class PhaseType(str, Enum):
+class PhaseType(str, Enum):  # noqa: UP042
     """Phase types control tracking and reporting behavior."""
 
     PERFORMANCE = "performance"
@@ -270,6 +271,7 @@ class PhaseIssuer:
                 data=prompt_data,
             )
         )
+        emit_trace_id(Event.ISSUED, query_id)
         self._issuer.issue(query)
         self.inflight += 1
         self.issued_count += 1
@@ -516,8 +518,15 @@ class BenchmarkSession:
             # a real response arriving after timeout double-publishes ERROR/COMPLETE
             # and double-decrements inflight (no per-request HTTP timeout
             # exists in endpoint_client; late arrivals are possible).
+            #
+            # The trace MAIN_RECEIVED emit is below the gate so a late
+            # arrival doesn't reopen a lifecycle whose synthetic COMPLETE
+            # has already been folded — that would record a negative
+            # `final chunk -> complete` duration in the dashboard.
             if phase_issuer is not None and query_id in phase_issuer.completed_uuids:
                 return
+
+            emit_trace_id(Event.MAIN_RECEIVED, resp.id)
 
             conv_id_str, turn_num = ("", None)
             if phase_issuer is not None:
@@ -561,6 +570,10 @@ class BenchmarkSession:
                         data=resp.response_output,
                     )
                 )
+            # Trace COMPLETE for every phase (incl. warmup): the dashboard
+            # tracks the full request lifecycle, and a warmup ISSUED with
+            # no matching COMPLETE would leak as "in-flight" forever.
+            emit_trace_id(Event.COMPLETE, query_id)
 
             if phase_issuer is not None and query_id in phase_issuer.uuid_to_index:
                 phase_issuer.mark_inflight_complete()
@@ -593,6 +606,8 @@ class BenchmarkSession:
                     turn=turn_num,
                 )
             )
+            if is_first:
+                emit_trace_id(Event.RECV_FIRST, resp.id)
 
     def _make_stop_check(
         self, settings: RuntimeSettings, phase_start_ns: int
