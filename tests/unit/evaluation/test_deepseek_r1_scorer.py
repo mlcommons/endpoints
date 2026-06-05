@@ -201,3 +201,208 @@ class TestDeepSeekR1Scorer:
         score, n_repeats = scorer.score()
         assert score is None
         assert n_repeats == 1
+
+
+@pytest.mark.unit
+class TestDeepSeekR1ScorerContainer:
+    """Container path: text subsets graded by the subprocess, livecodebench graded
+    via the lcb-service WebSocket, merged into one 5-subset number."""
+
+    OUTPUTS = [
+        r"reasoning \boxed{8}",  # math500
+        "```python\nprint(1)\n```",  # livecodebench
+    ]
+    GROUND_TRUTH = ["8", "lcb-q0"]
+    SUBSETS = ["math500", "livecodebench"]
+
+    @pytest.fixture
+    def dataset(self):
+        df = pd.DataFrame(
+            {
+                "ground_truth": self.GROUND_TRUTH,
+                "dataset": self.SUBSETS,
+                "question": ["q0", "q1"],
+            }
+        )
+        ds = MagicMock()
+        ds.dataframe = df
+        ds.num_samples.return_value = 2
+        return ds
+
+    @pytest.fixture
+    def staged(self, tmp_path):
+        report_dir = tmp_path / "report"
+        report_dir.mkdir()
+        uuids = [f"uuid-{i}" for i in range(2)]
+        (report_dir / "sample_idx_map.json").write_bytes(
+            msgspec.json.encode({"dsr1_acc": dict(zip(uuids, range(2), strict=True))})
+        )
+        enc = msgspec.json.Encoder(enc_hook=EventType.encode_hook)
+        with (report_dir / "events.jsonl").open("wb") as f:
+            for uid, out in zip(uuids, self.OUTPUTS, strict=True):
+                rec = EventRecord(
+                    event_type=SampleEventType.COMPLETE,
+                    sample_uuid=uid,
+                    data=TextModelOutput(output=out),
+                )
+                f.write(enc.encode(rec) + b"\n")
+        return report_dir
+
+    @pytest.fixture
+    def project(self, tmp_path):
+        project = tmp_path / "accuracy"
+        project.mkdir()
+        (project / "deepseek_eval_runner.py").write_text("# stub\n")
+        return project
+
+    @pytest.fixture
+    def patch_subprocess(self, monkeypatch):
+        """Emulate the runner: grade text subsets, mark --external-subsets ones
+        external (exact_match=None). Records call count + external args."""
+        calls: dict[str, object] = {"n": 0, "external": []}
+
+        def fake_run(cmd, **kwargs):
+            calls["n"] = int(calls["n"]) + 1  # type: ignore[arg-type]
+            ext = (
+                cmd[cmd.index("--external-subsets") + 1].split(",")
+                if "--external-subsets" in cmd
+                else []
+            )
+            calls["external"].append(ext)  # type: ignore[attr-defined]
+            df = pd.read_parquet(Path(cmd[cmd.index("--input") + 1]))
+            out_json = Path(cmd[cmd.index("--output") + 1])
+            per: dict[str, dict] = {}
+            for sub, g in df.groupby("dataset"):
+                if str(sub) in ext:
+                    per[str(sub)] = {
+                        "exact_match": None,
+                        "tokens_per_sample": 200.0,
+                        "num_samples": int(len(g)),
+                        "status": "external",
+                    }
+                else:
+                    per[str(sub)] = {
+                        "exact_match": 100.0,
+                        "tokens_per_sample": 50.0,
+                        "num_samples": int(len(g)),
+                        "status": "ok",
+                    }
+            out_json.write_bytes(
+                msgspec.json.encode(
+                    {
+                        "exact_match": 100.0,
+                        "tokens_per_sample": 100.0,
+                        "num_samples": int(len(df)),
+                        "evaluated_samples": int(len(df)),
+                        "complete": True,
+                        "per_dataset": per,
+                    }
+                )
+            )
+            return MagicMock(returncode=0, stdout="ok\n")
+
+        monkeypatch.setattr(scoring_mod.subprocess, "run", fake_run)
+        return calls
+
+    def _scorer(self, dataset, staged, project):
+        return DeepSeekR1Scorer(
+            dataset_name="dsr1_acc",
+            dataset=dataset,
+            report_dir=staged,
+            deepseek_eval_project_path=project,
+            lcb_websocket_port=13835,
+        )
+
+    def _results(self, staged):
+        return msgspec.json.decode(
+            (staged / "deepseek_eval" / "dsr1_acc_results.json").read_bytes()
+        )
+
+    def test_container_merges_lcb_in_run(
+        self, dataset, staged, project, patch_subprocess, monkeypatch
+    ):
+        monkeypatch.setattr(
+            scoring_mod,
+            "_lcb_ws_evaluate",
+            lambda url, codes, timeout: {
+                "total_samples": 1,
+                "results": {"lcb-q0": [True]},
+            },
+        )
+        score, n_repeats = self._scorer(dataset, staged, project).score()
+
+        assert score == pytest.approx(100.0)  # (1 text + 1 LCB) / 2
+        assert n_repeats == 1
+        # Subprocess ran exactly once, with livecodebench marked external.
+        assert patch_subprocess["n"] == 1
+        assert patch_subprocess["external"][0] == ["livecodebench"]
+        res = self._results(staged)
+        assert res["complete"] is True
+        assert res["evaluated_samples"] == 2
+        lcb = res["per_dataset"]["livecodebench"]
+        assert lcb["status"] == "lcb-service"
+        assert lcb["exact_match"] == pytest.approx(100.0)
+        assert lcb["tokens_per_sample"] == 200.0  # preserved from the runner
+
+    def test_container_unreachable_leaves_lcb_unscored(
+        self, dataset, staged, project, patch_subprocess, monkeypatch
+    ):
+        monkeypatch.setattr(
+            scoring_mod, "_lcb_ws_evaluate", lambda url, codes, timeout: None
+        )
+        score, n_repeats = self._scorer(dataset, staged, project).score()
+
+        # No in-process LCB re-grade: subprocess still ran exactly once.
+        assert patch_subprocess["n"] == 1
+        res = self._results(staged)
+        assert res["complete"] is False
+        assert res["per_dataset"]["livecodebench"]["status"] == "unscored"
+
+    def test_failed_text_subset_marks_incomplete(
+        self, dataset, staged, project, monkeypatch
+    ):
+        """A text subset that fails to grade must NOT be reported complete."""
+
+        def fake_run(cmd, **kwargs):
+            df = pd.read_parquet(Path(cmd[cmd.index("--input") + 1]))
+            out_json = Path(cmd[cmd.index("--output") + 1])
+            ext = (
+                cmd[cmd.index("--external-subsets") + 1].split(",")
+                if "--external-subsets" in cmd
+                else []
+            )
+            per: dict[str, dict] = {}
+            for sub, g in df.groupby("dataset"):
+                status = "external" if str(sub) in ext else "failed: boom"
+                per[str(sub)] = {
+                    "exact_match": None,
+                    "tokens_per_sample": 50.0,
+                    "num_samples": int(len(g)),
+                    "status": status,
+                }
+            out_json.write_bytes(
+                msgspec.json.encode(
+                    {
+                        "exact_match": None,
+                        "tokens_per_sample": 100.0,
+                        "num_samples": int(len(df)),
+                        "evaluated_samples": 0,
+                        "complete": False,
+                        "per_dataset": per,
+                    }
+                )
+            )
+            return MagicMock(returncode=0, stdout="")
+
+        monkeypatch.setattr(scoring_mod.subprocess, "run", fake_run)
+        monkeypatch.setattr(
+            scoring_mod,
+            "_lcb_ws_evaluate",
+            lambda url, codes, timeout: {
+                "total_samples": 1,
+                "results": {"lcb-q0": [True]},
+            },
+        )
+        self._scorer(dataset, staged, project).score()
+        # math500 failed -> must be flagged incomplete (was forced True pre-fix).
+        assert self._results(staged)["complete"] is False

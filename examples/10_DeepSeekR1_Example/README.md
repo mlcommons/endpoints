@@ -55,13 +55,12 @@ These are baked into the scripts/configs already; listed so you know _why_.
 7. **Remote client:** keep `warmup_connections: 0` and
    `min_required_connections: 0` (the configs do) - auto pre-opens thousands of
    connections at init and blows the worker-init timeout.
-8. **Long outputs:** the in-flight drain after a phase is bounded (240 s) - too
-   short for reasoning, so the run would score only the fast samples. Set the
-   accuracy-phase drain to wait indefinitely via `settings.drain.accuracy_timeout_s: null`
-   (per-phase `DrainConfig`). This knob ships in the open PR
-   `feat/make-configurable-drain-timeout`; until it merges, the drain is fixed
-   at 240 s and a long full run must be split or driven against an already
-   warmed-up batch.
+8. **Long outputs:** the in-flight drain after a phase is bounded (240 s, in
+   `session.py`), which can cut off the slowest reasoning samples on a full
+   offline burst (the run then scores only the samples that finished in time).
+   There is no committed override yet, so for a long full run either drive it
+   against an already-warmed-up server (so most samples complete within the
+   window) or split the dataset; a configurable per-phase drain is planned.
 9. **LiveCodeBench runs in a sandbox** (see "LiveCodeBench scoring"). It executes
    untrusted model code, so the `deepseek_r1` scorer grades it via the `lcb_serve`
    container over a WebSocket (in-run, port 13835) instead of in-process. If no
@@ -111,8 +110,7 @@ SERVER_ONLY=1 sbatch examples/10_DeepSeekR1_Example/launch_and_run.sh
 # 2. Wait until logs/dsr1_server_ready appears (~8 min: image import + weight load).
 
 # 3. Drive the client from the LOGIN node. Quick estimate (~385 samples).
-#    For long runs set settings.drain.accuracy_timeout_s: null in the config
-#    (needs the feat/make-configurable-drain-timeout PR; see gotcha #8).
+#    (Long full runs can hit the fixed 240 s post-phase drain - see gotcha #8.)
 BENCH_CONFIG=examples/10_DeepSeekR1_Example/offline_deepseek_r1_accuracy_subset.yaml \
 RELEASE_SERVER=1 \
 bash examples/10_DeepSeekR1_Example/run_client.sh

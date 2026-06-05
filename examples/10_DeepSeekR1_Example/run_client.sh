@@ -41,8 +41,14 @@ BENCH_CONFIG="${BENCH_CONFIG:-${SCRIPT_DIR}/offline_deepseek_r1_accuracy.yaml}"
 # from-config takes the endpoint from the YAML, so render a run copy with this
 # server's endpoint substituted in.
 RUN_YAML="$(mktemp /tmp/dsr1_run_XXXX.yaml)"
-sed -E "s#(- \").*(:8000\")#\1${ENDPOINT%:8000}\2#; s#https?://[^\"]+:8000#${ENDPOINT}#g" \
+# Replace the endpoints-list URL with this server's endpoint, regardless of the
+# port in the template (a hardcoded :8000 match silently skips other ports).
+sed -E "s#(- \")https?://[^\"]+(\")#\1${ENDPOINT}\2#g" \
     "${BENCH_CONFIG}" > "${RUN_YAML}"
+if ! grep -q "${ENDPOINT}" "${RUN_YAML}"; then
+    echo "ERROR: failed to substitute endpoint ${ENDPOINT} into ${BENCH_CONFIG}" >&2
+    exit 1
+fi
 
 echo "==> endpoint: ${ENDPOINT}"
 echo "==> config:   ${BENCH_CONFIG}"

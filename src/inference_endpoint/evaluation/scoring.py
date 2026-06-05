@@ -1501,56 +1501,86 @@ class DeepSeekR1Scorer(Scorer, scorer_id="deepseek_r1"):
             input_parquet, out_json, external_subsets=self.lcb_subset
         )
         results = msgspec.json.decode(out_json.read_bytes())
-
-        lcb_scored = self._score_lcb_via_container(
-            eval_df[eval_df["dataset"].astype(str) == self.lcb_subset]
-        )
-        if lcb_scored is None:
-            logger.warning(
-                "DeepSeekR1Scorer: lcb-service unreachable at %s; re-grading all "
-                "subsets in-process (prior behavior).",
-                self.lcb_websocket_url,
-            )
-            self._run_eval_subprocess(input_parquet, out_json)
-            results = msgspec.json.decode(out_json.read_bytes())
-            exact_match = results.get("exact_match")
-            return (float(exact_match) if exact_match is not None else None), n_repeats
-
-        lcb_passed, lcb_total = lcb_scored
         per_dataset = results.get("per_dataset", {})
+
+        # Aggregate every text subset the runner graded. Track whether any
+        # failed so a partial run is never reported as a complete score.
         text_correct = 0
         text_n = 0
+        text_complete = True
         for sub, d in per_dataset.items():
             if sub == self.lcb_subset:
                 continue
             em = d.get("exact_match")
             n = int(d.get("num_samples", 0))
-            if em is None:
+            if em is None:  # subset failed to grade (status != "ok")
+                text_complete = False
                 continue
             text_correct += round(em / 100.0 * n)
             text_n += n
 
+        lcb_scored = self._score_lcb_via_container(
+            eval_df[eval_df["dataset"].astype(str) == self.lcb_subset]
+        )
+        # Preserve the runner's external LCB entry (it carries tokens_per_sample).
+        lcb_entry = dict(per_dataset.get(self.lcb_subset, {}))
+        if lcb_scored is None:
+            # Container unreachable: leave livecodebench UNSCORED. Do NOT re-run
+            # the in-process executor - it can't sandbox runaway model code and
+            # needs a ~21 GB dataset load. Score LCB separately with
+            # score_livecodebench.sh and fold it in.
+            logger.warning(
+                "DeepSeekR1Scorer: lcb-service unreachable at %s; livecodebench "
+                "left unscored (reporting %d text samples only, run marked "
+                "incomplete). Score LCB separately via score_livecodebench.sh.",
+                self.lcb_websocket_url,
+                text_n,
+            )
+            lcb_passed = 0
+            lcb_total = 0
+            lcb_entry["exact_match"] = None
+            lcb_entry["status"] = "unscored"
+            lcb_ok = False
+        else:
+            lcb_passed, lcb_total = lcb_scored
+            lcb_entry["exact_match"] = (
+                100.0 * lcb_passed / lcb_total if lcb_total else None
+            )
+            lcb_entry["num_samples"] = lcb_total
+            lcb_entry["status"] = "lcb-service"
+            lcb_ok = lcb_total > 0
+
         total_n = text_n + lcb_total
         combined = 100.0 * (text_correct + lcb_passed) / total_n if total_n else None
 
-        # Persist the real 5-subset result (LCB from the container).
-        per_dataset[self.lcb_subset] = {
-            "exact_match": (100.0 * lcb_passed / lcb_total) if lcb_total else None,
-            "num_samples": lcb_total,
-            "status": "lcb-service",
-        }
+        # The headline number is only valid if it covers every issued sample;
+        # a failed text subset or a diverging LCB count silently shrinks total_n.
+        expected_n = len(eval_df)
+        complete = bool(
+            combined is not None and text_complete and lcb_ok and total_n == expected_n
+        )
+        if combined is not None and lcb_ok and total_n != expected_n:
+            logger.warning(
+                "DeepSeekR1Scorer: scored %d of %d samples (LCB count diverged "
+                "from the issued rows); marking the result incomplete.",
+                total_n,
+                expected_n,
+            )
+
+        per_dataset[self.lcb_subset] = lcb_entry
         results["per_dataset"] = per_dataset
         results["exact_match"] = combined
         results["evaluated_samples"] = total_n
-        results["complete"] = combined is not None
+        results["complete"] = complete
         out_json.write_bytes(msgspec.json.encode(results))
         logger.info(
-            "DeepSeekR1Scorer: combined exact_match=%.4f (text %d/%d + LCB %d/%d)",
-            combined if combined is not None else float("nan"),
+            "DeepSeekR1Scorer: combined exact_match=%s (text %d/%d + LCB %d/%d, complete=%s)",
+            f"{combined:.4f}" if combined is not None else "None",
             text_correct,
             text_n,
             lcb_passed,
             lcb_total,
+            complete,
         )
 
         if combined is None:
