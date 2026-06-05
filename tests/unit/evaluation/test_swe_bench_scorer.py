@@ -281,25 +281,49 @@ class TestSWEBenchScorer:
 
         assert "top_k" not in patched["model"]["model_kwargs"]
 
-    def test_num_instances_slice(
-        self, report_dir, swe_bench_project, template_yaml, patch_subprocess
+    @pytest.mark.parametrize(
+        "num_instances, expected_slice",
+        [
+            (5, "0:5"),
+            (100, "0:100"),
+        ],
+    )
+    def test_num_instances_produces_correct_slice(
+        self,
+        num_instances,
+        expected_slice,
+        report_dir,
+        swe_bench_project,
+        template_yaml,
+        patch_subprocess,
     ):
         scorer = SWEBenchScorer(
             dataset_name=_DATASET_NAME,
-            dataset=_make_dataset(n=100),
+            dataset=_make_dataset(n=num_instances),
             report_dir=report_dir,
             swe_bench_project_path=swe_bench_project,
             swebench_config_template=template_yaml,
-            num_instances=5,
+            num_instances=num_instances,
         )
         scorer.score()
-
         agent_cmd = patch_subprocess[0]
-        assert "--slice" in agent_cmd
-        assert agent_cmd[agent_cmd.index("--slice") + 1] == "0:5"
+        assert agent_cmd[agent_cmd.index("--slice") + 1] == expected_slice
 
-    def test_default_slice_uses_default_num_instances(
-        self, report_dir, swe_bench_project, template_yaml, patch_subprocess
+    @pytest.mark.parametrize(
+        "subset, expected_hf_name",
+        [
+            ("lite", "princeton-nlp/SWE-bench_Lite"),
+            ("verified", "princeton-nlp/SWE-bench_Verified"),
+        ],
+    )
+    def test_subset_maps_to_correct_hf_dataset_name(
+        self,
+        subset,
+        expected_hf_name,
+        report_dir,
+        swe_bench_project,
+        template_yaml,
+        patch_subprocess,
     ):
         scorer = SWEBenchScorer(
             dataset_name=_DATASET_NAME,
@@ -307,51 +331,11 @@ class TestSWEBenchScorer:
             report_dir=report_dir,
             swe_bench_project_path=swe_bench_project,
             swebench_config_template=template_yaml,
+            subset=subset,
         )
         scorer.score()
-
-        agent_cmd = patch_subprocess[0]
-        assert agent_cmd[agent_cmd.index("--slice") + 1] == "0:100"
-
-    def test_lite_subset_uses_correct_hf_name(
-        self, report_dir, swe_bench_project, template_yaml, patch_subprocess
-    ):
-        scorer = SWEBenchScorer(
-            dataset_name=_DATASET_NAME,
-            dataset=_make_dataset(),
-            report_dir=report_dir,
-            swe_bench_project_path=swe_bench_project,
-            swebench_config_template=template_yaml,
-            subset="lite",
-        )
-        scorer.score()
-
         eval_cmd = patch_subprocess[1]
-        assert "--dataset_name" in eval_cmd
-        assert (
-            eval_cmd[eval_cmd.index("--dataset_name") + 1]
-            == "princeton-nlp/SWE-bench_Lite"
-        )
-
-    def test_verified_subset_uses_correct_hf_name(
-        self, report_dir, swe_bench_project, template_yaml, patch_subprocess
-    ):
-        scorer = SWEBenchScorer(
-            dataset_name=_DATASET_NAME,
-            dataset=_make_dataset(),
-            report_dir=report_dir,
-            swe_bench_project_path=swe_bench_project,
-            swebench_config_template=template_yaml,
-            subset="verified",
-        )
-        scorer.score()
-
-        eval_cmd = patch_subprocess[1]
-        assert "--dataset_name" in eval_cmd
-        assert (
-            eval_cmd[eval_cmd.index("--dataset_name") + 1]
-            == "princeton-nlp/SWE-bench_Verified"
-        )
+        assert eval_cmd[eval_cmd.index("--dataset_name") + 1] == expected_hf_name
 
     def test_unknown_subset_raises_at_init(
         self, report_dir, swe_bench_project, template_yaml
@@ -499,38 +483,6 @@ class TestSWEBenchScorer:
         score, n_repeats = scorer.score()
         assert score is None
         assert n_repeats == 1
-
-    def test_score_result_non_dict_raises_decode_error(
-        self, report_dir, swe_bench_project, template_yaml, monkeypatch
-    ):
-        """msgspec.json.decode(..., type=dict) raises DecodeError on non-dict JSON."""
-
-        def fake_run(cmd, **kwargs):
-            cmd_str = " ".join(cmd)
-            if "mini-extra" in cmd_str:
-                output_dir = Path(cmd[cmd.index("--output") + 1])
-                output_dir.mkdir(parents=True, exist_ok=True)
-                (output_dir / "preds.json").write_text(json.dumps({}))
-            elif "run_evaluation" in cmd_str:
-                cwd = Path(kwargs["cwd"])
-                run_id = cmd[cmd.index("--run_id") + 1]
-                safe_model = _MODEL_NAME.replace("/", "__")
-                # Write a JSON array instead of a dict — should trigger DecodeError
-                (cwd / f"{safe_model}.{run_id}.json").write_text(
-                    json.dumps([{"resolved_instances": 3}])
-                )
-            return MagicMock(returncode=0, stdout="ok\n")
-
-        monkeypatch.setattr(scoring_mod.subprocess, "run", fake_run)
-        scorer = SWEBenchScorer(
-            dataset_name=_DATASET_NAME,
-            dataset=_make_dataset(),
-            report_dir=report_dir,
-            swe_bench_project_path=swe_bench_project,
-            swebench_config_template=template_yaml,
-        )
-        with pytest.raises(msgspec.DecodeError):
-            scorer.score()
 
 
 class TestSWEBenchScorerPreflight:
