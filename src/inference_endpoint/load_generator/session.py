@@ -39,6 +39,7 @@ from ..core.record import (
 )
 from ..core.types import PromptData, Query, QueryResult, StreamChunk
 from ..dataset_manager.dataset import Dataset
+from ..utils.trace import Event, emit_trace_id
 from .sample_order import create_sample_order
 from .strategy import LoadStrategy, create_load_strategy
 
@@ -75,7 +76,7 @@ def _extract_prompt_text(messages: list[Any]) -> str | None:
 # ---------------------------------------------------------------------------
 
 
-class PhaseType(str, Enum):
+class PhaseType(str, Enum):  # noqa: UP042
     """Phase types control tracking and reporting behavior."""
 
     PERFORMANCE = "performance"
@@ -92,6 +93,7 @@ class PhaseConfig:
     dataset: Dataset
     phase_type: PhaseType = PhaseType.PERFORMANCE
     drain_after: bool = True
+    drain_timeout: float | None = None
     strategy: LoadStrategy | None = field(default=None, compare=False)
 
 
@@ -269,6 +271,7 @@ class PhaseIssuer:
                 data=prompt_data,
             )
         )
+        emit_trace_id(Event.ISSUED, query_id)
         self._issuer.issue(query)
         self.inflight += 1
         self.issued_count += 1
@@ -429,7 +432,7 @@ class BenchmarkSession:
             self._strategy_task = None
 
         if phase.drain_after:
-            await self._drain_inflight(phase_issuer)
+            await self._drain_inflight(phase_issuer, phase.drain_timeout)
 
         if phase.phase_type == PhaseType.PERFORMANCE:
             self._publish_session_event(SessionEventType.STOP_PERFORMANCE_TRACKING)
@@ -454,21 +457,31 @@ class BenchmarkSession:
             end_time_ns=phase_end,
         )
 
-    async def _drain_inflight(self, phase_issuer: PhaseIssuer) -> None:
+    async def _drain_inflight(
+        self, phase_issuer: PhaseIssuer, timeout: float | None
+    ) -> None:
         """Wait for all in-flight responses from this phase to complete.
 
-        Hard-bounded at 240 s; logs an error and returns if exceeded so the
-        next phase starts regardless of stuck requests."""
+        Bounded by ``timeout`` seconds; on expiry logs an error and returns so
+        the next phase starts regardless of stuck requests. ``timeout=None``
+        waits indefinitely — accuracy phases use this because every sample must
+        complete and an offline burst over few connections legitimately exceeds
+        any fixed bound. A dropped transport still unblocks the wait via the
+        ``_receive_responses`` close path."""
         if phase_issuer.inflight <= 0 or self._stop_requested:
             return
         logger.info("Draining %d in-flight responses...", phase_issuer.inflight)
         self._drain_event.clear()
+        if timeout is None:
+            await self._drain_event.wait()
+            return
         try:
-            await asyncio.wait_for(self._drain_event.wait(), timeout=240.0)
+            await asyncio.wait_for(self._drain_event.wait(), timeout=timeout)
         except TimeoutError:
             logger.error(
-                "Drain timed out after 240 s with %d responses still in flight; "
+                "Drain timed out after %s s with %d responses still in flight; "
                 "proceeding to next phase.",
+                timeout,
                 phase_issuer.inflight,
             )
 
@@ -505,8 +518,15 @@ class BenchmarkSession:
             # a real response arriving after timeout double-publishes ERROR/COMPLETE
             # and double-decrements inflight (no per-request HTTP timeout
             # exists in endpoint_client; late arrivals are possible).
+            #
+            # The trace MAIN_RECEIVED emit is below the gate so a late
+            # arrival doesn't reopen a lifecycle whose synthetic COMPLETE
+            # has already been folded — that would record a negative
+            # `final chunk -> complete` duration in the dashboard.
             if phase_issuer is not None and query_id in phase_issuer.completed_uuids:
                 return
+
+            emit_trace_id(Event.MAIN_RECEIVED, resp.id)
 
             conv_id_str, turn_num = ("", None)
             if phase_issuer is not None:
@@ -550,6 +570,10 @@ class BenchmarkSession:
                         data=resp.response_output,
                     )
                 )
+            # Trace COMPLETE for every phase (incl. warmup): the dashboard
+            # tracks the full request lifecycle, and a warmup ISSUED with
+            # no matching COMPLETE would leak as "in-flight" forever.
+            emit_trace_id(Event.COMPLETE, query_id)
 
             if phase_issuer is not None and query_id in phase_issuer.uuid_to_index:
                 phase_issuer.mark_inflight_complete()
@@ -582,6 +606,8 @@ class BenchmarkSession:
                     turn=turn_num,
                 )
             )
+            if is_first:
+                emit_trace_id(Event.RECV_FIRST, resp.id)
 
     def _make_stop_check(
         self, settings: RuntimeSettings, phase_start_ns: int

@@ -112,7 +112,7 @@ test = [
     "Pympler==1.1",
     "scipy==1.17.1",
     # HTTP server and client for mock server fixture
-    "aiohttp==3.13.5",
+    "aiohttp==3.14.0",
     # Plotting for benchmark sweep mode
     "matplotlib==3.10.8",
     # Property-based testing (CLI fuzz)
