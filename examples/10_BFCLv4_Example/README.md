@@ -7,14 +7,41 @@ the agentic multi-turn subsets.
 The sampling here is tuned so a full four-category run finishes on an edge
 device in **under 3 hours**.
 
-## Prerequisites
+## Reproducing from the PRs
+
+This feature spans two pull requests that must both be present:
+
+| PR | Branch | What it does |
+| --- | --- | --- |
+| [PR #1](https://github.com/Palanivelg/endpoints/pull/1) | `chore/relax-numpy-pin` | Relaxes `numpy==2.4.4` → `>=1.26.4` so that `bfcl-eval` (which hard-pins `numpy==1.26.4`) can be installed alongside the project |
+| [PR #2](https://github.com/Palanivelg/endpoints/pull/2) | `feat/bfcl-v4-combined` | Full BFCL v4 ST + MT accuracy integration, adapter fixes, and seed forwarding |
+
+**PR #1 must be merged into `main` before `[bfcl]` can be installed.** The numpy pin conflict means `pip install -e ".[bfcl]"` will fail without it.
+
+### Installing from the branches
 
 ```bash
-pip install -e ".[bfcl]"   # installs bfcl-eval
+# Clone your fork (or the mlcommons upstream)
+git clone https://github.com/Palanivelg/endpoints.git
+cd endpoints
+
+# Check out the BFCL v4 branch (contains both PR changes during review)
+git checkout feat/bfcl-v4-combined
+
+# Install with the [bfcl] extra (requires PR #1's numpy pin already merged,
+# or you're on a branch that includes it)
+pip install -e ".[dev,test,bfcl]"
+
+# Verify the install resolves without conflict:
+pip show bfcl-eval numpy | grep -E "^(Name|Version)"
 ```
 
-A served, OpenAI-compatible endpoint (the examples below assume
-`http://localhost:8080`, model `Qwen3.6-27B-Q4_K_M`, `temperature=0`).
+### Prerequisites
+
+- Python 3.12+
+- A served, OpenAI-compatible endpoint. The examples below assume
+  `http://localhost:8080`, model `Qwen3.6-27B-Q4_K_M`, `temperature=0`.
+- At least ~16 GB RAM for the model; ~3 hours wall-clock time for the full run.
 
 ## Architecture: two run paths
 
@@ -70,6 +97,32 @@ Omit `--sample-pct` to run all entries (the full ~200-entry `multi_turn_base`
 plus the other multi-turn subsets), or pass `--subsets multi_turn_base` to
 restrict to one subset.
 
+### Reproducible sampling with `--seed`
+
+Both paths support a seed for deterministic server-side sampling. Pass
+`--seed <N>` to lock the RNG so repeated runs with the same model and same seed
+produce identical outputs (assuming a deterministic server):
+
+```bash
+# Single-turn: override seed via from-config flag
+inference-endpoint benchmark from-config \
+  --config offline_bfcl_v4_single_turn.yaml \
+  --accuracy-only \
+  --seed 42
+
+# Multi-turn: pass --seed directly to the CLI
+python -m inference_endpoint.evaluation.bfcl_v4_multi_turn_cli \
+  --endpoint http://localhost:8080 \
+  --model Qwen3.6-27B-Q4_K_M \
+  --sample-pct 3 \
+  --temperature 0 \
+  --seed 42 \
+  --report-dir results/bfcl_v4_multi_turn/
+```
+
+`seed` is forwarded in the `seed` field of the `/v1/chat/completions` request
+body. If the server does not support `seed`, it is silently ignored.
+
 ## Edge device budget (validated)
 
 Full four-category run on an edge device (`Qwen3.6-27B-Q4_K_M`, `temperature=0`):
@@ -91,7 +144,54 @@ reported category) and `memory` (not implemented on this branch).
 
 ## Expected accuracy (reference)
 
-`Qwen3.6-27B-Q4_K_M`, `temperature=0`, validated against evalscope:
+`Qwen3.6-27B-Q4_K_M`, `temperature=0`, validated against evalscope on a Thor
+edge device:
 
-- Single-turn `live` (10%): ~82%
-- Multi-turn base (full 200): 140/200 = 70.00%, exact parity with evalscope.
+Numbers below are from two independent seed validation runs on Thor
+(`Qwen3.6-27B-Q4_K_M`, `temperature=0`, 456 single-turn samples, full
+multi-turn `multi_turn_base`):
+
+| Category | Run 1 | Run 2 | Match? |
+| --- | --- | --- | --- |
+| Single-turn `non_live` (AST) | 86.98% | 86.98% | ✓ |
+| Single-turn `live` | 84.12% | 84.12% | ✓ |
+| Single-turn `hallucination` | 94.32% | 94.32% | ✓ |
+| **Single-turn overall** (456 samples) | **87.50%** | **87.50%** | ✓ |
+| Multi-turn `multi_turn_base` (200/200) | 70.00% (140/200) | — | exact parity with evalscope |
+
+Both single-turn runs are identical across seeds — confirming deterministic
+scoring. The multi-turn result is exact parity with evalscope on the same model
+and data. Wall-clock: ~82 min single-turn (~10.8 s/sample), ~80 min multi-turn.
+
+### Verifying the output
+
+After a single-turn run, the score is printed to stdout and also written to:
+
+```
+results/bfcl_v4_single_turn_accuracy/accuracy_scores.json
+```
+
+After a multi-turn run, per-entry details and aggregate scores are written to:
+
+```
+results/bfcl_v4_multi_turn/results.json
+results/bfcl_v4_multi_turn/per_entry_scores.json
+```
+
+A quick sanity check:
+
+```bash
+# Single-turn: print the live-category accuracy
+python3 -c "
+import json, pathlib
+s = json.loads(pathlib.Path('results/bfcl_v4_single_turn_accuracy/accuracy_scores.json').read_text())
+print(s)
+"
+
+# Multi-turn: print overall accuracy
+python3 -c "
+import json, pathlib
+r = json.loads(pathlib.Path('results/bfcl_v4_multi_turn/results.json').read_text())
+print('Overall MT accuracy:', r['accuracy_scores']['bfcl_v4::multi_turn']['score']['overall_accuracy'], '%')
+"
+```
