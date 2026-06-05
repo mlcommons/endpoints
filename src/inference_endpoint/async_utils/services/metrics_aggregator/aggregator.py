@@ -120,7 +120,7 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
         tokenize_pool: TokenizePool | None = None,
         streaming: bool = False,
         shutdown_event: asyncio.Event | None = None,
-        drain_timeout_s: float = _DEFAULT_DRAIN_TIMEOUT_S,
+        drain_timeout_s: float | None = _DEFAULT_DRAIN_TIMEOUT_S,
         **kwargs,
     ):
         # drain_timeout_s is injected (not derived) because the right
@@ -374,10 +374,15 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
             # would always be 0 (see drain_tasks docstring).
             n_pending = await table.drain_tasks(timeout=self._drain_timeout_s)
             if n_pending > 0:
+                timeout_str = (
+                    f"{self._drain_timeout_s:.1f}s"
+                    if self._drain_timeout_s is not None
+                    else "unlimited"
+                )
                 logger.warning(
-                    "drain_tasks timed out after %.1fs; %d async tasks "
+                    "drain_tasks timed out after %s; %d async tasks "
                     "did not complete and were cancelled",
-                    self._drain_timeout_s,
+                    timeout_str,
                     n_pending,
                 )
             logger.info(

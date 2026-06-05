@@ -673,6 +673,15 @@ async def _run_benchmark_async(
             aggregator_args.append("--streaming")
         if ctx.tokenizer_name is not None:
             aggregator_args.extend(["--tokenizer", ctx.tokenizer_name])
+        aggregator_args.extend(
+            ["--drain-timeout", str(config.settings.drain.metrics_drain_timeout_s)]
+        )
+        aggregator_args.extend(
+            [
+                "--tokenizer-workers",
+                str(config.settings.drain.metrics_tokenizer_workers),
+            ]
+        )
 
         # EventLoggerService writes events.jsonl to tmpfs (high-frequency writes)
         event_logger_args: list[str] = [

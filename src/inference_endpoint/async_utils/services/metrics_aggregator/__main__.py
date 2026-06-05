@@ -137,8 +137,8 @@ async def main() -> None:
             "Wall-clock budget (seconds) to wait for in-flight async tokenize "
             "tasks to finish after ENDED before the aggregator cancels them "
             "and emits the final snapshot with n_pending_tasks > 0 "
-            "(default: 60.0). Increase for long-context / low-worker-count "
-            "tokenize workloads."
+            "(default: 60.0; 0 = wait indefinitely). Increase for long-context "
+            "/ low-worker-count tokenize workloads."
         ),
     )
     parser.add_argument(
@@ -237,7 +237,7 @@ async def main() -> None:
                 tokenize_pool=pool,
                 streaming=args.streaming,
                 shutdown_event=shutdown_event,
-                drain_timeout_s=args.drain_timeout,
+                drain_timeout_s=None if args.drain_timeout == 0 else args.drain_timeout,
             )
             aggregator.start()
 
