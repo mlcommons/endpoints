@@ -13,15 +13,16 @@ model_params:
   streaming: "off"
 
 datasets:
-  # The performance dataset can be any supported type, including multi-turn.
-  # To run a multi-turn perf benchmark alongside SWE-bench accuracy evaluation,
-  # replace the entry below with a multi-turn dataset and set
-  # settings.load_pattern.type to multi_turn with a target_concurrency value.
-  # Minimal perf dataset required by the framework.
-  - name: swe_bench
+  # Minimal performance dataset required by the framework. Replace with any
+  # dataset representative of your workload — or a multi-turn dataset if you
+  # want to measure multi-turn throughput alongside SWE-bench accuracy.
+  # swe_bench cannot be used here: problem statements sent without an agent
+  # framework do not reflect real SWE-bench usage.
+  - name: swe_bench_perf
     type: "performance"
+    path: "examples/10_SWEBench_Example/smoke_1instance.jsonl"
 
-  # Accuracy dataset — instance_id rows tell the scorer which instances to run.
+  # Accuracy dataset — instance_id rows tell mini-swe-agent which instances to run.
   - name: swe_bench
     type: "accuracy"
     accuracy_config:

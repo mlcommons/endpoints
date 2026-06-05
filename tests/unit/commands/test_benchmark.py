@@ -36,6 +36,7 @@ from inference_endpoint.commands.benchmark.execute import (
     _build_phases,
     _run_benchmark_async,
     setup_benchmark,
+    _load_datasets,
 )
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import (
@@ -379,6 +380,31 @@ endpoint_config:
                 datasets=[{"path": "test.jsonl"}],
                 **overrides,
             )
+
+
+class TestAccuracyOnlyDataset:
+    """Test that datasets with ACCURACY_ONLY=True are rejected as perf datasets."""
+
+    @pytest.mark.unit
+    def test_swe_bench_as_perf_raises(self, tmp_path):
+        from unittest.mock import patch
+
+        import pandas as pd
+        from inference_endpoint.dataset_manager.predefined.swe_bench import SWEBench
+
+        fake_df = pd.DataFrame(
+            [{"instance_id": "repo__repo-0", "problem_statement": "Fix bug 0"}]
+        )
+        config = OfflineConfig(
+            endpoint_config={"endpoints": ["http://test:8000"]},
+            model_params={"name": "test-model"},
+            datasets=[{"name": "swe_bench"}],
+        )
+        with (
+            patch.object(SWEBench, "generate", return_value=fake_df),
+            pytest.raises(InputValidationError, match="accuracy-only"),
+        ):
+            _load_datasets(config, tmp_path)
 
 
 class TestYAMLTemplateValidation:

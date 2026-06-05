@@ -43,8 +43,14 @@ class SWEBench(
     the endpoint during the accuracy phase; responses are discarded by the
     scorer. The ``instance_id`` column identifies which instances mini-swe-agent
     will evaluate.
+
+    Using this dataset as a performance dataset (type: performance) is not
+    meaningful — problem statements sent directly to the model without an
+    agent framework don't reflect real SWE-bench usage. Use a different
+    dataset (e.g. ``random``) for the performance phase.
     """
 
+    ACCURACY_ONLY = True
     COLUMN_NAMES = ["instance_id", "prompt"]
 
     @classmethod

@@ -313,6 +313,14 @@ def _load_datasets(
         raise InputValidationError("Multiple performance datasets not supported")
 
     perf_cfg = performance_cfgs[0]
+    perf_cls = Dataset.PREDEFINED.get(perf_cfg.name)
+    if perf_cls is not None and perf_cls.ACCURACY_ONLY:
+        raise InputValidationError(
+            f"Dataset '{perf_cfg.name}' is accuracy-only and cannot be used "
+            "as a performance dataset. Use a different dataset (e.g. 'random') for the "
+            "performance phase."
+        )
+
     try:
         dataloader = DataLoaderFactory.create_loader(perf_cfg)
         dataloader.load(
@@ -320,9 +328,7 @@ def _load_datasets(
         )
         logger.info(f"Loaded {dataloader.num_samples()} samples")
     except FileNotFoundError as e:
-        raise InputValidationError(
-            f"Dataset file not found: {performance_cfgs[0].path}"
-        ) from e
+        raise InputValidationError(f"Dataset file not found: {perf_cfg.path}") from e
     except Exception as e:
         raise SetupError(f"Failed to load dataset: {e}") from e
 

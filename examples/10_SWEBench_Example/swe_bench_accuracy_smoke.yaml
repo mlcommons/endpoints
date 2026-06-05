@@ -11,9 +11,9 @@ model_params:
   streaming: "off"
 
 datasets:
-  - name: swe_bench
+  - name: swe_bench_perf
     type: "performance"
-    samples: 5
+    path: "examples/10_SWEBench_Example/smoke_1instance.jsonl"
 
   - name: swe_bench_smoke
     type: "accuracy"
@@ -30,7 +30,7 @@ datasets:
 settings:
   runtime:
     min_duration_ms: 0
-    n_samples_to_issue: 5
+    n_samples_to_issue: 1
   load_pattern:
     type: "max_throughput"
   client:

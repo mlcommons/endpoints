@@ -40,6 +40,9 @@ class TestSWEBenchRegistration:
         assert "swe_bench" in Dataset.PREDEFINED
         assert Dataset.PREDEFINED["swe_bench"] is SWEBench
 
+    def test_accuracy_only_flag(self):
+        assert SWEBench.ACCURACY_ONLY is True
+
 
 class TestSWEBenchGenerate:
     def test_downloads_and_caches(self, tmp_path: Path):
