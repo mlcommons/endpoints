@@ -1,0 +1,47 @@
+type: "online"
+
+model_params:
+  name: "Qwen/Qwen3.6-35B-A3B"
+  temperature: 1.0
+  top_p: 0.95
+  max_new_tokens: 64
+  streaming: "off"
+
+datasets:
+  # Multi-turn perf dataset: 2 conversations × 2 user turns.
+  - name: multiturn_perf
+    type: "performance"
+    path: "examples/10_SWEBench_Example/multiturn_perf_smoke.jsonl"
+    multi_turn:
+      turn_timeout_s: 60.0
+      use_dataset_history: false
+
+  # SWE-bench accuracy: 1 instance — exercises the full scorer pipeline.
+  - name: swe_bench_smoke
+    type: "accuracy"
+    path: "examples/10_SWEBench_Example/smoke_1instance.jsonl"
+    accuracy_config:
+      eval_method: "swe_bench_scorer"
+      num_repeats: 1
+      extras:
+        num_instances: 1
+        subset: "verified"
+        workers: 1
+        max_eval_workers: 4
+
+settings:
+  load_pattern:
+    type: "multi_turn"
+    target_concurrency: 2
+  runtime:
+    min_duration_ms: 0
+    n_samples_to_issue: 4
+  client:
+    num_workers: 1
+    warmup_connections: 0
+    max_idle_time: 0.5
+
+endpoint_config:
+  endpoints:
+    - "http://localhost:30000"
+  api_type: "openai"

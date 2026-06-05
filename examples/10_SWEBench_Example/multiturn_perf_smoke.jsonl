@@ -1,0 +1,6 @@
+{"conversation_id": "conv1", "turn": 1, "role": "user", "content": "What is 2+2?", "system": "You are a helpful assistant. Give very short answers."}
+{"conversation_id": "conv1", "turn": 2, "role": "assistant", "content": "4"}
+{"conversation_id": "conv1", "turn": 3, "role": "user", "content": "And 3+3?"}
+{"conversation_id": "conv2", "turn": 1, "role": "user", "content": "What is the capital of France?", "system": "You are a helpful assistant. Give very short answers."}
+{"conversation_id": "conv2", "turn": 2, "role": "assistant", "content": "Paris"}
+{"conversation_id": "conv2", "turn": 3, "role": "user", "content": "What is its population?"}

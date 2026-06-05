@@ -13,6 +13,10 @@ model_params:
   streaming: "off"
 
 datasets:
+  # The performance dataset can be any supported type, including multi-turn.
+  # To run a multi-turn perf benchmark alongside SWE-bench accuracy evaluation,
+  # replace the entry below with a multi-turn dataset and set
+  # settings.load_pattern.type to multi_turn with a target_concurrency value.
   # Minimal perf dataset required by the framework.
   - name: swe_bench
     type: "performance"
