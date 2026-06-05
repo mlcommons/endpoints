@@ -80,7 +80,9 @@ class Harmonizer:
         self.tokenizer_name = tokenizer_name
         self._encoding_name = encoding_name
         self._reasoning_effort = reasoning_effort
-        self._conversation_start_date = conversation_start_date or datetime.date.today().isoformat()
+        self._conversation_start_date = (
+            conversation_start_date or datetime.date.today().isoformat()
+        )
         self.tokenizer: PreTrainedTokenizer | None = None
         self.encoding: "harmony.HarmonyEncoding | None" = None
         self.system_message: "harmony.SystemContent | None" = None
