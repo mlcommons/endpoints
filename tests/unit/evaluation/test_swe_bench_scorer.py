@@ -113,9 +113,10 @@ def patch_subprocess(monkeypatch, report_dir: Path, mini_swe_dir: Path):
             output_dir.mkdir(parents=True, exist_ok=True)
             (output_dir / "preds.json").write_text(json.dumps({}))
         elif "run_evaluation" in cmd_str:
+            cwd = Path(kwargs["cwd"])
             run_id = cmd[cmd.index("--run_id") + 1]
             safe_model = _MODEL_NAME.replace("/", "__")
-            (mini_swe_dir / f"{safe_model}.{run_id}.json").write_text(
+            (cwd / f"{safe_model}.{run_id}.json").write_text(
                 json.dumps(
                     {
                         "resolved_instances": 3,

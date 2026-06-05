@@ -1933,13 +1933,13 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
         self._run_subprocess(
             eval_cmd,
             self.report_dir / "swe_bench_eval.log",
-            cwd=self.mini_swe_agent_dir,
+            cwd=output_dir,
         )
 
         safe_model = model_name.replace("/", "__")
-        result_path = self.mini_swe_agent_dir / f"{safe_model}.{run_id}.json"
+        result_path = output_dir / f"{safe_model}.{run_id}.json"
         if not result_path.exists():
-            candidates = list(self.mini_swe_agent_dir.glob(f"*{run_id}*.json"))
+            candidates = list(output_dir.glob(f"*{run_id}*.json"))
             if not candidates:
                 logger.error(
                     "SWE-bench result file not found (run_id=%s); returning None",
