@@ -380,6 +380,126 @@ class TestSWEBenchScorer:
                 swebench_config_template=bad_template,
             )
 
+    def test_subprocess_failure_raises(
+        self, report_dir, swe_bench_project, template_yaml, monkeypatch
+    ):
+        def fake_run(cmd, **kwargs):
+            cmd_str = " ".join(cmd)
+            if "mini-extra" in cmd_str:
+                output_dir = Path(cmd[cmd.index("--output") + 1])
+                output_dir.mkdir(parents=True, exist_ok=True)
+                (output_dir / "preds.json").write_text(json.dumps({}))
+                return MagicMock(returncode=0, stdout="ok\n")
+            return MagicMock(
+                returncode=2, stdout="", stderr=b"docker error: permission denied"
+            )
+
+        monkeypatch.setattr(scoring_mod.subprocess, "run", fake_run)
+        scorer = SWEBenchScorer(
+            dataset_name=_DATASET_NAME,
+            dataset=_make_dataset(),
+            report_dir=report_dir,
+            swe_bench_project_path=swe_bench_project,
+            swebench_config_template=template_yaml,
+        )
+        with pytest.raises(RuntimeError, match="exited with code 2"):
+            scorer.score()
+
+    def test_subprocess_timeout_raises(
+        self, report_dir, swe_bench_project, template_yaml, monkeypatch
+    ):
+        def fake_run(cmd, **kwargs):
+            cmd_str = " ".join(cmd)
+            if "mini-extra" in cmd_str:
+                output_dir = Path(cmd[cmd.index("--output") + 1])
+                output_dir.mkdir(parents=True, exist_ok=True)
+                (output_dir / "preds.json").write_text(json.dumps({}))
+                return MagicMock(returncode=0, stdout="ok\n")
+            raise scoring_mod.subprocess.TimeoutExpired(cmd=cmd, timeout=300)
+
+        monkeypatch.setattr(scoring_mod.subprocess, "run", fake_run)
+        scorer = SWEBenchScorer(
+            dataset_name=_DATASET_NAME,
+            dataset=_make_dataset(),
+            report_dir=report_dir,
+            swe_bench_project_path=swe_bench_project,
+            swebench_config_template=template_yaml,
+        )
+        with pytest.raises(RuntimeError, match="timed out after"):
+            scorer.score()
+
+    def test_result_glob_fallback(
+        self, report_dir, swe_bench_project, template_yaml, monkeypatch
+    ):
+        def fake_run(cmd, **kwargs):
+            cmd_str = " ".join(cmd)
+            if "mini-extra" in cmd_str:
+                output_dir = Path(cmd[cmd.index("--output") + 1])
+                output_dir.mkdir(parents=True, exist_ok=True)
+                (output_dir / "preds.json").write_text(json.dumps({}))
+            elif "run_evaluation" in cmd_str:
+                cwd = Path(kwargs["cwd"])
+                run_id = cmd[cmd.index("--run_id") + 1]
+                # Write under a different prefix so exact name won't match; glob will find it
+                (cwd / f"alt_prefix.{run_id}.json").write_text(
+                    json.dumps(
+                        {
+                            "resolved_instances": 1,
+                            "submitted_instances": 5,
+                            "total_instances": 500,
+                        }
+                    )
+                )
+            return MagicMock(returncode=0, stdout="ok\n")
+
+        monkeypatch.setattr(scoring_mod.subprocess, "run", fake_run)
+        scorer = SWEBenchScorer(
+            dataset_name=_DATASET_NAME,
+            dataset=_make_dataset(),
+            report_dir=report_dir,
+            swe_bench_project_path=swe_bench_project,
+            swebench_config_template=template_yaml,
+        )
+        score, n_repeats = scorer.score()
+        assert score == pytest.approx(1 / 5)
+        assert n_repeats == 1
+
+    def test_zero_submitted_instances_returns_none(
+        self, report_dir, swe_bench_project, template_yaml, monkeypatch
+    ):
+        def fake_run(cmd, **kwargs):
+            cmd_str = " ".join(cmd)
+            if "mini-extra" in cmd_str:
+                output_dir = Path(cmd[cmd.index("--output") + 1])
+                output_dir.mkdir(parents=True, exist_ok=True)
+                (output_dir / "preds.json").write_text(json.dumps({}))
+            elif "run_evaluation" in cmd_str:
+                cwd = Path(kwargs["cwd"])
+                run_id = cmd[cmd.index("--run_id") + 1]
+                safe_model = _MODEL_NAME.replace("/", "__")
+                (cwd / f"{safe_model}.{run_id}.json").write_text(
+                    json.dumps(
+                        {
+                            "resolved_instances": 0,
+                            "submitted_instances": 0,
+                            "total_instances": 500,
+                        }
+                    )
+                )
+            return MagicMock(returncode=0, stdout="ok\n")
+
+        monkeypatch.setattr(scoring_mod.subprocess, "run", fake_run)
+        scorer = SWEBenchScorer(
+            dataset_name=_DATASET_NAME,
+            dataset=_make_dataset(),
+            report_dir=report_dir,
+            swe_bench_project_path=swe_bench_project,
+            swebench_config_template=template_yaml,
+        )
+        score, n_repeats = scorer.score()
+        assert score is None
+        assert n_repeats == 1
+
     def test_score_result_non_dict_raises_decode_error(
         self, report_dir, swe_bench_project, template_yaml, monkeypatch
     ):
