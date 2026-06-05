@@ -332,3 +332,82 @@ class TestSWEBenchScorer:
             eval_cmd[eval_cmd.index("--dataset_name") + 1]
             == "princeton-nlp/SWE-bench_Lite"
         )
+
+    def test_verified_subset_uses_correct_hf_name(
+        self, report_dir, swe_bench_project, template_yaml, patch_subprocess
+    ):
+        scorer = SWEBenchScorer(
+            dataset_name=_DATASET_NAME,
+            dataset=_make_dataset(),
+            report_dir=report_dir,
+            swe_bench_project_path=swe_bench_project,
+            swebench_config_template=template_yaml,
+            subset="verified",
+        )
+        scorer.score()
+
+        eval_cmd = patch_subprocess[1]
+        assert "--dataset_name" in eval_cmd
+        assert (
+            eval_cmd[eval_cmd.index("--dataset_name") + 1]
+            == "princeton-nlp/SWE-bench_Verified"
+        )
+
+    def test_unknown_subset_raises_at_init(
+        self, report_dir, swe_bench_project, template_yaml
+    ):
+        with pytest.raises(ValueError, match="Unknown SWE-bench subset"):
+            SWEBenchScorer(
+                dataset_name=_DATASET_NAME,
+                dataset=_make_dataset(),
+                report_dir=report_dir,
+                swe_bench_project_path=swe_bench_project,
+                swebench_config_template=template_yaml,
+                subset="full",
+            )
+
+    def test_template_missing_model_kwargs_raises(
+        self, report_dir, swe_bench_project, tmp_path
+    ):
+        bad_template = tmp_path / "bad_template.yaml"
+        bad_template.write_text(yaml.dump({"model": {"model_name": ""}}))
+        with pytest.raises(ValueError, match="model.model_kwargs"):
+            SWEBenchScorer(
+                dataset_name=_DATASET_NAME,
+                dataset=_make_dataset(),
+                report_dir=report_dir,
+                swe_bench_project_path=swe_bench_project,
+                swebench_config_template=bad_template,
+            )
+
+    def test_score_result_non_dict_raises_decode_error(
+        self, report_dir, swe_bench_project, template_yaml, monkeypatch
+    ):
+        """msgspec.json.decode(..., type=dict) raises DecodeError on non-dict JSON."""
+
+        def fake_run(cmd, **kwargs):
+            cmd_str = " ".join(cmd)
+            if "mini-extra" in cmd_str:
+                output_dir = Path(cmd[cmd.index("--output") + 1])
+                output_dir.mkdir(parents=True, exist_ok=True)
+                (output_dir / "preds.json").write_text(json.dumps({}))
+            elif "run_evaluation" in cmd_str:
+                cwd = Path(kwargs["cwd"])
+                run_id = cmd[cmd.index("--run_id") + 1]
+                safe_model = _MODEL_NAME.replace("/", "__")
+                # Write a JSON array instead of a dict — should trigger DecodeError
+                (cwd / f"{safe_model}.{run_id}.json").write_text(
+                    json.dumps([{"resolved_instances": 3}])
+                )
+            return MagicMock(returncode=0, stdout="ok\n")
+
+        monkeypatch.setattr(scoring_mod.subprocess, "run", fake_run)
+        scorer = SWEBenchScorer(
+            dataset_name=_DATASET_NAME,
+            dataset=_make_dataset(),
+            report_dir=report_dir,
+            swe_bench_project_path=swe_bench_project,
+            swebench_config_template=template_yaml,
+        )
+        with pytest.raises(msgspec.DecodeError):
+            scorer.score()

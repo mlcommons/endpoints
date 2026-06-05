@@ -48,6 +48,8 @@ except ImportError:
     _evaluate = None
     _nltk = None
 
+import yaml
+
 from ..core.record import EventRecord, EventType, SampleEventType
 from ..core.types import TextModelOutput
 from ..dataset_manager.agentic_inference_dataset import AgenticInferenceDataset
@@ -1673,6 +1675,10 @@ _DEFAULT_SWE_BENCH_TEMPLATE = (
     / "10_SWEBench_Example"
     / "swebench_template.yaml"
 )
+_SWE_BENCH_HF_MAP: dict[str, str] = {
+    "verified": "princeton-nlp/SWE-bench_Verified",
+    "lite": "princeton-nlp/SWE-bench_Lite",
+}
 
 
 class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
@@ -1739,6 +1745,11 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
             if swebench_config_template is not None
             else _DEFAULT_SWE_BENCH_TEMPLATE
         )
+        if subset not in _SWE_BENCH_HF_MAP:
+            raise ValueError(
+                f"Unknown SWE-bench subset {subset!r}; "
+                f"choose from: {list(_SWE_BENCH_HF_MAP)}"
+            )
         self.subset = subset
         self.split = split
         self.num_instances = num_instances
@@ -1754,6 +1765,13 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
             raise FileNotFoundError(
                 f"swebench template not found: {self.swebench_config_template}. "
                 f"Pass swebench_config_template= in accuracy_config.extras."
+            )
+        with self.swebench_config_template.open() as _f:
+            _tmpl = yaml.safe_load(_f)
+        if not isinstance((_tmpl or {}).get("model", {}).get("model_kwargs"), dict):
+            raise ValueError(
+                f"swebench template {self.swebench_config_template} must have a "
+                "'model.model_kwargs' dict; check the template structure."
             )
         pyproject = self.swe_bench_project_path / "pyproject.toml"
         if not pyproject.exists():
@@ -1782,10 +1800,8 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
 
     def _patch_config(self, output_dir: Path, benchmark_config_dict: dict) -> Path:
         """Load template YAML, patch model fields from benchmark config, write to output_dir."""
-        import yaml as _yaml
-
         with self.swebench_config_template.open() as f:
-            cfg = _yaml.safe_load(f)
+            cfg = yaml.safe_load(f)
 
         model_params = benchmark_config_dict.get("model_params", {})
         endpoints = benchmark_config_dict.get("endpoint_config", {}).get(
@@ -1819,7 +1835,7 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
 
         patched_path = output_dir / "swebench_patched.yaml"
         with patched_path.open("w") as f:
-            _yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)
+            yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)
         return patched_path
 
     def _run_subprocess(self, cmd: list[str], log_path: Path, cwd: Path) -> None:
@@ -1864,10 +1880,8 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
 
     def score(self) -> tuple[float | None, int]:
         """Run mini-swe-agent + swebench evaluation. Returns (resolved_rate, 1)."""
-        import yaml as _yaml
-
         with (self.report_dir / "config.yaml").open() as f:
-            benchmark_cfg = _yaml.safe_load(f)
+            benchmark_cfg = yaml.safe_load(f)
 
         model_name: str = benchmark_cfg["model_params"]["name"]
         assert self.dataset.dataframe is not None
@@ -1916,11 +1930,7 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
             )
             return None, 1
 
-        hf_dataset_name = (
-            "princeton-nlp/SWE-bench_Verified"
-            if self.subset == "verified"
-            else "princeton-nlp/SWE-bench_Lite"
-        )
+        hf_dataset_name = _SWE_BENCH_HF_MAP[self.subset]
         run_id = f"endpoints_{uuid.uuid4().hex[:8]}"
         eval_cmd = [
             "python",
@@ -1958,7 +1968,7 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
 
         shutil.copy2(result_path, self.report_dir / "swe_bench_results.json")
 
-        result = msgspec.json.decode(result_path.read_bytes())
+        result = msgspec.json.decode(result_path.read_bytes(), type=dict)
         submitted = result.get("submitted_instances", 0)
         resolved = result.get("resolved_instances", 0)
         if submitted == 0:
