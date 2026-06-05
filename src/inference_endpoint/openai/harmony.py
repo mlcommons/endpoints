@@ -78,18 +78,39 @@ class Harmonizer:
                 If None, the current date will be used. (Default: None)
         """
         self.tokenizer_name = tokenizer_name
-        self.tokenizer = self.__class__.get_tokenizer(tokenizer_name)
-        self.encoding = self.__class__.get_encoding(encoding_name)
-
-        _effort = getattr(harmony.ReasoningEffort, reasoning_effort.upper())
-        if conversation_start_date is None:
-            conversation_start_date = datetime.date.today().isoformat()
-
-        self.system_message = (
-            harmony.SystemContent.new()
-            .with_reasoning_effort(_effort)
-            .with_conversation_start_date(conversation_start_date)
+        self._encoding_name = encoding_name
+        self._reasoning_effort = reasoning_effort
+        self._conversation_start_date = (
+            conversation_start_date or datetime.date.today().isoformat()
         )
+        self.tokenizer: PreTrainedTokenizer | None = None
+        self.encoding: "harmony.HarmonyEncoding | None" = None
+        self.system_message: "harmony.SystemContent | None" = None
+
+    def _ensure_loaded(
+        self,
+    ) -> "tuple[PreTrainedTokenizer, harmony.HarmonyEncoding, harmony.SystemContent]":
+        if self.tokenizer is None:
+            tokenizer = self.__class__.get_tokenizer(self.tokenizer_name)
+            encoding = self.__class__.get_encoding(self._encoding_name)
+
+            _effort = getattr(harmony.ReasoningEffort, self._reasoning_effort.upper())
+
+            system_message = (
+                harmony.SystemContent.new()
+                .with_reasoning_effort(_effort)
+                .with_conversation_start_date(self._conversation_start_date)
+            )
+
+            # Assign to instance variables only after all steps succeed to ensure atomicity
+            self.tokenizer = tokenizer
+            self.encoding = encoding
+            self.system_message = system_message
+
+        assert self.tokenizer is not None
+        assert self.encoding is not None
+        assert self.system_message is not None
+        return self.tokenizer, self.encoding, self.system_message
 
     def __call__(self, user_prompt: str, tokenize: bool = True) -> str | list[int]:
         """Convert a user prompt to a Harmony-compatible format.
@@ -103,22 +124,21 @@ class Harmonizer:
         Returns:
             The Harmony-compatible format of the user prompt.
         """
+        tokenizer, encoding, system_message = self._ensure_loaded()
         conv = harmony.Conversation.from_messages(
             [
                 harmony.Message.from_role_and_content(
-                    harmony.Role.SYSTEM, self.system_message
+                    harmony.Role.SYSTEM, system_message
                 ),
                 harmony.Message.from_role_and_content(harmony.Role.USER, user_prompt),
             ]
         )
-        toks = self.encoding.render_conversation_for_completion(
-            conv, harmony.Role.ASSISTANT
-        )
+        toks = encoding.render_conversation_for_completion(conv, harmony.Role.ASSISTANT)
 
         if tokenize:
             return toks
         else:
-            return self.tokenizer.decode(toks, skip_special_tokens=False)
+            return tokenizer.decode(toks, skip_special_tokens=False)
 
     def to_text(self, toks: list[int]) -> str:
         """Convert a tokenized sequence to a string.
@@ -129,7 +149,8 @@ class Harmonizer:
         Returns:
             The string representation of the sequence.
         """
-        return self.tokenizer.decode(toks, skip_special_tokens=False)
+        tokenizer, _, _ = self._ensure_loaded()
+        return tokenizer.decode(toks, skip_special_tokens=False)
 
     def to_tokens(self, text: str) -> list[int]:
         """Convert a string to a tokenized sequence.
@@ -140,4 +161,5 @@ class Harmonizer:
         Returns:
             The tokenized sequence.
         """
-        return self.tokenizer.encode(text, add_special_tokens=True)
+        tokenizer, _, _ = self._ensure_loaded()
+        return tokenizer.encode(text, add_special_tokens=True)
