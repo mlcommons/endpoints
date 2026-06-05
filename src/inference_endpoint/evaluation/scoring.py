@@ -111,11 +111,7 @@ class Scorer(ABC):
 
     @classmethod  # noqa: B027
     def preflight(cls, extras: dict[str, Any]) -> None:
-        """Verify external dependencies before the benchmark starts.
-
-        Subclasses that depend on external tools (Docker, uv, binaries) should
-        override this to raise SetupError if a required tool is unavailable.
-        """
+        """Verify external dependencies before the benchmark starts. No-op by default."""
 
     def __init__(
         self,
@@ -1693,32 +1689,9 @@ _SWE_BENCH_HF_MAP: dict[str, str] = {
 class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
     """SWE-bench accuracy scorer using mini-swe-agent.
 
-    Overrides score() entirely — ignores events.jsonl. Instead:
-    1. Patches swebench_template.yaml with model name, endpoint URL, and
-       sampling parameters read from the saved benchmark config.
-    2. Runs mini-extra swebench to generate predictions (preds.json).
-    3. Runs swebench.harness.run_evaluation to grade the predictions.
-    4. Returns resolved_rate = resolved_instances / submitted_instances.
-
-    mini-swe-agent and swebench are invoked via ``uv run --project
-    <swe_bench_project_path>`` so the parent benchmark process never needs to
-    import them directly. Run ``uv sync`` in the subproject directory once
-    before use.
-
-    extras keys (all optional except those listed):
-        swe_bench_project_path  Path to the accuracy subproject directory
-                                (examples/10_SWEBench_Example/accuracy).
-                                Falls back to $SWE_BENCH_PROJECT_PATH or
-                                the in-repo default.
-        swebench_config_template  Path to a swebench YAML template.
-                                  Defaults to examples/10_SWEBench_Example/
-                                  swebench_template.yaml in this repo.
-        subset                "verified" (default) or "lite".
-        split                 HF split to evaluate (default: "test").
-        num_instances         How many instances to run (default: 100).
-        workers               mini-extra parallelism (default: 10).
-        max_eval_workers      swebench harness parallelism (default: 10).
-        subprocess_timeout_s  Total wall-clock budget in seconds (default: 28800).
+    Invokes mini-extra and swebench via ``uv run --project <swe_bench_project_path>``
+    so the parent process never imports them directly. Run ``uv sync`` in the subproject
+    directory once before use.
     """
 
     REQUIRES_EXTRACTOR: ClassVar[bool] = False
