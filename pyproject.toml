@@ -126,6 +126,9 @@ bfcl = [
     # BFCL v4 function-calling evaluation. Pins numpy==1.26.4, which is why
     # the top-level numpy requirement is a lower bound (see chore/relax-numpy-pin).
     "bfcl-eval==2026.3.23",
+    # bfcl-eval's qwen model handler transitively imports qwen_agent → soundfile;
+    # soundfile is not used by our scorer but must be present for the import to succeed.
+    "soundfile==0.13.1",
 ]
 
 [project.scripts]
