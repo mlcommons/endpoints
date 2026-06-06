@@ -156,6 +156,9 @@ def generate_dataset(
     # single problem rather than the entire dataset, so the build fits in tight memory.
     # question_content is surfaced as "question"; all other non-dropped columns pass through.
     light_columns = [c for c in ds.column_names if c not in drop_columns]
+    output_columns = [
+        "question" if c == "question_content" else c for c in light_columns
+    ]
 
     if max_samples is not None and max_samples < len(ds):
         rng = random.Random(seed)
@@ -210,7 +213,7 @@ def generate_dataset(
 
     # Build the parquet from only the light columns (column order follows the dataset's,
     # minus the dropped columns) and save with pyarrow for performance.
-    df_to_save = pd.DataFrame.from_records(records)
+    df_to_save = pd.DataFrame.from_records(records, columns=output_columns)
     df_to_save.to_parquet(dst_path, engine="pyarrow")
     logger.info(f"Saved {len(df_to_save)} samples to {dst_path}")
 

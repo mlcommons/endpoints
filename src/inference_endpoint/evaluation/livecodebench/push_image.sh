@@ -24,7 +24,7 @@
 #   The dataset-generation step runs under emulation and is MUCH slower than native.
 #
 # Environment variables: see _image_env.sh (LCB_IMAGE_REGISTRY required).
-#   HF_TOKEN            required unless --no-build (used as a docker build secret).
+#   HF_TOKEN            required unless --no-build (passed as a BuildKit secret directly from the environment).
 #   LCB_IMAGE_PLATFORM  optional target platform(s), e.g. linux/arm64 (default: host native).
 set -euo pipefail
 
@@ -127,16 +127,12 @@ if [[ -n "$PLATFORM" ]]; then
         exit 1
     fi
 
-    secret_file="$(mktemp)"
-    trap 'rm -f "$secret_file"' EXIT
-    printf '%s' "$HF_TOKEN" >"$secret_file"
-
     echo ">> Building ${LCB_IMAGE_REF} for ${PLATFORM} and pushing (buildx) ..."
     docker buildx build \
         --builder "$BUILDX_BUILDER" \
         --platform "$PLATFORM" \
         -f "${SCRIPT_DIR}/lcb_serve.dockerfile" \
-        --secret "id=HF_TOKEN,src=${secret_file}" \
+        --secret id=HF_TOKEN,env=HF_TOKEN \
         -t "$LCB_IMAGE_REF" \
         --provenance=false \
         --output "type=image,push=true,compression=gzip,force-compression=true,oci-mediatypes=false" \
@@ -151,15 +147,10 @@ else
             exit 1
         fi
 
-        # Write the token to a temp secret file; remove it on exit no matter what.
-        secret_file="$(mktemp)"
-        trap 'rm -f "$secret_file"' EXIT
-        printf '%s' "$HF_TOKEN" >"$secret_file"
-
         echo ">> Building ${LCB_LOCAL_TAG} ..."
         docker build \
             -f "${SCRIPT_DIR}/lcb_serve.dockerfile" \
-            --secret "id=HF_TOKEN,src=${secret_file}" \
+            --secret id=HF_TOKEN,env=HF_TOKEN \
             -t "$LCB_LOCAL_TAG" \
             "$SCRIPT_DIR"
     fi
