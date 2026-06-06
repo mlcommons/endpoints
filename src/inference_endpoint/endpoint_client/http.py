@@ -791,14 +791,13 @@ class HttpRequestTemplate:
 
 @dataclass(slots=True)
 class InFlightRequest:
-    """State for a single HTTP request through its lifecycle.
+    """State for a single HTTP request through its lifecycle:
 
     Attributes:
         query_id: Correlates response back to original Query.
         http_bytes: Serialized HTTP request for socket.write().
         is_streaming: Whether this is a streaming (SSE) request or not.
-        connection: PooledConnection assigned to this request (set once
-            request is fired).
+        connection: PooledConnection assigned to this request (set once request is fired).
     """
 
     query_id: str

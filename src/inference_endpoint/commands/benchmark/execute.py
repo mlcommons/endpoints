@@ -26,7 +26,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import random
 import shutil
 import signal
@@ -97,7 +96,6 @@ from inference_endpoint.load_generator.session import (
     SessionResult,
 )
 from inference_endpoint.metrics.report import Report
-from inference_endpoint.utils import trace
 
 transformers_logging.set_verbosity_error()
 
@@ -567,8 +565,6 @@ async def _run_benchmark_async(
     config = ctx.config
     session_id = f"cli_benchmark_{uuid.uuid4().hex[:8]}"
 
-    trace.start_lag_task(loop)  # -vvv: main-proc loop-lag sampler
-
     # Progress bar + response collector
     pbar = tqdm(
         desc=f"{config.model_params.name} (Streaming: {ctx.enable_streaming})",
@@ -615,47 +611,6 @@ async def _run_benchmark_async(
             metrics_socket_name, zmq_ctx, loop
         )
         metrics_subscriber.start()
-
-        # -vvv: snapshot sidecar tap → dashboard's LOADGEN vs TRACE.
-        #
-        # The provider reads ``metrics_subscriber.latest``, which is only
-        # advanced by the subscriber's ``process()`` task scheduled off an
-        # ``add_reader`` callback on THIS loop. Under a saturated 30k+ req/s
-        # run the loop starves that callback, so ``latest`` freezes and the
-        # dashboard's live LOADGEN panel goes stale (the tap thread keeps
-        # re-writing the same frozen snapshot). The FINAL panel is NOT
-        # affected: trace.teardown() writes the authoritative
-        # ``state == "complete"`` snapshot to the same sidecar before it
-        # closes the FIFO, and the dashboard reader now prefers true FIFO
-        # EOF (all writers closed) before its final-snapshot poll — so the
-        # closing comparison always reflects ``final_snapshot.json``.
-        #
-        # TODO(trace-live-staleness): decouple the live feed from this loop
-        # with a trace-local second SUB, added purely here + as a helper in
-        # utils/trace.py (no edits to subscriber.py/publisher.py/APIs):
-        #   * In a daemon thread, create an independent ``zmq.Context`` and a
-        #     blocking SUB with ``CONFLATE=1`` + ``SUBSCRIBE b""`` connected
-        #     to ``ipc://{zmq_ctx.socket_dir}/{metrics_socket_name}`` (the
-        #     same endpoint the aggregator binds; a PUB fans out to all SUBs,
-        #     so the existing in-process subscriber is unaffected).
-        #   * Per recv: strip the ``TOPIC_FRAME_SIZE`` topic prefix and
-        #     handle the ``BATCH_TOPIC`` batch frame (mirror
-        #     ``ZmqMessageSubscriber.receive``), then
-        #     ``MetricsSnapshotCodec().decode`` + ``snapshot_to_dict`` and
-        #     hand the dict to the tap. A blocking recv in its own thread is
-        #     immune to main-loop starvation.
-        # Deferred for now: it would duplicate the transport's private
-        # framing (TOPIC_FRAME_SIZE / BATCH_TOPIC / single-vs-batch layout)
-        # outside the transport layer, which is a hidden coupling to a
-        # non-public contract — out of scope for a surgical in-bounds fix.
-        trace.start_snapshot_tap(
-            loop,
-            lambda: (
-                snapshot_to_dict(metrics_subscriber.latest)
-                if metrics_subscriber.latest is not None
-                else None
-            ),
-        )
 
         # Launch service subprocesses
         launcher = ServiceLauncher(zmq_ctx)
@@ -725,9 +680,6 @@ async def _run_benchmark_async(
                 api_key=config.endpoint_config.api_key,
                 event_logs_dir=ctx.report_dir,
                 cpu_affinity=ctx.affinity_plan,
-                trace_pipe_path=(
-                    trace.fifo_path(os.getpid()) if trace.is_enabled() else None
-                ),
             )
             http_client = await HTTPEndpointClient.create(http_config, loop)
             issuer = HttpClientSampleIssuer(http_client)
@@ -812,15 +764,13 @@ async def _run_benchmark_async(
 
         def _on_phase_start(phase: PhaseConfig) -> None:
             nonlocal global_timeout_handle
-            if phase.phase_type == PhaseType.PERFORMANCE:
-                # -vvv: signal the dashboard that warmup is over so its
-                # LOADGEN vs TRACE accumulators reset to the same
-                # window the loadgen aggregator's tracked counters use.
-                trace.emit_trace(trace.Event.PERF_START, 0)
-                if max_duration_ms is not None:
-                    global_timeout_handle = loop.call_later(
-                        max_duration_ms / 1000.0, _on_global_timeout
-                    )
+            if (
+                phase.phase_type == PhaseType.PERFORMANCE
+                and max_duration_ms is not None
+            ):
+                global_timeout_handle = loop.call_later(
+                    max_duration_ms / 1000.0, _on_global_timeout
+                )
 
         loop.add_signal_handler(signal.SIGINT, session.stop)
         try:
@@ -881,9 +831,6 @@ async def _run_benchmark_async(
                 except Exception as e:  # noqa: BLE001 — best-effort report build.
                     logger.warning(f"Failed to build report from snapshot: {e}")
 
-            # Cancel trace tasks, flush emitter, unlink FIFO, write final
-            # snapshot. No-op when trace was never enabled.
-            await trace.teardown(final_snapshot=snap_dict)
             metrics_subscriber.close()
             pbar.close()
 
