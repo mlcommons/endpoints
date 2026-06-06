@@ -313,6 +313,17 @@ class Dataset(BaseModel):
     multi_turn: MultiTurnConfig | None = Field(
         None, description="Multi-turn conversation configuration"
     )
+    model_params_override: dict[str, Any] | None = Field(
+        None,
+        description=(
+            "Per-dataset overrides for the top-level model_params (sparse — "
+            "only the fields you want to override). Merged on top of "
+            "BenchmarkConfig.model_params at dataset-load time. Useful for "
+            "MLPerf-style runs where accuracy and performance use different "
+            "output budgets in the same fleet, e.g. "
+            "model_params_override: {max_new_tokens: 32768, streaming: 'on'}."
+        ),
+    )
 
     @model_validator(mode="after")
     def _auto_derive_name(self) -> Self:
@@ -320,6 +331,34 @@ class Dataset(BaseModel):
         if not self.name and self.path:
             object.__setattr__(self, "name", Path(self.path).stem)
         return self
+
+    @model_validator(mode="after")
+    def _validate_model_params_override(self) -> Self:
+        """Fail fast on unknown keys; we cannot validate values here because
+        merging requires the base model_params, which lives on BenchmarkConfig.
+        """
+        if self.model_params_override:
+            valid = set(ModelParams.model_fields)
+            bad = sorted(set(self.model_params_override) - valid)
+            if bad:
+                raise ValueError(
+                    f"Dataset '{self.name}': unknown keys in "
+                    f"model_params_override: {bad}. "
+                    f"Valid keys: {sorted(valid)}"
+                )
+        return self
+
+    def effective_model_params(self, base: ModelParams) -> ModelParams:
+        """Return base merged with this dataset's overrides.
+
+        Re-validates the merged dict through ``ModelParams.model_validate``
+        so that cross-field constraints (e.g. value ranges) catch bad
+        overrides before downstream code touches them.
+        """
+        if not self.model_params_override:
+            return base
+        merged = {**base.model_dump(), **self.model_params_override}
+        return ModelParams.model_validate(merged)
 
 
 class AccuracyConfig(BaseModel):

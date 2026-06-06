@@ -288,9 +288,13 @@ def _load_datasets(
                 acc_cfg.accuracy_config.extras or {},
             )
         )
-        ds.load(
-            api_type=config.endpoint_config.api_type, model_params=config.model_params
-        )
+        try:
+            ds_model_params = acc_cfg.effective_model_params(config.model_params)
+        except Exception as e:
+            raise InputValidationError(
+                f"Dataset '{acc_cfg.name}': invalid model_params_override: {e}"
+            ) from e
+        ds.load(api_type=config.endpoint_config.api_type, model_params=ds_model_params)
         logger.info(f"Loaded {ds} - {ds.num_samples()} samples")
 
     if not accuracy_cfgs:
@@ -298,10 +302,17 @@ def _load_datasets(
     if len(performance_cfgs) > 1:
         raise InputValidationError("Multiple performance datasets not supported")
 
+    perf_cfg = performance_cfgs[0]
     try:
-        dataloader = DataLoaderFactory.create_loader(performance_cfgs[0])
+        perf_model_params = perf_cfg.effective_model_params(config.model_params)
+    except Exception as e:
+        raise InputValidationError(
+            f"Dataset '{perf_cfg.name}': invalid model_params_override: {e}"
+        ) from e
+    try:
+        dataloader = DataLoaderFactory.create_loader(perf_cfg)
         dataloader.load(
-            api_type=config.endpoint_config.api_type, model_params=config.model_params
+            api_type=config.endpoint_config.api_type, model_params=perf_model_params
         )
         logger.info(f"Loaded {dataloader.num_samples()} samples")
     except FileNotFoundError as e:

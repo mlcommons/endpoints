@@ -16,6 +16,7 @@
 """Tests for benchmark CLI models, config building, and command handlers."""
 
 import asyncio
+import json
 import random
 import tempfile
 from pathlib import Path
@@ -34,6 +35,7 @@ from inference_endpoint.commands.benchmark.execute import (
     BenchmarkContext,
     ResponseCollector,
     _build_phases,
+    _load_datasets,
     _run_benchmark_async,
     setup_benchmark,
 )
@@ -1277,3 +1279,120 @@ class TestSetupBenchmarkTokenizer:
             ctx = setup_benchmark(config, TestMode.PERF)
 
         assert ctx.tokenizer_name is None
+
+
+class TestLoadDatasetsModelParamsOverride:
+    """End-to-end check that _load_datasets honors per-dataset
+    model_params_override and propagates the overridden value down to the
+    static columns the adapter adds to each row."""
+
+    def _write_jsonl(self, path: Path, rows: list[dict]) -> None:
+        path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+
+    def _build_config(
+        self,
+        perf_path: Path,
+        acc_path: Path,
+        acc_override: dict | None,
+        perf_override: dict | None = None,
+    ) -> BenchmarkConfig:
+        return BenchmarkConfig(
+            type=TestType.OFFLINE,
+            model_params={"name": "test-model", "max_new_tokens": 1024},
+            endpoint_config={
+                "endpoints": ["http://localhost:8000"],
+                "api_type": "openai",
+            },
+            datasets=[
+                {
+                    "name": "perf",
+                    "type": "performance",
+                    "path": str(perf_path),
+                    **(
+                        {"model_params_override": perf_override}
+                        if perf_override
+                        else {}
+                    ),
+                },
+                {
+                    "name": "acc",
+                    "type": "accuracy",
+                    "path": str(acc_path),
+                    "accuracy_config": {
+                        "eval_method": "pass_at_1",
+                        "ground_truth": "ground_truth",
+                        "extractor": "boxed_math_extractor",
+                    },
+                    **({"model_params_override": acc_override} if acc_override else {}),
+                },
+            ],
+        )
+
+    @pytest.mark.unit
+    def test_override_propagates_to_loaded_rows(self, tmp_path):
+        """Override on accuracy dataset → its rows get max_completion_tokens=32768;
+        unmodified perf dataset keeps the global 1024."""
+        perf_path = tmp_path / "perf.jsonl"
+        acc_path = tmp_path / "acc.jsonl"
+        self._write_jsonl(perf_path, [{"prompt": "perf-prompt"}])
+        self._write_jsonl(acc_path, [{"prompt": "acc-prompt", "ground_truth": "42"}])
+
+        config = self._build_config(
+            perf_path, acc_path, acc_override={"max_new_tokens": 32768}
+        )
+        perf_ds, acc_datasets, _ = _load_datasets(config, tmp_path)
+
+        # openai (chat completions) adapter emits the key `max_completion_tokens`
+        # via AddStaticColumns. Each loaded row should carry its dataset's value.
+        assert perf_ds.load_sample(0)["max_completion_tokens"] == 1024
+        assert acc_datasets[0].load_sample(0)["max_completion_tokens"] == 32768
+
+    @pytest.mark.unit
+    def test_no_override_inherits_global(self, tmp_path):
+        """Without overrides, both datasets use the global model_params."""
+        perf_path = tmp_path / "perf.jsonl"
+        acc_path = tmp_path / "acc.jsonl"
+        self._write_jsonl(perf_path, [{"prompt": "perf-prompt"}])
+        self._write_jsonl(acc_path, [{"prompt": "acc-prompt", "ground_truth": "42"}])
+
+        config = self._build_config(perf_path, acc_path, acc_override=None)
+        perf_ds, acc_datasets, _ = _load_datasets(config, tmp_path)
+
+        assert perf_ds.load_sample(0)["max_completion_tokens"] == 1024
+        assert acc_datasets[0].load_sample(0)["max_completion_tokens"] == 1024
+
+    @pytest.mark.unit
+    def test_perf_dataset_override_also_honored(self, tmp_path):
+        """Symmetric check: overrides on the performance entry also flow
+        through (relevant for MLPerf-style perf with shorter max_new_tokens)."""
+        perf_path = tmp_path / "perf.jsonl"
+        acc_path = tmp_path / "acc.jsonl"
+        self._write_jsonl(perf_path, [{"prompt": "perf-prompt"}])
+        self._write_jsonl(acc_path, [{"prompt": "acc-prompt", "ground_truth": "42"}])
+
+        config = self._build_config(
+            perf_path,
+            acc_path,
+            acc_override={"max_new_tokens": 32768},
+            perf_override={"max_new_tokens": 10240},
+        )
+        perf_ds, acc_datasets, _ = _load_datasets(config, tmp_path)
+
+        assert perf_ds.load_sample(0)["max_completion_tokens"] == 10240
+        assert acc_datasets[0].load_sample(0)["max_completion_tokens"] == 32768
+
+    @pytest.mark.unit
+    def test_invalid_override_value_raises_input_validation_error(self, tmp_path):
+        """A value-level invalidity (e.g. bad streaming enum) is caught at
+        load time and surfaces as InputValidationError, not a generic
+        SetupError, so the user sees a clear actionable message."""
+        perf_path = tmp_path / "perf.jsonl"
+        acc_path = tmp_path / "acc.jsonl"
+        self._write_jsonl(perf_path, [{"prompt": "perf-prompt"}])
+        self._write_jsonl(acc_path, [{"prompt": "acc-prompt", "ground_truth": "42"}])
+
+        config = self._build_config(
+            perf_path, acc_path, acc_override={"streaming": "garbage"}
+        )
+        with pytest.raises(InputValidationError, match="invalid model_params_override"):
+            _load_datasets(config, tmp_path)

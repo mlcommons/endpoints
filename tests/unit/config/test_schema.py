@@ -123,6 +123,65 @@ class TestDataset:
         ds = Dataset(path="datasets/my_data.jsonl")
         assert ds.name == "my_data"
 
+    @pytest.mark.unit
+    def test_model_params_override_accepts_known_keys(self):
+        ds = Dataset(
+            name="acc",
+            type=DatasetType.ACCURACY,
+            path="acc.jsonl",
+            model_params_override={"max_new_tokens": 32768, "streaming": "on"},
+        )
+        assert ds.model_params_override == {
+            "max_new_tokens": 32768,
+            "streaming": "on",
+        }
+
+    @pytest.mark.unit
+    def test_model_params_override_rejects_unknown_key(self):
+        with pytest.raises(
+            ValueError, match=r"unknown keys in model_params_override.*bogus"
+        ):
+            Dataset(
+                name="acc",
+                path="a.jsonl",
+                model_params_override={"bogus": 1},
+            )
+
+    @pytest.mark.unit
+    def test_model_params_override_none_is_noop(self):
+        base = ModelParams(name="m", max_new_tokens=1024, streaming=StreamingMode.ON)
+        ds = Dataset(name="x", path="x.jsonl")
+        assert ds.effective_model_params(base) is base
+
+    @pytest.mark.unit
+    def test_effective_model_params_merges_sparse_dict(self):
+        base = ModelParams(name="m", temperature=0.5, top_p=0.9, max_new_tokens=1024)
+        ds = Dataset(
+            name="x",
+            path="x.jsonl",
+            model_params_override={"max_new_tokens": 32768},
+        )
+        merged = ds.effective_model_params(base)
+        # overridden field changes...
+        assert merged.max_new_tokens == 32768
+        # ...everything else is preserved from base
+        assert merged.name == "m"
+        assert merged.temperature == 0.5
+        assert merged.top_p == 0.9
+
+    @pytest.mark.unit
+    def test_effective_model_params_validates_value(self):
+        """ModelParams.model_validate is invoked on the merged dict, so a
+        type-invalid override is rejected (e.g. wrong type for streaming)."""
+        base = ModelParams(name="m")
+        ds = Dataset(
+            name="x",
+            path="x.jsonl",
+            model_params_override={"streaming": "garbage"},
+        )
+        with pytest.raises(ValueError):
+            ds.effective_model_params(base)
+
 
 class TestBenchmarkConfig:
     @pytest.mark.unit

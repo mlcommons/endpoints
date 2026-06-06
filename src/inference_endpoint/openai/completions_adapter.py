@@ -62,6 +62,7 @@ class OpenAITextCompletionsAdapter(HttpRequestAdapter):
             "repetition_penalty": model_params.repetition_penalty,
             "presence_penalty": model_params.presence_penalty,
             "frequency_penalty": model_params.frequency_penalty,
+            "skip_special_tokens": False,
         }
         return [
             Harmonize(),
