@@ -193,11 +193,6 @@ class HTTPClientConfig(WithUpdatesMixin, BaseModel):
         default=None, exclude=True
     )
 
-    # Trace FIFO path, set by trace.bootstrap under -vvv.
-    trace_pipe_path: Annotated[str | None, cyclopts.Parameter(parse=False)] = Field(
-        default=None, exclude=True
-    )
-
     # CPU affinity plan for worker processes (computed by caller, e.g. benchmark command).
     # None = disabled (no worker pinning)
     cpu_affinity: Annotated[AffinityPlan | None, cyclopts.Parameter(parse=False)] = (

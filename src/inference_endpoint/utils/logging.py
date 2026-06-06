@@ -30,12 +30,6 @@ from colorama import init as _colorama_init
 # Initialize colorama
 _colorama_init(autoreset=True)
 
-# Custom TRACE level below DEBUG (10) for high-frequency hot-path events.
-# Activated by -vvv on the CLI; the matching binary trace emitter lives in
-# inference_endpoint.utils.trace and is engaged from the same bootstrap.
-TRACE = 5
-logging.addLevelName(TRACE, "TRACE")
-
 # Map levelname -> color
 _LEVEL_COLORS = {
     "INFO": Fore.GREEN,
@@ -118,8 +112,9 @@ def setup_logging(level: str | None = None, format_string: str | None = None) ->
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(ColoredFormatter(fmt=format_string, use_color=use_color))
 
-    level_value = TRACE if level.upper() == "TRACE" else getattr(logging, level.upper())
-    logging.basicConfig(level=level_value, handlers=[handler], force=True)
+    logging.basicConfig(
+        level=getattr(logging, level.upper()), handlers=[handler], force=True
+    )
 
     # Set specific logger levels
     logging.getLogger("asyncio").setLevel(logging.WARNING)

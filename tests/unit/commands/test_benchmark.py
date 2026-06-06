@@ -620,7 +620,6 @@ class TestAggregatorArgs:
             patch(
                 "inference_endpoint.commands.benchmark.execute.ServiceLauncher"
             ) as MockLauncher,
-            patch("inference_endpoint.commands.benchmark.execute.trace"),
             patch("inference_endpoint.commands.benchmark.execute.tqdm"),
         ):
             MockZMQ.scoped.return_value.__enter__ = MagicMock(return_value=mock_zmq)
@@ -675,7 +674,6 @@ class TestAggregatorArgs:
             patch(
                 "inference_endpoint.commands.benchmark.execute.ServiceLauncher"
             ) as MockLauncher,
-            patch("inference_endpoint.commands.benchmark.execute.trace"),
             patch("inference_endpoint.commands.benchmark.execute.tqdm"),
         ):
             MockZMQ.scoped.return_value.__enter__ = MagicMock(return_value=mock_zmq)
