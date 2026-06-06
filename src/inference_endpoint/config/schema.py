@@ -539,6 +539,41 @@ class DrainConfig(BaseModel):
         gt=0,
         description="Accuracy drain timeout in seconds (None = wait indefinitely)",
     )
+    metrics_drain_timeout_s: Annotated[
+        float,
+        cyclopts.Parameter(
+            alias="--metrics-drain-timeout",
+            help=(
+                "Wall-clock budget (seconds) for the metrics aggregator to finish "
+                "in-flight async tokenize tasks after the run ends before cancelling "
+                "them. Set to 0 to wait indefinitely. Increase for large datasets or "
+                "long-context workloads where ISL/OSL/TPOT tokenization lags behind "
+                "request throughput."
+            ),
+        ),
+    ] = Field(
+        60.0,
+        ge=0,
+        description=(
+            "Wall-clock budget (seconds) for the metrics aggregator to drain "
+            "in-flight tokenize tasks after ENDED (default: 60.0; 0 = unlimited)."
+        ),
+    )
+    metrics_tokenizer_workers: Annotated[
+        int,
+        cyclopts.Parameter(
+            alias="--metrics-tokenizer-workers",
+            help=(
+                "Number of tokenizer worker threads in the metrics aggregator. "
+                "Increase if ISL/OSL/TPOT tokenization can't keep up with request "
+                "throughput (symptoms: large drain timeout warning at run end)."
+            ),
+        ),
+    ] = Field(
+        2,
+        ge=1,
+        description="Number of tokenizer worker threads in the metrics aggregator (default: 2).",
+    )
 
 
 @cyclopts.Parameter(name="*")
