@@ -42,6 +42,7 @@ from urllib.parse import urljoin
 import msgspec
 import msgspec.json
 from huggingface_hub import model_info
+from pydantic import ValidationError
 from tqdm import tqdm
 from transformers import AutoTokenizer
 from transformers.utils import logging as transformers_logging
@@ -289,10 +290,10 @@ def _load_datasets(
             )
         )
         try:
-            ds_model_params = acc_cfg.effective_model_params(config.model_params)
-        except Exception as e:
+            ds_model_params = acc_cfg.effective_generation_config(config.model_params)
+        except (ValidationError, ValueError) as e:
             raise InputValidationError(
-                f"Dataset '{acc_cfg.name}': invalid model_params_override: {e}"
+                f"Dataset '{acc_cfg.name}': invalid generation_config_override: {e}"
             ) from e
         ds.load(api_type=config.endpoint_config.api_type, model_params=ds_model_params)
         logger.info(f"Loaded {ds} - {ds.num_samples()} samples")
@@ -304,10 +305,10 @@ def _load_datasets(
 
     perf_cfg = performance_cfgs[0]
     try:
-        perf_model_params = perf_cfg.effective_model_params(config.model_params)
-    except Exception as e:
+        perf_model_params = perf_cfg.effective_generation_config(config.model_params)
+    except (ValidationError, ValueError) as e:
         raise InputValidationError(
-            f"Dataset '{perf_cfg.name}': invalid model_params_override: {e}"
+            f"Dataset '{perf_cfg.name}': invalid generation_config_override: {e}"
         ) from e
     try:
         dataloader = DataLoaderFactory.create_loader(perf_cfg)
@@ -316,9 +317,7 @@ def _load_datasets(
         )
         logger.info(f"Loaded {dataloader.num_samples()} samples")
     except FileNotFoundError as e:
-        raise InputValidationError(
-            f"Dataset file not found: {performance_cfgs[0].path}"
-        ) from e
+        raise InputValidationError(f"Dataset file not found: {perf_cfg.path}") from e
     except Exception as e:
         raise SetupError(f"Failed to load dataset: {e}") from e
 

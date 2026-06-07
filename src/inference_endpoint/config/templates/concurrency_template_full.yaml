@@ -27,7 +27,7 @@ datasets:  # Dataset configs
     prompt: text_input
   accuracy_config: null  # Accuracy evaluation settings
   multi_turn: null  # Multi-turn conversation configuration
-  model_params_override: null  # Per-dataset overrides for the top-level model_params (sparse — only the fields you want to override). Merged on top of BenchmarkConfig.model_params at dataset-load time. Useful for MLPerf-style runs where accuracy and performance use different output budgets in the same fleet, e.g. model_params_override: {max_new_tokens: 32768, streaming: 'on'}.
+  generation_config_override: null  # Per-dataset overrides for the top-level model_params (sparse — only the fields you want to override). Merged on top of BenchmarkConfig.model_params at dataset-load time. Useful for MLPerf-style runs where accuracy and performance use different output budgets in the same fleet, e.g. generation_config_override: {max_new_tokens: 32768, temperature: 0.0}. NOTE: per-dataset `streaming` and `name` are accepted (kwargs-style) but not honored by the single-aggregator metrics path — set those on top-level model_params.
 - name: accuracy
   type: accuracy  # Dataset purpose: performance or accuracy | options: performance, accuracy
   path: '<DATASET_PATH eg: tests/assets/datasets/ds_samples.jsonl>'  # Dataset file path
@@ -43,7 +43,7 @@ datasets:  # Dataset configs
     extractor: boxed_math_extractor  # Answer extractor (abcd_extractor, boxed_math_extractor, identity_extractor, python_code_extractor)
     num_repeats: 1  # Repeat dataset N times for evaluation
   multi_turn: null  # Multi-turn conversation configuration
-  model_params_override: null  # Per-dataset overrides for the top-level model_params (sparse — only the fields you want to override). Merged on top of BenchmarkConfig.model_params at dataset-load time. Useful for MLPerf-style runs where accuracy and performance use different output budgets in the same fleet, e.g. model_params_override: {max_new_tokens: 32768, streaming: 'on'}.
+  generation_config_override: null  # Per-dataset overrides for the top-level model_params (sparse — only the fields you want to override). Merged on top of BenchmarkConfig.model_params at dataset-load time. Useful for MLPerf-style runs where accuracy and performance use different output budgets in the same fleet, e.g. generation_config_override: {max_new_tokens: 32768, temperature: 0.0}. NOTE: per-dataset `streaming` and `name` are accepted (kwargs-style) but not honored by the single-aggregator metrics path — set those on top-level model_params.
 settings:
   runtime:
     min_duration_ms: 600000  # Min duration (ms, or with suffix: 600s, 10m)

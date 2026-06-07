@@ -1281,13 +1281,28 @@ class TestSetupBenchmarkTokenizer:
         assert ctx.tokenizer_name is None
 
 
-class TestLoadDatasetsModelParamsOverride:
-    """End-to-end check that _load_datasets honors per-dataset
-    model_params_override and propagates the overridden value down to the
-    static columns the adapter adds to each row."""
+class _OverrideTestBase:
+    """Shared helpers for the two end-to-end ``_load_datasets`` override classes
+    below (parametrized over the chat vs text-completions adapter)."""
+
+    # Subclasses set these:
+    api_type: str = ""
+    max_tokens_key: str = ""  # static column name AddStaticColumns adds
 
     def _write_jsonl(self, path: Path, rows: list[dict]) -> None:
         path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+
+    def _prompt_rows(self, prompt: str, ground_truth: str | None = None) -> list[dict]:
+        """Adapter-shaped row. Chat adapter wants a 'prompt' column; the
+        completions adapter wants pre-tokenized 'input_tokens' (so the
+        Harmonize transform early-exits and we avoid the HF tokenizer
+        dependency in unit tests)."""
+        row: dict = {"prompt": prompt}
+        if self.api_type == "openai_completions":
+            row = {"input_tokens": [1, 2, 3, 4]}
+        if ground_truth is not None:
+            row["ground_truth"] = ground_truth
+        return [row]
 
     def _build_config(
         self,
@@ -1301,7 +1316,7 @@ class TestLoadDatasetsModelParamsOverride:
             model_params={"name": "test-model", "max_new_tokens": 1024},
             endpoint_config={
                 "endpoints": ["http://localhost:8000"],
-                "api_type": "openai",
+                "api_type": self.api_type,
             },
             datasets=[
                 {
@@ -1309,7 +1324,7 @@ class TestLoadDatasetsModelParamsOverride:
                     "type": "performance",
                     "path": str(perf_path),
                     **(
-                        {"model_params_override": perf_override}
+                        {"generation_config_override": perf_override}
                         if perf_override
                         else {}
                     ),
@@ -1323,53 +1338,48 @@ class TestLoadDatasetsModelParamsOverride:
                         "ground_truth": "ground_truth",
                         "extractor": "boxed_math_extractor",
                     },
-                    **({"model_params_override": acc_override} if acc_override else {}),
+                    **(
+                        {"generation_config_override": acc_override}
+                        if acc_override
+                        else {}
+                    ),
                 },
             ],
         )
 
-    @pytest.mark.unit
-    def test_override_propagates_to_loaded_rows(self, tmp_path):
-        """Override on accuracy dataset → its rows get max_completion_tokens=32768;
-        unmodified perf dataset keeps the global 1024."""
+    def _write_fixture(self, tmp_path: Path) -> tuple[Path, Path]:
         perf_path = tmp_path / "perf.jsonl"
         acc_path = tmp_path / "acc.jsonl"
-        self._write_jsonl(perf_path, [{"prompt": "perf-prompt"}])
-        self._write_jsonl(acc_path, [{"prompt": "acc-prompt", "ground_truth": "42"}])
+        self._write_jsonl(perf_path, self._prompt_rows("perf-prompt"))
+        self._write_jsonl(acc_path, self._prompt_rows("acc-prompt", ground_truth="42"))
+        return perf_path, acc_path
 
+    @pytest.mark.unit
+    def test_override_propagates_to_loaded_rows(self, tmp_path):
+        """Override on accuracy dataset → its rows get the overridden value;
+        unmodified perf dataset keeps the global 1024."""
+        perf_path, acc_path = self._write_fixture(tmp_path)
         config = self._build_config(
             perf_path, acc_path, acc_override={"max_new_tokens": 32768}
         )
         perf_ds, acc_datasets, _ = _load_datasets(config, tmp_path)
-
-        # openai (chat completions) adapter emits the key `max_completion_tokens`
-        # via AddStaticColumns. Each loaded row should carry its dataset's value.
-        assert perf_ds.load_sample(0)["max_completion_tokens"] == 1024
-        assert acc_datasets[0].load_sample(0)["max_completion_tokens"] == 32768
+        assert perf_ds.load_sample(0)[self.max_tokens_key] == 1024
+        assert acc_datasets[0].load_sample(0)[self.max_tokens_key] == 32768
 
     @pytest.mark.unit
     def test_no_override_inherits_global(self, tmp_path):
         """Without overrides, both datasets use the global model_params."""
-        perf_path = tmp_path / "perf.jsonl"
-        acc_path = tmp_path / "acc.jsonl"
-        self._write_jsonl(perf_path, [{"prompt": "perf-prompt"}])
-        self._write_jsonl(acc_path, [{"prompt": "acc-prompt", "ground_truth": "42"}])
-
+        perf_path, acc_path = self._write_fixture(tmp_path)
         config = self._build_config(perf_path, acc_path, acc_override=None)
         perf_ds, acc_datasets, _ = _load_datasets(config, tmp_path)
-
-        assert perf_ds.load_sample(0)["max_completion_tokens"] == 1024
-        assert acc_datasets[0].load_sample(0)["max_completion_tokens"] == 1024
+        assert perf_ds.load_sample(0)[self.max_tokens_key] == 1024
+        assert acc_datasets[0].load_sample(0)[self.max_tokens_key] == 1024
 
     @pytest.mark.unit
     def test_perf_dataset_override_also_honored(self, tmp_path):
         """Symmetric check: overrides on the performance entry also flow
         through (relevant for MLPerf-style perf with shorter max_new_tokens)."""
-        perf_path = tmp_path / "perf.jsonl"
-        acc_path = tmp_path / "acc.jsonl"
-        self._write_jsonl(perf_path, [{"prompt": "perf-prompt"}])
-        self._write_jsonl(acc_path, [{"prompt": "acc-prompt", "ground_truth": "42"}])
-
+        perf_path, acc_path = self._write_fixture(tmp_path)
         config = self._build_config(
             perf_path,
             acc_path,
@@ -1377,22 +1387,41 @@ class TestLoadDatasetsModelParamsOverride:
             perf_override={"max_new_tokens": 10240},
         )
         perf_ds, acc_datasets, _ = _load_datasets(config, tmp_path)
-
-        assert perf_ds.load_sample(0)["max_completion_tokens"] == 10240
-        assert acc_datasets[0].load_sample(0)["max_completion_tokens"] == 32768
+        assert perf_ds.load_sample(0)[self.max_tokens_key] == 10240
+        assert acc_datasets[0].load_sample(0)[self.max_tokens_key] == 32768
 
     @pytest.mark.unit
     def test_invalid_override_value_raises_input_validation_error(self, tmp_path):
         """A value-level invalidity (e.g. bad streaming enum) is caught at
         load time and surfaces as InputValidationError, not a generic
         SetupError, so the user sees a clear actionable message."""
-        perf_path = tmp_path / "perf.jsonl"
-        acc_path = tmp_path / "acc.jsonl"
-        self._write_jsonl(perf_path, [{"prompt": "perf-prompt"}])
-        self._write_jsonl(acc_path, [{"prompt": "acc-prompt", "ground_truth": "42"}])
-
+        perf_path, acc_path = self._write_fixture(tmp_path)
         config = self._build_config(
             perf_path, acc_path, acc_override={"streaming": "garbage"}
         )
-        with pytest.raises(InputValidationError, match="invalid model_params_override"):
+        with pytest.raises(
+            InputValidationError, match="invalid generation_config_override"
+        ):
             _load_datasets(config, tmp_path)
+
+
+class TestLoadDatasetsGenerationConfigOverrideChat(_OverrideTestBase):
+    """End-to-end ``_load_datasets`` check against the OpenAI **chat**
+    completions adapter, which emits ``max_completion_tokens``."""
+
+    api_type = "openai"
+    max_tokens_key = "max_completion_tokens"
+
+
+class TestLoadDatasetsGenerationConfigOverrideCompletions(_OverrideTestBase):
+    """End-to-end ``_load_datasets`` check against the OpenAI **text**
+    completions adapter (``/v1/completions``), which emits ``max_tokens``.
+
+    This is the headline target of PR #344 — MLPerf-style runs use
+    ``api_type: openai_completions`` for pre-tokenized inputs — so an
+    integration test on this code path is essential. Rows carry pre-baked
+    ``input_tokens`` so the adapter's ``Harmonize()`` transform early-exits
+    and the test stays free of HF tokenizer downloads."""
+
+    api_type = "openai_completions"
+    max_tokens_key = "max_tokens"
