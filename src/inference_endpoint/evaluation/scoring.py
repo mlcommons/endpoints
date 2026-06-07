@@ -140,7 +140,9 @@ class Scorer(ABC):
         self.ground_truth_column = (
             ground_truth_column if ground_truth_column is not None else "ground_truth"
         )
-        self.sample_index_map = self._load_sample_index_map()
+        self.sample_index_map = (
+            None if self.SKIP_ENDPOINT_PHASE else self._load_sample_index_map()
+        )
 
     def _load_sample_index_map(self):
         sample_index_map_path = self.report_dir / "sample_idx_map.json"
