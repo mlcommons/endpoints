@@ -136,6 +136,9 @@ class TestSWEBenchScorerRegistration:
         assert "swe_bench_scorer" in Scorer.PREDEFINED
         assert Scorer.get("swe_bench_scorer") is SWEBenchScorer
 
+    def test_skip_endpoint_phase(self):
+        assert SWEBenchScorer.SKIP_ENDPOINT_PHASE is True
+
 
 class TestSWEBenchScorer:
     def test_score_happy_path(

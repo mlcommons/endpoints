@@ -994,6 +994,36 @@ class TestBuildPhases:
         assert acc.drain_timeout is None
 
     @pytest.mark.unit
+    def test_skip_endpoint_phase_omits_accuracy_phase(
+        self, base_rt_settings, simple_dataset
+    ):
+        class _SelfContainedScorer(Scorer, scorer_id="_test_skip_endpoint_phase"):
+            SKIP_ENDPOINT_PHASE = True
+
+            def score_single_sample(self, value, ground_truth):
+                return 0.0
+
+            def score(self):
+                return 1.0, 1
+
+        config = OfflineConfig(**_OFFLINE_KWARGS)
+        ctx = self._make_ctx(config, base_rt_settings, simple_dataset)
+        ctx.eval_configs = [
+            AccuracyConfiguration(
+                scorer=_SelfContainedScorer,
+                extractor=None,
+                dataset_name="acc",
+                dataset=simple_dataset,
+                report_dir=Path("/tmp"),
+                ground_truth_column=None,
+                num_repeats=1,
+            )
+        ]
+        phases = _build_phases(ctx)
+
+        assert all(p.phase_type != PhaseType.ACCURACY for p in phases)
+
+    @pytest.mark.unit
     def test_warmup_uses_independent_rng_instances(
         self, base_rt_settings, simple_dataset
     ):

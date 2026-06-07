@@ -70,6 +70,7 @@ class Scorer(ABC):
     PREDEFINED: ClassVar[dict[str, type["Scorer"]]] = {}
     SCORER_ID: ClassVar[str]
     REQUIRES_EXTRACTOR: ClassVar[bool] = True
+    SKIP_ENDPOINT_PHASE: ClassVar[bool] = False
 
     def __init_subclass__(
         cls,
@@ -108,6 +109,16 @@ class Scorer(ABC):
     def available_scorers(cls) -> list[str]:
         """Return the list of registered scorer names."""
         return list(Scorer.PREDEFINED.keys())
+
+    @classmethod
+    def external_sample_count(cls, extras: dict[str, Any]) -> int | None:
+        """Return the number of samples the scorer will evaluate externally, or None.
+
+        Used to surface sample counts for scorers that skip the endpoint phase and
+        manage their own evaluation (e.g. SWEBenchScorer running via mini-extra).
+        The default returns None (scorer uses the endpoint accuracy phase normally).
+        """
+        return None
 
     @classmethod  # noqa: B027
     def preflight(cls, extras: dict[str, Any]) -> None:
@@ -1695,6 +1706,7 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
     """
 
     REQUIRES_EXTRACTOR: ClassVar[bool] = False
+    SKIP_ENDPOINT_PHASE: ClassVar[bool] = True
     DEFAULT_SUBPROCESS_TIMEOUT_S: ClassVar[int] = 8 * 60 * 60
 
     def __init__(
@@ -1720,6 +1732,7 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
             extractor=extractor,
             ground_truth_column=ground_truth_column,
         )
+        self.report_dir = self.report_dir.resolve()
         self.swe_bench_project_path = self._resolve_project_path(swe_bench_project_path)
         self.swebench_config_template = (
             Path(swebench_config_template)
@@ -1773,6 +1786,13 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
         if from_env:
             return Path(from_env)
         return Path(_DEFAULT_SWE_BENCH_PROJECT_PATH)
+
+    @classmethod
+    def external_sample_count(cls, extras: dict[str, Any]) -> int | None:
+        try:
+            return int(extras["num_instances"])
+        except (KeyError, TypeError, ValueError):
+            return None
 
     @classmethod
     def preflight(cls, extras: dict[str, Any]) -> None:

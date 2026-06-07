@@ -406,7 +406,11 @@ def setup_benchmark(config: BenchmarkConfig, test_mode: TestMode) -> BenchmarkCo
     # Calculate and display expected sample count
     total_samples = rt_settings.total_samples_to_issue()
     if accuracy_datasets:
-        total_samples += sum(ds.num_samples() * ds.repeats for ds in accuracy_datasets)
+        total_samples += sum(
+            ds.num_samples() * ds.repeats
+            for ds, ec in zip(accuracy_datasets, eval_configs, strict=False)
+            if not ec.scorer.SKIP_ENDPOINT_PHASE
+        )
 
     collect_responses = test_mode in (TestMode.ACC, TestMode.BOTH)
     logger.info(
@@ -415,6 +419,16 @@ def setup_benchmark(config: BenchmarkConfig, test_mode: TestMode) -> BenchmarkCo
     logger.info(
         f"Min Duration: {rt_settings.min_duration_ms / 1000:.1f}s, Expected samples: {total_samples}"
     )
+    for ec in eval_configs:
+        if ec.scorer.SKIP_ENDPOINT_PHASE:
+            n = ec.scorer.external_sample_count(ec.extras)
+            if n is not None:
+                logger.info(
+                    "Accuracy dataset '%s' (%s): %d instances evaluated externally",
+                    ec.dataset_name,
+                    ec.scorer.SCORER_ID,
+                    n,
+                )
 
     return BenchmarkContext(
         config=config,
@@ -483,6 +497,8 @@ def _build_phases(
     # Accuracy phases — use eval_cfg.dataset_name as phase name so it matches
     # what Scorer._load_sample_index_map() looks up in sample_idx_map.json
     for eval_cfg in ctx.eval_configs:
+        if eval_cfg.scorer.SKIP_ENDPOINT_PHASE:
+            continue
         if eval_cfg.dataset_name == "performance":
             continue
         acc_ds = eval_cfg.dataset
