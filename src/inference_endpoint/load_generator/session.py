@@ -338,6 +338,16 @@ class BenchmarkSession:
         self._strategy_task: asyncio.Task | None = None
         self._drain_event = asyncio.Event()
 
+    def cancel_current_strategy(self) -> None:
+        """Cancel the running load strategy without ending the session.
+
+        Used when a performance phase hits its duration limit but later accuracy
+        phases should still run.
+        """
+        self._drain_event.set()
+        if self._strategy_task and not self._strategy_task.done():
+            self._strategy_task.cancel()
+
     def stop(self) -> None:
         """Signal early termination. Safe to call from signal handler.
 
@@ -346,14 +356,14 @@ class BenchmarkSession:
         event to unblock _drain_inflight if it's waiting for responses.
         """
         self._stop_requested = True
-        self._drain_event.set()
-        if self._strategy_task and not self._strategy_task.done():
-            self._strategy_task.cancel()
+        self.cancel_current_strategy()
 
     async def run(
         self,
         phases: list[PhaseConfig],
         on_phase_start: Callable[[PhaseConfig], None] | None = None,
+        on_phase_complete: Callable[[PhaseConfig, PhaseResult | None], None]
+        | None = None,
     ) -> SessionResult:
         """Run all benchmark phases sequentially.
 
@@ -374,6 +384,8 @@ class BenchmarkSession:
                 result = await self._run_phase(phase)
                 if result is not None:
                     phase_results.append(result)
+                if on_phase_complete is not None:
+                    on_phase_complete(phase, result)
         finally:
             self._done = True
             if self._recv_task and not self._recv_task.done():
@@ -468,7 +480,12 @@ class BenchmarkSession:
         ``_receive_responses`` close path."""
         if phase_issuer.inflight <= 0 or self._stop_requested:
             return
-        logger.info("Draining %d in-flight responses...", phase_issuer.inflight)
+        timeout_label = "unlimited" if timeout is None else f"{timeout:.0f} s"
+        logger.info(
+            "Draining %d in-flight responses (timeout=%s)...",
+            phase_issuer.inflight,
+            timeout_label,
+        )
         self._drain_event.clear()
         if timeout is None:
             await self._drain_event.wait()

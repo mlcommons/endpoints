@@ -33,6 +33,12 @@ Sample yaml configuration for online benchmarking of `meta-llama/Llama-2-70b-cha
 
 Sample yaml configuration to benchmark the multimodal `Qwen/Qwen3-VL-235B-A22B` model on a visual reasoning workload.
 
+### [10_DeepSeekV4Pro_Example](10_DeepSeekV4Pro_Example/)
+
+End-to-end example for benchmarking `deepseek-ai/DeepSeek-V4-Pro` with vLLM or SGLang (ROCm),
+using the same datasets as the GPT-OSS-120B example (performance parquet + AIME25 + GPQA +
+LiveCodeBench).
+
 ## Getting Help
 
 - For general usage: See main [README](../README.md)
