@@ -524,7 +524,7 @@ class DrainConfig(BaseModel):
             help="Performance drain timeout in seconds (None = wait indefinitely)",
         ),
     ] = Field(
-        240.0,
+        None,
         gt=0,
         description="Performance drain timeout in seconds (None = wait indefinitely)",
     )

@@ -94,19 +94,21 @@ class SampleRow(msgspec.Struct, gc=False):  # type: ignore[call-arg]
 
 @dataclass(slots=True)
 class TrackedBlock:
-    """A single START_PERFORMANCE_TRACKING → (last sample completion) window.
+    """A single START_PERFORMANCE_TRACKING → STOP_PERFORMANCE_TRACKING window.
 
-    Duration extends to the last tracked sample completion, not to
-    STOP_PERFORMANCE_TRACKING. Empty blocks have duration 0.
+    Duration is bounded by stop_ns when set. Draw-down completions after
+    STOP_PERFORMANCE_TRACKING do not extend the window.
     """
 
     start_ns: int
     last_complete_ns: int
     completed_samples: int = 0
+    stop_ns: int | None = None
 
     @property
     def duration_ns(self) -> int:
-        return self.last_complete_ns - self.start_ns
+        end = self.stop_ns if self.stop_ns is not None else self.last_complete_ns
+        return max(0, end - self.start_ns)
 
 
 # ---------------------------------------------------------------------------
@@ -480,6 +482,8 @@ class MetricsTable:
                 )
         elif ev == SessionEventType.STOP_PERFORMANCE_TRACKING:
             self.is_tracking = False
+            if self.tracked_blocks:
+                self.tracked_blocks[-1].stop_ns = ev_rec.timestamp_ns
 
     # --- Row access ---
 
@@ -531,7 +535,16 @@ class MetricsTable:
             if row is None:
                 return
 
-        self._fire_triggers(row, field_name, ev_rec)
+        # Draw-down: sample was issued before STOP but completes after.
+        # Block has stop_ns set → suppress metric triggers to exclude draw-down
+        # from reported percentiles; still update accounting fields below.
+        in_active_block = (
+            row.tracked_block_idx < 0
+            or row.tracked_block_idx >= len(self.tracked_blocks)
+            or self.tracked_blocks[row.tracked_block_idx].stop_ns is None
+        )
+        if in_active_block:
+            self._fire_triggers(row, field_name, ev_rec)
         setattr(row, field_name, value)
 
         if ev == SampleEventType.COMPLETE:
@@ -601,10 +614,12 @@ class MetricsTable:
                 task.add_done_callback(self._in_flight_tasks.discard)
 
     def _update_tracked_block(self, row: SampleRow, complete_ns: int) -> None:
-        """Extend the sample's tracked block duration and increment count."""
+        """Increment the sample's tracked block count; extend duration if still live."""
         idx = row.tracked_block_idx
         if 0 <= idx < len(self.tracked_blocks):
             block = self.tracked_blocks[idx]
-            if complete_ns > block.last_complete_ns:
+            # Only extend last_complete_ns while tracking is active; draw-down
+            # completions (block.stop_ns is set) must not inflate duration_ns.
+            if block.stop_ns is None and complete_ns > block.last_complete_ns:
                 block.last_complete_ns = complete_ns
             block.completed_samples += 1

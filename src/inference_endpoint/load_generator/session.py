@@ -429,11 +429,11 @@ class BenchmarkSession:
         finally:
             self._strategy_task = None
 
-        if phase.drain_after:
-            await self._drain_inflight(phase_issuer, phase.drain_timeout)
-
         if phase.phase_type == PhaseType.PERFORMANCE:
             self._publish_session_event(SessionEventType.STOP_PERFORMANCE_TRACKING)
+
+        if phase.drain_after:
+            await self._drain_inflight(phase_issuer, phase.drain_timeout)
 
         phase_end = time.monotonic_ns()
         logger.info(

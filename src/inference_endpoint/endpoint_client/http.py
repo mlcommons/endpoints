@@ -49,20 +49,18 @@ class _SocketConfig:
     # instead of the default delayed ACK behavior.
     TCP_QUICKACK: int = 1
 
-    # Connection keepalive-probe settings for long-lived connections
-    # client kernel sends probe, server's kernel ACKs - no application overhead
-    #
-    # NOTE(vir):
-    # we hit lots of connection timed out errors in offline and high-concurrency modes,
-    # disabling since we handle dead-connections in http.py connection_lost/eof_received
-    SO_KEEPALIVE: int = 0  # Disabled
-    TCP_KEEPIDLE: int = (
-        1  # Probe after 1s idle (only used when SO_KEEPALIVE is enabled)
-    )
+    # Connection keepalive-probe settings for long-lived streaming connections.
+    # Kernel sends probes silently; server's kernel ACKs — no application overhead.
+    # 60s idle threshold covers TTFT periods on long-generation workloads where
+    # network idle-timeouts would otherwise kill connections before the first token.
+    SO_KEEPALIVE: int = 1
+    TCP_KEEPIDLE: int = 60  # Start probing after 60s idle (covers DS-R1 TTFT periods)
     TCP_KEEPCNT: int = (
-        5  # 5 failed probes = dead (only used when SO_KEEPALIVE is enabled)
+        6  # 6 failed probes = dead (only used when SO_KEEPALIVE is enabled)
     )
-    TCP_KEEPINTVL: int = 1  # 1s between probes (only used when SO_KEEPALIVE is enabled)
+    TCP_KEEPINTVL: int = (
+        10  # 10s between probes (only used when SO_KEEPALIVE is enabled)
+    )
 
     # Socket buffer sizing: sliding windows, not full-message buffers.
     # The event loop reads eagerly so the buffer only holds data between

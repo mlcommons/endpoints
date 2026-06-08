@@ -67,6 +67,10 @@ class TestTrackedBlock:
         block = TrackedBlock(start_ns=100, last_complete_ns=500)
         assert block.duration_ns == 400
 
+    def test_duration_ns_uses_stop_ns_when_set(self):
+        block = TrackedBlock(start_ns=100, last_complete_ns=500, stop_ns=300)
+        assert block.duration_ns == 200  # stop_ns - start_ns, not last_complete_ns
+
     def test_empty_block_duration_zero(self):
         block = TrackedBlock(start_ns=100, last_complete_ns=100)
         assert block.duration_ns == 0
@@ -178,6 +182,7 @@ class TestMetricsTable:
         )
         table.handle_session_event(stop)
         assert not table.is_tracking
+        assert table.tracked_blocks[0].stop_ns == 200
 
     def test_duplicate_start_is_noop(self):
         table = _new_table()
@@ -235,7 +240,7 @@ class TestMetricsTable:
                 event_type=SessionEventType.STOP_PERFORMANCE_TRACKING, timestamp_ns=200
             )
         )
-        # s1 completes after STOP — still extends block 0
+        # s1 completes as draw-down after STOP — block 0 duration bounded by stop_ns
         table.set_field(
             "s1",
             "complete_ns",
@@ -275,10 +280,71 @@ class TestMetricsTable:
             ),
         )
 
-        assert table.tracked_blocks[0].duration_ns == 600  # 600 - 0
-        assert table.tracked_blocks[1].duration_ns == 200  # 1000 - 800
-        assert table.total_tracked_duration_ns == 800
+        assert (
+            table.tracked_blocks[0].duration_ns == 200
+        )  # stop_ns - start_ns = 200 - 0
+        assert (
+            table.tracked_blocks[1].duration_ns == 200
+        )  # last_complete_ns - start_ns = 1000 - 800
+        assert table.total_tracked_duration_ns == 400
         assert table.total_completed_tracked_samples == 2
+
+    def test_draw_down_does_not_extend_duration(self):
+        """Completions after STOP_PERFORMANCE_TRACKING don't extend block duration."""
+        from inference_endpoint.async_utils.services.metrics_aggregator.metrics_table import (
+            EmitTrigger,
+        )
+
+        fired_timestamps: list[int] = []
+
+        class _RecordTrigger(EmitTrigger):
+            def fire(self, ev_rec, row, pre_change):
+                fired_timestamps.append(ev_rec.timestamp_ns)
+                return None
+
+        table = _new_table()
+        trigger = _RecordTrigger("dummy", table._registry)
+        table.add_trigger("complete_ns", trigger)
+
+        # Start tracking at t=0, issue s1 at t=100
+        table.handle_session_event(
+            EventRecord(
+                event_type=SessionEventType.START_PERFORMANCE_TRACKING, timestamp_ns=0
+            )
+        )
+        table.set_field(
+            "s1",
+            "issued_ns",
+            100,
+            EventRecord(
+                event_type=SampleEventType.ISSUED, timestamp_ns=100, sample_uuid="s1"
+            ),
+        )
+
+        # Stop at t=200 — seals block 0
+        table.handle_session_event(
+            EventRecord(
+                event_type=SessionEventType.STOP_PERFORMANCE_TRACKING, timestamp_ns=200
+            )
+        )
+        assert table.tracked_blocks[0].stop_ns == 200
+
+        # s1 completes at t=600 as draw-down
+        table.set_field(
+            "s1",
+            "complete_ns",
+            600,
+            EventRecord(
+                event_type=SampleEventType.COMPLETE, timestamp_ns=600, sample_uuid="s1"
+            ),
+        )
+
+        # Duration bounded by stop_ns, not by draw-down completion
+        assert table.tracked_blocks[0].duration_ns == 200  # 200 - 0
+        # completed_samples still incremented for accounting
+        assert table.tracked_blocks[0].completed_samples == 1
+        # Trigger NOT fired for draw-down completion
+        assert fired_timestamps == []
 
 
 @pytest.mark.unit
