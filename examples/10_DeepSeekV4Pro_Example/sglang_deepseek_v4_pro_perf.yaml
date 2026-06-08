@@ -1,10 +1,10 @@
-name: "deepseek-v4-pro-benchmark"
+name: "deepseek-v4-pro-sglang-benchmark"
 version: "1.0"
 type: "online"
 timeout: 60
 
 model_params:
-  name: "/models/deepseek-ai/DeepSeek-V4-Pro"
+  name: "deepseek-ai/DeepSeek-V4-Pro"
   temperature: 1.0
   max_new_tokens: 50000
   top_k: -1
@@ -34,8 +34,8 @@ settings:
 
 endpoint_config:
   endpoints:
-    - "http://localhost:8000"
+    - "http://localhost:30000"
   api_key: null
   api_type: "openai"
 
-report_dir: "results/vllm_deepseek_v4_pro_benchmark_perf/"
+report_dir: "results/sglang_deepseek_v4_pro_benchmark_perf/"

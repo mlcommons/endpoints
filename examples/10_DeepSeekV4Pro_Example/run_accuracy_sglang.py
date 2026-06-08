@@ -1,7 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Accuracy-only benchmark for DeepSeek-V4-Pro via vLLM /v1/chat/completions."""
+"""Accuracy-only benchmark for DeepSeek-V4-Pro via SGLang /v1/chat/completions.
+
+Mirrors examples/04_GPTOSS120B_Example/run.py but uses the DeepSeek-V4 chat path
+(api_type=openai) instead of pre-tokenized /generate.
+"""
 
 from __future__ import annotations
 
@@ -19,7 +23,7 @@ from inference_endpoint.config.schema import (
     ModelParams,
     StreamingMode,
 )
-from inference_endpoint.dataset_manager import EmptyDataset
+from inference_endpoint.dataset_manager import Dataset, EmptyDataset
 from inference_endpoint.dataset_manager.predefined.aime25 import AIME25
 from inference_endpoint.dataset_manager.predefined.gpqa import GPQA
 from inference_endpoint.dataset_manager.predefined.livecodebench import LiveCodeBench
@@ -37,6 +41,8 @@ from inference_endpoint.load_generator import (
 )
 from tqdm import tqdm
 
+DEFAULT_MAX_NEW_TOKENS = 50_000
+
 
 class ProgressBarHook:
     def __init__(self, pbar: tqdm | None = None):
@@ -50,7 +56,7 @@ class ProgressBarHook:
         self.pbar = pbar
 
 
-def create_vllm_client(endpoint_url: str, num_workers: int) -> HTTPEndpointClient:
+def create_sglang_client(endpoint_url: str, num_workers: int) -> HTTPEndpointClient:
     http_config = HTTPClientConfig(
         endpoint_urls=[endpoint_url.rstrip("/")],
         num_workers=num_workers,
@@ -59,7 +65,9 @@ def create_vllm_client(endpoint_url: str, num_workers: int) -> HTTPEndpointClien
     return HTTPEndpointClient(http_config)
 
 
-def run_benchmark_session(accuracy_datasets, issuer, args):
+def run_benchmark_session(
+    accuracy_datasets: list[Dataset], issuer: HttpClientSampleIssuer, args
+) -> None:
     pbar_hook = ProgressBarHook()
     SampleEventHandler.register_hook(SampleEvent.COMPLETE, pbar_hook)
 
@@ -82,7 +90,9 @@ def run_benchmark_session(accuracy_datasets, issuer, args):
     )
 
     with tqdm(
-        desc="DeepSeek-V4-Pro Accuracy Benchmark", total=n_total, unit="samples"
+        desc="DeepSeek-V4-Pro SGLang Accuracy Benchmark",
+        total=n_total,
+        unit="samples",
     ) as pbar:
         pbar_hook.set_pbar(pbar)
         sess = BenchmarkSession.start(
@@ -91,7 +101,7 @@ def run_benchmark_session(accuracy_datasets, issuer, args):
             issuer,
             scheduler,
             accuracy_datasets=accuracy_datasets,
-            name="deepseek_v4_pro_accuracy_benchmark",
+            name="deepseek_v4_pro_sglang_accuracy_benchmark",
             report_dir=args.report_dir,
             dump_events_log=True,
             max_shutdown_timeout_s=None,
@@ -105,7 +115,7 @@ def run_benchmark_session(accuracy_datasets, issuer, args):
         extractor=ABCDExtractor,
     )
     score, n_repeats = scorer.score()
-    logging.info(f"GPQA Pass@1 Score ({n_repeats} repeats): {score}")
+    logging.info("GPQA Pass@1 Score (%d repeats): %s", n_repeats, score)
 
     scorer = PassAt1Scorer(
         AIME25.DATASET_ID,
@@ -115,7 +125,7 @@ def run_benchmark_session(accuracy_datasets, issuer, args):
         ground_truth_column="answer",
     )
     score, n_repeats = scorer.score()
-    logging.info(f"AIME25 Pass@1 Score ({n_repeats} repeats): {score}")
+    logging.info("AIME25 Pass@1 Score (%d repeats): %s", n_repeats, score)
 
     scorer = LiveCodeBenchScorer(
         LiveCodeBench.DATASET_ID,
@@ -123,14 +133,14 @@ def run_benchmark_session(accuracy_datasets, issuer, args):
         args.report_dir,
     )
     score, n_repeats = scorer.score()
-    logging.info(f"LCB Pass@1 Score ({n_repeats} repeats): {score}")
+    logging.info("LCB Pass@1 Score (%d repeats): %s", n_repeats, score)
 
 
-def run_main(args):
+def run_main(args) -> None:
     model_params = ModelParams(
         name=args.model_name,
         temperature=1.0,
-        max_new_tokens=50_000,
+        max_new_tokens=args.max_new_tokens,
         top_k=-1,
         top_p=1.0,
         streaming=StreamingMode.ON,
@@ -162,47 +172,54 @@ def run_main(args):
         )
         lcb_dataset.load(api_type=APIType.OPENAI, model_params=model_params)
 
-        logging.info(f"Creating vLLM client for endpoint: {args.endpoint_url}")
-        client = create_vllm_client(args.endpoint_url, args.num_workers)
+        logging.info("Creating SGLang client for endpoint: %s", args.endpoint_url)
+        client = create_sglang_client(args.endpoint_url, args.num_workers)
         sample_issuer = HttpClientSampleIssuer(client)
 
         logging.info("Starting accuracy benchmark session...")
         run_benchmark_session(
             [gpqa_dataset, aime25_dataset, lcb_dataset], sample_issuer, args
         )
-        logging.info(f"Benchmark complete! Results saved to {args.report_dir}/")
+        logging.info("Benchmark complete! Results saved to %s/", args.report_dir)
     finally:
         if client is not None:
             client.shutdown()
 
 
-def main():
+def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
 
-    parser = argparse.ArgumentParser(description="DeepSeek-V4-Pro vLLM accuracy benchmark")
+    parser = argparse.ArgumentParser(
+        description="DeepSeek-V4-Pro SGLang accuracy benchmark (GPQA + AIME25 + LCB)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
     parser.add_argument(
         "--endpoint-url",
-        default=os.environ.get("VLLM_ENDPOINT_URL", "http://localhost:8000"),
+        default=os.environ.get("SGLANG_ENDPOINT_URL", "http://localhost:30000"),
     )
     parser.add_argument(
         "--model-name",
-        default=os.environ.get(
-            "MODEL_NAME", "/models/deepseek-ai/DeepSeek-V4-Pro"
-        ),
+        default=os.environ.get("MODEL_NAME", "deepseek-ai/DeepSeek-V4-Pro"),
     )
     parser.add_argument("--force-regenerate", action="store_true")
     parser.add_argument("--min-duration", type=int, default=10)
-    parser.add_argument("--max-duration", type=int, default=600)
+    parser.add_argument("--max-duration", type=int, default=3600)
     parser.add_argument(
         "--report-dir",
         type=str,
-        default="results/deepseek_v4_pro_accuracy",
+        default="results/sglang_deepseek_v4_pro_accuracy",
     )
     parser.add_argument("--num-repeats", type=int, default=1)
     parser.add_argument("--num-workers", type=int, default=8)
+    parser.add_argument(
+        "--max-new-tokens",
+        type=int,
+        default=int(os.environ.get("MAX_NEW_TOKENS", DEFAULT_MAX_NEW_TOKENS)),
+    )
     args = parser.parse_args()
     run_main(args)
 

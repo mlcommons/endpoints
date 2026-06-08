@@ -35,8 +35,9 @@ Sample yaml configuration to benchmark the multimodal `Qwen/Qwen3-VL-235B-A22B` 
 
 ### [10_DeepSeekV4Pro_Example](10_DeepSeekV4Pro_Example/)
 
-End-to-end example for benchmarking `deepseek-ai/DeepSeek-V4-Pro` with vLLM, using the same
-datasets as the GPT-OSS-120B example (performance parquet + AIME25 + GPQA + LiveCodeBench).
+End-to-end example for benchmarking `deepseek-ai/DeepSeek-V4-Pro` with vLLM or SGLang (ROCm),
+using the same datasets as the GPT-OSS-120B example (performance parquet + AIME25 + GPQA +
+LiveCodeBench).
 
 ## Getting Help
 

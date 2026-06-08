@@ -1,13 +1,13 @@
 name: "deepseek-v4-pro-accuracy"
 version: "1.0"
 type: "offline"
-timeout: 600
+timeout: 3600
 
 model_params:
   # Served model id (must match vLLM --model). Use TOKENIZER_MODEL_PATH on host for ISL/OSL/TPOT.
   name: "/models/deepseek-ai/DeepSeek-V4-Pro"
   temperature: 1.0
-  max_new_tokens: 32768
+  max_new_tokens: 50000
   top_k: -1
   top_p: 1.0
   streaming: "on"  # required for TTFT/TPOT

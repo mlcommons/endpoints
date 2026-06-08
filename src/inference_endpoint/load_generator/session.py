@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 import uuid
 from collections.abc import Callable
@@ -350,6 +351,8 @@ class BenchmarkSession:
         self,
         phases: list[PhaseConfig],
         on_phase_start: Callable[[PhaseConfig], None] | None = None,
+        on_phase_complete: Callable[[PhaseConfig, PhaseResult | None], None]
+        | None = None,
     ) -> SessionResult:
         """Run all benchmark phases sequentially.
 
@@ -370,6 +373,8 @@ class BenchmarkSession:
                 result = await self._run_phase(phase)
                 if result is not None:
                     phase_results.append(result)
+                if on_phase_complete is not None:
+                    on_phase_complete(phase, result)
         finally:
             self._done = True
             if self._recv_task and not self._recv_task.done():
@@ -453,18 +458,25 @@ class BenchmarkSession:
     async def _drain_inflight(self, phase_issuer: PhaseIssuer) -> None:
         """Wait for all in-flight responses from this phase to complete.
 
-        Hard-bounded at 240 s; logs an error and returns if exceeded so the
-        next phase starts regardless of stuck requests."""
+        Bounded by ``BENCHMARK_PHASE_DRAIN_TIMEOUT_S`` (default 240 s). Logs an
+        error and returns if exceeded so the next phase starts regardless of
+        stuck requests."""
         if phase_issuer.inflight <= 0 or self._stop_requested:
             return
-        logger.info("Draining %d in-flight responses...", phase_issuer.inflight)
+        drain_timeout_s = float(os.environ.get("BENCHMARK_PHASE_DRAIN_TIMEOUT_S", "240"))
+        logger.info(
+            "Draining %d in-flight responses (timeout=%.0f s)...",
+            phase_issuer.inflight,
+            drain_timeout_s,
+        )
         self._drain_event.clear()
         try:
-            await asyncio.wait_for(self._drain_event.wait(), timeout=240.0)
+            await asyncio.wait_for(self._drain_event.wait(), timeout=drain_timeout_s)
         except TimeoutError:
             logger.error(
-                "Drain timed out after 240 s with %d responses still in flight; "
+                "Drain timed out after %.0f s with %d responses still in flight; "
                 "proceeding to next phase.",
+                drain_timeout_s,
                 phase_issuer.inflight,
             )
 

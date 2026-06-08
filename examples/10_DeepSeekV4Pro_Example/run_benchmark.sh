@@ -5,7 +5,7 @@
 #   3. inference-endpoint benchmark from-config
 set -euo pipefail
 
-ENDPOINTS_DIR="${ENDPOINTS_DIR:-/home/karverma/endpoints}"
+ENDPOINTS_DIR="${ENDPOINTS_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}"
 CONFIG="${CONFIG:-${ENDPOINTS_DIR}/examples/10_DeepSeekV4Pro_Example/vllm_deepseek_v4_pro_example.yaml}"
 VLLM_PORT="${VLLM_PORT:-8000}"
 LCB_PORT="${LCB_PORT:-13835}"

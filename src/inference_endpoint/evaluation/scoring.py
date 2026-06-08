@@ -155,6 +155,8 @@ class Scorer(ABC):
                     outputs.append(
                         {"sample_uuid": record.sample_uuid, "output": output_text}
                     )
+        if not outputs:
+            return pd.DataFrame(columns=["sample_uuid", "output"])
         return pd.DataFrame(outputs)
 
     def match_sample_index(self, row: pd.Series) -> pd.Series:
@@ -174,10 +176,19 @@ class Scorer(ABC):
                 Returns None as the score if evaluation fails.
         """
         df = self.get_outputs()
+        if df.empty:
+            raise FileNotFoundError(
+                f"No COMPLETE events in {self.report_dir / 'events.jsonl'} "
+                f"for dataset {self.dataset_name}"
+            )
 
         # Outputs are for all samples, not just the target dataset
         valid_uuids = self.sample_index_map.keys()
         df = df[df["sample_uuid"].isin(valid_uuids)]
+        if df.empty:
+            raise KeyError(
+                f"No COMPLETE events matched sample_idx_map for {self.dataset_name}"
+            )
 
         # Match to sample index from dataset
         df = df.apply(self.match_sample_index, axis=1)

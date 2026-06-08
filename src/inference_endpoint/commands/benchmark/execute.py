@@ -31,6 +31,7 @@ import random
 import shutil
 import signal
 import tempfile
+import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -74,6 +75,7 @@ from inference_endpoint.config.schema import (
     TestMode,
     TestType,
 )
+from inference_endpoint.core.record import EventRecord, EventType, SampleEventType
 from inference_endpoint.core.types import QueryResult
 from inference_endpoint.dataset_manager.dataset import Dataset
 from inference_endpoint.dataset_manager.factory import DataLoaderFactory
@@ -93,6 +95,7 @@ from inference_endpoint.load_generator.multi_turn_strategy import MultiTurnStrat
 from inference_endpoint.load_generator.session import (
     BenchmarkSession,
     PhaseConfig,
+    PhaseResult,
     PhaseType,
     SessionResult,
 )
@@ -533,11 +536,12 @@ def _build_phases(
                 f"Accuracy dataset '{eval_cfg.dataset_name}' is a MultiTurnDataset, "
                 "which is not yet supported for accuracy evaluation."
             )
-        # Accuracy phases run at MAX_THROUGHPUT; inheriting perf_lp (e.g. POISSON)
-        # would silently rate-limit evaluation until a multi-turn accuracy strategy
-        # and QPS-budgeting support are added.
+        # Accuracy phases use bounded concurrency (not MAX_THROUGHPUT burst) so long
+        # runs do not queue thousands of requests on the inference server at once.
+        acc_concurrency = max(1, ctx.config.settings.client.num_workers)
         acc_load_pattern: LoadPattern | None = LoadPattern(
-            type=LoadPatternType.MAX_THROUGHPUT
+            type=LoadPatternType.CONCURRENCY,
+            target_concurrency=acc_concurrency,
         )
         acc_settings = RuntimeSettings(
             metric_target=ctx.rt_settings.metric_target,
@@ -775,6 +779,8 @@ async def _run_benchmark_async(
                 )
                 session.cancel_current_strategy()
 
+        completed_accuracy_phases: list[PhaseResult] = []
+
         def _on_phase_start(phase: PhaseConfig) -> None:
             nonlocal global_timeout_handle
             if (
@@ -785,9 +791,29 @@ async def _run_benchmark_async(
                     max_duration_ms / 1000.0, _on_global_timeout
                 )
 
+        def _on_phase_complete(
+            phase: PhaseConfig, phase_result: PhaseResult | None
+        ) -> None:
+            if phase.phase_type != PhaseType.ACCURACY or phase_result is None:
+                return
+            completed_accuracy_phases.append(phase_result)
+            eval_cfg = next(
+                (e for e in ctx.eval_configs if e.dataset_name == phase.name),
+                None,
+            )
+            if eval_cfg is None:
+                return
+            _score_accuracy_phase_incremental(
+                ctx, eval_cfg, phase_result, completed_accuracy_phases, tmpfs_dir
+            )
+
         loop.add_signal_handler(signal.SIGINT, session.stop)
         try:
-            result = await session.run(phases, on_phase_start=_on_phase_start)
+            result = await session.run(
+                phases,
+                on_phase_start=_on_phase_start,
+                on_phase_complete=_on_phase_complete,
+            )
         except Exception as e:
             raise ExecutionError(f"Benchmark execution failed: {e}") from e
         finally:
@@ -861,6 +887,159 @@ def run_benchmark_async(ctx: BenchmarkContext) -> BenchmarkResult:
     return loop.run_until_complete(_run_benchmark_async(ctx, loop))
 
 
+def _score_eval_cfg(eval_cfg: AccuracyConfiguration) -> dict[str, Any]:
+    """Score one accuracy dataset from events.jsonl + sample_idx_map.json."""
+    scorer_instance = eval_cfg.scorer(
+        eval_cfg.dataset_name,
+        eval_cfg.dataset,
+        eval_cfg.report_dir,
+        extractor=eval_cfg.extractor,
+        ground_truth_column=eval_cfg.ground_truth_column,
+        **eval_cfg.extras,
+    )
+    score, n_repeats = scorer_instance.score()
+    assert eval_cfg.dataset.data is not None
+    return {
+        "dataset_name": eval_cfg.dataset_name,
+        "num_samples": len(eval_cfg.dataset.data),
+        "extractor": (
+            eval_cfg.extractor.__name__ if eval_cfg.extractor is not None else None
+        ),
+        "ground_truth_column": eval_cfg.ground_truth_column,
+        "score": score,
+        "n_repeats": n_repeats,
+    }
+
+
+def _write_accuracy_sample_idx_map(
+    report_dir: Path, accuracy_phase_results: list[PhaseResult]
+) -> None:
+    sample_idx_map = {pr.name: pr.uuid_to_index for pr in accuracy_phase_results}
+    map_path = report_dir / "sample_idx_map.json"
+    with map_path.open("wb") as f:
+        f.write(msgspec.json.format(msgspec.json.encode(sample_idx_map), indent=2))
+
+
+def _complete_uuids_in_event_log(events_path: Path) -> set[str]:
+    """Return sample UUIDs with a COMPLETE record in the event log."""
+    if not events_path.exists():
+        return set()
+    decoder = msgspec.json.Decoder(type=EventRecord, dec_hook=EventType.decode_hook)
+    complete: set[str] = set()
+    with events_path.open("r") as f:
+        for line in f:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            record = decoder.decode(stripped)
+            if (
+                record.event_type == SampleEventType.COMPLETE
+                and record.sample_uuid
+            ):
+                complete.add(record.sample_uuid)
+    return complete
+
+
+def _wait_for_phase_event_log(
+    events_path: Path,
+    phase_result: PhaseResult,
+    timeout_s: float = 60.0,
+) -> bool:
+    """Wait until the event logger has flushed COMPLETE records for a phase."""
+    expected_uuids = set(phase_result.uuid_to_index.keys())
+    if not expected_uuids:
+        return True
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        ready = _complete_uuids_in_event_log(events_path) & expected_uuids
+        if len(ready) >= phase_result.issued_count:
+            return True
+        time.sleep(0.25)
+    ready = _complete_uuids_in_event_log(events_path) & expected_uuids
+    logger.warning(
+        "Timed out waiting for phase %s events (%d/%d COMPLETE in log)",
+        phase_result.name,
+        len(ready),
+        phase_result.issued_count,
+    )
+    return False
+
+
+def _score_accuracy_phase_incremental(
+    ctx: BenchmarkContext,
+    eval_cfg: AccuracyConfiguration,
+    phase_result: PhaseResult,
+    accuracy_phase_results: list[PhaseResult],
+    tmpfs_dir: Path,
+) -> None:
+    """Persist events and score one accuracy phase before later phases run."""
+    _write_accuracy_sample_idx_map(ctx.report_dir, accuracy_phase_results)
+    events_path = tmpfs_dir / "events" / "events.jsonl"
+    expected_repeats = eval_cfg.num_repeats
+
+    partial_path = ctx.report_dir / "accuracy_scores_partial.json"
+    partial_scores: dict[str, Any] = {}
+    if partial_path.exists():
+        partial_scores = json.loads(partial_path.read_text())
+
+    deadline = time.monotonic() + 120.0
+    last_error: Exception | None = None
+    entry: dict[str, Any] | None = None
+    while time.monotonic() < deadline:
+        if not _wait_for_phase_event_log(
+            events_path, phase_result, timeout_s=30.0
+        ):
+            last_error = TimeoutError(
+                f"Timed out waiting for {phase_result.issued_count} COMPLETE events"
+            )
+            time.sleep(0.5)
+            continue
+        _salvage_tmpfs(ctx.report_dir, tmpfs_dir)
+        try:
+            candidate = _score_eval_cfg(eval_cfg)
+        except (FileNotFoundError, KeyError) as e:
+            last_error = e
+            time.sleep(0.5)
+            continue
+        except Exception as e:
+            last_error = e
+            if "events.jsonl" in str(e).lower() or "sample_uuid" in str(e):
+                time.sleep(0.5)
+                continue
+            logger.error(
+                "Incremental accuracy scoring failed for %s: %s",
+                eval_cfg.dataset_name,
+                e,
+            )
+            return
+        if candidate["n_repeats"] != expected_repeats:
+            last_error = RuntimeError(
+                f"Expected {expected_repeats} repeats, got {candidate['n_repeats']}"
+            )
+            time.sleep(0.5)
+            continue
+        entry = candidate
+        break
+
+    if entry is None:
+        logger.error(
+            "Incremental accuracy scoring failed for %s: %s",
+            eval_cfg.dataset_name,
+            last_error,
+        )
+        return
+
+    partial_scores[eval_cfg.dataset_name] = entry
+    partial_path.write_text(json.dumps(partial_scores, indent=2))
+    logger.info(
+        "Incremental score for %s: %s (%s repeats) -> %s",
+        eval_cfg.dataset_name,
+        entry["score"],
+        entry["n_repeats"],
+        partial_path,
+    )
+
+
 def _write_scoring_artifacts(
     ctx: BenchmarkContext,
     result: SessionResult,
@@ -872,15 +1051,11 @@ def _write_scoring_artifacts(
     We copy it to report_dir (typically on disk) during finalization.
     """
 
-    # sample_idx_map.json — {dataset_name: {uuid: sample_index}}
-    sample_idx_map: dict[str, dict[str, int]] = {}
-    for phase_result in result.phase_results:
-        sample_idx_map[phase_result.name] = phase_result.uuid_to_index
-
-    map_path = ctx.report_dir / "sample_idx_map.json"
-    with map_path.open("wb") as f:
-        f.write(msgspec.json.format(msgspec.json.encode(sample_idx_map), indent=2))
-    logger.debug(f"Wrote {map_path}")
+    accuracy_phase_results = [
+        pr for pr in result.phase_results if pr.phase_type == PhaseType.ACCURACY
+    ]
+    _write_accuracy_sample_idx_map(ctx.report_dir, accuracy_phase_results)
+    logger.debug("Wrote %s", ctx.report_dir / "sample_idx_map.json")
 
     # Copy events.jsonl from tmpfs to report_dir.
     # Tmpfs cleanup is handled by run_benchmark()'s finally block.
@@ -928,27 +1103,18 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
     # Accuracy scoring
     accuracy_scores: dict[str, Any] = {}
     for eval_cfg in ctx.eval_configs:
-        scorer_instance = eval_cfg.scorer(
+        try:
+            accuracy_scores[eval_cfg.dataset_name] = _score_eval_cfg(eval_cfg)
+        except Exception as e:
+            logger.error("Accuracy scoring failed for %s: %s", eval_cfg.dataset_name, e)
+            continue
+        entry = accuracy_scores[eval_cfg.dataset_name]
+        logger.info(
+            "Score for %s: %s (%s repeats)",
             eval_cfg.dataset_name,
-            eval_cfg.dataset,
-            eval_cfg.report_dir,
-            extractor=eval_cfg.extractor,
-            ground_truth_column=eval_cfg.ground_truth_column,
-            **eval_cfg.extras,
+            entry["score"],
+            entry["n_repeats"],
         )
-        score, n_repeats = scorer_instance.score()
-        assert eval_cfg.dataset.data is not None
-        accuracy_scores[eval_cfg.dataset_name] = {
-            "dataset_name": eval_cfg.dataset_name,
-            "num_samples": len(eval_cfg.dataset.data),
-            "extractor": (
-                eval_cfg.extractor.__name__ if eval_cfg.extractor is not None else None
-            ),
-            "ground_truth_column": eval_cfg.ground_truth_column,
-            "score": score,
-            "n_repeats": n_repeats,
-        }
-        logger.info(f"Score for {eval_cfg.dataset_name}: {score} ({n_repeats} repeats)")
 
     # Report metrics: prefer Report from MetricsSnapshot, fall back to SessionResult
     if report is not None and report.duration_ns is not None:
