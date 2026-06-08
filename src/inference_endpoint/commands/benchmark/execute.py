@@ -406,8 +406,9 @@ def setup_benchmark(config: BenchmarkConfig, test_mode: TestMode) -> BenchmarkCo
     if tokenizer_override:
         if not _check_tokenizer_exists(tokenizer_override):
             raise SetupError(
-                f"Tokenizer override '{tokenizer_override}' not found. "
-                "Provide a valid HF repo ID or local path, or remove the override to use the model name."
+                f"Tokenizer override '{tokenizer_override}' could not be verified. "
+                "Check that the HF repo ID or local path is correct, accessible, and contains tokenizer files. "
+                "See logs above for details."
             )
         tokenizer_name = tokenizer_override
     else:
