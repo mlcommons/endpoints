@@ -42,9 +42,7 @@ uv run inference-endpoint benchmark from-config \
 
 ## Common failure modes
 
-| Symptom                                             | Likely cause              | Fix                                                |
-| --------------------------------------------------- | ------------------------- | -------------------------------------------------- |
-| `FileNotFoundError: SWE-bench subproject not found` | subproject not synced     | Run `uv sync` in `examples/09_MultiTurn/accuracy`  |
-| Docker error during `run_evaluation`                | Docker daemon not running | Start Docker and retry                             |
-| HuggingFace rate limit                              | No auth token             | Set `HF_TOKEN` env var and retry                   |
-| `uv: command not found`                             | uv not installed          | `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
+| Symptom                                             | Likely cause              | Fix                                               |
+| --------------------------------------------------- | ------------------------- | ------------------------------------------------- |
+| `FileNotFoundError: SWE-bench subproject not found` | subproject not synced     | Run `uv sync` in `examples/09_MultiTurn/accuracy` |
+| Docker error during `run_evaluation`                | Docker daemon not running | Start Docker and retry                            |

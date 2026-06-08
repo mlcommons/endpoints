@@ -33,8 +33,7 @@ datasets:
 settings:
   load_pattern:
     type: "max_throughput"
-  client:
-    num_workers: 1
+    target_qps: 1
 
 endpoint_config:
   endpoints:
