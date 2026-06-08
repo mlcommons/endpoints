@@ -329,9 +329,9 @@ class Dataset:
         dataset_id: str | None = None,
         num_repeats: int = 1,
     ) -> "Dataset":
-        assert format is None or isinstance(format, DatasetFormat), (
-            "Format must be a DatasetFormat"
-        )
+        assert format is None or isinstance(
+            format, DatasetFormat
+        ), "Format must be a DatasetFormat"
         # TODO add arguments to the loader class
         LoaderClass = DatafileLoader.get_loader(file_path, format=format)
         loader = LoaderClass(file_path)

@@ -121,12 +121,9 @@ class BFCLMultiTurnRunner:
                 state, tool_calls, tool_call_ids, content
             )
 
-            if action.action_type == "continue":
-                messages = action.messages
-                tools = action.tools
-            elif action.action_type == "next_turn":
-                messages = action.messages
-                tools = action.tools
+            if action.action_type in ("continue", "next_turn"):
+                messages = action.messages or []
+                tools = action.tools or []
             elif action.action_type in ("complete", "force_terminated"):
                 break
 
@@ -244,8 +241,8 @@ class BFCLMultiTurnRunner:
         if not raw_tool_calls:
             return None, None, content
 
-        tool_calls = []
-        tool_call_ids = []
+        tool_calls: list[dict[str, Any]] = []
+        tool_call_ids: list[str] = []
         for tc in raw_tool_calls:
             func = tc.get("function", {})
             tool_calls.append(

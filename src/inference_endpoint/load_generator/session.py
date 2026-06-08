@@ -485,7 +485,6 @@ class BenchmarkSession:
         except TimeoutError:
             logger.error(
                 "Drain timed out after %.0f s with %d responses still in flight; "
-
                 "proceeding to next phase.",
                 timeout,
                 phase_issuer.inflight,

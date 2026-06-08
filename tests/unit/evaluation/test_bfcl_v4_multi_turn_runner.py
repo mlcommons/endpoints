@@ -62,9 +62,7 @@ def test_seed_included_in_payload_when_set():
 
     with patch.object(runner, "_get_client") as mock_client:
         mock_client.return_value = MagicMock(post=fake_post)
-        runner._send_request(
-            messages=[{"role": "user", "content": "hello"}], tools=[]
-        )
+        runner._send_request(messages=[{"role": "user", "content": "hello"}], tools=[])
 
     assert captured, "No request was sent"
     assert captured[0].get("seed") == 42
@@ -87,9 +85,7 @@ def test_seed_omitted_from_payload_when_none():
 
     with patch.object(runner, "_get_client") as mock_client:
         mock_client.return_value = MagicMock(post=fake_post)
-        runner._send_request(
-            messages=[{"role": "user", "content": "hello"}], tools=[]
-        )
+        runner._send_request(messages=[{"role": "user", "content": "hello"}], tools=[])
 
     assert captured, "No request was sent"
     assert "seed" not in captured[0]

@@ -43,13 +43,13 @@ CLI that comes with it.
 
 ## Step 0 — What you need before starting
 
-| Requirement | Notes |
-| --- | --- |
-| Python 3.12+ | Earlier versions not supported |
-| Git | To clone the repo |
-| A running model server | Any OpenAI-compatible endpoint. Validated with `Qwen3.6-27B-Q4_K_M` via llama.cpp (see below) |
+| Requirement                         | Notes                                                                                                 |
+| ----------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| Python 3.12+                        | Earlier versions not supported                                                                        |
+| Git                                 | To clone the repo                                                                                     |
+| A running model server              | Any OpenAI-compatible endpoint. Validated with `Qwen3.6-27B-Q4_K_M` via llama.cpp (see below)         |
 | ~24 GB memory (GPU/VRAM or unified) | The Q4 GGUF is ~16.8 GB on disk; the rest is KV cache at `--ctx-size 32768`. 16 GB is **not** enough. |
-| ~2.5–3 hours wall-clock | Single-turn (3 categories) + sampled multi-turn |
+| ~2.5–3 hours wall-clock             | Single-turn (3 categories) + sampled multi-turn                                                       |
 
 ### Starting a model server
 
@@ -109,6 +109,7 @@ docker run --rm -it --gpus all \
   --ctx-size 32768 \
   -ngl 99
 ```
+
 </details>
 
 ---
@@ -158,11 +159,11 @@ Before running, open `offline_bfcl_v4_single_turn.yaml` and set
 
 **Sampling rates** (validated for ~82 min single-turn on an edge device):
 
-| Category | Sample rate | Notes |
-| --- | --- | --- |
-| non_live | 20% | ~230 samples |
-| live | 10% (tiny subsets → 100%) | ~171 samples |
-| hallucination | 5% | ~56 samples |
+| Category      | Sample rate               | Notes        |
+| ------------- | ------------------------- | ------------ |
+| non_live      | 20%                       | ~230 samples |
+| live          | 10% (tiny subsets → 100%) | ~171 samples |
+| hallucination | 5%                        | ~56 samples  |
 
 Total ≈ 456 single-turn samples. Results are written to
 `results/bfcl_v4_single_turn_accuracy/`.
@@ -266,17 +267,17 @@ Validated on Thor (`Qwen3.6-27B-Q4_K_M`, `temperature=0`, `seed=42`).
 The full sampled suite (single-turn + `--sample-pct 3` multi-turn) was run twice,
 end to end, with a freshly restarted server each pass. Every score was identical.
 
-| Metric | Run 1 | Run 2 | Match? |
-| --- | --- | --- | --- |
-| Single-turn `non_live` (AST, ~230 samples) | 86.98% | 86.98% | ✓ |
-| Single-turn `live` (~171 samples) | 84.12% | 84.12% | ✓ |
-| Single-turn `hallucination` (~56 samples) | 94.32% | 94.32% | ✓ |
-| **Single-turn overall (456 samples)** | **87.50%** | **87.50%** | ✓ |
-| Multi-turn `multi_turn_base` | 66.67% (4/6) | 66.67% (4/6) | ✓ |
-| Multi-turn `multi_turn_miss_func` | 33.33% (2/6) | 33.33% (2/6) | ✓ |
-| Multi-turn `multi_turn_miss_param` | 16.67% (1/6) | 16.67% (1/6) | ✓ |
-| Multi-turn `multi_turn_long_context` | 66.67% (4/6) | 66.67% (4/6) | ✓ |
-| **Multi-turn overall (24 sampled entries)** | **45.84%** | **45.84%** | ✓ |
+| Metric                                      | Run 1        | Run 2        | Match? |
+| ------------------------------------------- | ------------ | ------------ | ------ |
+| Single-turn `non_live` (AST, ~230 samples)  | 86.98%       | 86.98%       | ✓      |
+| Single-turn `live` (~171 samples)           | 84.12%       | 84.12%       | ✓      |
+| Single-turn `hallucination` (~56 samples)   | 94.32%       | 94.32%       | ✓      |
+| **Single-turn overall (456 samples)**       | **87.50%**   | **87.50%**   | ✓      |
+| Multi-turn `multi_turn_base`                | 66.67% (4/6) | 66.67% (4/6) | ✓      |
+| Multi-turn `multi_turn_miss_func`           | 33.33% (2/6) | 33.33% (2/6) | ✓      |
+| Multi-turn `multi_turn_miss_param`          | 16.67% (1/6) | 16.67% (1/6) | ✓      |
+| Multi-turn `multi_turn_long_context`        | 66.67% (4/6) | 66.67% (4/6) | ✓      |
+| **Multi-turn overall (24 sampled entries)** | **45.84%**   | **45.84%**   | ✓      |
 
 Wall-clock per pass: ~82 min single-turn (~10.8 s/sample) + ~64 min multi-turn
 (~159 s/entry) ≈ **2.4–2.5 h**. Run-to-run timing varied < 1.1%; accuracy did

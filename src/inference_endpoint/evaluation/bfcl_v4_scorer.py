@@ -224,8 +224,15 @@ class BFCLv4Scorer(Scorer, scorer_id="bfcl_v4"):
         )
         return 1.0 if result["valid"] else 0.0
 
-    def score(self) -> tuple[dict[str, Any] | float | None, int]:
+    def score(  # type: ignore[override]
+        self,
+    ) -> tuple[dict[str, Any] | float | None, int]:
         """Score all samples and return per-category results.
+
+        Widens the base ``Scorer.score`` return: the first element is a
+        per-subset results dict rather than a single float. The accuracy
+        consumer in ``commands/benchmark/execute.py`` stores it verbatim, so
+        the richer payload is preserved end-to-end.
 
         Returns:
             (results_dict, n_repeats) where results_dict contains per-subset
@@ -324,7 +331,9 @@ class BFCLv4Scorer(Scorer, scorer_id="bfcl_v4"):
             float(np.mean(list(category_results.values()))) if category_results else 0.0
         )
 
-        n_repeats = max(1, len(all_scores) // self.dataset.num_samples()) if all_scores else 1
+        n_repeats = (
+            max(1, len(all_scores) // self.dataset.num_samples()) if all_scores else 1
+        )
 
         unscored_subsets = {
             s: f"{subset_results[s] * 100:.2f}"
