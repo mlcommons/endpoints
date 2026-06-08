@@ -204,15 +204,16 @@ class BFCLExecutionBridge:
             return self._advance_turn(state)
 
         # Parse tool_calls into bfcl-eval format: [{func_name: args_dict}, ...]
-        model_responses_bfcl = []
-        for tc in tool_calls:
-            args = tc["arguments"]
-            if isinstance(args, str):
-                args = json.loads(args)
-            model_responses_bfcl.append({tc["name"]: args})
-
-        # Decode into executable format
+        # and decode into executable format. Both steps are inside one try-except
+        # so that invalid JSON in arguments (common for small/quantized models)
+        # is handled the same way as an unrecognised function name.
         try:
+            model_responses_bfcl = []
+            for tc in tool_calls:
+                args = tc["arguments"]
+                if isinstance(args, str):
+                    args = json.loads(args)
+                model_responses_bfcl.append({tc["name"]: args})
             decoded_calls = convert_to_function_call(model_responses_bfcl)
         except Exception as exc:
             logger.warning(

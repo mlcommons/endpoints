@@ -324,7 +324,7 @@ class BFCLv4Scorer(Scorer, scorer_id="bfcl_v4"):
             float(np.mean(list(category_results.values()))) if category_results else 0.0
         )
 
-        n_repeats = len(all_scores) // self.dataset.num_samples() if all_scores else 1
+        n_repeats = max(1, len(all_scores) // self.dataset.num_samples()) if all_scores else 1
 
         unscored_subsets = {
             s: f"{subset_results[s] * 100:.2f}"

@@ -196,9 +196,10 @@ class BFCLMultiTurnRunner:
             "temperature": int(self._temperature)
             if self._temperature == 0
             else self._temperature,
-            "tools": tools,
-            "tool_choice": "auto",
         }
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = "auto"
         if self._seed is not None:
             payload["seed"] = self._seed
 
