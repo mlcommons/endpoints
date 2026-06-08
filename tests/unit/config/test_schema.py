@@ -493,6 +493,16 @@ class TestMultiTurnValidation:
         assert config.settings.load_pattern.target_concurrency == 16
 
     @pytest.mark.unit
+    def test_multi_turn_rejects_removed_stop_on_first_empty_slot_config(self):
+        with pytest.raises(ValueError, match="stop_on_first_empty_slot"):
+            BenchmarkConfig(
+                **self._make_online_multi_turn(
+                    concurrency=16,
+                    multi_turn={"stop_on_first_empty_slot": True},
+                )
+            )
+
+    @pytest.mark.unit
     def test_multi_turn_requires_target_concurrency(self):
         with pytest.raises(ValueError, match="Multi-turn requires --concurrency"):
             BenchmarkConfig(**self._make_online_multi_turn(concurrency=None))

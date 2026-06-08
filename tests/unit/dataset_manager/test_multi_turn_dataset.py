@@ -1367,7 +1367,7 @@ def test_enable_salt_warns_when_conversation_has_no_system_prompt(caplog):
 
     ds.load()
 
-    assert "cache salt not applied" in caplog.text
+    assert "salt not applied" in caplog.text
     assert ds.conversation_metadata.system_prompts_by_conv["c1"] is None
 
 

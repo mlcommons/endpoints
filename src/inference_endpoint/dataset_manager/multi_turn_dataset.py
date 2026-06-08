@@ -415,14 +415,19 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
                     system_content = val
                     break
             if self._enable_salt and system_content:
-                salt_hex = hashlib.blake2b(
-                    str(conv_id).encode("utf-8"), digest_size=8
+                repeat_salt = hashlib.blake2b(b"1", digest_size=2).hexdigest()
+                conv_salt = hashlib.blake2b(
+                    str(conv_id).encode("utf-8"), digest_size=2
                 ).hexdigest()
-                system_content = f"{system_content}\n\n[cache_salt: {salt_hex}]"
+                system_content = (
+                    f"[salt: {repeat_salt}]\n\n"
+                    f"{system_content}\n\n"
+                    f"[salt: {conv_salt}]"
+                )
             elif self._enable_salt:
                 logger.warning(
                     "multi_turn.enable_salt requested but conversation %s has no "
-                    "system prompt; cache salt not applied",
+                    "system prompt; salt not applied",
                     conv_id,
                 )
             system_prompts_by_conv[str(conv_id)] = system_content
