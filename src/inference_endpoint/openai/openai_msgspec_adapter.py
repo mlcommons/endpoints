@@ -72,11 +72,13 @@ class OpenAIMsgspecAdapter(HttpRequestAdapter):
 
     @classmethod
     def dataset_transforms(cls, model_params: ModelParams) -> list[Transform]:
-        metadata = {
+        temp = model_params.temperature
+        if temp is not None and float(temp) == int(temp):
+            temp = int(temp)
+        metadata: dict[str, Any] = {
             "model": model_params.name,
-            "stream": (model_params.streaming == StreamingMode.ON),
-            "max_completion_tokens": model_params.max_new_tokens,
-            "temperature": model_params.temperature,
+            "temperature": temp,
+            "seed": model_params.seed,
             "top_p": model_params.top_p,
             "top_k": model_params.top_k,
             "repetition_penalty": model_params.repetition_penalty,
@@ -84,6 +86,10 @@ class OpenAIMsgspecAdapter(HttpRequestAdapter):
             "frequency_penalty": model_params.frequency_penalty,
             "chat_template_kwargs": model_params.chat_template_kwargs,
         }
+        if model_params.streaming == StreamingMode.ON:
+            metadata["stream"] = True
+        if model_params.max_new_tokens is not None:
+            metadata["max_completion_tokens"] = model_params.max_new_tokens
 
         # These fields are used in .to_endpoint_request() but don't exist in ModelParams,
         # so they currently cannot be configured unless they are specified in the dataset file
@@ -91,20 +97,20 @@ class OpenAIMsgspecAdapter(HttpRequestAdapter):
         # See: https://platform.openai.com/docs/api-reference/chat/create for more details on
         # what the fields mean.
         allowed = [
+            "prompt",
+            "system",
+            "messages",
+            "tools",
+            "tool_choice",
             "name",  # NOT the model name, but rather a proper noun like 'Bob' for the LLM to keep track of entities
             "n",
             "stop",
             "logit_bias",
             "user",
             "chat_template",
-            "tools",
         ]
         return [
-            ColumnFilter(
-                required_columns=["prompt"],
-                optional_columns=["system"]
-                + allowed,  # Allow for custom passthrough for OpenAI params
-            ),
+            ColumnFilter(required_columns=[], optional_columns=allowed),
             AddStaticColumns(metadata),
         ]
 
@@ -175,6 +181,7 @@ class OpenAIMsgspecAdapter(HttpRequestAdapter):
             stream=query.data.get("stream"),
             max_completion_tokens=query.data.get("max_completion_tokens"),
             temperature=query.data.get("temperature"),
+            seed=query.data.get("seed"),
             top_p=query.data.get("top_p"),
             top_k=query.data.get("top_k"),
             repetition_penalty=query.data.get("repetition_penalty"),
@@ -187,6 +194,7 @@ class OpenAIMsgspecAdapter(HttpRequestAdapter):
             chat_template=query.data.get("chat_template"),
             chat_template_kwargs=query.data.get("chat_template_kwargs"),
             tools=query.data.get("tools"),
+            tool_choice=query.data.get("tool_choice"),
         )
 
     @classmethod
@@ -207,23 +215,27 @@ class OpenAIMsgspecAdapter(HttpRequestAdapter):
         if not response.choices:
             raise ValueError("Response must contain at least one choice")
 
-        choice = response.choices[0]
+        message = response.choices[0].message
         metadata: dict[str, Any] = {}
-        if choice.finish_reason:
-            metadata["finish_reason"] = choice.finish_reason
-        if choice.message.tool_calls:
-            metadata["tool_calls"] = choice.message.tool_calls
-        if choice.message.reasoning_content:
-            metadata["reasoning_content"] = choice.message.reasoning_content
+        if response.choices[0].finish_reason:
+            metadata["finish_reason"] = response.choices[0].finish_reason
+        if message.tool_calls:
+            metadata["tool_calls"] = message.tool_calls
+        if message.reasoning_content:
+            metadata["reasoning_content"] = message.reasoning_content
 
-        tool_calls_tuple = (
-            tuple(choice.message.tool_calls) if choice.message.tool_calls else None
-        )
+        # Keep `output` as the textual content only. Structured tool calls live in
+        # the dedicated `tool_calls` field; TextModelOutput.__str__ serializes them
+        # once for scoring. Serializing them into `output` here too would make
+        # __str__ emit the JSON twice, corrupting it for downstream parsers.
+        output_text = message.content or ""
+
+        tool_calls_tuple = tuple(message.tool_calls) if message.tool_calls else None
         return QueryResult(
             id=result_id or response.id,
             response_output=TextModelOutput(
-                output=choice.message.content or "",
-                reasoning=choice.message.reasoning_content,
+                output=output_text,
+                reasoning=message.reasoning_content,
                 tool_calls=tool_calls_tuple,
             ),
             metadata=metadata,

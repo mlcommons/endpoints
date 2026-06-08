@@ -1,0 +1,57 @@
+# BFCL v4 single-turn accuracy — edge device (<3h) budget
+#
+# Runs the three single-turn BFCL v4 categories (non_live, live, hallucination)
+# through the accuracy pipeline with per-category sampling tuned to finish on an
+# edge device within ~3 hours. Multi-turn is run separately via run_accuracy.sh.
+#
+# For final submission, fields marked "do not change" must be kept as-is.
+# Fields marked "set to your value" must be updated for your environment.
+#
+# Run:
+#   inference-endpoint benchmark from-config \
+#     --config offline_bfcl_v4_single_turn.yaml --accuracy-only
+#
+# Requires: pip install -e ".[bfcl]"
+name: "bfcl-v4-single-turn-accuracy"
+version: "1.0" # do not change.
+type: "offline" # do not change.
+timeout: 10800 # do not change.
+
+model_params:
+  name: "Qwen3.6-27B-Q4_K_M" # set to your served model name.
+  temperature: 0 # do not change.
+
+datasets:
+  - name: bfcl_v4::function_calling # do not change.
+    type: "accuracy" # do not change.
+    params:
+      categories: ["non_live", "live", "hallucination"] # do not change.
+      category_sample_pct:
+        non_live: 20 # do not change.
+        live: 10 # do not change.
+        hallucination: 5 # do not change.
+      # Subsets with total size <= 25 are always taken in full so their scores
+      # are not reduced to one or two noisy samples.
+      subset_floor: 25 # do not change.
+    accuracy_config:
+      eval_method: "bfcl_v4" # do not change.
+      ground_truth: "ground_truth" # do not change.
+      extractor: "function_call_extractor" # do not change.
+      num_repeats: 1 # do not change.
+
+settings:
+  runtime:
+    min_duration_ms: 0 # do not change.
+    dataloader_random_seed: 42 # do not change.
+  load_pattern:
+    type: "max_throughput" # do not change.
+  client:
+    num_workers: 1 # do not change.
+    max_connections: 1 # do not change.
+
+endpoint_config:
+  endpoints:
+    - "http://localhost:8080" # set to your endpoint URL.
+  api_key: null
+
+report_dir: results/bfcl_v4_single_turn_accuracy/ # do not change.

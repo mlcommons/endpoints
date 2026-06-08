@@ -92,6 +92,23 @@ class WithoutReplacementSampleOrder(SampleOrder):
         return retval
 
 
+class SequentialSampleOrder(SampleOrder):
+    """Sequential ordering: 0, 1, 2, ..., n-1, 0, 1, ...
+
+    Used for accuracy evaluation to ensure deterministic sample ordering
+    that matches reference implementations (e.g. evalscope).
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._curr_idx = 0
+
+    def next_sample_index(self) -> int:
+        idx = self._curr_idx
+        self._curr_idx = (self._curr_idx + 1) % self.n_samples_in_dataset
+        return idx
+
+
 class WithReplacementSampleOrder(SampleOrder):
     """Truly random sampling from dataset with replacement.
 
@@ -102,8 +119,19 @@ class WithReplacementSampleOrder(SampleOrder):
         return self.rng.randint(0, self.n_samples_in_dataset - 1)
 
 
-def create_sample_order(settings: RuntimeSettings) -> SampleOrder:
-    """Create a SampleOrder from RuntimeSettings."""
+def create_sample_order(
+    settings: RuntimeSettings, sequential: bool = False
+) -> SampleOrder:
+    """Create a SampleOrder from RuntimeSettings.
+
+    Args:
+        settings: Runtime configuration.
+        sequential: If True, use sequential ordering (for accuracy evaluation).
+    """
+    if sequential:
+        return SequentialSampleOrder(
+            n_samples_in_dataset=settings.n_samples_from_dataset,
+        )
     return WithoutReplacementSampleOrder(
         n_samples_in_dataset=settings.n_samples_from_dataset,
         rng=settings.rng_sample_index,

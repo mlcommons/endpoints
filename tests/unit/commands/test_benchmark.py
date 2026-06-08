@@ -288,6 +288,43 @@ datasets:
         assert called_mode == TestMode.BOTH
 
     @pytest.mark.unit
+    @patch("inference_endpoint.commands.benchmark.cli.run_benchmark")
+    def test_from_config_seed_override(self, mock_run, tmp_path):
+        yaml_content = """
+type: "offline"
+model_params:
+  name: "test-model"
+endpoint_config:
+  endpoints: ["http://test:8000"]
+datasets:
+  - path: "test.jsonl"
+"""
+        config_file = tmp_path / "cfg.yaml"
+        config_file.write_text(yaml_content)
+        from_config(config=config_file, seed=42)
+        called_config, _ = mock_run.call_args[0]
+        assert called_config.model_params.seed == 42
+
+    @pytest.mark.unit
+    @patch("inference_endpoint.commands.benchmark.cli.run_benchmark")
+    def test_from_config_report_dir_override(self, mock_run, tmp_path):
+        yaml_content = """
+type: "offline"
+model_params:
+  name: "test-model"
+endpoint_config:
+  endpoints: ["http://test:8000"]
+datasets:
+  - path: "test.jsonl"
+"""
+        config_file = tmp_path / "cfg.yaml"
+        config_file.write_text(yaml_content)
+        override_dir = tmp_path / "reports"
+        from_config(config=config_file, report_dir=override_dir)
+        called_config, _ = mock_run.call_args[0]
+        assert called_config.report_dir == override_dir
+
+    @pytest.mark.unit
     def test_from_config_bad_yaml(self, tmp_path):
         bad_file = tmp_path / "bad.yaml"
         bad_file.write_text("{{invalid yaml")

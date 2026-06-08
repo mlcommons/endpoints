@@ -23,6 +23,11 @@ from .dataset import Dataset, EmptyDataset
 from .factory import DataLoaderFactory
 from .multi_turn_dataset import MultiTurnDataset
 from .predefined.aime25 import AIME25
+
+try:
+    from .predefined.bfcl_v4 import BFCLv4  # noqa: F401  # optional dep
+except ImportError:
+    BFCLv4 = None  # type: ignore[assignment,misc]
 from .predefined.cnndailymail import CNNDailyMail
 from .predefined.gpqa import GPQA
 from .predefined.livecodebench import LiveCodeBench

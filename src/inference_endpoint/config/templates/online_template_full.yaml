@@ -6,6 +6,7 @@ benchmark_mode: null  # options: offline, online
 model_params:
   name: '<MODEL_NAME eg: meta-llama/Llama-3.1-8B-Instruct>'
   temperature: null  # Sampling temperature
+  seed: null  # Random seed for reproducible sampling
   top_k: null  # Top-K sampling
   top_p: null  # Top-P (nucleus) sampling
   repetition_penalty: null  # Repetition penalty
@@ -24,6 +25,7 @@ datasets:  # Dataset configs
   eval_method: null
   parser:  # Column remapping: {prompt: <col>, system: <col>}
     prompt: text_input
+  params: null  # Dataset-specific parameters passed to the generate() method
   accuracy_config: null  # Accuracy evaluation settings
   multi_turn: null  # Multi-turn conversation configuration
 - name: accuracy
@@ -35,8 +37,9 @@ datasets:  # Dataset configs
   parser:  # Column remapping: {prompt: <col>, system: <col>}
     prompt: question
     system: system_prompt
+  params: null  # Dataset-specific parameters passed to the generate() method
   accuracy_config:  # Accuracy evaluation settings
-    eval_method: pass_at_1  # Scorer method | options: pass_at_1, string_match, rouge, code_bench_scorer, shopify_category_f1, vbench
+    eval_method: pass_at_1  # Scorer method | options: pass_at_1, string_match, rouge, code_bench_scorer, shopify_category_f1, vbench, bfcl_v4
     ground_truth: ground_truth  # Ground truth column name
     extractor: boxed_math_extractor  # Answer extractor (abcd_extractor, boxed_math_extractor, identity_extractor, python_code_extractor)
     num_repeats: 1  # Repeat dataset N times for evaluation

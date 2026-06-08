@@ -98,6 +98,7 @@ class ScorerMethod(str, Enum):
     CODE_BENCH = "code_bench_scorer"
     SHOPIFY_CATEGORY_F1 = "shopify_category_f1"
     VBENCH = "vbench"
+    BFCL_V4 = "bfcl_v4"
 
 
 class TestMode(str, Enum):
@@ -185,6 +186,7 @@ class ModelParams(BaseModel):
         cyclopts.Parameter(alias="--model", help="Model name", required=True),
     ] = ""
     temperature: float | None = Field(None, description="Sampling temperature")
+    seed: int | None = Field(None, description="Random seed for reproducible sampling")
     top_k: int | None = Field(None, description="Top-K sampling")
     top_p: float | None = Field(None, description="Top-P (nucleus) sampling")
     repetition_penalty: float | None = Field(None, description="Repetition penalty")
@@ -299,6 +301,9 @@ class Dataset(BaseModel):
     )
     parser: dict[str, str] | None = Field(
         None, description="Column remapping: {prompt: <col>, system: <col>}"
+    )
+    params: dict[str, Any] | None = Field(
+        None, description="Dataset-specific parameters passed to the generate() method"
     )
     accuracy_config: AccuracyConfig | None = Field(
         None, description="Accuracy evaluation settings"
