@@ -1,0 +1,52 @@
+# Agentic coding performance benchmark — edge device
+#
+# Replays recorded multi-turn agentic coding trajectories (SWE-bench-style) as a
+# performance workload against the same served endpoint used for BFCL v4
+# accuracy. This is a *performance* dataset (throughput/latency); it carries no
+# ground truth and is not scored.
+#
+# Each recorded conversation is replayed turn by turn: the recorded user/tool
+# turns are issued to the endpoint and the model generates each assistant
+# response (use_dataset_history=True, the default — recorded assistant/tool
+# history is fed back so every turn sees the original context).
+#
+# Run:
+#   inference-endpoint benchmark from-config \
+#     --config online_agentic_coding_perf.yaml
+#
+# Pair this with the BFCL v4 accuracy runs (see README.md) for a combined
+# accuracy + performance picture on the same endpoint.
+name: "agentic-coding-perf"
+version: "1.0"
+type: "online"
+
+model_params:
+  name: "Qwen3.6-27B-Q4_K_M" # replace with your served model name
+  max_new_tokens: 1024
+
+datasets:
+  - name: agentic_coding
+    type: performance
+    # 16 recorded agentic-coding conversations (~889 client turns).
+    path: examples/10_Edge_Agentic_Example/agentic_coding_16.jsonl
+    multi_turn:
+      turn_timeout_s: 600.0
+
+settings:
+  runtime:
+    min_duration_ms: 0
+    # Cap the run at 1h so it stays within an edge-device budget; the dataset
+    # may finish sooner once all conversations are exhausted.
+    max_duration_ms: 3600000
+  load_pattern:
+    type: multi_turn
+    # Concurrent in-flight conversations. Tune to the edge endpoint's capacity;
+    # raise on larger hardware for higher throughput.
+    target_concurrency: 16
+
+endpoint_config:
+  endpoints:
+    - "http://localhost:8080"
+  api_type: openai
+
+report_dir: results/agentic_coding_perf/

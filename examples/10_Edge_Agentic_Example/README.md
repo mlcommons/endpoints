@@ -1,4 +1,19 @@
-# BFCL v4 Accuracy Benchmarking
+# Edge-Agentic (BFCL v4) Accuracy Benchmarking
+
+## Quick start
+
+To reproduce all reference accuracy numbers (~2.5 h on an edge device), set
+your model name and endpoint URL, then run:
+
+```bash
+MODEL=Qwen3.6-27B-Q4_K_M ENDPOINT=http://localhost:8080 bash run_accuracy.sh
+```
+
+`run_accuracy.sh` runs both single-turn and multi-turn phases end-to-end with
+the exact validated parameters. See the steps below if you prefer to run each
+phase individually or need to customise the configuration.
+
+---
 
 ## What is this?
 
@@ -98,34 +113,21 @@ docker run --rm -it --gpus all \
 
 ---
 
-## Step 1 — Install from the PRs
-
-This feature spans two pull requests. Both must be present:
-
-| PR | Branch | What it does |
-| --- | --- | --- |
-| [PR #1](https://github.com/Palanivelg/endpoints/pull/1) | `chore/relax-numpy-pin` | Relaxes the `numpy` pin so `bfcl-eval` can install alongside the project |
-| [PR #2](https://github.com/Palanivelg/endpoints/pull/2) | `feat/bfcl-v4-combined` | Full BFCL v4 single-turn + multi-turn accuracy integration |
-
-**PR #1 is a prerequisite for PR #2.** Without it, `pip install -e ".[bfcl]"`
-fails with a numpy version conflict.
+## Step 1 — Install
 
 ```bash
-# 1. Clone the fork that contains both PRs
-git clone https://github.com/Palanivelg/endpoints.git
+# 1. Clone the repo
+git clone https://github.com/mlcommons/endpoints.git
 cd endpoints
 
-# 2. Check out the BFCL v4 branch (PR #2; already includes the PR #1 change)
-git checkout feat/bfcl-v4-combined
-
-# 3. Install the package with the [bfcl] scoring extra
+# 2. Install the package with the [bfcl] scoring extra
 pip install -e ".[bfcl]"
 
-# 4. Confirm the install resolved without conflict
+# 3. Confirm the install resolved without conflict
 pip show bfcl-eval numpy | grep -E "^(Name|Version)"
-# Expected: bfcl-eval present, numpy >= 1.26.4 (bfcl-eval may cap it < 2)
+# Expected: bfcl-eval present, numpy >= 1.26.4
 
-# 5. Confirm the CLI is available
+# 4. Confirm the CLI is available
 inference-endpoint --help
 ```
 
@@ -138,8 +140,8 @@ Single-turn covers three BFCL v4 categories: `non_live`, `live`, and
 The YAML config in this directory has the sampling rates pre-configured.
 
 ```bash
-# Run from the examples/10_BFCLv4_Example/ directory
-cd examples/10_BFCLv4_Example/
+# Run from the examples/10_Edge_Agentic_Example/ directory
+cd examples/10_Edge_Agentic_Example/
 
 inference-endpoint benchmark from-config \
   --config offline_bfcl_v4_single_turn.yaml \
@@ -180,6 +182,8 @@ python -m inference_endpoint.evaluation.bfcl_v4_multi_turn_cli \
   --model Qwen3.6-27B-Q4_K_M \
   --sample-pct 3 \
   --temperature 0 \
+  --seed 42 \
+  --max-steps-per-turn 25 \
   --report-dir results/bfcl_v4_multi_turn/
 ```
 
