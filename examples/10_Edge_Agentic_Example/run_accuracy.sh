@@ -22,13 +22,22 @@ echo "  Model:    $MODEL"
 echo "  Endpoint: $ENDPOINT"
 echo ""
 
+# from-config reads model name and endpoint from the YAML (it has no
+# model/endpoint override flags). Render a temp config with MODEL/ENDPOINT
+# substituted in so the env vars above take effect without editing the
+# committed YAML; the trailing "# set to your ..." comments anchor the edit.
+ST_CONFIG="$(mktemp --suffix=.yaml)"
+trap 'rm -f "$ST_CONFIG"' EXIT
+sed -E \
+    -e "s|^( *name: ).*(# set to your served model name\.)|\1\"${MODEL}\" \2|" \
+    -e "s|^( *- ).*(# set to your endpoint URL\.)|\1\"${ENDPOINT}\" \2|" \
+    offline_bfcl_v4_single_turn.yaml > "$ST_CONFIG"
+
 # Single-turn: non_live (20%), live (10%), hallucination (5%) — ~82 min
 echo "--- Single-turn (~82 min) ---"
 inference-endpoint benchmark from-config \
-    --config offline_bfcl_v4_single_turn.yaml \
-    --accuracy-only \
-    --model-params.name "$MODEL" \
-    --endpoint-config.endpoints "$ENDPOINT"
+    --config "$ST_CONFIG" \
+    --accuracy-only
 
 # Multi-turn: 3% sample across all four subsets — ~64 min
 echo "--- Multi-turn (~64 min) ---"
