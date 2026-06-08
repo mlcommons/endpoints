@@ -2,59 +2,56 @@
 #
 # Runs the three single-turn BFCL v4 categories (non_live, live, hallucination)
 # through the accuracy pipeline with per-category sampling tuned to finish on an
-# edge device within ~3 hours. Multi-turn (the slow category) is
-# run separately via the CLI — see README.md.
+# edge device within ~3 hours. Multi-turn is run separately via run_accuracy.sh.
 #
-# Run with the --accuracy-only flag (there is no performance dataset here):
+# For final submission, fields marked "do not change" must be kept as-is.
+# Fields marked "set to your value" must be updated for your environment.
+#
+# Run:
 #   inference-endpoint benchmark from-config \
 #     --config offline_bfcl_v4_single_turn.yaml --accuracy-only
 #
 # Requires: pip install -e ".[bfcl]"
 name: "bfcl-v4-single-turn-accuracy"
-version: "1.0"
-type: "offline"
-timeout: 10800 # 3 hours
+version: "1.0" # do not change.
+type: "offline" # do not change.
+timeout: 10800 # do not change.
 
 model_params:
-  name: "Qwen3.6-27B-Q4_K_M" # replace with your served model name
-  temperature: 0 # deterministic for reproducible accuracy
+  name: "Qwen3.6-27B-Q4_K_M" # set to your served model name.
+  temperature: 0 # do not change.
 
 datasets:
-  - name: bfcl_v4::function_calling
-    type: "accuracy"
+  - name: bfcl_v4::function_calling # do not change.
+    type: "accuracy" # do not change.
     params:
-      categories: ["non_live", "live", "hallucination"]
-      # Per-category sampling rates (validated full-run values).
+      categories: ["non_live", "live", "hallucination"] # do not change.
       category_sample_pct:
-        non_live: 20
-        live: 10
-        hallucination: 5
-      # Tiny-subset floor: any subset whose TOTAL size is <= 25 is taken in full.
-      # In practice this promotes only live_parallel (16) and
-      # live_parallel_multiple (24) to 100%, keeping their scores from collapsing
-      # to one or two noisy samples.
-      subset_floor: 25
+        non_live: 20 # do not change.
+        live: 10 # do not change.
+        hallucination: 5 # do not change.
+      # Subsets with total size <= 25 are always taken in full so their scores
+      # are not reduced to one or two noisy samples.
+      subset_floor: 25 # do not change.
     accuracy_config:
-      eval_method: "bfcl_v4"
-      ground_truth: "ground_truth"
-      extractor: "function_call_extractor"
-      num_repeats: 1
+      eval_method: "bfcl_v4" # do not change.
+      ground_truth: "ground_truth" # do not change.
+      extractor: "function_call_extractor" # do not change.
+      num_repeats: 1 # do not change.
 
 settings:
   runtime:
-    min_duration_ms: 0 # accuracy-only: no min duration
-    dataloader_random_seed: 42
+    min_duration_ms: 0 # do not change.
+    dataloader_random_seed: 42 # do not change.
   load_pattern:
-    type: "max_throughput"
+    type: "max_throughput" # do not change.
   client:
-    # --accuracy-only forces num_workers=1 / max_connections=1 for deterministic
-    # per-sample ordering; these are set here for clarity.
-    num_workers: 1
-    max_connections: 1
+    num_workers: 1 # do not change.
+    max_connections: 1 # do not change.
 
 endpoint_config:
   endpoints:
-    - "http://localhost:8080"
+    - "http://localhost:8080" # set to your endpoint URL.
   api_key: null
 
-report_dir: results/bfcl_v4_single_turn_accuracy/
+report_dir: results/bfcl_v4_single_turn_accuracy/ # do not change.
