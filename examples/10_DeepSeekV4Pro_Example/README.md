@@ -92,6 +92,44 @@ uv run inference-endpoint benchmark from-config \
   --timeout 60
 ```
 
+### Run Accuracy (vLLM)
+
+Same workflow as SGLang: start vLLM, set `HF_TOKEN` (required for gated GPQA), then run the
+accuracy helper (checks prerequisites, tees logs under `results/docker_logs/accuracy/`):
+
+```bash
+export HF_TOKEN=<your HuggingFace token>
+export HF_HOME=~/.cache/huggingface
+
+# Start vLLM (see Launch Server above), then:
+./examples/10_DeepSeekV4Pro_Example/run_vllm_accuracy_benchmark.sh
+```
+
+YAML-only (equivalent):
+
+```bash
+uv run inference-endpoint benchmark from-config \
+  -c examples/10_DeepSeekV4Pro_Example/vllm_deepseek_v4_pro_accuracy.yaml \
+  --timeout 3600
+```
+
+Python script (legacy `run_accuracy.py` path):
+
+```bash
+USE_PYTHON_SCRIPT=true ./examples/10_DeepSeekV4Pro_Example/run_vllm_accuracy_benchmark.sh
+```
+
+| Argument / env | Default | Description |
+| -------------- | ------- | ----------- |
+| `HF_TOKEN` | _(required)_ | HuggingFace token for GPQA download |
+| `VLLM_PORT` | `8000` | vLLM HTTP port |
+| `TIMEOUT` | `3600` | Benchmark timeout (seconds) |
+| `ALLOW_LCB_LOCAL_EVAL` | `true` | Subprocess LCB scoring when `lcb-service` is unavailable |
+| `USE_PYTHON_SCRIPT` | `false` | Use `run_accuracy.py` instead of YAML |
+
+Accuracy config uses `max_new_tokens: 32000`, concurrency `num_workers: 64`, and phase order
+AIME25 ×8 → GPQA ×5 → LiveCodeBench ×3 so math scores are recorded before the LCB phase.
+
 ---
 
 ## SGLang (ROCm / MI35x)
@@ -252,7 +290,8 @@ USE_PYTHON_SCRIPT=true ./examples/10_DeepSeekV4Pro_Example/run_sglang_accuracy_b
 | `USE_PYTHON_SCRIPT` | `false` | Use `run_accuracy_sglang.py` instead of YAML |
 | `DOCKER_LOG_STORAGE_GB` | `16` | Container writable layer size when supported |
 
-Accuracy config uses `max_new_tokens: 50000` and dataset repeats: GPQA ×5, AIME25 ×8, LCB ×3.
+Accuracy config uses `max_new_tokens: 32000`, concurrency `num_workers: 64`, and phase order
+AIME25 ×8 → GPQA ×5 → LiveCodeBench ×3.
 
 ### Docker log storage
 
@@ -293,10 +332,12 @@ Same fallback as the GPT-OSS example — runs `lcb_serve` as a subprocess on the
 
 ```bash
 export ALLOW_LCB_LOCAL_EVAL=true
+./examples/10_DeepSeekV4Pro_Example/run_vllm_accuracy_benchmark.sh
+# or
 ./examples/10_DeepSeekV4Pro_Example/run_sglang_accuracy_benchmark.sh
 ```
 
-`run_sglang_accuracy_benchmark.sh` skips the `:13835` preflight when this is set.
+Both accuracy helpers skip the `:13835` preflight when this is set (default `true`).
 WebSocket scoring is attempted first if `lcb-service` is up; otherwise scoring falls
 back to the subprocess path automatically.
 
@@ -310,8 +351,9 @@ If inference completed but scoring failed (e.g. `lcb-service` was not running), 
 ```bash
 cd endpoints
 uv run python examples/10_DeepSeekV4Pro_Example/rescore_accuracy.py \
-  --report-dir results/sglang_deepseek_v4_pro_accuracy \
+  --report-dir results/vllm_deepseek_v4_pro_accuracy \
   --write-results-json
+# or results/sglang_deepseek_v4_pro_accuracy for SGLang runs
 ```
 
 Skip LiveCodeBench until the container is ready:

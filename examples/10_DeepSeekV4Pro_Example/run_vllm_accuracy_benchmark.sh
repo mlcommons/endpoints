@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Accuracy-only DeepSeek-V4-Pro benchmark against SGLang (GPQA + AIME25 + LCB).
-# Workflow mirrors examples/04_GPTOSS120B_Example/run.py + from-config accuracy YAML.
+# Accuracy-only DeepSeek-V4-Pro benchmark against vLLM (AIME25 + GPQA + LCB).
+# Workflow mirrors run_sglang_accuracy_benchmark.sh + from-config accuracy YAML.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -8,8 +8,8 @@ ENDPOINTS_DIR="${ENDPOINTS_DIR:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"
 # shellcheck source=docker_common.sh
 source "${SCRIPT_DIR}/docker_common.sh"
 
-CONFIG="${CONFIG:-${SCRIPT_DIR}/sglang_deepseek_v4_pro_accuracy.yaml}"
-SGLANG_PORT="${SGLANG_PORT:-30000}"
+CONFIG="${CONFIG:-${SCRIPT_DIR}/vllm_deepseek_v4_pro_accuracy.yaml}"
+VLLM_PORT="${VLLM_PORT:-8000}"
 LCB_PORT="${LCB_PORT:-13835}"
 TIMEOUT="${TIMEOUT:-3600}"
 USE_PYTHON_SCRIPT="${USE_PYTHON_SCRIPT:-false}"
@@ -40,12 +40,12 @@ export LCB_DATASETS_DIR="${LCB_DATASETS_DIR:-${ENDPOINTS_DIR}/dataset_cache/live
 
 echo "=== Pre-flight checks ==="
 
-if ! curl --output /dev/null --silent --fail "http://127.0.0.1:${SGLANG_PORT}/health"; then
-  echo "ERROR: SGLang is not healthy on port ${SGLANG_PORT}."
-  echo "Start the server: ${SCRIPT_DIR}/start_sglang_server.sh"
+if ! curl --output /dev/null --silent --fail "http://127.0.0.1:${VLLM_PORT}/health"; then
+  echo "ERROR: vLLM is not healthy on port ${VLLM_PORT}."
+  echo "Start the server first (see README.md)."
   exit 1
 fi
-echo "SGLang OK on port ${SGLANG_PORT}"
+echo "vLLM OK on port ${VLLM_PORT}"
 
 _allow_lcb_local=false
 case "${ALLOW_LCB_LOCAL_EVAL:-}" in
@@ -82,16 +82,16 @@ echo "Log directory (host): ${LOG_DIR}"
 echo "Accuracy phase drain: unlimited (settings.drain.accuracy_timeout_s default)"
 echo ""
 
-rm -rf "${ENDPOINTS_DIR}/results/sglang_deepseek_v4_pro_accuracy"
-echo "Cleared prior results: results/sglang_deepseek_v4_pro_accuracy/"
+rm -rf "${ENDPOINTS_DIR}/results/vllm_deepseek_v4_pro_accuracy"
+echo "Cleared prior results: results/vllm_deepseek_v4_pro_accuracy/"
 echo ""
 
 if [[ "${USE_PYTHON_SCRIPT}" == "true" ]]; then
-  echo "=== Running accuracy suite (Python script, GPT-OSS style) ==="
+  echo "=== Running accuracy suite (Python script) ==="
   BENCHMARK_LOG="${LOG_DIR}/accuracy_benchmark.log"
-  uv run python "${SCRIPT_DIR}/run_accuracy_sglang.py" \
-    --endpoint-url "http://127.0.0.1:${SGLANG_PORT}" \
-    --report-dir results/sglang_deepseek_v4_pro_accuracy \
+  uv run python "${SCRIPT_DIR}/run_accuracy.py" \
+    --endpoint-url "http://127.0.0.1:${VLLM_PORT}" \
+    --report-dir results/vllm_deepseek_v4_pro_accuracy \
     --max-duration "${TIMEOUT}" \
     2>&1 | tee "${BENCHMARK_LOG}"
 else
