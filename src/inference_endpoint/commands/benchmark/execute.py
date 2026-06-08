@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import random
 import shutil
 import signal
@@ -100,6 +101,31 @@ from inference_endpoint.metrics.report import Report
 transformers_logging.set_verbosity_error()
 
 logger = logging.getLogger(__name__)
+
+_SERVICE_READY_TIMEOUT_ENV = "INFERENCE_ENDPOINT_SERVICE_READY_TIMEOUT_S"
+_SERVICE_READY_TIMEOUT_DEFAULT = 30.0
+
+
+def _service_ready_timeout() -> float:
+    """Service-startup readiness timeout, overridable via env.
+
+    Service imports off a shared/Lustre FS can exceed the default under heavy
+    login-node I/O contention. A non-numeric override is ignored with a warning
+    rather than crashing setup.
+    """
+    raw = os.environ.get(_SERVICE_READY_TIMEOUT_ENV)
+    if raw is None:
+        return _SERVICE_READY_TIMEOUT_DEFAULT
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning(
+            "Ignoring non-numeric %s=%r; using default %.0fs",
+            _SERVICE_READY_TIMEOUT_ENV,
+            raw,
+            _SERVICE_READY_TIMEOUT_DEFAULT,
+        )
+        return _SERVICE_READY_TIMEOUT_DEFAULT
 
 
 def _default_report_path() -> Path:
@@ -661,11 +687,7 @@ async def _run_benchmark_async(
                     args=event_logger_args,
                 ),
             ],
-            # Service startup imports off a shared/Lustre FS can exceed 30 s
-            # under heavy login-node I/O contention; allow an override.
-            timeout=float(
-                os.environ.get("INFERENCE_ENDPOINT_SERVICE_READY_TIMEOUT_S", "30")
-            ),
+            timeout=_service_ready_timeout(),
         )
 
         # Create endpoint client on the shared loop
@@ -919,14 +941,20 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
     # Accuracy scoring
     accuracy_scores: dict[str, Any] = {}
     for eval_cfg in ctx.eval_configs:
-        scorer_instance = eval_cfg.scorer(
-            eval_cfg.dataset_name,
-            eval_cfg.dataset,
-            eval_cfg.report_dir,
-            extractor=eval_cfg.extractor,
-            ground_truth_column=eval_cfg.ground_truth_column,
-            **eval_cfg.extras,
-        )
+        try:
+            scorer_instance = eval_cfg.scorer(
+                eval_cfg.dataset_name,
+                eval_cfg.dataset,
+                eval_cfg.report_dir,
+                extractor=eval_cfg.extractor,
+                ground_truth_column=eval_cfg.ground_truth_column,
+                **eval_cfg.extras,
+            )
+        except TypeError as e:
+            raise InputValidationError(
+                f"Dataset '{eval_cfg.dataset_name}': invalid accuracy_config.extras "
+                f"for scorer '{eval_cfg.scorer.__name__}': {e}"
+            ) from e
         score, n_repeats = scorer_instance.score()
         assert eval_cfg.dataset.data is not None
         accuracy_scores[eval_cfg.dataset_name] = {
