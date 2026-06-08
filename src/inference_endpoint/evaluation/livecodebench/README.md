@@ -173,29 +173,87 @@ docker build \
 rm /tmp/.hf_token
 ```
 
+### Distributing the Image via a Container Registry
+
+The `lcb-service` image is **self-contained**: the LiveCodeBench dataset is baked into the image at build time. This means a maintainer
+can build the image **once** (the only step that needs an `HF_TOKEN` and a `dhi.io` login) and push it to a registry, after which any
+consumer can **pull and run it with no `HF_TOKEN` and no rebuild**.
+
+Two scripts in this directory wrap the docker build/tag/push/pull steps. Both resolve the image reference from environment variables
+(shared via `_image_env.sh`):
+
+| Variable             | Required | Default              | Meaning                                                                     |
+| -------------------- | -------- | -------------------- | --------------------------------------------------------------------------- |
+| `LCB_IMAGE_REGISTRY` | yes      | —                    | registry + namespace, e.g. `myregistry.com/team`                            |
+| `LCB_IMAGE_NAME`     | no       | `lcb-service`        | image repo name                                                             |
+| `LCB_IMAGE_TAG`      | no       | `release_v6`         | tag; defaults to the baked-in dataset version so the tag is self-describing |
+| `LCB_LOCAL_TAG`      | no       | `lcb-service:latest` | local tag the run command / scorer expect                                   |
+
+The resolved remote reference is `${LCB_IMAGE_REGISTRY}/${LCB_IMAGE_NAME}:${LCB_IMAGE_TAG}`.
+
+#### Push (maintainer)
+
+Requires `docker login dhi.io` (base images) and `docker login` to your target registry first.
+
+```bash
+# Build (using HF_TOKEN as a build secret) and push:
+LCB_IMAGE_REGISTRY=myregistry.com/team HF_TOKEN=<your HuggingFace Token> \
+  ./push_image.sh
+
+# Or push an already-built local image without rebuilding:
+LCB_IMAGE_REGISTRY=myregistry.com/team ./push_image.sh --no-build
+```
+
+**Cross-architecture builds.** To build for an architecture other than the host's (e.g. build `arm64` on an
+`x86_64` node, or a multi-arch manifest), pass `--platform`:
+
+```bash
+LCB_IMAGE_REGISTRY=myregistry.com/team HF_TOKEN=<token> ./push_image.sh --platform linux/arm64
+LCB_IMAGE_REGISTRY=myregistry.com/team HF_TOKEN=<token> ./push_image.sh --platform linux/amd64,linux/arm64
+```
+
+Platform builds use `docker buildx` and push the image **straight to the registry** (a non-native image cannot be
+loaded into the local docker store, so there is no `--no-build` for this path). The script auto-creates a
+`docker-container` buildx builder. The target architecture must have **QEMU emulation registered on the host**,
+a one-time step that needs `--privileged`:
+
+```bash
+docker run --privileged --rm tonistiigi/binfmt --install all
+```
+
+> ⚠️ The dataset-generation step runs under emulation when cross-building, which is **much slower** than a native
+> build (and still needs the same ~21 GiB peak). Prefer building natively on a host of the target architecture
+> when one is available.
+
+#### Pull (consumer / eval side)
+
+No `HF_TOKEN` needed. By default the image is re-tagged locally as `lcb-service:latest`, so the
+[hardened run command](#hardened-run-command) and the scorer's `ws://localhost:13835/evaluate` expectation work unchanged.
+
+```bash
+LCB_IMAGE_REGISTRY=myregistry.com/team ./pull_image.sh
+```
+
 ### (Only if using enroot) Generating a .sqsh file for enroot
 
-Once the image has been built, it can be imported into [enroot](https://github.com/NVIDIA/enroot/tree/main) via the standard
-[enroot import process](https://github.com/NVIDIA/enroot/blob/main/doc/cmd/import.md).
+The pull script can produce an enroot `.sqsh` from the pulled image with the `--sqsh` flag, for infrastructure that only supports
+[enroot](https://github.com/NVIDIA/enroot/tree/main) (e.g. SLURM clusters):
 
-First, add authentication with `dhi.io` to enroot via the `$ENROOT_CONFIG_PATH/.credentials` file. Create a read-only personal access
-token (PAT) for dhi.io and store it in an environment variable (i.e. `export DHI_PAT_RO=<your PAT>`). Then add this to your enroot
-credentials file:
+```bash
+LCB_IMAGE_REGISTRY=myregistry.com/team ./pull_image.sh --sqsh            # writes lcb_service.sqsh
+LCB_IMAGE_REGISTRY=myregistry.com/team ./pull_image.sh --sqsh out.sqsh   # custom output path
+```
+
+This runs `enroot import --output <file> dockerd://${LCB_IMAGE_REF}` on the just-pulled image. Running the service via enroot is
+**NOT RECOMMENDED** unless your infrastructure only supports enroot and not docker, because enroot lacks some of the extra security
+isolation features detailed in the [Docker Security Hardening](#docker-security-hardening) section.
+
+If instead you need to import directly from the `dhi.io` base-image registry (rather than a pulled `lcb-service` image), add a
+read-only personal access token (PAT) for `dhi.io` to your `$ENROOT_CONFIG_PATH/.credentials` file:
 
 ```
 machine dhi.io login <docker username / email> password $DHI_PAT_RO
 ```
-
-After doing so, you should be able to create the sqsh file with the pre-built Docker image:
-
-```
-enroot import --output lcb_service.sqsh dockerd://lcb-service:latest
-```
-
-After which you can run the service via enroot. Note however that this is **NOT RECOMMENDED** and should only be done if your
-infrastructure only supports enroot and not docker. This is because enroot is designed for high-performance and does not have
-some of the extra security isolation features that docker has that are detailed in the [Docker Security Hardening](#docker-security-hardening)
-section.
 
 ### Run the Container
 

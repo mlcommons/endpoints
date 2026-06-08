@@ -46,9 +46,7 @@ from inference_endpoint.endpoint_client.http import (
     PooledConnection,
 )
 from inference_endpoint.profiling import profile
-from inference_endpoint.utils import trace
 from inference_endpoint.utils.logging import setup_logging
-from inference_endpoint.utils.trace import Event, emit_trace_id
 
 logger = logging.getLogger(__name__)
 
@@ -83,15 +81,6 @@ def worker_main(
 
     worker_log_format = f"%(asctime)s - %(name)s[W{worker_id}/%(process)d] - %(funcName)s - %(levelname)s - %(message)s"
     setup_logging(level=http_config.log_level, format_string=worker_log_format)
-    # -vvv: worker attaches to the FIFO main proc created at bootstrap.
-    # Missing here means the caller set trace_pipe_path but skipped
-    # mkfifo — fail loud rather than silently lose trace events.
-    if http_config.trace_pipe_path:
-        if not os.path.exists(http_config.trace_pipe_path):
-            raise FileNotFoundError(
-                f"trace_pipe_path={http_config.trace_pipe_path} missing"
-            )
-        trace.enable_tracing(http_config.trace_pipe_path)
 
     # Configure GC based on worker_gc_mode
     match http_config.worker_gc_mode:
@@ -240,11 +229,6 @@ class Worker:
             signal.signal(signal.SIGTERM, self.shutdown)
             signal.signal(signal.SIGINT, self.shutdown)
 
-            # Event-loop lag sampler also drains this worker's trace
-            # buffer on the loop thread — see `trace.emit_loop_lag`.
-            if trace.is_enabled():
-                self._loop.create_task(trace.emit_loop_lag(self.worker_id))
-
             # Warmup connection pool if enabled
             warmup_cfg = self.http_config.warmup_connections
             if warmup_cfg != 0:
@@ -322,8 +306,6 @@ class Worker:
                     if query is None:
                         break
 
-                    emit_trace_id(Event.WORKER_RECEIVED, query.id)
-
                     # Prepare and fire request
                     req = self._prepare_request(query)
                     if not await self._fire_request(req):
@@ -357,7 +339,7 @@ class Worker:
             extra_headers=query.headers,
         )
 
-        # Create request context.
+        # Create request context
         req = InFlightRequest(
             query_id=query.id,
             http_bytes=http_bytes,
@@ -383,11 +365,8 @@ class Worker:
             # Acquire connection from pool
             conn = await self._pool.acquire()
 
-            emit_trace_id(Event.CONN_ACQUIRED, req.query_id)
-
             # Write request bytes directly to transport
             conn.protocol.write(req.http_bytes)
-            emit_trace_id(Event.WRITTEN, req.query_id)
 
             # Store connection on req for response processing
             req.connection = conn
@@ -407,7 +386,6 @@ class Worker:
         try:
             # Await headers and handle error status
             status_code, _ = await conn.protocol.read_headers()
-            emit_trace_id(Event.RESPONSE_HEADERS, req.query_id)
             if status_code != 200:
                 error_body = await conn.protocol.read_body()
                 self._pool.release(conn)
@@ -445,20 +423,13 @@ class Worker:
         accumulator = self._accumulator(query_id, self.http_config.stream_all_chunks)
 
         # Process SSE stream - yields batches of chunks
-        first_chunk = True
         async for chunk_batch in self._iter_sse_lines(conn):
-            if first_chunk:
-                emit_trace_id(Event.RESPONSE_BYTES, req.query_id)
-                first_chunk = False
             for delta in chunk_batch:
                 if stream_chunk := accumulator.add_chunk(delta):
                     self._responses.send(stream_chunk)
 
         # Release connection early - done with socket I/O (idempotent)
         self._pool.release(conn)
-
-        # Last chunk received — splits server token-gen from the client tail.
-        emit_trace_id(Event.RESPONSE_DONE, req.query_id)
 
         # Send final complete back to main rank
         self._responses.send(accumulator.get_final_output())
@@ -471,7 +442,6 @@ class Worker:
 
         # Read entire response body
         response_bytes = await conn.protocol.read_body()
-        emit_trace_id(Event.RESPONSE_BYTES, req.query_id)
 
         # Release connection early - done with socket I/O (idempotent)
         self._pool.release(conn)
