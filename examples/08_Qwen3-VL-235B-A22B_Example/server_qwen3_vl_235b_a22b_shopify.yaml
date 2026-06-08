@@ -40,6 +40,10 @@ settings:
     max_connections: 1000
     # Increase timeout for slow worker startup (spawn, imports). Default 40s may be too short.
     worker_initialization_timeout: 120
+  warmup:
+    enabled: true # Enable warmup phase before performance run
+    n_requests: 1600 # Warmup request count (None = full dataset once)
+    salt: false
 
 endpoint_config:
   endpoints:

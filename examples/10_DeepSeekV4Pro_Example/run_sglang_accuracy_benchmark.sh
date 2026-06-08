@@ -13,9 +13,7 @@ SGLANG_PORT="${SGLANG_PORT:-30000}"
 LCB_PORT="${LCB_PORT:-13835}"
 TIMEOUT="${TIMEOUT:-3600}"
 USE_PYTHON_SCRIPT="${USE_PYTHON_SCRIPT:-false}"
-# Accuracy phases use bounded concurrency then drain; default 240 s is far too short
-# for long DeepSeek runs. Override per phase (48 h default here).
-export BENCHMARK_PHASE_DRAIN_TIMEOUT_S="${BENCHMARK_PHASE_DRAIN_TIMEOUT_S:-172800}"
+# Accuracy phases drain with no timeout by default (settings.drain.accuracy_timeout_s).
 export ALLOW_LCB_LOCAL_EVAL="${ALLOW_LCB_LOCAL_EVAL:-true}"
 
 cd "${ENDPOINTS_DIR}"

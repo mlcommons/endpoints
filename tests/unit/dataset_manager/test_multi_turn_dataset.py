@@ -1355,6 +1355,22 @@ def test_metadata_system_prompts_multiple_convs():
     assert spc["c2"] == "Sys2"
 
 
+@pytest.mark.unit
+def test_enable_salt_warns_when_conversation_has_no_system_prompt(caplog):
+    rows = [
+        {"conversation_id": "c1", "turn": 1, "role": "user", "content": "Hi"},
+        {"conversation_id": "c1", "turn": 2, "role": "assistant", "content": "Ok"},
+    ]
+    df = pd.DataFrame(rows)
+    ds = MultiTurnDataset(df)
+    ds.enable_salt()
+
+    ds.load()
+
+    assert "cache salt not applied" in caplog.text
+    assert ds.conversation_metadata.system_prompts_by_conv["c1"] is None
+
+
 # ============================================================================
 # Fix 2: tool_results / tool_calls stripped from sample dicts
 # ============================================================================
@@ -1437,6 +1453,19 @@ def test_multi_turn_dataset_null_conversation_id_rejected(conv_id):
     rows = [{"conversation_id": conv_id, "turn": 1, "role": "user", "content": "Hi"}]
     df = pd.DataFrame(rows)
     with pytest.raises(InputValidationError, match="conversation_id"):
+        MultiTurnDataset(df)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "conv_id",
+    ["conv\nInjected: x", "conv\r\nInjected: x", "conv\tbad", "conv\x00bad", "conv-é"],
+    ids=["lf", "crlf", "tab", "nul", "non_ascii"],
+)
+def test_multi_turn_dataset_non_printable_conversation_id_rejected(conv_id):
+    rows = [{"conversation_id": conv_id, "turn": 1, "role": "user", "content": "Hi"}]
+    df = pd.DataFrame(rows)
+    with pytest.raises(InputValidationError, match="non-printable or non-ASCII"):
         MultiTurnDataset(df)
 
 

@@ -486,6 +486,7 @@ def _build_phases(
 ) -> list[PhaseConfig]:
     """Build the phase list from BenchmarkContext."""
     phases: list[PhaseConfig] = []
+    drain_cfg = ctx.config.settings.drain
 
     # Warmup phase (optional, before performance)
     warmup_cfg = ctx.config.settings.warmup
@@ -513,6 +514,7 @@ def _build_phases(
                 warmup_dataset,
                 PhaseType.WARMUP,
                 drain_after=warmup_cfg.drain,
+                drain_timeout=drain_cfg.warmup_timeout_s,
             )
         )
 
@@ -524,6 +526,7 @@ def _build_phases(
             ctx.dataloader,
             PhaseType.PERFORMANCE,
             strategy=perf_strategy,
+            drain_timeout=drain_cfg.performance_timeout_s,
         )
     )
 
@@ -556,7 +559,13 @@ def _build_phases(
             load_pattern=acc_load_pattern,
         )
         phases.append(
-            PhaseConfig(eval_cfg.dataset_name, acc_settings, acc_ds, PhaseType.ACCURACY)
+            PhaseConfig(
+                eval_cfg.dataset_name,
+                acc_settings,
+                acc_ds,
+                PhaseType.ACCURACY,
+                drain_timeout=drain_cfg.accuracy_timeout_s,
+            )
         )
 
     return phases
@@ -654,6 +663,15 @@ async def _run_benchmark_async(
             aggregator_args.append("--streaming")
         if ctx.tokenizer_name is not None:
             aggregator_args.extend(["--tokenizer", ctx.tokenizer_name])
+        aggregator_args.extend(
+            ["--drain-timeout", str(config.settings.drain.metrics_drain_timeout_s)]
+        )
+        aggregator_args.extend(
+            [
+                "--tokenizer-workers",
+                str(config.settings.drain.metrics_tokenizer_workers),
+            ]
+        )
 
         # EventLoggerService writes events.jsonl to tmpfs (high-frequency writes)
         event_logger_args: list[str] = [

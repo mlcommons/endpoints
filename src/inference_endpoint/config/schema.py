@@ -190,6 +190,10 @@ class ModelParams(BaseModel):
     repetition_penalty: float | None = Field(None, description="Repetition penalty")
     presence_penalty: float | None = Field(None, description="Presence penalty")
     frequency_penalty: float | None = Field(None, description="Frequency penalty")
+    chat_template_kwargs: dict[str, Any] | None = Field(
+        None,
+        description="Per-request chat-template kwargs forwarded to compatible servers.",
+    )
     max_new_tokens: Annotated[
         int, cyclopts.Parameter(alias="--max-output-tokens", help="Max output tokens")
     ] = 1024
@@ -253,6 +257,20 @@ class MultiTurnConfig(BaseModel):
 
     turn_timeout_s: float = Field(default=300.0, gt=0)
     use_dataset_history: bool = True
+    enable_salt: bool = Field(
+        False,
+        description=(
+            "Enable salt addition after system prompt to prevent KV cache reuse "
+            "across trajectories in multi-turn setting."
+        ),
+    )
+    inject_tool_delay: bool = Field(
+        False,
+        description=(
+            "Pause for a predefined duration between turns. Duration is defined "
+            "in dataset."
+        ),
+    )
 
 
 class Dataset(BaseModel):
@@ -483,6 +501,81 @@ class WarmupConfig(BaseModel):
     ] = Field(42, description="RNG seed for warmup scheduling and sample ordering")
 
 
+class DrainConfig(BaseModel):
+    """Per-phase in-flight response drain timeout configuration."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    warmup_timeout_s: Annotated[
+        float | None,
+        cyclopts.Parameter(
+            alias="--warmup-drain-timeout",
+            help="Warmup drain timeout in seconds (None = wait indefinitely)",
+        ),
+    ] = Field(
+        240.0,
+        gt=0,
+        description="Warmup drain timeout in seconds (None = wait indefinitely)",
+    )
+    performance_timeout_s: Annotated[
+        float | None,
+        cyclopts.Parameter(
+            alias="--performance-drain-timeout",
+            help="Performance drain timeout in seconds (None = wait indefinitely)",
+        ),
+    ] = Field(
+        240.0,
+        gt=0,
+        description="Performance drain timeout in seconds (None = wait indefinitely)",
+    )
+    accuracy_timeout_s: Annotated[
+        float | None,
+        cyclopts.Parameter(
+            alias="--accuracy-drain-timeout",
+            help="Accuracy drain timeout in seconds (None = wait indefinitely)",
+        ),
+    ] = Field(
+        None,
+        gt=0,
+        description="Accuracy drain timeout in seconds (None = wait indefinitely)",
+    )
+    metrics_drain_timeout_s: Annotated[
+        float,
+        cyclopts.Parameter(
+            alias="--metrics-drain-timeout",
+            help=(
+                "Wall-clock budget (seconds) for the metrics aggregator to finish "
+                "in-flight async tokenize tasks after the run ends before cancelling "
+                "them. Set to 0 to wait indefinitely. Increase for large datasets or "
+                "long-context workloads where ISL/OSL/TPOT tokenization lags behind "
+                "request throughput."
+            ),
+        ),
+    ] = Field(
+        60.0,
+        ge=0,
+        description=(
+            "Wall-clock budget (seconds) for the metrics aggregator to drain "
+            "in-flight tokenize tasks after ENDED (default: 60.0; 0 = unlimited)."
+        ),
+    )
+    metrics_tokenizer_workers: Annotated[
+        int,
+        cyclopts.Parameter(
+            alias="--metrics-tokenizer-workers",
+            help=(
+                "Number of tokenizer worker threads in the metrics aggregator. "
+                "Increase if ISL/OSL/TPOT tokenization can't keep up with request "
+                "throughput (symptoms: large drain timeout warning at run end)."
+            ),
+        ),
+    ] = Field(
+        2,
+        ge=1,
+        description="Number of tokenizer worker threads in the metrics aggregator (default: 2).",
+    )
+
+
 @cyclopts.Parameter(name="*")
 class Settings(BaseModel):
     """Test settings."""
@@ -492,6 +585,10 @@ class Settings(BaseModel):
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
     load_pattern: LoadPattern = Field(default_factory=LoadPattern)
     client: HTTPClientConfig = Field(default_factory=HTTPClientConfig)
+    drain: DrainConfig = Field(
+        default_factory=DrainConfig,
+        description="Per-phase in-flight response drain timeout configuration",
+    )
     warmup: WarmupConfig = Field(default_factory=WarmupConfig)
 
 
