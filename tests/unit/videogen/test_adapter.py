@@ -19,7 +19,7 @@ import json
 
 import pytest
 from inference_endpoint.config.schema import ModelParams
-from inference_endpoint.core.types import APIType, Query, QueryResult
+from inference_endpoint.core.types import APIType, Query, QueryResult, TextModelOutput
 from inference_endpoint.endpoint_client.accumulator_protocol import (
     SSEAccumulatorProtocol,
 )
@@ -118,7 +118,11 @@ class TestVideoGenAdapter:
         }
 
     def test_decode_response_returns_video_path_in_metadata(self):
-        """Perf-mode decode branch — covered separately from integration."""
+        """Perf-mode decode branch — covered separately from integration.
+
+        video_path is also mirrored into response_output so the event log
+        carries it to the accuracy scorer (VBench reads videos by path).
+        """
         resp = VideoPathResponse(
             video_id="vid_perf_001",
             video_path="/lustre/videos/vid_perf_001.mp4",
@@ -127,11 +131,35 @@ class TestVideoGenAdapter:
         assert isinstance(result, QueryResult)
         assert result.id == "q1"
         assert result.error is None
-        assert result.response_output is None
+        assert result.response_output == TextModelOutput(
+            output="/lustre/videos/vid_perf_001.mp4"
+        )
         assert result.metadata == {
             "video_id": "vid_perf_001",
             "video_path": "/lustre/videos/vid_perf_001.mp4",
         }
+
+    def test_decode_response_with_ftyp_binary_writes_fallback(
+        self, tmp_path, monkeypatch
+    ):
+        """trtllm-serve builds that return raw mp4 bytes for response_format=video_path:
+        adapter sniffs the ISO BMFF `ftyp` box, persists to $INFERENCE_ENDPOINT_VIDEOGEN_FALLBACK_DIR,
+        and returns a QueryResult carrying only the path (keeps IPC frame small)."""
+        monkeypatch.setenv("INFERENCE_ENDPOINT_VIDEOGEN_FALLBACK_DIR", str(tmp_path))
+        body = b"\x00\x00\x00\x20ftypisom" + b"\x00" * 32
+        result = VideoGenAdapter.decode_response(body, "qbin")
+        out = tmp_path / "qbin.mp4"
+        assert out.exists() and out.read_bytes() == body
+        assert result.response_output == TextModelOutput(output=str(out))
+        assert result.metadata == {"video_id": "qbin", "video_path": str(out)}
+
+    def test_decode_response_binary_without_env_raises(self, monkeypatch):
+        monkeypatch.delenv("INFERENCE_ENDPOINT_VIDEOGEN_FALLBACK_DIR", raising=False)
+        body = b"\x00\x00\x00\x20ftypisom" + b"\x00" * 16
+        with pytest.raises(
+            RuntimeError, match="INFERENCE_ENDPOINT_VIDEOGEN_FALLBACK_DIR"
+        ):
+            VideoGenAdapter.decode_response(body, "qbin")
 
     def test_decode_sse_message_raises_not_implemented(self):
         with pytest.raises(NotImplementedError):

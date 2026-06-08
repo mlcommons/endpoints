@@ -19,7 +19,6 @@ import asyncio
 import logging
 import time
 from collections import defaultdict, deque
-from collections.abc import Iterator
 from typing import Any
 
 from ..config.schema import MultiTurnConfig
@@ -34,6 +33,11 @@ logger = logging.getLogger(__name__)
 
 # Default turn timeout when no MultiTurnConfig is provided.
 _DEFAULT_TURN_TIMEOUT_S = 300.0
+
+ConversationTurn = tuple[int, int]
+ConversationTurns = list[ConversationTurn]
+PendingConversation = tuple[str, ConversationTurns]
+ActiveConversationState = tuple[ConversationTurns, int]
 
 
 class MultiTurnStrategy:
@@ -131,9 +135,10 @@ class MultiTurnStrategy:
         self._conv_states: dict[str, ConversationState] = {}
 
         # Event-driven state — populated in execute().
-        self._pending_convs: deque[tuple[str, list[tuple[int, int]]]] = deque()
-        self._active_iters: dict[str, Iterator[tuple[int, int]]] = {}
+        self._pending_convs: deque[PendingConversation] = deque()
+        self._active_iters: dict[str, ActiveConversationState] = {}
         self._timeout_handles: dict[str, asyncio.TimerHandle] = {}
+        self._delay_handles: dict[str, asyncio.TimerHandle] = {}
         self._error: BaseException | None = None
         self._all_done: asyncio.Event | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -153,7 +158,7 @@ class MultiTurnStrategy:
         self._all_done = asyncio.Event()
         self._error = None
 
-        conv_samples: dict[str, list[tuple[int, int]]] = defaultdict(list)
+        conv_samples: dict[str, ConversationTurns] = defaultdict(list)
         for sample_meta in self._dataset_metadata.samples:
             conv_id = sample_meta.conversation_id
             assert sample_meta.sample_index is not None
@@ -188,7 +193,7 @@ class MultiTurnStrategy:
             for _ in range(n_to_start):
                 self._start_conversation()
 
-            if not self._active_iters and not self._inflight:
+            if not self._has_work_remaining():
                 return phase_issuer.issued_count
 
             await self._all_done.wait()
@@ -199,6 +204,9 @@ class MultiTurnStrategy:
             for handle in self._timeout_handles.values():
                 handle.cancel()
             self._timeout_handles.clear()
+            for handle in self._delay_handles.values():
+                handle.cancel()
+            self._delay_handles.clear()
             if self._inflight:
                 logger.warning(
                     "%d query(ies) never received a response (session stop or transport failure): %s",
@@ -207,25 +215,72 @@ class MultiTurnStrategy:
                 )
                 self._inflight.clear()
 
+    def _has_work_remaining(self) -> bool:
+        return bool(
+            self._pending_convs
+            or self._active_iters
+            or self._inflight
+            or self._delay_handles
+        )
+
     def _start_conversation(self) -> None:
         """Pop the next conversation from the pending queue and issue its first turn."""
         conv_id, turns = self._pending_convs.popleft()
-        self._active_iters[conv_id] = iter(turns)
+        self._active_iters[conv_id] = (turns, 0)
         self._issue_next_turn(conv_id)
 
     def _issue_next_turn(self, conv_id: str) -> None:
-        """Issue the next turn for conv_id, or mark the conversation done."""
-        it = self._active_iters.get(conv_id)
-        if it is None:
+        """Schedule the next turn for conv_id, applying inter-turn delay if set."""
+        state = self._active_iters.get(conv_id)
+        if state is None:
             return
 
-        pair = next(it, None)
-        if pair is None:
+        turns, cursor = state
+        if cursor >= len(turns):
             del self._active_iters[conv_id]
             self._fill_slot()
             return
 
-        idx, turn = pair
+        idx, turn = turns[cursor]
+
+        delay = 0.0
+        if (
+            self._multi_turn_config is not None
+            and self._multi_turn_config.inject_tool_delay
+        ):
+            delay_map = self._dataset_metadata.delay_seconds_by_key
+            delay = float(delay_map.get((conv_id, turn), 0.0))
+
+        if delay > 0.0:
+            assert self._loop is not None
+            handle = self._loop.call_later(
+                delay, self._issue_turn_now, conv_id, idx, turn
+            )
+            self._delay_handles[conv_id] = handle
+        else:
+            self._issue_turn_now(conv_id, idx, turn)
+
+    def _issue_turn_now(self, conv_id: str, idx: int, turn: int) -> None:
+        """Issue a single turn to the phase issuer."""
+        self._delay_handles.pop(conv_id, None)
+
+        active_iter = self._active_iters.get(conv_id)
+        if active_iter is None:
+            return
+        turns, cursor = active_iter
+        if cursor >= len(turns):
+            return
+        expected_idx, expected_turn = turns[cursor]
+        if expected_idx != idx or expected_turn != turn:
+            logger.debug(
+                "dropping stale delayed turn for conv=%s idx=%s turn=%s",
+                conv_id,
+                idx,
+                turn,
+            )
+            return
+        self._active_iters[conv_id] = (turns, cursor + 1)
+
         state = self._conv_states[conv_id]
 
         data_override: dict[str, Any] | None = None
@@ -272,7 +327,7 @@ class MultiTurnStrategy:
         try:
             if self._pending_convs:
                 self._start_conversation()
-            elif not self._active_iters:
+            elif not self._has_work_remaining():
                 assert self._all_done is not None
                 self._all_done.set()
         except Exception as exc:
@@ -294,7 +349,7 @@ class MultiTurnStrategy:
             and hasattr(self._phase_issuer, "uuid_to_index")
             and query_id in self._phase_issuer.uuid_to_index  # type: ignore[attr-defined]
         ):
-            self._phase_issuer.inflight -= 1  # type: ignore[attr-defined]
+            self._phase_issuer.mark_inflight_complete()
             if hasattr(self._phase_issuer, "completed_uuids"):
                 self._phase_issuer.completed_uuids.add(query_id)  # type: ignore[attr-defined]
             if hasattr(self._phase_issuer, "uuid_to_conv_info"):
@@ -379,12 +434,16 @@ class MultiTurnStrategy:
                 )
 
     def _abort_remaining_turns(self, conv_id: str, reason: str) -> int:
-        it = self._active_iters.pop(conv_id, None)
-        if it is None:
+        delay_handle = self._delay_handles.pop(conv_id, None)
+        if delay_handle is not None:
+            delay_handle.cancel()
+        state = self._active_iters.pop(conv_id, None)
+        if state is None:
             return 0
+        turns, cursor = state
         assert self._phase_issuer is not None
         dropped = 0
-        for idx, turn in it:
+        for idx, turn in turns[cursor:]:
             self._conv_manager.mark_turn_failed(
                 conv_id, store_in_history=self._store_in_history
             )

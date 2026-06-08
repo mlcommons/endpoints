@@ -259,6 +259,11 @@
           "type": "string",
           "description": "Custom chat formatting template"
         },
+        "delay_seconds": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Delay in seconds before issuing this client turn"
+        },
         "tools": {
           "type": "array",
           "description": "OpenAI tool definitions for tool-calling models",
@@ -422,6 +427,11 @@
         "field": "tool_results",
         "type": "array",
         "description": "Tool execution results (required for all 'tool' role rows). Each element has {tool_call_id, content}. Single results have one entry; parallel results have multiple entries."
+      },
+      {
+        "field": "delay_seconds",
+        "type": "number",
+        "description": "Optional. Inter-turn wall-clock delay (seconds) the client should sleep before issuing this row. Typically set only on 'tool' or 'user' rows. Honored at run time only when MultiTurnConfig.inject_tool_delay=True; otherwise ignored. Missing or zero means no sleep."
       },
       {
         "field": "model",

@@ -400,3 +400,50 @@ class TestTpotTriggerToolCalls:
         await task
 
         assert snapshot_series_count(registry, "tpot_ns") == 1
+
+    async def test_tpot_uses_tool_call_deltas_after_first_chunk(self):
+        from inference_endpoint.async_utils.services.metrics_aggregator.metrics_table import (
+            SampleField,
+            SampleRow,
+            TpotTrigger,
+        )
+        from inference_endpoint.core.types import TextModelOutput
+
+        from .conftest import MockTokenizePool, snapshot_series_total
+
+        registry = MetricsRegistry()
+        registry.register_series(
+            "tpot_ns", hdr_low=1, hdr_high=100_000_000_000, dtype=float
+        )
+        loop = asyncio.get_running_loop()
+        pool = MockTokenizePool(delay=0)
+        trigger = TpotTrigger(registry, pool, loop)
+
+        tool_call_chunks = (
+            (
+                {
+                    "index": 0,
+                    "id": "c1",
+                    "type": "function",
+                    "function": {"name": "f", "arguments": "first chunk "},
+                },
+            ),
+            ({"index": 0, "function": {"arguments": "after chunk"}},),
+        )
+        tmo = TextModelOutput(
+            output=[],
+            tool_calls=tool_call_chunks,
+        )
+        ev = EventRecord(
+            event_type=SampleEventType.COMPLETE,
+            timestamp_ns=5000,
+            sample_uuid="s1",
+            data=tmo,
+        )
+        row = SampleRow(sample_uuid="s1")
+        pre_change = {SampleField.RECV_FIRST_NS: 1000}
+        task = trigger.fire(ev, row, pre_change)
+        assert task is not None
+        await task
+
+        assert snapshot_series_total(registry, "tpot_ns") == pytest.approx(2000.0)

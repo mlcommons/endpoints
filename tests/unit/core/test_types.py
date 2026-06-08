@@ -941,6 +941,41 @@ class TestTextModelOutputToolCalls:
         after = tmo.text_after_first_chunk()
         assert '"function"' in after
 
+    def test_text_after_first_chunk_uses_tool_call_delta_tail(self):
+        tmo = TextModelOutput(
+            output=[],
+            tool_calls=(
+                (
+                    {
+                        "index": 0,
+                        "id": "c1",
+                        "type": "function",
+                        "function": {"name": "f", "arguments": "first"},
+                    },
+                ),
+                ({"index": 0, "function": {"arguments": "tail"}},),
+            ),
+        )
+        after = tmo.text_after_first_chunk()
+        assert "tail" in after
+        assert '"name"' not in after
+
+    def test_text_after_first_chunk_skips_single_tool_call_delta(self):
+        tmo = TextModelOutput(
+            output=[],
+            tool_calls=(
+                (
+                    {
+                        "index": 0,
+                        "id": "c1",
+                        "type": "function",
+                        "function": {"name": "f", "arguments": "{}"},
+                    },
+                ),
+            ),
+        )
+        assert tmo.text_after_first_chunk() == ""
+
     def test_as_message_parts_str_output(self):
         tmo = TextModelOutput(output="hello", tool_calls=self._TC)
         content, reasoning, tc = tmo.as_message_parts()
@@ -957,6 +992,30 @@ class TestTextModelOutputToolCalls:
         assert reasoning == "r1r2"
         assert tc == tmo.tool_calls
 
+    def test_as_message_parts_merges_tool_call_chunks(self):
+        tmo = TextModelOutput(
+            output="",
+            tool_calls=(
+                (
+                    {
+                        "index": 0,
+                        "id": "c1",
+                        "type": "function",
+                        "function": {"name": "f", "arguments": '{"a":'},
+                    },
+                ),
+                ({"index": 0, "function": {"arguments": "1}"}},),
+            ),
+        )
+        _content, _reasoning, tc = tmo.as_message_parts()
+        assert tc == (
+            {
+                "id": "c1",
+                "type": "function",
+                "function": {"name": "f", "arguments": '{"a":1}'},
+            },
+        )
+
     def test_as_message_parts_after_first_chunk_str_output(self):
         tmo = TextModelOutput(output="hello", tool_calls=self._TC)
         content, reasoning, tc = tmo.as_message_parts_after_first_chunk()
@@ -972,12 +1031,66 @@ class TestTextModelOutputToolCalls:
         assert reasoning is None
         assert tc == tmo.tool_calls
 
+    def test_as_message_parts_after_first_chunk_uses_tool_call_delta_tail(self):
+        tmo = TextModelOutput(
+            output=(),
+            tool_calls=(
+                (
+                    {
+                        "index": 0,
+                        "id": "c1",
+                        "type": "function",
+                        "function": {"name": "f", "arguments": "first"},
+                    },
+                ),
+                ({"index": 0, "function": {"arguments": "tail"}},),
+            ),
+        )
+        content, reasoning, tc = tmo.as_message_parts_after_first_chunk()
+        assert content == ""
+        assert reasoning is None
+        assert tc == ({"type": "function", "function": {"arguments": "tail"}},)
+
     def test_serialization_roundtrip_with_tool_calls(self):
         import msgspec
 
-        tmo = TextModelOutput(output="hello", tool_calls=self._TC)
+        tmo = TextModelOutput(
+            output="hello",
+            tool_calls=self._TC,
+        )
         encoded = msgspec.msgpack.encode(tmo)
         decoded = msgspec.msgpack.decode(encoded, type=TextModelOutput)
         assert decoded.tool_calls is not None
         assert len(decoded.tool_calls) == 1
         assert decoded.tool_calls[0]["function"]["name"] == "f"
+
+    def test_serialization_roundtrip_with_streamed_tool_call_chunks(self):
+        import msgspec
+
+        tmo = TextModelOutput(
+            output=[],
+            tool_calls=(
+                (
+                    {
+                        "index": 0,
+                        "id": "c1",
+                        "type": "function",
+                        "function": {"name": "f", "arguments": '{"a":'},
+                    },
+                ),
+                ({"index": 0, "function": {"arguments": "1}"}},),
+            ),
+        )
+        encoded = msgspec.msgpack.encode(tmo)
+        decoded = msgspec.msgpack.decode(encoded, type=TextModelOutput)
+
+        assert decoded.as_message_parts()[2] == (
+            {
+                "id": "c1",
+                "type": "function",
+                "function": {"name": "f", "arguments": '{"a":1}'},
+            },
+        )
+        assert decoded.as_message_parts_after_first_chunk()[2] == (
+            {"type": "function", "function": {"arguments": "1}"}},
+        )

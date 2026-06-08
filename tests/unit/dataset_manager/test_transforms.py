@@ -650,6 +650,18 @@ class TestAddStaticColumns:
         assert bool(result["bool_col"][0]) is False
         assert result["none_col"][0] is None
 
+    def test_dict_value_is_added_as_static_column(self):
+        """Test adding a dictionary as a constant value."""
+        static_value = {"thinking": True, "preserve_thinking": True}
+        df = pd.DataFrame({"col1": [1, 2]})
+        transform = AddStaticColumns({"chat_template_kwargs": static_value})
+        result = transform(df)
+
+        assert result["chat_template_kwargs"].tolist() == [
+            static_value,
+            static_value,
+        ]
+
 
 class TestColumnFilter:
     """Test suite for ColumnFilter transform."""
@@ -874,3 +886,17 @@ class TestAddStaticColumnsNoOverwrite:
         assert result["temp"].tolist()[0] == pytest.approx(0.9)
         assert result["temp"].tolist()[1] == pytest.approx(0.7)
         assert result["temp"].tolist()[2] == pytest.approx(0.5)
+
+    @pytest.mark.unit
+    def test_fills_nan_values_with_dict_default(self):
+        """NaN cells in an existing column are replaced with a dictionary default."""
+        static_value = {"thinking": True, "preserve_thinking": True}
+        df = pd.DataFrame({"chat_template_kwargs": [float("nan"), {"thinking": False}]})
+        result = AddStaticColumns(
+            {"chat_template_kwargs": static_value}, overwrite=False
+        )(df)
+
+        assert result["chat_template_kwargs"].tolist() == [
+            static_value,
+            {"thinking": False},
+        ]

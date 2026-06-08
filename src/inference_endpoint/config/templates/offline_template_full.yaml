@@ -11,6 +11,7 @@ model_params:
   repetition_penalty: null  # Repetition penalty
   presence_penalty: null  # Presence penalty
   frequency_penalty: null  # Frequency penalty
+  chat_template_kwargs: null  # Per-request chat-template kwargs forwarded to compatible servers.
   max_new_tokens: 1024  # Max output tokens
   osl_distribution: null  # Output sequence length distribution
   streaming: 'off'  # Streaming mode: auto/on/off | options: auto, on, off
@@ -36,7 +37,7 @@ datasets:  # Dataset configs
     prompt: question
     system: system_prompt
   accuracy_config:  # Accuracy evaluation settings
-    eval_method: pass_at_1  # Scorer method | options: pass_at_1, string_match, rouge, code_bench_scorer, shopify_category_f1
+    eval_method: pass_at_1  # Scorer method | options: pass_at_1, string_match, rouge, code_bench_scorer, shopify_category_f1, vbench
     ground_truth: ground_truth  # Ground truth column name
     extractor: boxed_math_extractor  # Answer extractor (abcd_extractor, boxed_math_extractor, identity_extractor, python_code_extractor)
     num_repeats: 1  # Repeat dataset N times for evaluation
@@ -70,14 +71,21 @@ settings:
     worker_initialization_timeout: 60.0  # Worker init timeout (seconds)
     worker_graceful_shutdown_wait: 0.5  # Post-run graceful shutdown wait (seconds)
     worker_force_kill_timeout: 0.5  # Force kill timeout after graceful wait (seconds)
+    insecure: false  # Skip TLS certificate verification
     max_idle_time: 4.0  # Discard connections idle longer than this (seconds)
     min_required_connections: -1  # Min connections to initialize (-1=auto, 0=disabled)
     worker_gc_mode: relaxed  # Worker GC strategy | options: disabled, relaxed, system
+  drain:
+    warmup_timeout_s: 240.0  # Warmup drain timeout in seconds (None = wait indefinitely)
+    performance_timeout_s: 240.0  # Performance drain timeout in seconds (None = wait indefinitely)
+    accuracy_timeout_s: null  # Accuracy drain timeout in seconds (None = wait indefinitely)
+    metrics_drain_timeout_s: 60.0  # Wall-clock budget (seconds) for the metrics aggregator to drain in-flight tokenize tasks after ENDED (default: 60.0; 0 = unlimited).
+    metrics_tokenizer_workers: 2  # Number of tokenizer worker threads in the metrics aggregator (default: 2).
   warmup:
     enabled: false  # Enable warmup phase before performance run
     n_requests: null  # Warmup request count (None = full dataset once)
     salt: false  # Prepend a unique random hex salt to each warmup prompt
-    drain: false  # Drain in-flight warmup requests before starting the performance phase
+    drain: false
     warmup_random_seed: 42  # RNG seed for warmup scheduling and sample ordering
 endpoint_config:
   endpoints:  # Endpoint URL(s). Must include scheme, e.g. 'http://host:port'.

@@ -18,6 +18,7 @@
 import json
 
 import msgspec
+import pandas as pd
 import pytest
 from inference_endpoint.core.types import Query
 from inference_endpoint.openai.openai_msgspec_adapter import (
@@ -191,3 +192,67 @@ def test_from_endpoint_response_populates_tool_calls_in_text_output():
     assert result.response_output.tool_calls[0]["function"]["name"] == "search"
     # metadata path unchanged
     assert result.metadata.get("tool_calls") == tool_calls
+
+
+@pytest.mark.unit
+def test_chat_template_kwargs_forwarded_when_set():
+    query = Query(
+        id="q3",
+        data={
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+            "chat_template_kwargs": {"thinking": True, "preserve_thinking": True},
+        },
+    )
+    request = OpenAIMsgspecAdapter.to_endpoint_request(query)
+    payload = json.loads(msgspec.json.encode(request))
+    assert payload["chat_template_kwargs"] == {
+        "thinking": True,
+        "preserve_thinking": True,
+    }
+
+
+@pytest.mark.unit
+def test_chat_template_kwargs_omitted_when_unset():
+    query = Query(
+        id="q4",
+        data={"model": "m", "messages": [{"role": "user", "content": "hi"}]},
+    )
+    request = OpenAIMsgspecAdapter.to_endpoint_request(query)
+    payload = json.loads(msgspec.json.encode(request))
+    assert "chat_template_kwargs" not in payload
+
+
+@pytest.mark.unit
+def test_dataset_transforms_includes_chat_template_kwargs():
+    from inference_endpoint.config.schema import ModelParams
+    from inference_endpoint.dataset_manager.transforms import AddStaticColumns
+
+    mp = ModelParams(
+        name="m", chat_template_kwargs={"thinking": True, "preserve_thinking": True}
+    )
+    transforms = OpenAIMsgspecAdapter.dataset_transforms(mp)
+    add_static = next(t for t in transforms if isinstance(t, AddStaticColumns))
+    assert add_static.data["chat_template_kwargs"] == {
+        "thinking": True,
+        "preserve_thinking": True,
+    }
+
+
+@pytest.mark.unit
+def test_dataset_transforms_preserve_chat_template_kwargs_dict():
+    from inference_endpoint.config.schema import ModelParams
+
+    chat_template_kwargs = {"thinking": True, "preserve_thinking": True}
+    mp = ModelParams(name="m", chat_template_kwargs=chat_template_kwargs)
+    df = pd.DataFrame({"prompt": ["hi"]})
+
+    for transform in OpenAIMsgspecAdapter.dataset_transforms(mp):
+        df = transform(df)
+
+    row = df.to_dict(orient="records")[0]
+    assert row["chat_template_kwargs"] == chat_template_kwargs
+
+    request = OpenAIMsgspecAdapter.to_endpoint_request(Query(id="q5", data=row))
+    payload = json.loads(msgspec.json.encode(request))
+    assert payload["chat_template_kwargs"] == chat_template_kwargs
