@@ -35,6 +35,7 @@ from inference_endpoint.commands.benchmark.execute import (
     ResponseCollector,
     _build_phases,
     _run_benchmark_async,
+    setup_benchmark,
 )
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import (
@@ -63,7 +64,7 @@ from inference_endpoint.core.types import QueryResult
 from inference_endpoint.dataset_manager.dataset import Dataset
 from inference_endpoint.endpoint_client.config import HTTPClientConfig
 from inference_endpoint.evaluation.scoring import Scorer
-from inference_endpoint.exceptions import InputValidationError
+from inference_endpoint.exceptions import InputValidationError, SetupError
 from inference_endpoint.load_generator.sample_order import create_sample_order
 from inference_endpoint.load_generator.session import PhaseType
 from inference_endpoint.metrics.metric import Throughput
@@ -1137,3 +1138,69 @@ class TestErrorFormatter:
 
         panel = _error_formatter(FakeError())
         assert "something went wrong" in panel.renderable
+
+
+class TestSetupBenchmarkTokenizer:
+    """Tests for tokenizer resolution logic in setup_benchmark."""
+
+    @pytest.fixture()
+    def _base_patches(self, tmp_path):
+        with (
+            patch(
+                "inference_endpoint.commands.benchmark.execute.pin_loadgen",
+                return_value=None,
+            ),
+            patch(
+                "inference_endpoint.config.schema.BenchmarkConfig.to_yaml_file",
+                return_value=None,
+            ),
+        ):
+            yield
+
+    @pytest.mark.unit
+    def test_invalid_tokenizer_override_raises(self, tmp_path, _base_patches):
+        config = OfflineConfig(
+            **_OFFLINE_KWARGS
+            | {
+                "model_params": {"name": "test-model", "tokenizer_name": "bad/override"}
+            },
+            report_dir=str(tmp_path),
+        )
+        with (
+            patch(
+                "inference_endpoint.commands.benchmark.execute._check_tokenizer_exists",
+                return_value=False,
+            ),
+            pytest.raises(SetupError, match="bad/override"),
+        ):
+            setup_benchmark(config, TestMode.PERF)
+
+    @pytest.mark.unit
+    def test_valid_tokenizer_override_not_fallen_back_to_model_name(
+        self, tmp_path, _base_patches
+    ):
+        config = OfflineConfig(
+            **_OFFLINE_KWARGS
+            | {
+                "model_params": {
+                    "name": "test-model",
+                    "tokenizer_name": "good/override",
+                }
+            },
+            report_dir=str(tmp_path),
+        )
+        mock_check = MagicMock(return_value=True)
+        with (
+            patch(
+                "inference_endpoint.commands.benchmark.execute._check_tokenizer_exists",
+                mock_check,
+            ),
+            patch(
+                "inference_endpoint.commands.benchmark.execute._load_datasets",
+                side_effect=StopIteration,
+            ),
+            pytest.raises(StopIteration),
+        ):
+            setup_benchmark(config, TestMode.PERF)
+
+        mock_check.assert_called_once_with("good/override")
