@@ -17,7 +17,7 @@
 
 Run from the repo root to print the ISL distribution for a dataset::
 
-    python scripts/multi_turn_isl.py \\
+    python scripts/agentic_inference_isl_precompute.py \\
         --dataset path/to/dataset.jsonl \\
         --tokenizer <model-name-or-path>
 """
