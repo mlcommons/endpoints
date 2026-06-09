@@ -119,10 +119,10 @@ def _build_conversation_metadata(
     enable_salt: bool,
 ) -> tuple[
     str,
-    dict[tuple, list[dict]],
-    dict[tuple, list[dict]],
+    dict[tuple[str, int], list[dict]],
+    dict[tuple[str, int], list[dict]],
     str | None,
-    dict[tuple, float],
+    dict[tuple[str, int], float],
     list[ConversationSampleEntry],
     int,
 ]:
@@ -153,9 +153,9 @@ def _build_conversation_metadata(
             conv_id,
         )
 
-    pre_built_messages_by_key: dict[tuple, list[dict]] = {}
-    current_turn_messages_by_key: dict[tuple, list[dict]] = {}
-    delay_seconds_by_key: dict[tuple, float] = {}
+    pre_built_messages_by_key: dict[tuple[str, int], list[dict]] = {}
+    current_turn_messages_by_key: dict[tuple[str, int], list[dict]] = {}
+    delay_seconds_by_key: dict[tuple[str, int], float] = {}
     samples: list[ConversationSampleEntry] = []
 
     # Single pass over all rows in turn order, carrying a running history list.
@@ -169,7 +169,7 @@ def _build_conversation_metadata(
         role = row.get("role")
 
         # Format this row into message(s) using the same field extraction as before.
-        expanded = _expand_tool_results(row)
+        expanded = _expand_tool_results(row.to_dict())
         if expanded:
             row_msgs: list[dict] = expanded
         else:
@@ -202,7 +202,7 @@ def _build_conversation_metadata(
                 list(history) + current_turn_msgs
             )
             current_turn_messages_by_key[(str_conv_id, t_n)] = current_turn_msgs
-            history = history + current_turn_msgs
+            history.extend(current_turn_msgs)
 
             delay_val = row.get("delay_seconds")
             if delay_val is not None and not (
@@ -220,7 +220,7 @@ def _build_conversation_metadata(
             )
         else:
             # Non-client row (assistant, etc.): extend history for future client turns.
-            history = history + row_msgs
+            history.extend(row_msgs)
 
     client_turns_count = int(client_rows.shape[0])
     return (
@@ -509,10 +509,10 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
 
         samples: list[ConversationSampleEntry] = []
         client_turns_per_conv: dict[str, int] = {}
-        pre_built_messages_by_key: dict[tuple, list[dict]] = {}
-        current_turn_messages_by_key: dict[tuple, list[dict]] = {}
+        pre_built_messages_by_key: dict[tuple[str, int], list[dict]] = {}
+        current_turn_messages_by_key: dict[tuple[str, int], list[dict]] = {}
         system_prompts_by_conv: dict[str, str | None] = {}
-        delay_seconds_by_key: dict[tuple, float] = {}
+        delay_seconds_by_key: dict[tuple[str, int], float] = {}
 
         for conv_id, group in self._conv_groups.items():
             (

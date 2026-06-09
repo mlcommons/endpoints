@@ -52,6 +52,7 @@ def _precompute_isl(dataloader: MultiTurnDataset, tokenizer_name: str) -> None:
         logger.exception("Failed to load tokenizer %s", tokenizer_name)
         return
 
+    first_failure_logged = False
     first_failure_lock = threading.Lock()
 
     def _tokenize_sample(sample: dict) -> list[int] | None:
@@ -78,8 +79,11 @@ def _precompute_isl(dataloader: MultiTurnDataset, tokenizer_name: str) -> None:
             token_ids: list[int] = raw.input_ids if hasattr(raw, "input_ids") else raw
             return token_ids
         except Exception:
-            if first_failure_lock.acquire(blocking=False):
-                logger.exception("apply_chat_template failed (first failure shown)")
+            nonlocal first_failure_logged
+            with first_failure_lock:
+                if not first_failure_logged:
+                    logger.exception("apply_chat_template failed (first failure shown)")
+                    first_failure_logged = True
             return None
 
     n_workers = min(os.cpu_count() or 32, 32)
