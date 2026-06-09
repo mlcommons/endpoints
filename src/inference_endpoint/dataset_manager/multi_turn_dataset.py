@@ -70,7 +70,7 @@ class ConversationMetadata:
     delay_seconds_by_key: dict[tuple[str, int], float] = field(default_factory=dict)
 
 
-def _expand_tool_results(row: dict) -> list[dict]:
+def _expand_tool_results(row: dict | pd.Series) -> list[dict]:
     """Expand a tool row into one OpenAI tool message per result.
 
     All ``role: "tool"`` rows carry a ``tool_results`` array. Each entry expands to
@@ -169,7 +169,7 @@ def _build_conversation_metadata(
         role = row.get("role")
 
         # Format this row into message(s) using the same field extraction as before.
-        expanded = _expand_tool_results(row.to_dict())
+        expanded = _expand_tool_results(row)
         if expanded:
             row_msgs: list[dict] = expanded
         else:
