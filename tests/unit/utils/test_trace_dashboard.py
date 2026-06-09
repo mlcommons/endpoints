@@ -344,6 +344,26 @@ class TestStageN:
         d.finalize_completed()
         assert d.n_complete_folded == 1
 
+    def test_flush_pending_folds_refreshes_frozen_stats(self) -> None:
+        # Regression: render() freezes stage stats when is_done first fires,
+        # but that fires inside the fold-defer window — a COMPLETE seen just
+        # before PERF_END is still queued and excluded from the freeze. The
+        # end-of-run flush_pending_folds() folds it; without invalidating the
+        # freeze the closing frame would keep the stale (N=0) frozen copy and
+        # disagree with the LOADGEN panel.
+        d = Dashboard(fold_defer_ns=50_000_000)  # 50 ms defer
+        sid = _new_sid()
+        d.ingest_frames(_full_lifecycle(sid))  # COMPLETE just observed → deferred
+        d.ingest_frames(_frame(Event.PERF_END, 0))  # is_done
+        d.render()  # freezes before the deferred COMPLETE is folded
+        assert d._frozen_stats is not None
+        assert d._frozen_stats["e2e"].n == 0  # deferred completion excluded
+        d.flush_pending_folds()  # folds it AND invalidates the freeze
+        assert d._frozen_stats is None
+        d.render()  # re-freezes with the folded completion
+        assert d._frozen_stats is not None
+        assert d._frozen_stats["e2e"].n == 1  # now in the closing frame
+
     def test_n_grows_monotonically_with_completions(self) -> None:
         d = _dash()
         for _ in range(100):
@@ -1157,47 +1177,46 @@ class TestEndOfRunFreshness:
 
 @pytest.mark.unit
 class TestBackpressureCause:
-    """The cause tree (arrow + one leaf per worker-loop phase) renders inline
-    to the right of the e2e bar."""
+    """The cause tree (one leaf per worker-loop phase) hangs in the verdict,
+    dropping straight down from the backpressure % value. No separate root
+    line — the verdict's '[workers busy]' tag is the root."""
 
     def test_cause_tree_lines_name_all_phases(self) -> None:
         d = _dash()
         d._metrics["e2e"].add(100)
         d._metrics["backpressure"].add(50)  # 50% of E2E → is_backpressured
         lines = d._backpressure_cause_lines()
-        assert lines[0][0][0] == "worker loop busy"  # root on top
-        assert len(lines) == 1 + len(d._BACKPRESSURE_PHASES)
-        for leaf, phase in zip(lines[1:], d._BACKPRESSURE_PHASES, strict=False):
-            assert leaf[0][0] in ("├─ ", "└─ ")
-            assert leaf[1][0] == phase
+        assert len(lines) == len(d._BACKPRESSURE_PHASES)  # leaves only, no root
+        for leaf, phase in zip(lines, d._BACKPRESSURE_PHASES, strict=False):
+            assert leaf[0][0] == phase  # phase label first
+            assert leaf[1][0] in (" ─┤", " ─┘")  # right-hand spine connector
 
     def test_phase_highlighted_when_its_region_dominates(self) -> None:
         d = _dash()
         d._metrics["e2e"].add(100)
         d._metrics["backpressure"].add(20)  # issue→conn = 20% of E2E (15–25% → warn)
-        styles = {leaf[1][0]: leaf[1][1] for leaf in d._backpressure_cause_lines()[1:]}
+        styles = {leaf[0][0]: leaf[0][1] for leaf in d._backpressure_cause_lines()}
         assert styles["tcp-acquire"] == "warn"  # issue→conn region in warn band
         assert styles["encode"] == "warn"
         assert styles["final-decode"] == "muted"  # client_post region cold
         assert styles["sse-decode"] == "muted"  # stream_gen region cold here
         # sse-decode tracks the 1st→last-chunk (stream_gen) region:
         d._metrics["stream_gen"].add(20)  # now 20% of E2E → warn
-        styles = {leaf[1][0]: leaf[1][1] for leaf in d._backpressure_cause_lines()[1:]}
+        styles = {leaf[0][0]: leaf[0][1] for leaf in d._backpressure_cause_lines()}
         assert styles["sse-decode"] == "warn"
 
     def test_tcp_acquire_critical_on_connection_exhaustion(self) -> None:
         # issue→conn-acquired stage dominating E2E = requests stuck reaching a
         # connection (concurrency cap / OS ephemeral ports maxed) → tcp-acquire
         # critical; encode (always tiny) is muted, as it can't account for a
-        # stage that large.
+        # stage that large. The root style mirrors the worst leaf.
         d = _dash()
         d._metrics["e2e"].add(100)
         d._metrics["backpressure"].add(60)  # issue→conn = 60% ≥ 25% (crit)
-        lines = d._backpressure_cause_lines()
-        styles = {leaf[1][0]: leaf[1][1] for leaf in lines[1:]}
+        styles, root_style = d._backpressure_phase_styles()
         assert styles["tcp-acquire"] == "critical"
         assert styles["encode"] == "muted"
-        assert lines[0][0][1] == "critical"  # root mirrors the worst leaf
+        assert root_style == "critical"
 
     def test_heat_scale_boundaries(self) -> None:
         # Shared severity scale (pct 0-100): warn ≥15%, critical ≥25%.
@@ -1206,14 +1225,48 @@ class TestBackpressureCause:
         assert _heat(24.9) == "warn"
         assert _heat(25.0) == "critical"
 
-    def test_tree_renders_inline_right_of_e2e_bar(self) -> None:
+    def test_verdict_row_has_uncolored_workers_busy_tag(self) -> None:
         d = _dash()
+        d._metrics["e2e"].add(100)
+        d._metrics["backpressure"].add(50)
+        out = Text()
+        d._render_verdict(out, 100.0)
+        assert len(out.plain.splitlines()) == 1  # just the row; tree is beside the bar
+        line = out.plain.splitlines()[0]
+        assert "backpressure [workers busy]" in line  # tag in the label, left of value
+        assert "worker loop busy" not in out.plain  # no separate root line
+        # The tag is dim label text, never heat-colored.
+        tag_idx = line.index("[workers busy]")
+        tag_styles = [sp.style for sp in out.spans if sp.start <= tag_idx < sp.end]
+        assert "warn" not in tag_styles and "critical" not in tag_styles
+
+    def test_tree_drops_from_value_beside_bar(self) -> None:
+        d = _dash()
+        d._metrics["e2e"].add(100)
+        d._metrics["backpressure"].add(50)
         out = Text()
         d._render_timeline(out, [("server", 100.0)])
-        first = out.plain.splitlines()[0]
-        # Cause text sits to the RIGHT of the bar's closing border on row 0.
-        assert "worker loop busy" in first
-        assert first.index("worker loop busy") > first.rindex("│")
+        plain = out.plain
+        assert "encode" in plain and "complete-ipc" in plain  # tree beside the bar
+        # Every leaf's spine right-aligns to the backpressure value's column, so
+        # the tree drops straight down from the % in the verdict above.
+        verdict_right = 2 + 3 * 40 + 2 * 3
+        spine_lines = [ln for ln in plain.splitlines() if "─┤" in ln or "─┘" in ln]
+        assert len(spine_lines) == len(d._BACKPRESSURE_PHASES)
+        assert all(len(ln) == verdict_right for ln in spine_lines)
+
+    def test_backpressure_segment_is_heat_colored(self) -> None:
+        # ▓ backpressure segment shares the _heat scale with the cause tree:
+        # a ≥25% share renders it "critical" (red), in lockstep with its leaves.
+        d = _dash()
+        out = Text()
+        d._render_timeline(out, [("backpressure", 30.0), ("server", 70.0)])
+        bp_critical = [
+            out.plain[sp.start : sp.end]
+            for sp in out.spans
+            if sp.style == "critical" and "▓" in out.plain[sp.start : sp.end]
+        ]
+        assert bp_critical  # at least one ▓ run rendered critical
 
 
 @pytest.mark.unit

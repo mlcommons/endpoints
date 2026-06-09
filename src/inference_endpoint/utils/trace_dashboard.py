@@ -352,6 +352,10 @@ class Dashboard:
         self._last_lifecycle_ns = 0
         # Set by the PERF_END frame (main proc, run over) → is_done.
         self._ended = False
+        # Monotonic ns when PERF_END first landed; drives the "finalizing… Ns"
+        # age. The snapshot ts can't: the aggregator keeps ticking during the
+        # drain, so the freshest-snapshot age stays ~0 the whole time.
+        self._done_ns = 0
         # Set by the CLI once its end-of-run wait elapses without a terminal
         # snapshot: the aggregator never finalized (vs merely still finalizing).
         self._final_unavailable = False
@@ -582,6 +586,8 @@ class Dashboard:
                     self._reset_metrics(now_ns)
                     continue
                 if eb == Event.PERF_END:
+                    if not self._ended:
+                        self._done_ns = now_ns  # start the finalize clock once
                     self._ended = True  # benchmark over → freeze (is_done)
                     continue
                 lc = self._lifecycles.get(sid)
@@ -648,6 +654,7 @@ class Dashboard:
         self._last_complete_ns = 0
         self._last_lifecycle_ns = 0
         self._ended = False
+        self._done_ns = 0
         self._final_unavailable = False
         self._frozen_stats = None
         self._start_ns = now_ns  # uptime resets too — rate denominators
@@ -664,6 +671,14 @@ class Dashboard:
         """
         with self._lock:
             self._finalize_completed_impl(fold_defer_ns=0)
+            # render() freezes _frozen_stats once, when is_done first fires —
+            # which is BEFORE this end-of-run flush, so the completions folded
+            # here (those still inside the defer window at freeze time) would
+            # never reach the closing frame. Invalidate the freeze so the final
+            # render re-captures the now-complete _metrics; otherwise the
+            # LIFECYCLE/verdict/timeline panels undercount the last completions
+            # and disagree with the authoritative LOADGEN panel.
+            self._frozen_stats = None
 
     def finalize_completed(self) -> None:
         """Drain the fold queue (folds-since-last-tick) and the TTL queue
@@ -964,7 +979,10 @@ class Dashboard:
             + _stats(self._metrics["client_post"]).avg
         )
         server = _stats(self._metrics["server_http"]).avg
-        queue = _stats(self._metrics["ipc_wait"]).avg
+        # "backpressure" = the whole ISSUED→CONN_ACQUIRED wait (inbox queue +
+        # pool acquire), the same metric the timeline ▓ segment and the cause
+        # tree use, so all three colour off one number.
+        queue = _stats(self._metrics["backpressure"]).avg
         # Clamp at 100: each bucket is a sub-interval of E2E. The raw ratio
         # can top 100% because each avg is over a different folded
         # population (different N when intermediate frames drop).
@@ -977,14 +995,25 @@ class Dashboard:
         c_style = _heat(c_pct)
         q_style = _heat(q_pct)
 
-        self._row(
-            out,
+        # Same 3-col grid as _row. The backpressure cell carries a plain
+        # "[workers busy]" tag inside its label (same dim style as the other
+        # labels — it names the cause tree rendered beside the timeline below),
+        # with the value right-aligned to the column edge so all three line up.
+        out.append("  ")
+        for i, (label, value, style) in enumerate(
             (
                 ("client work", f"{c_pct:>9.1f}%", c_style),
                 ("server work", f"{s_pct:>9.1f}%", ""),
-                ("backpressure", f"{q_pct:>9.1f}%", q_style),
-            ),
-        )
+                ("backpressure [workers busy]", f"{q_pct:>9.1f}%", q_style),
+            )
+        ):
+            if i > 0:
+                out.append(" " * 3)
+            pad = max(1, 40 - len(label) - 1 - len(value))
+            out.append(f"{label} ", style="rule")
+            out.append(" " * pad)
+            out.append(value, style=style)
+        out.append("\n")
 
     # Worker-loop phases that occupy the event loop; when they pile up the loop
     # is slow to return to requests.recv() and queued queries wait in the ZMQ
@@ -1003,17 +1032,16 @@ class Dashboard:
         # muted (grey) rather than blank for an idle phase. pct is a fraction.
         return _heat(pct * 100.0) or "muted"
 
-    def _backpressure_cause_lines(self) -> list[list[tuple[str, str]]]:
-        """Backpressure-cause breakdown: a 'worker loop busy' root + one leaf
-        per worker-loop phase as a top-down tree (├─/└─). Each phase is heat-
-        styled by its region's share of E2E (the shared _heat scale: warn ≥ 15%,
-        critical ≥ 25%). Region map: issue→conn-acquired → encode/tcp-acquire;
-        stream_gen (1st→last chunk) → sse-decode; client_post (body→complete) →
-        final-decode/complete-ipc. When the issue→conn-acquired region is
-        critical it is connection/port exhaustion (a region that large can't be
-        encode), so tcp-acquire stays red and encode is muted. The root mirrors
-        the worst leaf — critical if any is critical, warn if any is warn, else
-        a plain section header."""
+    def _backpressure_phase_styles(self) -> tuple[dict[str, str], str]:
+        """Heat style per worker-loop phase, plus the root style (mirrors the
+        worst leaf). Each phase is graded by its region's share of E2E on the
+        shared _heat scale (warn ≥ 15%, critical ≥ 25%). Region map:
+        issue→conn-acquired → encode/tcp-acquire; stream_gen (1st→last chunk) →
+        sse-decode; client_post (body→complete) → final-decode/complete-ipc.
+        When the issue→conn-acquired region is critical it is connection/port
+        exhaustion (a region that large can't be encode), so tcp-acquire stays
+        red and encode is muted. Root: critical if any leaf is, else warn if
+        any is, else a plain section header."""
         e2e = _stats(self._metrics["e2e"]).avg or 1.0
         # Whole issue→conn-acquired stage (queue wait + acquire): when it
         # dominates, requests are stuck reaching a connection regardless of
@@ -1029,8 +1057,6 @@ class Dashboard:
             "final-decode": post,
             "complete-ipc": post,
         }
-        # Root mirrors the worst leaf: red if any phase is critical, orange if
-        # any is warn, else a plain section header.
         leaf_styles = set(styles.values())
         if "critical" in leaf_styles:
             root_style = "critical"
@@ -1038,11 +1064,21 @@ class Dashboard:
             root_style = "warn"
         else:
             root_style = "section"
-        lines: list[list[tuple[str, str]]] = [[("worker loop busy", root_style)]]
+        return styles, root_style
+
+    def _backpressure_cause_lines(self) -> list[list[tuple[str, str]]]:
+        """Lines of the cause tree, one per worker-loop phase, heat-styled by
+        :meth:`_backpressure_phase_styles`. The connector spine is on the RIGHT
+        (``label ─┤``; final ``─┘``) so when each line is right-aligned beside
+        the timeline the spine lands directly under the backpressure % value in
+        the verdict above — the tree visibly drops from the number. No root
+        line: the verdict's 'backpressure [workers busy]' cell is the root."""
+        styles, _root = self._backpressure_phase_styles()
+        lines: list[list[tuple[str, str]]] = []
         last = len(self._BACKPRESSURE_PHASES) - 1
         for i, phase in enumerate(self._BACKPRESSURE_PHASES):
-            branch = "└─ " if i == last else "├─ "
-            lines.append([(branch, "rule"), (phase, styles[phase])])
+            conn = " ─┘" if i == last else " ─┤"
+            lines.append([(phase, styles[phase]), (conn, "rule")])
         return lines
 
     _TIMELINE_W = 80  # stacked-bar width in columns
@@ -1050,27 +1086,27 @@ class Dashboard:
 
     def _render_timeline(self, out: Text, stage_data: list[tuple[str, float]]) -> None:
         """One stacked bar of where E2E goes, segmented by stage and colored
-        █ server / ▒ client — the visual companion to the client/server/
-        backpressure verdict line directly above it.
+        █ server / ▒ client / ▓ backpressure — the visual companion to the
+        verdict line directly above it.
 
         The bar is always exactly ``_TIMELINE_W`` columns wide: segments are
         allocated by cumulative-boundary rounding (each stage's share of the
         summed stage time), so the sum is invariant and the bar never grows
         or shrinks between frames as the percentages drift. Sub-column stages
         round to width 0 and drop out rather than padding the total.
+
+        The ▓ backpressure segment is heat-graded on the shared _heat scale
+        (warn ≥ 15%, critical ≥ 25%), so when it lights up red its cause-tree
+        breakdown (hanging from the verdict above) lights up red too.
         """
         w = self._TIMELINE_W
         total = sum(pct for _side, pct in stage_data)
         tree = self._backpressure_cause_lines()
         bar_end = 2 + self._TIMELINE_LABEL_W + 1 + w + 1  # col after closing │
         legend_end = (
-            2 + self._TIMELINE_LABEL_W + len("▒ client   █ server   ▓ backpressure")
+            2 + self._TIMELINE_LABEL_W + len("▒ client   ▓ backpressure   █ server")
         )
-        # Cause tree is a top-down tree (root 'worker loop busy' + leaves),
-        # left-aligned as a block whose widest line ends under the verdict's
-        # backpressure number (verdict width = _row 3 cols × 40 + 2 gaps × 3).
-        verdict_right = 2 + 3 * 40 + 2 * 3
-        tree_left = verdict_right - max(sum(len(t) for t, _ in line) for line in tree)
+        verdict_right = 2 + 3 * 40 + 2 * 3  # backpressure value's right edge
         for row in range(max(len(tree), 2)):
             col = 0
             if row == 0:
@@ -1091,7 +1127,7 @@ class Dashboard:
                         if side == _SIDE_SERVER:
                             glyph, gstyle = "█", "server_row"
                         elif side == _SIDE_BACKPRESSURE:
-                            glyph, gstyle = "▓", "warn"
+                            glyph, gstyle = "▓", _heat(pct) or "warn"
                         else:
                             glyph, gstyle = "▒", "client_row"
                         out.append(glyph * seg, style=gstyle)
@@ -1101,14 +1137,15 @@ class Dashboard:
                 out.append(f"  {'':<{self._TIMELINE_LABEL_W}}", style="label")
                 out.append("▒ client", style="client_row")
                 out.append("   ", style="label")
-                out.append("█ server", style="server_row")
-                out.append("   ", style="label")
                 out.append("▓ backpressure", style="warn")
+                out.append("   ", style="label")
+                out.append("█ server", style="server_row")
                 col = legend_end
-            # Backpressure-cause breakdown beside/below the bar: root on top,
-            # phases as leaves; the block's right edge sits under the number.
+            # Reverse cause tree beside the bar: right-align each line so its
+            # spine drops under the backpressure value in the verdict above.
             if row < len(tree):
-                out.append(" " * max(1, tree_left - col))
+                line_w = sum(len(t) for t, _ in tree[row])
+                out.append(" " * max(1, verdict_right - line_w - col))
                 for text, style in tree[row]:
                     out.append(text, style=style)
             out.append("\n")
@@ -1129,9 +1166,11 @@ class Dashboard:
 
     def _render_loadgen(self, out: Text) -> None:
         """Authoritative loadgen panel: issued/completed counts + rates and
-        the ttft/tpot/e2e latency table. These are the drop-immune totals
-        (the trace's own counts undercount under FIFO drops). Skipped until
-        a snapshot lands.
+        the ttft/tpot/e2e latency table. Drop-immune (the trace's own counts
+        undercount under FIFO drops) and reported over the perf window
+        (tracked_*) so the counts, the per-second rates, and the latency table
+        all share one window — and agree with the benchmark's headline
+        throughput. Skipped until a snapshot lands.
         """
         snap = self._loadgen_snapshot
         if snap is None:
@@ -1141,16 +1180,19 @@ class Dashboard:
             for m in (snap.get("metrics") or ())
             if m.get("type") == "counter"
         }
-        issued = int(c.get("total_samples_issued") or 0)
-        completed = int(c.get("total_samples_completed") or 0)
-        tracked = int(c.get("tracked_samples_completed") or 0)
+        # Perf-window (tracked_*) throughout: counts, rates, and the latency
+        # table below all share the tracked window, so issued/completed match
+        # their per-second rates instead of dividing an all-run total count by
+        # the perf-window duration (which over-stated issued/s under --warmup).
+        issued = int(c.get("tracked_samples_issued") or 0)
+        completed = int(c.get("tracked_samples_completed") or 0)
         failed = int(c.get("tracked_samples_failed") or 0)
         dur_ns = int(c.get("tracked_duration_ns") or 0) or int(
             c.get("total_duration_ns") or 0
         )
         dur_s = dur_ns / 1e9 if dur_ns > 0 else 0.0
         issued_s = (issued / dur_s) if dur_s else 0.0
-        completed_s = (tracked / dur_s) if dur_s else 0.0
+        completed_s = (completed / dur_s) if dur_s else 0.0
         tok_s = (
             (float(self._loadgen_series("osl").get("total") or 0.0) / dur_s)
             if dur_s
@@ -1169,7 +1211,11 @@ class Dashboard:
             if self._final_unavailable:
                 age_tag = "  (final snapshot unavailable — aggregator did not finalize)"
             else:
-                age_s = (time.monotonic_ns() - self._loadgen_snapshot_ts) / 1e9
+                age_s = (
+                    (time.monotonic_ns() - self._done_ns) / 1e9
+                    if self._done_ns
+                    else 0.0
+                )
                 age_tag = f"  (finalizing… {age_s:.0f}s)"
         else:
             age_s = (time.monotonic_ns() - self._loadgen_snapshot_ts) / 1e9

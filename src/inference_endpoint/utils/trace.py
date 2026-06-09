@@ -293,10 +293,15 @@ _active_emitter: _TraceEmitter | None = None
 # Adaptive sampling: 0 = trace every request (the default, and the only
 # state at QPS the FIFO can carry). emit_loop_lag raises the shift when it
 # observes drops so emit volume falls 2× per step until drops stop, then
-# lowers it again once the channel is clear. Power-of-2 by sid keeps the
-# decision consistent across processes — the fully-traced subset is
-# {sid & ((1<<maxshift)-1) == 0}, the coarsest sampler's set, so its
-# lifecycles carry every stage; partials just fold fewer stages.
+# eases off once the channel is clear. The shift is per-process — each
+# process drives its own from its own drop counter, with no cross-process
+# coordination. The nested {sid & ((1<<shift)-1) == 0} masks make a
+# process's coarser samples a subset of its finer ones, but two processes
+# can sample at different rates: when a worker drops more than the main
+# proc, the main proc still emits ISSUED/COMPLETE for sids the worker
+# sampled out, so those sids fold an e2e total but no per-stage rows —
+# stage-row N can sit below e2e N under load (the dashboard clamps the
+# resulting sub-interval ratios at 100%).
 _sample_shift = 0
 _MAX_SAMPLE_SHIFT = 8  # cap at 1/256
 _SAMPLE_RECOVER_TICKS = 10  # ~3 s of no new drops before easing off
