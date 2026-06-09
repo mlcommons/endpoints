@@ -17,7 +17,6 @@
 
 import hashlib
 import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -160,15 +159,21 @@ def _build_conversation_metadata(
     delay_seconds_by_key: dict[tuple, float] = {}
     samples: list[ConversationSampleEntry] = []
 
-    for _, row in client_rows.iterrows():
-        t_n = int(row["turn"])
+    # Single pass over all rows in turn order, carrying a running history list.
+    # Each row is formatted once; client turns snapshot (history + current_msgs)
+    # before extending history. This is O(N) vs the previous O(N²) per-turn rescan.
+    history: list[dict] = []
+    if system_content:
+        history.append({"role": "system", "content": system_content})
 
-        messages: list[dict] = []
-        if system_content:
-            messages.append({"role": "system", "content": system_content})
+    for _, row in sorted_group.iterrows():
+        role = row.get("role")
 
-        prior_rows = sorted_group[sorted_group["turn"] < t_n]
-        for _, prior_row in prior_rows.iterrows():
+        # Format this row into message(s) using the same field extraction as before.
+        expanded = _expand_tool_results(row)
+        if expanded:
+            row_msgs: list[dict] = expanded
+        else:
             msg: dict[str, Any] = {}
             for key in (
                 "role",
@@ -178,7 +183,7 @@ def _build_conversation_metadata(
                 "tool_results",
                 "reasoning_content",
             ):
-                val = prior_row.get(key)
+                val = row.get(key)
                 if val is not None and not (isinstance(val, float) and pd.isna(val)):
                     msg[key] = val
             if (
@@ -187,41 +192,36 @@ def _build_conversation_metadata(
                 and "content" not in msg
             ):
                 msg["content"] = None
-            if msg.get("role"):
-                expanded = _expand_tool_results(msg)
-                if expanded:
-                    messages.extend(expanded)
-                else:
-                    messages.append(msg)
+            row_msgs = [msg] if msg.get("role") else []
 
-        current_turn_msgs: list[dict] = []
-        expanded = _expand_tool_results(row)
-        if expanded:
-            current_turn_msgs = expanded
+        if role in ("user", "tool"):
+            t_n = int(row["turn"])
+            current_turn_msgs: list[dict] = row_msgs
+            # Snapshot: history holds everything before this turn; create new lists
+            # so stored snapshots are not mutated by later history extensions.
+            pre_built_messages_by_key[(str_conv_id, t_n)] = (
+                list(history) + current_turn_msgs
+            )
+            current_turn_messages_by_key[(str_conv_id, t_n)] = current_turn_msgs
+            history = history + current_turn_msgs
+
+            delay_val = row.get("delay_seconds")
+            if delay_val is not None and not (
+                isinstance(delay_val, float) and pd.isna(delay_val)
+            ):
+                try:
+                    delay_f = float(delay_val)
+                except (TypeError, ValueError):
+                    delay_f = 0.0
+                if delay_f > 0.0:
+                    delay_seconds_by_key[(str_conv_id, t_n)] = delay_f
+
+            samples.append(
+                ConversationSampleEntry(conversation_id=str_conv_id, turn=t_n)
+            )
         else:
-            cur: dict[str, Any] = {}
-            for key in ("role", "content", "name"):
-                val = row.get(key)
-                if val is not None and not (isinstance(val, float) and pd.isna(val)):
-                    cur[key] = val
-            current_turn_msgs = [cur]
-        messages.extend(current_turn_msgs)
-
-        pre_built_messages_by_key[(str_conv_id, t_n)] = messages
-        current_turn_messages_by_key[(str_conv_id, t_n)] = current_turn_msgs
-
-        delay_val = row.get("delay_seconds")
-        if delay_val is not None and not (
-            isinstance(delay_val, float) and pd.isna(delay_val)
-        ):
-            try:
-                delay_f = float(delay_val)
-            except (TypeError, ValueError):
-                delay_f = 0.0
-            if delay_f > 0.0:
-                delay_seconds_by_key[(str_conv_id, t_n)] = delay_f
-
-        samples.append(ConversationSampleEntry(conversation_id=str_conv_id, turn=t_n))
+            # Non-client row (assistant, etc.): extend history for future client turns.
+            history = history + row_msgs
 
     client_turns_count = int(client_rows.shape[0])
     return (
@@ -502,8 +502,6 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
 
         Pre-computes the complete message list for each client turn so that
         conversation history does not need to be accumulated at runtime.
-        Conversations are built in parallel; turns within each conversation are
-        processed sequentially because turn N depends on prior turns.
 
         Returns:
             ConversationMetadata with samples, counts, and pre-built message maps.
@@ -517,31 +515,22 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
         system_prompts_by_conv: dict[str, str | None] = {}
         delay_seconds_by_key: dict[tuple, float] = {}
 
-        with ThreadPoolExecutor() as executor:
-            futures = {
-                executor.submit(
-                    _build_conversation_metadata, conv_id, group, self._enable_salt
-                ): conv_id
-                for conv_id, group in self._conv_groups.items()
-            }
-            for future in as_completed(futures):
-                (
-                    str_conv_id,
-                    partial_pre_built,
-                    partial_current_turn,
-                    system_prompt,
-                    partial_delay,
-                    conv_samples,
-                    client_turns_count,
-                ) = future.result()
-                pre_built_messages_by_key.update(partial_pre_built)
-                current_turn_messages_by_key.update(partial_current_turn)
-                system_prompts_by_conv[str_conv_id] = system_prompt
-                delay_seconds_by_key.update(partial_delay)
-                samples.extend(conv_samples)
-                client_turns_per_conv[str_conv_id] = client_turns_count
-
-        samples.sort(key=lambda e: (e.conversation_id, e.turn))
+        for conv_id, group in self._conv_groups.items():
+            (
+                str_conv_id,
+                partial_pre_built,
+                partial_current_turn,
+                system_prompt,
+                partial_delay,
+                conv_samples,
+                client_turns_count,
+            ) = _build_conversation_metadata(conv_id, group, self._enable_salt)
+            pre_built_messages_by_key.update(partial_pre_built)
+            current_turn_messages_by_key.update(partial_current_turn)
+            system_prompts_by_conv[str_conv_id] = system_prompt
+            delay_seconds_by_key.update(partial_delay)
+            samples.extend(conv_samples)
+            client_turns_per_conv[str_conv_id] = client_turns_count
 
         return ConversationMetadata(
             samples=samples,
