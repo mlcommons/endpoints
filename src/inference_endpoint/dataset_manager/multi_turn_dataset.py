@@ -130,7 +130,6 @@ def _build_conversation_metadata(
 
     Returns a tuple of (str_conv_id, pre_built_messages, current_turn_messages,
     system_prompt, delay_seconds, samples, client_turns_count).
-    Safe to call from any thread — no shared mutable state is accessed.
     """
     str_conv_id = str(conv_id)
     sorted_group = group.sort_values("turn")
@@ -161,7 +160,7 @@ def _build_conversation_metadata(
 
     # Single pass over all rows in turn order, carrying a running history list.
     # Each row is formatted once; client turns snapshot (history + current_msgs)
-    # before extending history. This is O(N) vs the previous O(N²) per-turn rescan.
+    # before extending history.
     history: list[dict] = []
     if system_content:
         history.append({"role": "system", "content": system_content})

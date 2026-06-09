@@ -82,7 +82,7 @@ def _precompute_isl(dataloader: MultiTurnDataset, tokenizer_name: str) -> None:
                 logger.exception("apply_chat_template failed (first failure shown)")
             return None
 
-    n_workers = min(os.cpu_count(), 32) or 4
+    n_workers = min(os.cpu_count() or 32, 32)
     skipped = 0
     with ThreadPoolExecutor(
         max_workers=n_workers, thread_name_prefix="ISLPrecompute"
