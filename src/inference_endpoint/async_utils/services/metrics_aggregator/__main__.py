@@ -163,7 +163,18 @@ async def main() -> None:
         "--tokenizer-workers",
         type=int,
         default=2,
-        help="Number of tokenizer worker threads (default: 2)",
+        help="Number of tokenizer worker threads for the sync/chat-template path (default: 2)",
+    )
+    parser.add_argument(
+        "--tokenizer-cores-per-worker",
+        type=int,
+        default=8,
+        help=(
+            "Cores per pinned tokenizer worker process for the async batch path. "
+            "available_cores // this many processes are spawned to use the whole "
+            "machine (a single rayon pool tops out at ~8 cores for BPE). "
+            "0 disables process sharding (thread-only). Default: 8"
+        ),
     )
     parser.add_argument(
         "--streaming",
@@ -207,7 +218,11 @@ async def main() -> None:
     # (coalesces to 'object' not 'AbstractContextManager[TokenizePool | None]')
     pool_cm: AbstractContextManager[TokenizePool | None]
     if args.tokenizer:
-        pool_cm = TokenizePool(args.tokenizer, n_workers=args.tokenizer_workers)
+        pool_cm = TokenizePool(
+            args.tokenizer,
+            n_workers=args.tokenizer_workers,
+            cores_per_worker=args.tokenizer_cores_per_worker,
+        )
     else:
         pool_cm = nullcontext()
 

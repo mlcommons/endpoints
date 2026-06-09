@@ -226,14 +226,54 @@ class _FakeTokenizerWithBackend(_FakeTokenizer):
         self.backend_tokenizer = _FakeBackend()
 
 
+class _FakeFuture:
+    def __init__(self, value):
+        self._value = value
+
+    def result(self):
+        return self._value
+
+
+class _FakeProcExec:
+    """Stand-in for ProcessPoolExecutor that records pinning without spawning.
+
+    ``initargs`` of every constructed executor land in the class-level
+    ``created`` list so tests can assert lane count and per-worker core sets.
+    """
+
+    created: list = []
+
+    @classmethod
+    def reset(cls) -> None:
+        cls.created = []
+
+    def __init__(self, *, max_workers, mp_context, initializer, initargs):
+        _FakeProcExec.created.append(initargs)
+
+    def submit(self, fn, *args):
+        return _FakeFuture(True)
+
+    def shutdown(self, wait=True):
+        pass
+
+
+_PROC_EXEC_TARGET = (
+    "inference_endpoint.async_utils.services.metrics_aggregator."
+    "token_metrics.ProcessPoolExecutor"
+)
+
+
 @pytest.mark.unit
 class TestTokenizePoolBatchPath:
+    # cores_per_worker=0 forces the thread lane so these exercise the coalescing
+    # logic without spawning real worker processes (the fake backend can't be
+    # loaded in a spawned subprocess). Process sharding is validated on cluster.
     @pytest.mark.asyncio
     async def test_async_uses_backend_and_counts_correctly(self):
         _FakeBackend.reset()
         with patch(_MOCK_TARGET, _FakeTokenizerWithBackend):
             loop = asyncio.get_running_loop()
-            with TokenizePool("fake", n_workers=1) as pool:
+            with TokenizePool("fake", n_workers=1, cores_per_worker=0) as pool:
                 count = await pool.token_count_async("a b c d", loop)
                 assert count == 4
                 assert _FakeBackend.batch_calls >= 1
@@ -244,7 +284,7 @@ class TestTokenizePoolBatchPath:
         _FakeBackend.reset()
         with patch(_MOCK_TARGET, _FakeTokenizerWithBackend):
             loop = asyncio.get_running_loop()
-            with TokenizePool("fake", n_workers=1) as pool:
+            with TokenizePool("fake", n_workers=1, cores_per_worker=0) as pool:
                 texts = [" ".join(["w"] * (i + 1)) for i in range(50)]
                 counts = await asyncio.gather(
                     *(pool.token_count_async(t, loop) for t in texts)
@@ -261,7 +301,9 @@ class TestTokenizePoolBatchPath:
         _FakeBackend.reset()
         with patch(_MOCK_TARGET, _FakeTokenizerWithBackend):
             loop = asyncio.get_running_loop()
-            with TokenizePool("fake", n_workers=1, max_batch_size=4) as pool:
+            with TokenizePool(
+                "fake", n_workers=1, cores_per_worker=0, max_batch_size=4
+            ) as pool:
                 texts = [f"t{i}" for i in range(30)]
                 counts = await asyncio.gather(
                     *(pool.token_count_async(t, loop) for t in texts)
@@ -276,7 +318,73 @@ class TestTokenizePoolBatchPath:
         _FakeBackend.reset()
         with patch(_MOCK_TARGET, _FakeTokenizer):  # no backend_tokenizer attr
             loop = asyncio.get_running_loop()
-            with TokenizePool("fake", n_workers=1) as pool:
+            with TokenizePool("fake", n_workers=1, cores_per_worker=0) as pool:
                 count = await pool.token_count_async("one two three", loop)
                 assert count == 3
                 assert _FakeBackend.batch_calls == 0  # backend never used
+
+
+@pytest.mark.unit
+class TestProcessLaneSetup:
+    """Process-lane selection logic (without spawning real workers)."""
+
+    def test_disabled_when_cores_per_worker_zero(self):
+        with patch(_MOCK_TARGET, _FakeTokenizerWithBackend):
+            with TokenizePool("fake", n_workers=1, cores_per_worker=0) as pool:
+                assert pool._proc_executors == []
+                assert pool._lane_is_process is False
+
+    def test_disabled_for_slow_tokenizer(self):
+        # No backend_tokenizer => no encode_batch_fast => stay on threads even
+        # with a large core budget.
+        with patch(_MOCK_TARGET, _FakeTokenizer):
+            with patch("os.sched_getaffinity", return_value=set(range(64))):
+                with TokenizePool("fake", n_workers=1, cores_per_worker=8) as pool:
+                    assert pool._proc_executors == []
+                    assert pool._lane_is_process is False
+
+    def test_disabled_when_fewer_than_two_blocks(self):
+        # 8 available cores / 8 per worker = 1 block -> single process not worth
+        # it, fall back to the thread lane.
+        with patch(_MOCK_TARGET, _FakeTokenizerWithBackend):
+            with patch("os.sched_getaffinity", return_value=set(range(8))):
+                with TokenizePool("fake", n_workers=1, cores_per_worker=8) as pool:
+                    assert pool._proc_executors == []
+                    assert pool._lane_is_process is False
+
+    def test_spawns_one_process_per_core_block(self):
+        # 32 cores / 8 per worker = 4 pinned process lanes; assert count + pinning.
+        _FakeProcExec.reset()
+        with patch(_MOCK_TARGET, _FakeTokenizerWithBackend):
+            with (
+                patch("os.sched_getaffinity", return_value=set(range(32))),
+                patch(_PROC_EXEC_TARGET, _FakeProcExec),
+            ):
+                pool = TokenizePool("fake", n_workers=1, cores_per_worker=8)
+                try:
+                    assert pool._lane_is_process is True
+                    assert len(pool._proc_executors) == 4
+                    core_sets = [ia[1] for ia in _FakeProcExec.created]
+                    assert core_sets == [
+                        list(range(0, 8)),
+                        list(range(8, 16)),
+                        list(range(16, 24)),
+                        list(range(24, 32)),
+                    ]
+                finally:
+                    pool.close()
+
+    def test_max_processes_caps_lane_count(self):
+        _FakeProcExec.reset()
+        with patch(_MOCK_TARGET, _FakeTokenizerWithBackend):
+            with (
+                patch("os.sched_getaffinity", return_value=set(range(144))),
+                patch(_PROC_EXEC_TARGET, _FakeProcExec),
+            ):
+                pool = TokenizePool(
+                    "fake", n_workers=1, cores_per_worker=8, max_processes=4
+                )
+                try:
+                    assert len(pool._proc_executors) == 4  # capped from 18
+                finally:
+                    pool.close()

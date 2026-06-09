@@ -20,12 +20,16 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import multiprocessing
+import os
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from collections import deque
+from concurrent.futures import Executor, ProcessPoolExecutor, ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any
 
 import msgspec
 from transformers import AutoTokenizer
+from transformers.utils import logging as transformers_logging
 
 # Minimal user message used to satisfy chat templates that reject assistant-only
 # message lists. Its token count is subtracted so only the assistant payload is
@@ -35,13 +39,21 @@ _PREFIX_USER_MSG: dict[str, str] = {"role": "user", "content": ""}
 # Coalescing batch defaults for the async text path. Concurrent token_count_async
 # calls (one per COMPLETE event) are buffered and tokenized in one
 # backend.encode_batch_fast call, which parallelizes across the batch via the
-# Rust tokenizer's rayon pool. Exactly one batch is in flight at a time so only
-# one rayon pool is active: many concurrent per-item encode calls each spin the
-# process-global rayon pool and oversubscribe, which measures ~3x slower than a
-# single batched call on GB200. Batch size adapts to load — whatever accumulates
-# while one batch encodes becomes the next batch.
+# Rust tokenizer's rayon pool. Batch size adapts to load — whatever accumulates
+# while batches encode becomes the next batch — and is capped so a huge
+# offline-drain backlog chunks into bounded batches.
 _DEFAULT_MAX_BATCH_SIZE = 512
 _DEFAULT_MAX_BATCH_DELAY_S = 0.01
+
+# A single rayon pool saturates at ~8 threads for BPE tokenization (memory-bound;
+# more threads oversubscribe and, on multi-socket Grace, cross the NUMA boundary
+# into the first-touch heap). To use the whole machine we shard across worker
+# *processes*, each pinned to its own block of this many cores so its rayon pool
+# stays NUMA-local. Measured on GB200: 1 process ~1.5k items/s, 18 processes
+# (×8 cores) ~25k items/s.
+_DEFAULT_CORES_PER_WORKER = 8
+
+logger = logging.getLogger(__name__)
 
 
 def _normalize_tool_calls_for_template(
@@ -71,28 +83,82 @@ def _normalize_tool_calls_for_template(
     return normalized
 
 
+# ---------------------------------------------------------------------------
+# Process-worker entry points (module-level so ProcessPoolExecutor can pickle
+# them by qualified name). Each worker process holds one raw tokenizers backend
+# in a process global, pinned to a fixed core block.
+# ---------------------------------------------------------------------------
+
+_WORKER_BACKEND: Any = None
+
+
+def _init_proc_worker(tokenizer_name: str, core_set: list[int]) -> None:
+    """ProcessPoolExecutor initializer: pin affinity, then load the backend.
+
+    Affinity is set before the first encode so the Rust rayon pool sizes itself
+    to ``core_set`` (num_cpus respects sched_getaffinity on Linux) and stays on
+    one NUMA node.
+    """
+    if core_set:
+        try:
+            os.sched_setaffinity(0, set(core_set))
+        except (OSError, AttributeError):
+            # Affinity not settable (non-Linux, restricted cpuset): rayon falls
+            # back to all visible cores; correctness is unaffected.
+            logger.debug("could not pin tokenizer worker to %s", core_set)
+    transformers_logging.set_verbosity_error()
+    tok = AutoTokenizer.from_pretrained(tokenizer_name)
+    global _WORKER_BACKEND
+    _WORKER_BACKEND = getattr(tok, "backend_tokenizer", None)
+    if _WORKER_BACKEND is not None:
+        _WORKER_BACKEND.encode("warmup", add_special_tokens=False)
+
+
+def _proc_encode_batch_lengths(texts: list[str]) -> list[int]:
+    """Process-worker task: per-text token counts via encode_batch_fast."""
+    backend = _WORKER_BACKEND
+    if backend is None:
+        raise RuntimeError("tokenizer worker backend unavailable")
+    encode_batch = getattr(backend, "encode_batch_fast", None)
+    if encode_batch is None:
+        encode_batch = backend.encode_batch
+    return [len(e.ids) for e in encode_batch(texts, add_special_tokens=False)]
+
+
+def _proc_ping() -> bool:
+    """Warmup probe: returns True once the worker's backend is loaded."""
+    return _WORKER_BACKEND is not None
+
+
 if TYPE_CHECKING:
     from transformers import PreTrainedTokenizerBase
 
-logger = logging.getLogger(__name__)
-
 
 class TokenizePool:
-    """A pool of worker threads, each with its own HuggingFace AutoTokenizer.
+    """Tokenizes text for ISL/OSL/TPOT metrics, scaling across CPU cores.
 
-    Uses multi-threading (not multiprocessing) because HuggingFace tokenizers
-    use a Rust backend that releases the GIL during tokenization, so threads
-    can run tokenization in parallel without GIL contention. Multiprocessing
-    would add process spawn overhead and per-process tokenizer memory and
-    IPC latency.
+    The async text path (``token_count_async`` — the hot path, one call per
+    COMPLETE event) coalesces concurrent calls into batches and runs each batch
+    through ``tokenizers.Tokenizer.encode_batch_fast``. Batches are fanned out
+    across one or more *lanes*:
 
-    Thread-safety notes:
-    - The ThreadPoolExecutor itself is thread-safe (submit/shutdown are synchronized).
-    - Each worker thread has its own tokenizer via thread-local storage, so there
-      is no shared mutable state during tokenization.
-    - The blocking `token_count()` method is safe to call from multiple threads
-      concurrently.
-    - In an async context, use `token_count_async` to avoid blocking the event loop.
+    - **Process lanes** (default when a fast tokenizer + multiple core blocks are
+      available): ``available_cores // cores_per_worker`` worker processes, each
+      pinned to its own core block. A single rayon pool tops out at ~8 cores for
+      BPE, so sharding across pinned processes is the only way to use the whole
+      machine (and each process's heap stays NUMA-local). Up to one batch per
+      process runs concurrently.
+    - **Thread lane** (fallback for slow tokenizers, single-core boxes, or
+      ``cores_per_worker <= 0``): one in-flight batch on a worker thread, using a
+      thread-local tokenizer. The Rust backend releases the GIL during encode.
+
+    The sync ``token_count`` and the chat-template ``token_count_message*`` paths
+    (used only when tool calls / reasoning are present) always run on the thread
+    pool; they are rare relative to plain-text OSL.
+
+    Thread-safety: the coalescing buffer and lane bookkeeping are touched only
+    from the aggregator's single event-loop thread (``token_count_async`` and its
+    flush callbacks all run there), so no lock is needed.
     """
 
     def __init__(
@@ -100,6 +166,8 @@ class TokenizePool:
         tokenizer_name: str,
         n_workers: int,
         *,
+        cores_per_worker: int = _DEFAULT_CORES_PER_WORKER,
+        max_processes: int | None = None,
         max_batch_size: int = _DEFAULT_MAX_BATCH_SIZE,
         max_batch_delay_s: float = _DEFAULT_MAX_BATCH_DELAY_S,
     ) -> None:
@@ -109,41 +177,110 @@ class TokenizePool:
         self._n_workers = n_workers
         self._thread_local = threading.local()
         self._fallback_warned: set[str] = set()
+        self._max_batch_size = max_batch_size
+        self._max_batch_delay_s = max_batch_delay_s
+
+        # Thread executor: sync token_count, the message (tool-call) path, and the
+        # async fallback / process-failure retry path.
         self._executor: ThreadPoolExecutor | None = ThreadPoolExecutor(
             max_workers=n_workers,
             thread_name_prefix="TokenizePool",
         )
-
-        # Coalescing batch state for the async text path. Touched only from the
-        # aggregator's event-loop thread (token_count_async and its flush
-        # callbacks all run there), so no lock is needed.
-        self._max_batch_size = max_batch_size
-        self._max_batch_delay_s = max_batch_delay_s
-        self._pending_texts: list[str] = []
-        self._pending_futs: list[asyncio.Future[int]] = []
-        self._batch_inflight = False
-        self._flush_handle: asyncio.TimerHandle | None = None
-        # Pre-load a tokenizer on every worker thread so the first real
-        # token_count call doesn't pay the AutoTokenizer.from_pretrained cost.
-        # Submitting n_workers tasks is guaranteed to hit every thread because
-        # AutoTokenizer.from_pretrained blocks long enough that no thread
-        # completes before all tasks are submitted.
-        # **IMPORTANT**: This is not a guarantee - for instance when using a mock
-        # object in tests for the tokenizer, the mock object *must* block in the 100ms
-        # range to simulate proper .from_pretrained behavior.
-        # It is not super impactful if a thread is not pre-initialized - it will just
-        # have to pay the cost of .from_pretrained on the first pool.token_count call
-        # for that thread.
-        futures = [
+        # Pre-load a tokenizer on every worker thread so the first real call does
+        # not pay the AutoTokenizer.from_pretrained cost. Submitting n_workers
+        # tasks hits every thread because from_pretrained blocks long enough that
+        # no thread finishes before all tasks are submitted. (Not a hard
+        # guarantee — a mock tokenizer in tests must block ~100ms to simulate it;
+        # an un-warmed thread merely pays the load cost on its first real call.)
+        warmup = [
             self._executor.submit(self._get_thread_tokenizer) for _ in range(n_workers)
         ]
         try:
-            for f in futures:
+            for f in warmup:
                 f.result()
         except Exception:
             self._executor.shutdown(wait=False)
             self._executor = None
             raise
+
+        # Process lanes for the async batch path.
+        self._proc_executors: list[ProcessPoolExecutor] = []
+        self._setup_process_lanes(cores_per_worker, max_processes)
+
+        # Lane bookkeeping for the async coalescer. Process mode dispatches the
+        # picklable module function to the pinned worker pools; thread mode runs
+        # the bound batch method on the shared thread executor.
+        if self._proc_executors:
+            self._lane_executors: list[Executor] = list(self._proc_executors)
+            self._lane_fn: Any = _proc_encode_batch_lengths
+            self._lane_is_process = True
+        else:
+            self._lane_executors = [self._executor]
+            self._lane_fn = self._encode_batch_lengths
+            self._lane_is_process = False
+        self._free_lanes: deque[int] = deque(range(len(self._lane_executors)))
+        self._pending_texts: list[str] = []
+        self._pending_futs: list[asyncio.Future[int]] = []
+        self._flush_handle: asyncio.TimerHandle | None = None
+
+    # -- process-lane setup -------------------------------------------------
+
+    def _setup_process_lanes(
+        self, cores_per_worker: int, max_processes: int | None
+    ) -> None:
+        """Spawn and warm one pinned single-worker process per core block.
+
+        No-op (leaving the pool in thread mode) when the tokenizer has no fast
+        Rust backend, affinity is unavailable, or fewer than two core blocks fit
+        — a single process is no faster than the thread lane, so it is not worth
+        the spawn cost and memory.
+        """
+        if cores_per_worker <= 0:
+            return
+        if getattr(self._get_thread_tokenizer(), "backend_tokenizer", None) is None:
+            # Slow tokenizer: encode_batch_fast unavailable, stay on threads.
+            return
+        try:
+            available = sorted(os.sched_getaffinity(0))
+        except (OSError, AttributeError):
+            return
+        n_proc = len(available) // cores_per_worker
+        if max_processes is not None:
+            n_proc = min(n_proc, max_processes)
+        if n_proc < 2:
+            return
+
+        ctx = multiprocessing.get_context("spawn")
+        executors: list[ProcessPoolExecutor] = []
+        try:
+            for i in range(n_proc):
+                core_set = available[i * cores_per_worker : (i + 1) * cores_per_worker]
+                ex = ProcessPoolExecutor(
+                    max_workers=1,
+                    mp_context=ctx,
+                    initializer=_init_proc_worker,
+                    initargs=(self._tokenizer_name, core_set),
+                )
+                executors.append(ex)
+            # Force each worker to spawn + run its initializer (pin + load) now,
+            # so the first real batch does not stall on tokenizer load.
+            for ex in executors:
+                ex.submit(_proc_ping).result()
+        except Exception:
+            for ex in executors:
+                ex.shutdown(wait=False)
+            logger.exception(
+                "tokenizer process-lane setup failed; falling back to thread pool"
+            )
+            return
+        self._proc_executors = executors
+        logger.info(
+            "TokenizePool: %d process lanes x %d cores (async batch tokenization)",
+            n_proc,
+            cores_per_worker,
+        )
+
+    # -- thread-local tokenizer + per-item workers --------------------------
 
     def _get_thread_tokenizer(self) -> PreTrainedTokenizerBase:
         """Return the tokenizer for the current thread, loading it if needed."""
@@ -188,14 +325,13 @@ class TokenizePool:
         return len(tokenizer.tokenize(text))
 
     def _encode_batch_lengths(self, texts: list[str]) -> list[int]:
-        """Worker entry: per-text token counts for a whole batch in one call.
+        """Thread-lane batch worker: per-text token counts in one call.
 
-        Uses the raw ``tokenizers.Tokenizer`` backend's ``encode_batch_fast``,
-        which parallelizes across the batch on the Rust rayon pool and skips the
-        ``transformers`` per-call wrapper (BatchEncoding, offsets, attention
-        masks). ``len(encode(...).ids)`` equals ``len(tokenize(...))`` for token
-        counting, so OSL/ISL/TPOT counts match the per-text path exactly. Falls
-        back to per-text ``tokenize`` for slow tokenizers with no fast backend.
+        Uses the raw ``tokenizers.Tokenizer`` backend's ``encode_batch_fast``
+        (parallel across the batch on the rayon pool, no transformers wrapper).
+        ``len(encode(...).ids)`` equals ``len(tokenize(...))`` for counting, so
+        OSL/ISL/TPOT counts match the per-text path. Falls back to per-text
+        tokenize for slow tokenizers with no fast backend.
         """
         tokenizer = self._get_thread_tokenizer()
         backend = getattr(tokenizer, "backend_tokenizer", None)
@@ -203,8 +339,7 @@ class TokenizePool:
             encode_batch = getattr(backend, "encode_batch_fast", None)
             if encode_batch is None:
                 encode_batch = backend.encode_batch
-            encodings = encode_batch(texts, add_special_tokens=False)
-            return [len(e.ids) for e in encodings]
+            return [len(e.ids) for e in encode_batch(texts, add_special_tokens=False)]
         return [len(tokenizer.tokenize(t)) for t in texts]
 
     def _token_count_message_worker(
@@ -254,6 +389,8 @@ class TokenizePool:
             fallback_text = "\n".join(parts)
             return self._token_count_worker(fallback_text)
 
+    # -- sync + message API (thread pool) -----------------------------------
+
     def token_count(self, text: str) -> int:
         """Return the number of tokens in the input string (blocking)."""
         if self._executor is None:
@@ -275,80 +412,6 @@ class TokenizePool:
         )
         return future.result()
 
-    async def token_count_async(
-        self, text: str, loop: asyncio.AbstractEventLoop
-    ) -> int:
-        """Return the number of tokens without blocking the event loop.
-
-        Coalesces concurrent calls into batches: the text is appended to a
-        pending buffer and tokenized as part of the next ``encode_batch_fast``
-        flush. The caller awaits a future resolved when that batch completes.
-        ``loop`` must be the single event loop that drives this pool.
-        """
-        if self._executor is None:
-            raise RuntimeError("TokenizePool is closed")
-        fut: asyncio.Future[int] = loop.create_future()
-        self._pending_texts.append(text)
-        self._pending_futs.append(fut)
-        self._maybe_schedule_flush(loop)
-        return await fut
-
-    def _maybe_schedule_flush(self, loop: asyncio.AbstractEventLoop) -> None:
-        """Flush immediately if the batch is full, else arm a short delay timer.
-
-        No-op while a batch is in flight — the in-flight batch's completion
-        callback re-checks the buffer, so anything that accumulates meanwhile
-        forms the next batch (one rayon pool active at a time)."""
-        if self._batch_inflight or not self._pending_texts:
-            return
-        if len(self._pending_texts) >= self._max_batch_size:
-            self._flush_batch(loop)
-        elif self._flush_handle is None:
-            self._flush_handle = loop.call_later(
-                self._max_batch_delay_s, self._flush_batch, loop
-            )
-
-    def _flush_batch(self, loop: asyncio.AbstractEventLoop) -> None:
-        """Hand up to ``max_batch_size`` pending texts to one in-flight encode task.
-
-        Slicing caps per-batch memory and latency: a huge backlog (e.g. an
-        offline drain releasing 10^6 completions at once) chunks into bounded
-        batches rather than one giant ``encode_batch_fast`` call. Leftovers are
-        re-flushed by the completion callback."""
-        if self._flush_handle is not None:
-            self._flush_handle.cancel()
-            self._flush_handle = None
-        if self._batch_inflight or not self._pending_texts or self._executor is None:
-            return
-        n = min(len(self._pending_texts), self._max_batch_size)
-        texts = self._pending_texts[:n]
-        futs = self._pending_futs[:n]
-        self._pending_texts = self._pending_texts[n:]
-        self._pending_futs = self._pending_futs[n:]
-        self._batch_inflight = True
-        loop.create_task(self._run_batch(texts, futs, loop))
-
-    async def _run_batch(
-        self,
-        texts: list[str],
-        futs: list[asyncio.Future[int]],
-        loop: asyncio.AbstractEventLoop,
-    ) -> None:
-        try:
-            lengths = await loop.run_in_executor(
-                self._executor, self._encode_batch_lengths, texts
-            )
-            for f, n in zip(futs, lengths, strict=False):
-                if not f.done():
-                    f.set_result(n)
-        except Exception as exc:
-            for f in futs:
-                if not f.done():
-                    f.set_exception(exc)
-        finally:
-            self._batch_inflight = False
-            self._maybe_schedule_flush(loop)
-
     async def token_count_message_async(
         self,
         content: str,
@@ -367,17 +430,111 @@ class TokenizePool:
             tool_calls,
         )
 
-    def close(self) -> None:
-        """Shut down the worker pool. Idempotent."""
+    # -- async text path (coalesced batch tokenization) ---------------------
+
+    async def token_count_async(
+        self, text: str, loop: asyncio.AbstractEventLoop
+    ) -> int:
+        """Return the number of tokens without blocking the event loop.
+
+        Coalesces concurrent calls into batches dispatched across the lanes
+        (pinned worker processes, or the thread lane as fallback). The caller
+        awaits a future resolved when its batch completes. ``loop`` must be the
+        single event loop that drives this pool.
+        """
+        if self._executor is None:
+            raise RuntimeError("TokenizePool is closed")
+        fut: asyncio.Future[int] = loop.create_future()
+        self._pending_texts.append(text)
+        self._pending_futs.append(fut)
+        self._pump(loop)
+        return await fut
+
+    def _pump(self, loop: asyncio.AbstractEventLoop, *, force: bool = False) -> None:
+        """Dispatch batches to free lanes; arm a timer for a partial remainder.
+
+        Dispatches a full batch as soon as one is buffered and a lane is free
+        (up to all lanes concurrently). A partial batch is only dispatched when
+        ``force`` (timer fired), bounding small-batch overhead while keeping
+        tail latency at ``max_batch_delay_s``."""
         if self._flush_handle is not None:
             self._flush_handle.cancel()
             self._flush_handle = None
-        # Fail any still-pending awaiters so they don't hang on a dead pool.
-        for f in self._pending_futs:
+        while self._free_lanes and self._pending_texts:
+            if not force and len(self._pending_texts) < self._max_batch_size:
+                break
+            self._dispatch_one(loop)
+        if self._pending_texts and self._free_lanes and self._flush_handle is None:
+            self._flush_handle = loop.call_later(
+                self._max_batch_delay_s, self._flush_partial, loop
+            )
+
+    def _flush_partial(self, loop: asyncio.AbstractEventLoop) -> None:
+        """Timer callback: dispatch the buffered remainder even if under-size."""
+        self._pump(loop, force=True)
+
+    def _dispatch_one(self, loop: asyncio.AbstractEventLoop) -> None:
+        """Slice up to ``max_batch_size`` pending texts onto one free lane."""
+        lane = self._free_lanes.popleft()
+        n = min(len(self._pending_texts), self._max_batch_size)
+        texts = self._pending_texts[:n]
+        futs = self._pending_futs[:n]
+        self._pending_texts = self._pending_texts[n:]
+        self._pending_futs = self._pending_futs[n:]
+        loop.create_task(self._run_batch(lane, texts, futs, loop))
+
+    async def _run_batch(
+        self,
+        lane: int,
+        texts: list[str],
+        futs: list[asyncio.Future[int]],
+        loop: asyncio.AbstractEventLoop,
+    ) -> None:
+        try:
+            lengths = await loop.run_in_executor(
+                self._lane_executors[lane], self._lane_fn, texts
+            )
+            self._resolve(futs, lengths)
+        except Exception as exc:
+            # A process lane can die (worker crash / OOM); retry the batch on the
+            # thread lane so samples are never silently dropped.
+            if self._lane_is_process and self._executor is not None:
+                try:
+                    lengths = await loop.run_in_executor(
+                        self._executor, self._encode_batch_lengths, texts
+                    )
+                    self._resolve(futs, lengths)
+                except Exception as retry_exc:
+                    self._fail(futs, retry_exc)
+            else:
+                self._fail(futs, exc)
+        finally:
+            self._free_lanes.append(lane)
+            self._pump(loop)
+
+    @staticmethod
+    def _resolve(futs: list[asyncio.Future[int]], lengths: list[int]) -> None:
+        for f, n in zip(futs, lengths, strict=False):
             if not f.done():
-                f.set_exception(RuntimeError("TokenizePool closed"))
+                f.set_result(n)
+
+    @staticmethod
+    def _fail(futs: list[asyncio.Future[int]], exc: BaseException) -> None:
+        for f in futs:
+            if not f.done():
+                f.set_exception(exc)
+
+    def close(self) -> None:
+        """Shut down all lanes. Idempotent."""
+        if self._flush_handle is not None:
+            self._flush_handle.cancel()
+            self._flush_handle = None
+        self._fail(self._pending_futs, RuntimeError("TokenizePool closed"))
         self._pending_texts = []
         self._pending_futs = []
+        for ex in self._proc_executors:
+            ex.shutdown(wait=False)
+        self._proc_executors = []
         if self._executor is not None:
             self._executor.shutdown(wait=True)
             self._executor = None
