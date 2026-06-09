@@ -43,7 +43,6 @@ import msgspec
 import msgspec.json
 from huggingface_hub import model_info
 from tqdm import tqdm
-from transformers import AutoTokenizer
 from transformers.utils import logging as transformers_logging
 
 from inference_endpoint.async_utils.event_publisher import EventPublisherService
@@ -57,9 +56,6 @@ from inference_endpoint.async_utils.services.metrics_aggregator.snapshot import 
 )
 from inference_endpoint.async_utils.services.metrics_aggregator.subscriber import (
     MetricsSnapshotSubscriber,
-)
-from inference_endpoint.async_utils.services.metrics_aggregator.token_metrics import (
-    _normalize_tool_calls_for_template,
 )
 from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
 from inference_endpoint.config.runtime_settings import RuntimeSettings
@@ -314,75 +310,6 @@ def _load_datasets(
     return dataloader, accuracy_datasets, eval_configs
 
 
-def _precompute_isl_for_multi_turn(
-    dataloader: MultiTurnDataset, tokenizer_name: str
-) -> None:
-    """Tokenize pre-built message lists and store token counts in each sample.
-
-    Runs apply_chat_template once per client turn so the hot-path IslTrigger
-    sync path (len(token_ids)) is used instead of on-the-fly text tokenization.
-    Only affects dataset-history turns; live-history turns override 'messages'
-    at runtime so the stored input_tokens are stale (acceptable approximation).
-    """
-    try:
-        tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
-    except Exception:
-        logger.exception(
-            "ISL pre-computation: failed to load tokenizer %s; "
-            "falling back to text-tokenization at runtime",
-            tokenizer_name,
-        )
-        return
-    skipped = 0
-    first_failure_logged = False
-    for sample in dataloader.data or []:
-        messages = sample.get("messages")
-        if not messages:
-            continue
-        try:
-            normalized_messages = []
-            for msg in messages:
-                if msg.get("tool_calls"):
-                    msg = {
-                        **msg,
-                        "tool_calls": _normalize_tool_calls_for_template(
-                            msg["tool_calls"]
-                        ),
-                    }
-                normalized_messages.append(msg)
-            tools = sample.get("tools")
-            raw = tokenizer.apply_chat_template(
-                normalized_messages,
-                tools=tools if tools else None,
-                tokenize=True,
-                add_generation_prompt=True,
-            )
-            # Some tokenizers (e.g. Qwen3 fast tokenizer) return BatchEncoding
-            # instead of a plain list; extract .input_ids in that case.
-            token_ids: list[int] = raw.input_ids if hasattr(raw, "input_ids") else raw
-            sample["input_tokens"] = token_ids
-        except Exception:
-            if not first_failure_logged:
-                logger.exception(
-                    "ISL pre-computation: apply_chat_template failed (first failure shown)"
-                )
-                first_failure_logged = True
-            skipped += 1
-    if skipped:
-        logger.warning(
-            "ISL pre-computation: %d turn(s) skipped (apply_chat_template failed)",
-            skipped,
-        )
-    total_with_messages = len([s for s in (dataloader.data or []) if s.get("messages")])
-    if total_with_messages > 0 and skipped == total_with_messages:
-        logger.warning(
-            "ISL precomputation: all %d turn(s) failed apply_chat_template; "
-            "ISL metrics will use text-tokenization fallback. "
-            "Check tokenizer/template compatibility.",
-            total_with_messages,
-        )
-
-
 def setup_benchmark(config: BenchmarkConfig, test_mode: TestMode) -> BenchmarkContext:
     """Load tokenizer, dataset, create scheduler, setup report dir."""
     # CPU affinity
@@ -422,10 +349,6 @@ def setup_benchmark(config: BenchmarkConfig, test_mode: TestMode) -> BenchmarkCo
 
     # Datasets
     dataloader, accuracy_datasets, eval_configs = _load_datasets(config, report_dir)
-
-    if isinstance(dataloader, MultiTurnDataset) and tokenizer_name is not None:
-        logger.info("Pre-computing ISL token counts for multi-turn dataset…")
-        _precompute_isl_for_multi_turn(dataloader, tokenizer_name)
 
     # Setup runtime settings using factory method
     rt_settings = RuntimeSettings.from_config(config, dataloader.num_samples())

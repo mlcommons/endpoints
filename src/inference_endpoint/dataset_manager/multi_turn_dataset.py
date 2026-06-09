@@ -17,6 +17,7 @@
 
 import hashlib
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -111,6 +112,127 @@ def _expand_tool_results(row: dict) -> list[dict]:
             {"role": "tool", "tool_call_id": tool_call_id, "content": content}
         )
     return messages
+
+
+def _build_conversation_metadata(
+    conv_id: Any,
+    group: Any,
+    enable_salt: bool,
+) -> tuple[
+    str,
+    dict[tuple, list[dict]],
+    dict[tuple, list[dict]],
+    str | None,
+    dict[tuple, float],
+    list[ConversationSampleEntry],
+    int,
+]:
+    """Build message history for all client turns in a single conversation.
+
+    Returns a tuple of (str_conv_id, pre_built_messages, current_turn_messages,
+    system_prompt, delay_seconds, samples, client_turns_count).
+    Safe to call from any thread — no shared mutable state is accessed.
+    """
+    str_conv_id = str(conv_id)
+    sorted_group = group.sort_values("turn")
+    client_rows = sorted_group[sorted_group["role"].isin(["user", "tool"])]
+
+    system_content: str | None = None
+    for _, srow in sorted_group.iterrows():
+        val = srow.get("system")
+        if val and isinstance(val, str):
+            system_content = val
+            break
+    if enable_salt and system_content:
+        salt_hex = hashlib.blake2b(
+            str_conv_id.encode("utf-8"), digest_size=8
+        ).hexdigest()
+        system_content = f"{system_content}\n\n[cache_salt: {salt_hex}]"
+    elif enable_salt:
+        logger.warning(
+            "multi_turn.enable_salt requested but conversation %s has no "
+            "system prompt; cache salt not applied",
+            conv_id,
+        )
+
+    pre_built_messages_by_key: dict[tuple, list[dict]] = {}
+    current_turn_messages_by_key: dict[tuple, list[dict]] = {}
+    delay_seconds_by_key: dict[tuple, float] = {}
+    samples: list[ConversationSampleEntry] = []
+
+    for _, row in client_rows.iterrows():
+        t_n = int(row["turn"])
+
+        messages: list[dict] = []
+        if system_content:
+            messages.append({"role": "system", "content": system_content})
+
+        prior_rows = sorted_group[sorted_group["turn"] < t_n]
+        for _, prior_row in prior_rows.iterrows():
+            msg: dict[str, Any] = {}
+            for key in (
+                "role",
+                "content",
+                "name",
+                "tool_calls",
+                "tool_results",
+                "reasoning_content",
+            ):
+                val = prior_row.get(key)
+                if val is not None and not (isinstance(val, float) and pd.isna(val)):
+                    msg[key] = val
+            if (
+                msg.get("role") == "assistant"
+                and "tool_calls" in msg
+                and "content" not in msg
+            ):
+                msg["content"] = None
+            if msg.get("role"):
+                expanded = _expand_tool_results(msg)
+                if expanded:
+                    messages.extend(expanded)
+                else:
+                    messages.append(msg)
+
+        current_turn_msgs: list[dict] = []
+        expanded = _expand_tool_results(row)
+        if expanded:
+            current_turn_msgs = expanded
+        else:
+            cur: dict[str, Any] = {}
+            for key in ("role", "content", "name"):
+                val = row.get(key)
+                if val is not None and not (isinstance(val, float) and pd.isna(val)):
+                    cur[key] = val
+            current_turn_msgs = [cur]
+        messages.extend(current_turn_msgs)
+
+        pre_built_messages_by_key[(str_conv_id, t_n)] = messages
+        current_turn_messages_by_key[(str_conv_id, t_n)] = current_turn_msgs
+
+        delay_val = row.get("delay_seconds")
+        if delay_val is not None and not (
+            isinstance(delay_val, float) and pd.isna(delay_val)
+        ):
+            try:
+                delay_f = float(delay_val)
+            except (TypeError, ValueError):
+                delay_f = 0.0
+            if delay_f > 0.0:
+                delay_seconds_by_key[(str_conv_id, t_n)] = delay_f
+
+        samples.append(ConversationSampleEntry(conversation_id=str_conv_id, turn=t_n))
+
+    client_turns_count = int(client_rows.shape[0])
+    return (
+        str_conv_id,
+        pre_built_messages_by_key,
+        current_turn_messages_by_key,
+        system_content,
+        delay_seconds_by_key,
+        samples,
+        client_turns_count,
+    )
 
 
 class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
@@ -380,133 +502,46 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
 
         Pre-computes the complete message list for each client turn so that
         conversation history does not need to be accumulated at runtime.
+        Conversations are built in parallel; turns within each conversation are
+        processed sequentially because turn N depends on prior turns.
 
         Returns:
             ConversationMetadata with samples, counts, and pre-built message maps.
         """
+        assert self.dataframe is not None, "Dataframe must be initialized"
+
         samples: list[ConversationSampleEntry] = []
-
-        # Count client turns (user + tool) per conversation for completion tracking
-        client_turns_per_conv = {
-            str(conv_id): int(group["role"].isin(["user", "tool"]).sum())
-            for conv_id, group in self._conv_groups.items()
-        }
-
-        # Map (conversation_id, turn) → complete message list ready to send to endpoint.
-        # Each entry is: [system (optional)] + all prior rows formatted as messages
-        #                + the current client turn message.
-        # This includes assistant rows (tool dispatches or terminal responses)
-        # so no runtime injection is required.
+        client_turns_per_conv: dict[str, int] = {}
         pre_built_messages_by_key: dict[tuple, list[dict]] = {}
         current_turn_messages_by_key: dict[tuple, list[dict]] = {}
         system_prompts_by_conv: dict[str, str | None] = {}
         delay_seconds_by_key: dict[tuple, float] = {}
 
-        assert self.dataframe is not None, "Dataframe must be initialized"
-        for conv_id, group in self._conv_groups.items():
-            sorted_group = group.sort_values("turn")
-            client_rows = sorted_group[sorted_group["role"].isin(["user", "tool"])]
+        with ThreadPoolExecutor() as executor:
+            futures = {
+                executor.submit(
+                    _build_conversation_metadata, conv_id, group, self._enable_salt
+                ): conv_id
+                for conv_id, group in self._conv_groups.items()
+            }
+            for future in as_completed(futures):
+                (
+                    str_conv_id,
+                    partial_pre_built,
+                    partial_current_turn,
+                    system_prompt,
+                    partial_delay,
+                    conv_samples,
+                    client_turns_count,
+                ) = future.result()
+                pre_built_messages_by_key.update(partial_pre_built)
+                current_turn_messages_by_key.update(partial_current_turn)
+                system_prompts_by_conv[str_conv_id] = system_prompt
+                delay_seconds_by_key.update(partial_delay)
+                samples.extend(conv_samples)
+                client_turns_per_conv[str_conv_id] = client_turns_count
 
-            # Extract system prompt from the first row that has it (typically turn 1)
-            system_content: str | None = None
-            for _, srow in sorted_group.iterrows():
-                val = srow.get("system")
-                if val and isinstance(val, str):
-                    system_content = val
-                    break
-            if self._enable_salt and system_content:
-                salt_hex = hashlib.blake2b(
-                    str(conv_id).encode("utf-8"), digest_size=8
-                ).hexdigest()
-                system_content = f"{system_content}\n\n[cache_salt: {salt_hex}]"
-            elif self._enable_salt:
-                logger.warning(
-                    "multi_turn.enable_salt requested but conversation %s has no "
-                    "system prompt; cache salt not applied",
-                    conv_id,
-                )
-            system_prompts_by_conv[str(conv_id)] = system_content
-
-            for _, row in client_rows.iterrows():
-                t_n = int(row["turn"])
-
-                messages: list[dict] = []
-                if system_content:
-                    messages.append({"role": "system", "content": system_content})
-
-                # All dataset rows strictly before this client turn (includes
-                # assistant rows and prior tool results).
-                prior_rows = sorted_group[sorted_group["turn"] < t_n]
-                for _, prior_row in prior_rows.iterrows():
-                    msg: dict[str, Any] = {}
-                    for key in (
-                        "role",
-                        "content",
-                        "name",
-                        "tool_calls",
-                        "tool_results",
-                        "reasoning_content",
-                    ):
-                        val = prior_row.get(key)
-                        if val is not None and not (
-                            isinstance(val, float) and pd.isna(val)
-                        ):
-                            msg[key] = val
-                    if (
-                        msg.get("role") == "assistant"
-                        and "tool_calls" in msg
-                        and "content" not in msg
-                    ):
-                        msg["content"] = None
-                    if msg.get("role"):
-                        # Expand merged parallel tool results: a single row with
-                        # tool_results: [{tool_call_id, content}, ...] expands into
-                        # one OpenAI tool message per result entry.
-                        expanded = _expand_tool_results(msg)
-                        if expanded:
-                            messages.extend(expanded)
-                        else:
-                            messages.append(msg)
-
-                # Append the current client turn message.
-                # A merged parallel-tool row carries tool_results instead of a
-                # single tool_call_id/content pair; expand to one message per result.
-                current_turn_msgs: list[dict] = []
-                expanded = _expand_tool_results(row)
-                if expanded:
-                    current_turn_msgs = expanded
-                else:
-                    cur: dict[str, Any] = {}
-                    for key in ("role", "content", "name"):
-                        val = row.get(key)
-                        if val is not None and not (
-                            isinstance(val, float) and pd.isna(val)
-                        ):
-                            cur[key] = val
-                    current_turn_msgs = [cur]
-                messages.extend(current_turn_msgs)
-
-                str_conv_id = str(conv_id)
-                pre_built_messages_by_key[(str_conv_id, t_n)] = messages
-                current_turn_messages_by_key[(str_conv_id, t_n)] = current_turn_msgs
-
-                delay_val = row.get("delay_seconds")
-                if delay_val is not None and not (
-                    isinstance(delay_val, float) and pd.isna(delay_val)
-                ):
-                    try:
-                        delay_f = float(delay_val)
-                    except (TypeError, ValueError):
-                        delay_f = 0.0
-                    if delay_f > 0.0:
-                        delay_seconds_by_key[(str_conv_id, t_n)] = delay_f
-
-                samples.append(
-                    ConversationSampleEntry(
-                        conversation_id=str_conv_id,
-                        turn=t_n,
-                    )
-                )
+        samples.sort(key=lambda e: (e.conversation_id, e.turn))
 
         return ConversationMetadata(
             samples=samples,
