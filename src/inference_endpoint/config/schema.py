@@ -566,21 +566,6 @@ class DrainConfig(BaseModel):
             "in-flight tokenize tasks after ENDED (default: 60.0; 0 = unlimited)."
         ),
     )
-    metrics_tokenizer_workers: Annotated[
-        int,
-        cyclopts.Parameter(
-            alias="--metrics-tokenizer-workers",
-            help=(
-                "Number of tokenizer worker threads in the metrics aggregator. "
-                "Increase if ISL/OSL/TPOT tokenization can't keep up with request "
-                "throughput (symptoms: large drain timeout warning at run end)."
-            ),
-        ),
-    ] = Field(
-        2,
-        ge=1,
-        description="Number of tokenizer worker threads in the metrics aggregator (default: 2).",
-    )
 
 
 @cyclopts.Parameter(name="*")

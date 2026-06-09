@@ -17,9 +17,9 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any
@@ -33,7 +33,8 @@ if TYPE_CHECKING:
         MetricsRegistry,
     )
     from inference_endpoint.async_utils.services.metrics_aggregator.token_metrics import (
-        TokenizePool,
+        MessageParts,
+        TokenBatchQueue,
     )
     from inference_endpoint.core.record import EventRecord
 
@@ -146,8 +147,13 @@ class EmitTrigger(ABC):
         ev_rec: EventRecord,
         row: SampleRow,
         pre_change: dict[str, Any],
-    ) -> asyncio.Task | None:
-        """Must be non-blocking. Return a Task if async work was scheduled."""
+    ) -> None:
+        """Must be non-blocking.
+
+        Sync triggers record into the registry directly. Token triggers
+        enqueue onto the shared ``TokenBatchQueue`` for batched tokenization
+        at the next flush; neither path schedules per-event tasks.
+        """
         raise NotImplementedError()
 
 
@@ -177,28 +183,27 @@ class TimeDeltaTrigger(EmitTrigger):
 
 
 class AsyncTokenTrigger(EmitTrigger):
-    """Base for triggers that need async tokenization.
+    """Base for triggers whose metric needs tokenization.
 
-    Subclasses implement ``_extract_text()`` to pull the text to tokenize
-    from the event record. If text is returned, an async task is created
-    to tokenize and emit. Subclasses can also override ``_extract_message()``
-    to return (content, reasoning, tool_calls) for chat-template–aware tokenization
-    when tool calls are present. Subclasses can override ``_compute_value()`` to
-    transform the token count before storing.
+    Subclasses implement ``_extract_text()`` to pull the text to tokenize from
+    the event record, and may override ``_extract_message()`` to return
+    (content, reasoning, tool_calls) for chat-template–aware tokenization when
+    tool calls are present. ``fire()`` does not tokenize inline — it enqueues
+    the work plus a recorder callback onto the shared ``TokenBatchQueue``, which
+    the aggregator flushes in batches. ``_compute_value()`` can transform the
+    token count before it is recorded.
     """
 
     def __init__(
         self,
         metric_name: str,
         registry: MetricsRegistry,
-        tokenize_pool: TokenizePool | None,
-        loop: asyncio.AbstractEventLoop | None,
+        queue: TokenBatchQueue | None,
         requires: tuple[str, ...] = (),
         dtype: type = int,
     ):
         super().__init__(metric_name, registry, requires=requires, dtype=dtype)
-        self._pool = tokenize_pool
-        self._loop = loop
+        self._queue = queue
 
     @abstractmethod
     def _extract_text(
@@ -209,11 +214,11 @@ class AsyncTokenTrigger(EmitTrigger):
 
     def _extract_message(
         self, ev_rec: EventRecord, row: SampleRow, pre_change: dict[str, Any]
-    ) -> tuple[str, str | None, tuple[dict[str, Any], ...] | None] | None:
-        """Return (content, reasoning, tool_calls) for message-aware tokenization, or None.
+    ) -> MessageParts | None:
+        """Return (content, reasoning, tool_calls) for message-aware tokenization.
 
-        When non-None is returned, ``token_count_message_async`` is used instead of
-        ``token_count_async``. Default returns None (use text path).
+        When non-None, the message (chat-template) path is used instead of the
+        plain-text path. Default returns None (use text path).
         """
         return None
 
@@ -223,48 +228,32 @@ class AsyncTokenTrigger(EmitTrigger):
         """Transform token count into the metric value. Default: count as-is."""
         return token_count
 
-    def fire(self, ev_rec, row, pre_change):
-        if self._pool is None or self._loop is None:
-            return None
+    def _make_recorder(
+        self, ev_rec: EventRecord, pre_change: dict[str, Any]
+    ) -> Callable[[int], None]:
+        """Build the callback the queue runs once the token count is known."""
+        registry, name = self.registry, self.metric_name
 
+        def record(count: int) -> None:
+            value = self._compute_value(count, ev_rec, pre_change)
+            if value is not None:
+                registry.record(name, value)
+
+        return record
+
+    def fire(self, ev_rec, row, pre_change):
+        if self._queue is None:
+            return
         message_parts = self._extract_message(ev_rec, row, pre_change)
         if message_parts is not None:
-            content, reasoning, tool_calls = message_parts
-            pool, loop = self._pool, self._loop
-            registry, name = self.registry, self.metric_name
-            uuid = row.sample_uuid
-
-            async def _tokenize_message_and_emit() -> None:
-                try:
-                    count = await pool.token_count_message_async(
-                        content, reasoning, tool_calls, loop
-                    )
-                    value = self._compute_value(count, ev_rec, pre_change)
-                    if value is not None:
-                        registry.record(name, value)
-                except Exception:
-                    logger.exception("%s tokenization failed for %s", name, uuid)
-
-            return loop.create_task(_tokenize_message_and_emit())
-
+            self._queue.enqueue_message(
+                message_parts, self._make_recorder(ev_rec, pre_change)
+            )
+            return
         text = self._extract_text(ev_rec, row, pre_change)
         if not text:
-            return None
-
-        pool, loop = self._pool, self._loop
-        registry, name = self.registry, self.metric_name
-        uuid = row.sample_uuid
-
-        async def _tokenize_and_emit() -> None:
-            try:
-                count = await pool.token_count_async(text, loop)
-                value = self._compute_value(count, ev_rec, pre_change)
-                if value is not None:
-                    registry.record(name, value)
-            except Exception:
-                logger.exception("%s tokenization failed for %s", name, uuid)
-
-        return loop.create_task(_tokenize_and_emit())
+            return
+        self._queue.enqueue_text(text, self._make_recorder(ev_rec, pre_change))
 
 
 # ---------------------------------------------------------------------------
@@ -319,19 +308,18 @@ class IslTrigger(AsyncTokenTrigger):
     def __init__(
         self,
         registry: MetricsRegistry,
-        tokenize_pool: TokenizePool | None,
-        loop: asyncio.AbstractEventLoop | None,
+        queue: TokenBatchQueue | None,
     ):
-        super().__init__(MetricSeriesKey.ISL, registry, tokenize_pool, loop)
+        super().__init__(MetricSeriesKey.ISL, registry, queue)
 
     def fire(self, ev_rec, row, pre_change):
         # Sync fast path: any backend that pre-populates token_ids (e.g. SGLang).
         if isinstance(ev_rec.data, PromptData) and ev_rec.data.token_ids is not None:
             self.registry.record(self.metric_name, len(ev_rec.data.token_ids))
-            return None
-        # Async path: tokenize raw text — used when token_ids are unavailable
-        # (e.g. OpenAI-compatible endpoints). Handled by the base class.
-        return super().fire(ev_rec, row, pre_change)
+            return
+        # Text path: tokenize raw prompt text — used when token_ids are
+        # unavailable (e.g. OpenAI-compatible endpoints). Enqueued by the base.
+        super().fire(ev_rec, row, pre_change)
 
     def _extract_text(self, ev_rec, row, pre_change):
         if isinstance(ev_rec.data, PromptData) and ev_rec.data.text is not None:
@@ -345,10 +333,9 @@ class OslTrigger(AsyncTokenTrigger):
     def __init__(
         self,
         registry: MetricsRegistry,
-        tokenize_pool: TokenizePool | None,
-        loop: asyncio.AbstractEventLoop | None,
+        queue: TokenBatchQueue | None,
     ):
-        super().__init__(MetricSeriesKey.OSL, registry, tokenize_pool, loop)
+        super().__init__(MetricSeriesKey.OSL, registry, queue)
 
     def _extract_text(self, ev_rec, row, pre_change):
         if isinstance(ev_rec.data, TextModelOutput):
@@ -383,14 +370,12 @@ class TpotTrigger(AsyncTokenTrigger):
     def __init__(
         self,
         registry: MetricsRegistry,
-        tokenize_pool: TokenizePool | None,
-        loop: asyncio.AbstractEventLoop | None,
+        queue: TokenBatchQueue | None,
     ):
         super().__init__(
             MetricSeriesKey.TPOT_NS,
             registry,
-            tokenize_pool,
-            loop,
+            queue,
             requires=(SampleField.RECV_FIRST_NS,),
             dtype=float,
         )
@@ -444,7 +429,6 @@ class MetricsTable:
         self._registry = registry
         self._in_flight: dict[str, SampleRow] = {}
         self._triggers: dict[str, list[EmitTrigger]] = {}
-        self._in_flight_tasks: set[asyncio.Task] = set()
 
         # Session-level state
         self.is_tracking: bool = False
@@ -538,45 +522,6 @@ class MetricsTable:
             self._update_tracked_block(row, ev_rec.timestamp_ns)
             self._in_flight.pop(sample_uuid, None)
 
-    # --- Task draining ---
-
-    @property
-    def in_flight_tasks_count(self) -> int:
-        """Number of async trigger tasks currently in flight."""
-        return len(self._in_flight_tasks)
-
-    async def drain_tasks(self, *, timeout: float | None = None) -> int:
-        """Await in-flight async trigger tasks.
-
-        With ``timeout``, the pending set at the timeout boundary is
-        cancelled and awaited; the count of those pending tasks is
-        returned (>0 indicates the drain timed out). Without
-        ``timeout``, blocks indefinitely and returns 0 on clean drain.
-
-        The pending count must be captured BEFORE the cancel-and-await
-        step: each task's ``add_done_callback(_in_flight_tasks.discard)``
-        empties ``_in_flight_tasks`` as cancellation propagates, so
-        reading ``in_flight_tasks_count`` after this method returns
-        would always be 0 — making a drain timeout indistinguishable
-        from a clean run.
-        """
-        if not self._in_flight_tasks:
-            return 0
-        if timeout is None:
-            await asyncio.gather(*self._in_flight_tasks, return_exceptions=True)
-            self._in_flight_tasks.clear()
-            return 0
-        _, still_pending = await asyncio.wait(
-            list(self._in_flight_tasks), timeout=timeout
-        )
-        n_pending = len(still_pending)
-        if still_pending:
-            for t in still_pending:
-                t.cancel()
-            await asyncio.gather(*still_pending, return_exceptions=True)
-        self._in_flight_tasks.clear()
-        return n_pending
-
     # --- Internal ---
 
     def _create_row(self, sample_uuid: str) -> SampleRow:
@@ -595,10 +540,7 @@ class MetricsTable:
     ) -> None:
         for trigger in self._triggers.get(field_name, ()):
             pre_change = {attr: getattr(row, attr) for attr in trigger.requires}
-            task = trigger.fire(ev_rec, row, pre_change)
-            if task is not None:
-                self._in_flight_tasks.add(task)
-                task.add_done_callback(self._in_flight_tasks.discard)
+            trigger.fire(ev_rec, row, pre_change)
 
     def _update_tracked_block(self, row: SampleRow, complete_ns: int) -> None:
         """Extend the sample's tracked block duration and increment count."""

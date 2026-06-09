@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for TokenizePool thread-safety and correctness."""
+"""Tests for BatchTokenizer and TokenBatchQueue."""
 
 import asyncio
 import time
@@ -22,18 +22,22 @@ from unittest.mock import patch
 
 import pytest
 from inference_endpoint.async_utils.services.metrics_aggregator.token_metrics import (
-    TokenizePool,
+    BatchTokenizer,
+    TokenBatchQueue,
 )
 
 _MOCK_TARGET = "inference_endpoint.async_utils.services.metrics_aggregator.token_metrics.AutoTokenizer"
 
 
 class _FakeTokenizer:
-    """Deterministic tokenizer that splits on whitespace."""
+    """Deterministic tokenizer that splits on whitespace.
 
-    def __init__(self, load_delay: float = 0.1):
-        # Simulate the blocking cost of from_pretrained so that
-        # pre-initialization in __init__ saturates all worker threads.
+    Has no ``backend_tokenizer``, so BatchTokenizer keeps the batch path
+    in-process (no subprocess shards) and ``count_texts`` falls back to
+    ``tokenize`` per text — which is what these tests assert against.
+    """
+
+    def __init__(self, load_delay: float = 0.0):
         time.sleep(load_delay)
 
     def tokenize(self, text: str) -> list[str]:
@@ -45,64 +49,58 @@ class _FakeTokenizer:
 
 
 @pytest.mark.unit
-class TestTokenizePool:
+class TestBatchTokenizer:
     def test_token_count_returns_int(self):
         with patch(_MOCK_TARGET, _FakeTokenizer):
-            with TokenizePool("fake", n_workers=1) as pool:
-                count = pool.token_count("Hello world")
-                assert count == 2
+            with BatchTokenizer("fake") as tok:
+                assert tok.token_count("Hello world") == 2
 
-    def test_multiple_workers(self):
+    def test_count_texts_batch(self):
         with patch(_MOCK_TARGET, _FakeTokenizer):
-            with TokenizePool("fake", n_workers=4) as pool:
-                results = []
-                for i in range(10):
-                    results.append(pool.token_count(f"Sentence number {i}"))
-                assert all(isinstance(r, int) and r > 0 for r in results)
+            with BatchTokenizer("fake") as tok:
+                assert tok.count_texts(["a b", "c d e", "x"]) == [2, 3, 1]
 
-    def test_concurrent_calls_thread_safe(self):
+    def test_count_texts_empty(self):
         with patch(_MOCK_TARGET, _FakeTokenizer):
-            with TokenizePool("fake", n_workers=2) as pool:
-                texts = [f"word{i} word{i+1}" for i in range(20)]
+            with BatchTokenizer("fake") as tok:
+                assert tok.count_texts([]) == []
 
+    def test_concurrent_token_count_thread_safe(self):
+        with patch(_MOCK_TARGET, _FakeTokenizer):
+            with BatchTokenizer("fake") as tok:
+                texts = [f"word{i} word{i + 1}" for i in range(20)]
                 with ThreadPoolExecutor(max_workers=8) as executor:
-                    futures = [executor.submit(pool.token_count, t) for t in texts]
+                    futures = [executor.submit(tok.token_count, t) for t in texts]
                     results = [f.result() for f in futures]
-
-                assert len(results) == 20
-                assert all(r == 2 for r in results)
+                assert results == [2] * 20
 
     def test_close_is_idempotent(self):
         with patch(_MOCK_TARGET, _FakeTokenizer):
-            pool = TokenizePool("fake", n_workers=1)
-            pool.close()
-            pool.close()  # Should not raise
+            tok = BatchTokenizer("fake")
+            tok.close()
+            tok.close()  # must not raise
 
     def test_use_after_close_raises(self):
         with patch(_MOCK_TARGET, _FakeTokenizer):
-            pool = TokenizePool("fake", n_workers=1)
-            pool.close()
+            tok = BatchTokenizer("fake")
+            tok.close()
             with pytest.raises(RuntimeError, match="closed"):
-                pool.token_count("hello")
-
-    def test_n_workers_zero_raises(self):
-        with pytest.raises(ValueError, match="n_workers"):
-            TokenizePool("fake", n_workers=0)
+                tok.token_count("hello")
 
     @pytest.mark.asyncio
-    async def test_token_count_async(self):
+    async def test_count_texts_async(self):
         with patch(_MOCK_TARGET, _FakeTokenizer):
             loop = asyncio.get_running_loop()
-            with TokenizePool("fake", n_workers=1) as pool:
-                count = await pool.token_count_async("Hello world foo", loop)
-                assert count == 3
+            with BatchTokenizer("fake") as tok:
+                counts = await tok.count_texts_async(["Hello world foo", "a"], loop)
+                assert counts == [3, 1]
 
     def test_context_manager(self):
         with patch(_MOCK_TARGET, _FakeTokenizer):
-            with TokenizePool("fake", n_workers=1) as pool:
-                assert pool.token_count("a b c") == 3
+            with BatchTokenizer("fake") as tok:
+                assert tok.token_count("a b c") == 3
             with pytest.raises(RuntimeError, match="closed"):
-                pool.token_count("test")
+                tok.token_count("test")
 
 
 class _FakeTokenizerWithTemplate(_FakeTokenizer):
@@ -130,19 +128,18 @@ class _FakeTokenizerWithTemplate(_FakeTokenizer):
 
 
 @pytest.mark.unit
-class TestTokenizePoolMessageTokenization:
+class TestBatchTokenizerMessageTokenization:
     def test_token_count_message_subtracts_baseline(self):
         """token_count_message returns full_tokens - baseline."""
         with patch(_MOCK_TARGET, _FakeTokenizerWithTemplate):
-            with TokenizePool("fake", n_workers=1) as pool:
-                # "hello world" -> 2 content words + 2 wrapper = 4; baseline = 0 + 2 = 2; net = 2
-                count = pool.token_count_message("hello world", None, None)
-                assert count == 2
+            with BatchTokenizer("fake") as tok:
+                # "hello world" -> 2 content + 2 wrapper = 4; baseline = 0, prefix = 2
+                assert tok.token_count_message("hello world", None, None) == 2
 
     def test_token_count_message_includes_tool_calls(self):
         """token_count_message includes tool-call JSON tokens."""
         with patch(_MOCK_TARGET, _FakeTokenizerWithTemplate):
-            with TokenizePool("fake", n_workers=1) as pool:
+            with BatchTokenizer("fake") as tok:
                 tool_calls = (
                     {
                         "id": "c1",
@@ -150,9 +147,9 @@ class TestTokenizePoolMessageTokenization:
                         "function": {"name": "f", "arguments": "{}"},
                     },
                 )
-                count_without = pool.token_count_message("hello", None, None)
-                count_with = pool.token_count_message("hello", None, tool_calls)
-                assert count_with > count_without
+                without = tok.token_count_message("hello", None, None)
+                with_calls = tok.token_count_message("hello", None, tool_calls)
+                assert with_calls > without
 
     def test_token_count_message_fallback_on_exception(self):
         """Falls back to whitespace split when apply_chat_template raises."""
@@ -162,7 +159,7 @@ class TestTokenizePoolMessageTokenization:
                 raise ValueError("template does not support tool_calls")
 
         with patch(_MOCK_TARGET, _BadTemplateTokenizer):
-            with TokenizePool("fake", n_workers=1) as pool:
+            with BatchTokenizer("fake") as tok:
                 tool_calls = (
                     {
                         "id": "c1",
@@ -170,17 +167,82 @@ class TestTokenizePoolMessageTokenization:
                         "function": {"name": "f", "arguments": "{}"},
                     },
                 )
-                # Should not raise; falls back to whitespace tokenizer
-                count = pool.token_count_message("hello world", None, tool_calls)
-                assert count > 0
+                # Must not raise; falls back to whitespace tokenizer.
+                assert tok.token_count_message("hello world", None, tool_calls) > 0
 
     @pytest.mark.asyncio
     async def test_token_count_message_async(self):
-        """token_count_message_async returns count without blocking event loop."""
         with patch(_MOCK_TARGET, _FakeTokenizerWithTemplate):
             loop = asyncio.get_running_loop()
-            with TokenizePool("fake", n_workers=1) as pool:
-                count = await pool.token_count_message_async(
+            with BatchTokenizer("fake") as tok:
+                count = await tok.token_count_message_async(
                     "hello world", None, None, loop
                 )
                 assert count == 2
+
+
+class _CapturingTokenizer:
+    """Minimal tokenizer stub for queue tests: whitespace counts, no procs."""
+
+    async def count_texts_async(self, texts, _loop):
+        return [len(t.split()) for t in texts]
+
+    async def token_count_message_async(self, content, reasoning, tool_calls, _loop):
+        parts = [p for p in (content, reasoning) if p]
+        return len(" ".join(parts).split()) + (len(tool_calls) if tool_calls else 0)
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+class TestTokenBatchQueue:
+    async def test_flush_records_text_via_callback(self):
+        loop = asyncio.get_running_loop()
+        queue = TokenBatchQueue(_CapturingTokenizer(), loop)
+        recorded: list[int] = []
+        queue.enqueue_text("a b c", recorded.append)
+        queue.enqueue_text("d e", recorded.append)
+        assert queue.pending == 2
+        await queue.flush()
+        assert sorted(recorded) == [2, 3]
+        assert queue.pending == 0
+
+    async def test_flush_records_message_via_callback(self):
+        loop = asyncio.get_running_loop()
+        queue = TokenBatchQueue(_CapturingTokenizer(), loop)
+        recorded: list[int] = []
+        queue.enqueue_message(("hello world", None, None), recorded.append)
+        await queue.flush()
+        assert recorded == [2]
+
+    async def test_flush_empty_is_noop(self):
+        loop = asyncio.get_running_loop()
+        queue = TokenBatchQueue(_CapturingTokenizer(), loop)
+        await queue.flush()
+        assert queue.pending == 0
+
+    async def test_flush_remaining_clean_returns_zero(self):
+        loop = asyncio.get_running_loop()
+        queue = TokenBatchQueue(_CapturingTokenizer(), loop)
+        recorded: list[int] = []
+        queue.enqueue_text("a b", recorded.append)
+        assert await queue.flush_remaining(timeout=5.0) == 0
+        assert recorded == [2]
+
+    async def test_flush_remaining_timeout_reports_pending(self):
+        """A tokenizer slower than the budget leaves items pending."""
+
+        class _BlockingTokenizer:
+            async def count_texts_async(self, texts, _loop):
+                await asyncio.sleep(10.0)
+                return [0] * len(texts)
+
+            async def token_count_message_async(self, *args):
+                return 0
+
+        loop = asyncio.get_running_loop()
+        queue = TokenBatchQueue(_BlockingTokenizer(), loop)
+        recorded: list[int] = []
+        queue.enqueue_text("never counted", recorded.append)
+        n_pending = await queue.flush_remaining(timeout=0.05)
+        assert n_pending == 1
+        assert recorded == []

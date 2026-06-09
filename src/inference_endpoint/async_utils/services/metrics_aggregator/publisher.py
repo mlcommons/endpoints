@@ -21,7 +21,7 @@ import asyncio
 import json
 import logging
 import os
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from inference_endpoint.async_utils.services.metrics_aggregator.registry import (
@@ -102,15 +102,22 @@ class MetricsPublisher:
         registry: MetricsRegistry,
         publish_interval_s: float,
         get_runtime_state: Callable[[], tuple[SessionState, int]],
+        pre_publish: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         """Begin publishing live ticks every ``publish_interval_s`` seconds.
 
         ``get_runtime_state`` returns ``(state, n_pending_tasks)`` for the
         current moment: the aggregator's session state (``LIVE`` or
-        ``DRAINING``) and the count of in-flight async tokenize tasks. The
-        callable is invoked once per tick and the values are plumbed into
-        the published snapshot. ``COMPLETE`` is emitted only by
-        ``publish_final``, never by the tick task.
+        ``DRAINING``) and the count of pending tokenizations. The callable is
+        invoked once per tick and the values are plumbed into the published
+        snapshot. ``COMPLETE`` is emitted only by ``publish_final``, never by
+        the tick task.
+
+        ``pre_publish``, if given, is awaited at the top of each tick before
+        the snapshot is built — the aggregator uses it to flush buffered
+        tokenizations so live ISL/OSL/TPOT reflect recently completed samples.
+        Its failures are swallowed by the tick's own try/except (the tick keeps
+        going), so a transient tokenizer hiccup never stops live publishing.
 
         Idempotent on the tick-task slot: a second call (e.g. from a
         spurious duplicate ``STARTED`` event or a buggy replay producer)
@@ -133,6 +140,8 @@ class MetricsPublisher:
             while True:
                 try:
                     await asyncio.sleep(publish_interval_s)
+                    if pre_publish is not None:
+                        await pre_publish()
                     state, n_pending = get_runtime_state()
                     snap = registry.build_snapshot(
                         state=state, n_pending_tasks=n_pending

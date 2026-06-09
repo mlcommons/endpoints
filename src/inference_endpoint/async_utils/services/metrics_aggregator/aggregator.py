@@ -47,7 +47,7 @@ from .metrics_table import (
 from .publisher import MetricsPublisher
 from .registry import MetricsRegistry
 from .snapshot import SessionState
-from .token_metrics import TokenizePool
+from .token_metrics import BatchTokenizer, TokenBatchQueue
 
 logger = logging.getLogger(__name__)
 
@@ -117,7 +117,7 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
         publish_interval_s: float,
         sig_figs: int,
         n_histogram_buckets: int,
-        tokenize_pool: TokenizePool | None = None,
+        tokenizer: BatchTokenizer | None = None,
         streaming: bool = False,
         shutdown_event: asyncio.Event | None = None,
         drain_timeout_s: float | None = _DEFAULT_DRAIN_TIMEOUT_S,
@@ -133,7 +133,12 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
         self._registry = registry
         self._publisher = publisher
         self._publish_interval_s = publish_interval_s
-        self._tokenize_pool = tokenize_pool
+        # Token triggers enqueue onto this queue; it is flushed in batches at
+        # each publish tick and at end-of-run. None when no tokenizer is set
+        # (token metrics disabled), in which case those triggers are no-ops.
+        self._token_queue: TokenBatchQueue | None = (
+            TokenBatchQueue(tokenizer, self.loop) if tokenizer is not None else None
+        )
         self._streaming = streaming
         self._shutdown_event = shutdown_event
         self._shutdown_received = False
@@ -223,21 +228,23 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
         """
         table = self._table
         registry = self._registry
-        pool = self._tokenize_pool
-        loop = self.loop
+        queue = self._token_queue
 
         # Always registered
-        table.add_trigger(SampleField.ISSUED_NS, IslTrigger(registry, pool, loop))
+        table.add_trigger(SampleField.ISSUED_NS, IslTrigger(registry, queue))
         table.add_trigger(SampleField.COMPLETE_NS, SampleLatencyTrigger(registry))
-        table.add_trigger(SampleField.COMPLETE_NS, OslTrigger(registry, pool, loop))
+        table.add_trigger(SampleField.COMPLETE_NS, OslTrigger(registry, queue))
 
         # Streaming-only
         if streaming:
             table.add_trigger(SampleField.RECV_FIRST_NS, TtftTrigger(registry))
             table.add_trigger(SampleField.LAST_RECV_NS, ChunkDeltaTrigger(registry))
-            table.add_trigger(
-                SampleField.COMPLETE_NS, TpotTrigger(registry, pool, loop)
-            )
+            table.add_trigger(SampleField.COMPLETE_NS, TpotTrigger(registry, queue))
+
+    async def _flush_tokens(self) -> None:
+        """Flush buffered tokenizations so the next snapshot reflects them."""
+        if self._token_queue is not None:
+            await self._token_queue.flush()
 
     # ------------------------------------------------------------------
     # Event processing
@@ -311,8 +318,11 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
                                 self._publish_interval_s,
                                 get_runtime_state=lambda: (
                                     self._session_state,
-                                    table.in_flight_tasks_count,
+                                    self._token_queue.pending
+                                    if self._token_queue is not None
+                                    else 0,
                                 ),
+                                pre_publish=self._flush_tokens,
                             )
                     table.handle_session_event(record)
                     if ev == SessionEventType.STOP_PERFORMANCE_TRACKING:
@@ -367,12 +377,18 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
             # ENDED has been observed; transition to DRAINING so any tick
             # that fires before publish_final reflects the new state.
             self._session_state = SessionState.DRAINING
-            logger.info("Draining %d async tasks...", table.in_flight_tasks_count)
-            # drain_tasks owns the timeout + cancel-and-await sequence so
-            # the pending count is captured BEFORE done-callbacks empty
-            # the in-flight set. Reading in_flight_tasks_count out here
-            # would always be 0 (see drain_tasks docstring).
-            n_pending = await table.drain_tasks(timeout=self._drain_timeout_s)
+            queue = self._token_queue
+            pending = queue.pending if queue is not None else 0
+            logger.info("Draining %d pending tokenizations...", pending)
+            # flush_remaining tokenizes the whole buffer in one batched pass,
+            # bounded by the drain budget; it returns the count it could not
+            # finish (non-zero only on a timeout), which becomes the snapshot's
+            # n_pending_tasks so Report can flag an incomplete drain.
+            n_pending = (
+                await queue.flush_remaining(self._drain_timeout_s)
+                if queue is not None
+                else 0
+            )
             if n_pending > 0:
                 timeout_str = (
                     f"{self._drain_timeout_s:.1f}s"
@@ -380,13 +396,13 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
                     else "unlimited"
                 )
                 logger.warning(
-                    "drain_tasks timed out after %s; %d async tasks "
-                    "did not complete and were cancelled",
+                    "tokenizer drain timed out after %s; %d tokenizations "
+                    "did not complete",
                     timeout_str,
                     n_pending,
                 )
             logger.info(
-                "Async tasks drained (n_pending_tasks=%d at finalize)", n_pending
+                "Tokenizations drained (n_pending_tasks=%d at finalize)", n_pending
             )
             registry.set_counter(
                 MetricCounterKey.TRACKED_DURATION_NS.value,

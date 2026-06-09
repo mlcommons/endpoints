@@ -49,24 +49,26 @@ from inference_endpoint.core.record import (
 from inference_endpoint.core.types import TextModelOutput
 
 # ---------------------------------------------------------------------------
-# Mock TokenizePool — used by tests that exercise async triggers directly.
+# Mock BatchTokenizer — whitespace token counts; matches the BatchTokenizer
+# surface the TokenBatchQueue calls (count_texts_async + message path).
 # ---------------------------------------------------------------------------
 
 
-class MockTokenizePool:
-    """Mock TokenizePool that splits on whitespace with artificial async delay."""
+class MockBatchTokenizer:
+    """Mock BatchTokenizer that splits on whitespace with optional async delay."""
 
-    def __init__(self, delay: float = 0.01) -> None:
+    def __init__(self, delay: float = 0.0) -> None:
         self._delay = delay
 
     def token_count(self, text: str) -> int:
         return len(text.split())
 
-    async def token_count_async(
-        self, text: str, _loop: asyncio.AbstractEventLoop
-    ) -> int:
-        await asyncio.sleep(self._delay)
-        return len(text.split())
+    async def count_texts_async(
+        self, texts: list[str], _loop: asyncio.AbstractEventLoop
+    ) -> list[int]:
+        if self._delay:
+            await asyncio.sleep(self._delay)
+        return [len(t.split()) for t in texts]
 
     async def token_count_message_async(
         self,
@@ -77,7 +79,8 @@ class MockTokenizePool:
     ) -> int:
         import msgspec
 
-        await asyncio.sleep(self._delay)
+        if self._delay:
+            await asyncio.sleep(self._delay)
         tool_calls_str = (
             msgspec.json.encode(list(tool_calls)).decode() if tool_calls else ""
         )
@@ -164,7 +167,7 @@ def make_aggregator(
     loop: asyncio.AbstractEventLoop,
     socket_name: str,
     *,
-    tokenize_pool=None,
+    tokenizer=None,
     streaming: bool = True,
     shutdown_event: asyncio.Event | None = None,
 ) -> tuple[MetricsAggregatorService, MetricsRegistry, MagicMock]:
@@ -195,7 +198,7 @@ def make_aggregator(
         publish_interval_s=0.25,
         sig_figs=3,
         n_histogram_buckets=10,
-        tokenize_pool=tokenize_pool,
+        tokenizer=tokenizer,
         streaming=streaming,
         shutdown_event=shutdown_event,
     )
