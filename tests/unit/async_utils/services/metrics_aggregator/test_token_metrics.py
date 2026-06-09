@@ -16,6 +16,7 @@
 """Tests for TokenizePool thread-safety and correctness."""
 
 import asyncio
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
@@ -184,3 +185,98 @@ class TestTokenizePoolMessageTokenization:
                     "hello world", None, None, loop
                 )
                 assert count == 2
+
+
+class _FakeEncoding:
+    """Mimics tokenizers.Encoding: exposes .ids of the right length."""
+
+    def __init__(self, n: int):
+        self.ids = [0] * n
+
+
+class _FakeBackend:
+    """Mimics tokenizers.Tokenizer: encode_batch_fast over a whitespace split.
+
+    Class-level spies record how many batch calls happened and the largest
+    batch seen, so tests can prove concurrent calls coalesced into few calls.
+    """
+
+    batch_calls = 0
+    max_batch_seen = 0
+    _lock = threading.Lock()
+
+    @classmethod
+    def reset(cls) -> None:
+        with cls._lock:
+            cls.batch_calls = 0
+            cls.max_batch_seen = 0
+
+    def encode_batch_fast(self, texts, add_special_tokens=False):
+        with _FakeBackend._lock:
+            _FakeBackend.batch_calls += 1
+            _FakeBackend.max_batch_seen = max(_FakeBackend.max_batch_seen, len(texts))
+        return [_FakeEncoding(len(t.split())) for t in texts]
+
+
+class _FakeTokenizerWithBackend(_FakeTokenizer):
+    """Fast-tokenizer stand-in exposing a backend_tokenizer for the batch path."""
+
+    def __init__(self, load_delay: float = 0.05):
+        super().__init__(load_delay)
+        self.backend_tokenizer = _FakeBackend()
+
+
+@pytest.mark.unit
+class TestTokenizePoolBatchPath:
+    @pytest.mark.asyncio
+    async def test_async_uses_backend_and_counts_correctly(self):
+        _FakeBackend.reset()
+        with patch(_MOCK_TARGET, _FakeTokenizerWithBackend):
+            loop = asyncio.get_running_loop()
+            with TokenizePool("fake", n_workers=1) as pool:
+                count = await pool.token_count_async("a b c d", loop)
+                assert count == 4
+                assert _FakeBackend.batch_calls >= 1
+
+    @pytest.mark.asyncio
+    async def test_concurrent_calls_coalesce_into_few_batches(self):
+        """50 concurrent awaits return correct per-text counts in few batch calls."""
+        _FakeBackend.reset()
+        with patch(_MOCK_TARGET, _FakeTokenizerWithBackend):
+            loop = asyncio.get_running_loop()
+            with TokenizePool("fake", n_workers=1) as pool:
+                texts = [" ".join(["w"] * (i + 1)) for i in range(50)]
+                counts = await asyncio.gather(
+                    *(pool.token_count_async(t, loop) for t in texts)
+                )
+                # Each text i has i+1 whitespace tokens.
+                assert counts == [i + 1 for i in range(50)]
+                # Coalescing: far fewer encode calls than texts.
+                assert _FakeBackend.batch_calls < 50
+                assert _FakeBackend.max_batch_seen > 1
+
+    @pytest.mark.asyncio
+    async def test_batch_slice_capped_at_max_batch_size(self):
+        """No single encode batch exceeds max_batch_size, even under a backlog."""
+        _FakeBackend.reset()
+        with patch(_MOCK_TARGET, _FakeTokenizerWithBackend):
+            loop = asyncio.get_running_loop()
+            with TokenizePool("fake", n_workers=1, max_batch_size=4) as pool:
+                texts = [f"t{i}" for i in range(30)]
+                counts = await asyncio.gather(
+                    *(pool.token_count_async(t, loop) for t in texts)
+                )
+                assert counts == [1] * 30
+                assert _FakeBackend.max_batch_seen <= 4
+                assert _FakeBackend.batch_calls >= 8  # 30 items / 4 per batch
+
+    @pytest.mark.asyncio
+    async def test_fallback_when_no_backend(self):
+        """Tokenizers without a backend_tokenizer fall back to per-text tokenize."""
+        _FakeBackend.reset()
+        with patch(_MOCK_TARGET, _FakeTokenizer):  # no backend_tokenizer attr
+            loop = asyncio.get_running_loop()
+            with TokenizePool("fake", n_workers=1) as pool:
+                count = await pool.token_count_async("one two three", loop)
+                assert count == 3
+                assert _FakeBackend.batch_calls == 0  # backend never used
