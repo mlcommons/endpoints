@@ -50,6 +50,7 @@ ADAPTER_MAP = {
     APIType.OPENAI_COMPLETIONS: "inference_endpoint.openai.completions_adapter.OpenAITextCompletionsAdapter",
     APIType.SGLANG: "inference_endpoint.sglang.adapter.SGLangGenerateAdapter",
     APIType.VIDEOGEN: "inference_endpoint.videogen.adapter.VideoGenAdapter",
+    APIType.TRTLLM: "inference_endpoint.trtllm.adapter.TRTLLMAdapter",
 }
 
 ACCUMULATOR_MAP = {
@@ -57,6 +58,7 @@ ACCUMULATOR_MAP = {
     APIType.OPENAI_COMPLETIONS: "inference_endpoint.openai.accumulator.OpenAISSEAccumulator",
     APIType.SGLANG: "inference_endpoint.sglang.accumulator.SGLangSSEAccumulator",
     APIType.VIDEOGEN: "inference_endpoint.videogen.adapter.VideoGenAccumulator",
+    APIType.TRTLLM: "inference_endpoint.trtllm.accumulator.TRTLLMSSEAccumulator",
 }
 
 

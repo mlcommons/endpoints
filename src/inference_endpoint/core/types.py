@@ -38,6 +38,7 @@ class APIType(str, Enum):
     OPENAI_COMPLETIONS = "openai_completions"
     SGLANG = "sglang"
     VIDEOGEN = "videogen"
+    TRTLLM = "trtllm"
 
     def default_route(self) -> str:
         """Return the default relative URL path for this API type."""
@@ -50,6 +51,9 @@ class APIType(str, Enum):
                 return "generate"
             case APIType.VIDEOGEN:
                 return "v1/videos/generations"
+            case APIType.TRTLLM:
+                # TRT-LLM's OpenAI-compatible chat route, with prompt_token_ids.
+                return "v1/chat/completions"
             case _:
                 raise ValueError(f"Invalid API type: {self}")
 
