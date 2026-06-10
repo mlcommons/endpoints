@@ -1316,15 +1316,10 @@ class TestTimeline:
 
 
 @pytest.mark.unit
-class TestCorrectedRow:
-    """LOADGEN 'e2e corrected' row: per-request server-bound view.
-
-    By the lifecycle partition e2e = ipc_wait + client_pre + server_http +
-    client_post, the corrected distribution IS the folded server_http
-    metric (real per-request percentiles, not an avg*ratio estimate);
-    client_work folds (pre + post) per request for the verdict's client
-    share.
-    """
+class TestClientWorkFold:
+    """client_work folds (pre + post) as ONE value per request, so the
+    verdict's client chip reads a true per-request distribution rather
+    than a sum of two separately-folded series."""
 
     def test_client_work_folds_per_request_sum(self) -> None:
         d = _dash()
@@ -1353,28 +1348,3 @@ class TestCorrectedRow:
             + d._metrics["server_http"].sum_ns
             == d._metrics["e2e"].sum_ns
         )
-
-    def test_corrected_row_renders_after_folds(self) -> None:
-        d = _dash()
-        for _ in range(5):
-            d.ingest_frames(_full_lifecycle(_new_sid()))
-        d.finalize_completed()
-        out = Text()
-        d._render_corrected(out, 100.0)
-        plain = out.plain
-        assert "e2e corrected" in plain
-        assert "corrected/s" in plain
-        # corrected/s scales completed/s by the per-request latency
-        # reduction: completed_s * (trace e2e avg / server_http avg).
-        e2e = d._metrics["e2e"]
-        srv = d._metrics["server_http"]
-        speedup = (e2e.sum_ns / e2e.total) / (srv.sum_ns / srv.total)
-        assert f"{100.0 * speedup:,.1f}" in plain
-
-    def test_corrected_row_absent_without_trace_folds(self) -> None:
-        # No -vvv lifecycle folds -> no corrected row; the loadgen panel
-        # stays exactly as it was (snapshot-only).
-        d = _dash()
-        out = Text()
-        d._render_corrected(out, 100.0)
-        assert out.plain == ""
