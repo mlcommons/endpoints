@@ -116,8 +116,10 @@ class MetricsPublisher:
         ``pre_publish``, if given, is awaited at the top of each tick before
         the snapshot is built — the aggregator uses it to flush buffered
         tokenizations so live ISL/OSL/TPOT reflect recently completed samples.
-        Its failures are swallowed by the tick's own try/except (the tick keeps
-        going), so a transient tokenizer hiccup never stops live publishing.
+        Its failures are swallowed in their own handler so the snapshot is
+        still built and published — even a tokenizer that fails on every tick
+        cannot stop live publishing; the unflushed items remain visible as
+        ``n_pending_tasks``.
 
         Idempotent on the tick-task slot: a second call (e.g. from a
         spurious duplicate ``STARTED`` event or a buggy replay producer)
@@ -137,11 +139,28 @@ class MetricsPublisher:
             )
 
         async def _tick() -> None:
+            flush_failure_logged = False
             while True:
                 try:
                     await asyncio.sleep(publish_interval_s)
                     if pre_publish is not None:
-                        await pre_publish()
+                        # Isolated from the publish path: a persistently
+                        # broken tokenizer would otherwise abort every tick
+                        # here and stop ALL live snapshots, not just token
+                        # series. Unflushed items stay visible to consumers
+                        # via n_pending_tasks.
+                        try:
+                            await pre_publish()
+                        except Exception:  # noqa: BLE001 — publish anyway.
+                            if not flush_failure_logged:
+                                flush_failure_logged = True
+                                logger.exception(
+                                    "pre_publish flush failed; live snapshots "
+                                    "continue without fresh token metrics "
+                                    "(further failures logged at debug)"
+                                )
+                            else:
+                                logger.debug("pre_publish flush failed again")
                     state, n_pending = get_runtime_state()
                     snap = registry.build_snapshot(
                         state=state, n_pending_tasks=n_pending

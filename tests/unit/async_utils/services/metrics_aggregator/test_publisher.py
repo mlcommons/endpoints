@@ -139,20 +139,29 @@ class TestMetricsPublisher:
             registry = MetricsRegistry()
             registry.register_counter("c")
             attempts = 0
+            published_states = 0
 
             async def pre_publish() -> None:
                 nonlocal attempts
                 attempts += 1
                 raise RuntimeError("tokenizer hiccup")
 
+            def get_runtime_state() -> tuple[SessionState, int]:
+                nonlocal published_states
+                published_states += 1
+                return SessionState.LIVE, 0
+
             publisher.start(
                 registry,
                 publish_interval_s=0.01,
-                get_runtime_state=lambda: (SessionState.LIVE, 0),
+                get_runtime_state=get_runtime_state,
                 pre_publish=pre_publish,
             )
             await asyncio.sleep(0.08)
             assert attempts >= 2, "tick task died after a pre_publish failure"
+            # The failure must not suppress the snapshot: every failing tick
+            # still proceeds to capture state and publish.
+            assert published_states >= 2, "failing pre_publish suppressed publishing"
             assert publisher._tick_task is not None
             assert not publisher._tick_task.done()
         finally:

@@ -46,6 +46,11 @@ from transformers.utils import logging as transformers_logging
 # used. Measured on GB200: ~16k texts/s at 18 blocks vs ~1.5k single-process.
 CORES_PER_WORKER = 8
 
+# Budget for the parallel shard warmup (spawn + transformers import +
+# tokenizer load per worker). A hung load (e.g. a stuck network filesystem)
+# must degrade to the in-process path, not wedge service startup.
+_SHARD_WARMUP_TIMEOUT_S = 120.0
+
 # Minimal user message used to satisfy chat templates that reject assistant-only
 # message lists. Its token count is subtracted so only the assistant payload is
 # measured.
@@ -130,6 +135,23 @@ def _worker_encode_lengths(texts: list[str]) -> list[int]:
 def _worker_ready(_: int) -> bool:
     """Warmup probe: returns once the worker's backend is loaded."""
     return _WORKER_BACKEND is not None
+
+
+def _terminate_procs(procs: list[ProcessPoolExecutor]) -> None:
+    """Best-effort immediate stop: cancel queued work and SIGTERM workers.
+
+    ``shutdown(wait=False)`` alone leaves an in-flight encode running, and the
+    non-daemon worker would still be joined at interpreter exit — so a drain
+    timeout could stall process shutdown until the chunk finished.
+    """
+    for ex in procs:
+        ex.shutdown(wait=False, cancel_futures=True)
+        workers = getattr(ex, "_processes", None) or {}  # CPython impl detail.
+        for p in workers.values():
+            try:
+                p.terminate()
+            except Exception:  # noqa: BLE001 — already-dead workers are fine.
+                pass
 
 
 if TYPE_CHECKING:
@@ -263,12 +285,13 @@ class BatchTokenizer:
             # Submit to every shard first so the loads run in parallel, then
             # await — waiting on each before submitting the next would
             # serialize P tokenizer loads and can exceed the launch budget.
+            # The wait is bounded: one hung load must not wedge startup.
             ready = [ex.submit(_worker_ready, 0) for ex in procs]
+            deadline = time.monotonic() + _SHARD_WARMUP_TIMEOUT_S
             for f in ready:
-                f.result()
+                f.result(timeout=max(0.0, deadline - time.monotonic()))
         except Exception:
-            for ex in procs:
-                ex.shutdown(wait=False)
+            _terminate_procs(procs)
             logger.exception(
                 "tokenizer shard setup failed; using in-process tokenization"
             )
@@ -371,11 +394,11 @@ class BatchTokenizer:
     def close(self) -> None:
         """Shut down all workers. Idempotent.
 
-        Shard shutdown uses ``wait=False``: a hung worker must not block
-        aggregator shutdown; idle workers exit on their own once signalled.
+        Shards are stopped without waiting (a hung worker must not block
+        aggregator shutdown) and terminated so an in-flight encode cannot
+        stall interpreter exit after a drain timeout.
         """
-        for ex in self._procs:
-            ex.shutdown(wait=False)
+        _terminate_procs(self._procs)
         self._procs = []
         if self._thread is not None:
             self._thread.shutdown(wait=True)
@@ -404,7 +427,8 @@ class TokenCounter(Protocol):
     async def count_texts_async(
         self, texts: list[str], loop: asyncio.AbstractEventLoop, /
     ) -> list[int]:
-        pass
+        """Per-text token counts for a whole batch."""
+        raise NotImplementedError
 
     async def token_count_message_async(
         self,
@@ -414,7 +438,8 @@ class TokenCounter(Protocol):
         loop: asyncio.AbstractEventLoop,
         /,
     ) -> int:
-        pass
+        """Chat-template token count for one assistant message."""
+        raise NotImplementedError
 
 
 class TokenBatchQueue:

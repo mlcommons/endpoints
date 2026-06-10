@@ -95,8 +95,10 @@ each block of `CORES_PER_WORKER` (8) cores. Why this shape:
   and stays NUMA-local) is how the whole machine is used.
 - Workers are spawn-context processes with module-level entry points (pickled
   by name), warmed in parallel at construction so N tokenizer loads do not
-  serialize, and they ignore SIGINT — Ctrl-C goes to the whole process group,
-  and worker lifetime must stay under the parent drain's control.
+  serialize (the warmup wait is bounded — a hung load degrades to the
+  in-process path instead of wedging startup), and they ignore SIGINT —
+  Ctrl-C goes to the whole process group, and worker lifetime must stay under
+  the parent drain's control.
 
 `--tokenizer-workers` controls the shard count: `-1` (default) auto-fits one
 shard per 8-core block of the process affinity mask, an explicit count is

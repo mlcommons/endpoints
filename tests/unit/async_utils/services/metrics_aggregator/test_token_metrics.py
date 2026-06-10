@@ -62,7 +62,7 @@ class _FakeProc:
         fut.set_result([len(t.split()) for t in chunk])
         return fut
 
-    def shutdown(self, wait=False):
+    def shutdown(self, wait=False, cancel_futures=False):
         pass
 
 
@@ -74,7 +74,7 @@ class _BrokenProc:
         fut.set_exception(BrokenProcessPool("worker died"))
         return fut
 
-    def shutdown(self, wait=False):
+    def shutdown(self, wait=False, cancel_futures=False):
         pass
 
 
@@ -248,6 +248,95 @@ class TestEncodeHelpers:
     def test_worker_encode_lengths_uses_backend(self, monkeypatch):
         monkeypatch.setattr(token_metrics_module, "_WORKER_BACKEND", _FastBackend())
         assert _worker_encode_lengths(["a b", "c d e"]) == [2, 3]
+
+
+class _FakeTokenizerWithBackend(_FakeTokenizer):
+    """Fast-backend fake: lets ``_setup_shards`` proceed past the backend guard."""
+
+    backend_tokenizer = _FastBackend()
+
+
+class _SpawnlessExecutor:
+    """Stands in for ProcessPoolExecutor: records ctor args, instant warmup."""
+
+    def __init__(self, max_workers, mp_context=None, initializer=None, initargs=()):
+        self.initargs = initargs
+
+    def submit(self, fn, *args):
+        fut: Future = Future()
+        fut.set_result(True)
+        return fut
+
+    def shutdown(self, wait=False, cancel_futures=False):
+        pass
+
+
+@pytest.mark.unit
+class TestSetupShardsDecisions:
+    """Pins the --tokenizer-workers contract: -1 auto / N clamped / 0 disabled."""
+
+    def _make(self, monkeypatch, cpus, n_workers, executor=_SpawnlessExecutor):
+        monkeypatch.setattr(token_metrics_module, "ProcessPoolExecutor", executor)
+        monkeypatch.setattr(
+            token_metrics_module.os, "sched_getaffinity", lambda pid: set(range(cpus))
+        )
+        with patch(_MOCK_TARGET, _FakeTokenizerWithBackend):
+            return BatchTokenizer("fake", n_workers=n_workers)
+
+    @pytest.mark.parametrize(
+        "cpus, n_workers, expected_shards",
+        [
+            (16, -1, 2),  # auto: one shard per 8-core block
+            (10, -1, 0),  # auto needs >= 2 blocks (1 shard ~= in-process)
+            (48, 3, 3),  # explicit count under capacity
+            (16, 10, 2),  # explicit count clamped to capacity
+            (16, 1, 1),  # explicit single shard honored
+            (16, 0, 0),  # 0 disables sharding
+        ],
+    )
+    def test_shard_count(self, monkeypatch, cpus, n_workers, expected_shards):
+        tok = self._make(monkeypatch, cpus, n_workers)
+        try:
+            assert len(tok._procs) == expected_shards
+        finally:
+            tok.close()
+
+    def test_blocks_are_disjoint_consecutive_core_sets(self, monkeypatch):
+        tok = self._make(monkeypatch, 16, -1)
+        try:
+            blocks = [set(ex.initargs[1]) for ex in tok._procs]
+            assert blocks == [set(range(0, 8)), set(range(8, 16))]
+        finally:
+            tok.close()
+
+    def test_affinity_failure_falls_back_in_process(self, monkeypatch):
+        monkeypatch.setattr(
+            token_metrics_module, "ProcessPoolExecutor", _SpawnlessExecutor
+        )
+
+        def _raise(pid):
+            raise OSError("affinity unavailable")
+
+        monkeypatch.setattr(token_metrics_module.os, "sched_getaffinity", _raise)
+        with patch(_MOCK_TARGET, _FakeTokenizerWithBackend):
+            tok = BatchTokenizer("fake")
+        try:
+            assert tok._procs == []
+        finally:
+            tok.close()
+
+    def test_warmup_failure_falls_back_in_process(self, monkeypatch):
+        class _BrokenWarmup(_SpawnlessExecutor):
+            def submit(self, fn, *args):
+                fut: Future = Future()
+                fut.set_exception(RuntimeError("spawn died"))
+                return fut
+
+        tok = self._make(monkeypatch, 16, -1, executor=_BrokenWarmup)
+        try:
+            assert tok._procs == []
+        finally:
+            tok.close()
 
 
 @pytest.mark.unit
