@@ -22,10 +22,15 @@ from concurrent.futures.process import BrokenProcessPool
 from unittest.mock import patch
 
 import pytest
+from inference_endpoint.async_utils.services.metrics_aggregator import (
+    token_metrics as token_metrics_module,
+)
 from inference_endpoint.async_utils.services.metrics_aggregator.token_metrics import (
     BatchTokenizer,
     TokenBatchQueue,
+    _encode_batch_lengths,
     _even_chunks,
+    _worker_encode_lengths,
 )
 
 _MOCK_TARGET = "inference_endpoint.async_utils.services.metrics_aggregator.token_metrics.AutoTokenizer"
@@ -208,6 +213,43 @@ class TestBatchTokenizerMessageTokenization:
                 assert count > 0
 
 
+class _Encoding:
+    def __init__(self, n: int):
+        self.ids = list(range(n))
+
+
+class _FastBackend:
+    """Raw-tokenizers backend stub with the fast batch entry point."""
+
+    def encode_batch_fast(self, texts, add_special_tokens=False):
+        return [_Encoding(len(t.split())) for t in texts]
+
+
+class _SlowBackend:
+    """Raw-tokenizers backend stub without encode_batch_fast."""
+
+    def encode_batch(self, texts, add_special_tokens=False):
+        return [_Encoding(len(t.split())) for t in texts]
+
+
+@pytest.mark.unit
+class TestEncodeHelpers:
+    def test_encode_batch_lengths_prefers_fast(self):
+        assert _encode_batch_lengths(_FastBackend(), ["a b", "c"]) == [2, 1]
+
+    def test_encode_batch_lengths_falls_back_to_encode_batch(self):
+        assert _encode_batch_lengths(_SlowBackend(), ["a b c", "d"]) == [3, 1]
+
+    def test_worker_encode_lengths_raises_without_backend(self, monkeypatch):
+        monkeypatch.setattr(token_metrics_module, "_WORKER_BACKEND", None)
+        with pytest.raises(RuntimeError, match="backend unavailable"):
+            _worker_encode_lengths(["a"])
+
+    def test_worker_encode_lengths_uses_backend(self, monkeypatch):
+        monkeypatch.setattr(token_metrics_module, "_WORKER_BACKEND", _FastBackend())
+        assert _worker_encode_lengths(["a b", "c d e"]) == [2, 3]
+
+
 @pytest.mark.unit
 class TestEvenChunks:
     def test_splits_into_near_equal_chunks(self):
@@ -311,3 +353,40 @@ class TestTokenBatchQueue:
         queue.enqueue_text("x y", recorded.append)
         assert await queue.flush_remaining(timeout=5.0) == 1
         assert recorded == []
+
+    async def test_flush_text_failure_does_not_drop_message_items(self):
+        """The message phase runs (and records) even when the text batch fails."""
+
+        class _TextFailingTokenizer:
+            async def count_texts_async(self, texts, _loop):
+                raise RuntimeError("text shard died")
+
+            async def token_count_message_async(
+                self, content, reasoning, tool_calls, _loop
+            ):
+                return len(content.split())
+
+        loop = asyncio.get_running_loop()
+        queue = TokenBatchQueue(_TextFailingTokenizer(), loop)
+        recorded: list[int] = []
+        queue.enqueue_text("never counted", recorded.append)
+        queue.enqueue_message(("hello world", None, None), recorded.append)
+        with pytest.raises(RuntimeError, match="text shard died"):
+            await queue.flush()
+        assert recorded == [2], "message item must survive the text failure"
+        assert queue.pending == 1, "only the text item remains pending"
+
+    async def test_flush_recorder_failure_does_not_poison_batch(self):
+        """One raising on_count is logged; the rest of the batch still records."""
+        loop = asyncio.get_running_loop()
+        queue = TokenBatchQueue(_CapturingTokenizer(), loop)
+        recorded: list[int] = []
+
+        def bad_recorder(count: int) -> None:
+            raise ValueError("recorder bug")
+
+        queue.enqueue_text("a b", bad_recorder)
+        queue.enqueue_text("c d e", recorded.append)
+        await queue.flush()
+        assert recorded == [3]
+        assert queue.pending == 0, "a raising recorder still counts as recorded"

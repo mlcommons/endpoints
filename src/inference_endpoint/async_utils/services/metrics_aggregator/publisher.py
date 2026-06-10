@@ -168,9 +168,9 @@ class MetricsPublisher:
     ) -> None:
         """Write the final snapshot to disk and signal pub/sub consumers.
 
-        ``n_pending_tasks`` is the count of in-flight async tokenize tasks
-        at finalization time. Drain timeout is detected by Report consumers
-        as ``state == COMPLETE and n_pending_tasks > 0``.
+        ``n_pending_tasks`` is the count of buffered tokenizations not yet
+        recorded at finalization time. An incomplete drain is detected by
+        Report consumers as ``state == COMPLETE and n_pending_tasks > 0``.
 
         ``interrupted=True`` is set by the signal handler in __main__.py
         when SIGTERM/SIGINT triggers shutdown before ``ENDED`` arrived;

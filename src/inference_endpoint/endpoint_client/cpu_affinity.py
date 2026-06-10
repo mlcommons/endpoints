@@ -318,6 +318,32 @@ def pin_loadgen(
 
 
 @require_linux
+def expand_to_all_online_cpus() -> set[int]:
+    """Reset the current process's affinity to every online CPU.
+
+    Undoes a narrow mask inherited from a pinned parent (subprocesses spawned
+    after ``pin_loadgen`` inherit the loadgen mask). The kernel intersects the
+    request with the cgroup cpuset, so container/Slurm CPU limits still apply.
+
+    Returns:
+        The effective CPU set after the reset.
+
+    Raises:
+        UnsupportedPlatformError: If not running on Linux.
+    """
+    online = _read_sysfs_cpulist(_SYSFS_CPU / "online") or set()
+    if online:
+        try:
+            os.sched_setaffinity(0, online)
+        except OSError as e:
+            logger.warning(f"Could not expand CPU affinity: {e}")
+    try:
+        return os.sched_getaffinity(0)
+    except OSError:
+        return online
+
+
+@require_linux
 def set_cpu_affinity(pid: int, cpus: set[int]) -> bool:
     """Set CPU affinity for a process.
 

@@ -26,6 +26,10 @@ from pathlib import Path
 from inference_endpoint.async_utils.loop_manager import LoopManager
 from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
 from inference_endpoint.async_utils.transport.zmq.ready_check import send_ready_signal
+from inference_endpoint.endpoint_client.cpu_affinity import (
+    UnsupportedPlatformError,
+    expand_to_all_online_cpus,
+)
 from inference_endpoint.utils.logging import setup_logging
 
 from .aggregator import MetricCounterKey, MetricsAggregatorService
@@ -160,6 +164,15 @@ async def main() -> None:
         help="HuggingFace tokenizer name for ISL/OSL/TPOT (e.g. 'gpt2'). If not set, token metrics are disabled.",
     )
     parser.add_argument(
+        "--tokenizer-workers",
+        type=int,
+        default=-1,
+        help=(
+            "Number of tokenizer shard processes (-1 = auto: one per "
+            "8-core block of this machine; 0 = in-process tokenization)."
+        ),
+    )
+    parser.add_argument(
         "--streaming",
         action="store_true",
         default=False,
@@ -201,7 +214,16 @@ async def main() -> None:
     # (coalesces to 'object' not 'AbstractContextManager[BatchTokenizer | None]')
     tokenizer_cm: AbstractContextManager[BatchTokenizer | None]
     if args.tokenizer:
-        tokenizer_cm = BatchTokenizer(args.tokenizer)
+        # Tokenization drains after the benchmark run, so the loadgen/worker
+        # affinity partition does not apply to this stage: drop the narrow
+        # mask inherited from the pinned parent so shards size to the whole
+        # machine (cgroup/Slurm CPU limits still apply).
+        try:
+            cpus = expand_to_all_online_cpus()
+            logger.info("metrics aggregator affinity: %d CPUs", len(cpus))
+        except UnsupportedPlatformError:
+            pass  # non-Linux: no inherited pin to undo.
+        tokenizer_cm = BatchTokenizer(args.tokenizer, n_workers=args.tokenizer_workers)
     else:
         tokenizer_cm = nullcontext()
 

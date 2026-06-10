@@ -30,6 +30,8 @@ import json
 import logging
 import multiprocessing
 import os
+import signal
+import time
 from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any, Protocol, cast
@@ -94,6 +96,10 @@ def _init_worker(tokenizer_name: str, core_set: list[int]) -> None:
     Affinity is set before the first encode so the Rust rayon pool sizes itself
     to the pinned core count (num_cpus respects sched_getaffinity on Linux).
     """
+    # Ctrl-C sends SIGINT to the whole foreground process group; the parent
+    # drives worker shutdown, so a worker dying mid-drain would break the pool
+    # and lose the buffered tokenizations it was counting.
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
     if core_set:
         try:
             os.sched_setaffinity(0, set(core_set))
@@ -151,20 +157,21 @@ class BatchTokenizer:
         tokenizer_name: str,
         *,
         cores_per_worker: int = CORES_PER_WORKER,
+        n_workers: int = -1,
     ) -> None:
         self._tokenizer_name = tokenizer_name
         self._fallback_warned: set[str] = set()
         self._tokenizer: PreTrainedTokenizerBase | None = None
         self._prefix_len = 0
         self._baseline = 0
-        # In-process thread for the sync + chat-template paths.
+        # In-process thread for the chat-template path.
         self._thread: ThreadPoolExecutor | None = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="tok-thread"
         )
         self._load_tokenizer()  # also computes the chat-template baseline
         # Process shards for the batched text path (or empty -> in-process).
         self._procs: list[ProcessPoolExecutor] = []
-        self._setup_shards(cores_per_worker)
+        self._setup_shards(cores_per_worker, n_workers)
 
     # -- setup --------------------------------------------------------------
 
@@ -199,24 +206,47 @@ class BatchTokenizer:
                 self._tokenizer_name,
             )
 
-    def _setup_shards(self, cores_per_worker: int) -> None:
+    def _setup_shards(self, cores_per_worker: int, n_workers: int) -> None:
         """Spawn one pinned single-worker process per core block.
 
-        No-op (leaving the batch path in-process) when the tokenizer has no fast
-        Rust backend, affinity is unavailable, or fewer than two blocks fit — a
-        single shard is no faster than the in-process backend.
+        ``n_workers <= 0`` (auto) fits as many shards as this process's
+        affinity mask allows, one per ``cores_per_worker`` block; an explicit
+        count is clamped to that capacity. No-op (leaving the batch path
+        in-process) when the tokenizer has no fast Rust backend, affinity is
+        unavailable, or — in auto mode — fewer than two blocks fit (a single
+        shard is no faster than the in-process backend). Each fallback is
+        logged: a missing "shards" INFO line is the only other signal that
+        the batched path is running single-threaded.
         """
-        if cores_per_worker <= 0:
+        if cores_per_worker <= 0 or n_workers == 0:
+            logger.info("BatchTokenizer: sharding disabled")
             return
         if getattr(self._tokenizer, "backend_tokenizer", None) is None:
+            logger.info(
+                "BatchTokenizer: no fast tokenizer backend; using in-process "
+                "tokenization"
+            )
             return
         try:
             available = sorted(os.sched_getaffinity(0))
         except (OSError, AttributeError):
+            logger.info(
+                "BatchTokenizer: CPU affinity unavailable; using in-process "
+                "tokenization"
+            )
             return
-        n = len(available) // cores_per_worker
-        if n < 2:
+        capacity = len(available) // cores_per_worker
+        n = capacity if n_workers < 0 else min(n_workers, capacity)
+        if n < (2 if n_workers < 0 else 1):
+            logger.info(
+                "BatchTokenizer: %d CPUs available (capacity %d blocks of %d); "
+                "using in-process tokenization",
+                len(available),
+                capacity,
+                cores_per_worker,
+            )
             return
+        t0 = time.perf_counter()
         ctx = multiprocessing.get_context("spawn")
         procs: list[ProcessPoolExecutor] = []
         try:
@@ -245,7 +275,10 @@ class BatchTokenizer:
             return
         self._procs = procs
         logger.info(
-            "BatchTokenizer: %d shards x %d cores", len(procs), cores_per_worker
+            "BatchTokenizer: %d shards x %d cores (setup %.1fs)",
+            len(procs),
+            cores_per_worker,
+            time.perf_counter() - t0,
         )
 
     # -- batched text path --------------------------------------------------
@@ -437,23 +470,42 @@ class TokenBatchQueue:
                 return
             text_items, self._text = self._text, []
             msg_items, self._msg = self._msg, []
+            # The text and message phases fail independently — they run on
+            # separate executors, so a dead text shard must not drop message
+            # items that would still succeed (and vice versa). The first
+            # failure is re-raised after both phases so callers still see it.
+            failure: Exception | None = None
             if text_items:
-                counts = await self._tokenizer.count_texts_async(
-                    [t for t, _ in text_items], self._loop
-                )
-                for (_, on_count), count in zip(text_items, counts, strict=True):
-                    try:
-                        on_count(count)
-                    finally:
-                        self._inflight -= 1
-            for (content, reasoning, tool_calls), on_count in msg_items:
-                count = await self._tokenizer.token_count_message_async(
-                    content, reasoning, tool_calls, self._loop
-                )
                 try:
-                    on_count(count)
-                finally:
-                    self._inflight -= 1
+                    counts = await self._tokenizer.count_texts_async(
+                        [t for t, _ in text_items], self._loop
+                    )
+                except Exception as exc:  # noqa: BLE001 — isolate phases.
+                    failure = exc
+                else:
+                    for (_, on_count), count in zip(text_items, counts, strict=True):
+                        self._record(on_count, count)
+            for (content, reasoning, tool_calls), on_count in msg_items:
+                try:
+                    count = await self._tokenizer.token_count_message_async(
+                        content, reasoning, tool_calls, self._loop
+                    )
+                except Exception as exc:  # noqa: BLE001 — isolate items.
+                    failure = failure or exc
+                    continue
+                self._record(on_count, count)
+            if failure is not None:
+                raise failure
+
+    def _record(self, on_count: Callable[[int], None], count: int) -> None:
+        """Run one recorder callback; a raising recorder must not poison the
+        rest of the batch, and the item still counts as recorded."""
+        try:
+            on_count(count)
+        except Exception:  # noqa: BLE001 — per-item isolation.
+            logger.exception("token metric recorder failed")
+        finally:
+            self._inflight -= 1
 
     async def flush_remaining(self, timeout: float | None) -> int:
         """End-of-run flush, bounded by ``timeout`` seconds.
