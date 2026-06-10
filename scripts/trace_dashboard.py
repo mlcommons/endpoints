@@ -65,6 +65,59 @@ def _try_load_snapshot(path: str) -> dict | None:
         return None
 
 
+def _benchmark_pids(root_pid: int) -> list[int]:
+    """The benchmark process tree whose TCP conns we count: the main proc
+    plus its direct children (workers, aggregator, event logger), minus
+    this dashboard process itself."""
+    pids = [root_pid]
+    try:
+        with open(f"/proc/{root_pid}/task/{root_pid}/children") as f:
+            pids += [int(p) for p in f.read().split()]
+    except (OSError, ValueError):
+        pass  # parent exiting / non-Linux — count what we have
+    me = os.getpid()
+    return [p for p in pids if p != me]
+
+
+def _count_established_tcp(pids: list[int]) -> int:
+    """ESTABLISHED TCP conns held by ``pids`` via /proc cross-reference:
+    each pid's socket-fd inodes ∩ the ESTABLISHED inodes in /proc/net/tcp*.
+    Pure observation from this (dashboard) process — the counted processes
+    carry no collection logic and take no hot-path cost. Returns -1 when
+    /proc/net is unreadable (non-Linux), which hides the dashboard cell."""
+    inodes: set[str] = set()
+    readable = False
+    for path in ("/proc/net/tcp", "/proc/net/tcp6"):
+        try:
+            with open(path) as f:
+                next(f, None)  # header row
+                for line in f:
+                    parts = line.split()
+                    # Column 3 is the socket state (01 = ESTABLISHED);
+                    # column 9 is the socket inode.
+                    if len(parts) > 9 and parts[3] == "01":
+                        inodes.add(parts[9])
+            readable = True
+        except OSError:
+            continue  # e.g. ipv6 disabled — the other table may still work
+    if not readable:
+        return -1
+    n = 0
+    for pid in pids:
+        try:
+            fds = os.listdir(f"/proc/{pid}/fd")
+        except OSError:
+            continue  # process exited mid-scan
+        for fd in fds:
+            try:
+                tgt = os.readlink(f"/proc/{pid}/fd/{fd}")
+            except OSError:
+                continue  # fd closed mid-scan
+            if tgt.startswith("socket:[") and tgt[8:-1] in inodes:
+                n += 1
+    return n
+
+
 # End-of-run exit policy. The authoritative final snapshot (state=="complete")
 # is written by the parent's trace.teardown() just before it closes its FIFO
 # write fd; every worker closes its write fd at exit. The reader runs until true
@@ -240,6 +293,7 @@ def main() -> int:
     # it BEFORE leaving the context and print it to the normal buffer
     # afterward.
     final_frame = None
+    last_tcp_sample = 0.0
     with Live(
         dash.render(),
         console=console,
@@ -261,6 +315,14 @@ def main() -> int:
                 snap = _try_load_snapshot(snap_path)
                 if snap is not None:
                     dash.attach_loadgen_snapshot(snap, force=dash.is_done)
+            # TCP conn gauge: 1 Hz is plenty for a live gauge, and the /proc
+            # scan cost scales with conn count — keep it off the render tick.
+            now = time.monotonic()
+            if now - last_tcp_sample >= 1.0:
+                last_tcp_sample = now
+                dash.set_tcp_established(
+                    _count_established_tcp(_benchmark_pids(os.getppid()))
+                )
             live.update(dash.render())
             time.sleep(1.0 / REFRESH_HZ)
         # Join the SUB before the final render so no late snapshot attaches.

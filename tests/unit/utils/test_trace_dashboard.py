@@ -1348,3 +1348,24 @@ class TestClientWorkFold:
             + d._metrics["server_http"].sum_ns
             == d._metrics["e2e"].sum_ns
         )
+
+
+@pytest.mark.unit
+class TestTcpConnsCell:
+    """The fleet-health line's tcp-conns gauge: fed from outside (the CLI
+    wrapper samples /proc), hidden until the first sample arrives."""
+
+    def test_hidden_without_sample(self) -> None:
+        d = _dash()
+        d.ingest_frames(_frame(Event.LOOP_LAG, _loop_lag_sid(0, 1_000_000)))
+        out = Text()
+        d._render_loop_lag(out)
+        assert "tcp conns" not in out.plain
+
+    def test_shown_with_sample(self) -> None:
+        d = _dash()
+        d.ingest_frames(_frame(Event.LOOP_LAG, _loop_lag_sid(0, 1_000_000)))
+        d.set_tcp_established(3988)
+        out = Text()
+        d._render_loop_lag(out)
+        assert "tcp conns  3,988" in out.plain

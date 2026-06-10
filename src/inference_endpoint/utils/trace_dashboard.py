@@ -380,6 +380,10 @@ class Dashboard:
         # straggler frames don't cause numbers to keep moving after the
         # run is logically complete.
         self._frozen_stats: dict[str, Stats] | None = None
+        # Fleet-wide ESTABLISHED TCP connection count, sampled by the CLI
+        # wrapper from /proc (observer-side; zero producer/hot-path cost).
+        # -1 = no sample yet / probe unavailable → cell hidden.
+        self._tcp_established = -1
 
     # ---- loadgen comparison hook ---------------------------------------
 
@@ -508,6 +512,13 @@ class Dashboard:
         LOADGEN freshness tag from "finalizing…" to an explicit failure."""
         with self._lock:
             self._final_unavailable = True
+
+    def set_tcp_established(self, n: int) -> None:
+        """Attach the latest fleet-wide ESTABLISHED TCP conn count. Sampled
+        outside this module (the CLI wrapper reads /proc) so the dashboard
+        stays pure and the benchmark processes carry no collection logic."""
+        with self._lock:
+            self._tcp_established = n
 
     @property
     def is_backpressured(self) -> bool:
@@ -1298,7 +1309,11 @@ class Dashboard:
             f"  fleet p99 {fleet_p99_ms:.2f} ms   hot workers (p99 ≥ 5 ms)  ",
             style="label",
         )
-        out.append(f"{n_hot}/{n_workers}\n", style=hot_style or "label")
+        out.append(f"{n_hot}/{n_workers}", style=hot_style or "label")
+        if self._tcp_established >= 0:
+            out.append("   tcp conns  ", style="label")
+            out.append(f"{self._tcp_established:,}", style="value")
+        out.append("\n")
 
         def _emit(label: str, s: Stats, *, highlight: bool = False) -> None:
             mx_ms = s.max / 1e6
