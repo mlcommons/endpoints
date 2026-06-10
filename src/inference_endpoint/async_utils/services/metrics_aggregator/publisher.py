@@ -21,7 +21,7 @@ import asyncio
 import json
 import logging
 import os
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from pathlib import Path
 
 from inference_endpoint.async_utils.services.metrics_aggregator.registry import (
@@ -102,7 +102,6 @@ class MetricsPublisher:
         registry: MetricsRegistry,
         publish_interval_s: float,
         get_runtime_state: Callable[[], tuple[SessionState, int]],
-        pre_publish: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         """Begin publishing live ticks every ``publish_interval_s`` seconds.
 
@@ -112,14 +111,6 @@ class MetricsPublisher:
         invoked once per tick and the values are plumbed into the published
         snapshot. ``COMPLETE`` is emitted only by ``publish_final``, never by
         the tick task.
-
-        ``pre_publish``, if given, is awaited at the top of each tick before
-        the snapshot is built — the aggregator uses it to flush buffered
-        tokenizations so live ISL/OSL/TPOT reflect recently completed samples.
-        Its failures are swallowed in their own handler so the snapshot is
-        still built and published — even a tokenizer that fails on every tick
-        cannot stop live publishing; the unflushed items remain visible as
-        ``n_pending_tasks``.
 
         Idempotent on the tick-task slot: a second call (e.g. from a
         spurious duplicate ``STARTED`` event or a buggy replay producer)
@@ -139,28 +130,9 @@ class MetricsPublisher:
             )
 
         async def _tick() -> None:
-            flush_failure_logged = False
             while True:
                 try:
                     await asyncio.sleep(publish_interval_s)
-                    if pre_publish is not None:
-                        # Isolated from the publish path: a persistently
-                        # broken tokenizer would otherwise abort every tick
-                        # here and stop ALL live snapshots, not just token
-                        # series. Unflushed items stay visible to consumers
-                        # via n_pending_tasks.
-                        try:
-                            await pre_publish()
-                        except Exception:  # noqa: BLE001 — publish anyway.
-                            if not flush_failure_logged:
-                                flush_failure_logged = True
-                                logger.exception(
-                                    "pre_publish flush failed; live snapshots "
-                                    "continue without fresh token metrics "
-                                    "(further failures logged at debug)"
-                                )
-                            else:
-                                logger.debug("pre_publish flush failed again")
                     state, n_pending = get_runtime_state()
                     snap = registry.build_snapshot(
                         state=state, n_pending_tasks=n_pending

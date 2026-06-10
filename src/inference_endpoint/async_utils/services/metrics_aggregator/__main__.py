@@ -137,11 +137,11 @@ async def main() -> None:
     parser.add_argument(
         "--drain-timeout",
         type=float,
-        default=60.0,
+        default=300.0,
         help=(
             "Wall-clock budget (seconds) to finish tokenizing buffered samples "
             "after ENDED before the aggregator emits the final snapshot with "
-            "n_pending_tasks > 0 (default: 60.0; 0 = wait indefinitely). Increase "
+            "n_pending_tasks > 0 (default: 300.0; 0 = wait indefinitely). Increase "
             "for very large datasets where the end-of-run tokenize batch is big."
         ),
     )
@@ -173,6 +173,16 @@ async def main() -> None:
             "in-process tokenization). A tokenizer without a fast (Rust) "
             "backend is a startup error unless 0 is passed; platforms "
             "without CPU affinity (e.g. macOS) shard unpinned."
+        ),
+    )
+    parser.add_argument(
+        "--live-tokenizers",
+        type=int,
+        default=1,
+        help=(
+            "Shards used for mid-run (live) token-metric flushes (default: 1 "
+            "— the highest core block, away from the loadgen's cores; 0 = no "
+            "mid-run tokenization, everything defers to the end-of-run drain)."
         ),
     )
     parser.add_argument(
@@ -228,7 +238,9 @@ async def main() -> None:
             pass  # non-Linux: no inherited pin to undo.
         try:
             tokenizer_cm = BatchTokenizer(
-                args.tokenizer, n_workers=args.tokenizer_workers
+                args.tokenizer,
+                n_workers=args.tokenizer_workers,
+                live_workers=args.live_tokenizers,
             )
         except RuntimeError as exc:
             # Fail-fast contract: a tokenizer environment that cannot shard
@@ -262,6 +274,9 @@ async def main() -> None:
                 sig_figs=args.hdr_sig_figs,
                 n_histogram_buckets=args.n_histogram_buckets,
                 tokenizer=tokenizer,
+                live_flush_interval_s=(
+                    args.publish_interval if args.live_tokenizers > 0 else None
+                ),
                 streaming=args.streaming,
                 shutdown_event=shutdown_event,
                 drain_timeout_s=None if args.drain_timeout == 0 else args.drain_timeout,

@@ -18,7 +18,8 @@
 ``BatchTokenizer`` tokenizes whole batches at once, sharded across worker
 processes each pinned to a block of ``CORES_PER_WORKER`` cores (a single BPE
 rayon pool is memory-bound and saturates ~8 cores). The aggregator buffers
-per-sample text and flushes the batch once per publish tick and at drain.
+per-sample text; a queue-owned live loop flushes through a bounded live lane
+(default one shard) mid-run, and the end-of-run drain uses every shard.
 Sharding requires the fast (Rust) tokenizers backend; an environment without
 one is a startup error, never a silent slow path — ``--tokenizer-workers 0``
 is the only (explicit) in-process mode. Platforms without CPU affinity (e.g.
@@ -28,6 +29,7 @@ macOS) shard unpinned at full speed; only cache/NUMA locality is lost.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import multiprocessing
@@ -185,8 +187,10 @@ class BatchTokenizer:
         *,
         cores_per_worker: int = CORES_PER_WORKER,
         n_workers: int = -1,
+        live_workers: int = 1,
     ) -> None:
         self._tokenizer_name = tokenizer_name
+        self._live_workers = live_workers
         self._fallback_warned: set[str] = set()
         self._tokenizer: PreTrainedTokenizerBase | None = None
         self._prefix_len = 0
@@ -322,18 +326,39 @@ class BatchTokenizer:
         if not texts:
             return []
         if self._procs:
-            chunks = _even_chunks(texts, len(self._procs))
-            futures = [
-                asyncio.wrap_future(ex.submit(_worker_encode_lengths, chunk))
-                for ex, chunk in zip(self._procs, chunks, strict=False)
-            ]
-            results = await asyncio.gather(*futures)
-            return [n for r in results for n in r]
+            return await self._fan_out(self._procs, texts)
         if self._thread is None:
             raise RuntimeError("BatchTokenizer is closed")
         return await loop.run_in_executor(
             self._thread, self._encode_lengths_inproc, texts
         )
+
+    async def count_texts_live_async(
+        self, texts: list[str], loop: asyncio.AbstractEventLoop
+    ) -> list[int]:
+        """Like ``count_texts_async``, bounded to the live lane.
+
+        Mid-run flushes use only the last ``live_workers`` shards — the
+        highest core blocks, farthest from the loadgen's low cores — so live
+        token metrics never contend with the benchmark hot path. The
+        end-of-run drain uses every shard.
+        """
+        if not texts:
+            return []
+        live_n = max(1, self._live_workers)
+        if self._procs and live_n < len(self._procs):
+            return await self._fan_out(self._procs[-live_n:], texts)
+        return await self.count_texts_async(texts, loop)
+
+    @staticmethod
+    async def _fan_out(procs: list[ProcessPoolExecutor], texts: list[str]) -> list[int]:
+        chunks = _even_chunks(texts, len(procs))
+        futures = [
+            asyncio.wrap_future(ex.submit(_worker_encode_lengths, chunk))
+            for ex, chunk in zip(procs, chunks, strict=False)
+        ]
+        results = await asyncio.gather(*futures)
+        return [n for r in results for n in r]
 
     # -- sync + chat-template paths (in-process thread) ---------------------
 
@@ -426,7 +451,13 @@ class TokenCounter(Protocol):
     async def count_texts_async(
         self, texts: list[str], loop: asyncio.AbstractEventLoop, /
     ) -> list[int]:
-        """Per-text token counts for a whole batch."""
+        """Per-text token counts for a whole batch (full pool)."""
+        raise NotImplementedError
+
+    async def count_texts_live_async(
+        self, texts: list[str], loop: asyncio.AbstractEventLoop, /
+    ) -> list[int]:
+        """Per-text token counts via the bounded live lane."""
         raise NotImplementedError
 
     async def token_count_message_async(
@@ -445,10 +476,11 @@ class TokenBatchQueue:
     """Buffers per-sample tokenization work and clears it in batches.
 
     Triggers call ``enqueue_text`` / ``enqueue_message`` at event time with an
-    ``on_count`` callback that records the resulting metric. The aggregator
-    flushes the buffer with ``flush`` once per publish tick (so live ISL/OSL/
-    TPOT stay current) and with ``flush_remaining`` at end-of-run, sending the
-    whole batch through ``BatchTokenizer`` in one sharded call.
+    ``on_count`` callback that records the resulting metric. The queue owns
+    its own flush cadence: ``start_live`` begins a periodic flush through the
+    tokenizer's bounded live lane (so live ISL/OSL/TPOT stay current without
+    touching the benchmark's cores), and ``flush_remaining`` drains everything
+    left at end-of-run through every shard.
 
     ``pending`` counts enqueued-but-not-yet-recorded items; it is the
     ``n_pending_tasks`` on the snapshot. A non-zero value in the final snapshot
@@ -463,9 +495,37 @@ class TokenBatchQueue:
         self._text: list[tuple[str, Callable[[int], None]]] = []
         self._msg: list[tuple[MessageParts, Callable[[int], None]]] = []
         self._inflight = 0
-        # Serializes flushes so a periodic tick flush and the end-of-run flush
-        # never record the same item twice or race on the pending count.
+        self._live_task: asyncio.Task | None = None
+        # Serializes flushes so the periodic live flush and the end-of-run
+        # flush never record the same item twice or race on the pending count.
         self._lock = asyncio.Lock()
+
+    def start_live(self, interval_s: float) -> None:
+        """Begin the periodic live flush (idempotent).
+
+        Failures are logged once and never interrupt the loop — unflushed
+        items stay visible as ``pending`` and the end-of-run drain picks
+        them up.
+        """
+        if self._live_task is not None:
+            return
+        self._live_task = self._loop.create_task(self._live_flush_loop(interval_s))
+
+    async def _live_flush_loop(self, interval_s: float) -> None:
+        failure_logged = False
+        while True:
+            await asyncio.sleep(interval_s)
+            try:
+                await self.flush(live=True)
+            except Exception:  # noqa: BLE001 — keep live metrics flowing.
+                if not failure_logged:
+                    failure_logged = True
+                    logger.exception(
+                        "live token flush failed; retrying each interval "
+                        "(further failures logged at debug)"
+                    )
+                else:
+                    logger.debug("live token flush failed again")
 
     @property
     def pending(self) -> int:
@@ -482,15 +542,23 @@ class TokenBatchQueue:
         self._inflight += 1
         self._msg.append((parts, on_count))
 
-    async def flush(self) -> None:
+    async def flush(self, live: bool = False) -> None:
         """Tokenize everything buffered so far and run each ``on_count``.
 
-        Items are detached from the buffer up front so concurrent enqueues land
-        in the next flush. ``_inflight`` is decremented only after a callback
-        runs, so a cancellation (drain timeout) or a tokenizer error leaves it
-        reflecting exactly the items that were not recorded — those surface as
-        ``pending`` (an incomplete drain), not as silently dropped samples.
+        ``live=True`` routes text batches through the tokenizer's bounded
+        live lane instead of the full shard pool, and re-queues items on
+        failure or cancellation so a mid-run hiccup never loses samples — the
+        end-of-run drain retries them. Drain-mode failures are terminal: the
+        un-recorded items stay counted in ``pending`` (``_inflight`` is
+        decremented only after a callback runs) and surface as an incomplete
+        drain, not as silently dropped samples. Items are detached from the
+        buffer up front so concurrent enqueues land in the next flush.
         """
+        count_texts = (
+            self._tokenizer.count_texts_live_async
+            if live
+            else self._tokenizer.count_texts_async
+        )
         async with self._lock:
             if not (self._text or self._msg):
                 return
@@ -503,21 +571,34 @@ class TokenBatchQueue:
             failure: Exception | None = None
             if text_items:
                 try:
-                    counts = await self._tokenizer.count_texts_async(
-                        [t for t, _ in text_items], self._loop
-                    )
+                    counts = await count_texts([t for t, _ in text_items], self._loop)
+                except asyncio.CancelledError:
+                    if live:
+                        self._text[:0] = text_items
+                    raise
                 except Exception as exc:  # noqa: BLE001 — isolate phases.
                     failure = exc
+                    if live:
+                        # A live hiccup must not lose samples: give the items
+                        # back so the end-of-run drain (full pool) retries.
+                        # Drain failures are terminal and stay pending-only.
+                        self._text[:0] = text_items
                 else:
                     for (_, on_count), count in zip(text_items, counts, strict=True):
                         self._record(on_count, count)
-            for (content, reasoning, tool_calls), on_count in msg_items:
+            for i, ((content, reasoning, tool_calls), on_count) in enumerate(msg_items):
                 try:
                     count = await self._tokenizer.token_count_message_async(
                         content, reasoning, tool_calls, self._loop
                     )
+                except asyncio.CancelledError:
+                    if live:
+                        self._msg[:0] = msg_items[i:]
+                    raise
                 except Exception as exc:  # noqa: BLE001 — isolate items.
                     failure = failure or exc
+                    if live:
+                        self._msg.append(((content, reasoning, tool_calls), on_count))
                     continue
                 self._record(on_count, count)
             if failure is not None:
@@ -536,11 +617,17 @@ class TokenBatchQueue:
     async def flush_remaining(self, timeout: float | None) -> int:
         """End-of-run flush, bounded by ``timeout`` seconds.
 
+        Stops the live flush loop, then drains through the full shard pool.
         Returns the number of items still un-tokenized — non-zero if the budget
         was exhausted (``timeout`` reached) or tokenization failed. ``None``
         waits indefinitely. Never raises: a failure here must not stop the
         aggregator from publishing the (incomplete) final snapshot.
         """
+        if self._live_task is not None:
+            self._live_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._live_task
+            self._live_task = None
         if self._inflight == 0:
             return 0
         try:

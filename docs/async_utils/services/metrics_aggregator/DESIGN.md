@@ -38,7 +38,7 @@ INITIALIZE ──STARTED──► LIVE ──ENDED──► DRAINING ──► C
 - **LIVE**: the publisher tick task emits a snapshot every
   `--publish-interval` seconds (default 0.25 s).
 - **DRAINING**: entered on `ENDED`; the buffered tokenizations are flushed,
-  bounded by the `--drain-timeout` budget (default 60 s; `0` = unlimited).
+  bounded by the `--drain-timeout` budget (default 300 s; `0` = unlimited).
 - The ENDED path runs inside a finalization boundary: whatever the drain does
   — finish, time out, or fail — `publish_final` and the shutdown signal always
   run. A tokenizer failure can degrade the snapshot (see the
@@ -63,12 +63,17 @@ Token triggers do no work at event time. `fire()` appends
 to a buffer, an O(1) operation with no event-loop tasks. The buffer is cleared
 in batches at exactly two points:
 
-1. **Every publish tick** — the publisher awaits a `pre_publish` hook before
-   composing each snapshot, so live ISL/OSL/TPOT reflect recently completed
-   samples. A failure here is swallowed by the tick (live publishing never
-   stops).
-2. **End-of-run** — `flush_remaining(timeout)` drains everything still
-   buffered, bounded by the drain budget.
+1. **The queue's own live loop** — `start_live(interval)` flushes
+   periodically (at the publish cadence) through the tokenizer's **bounded
+   live lane**: the last `--live-tokenizers` shards (default 1 — the highest
+   core block, farthest from the loadgen's low cores), so live ISL/OSL/TPOT
+   stay current without touching the benchmark hot path. `--live-tokenizers
+0` disables mid-run tokenization entirely. Failures are logged once and
+   never stop the loop.
+2. **End-of-run** — `flush_remaining(timeout)` stops the live loop and drains
+   everything still buffered through **every** shard, bounded by the drain
+   budget. The publisher knows nothing about tokenization — it only reads
+   `(state, n_pending_tasks)`.
 
 `flush()` serializes under an asyncio lock and detaches the buffer up front,
 so enqueues that race a flush land in the next one. Failure isolation is
@@ -146,7 +151,7 @@ as a clean run.
 ```
 COMPLETE event ─► TokenTrigger.fire ─► queue.enqueue(text, on_count)   [O(1)]
                                             │
-        publish tick (0.25 s) ──────────────┤  flush()
+        live loop (0.25 s, live lane) ─────┤  flush()
         ENDED drain (budgeted) ─────────────┘    │
                                                  ├─► chunks ─► N pinned worker procs
                                                  │             (encode_batch_fast)
@@ -161,9 +166,10 @@ COMPLETE event ─► TokenTrigger.fire ─► queue.enqueue(text, on_count)   [
 | `--metrics-socket`               | required | Snapshot PUB socket name                            |
 | `--metrics-output-dir`           | required | Directory for `final_snapshot.json`                 |
 | `--publish-interval`             | 0.25     | Live snapshot cadence (seconds)                     |
-| `--drain-timeout`                | 60.0     | End-of-run tokenize budget (`0` = unlimited)        |
+| `--drain-timeout`                | 300.0    | End-of-run tokenize budget (`0` = unlimited)        |
 | `--tokenizer`                    | none     | HF name or local path; unset disables token metrics |
 | `--tokenizer-workers`            | -1       | Shard processes (`-1` auto, `0` in-process)         |
+| `--live-tokenizers`              | 1        | Shards for mid-run live flushes (`0` = defer all)   |
 | `--streaming`                    | off      | Register TTFT/chunk-delta/TPOT triggers             |
 
 ## References

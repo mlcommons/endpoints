@@ -118,6 +118,7 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
         sig_figs: int,
         n_histogram_buckets: int,
         tokenizer: BatchTokenizer | None = None,
+        live_flush_interval_s: float | None = None,
         streaming: bool = False,
         shutdown_event: asyncio.Event | None = None,
         drain_timeout_s: float | None = _DEFAULT_DRAIN_TIMEOUT_S,
@@ -139,6 +140,9 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
         self._token_queue: TokenBatchQueue | None = (
             TokenBatchQueue(tokenizer, self.loop) if tokenizer is not None else None
         )
+        # Cadence of the queue's live flush loop (None = no mid-run
+        # tokenization; everything defers to the end-of-run drain).
+        self._live_flush_interval_s = live_flush_interval_s
         self._streaming = streaming
         self._shutdown_event = shutdown_event
         self._shutdown_received = False
@@ -246,11 +250,6 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
         """Enqueued tokenizations not yet recorded (the snapshot n_pending_tasks)."""
         return self._token_queue.pending if self._token_queue is not None else 0
 
-    async def _flush_tokens(self) -> None:
-        """Flush buffered tokenizations so the next snapshot reflects them."""
-        if self._token_queue is not None:
-            await self._token_queue.flush()
-
     # ------------------------------------------------------------------
     # Event processing
     # ------------------------------------------------------------------
@@ -325,8 +324,14 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
                                     self._session_state,
                                     self.pending_tokens,
                                 ),
-                                pre_publish=self._flush_tokens,
                             )
+                            if (
+                                self._token_queue is not None
+                                and self._live_flush_interval_s is not None
+                            ):
+                                self._token_queue.start_live(
+                                    self._live_flush_interval_s
+                                )
                     table.handle_session_event(record)
                     if ev == SessionEventType.STOP_PERFORMANCE_TRACKING:
                         registry.set_counter(

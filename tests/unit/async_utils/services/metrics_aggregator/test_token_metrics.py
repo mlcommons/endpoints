@@ -342,6 +342,86 @@ class TestSetupShardsDecisions:
             self._make(monkeypatch, 16, -1, executor=_BrokenWarmup)
 
 
+class _RecordingProc(_FakeProc):
+    """_FakeProc that records the chunks submitted to it."""
+
+    def __init__(self):
+        self.chunks = []
+
+    def submit(self, _fn, chunk):
+        self.chunks.append(list(chunk))
+        return super().submit(_fn, chunk)
+
+
+@pytest.mark.unit
+class TestLiveLane:
+    @pytest.mark.asyncio
+    async def test_live_uses_only_the_last_shards(self):
+        """Mid-run flushes stay off the low core blocks (loadgen side)."""
+        with patch(_MOCK_TARGET, _FakeTokenizer):
+            loop = asyncio.get_running_loop()
+            with BatchTokenizer("fake", n_workers=0, live_workers=1) as tok:
+                procs = [_RecordingProc(), _RecordingProc(), _RecordingProc()]
+                tok._procs = procs
+                counts = await tok.count_texts_live_async(["a b", "c"], loop)
+                assert counts == [2, 1]
+                assert procs[0].chunks == [] and procs[1].chunks == []
+                assert procs[2].chunks == [["a b", "c"]]
+
+    @pytest.mark.asyncio
+    async def test_drain_uses_every_shard(self):
+        with patch(_MOCK_TARGET, _FakeTokenizer):
+            loop = asyncio.get_running_loop()
+            with BatchTokenizer("fake", n_workers=0, live_workers=1) as tok:
+                procs = [_RecordingProc(), _RecordingProc()]
+                tok._procs = procs
+                await tok.count_texts_async(["a", "b", "c", "d"], loop)
+                assert all(p.chunks for p in procs)
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+class TestQueueLiveLoop:
+    async def test_start_live_flushes_periodically(self):
+        loop = asyncio.get_running_loop()
+        queue = TokenBatchQueue(_CapturingTokenizer(), loop)
+        recorded: list[int] = []
+        queue.enqueue_text("a b c", recorded.append)
+        queue.start_live(0.01)
+        queue.start_live(0.01)  # idempotent
+        await asyncio.sleep(0.05)
+        assert recorded == [3]
+        assert queue.pending == 0
+        await queue.flush_remaining(timeout=1.0)
+
+    async def test_live_loop_survives_tokenizer_failure(self):
+        class _FailingLive(_CapturingTokenizer):
+            async def count_texts_live_async(self, texts, _loop):
+                raise RuntimeError("live lane boom")
+
+        loop = asyncio.get_running_loop()
+        queue = TokenBatchQueue(_FailingLive(), loop)
+        recorded: list[int] = []
+        queue.enqueue_text("a b", recorded.append)
+        queue.start_live(0.01)
+        await asyncio.sleep(0.05)
+        assert recorded == []
+        assert queue.pending == 1, "failed live flush must keep items pending"
+        assert queue._live_task is not None and not queue._live_task.done()
+        # The end-of-run drain (full pool) still recovers the items.
+        assert await queue.flush_remaining(timeout=1.0) == 0
+        assert recorded == [2]
+
+    async def test_flush_remaining_stops_live_loop(self):
+        loop = asyncio.get_running_loop()
+        queue = TokenBatchQueue(_CapturingTokenizer(), loop)
+        queue.start_live(0.01)
+        task = queue._live_task
+        await queue.flush_remaining(timeout=1.0)
+        assert queue._live_task is None
+        assert task is not None and task.cancelled()
+
+
 @pytest.mark.unit
 class TestEvenChunks:
     def test_splits_into_near_equal_chunks(self):
@@ -368,6 +448,9 @@ class _CapturingTokenizer:
 
     async def count_texts_async(self, texts, _loop):
         return [len(t.split()) for t in texts]
+
+    async def count_texts_live_async(self, texts, _loop):
+        return await self.count_texts_async(texts, _loop)
 
     async def token_count_message_async(self, content, reasoning, tool_calls, _loop):
         parts = [p for p in (content, reasoning) if p]

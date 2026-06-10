@@ -332,7 +332,7 @@ class TestTimingMetrics:
                         ),
                     ]
                 )
-                await agg._flush_tokens()
+                await agg._token_queue.flush()
                 # sample_latency = 3000-1000 = 2000
                 assert (
                     snapshot_series_total(
@@ -796,7 +796,7 @@ class TestAsyncTriggers:
                     ]
                 )
                 # ISL task is in-flight; drain it
-                await agg._flush_tokens()
+                await agg._token_queue.flush()
                 assert snapshot_series_total(registry, MetricSeriesKey.ISL.value) == 4
             finally:
                 agg.close()
@@ -825,7 +825,7 @@ class TestAsyncTriggers:
                         ),
                     ]
                 )
-                await agg._flush_tokens()
+                await agg._token_queue.flush()
                 # sample_latency_ns = 5000-1000 = 4000
                 assert (
                     snapshot_series_total(
@@ -864,7 +864,7 @@ class TestAsyncTriggers:
                         ),
                     ]
                 )
-                await agg._flush_tokens()
+                await agg._token_queue.flush()
                 # OSL = "hello world foo" = 3 tokens
                 assert snapshot_series_total(registry, MetricSeriesKey.OSL.value) == 3
                 # tpot = (5000 - 2000) / token_count("world foo") = 3000 / 2 = 1500
@@ -900,7 +900,7 @@ class TestAsyncTriggers:
                         ),
                     ]
                 )
-                await agg._flush_tokens()
+                await agg._token_queue.flush()
                 assert snapshot_series_total(registry, MetricSeriesKey.OSL.value) == 1
                 assert (
                     snapshot_series_count(registry, MetricSeriesKey.TPOT_NS.value) == 0
@@ -939,7 +939,7 @@ class TestAsyncTriggers:
                         ),
                     ]
                 )
-                await agg._flush_tokens()
+                await agg._token_queue.flush()
                 # sample_latency / OSL still emitted in non-streaming mode.
                 assert (
                     snapshot_series_total(
@@ -981,7 +981,7 @@ class TestAsyncTriggers:
                         ),
                     ]
                 )
-                await agg._flush_tokens()
+                await agg._token_queue.flush()
                 assert snapshot_series_total(registry, MetricSeriesKey.OSL.value) == 3
                 assert (
                     snapshot_series_count(registry, MetricSeriesKey.TPOT_NS.value) == 0
@@ -1016,7 +1016,7 @@ class TestAsyncTriggers:
                 # Enqueued by fire(), not yet tokenized (no tick/drain flush).
                 assert agg._token_queue.pending > 0
 
-                await agg._flush_tokens()
+                await agg._token_queue.flush()
                 assert agg._token_queue.pending == 0
                 assert snapshot_series_total(registry, MetricSeriesKey.ISL.value) == 5
             finally:
@@ -1185,7 +1185,7 @@ class TestAsyncTriggers:
                         ),
                     ]
                 )
-                await agg._flush_tokens()
+                await agg._token_queue.flush()
                 # OSL = token_count("ok" + tool_calls_json) = 2
                 assert snapshot_series_total(registry, MetricSeriesKey.OSL.value) == 2
                 # tpot = (5000 - 2000) / token_count(tool_calls_json) = 3000 / 1 = 3000
