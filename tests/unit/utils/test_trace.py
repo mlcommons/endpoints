@@ -112,7 +112,7 @@ class TestAdaptiveSampling:
 def _make_fifo_with_drain_thread() -> tuple[str, threading.Thread]:
     """Set up the convention layout (per-pid 0o700 dir + FIFO inside)
     that bootstrap() would normally create, plus a background reader
-    so enable_tracing's blocking O_WRONLY open returns immediately."""
+    so enable_tracing's non-blocking O_WRONLY open finds a reader at once."""
     path = trace.fifo_path(os.getpid())
     trace_dir = os.path.dirname(path)
     # Wipe any stale dir from a prior test in the same pid.
@@ -145,6 +145,23 @@ class TestEnableTracing:
 
     def test_no_op_on_missing_fifo(self) -> None:
         trace.enable_tracing("/tmp/this/does/not/exist")
+        assert trace.is_enabled() is False
+
+    def test_raises_when_no_reader_within_timeout(self, monkeypatch) -> None:
+        # FIFO exists but nobody opened the read end: enable_tracing must
+        # fail fast (bounded retry → RuntimeError) instead of blocking
+        # forever on O_WRONLY, so the caller can exit cleanly.
+        monkeypatch.setattr(trace, "_FIFO_OPEN_TIMEOUT_S", 0.2)
+        monkeypatch.setattr(trace, "_FIFO_OPEN_POLL_S", 0.02)
+        path = trace.fifo_path(os.getpid())
+        trace_dir = os.path.dirname(path)
+        if os.path.isdir(trace_dir):
+            shutil.rmtree(trace_dir, ignore_errors=True)
+        os.mkdir(trace_dir, 0o700)
+        os.mkfifo(path, 0o600)
+        trace._state.fifo_path = path  # teardown_method unlinks it
+        with pytest.raises(RuntimeError, match="no reader"):
+            trace.enable_tracing(path)
         assert trace.is_enabled() is False
 
     def test_enable_then_teardown_idempotent(self) -> None:

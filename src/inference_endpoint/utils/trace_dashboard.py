@@ -635,11 +635,17 @@ class Dashboard:
             self._dropped_bytes_by_proc[proc_id] = dropped
 
     def _reset_metrics(self, now_ns: int) -> None:
-        """Drop warmup-phase state on PERF_START. Per-worker loop_lag
-        and per-proc dropped-bytes counters are kept — they apply to
-        the worker process, not the request stream."""
+        """Drop warmup-phase state on PERF_START so every panel reflects only
+        the perf window. Per-proc dropped-bytes counters are kept: the producer
+        re-emits its *cumulative* total each tick (a window reset would just be
+        overwritten) and it is a trace-fidelity gauge, not a request sample."""
         self._lifecycles.clear()
         self._fold_queue.clear()
+        # Loop-lag is per-worker-process, but its warmup samples (cold caches,
+        # connection ramp) skew p99/max — clear so the EVENT LOOP panel reads
+        # only perf-window lag, like every other panel. Rows repopulate from
+        # the first post-PERF_START tick (~0.1 s).
+        self._loop_lag.clear()
         for m in self._metrics.values():
             m.total = 0
             m.sum_ns = 0.0
@@ -882,13 +888,20 @@ class Dashboard:
                 out.append(" " * col_w)
         out.append("\n")
 
+    def _stat(self, key: str, frozen_stats: dict[str, Stats] | None) -> Stats:
+        """Stats for ``key`` from the frozen snapshot when the run has ended
+        (post-PERF_END), else live from ``_metrics``. Threading ``frozen_stats``
+        through every panel keeps the verdict + cause tree consistent with the
+        ``[frozen]`` lifecycle table instead of drifting on straggler frames."""
+        if frozen_stats is not None:
+            return frozen_stats.get(key, Stats(0, 0.0, 0.0, 0.0, 0.0, 0.0))
+        return _stats(self._metrics[key])
+
     def _render_lifecycle(
         self, out: Text, frozen_stats: dict[str, Stats] | None = None
     ) -> None:
         def _get(key: str) -> Stats:
-            if frozen_stats is not None:
-                return frozen_stats.get(key, Stats(0, 0.0, 0.0, 0.0, 0.0, 0.0))
-            return _stats(self._metrics[key])
+            return self._stat(key, frozen_stats)
 
         e2e_avg = _get("e2e").avg or 1.0
         # Streaming if the 1st-chunk→last-chunk delta folded (RESPONSE_DONE
@@ -922,8 +935,8 @@ class Dashboard:
             bold=True,
         )
         out.append("\n")
-        self._render_verdict(out, e2e_avg)
-        self._render_timeline(out, stage_data)
+        self._render_verdict(out, e2e_avg, frozen_stats)
+        self._render_timeline(out, stage_data, frozen_stats)
 
     def _render_row_stats(
         self, out: Text, side: str, label: str, s: Stats, e2e_avg: float
@@ -971,18 +984,20 @@ class Dashboard:
         out.append(_fmt_row(s), style=style)
         out.append(f"{pct:>8.1f}%\n", style=style)
 
-    def _render_verdict(self, out: Text, e2e_avg: float) -> None:
+    def _render_verdict(
+        self, out: Text, e2e_avg: float, frozen_stats: dict[str, Stats] | None = None
+    ) -> None:
         # Two plain rows; no section headers, no dividers, no footer.
         # Same 3-column grid as the header so everything anchors.
         client = (
-            _stats(self._metrics["client_pre"]).avg
-            + _stats(self._metrics["client_post"]).avg
+            self._stat("client_pre", frozen_stats).avg
+            + self._stat("client_post", frozen_stats).avg
         )
-        server = _stats(self._metrics["server_http"]).avg
+        server = self._stat("server_http", frozen_stats).avg
         # "backpressure" = the whole ISSUED→CONN_ACQUIRED wait (inbox queue +
         # pool acquire), the same metric the timeline ▓ segment and the cause
         # tree use, so all three colour off one number.
-        queue = _stats(self._metrics["backpressure"]).avg
+        queue = self._stat("backpressure", frozen_stats).avg
         # Clamp at 100: each bucket is a sub-interval of E2E. The raw ratio
         # can top 100% because each avg is over a different folded
         # population (different N when intermediate frames drop).
@@ -1037,16 +1052,18 @@ class Dashboard:
         "complete-ipc": "tail",
     }
 
-    def _backpressure_cause_lines(self) -> list[list[tuple[str, str]]]:
+    def _backpressure_cause_lines(
+        self, frozen_stats: dict[str, Stats] | None = None
+    ) -> list[list[tuple[str, str]]]:
         """Reverse cause tree (right-aligned spine ``─┤`` / ``─┘``, dropping from
         the verdict's backpressure value above), one leaf per worker-loop phase.
         Every leaf starts at the muted base colour and takes its lifecycle
         stage's heat (warn ≥ 15% / critical ≥ 25% of E2E), so it lights up in
         step with that stage's %E2E cell in the table above."""
-        e2e = _stats(self._metrics["e2e"]).avg or 1.0
+        e2e = self._stat("e2e", frozen_stats).avg or 1.0
         tail = (
             "tail_stream"
-            if _stats(self._metrics["stream_gen"]).n > 0
+            if self._stat("stream_gen", frozen_stats).n > 0
             else "tail_offline"
         )
         lines: list[list[tuple[str, str]]] = []
@@ -1056,14 +1073,19 @@ class Dashboard:
             stage_key = self._PHASE_STAGE[phase]
             if stage_key == "tail":
                 stage_key = tail
-            pct = min(100.0, 100.0 * _stats(self._metrics[stage_key]).avg / e2e)
+            pct = min(100.0, 100.0 * self._stat(stage_key, frozen_stats).avg / e2e)
             lines.append([(phase, _heat(pct) or "muted"), (conn, "rule")])
         return lines
 
     _TIMELINE_W = 80  # stacked-bar width in columns
     _TIMELINE_LABEL_W = 18
 
-    def _render_timeline(self, out: Text, stage_data: list[tuple[str, float]]) -> None:
+    def _render_timeline(
+        self,
+        out: Text,
+        stage_data: list[tuple[str, float]],
+        frozen_stats: dict[str, Stats] | None = None,
+    ) -> None:
         """One stacked bar of where E2E goes, segmented by stage and colored
         █ server / ▒ client / ▓ backpressure — the visual companion to the
         verdict line directly above it.
@@ -1079,7 +1101,7 @@ class Dashboard:
         """
         w = self._TIMELINE_W
         total = sum(pct for _side, pct in stage_data)
-        tree = self._backpressure_cause_lines()
+        tree = self._backpressure_cause_lines(frozen_stats)
         bar_end = 2 + self._TIMELINE_LABEL_W + 1 + w + 1  # col after closing │
         legend_end = (
             2 + self._TIMELINE_LABEL_W + len("▒ client   ▓ backpressure   █ server")

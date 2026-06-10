@@ -1026,13 +1026,17 @@ class TestPerfStartReset:
         assert d.stage_n("e2e") == 0
         assert d.in_flight == 0
 
-    def test_loop_lag_survives_reset(self) -> None:
-        # Loop lag is per-worker process health, not per-request — it
-        # must not get wiped by a phase boundary.
+    def test_loop_lag_cleared_on_reset(self) -> None:
+        # Loop lag is per-worker, but its warmup samples (cold caches,
+        # connection ramp) skew p99/max — PERF_START clears it so the
+        # EVENT LOOP panel reflects only the perf window, like every other
+        # panel. Rows repopulate fresh from the first post-reset tick.
         d = _dash()
         d.ingest_frames(_frame(Event.LOOP_LAG, _loop_lag_sid(0, 1_000_000)))
+        assert d._loop_lag[0].total == 1
         d.ingest_frames(_frame(Event.PERF_START, 0))
-        assert 0 in d._loop_lag
+        assert 0 not in d._loop_lag
+        d.ingest_frames(_frame(Event.LOOP_LAG, _loop_lag_sid(0, 2_000_000)))
         assert d._loop_lag[0].total == 1
 
     def test_warmup_request_completing_after_perf_start_not_counted(self) -> None:

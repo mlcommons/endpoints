@@ -54,6 +54,7 @@ import errno
 import fcntl
 import json
 import logging
+import mmap
 import os
 import shutil
 import struct
@@ -183,9 +184,11 @@ def publish_metrics_addr(addr: str) -> None:
 # Per-process SPSC producer ring (producer + emit_loop_lag share the loop, no
 # lock). 512 MiB ≈ 31M frames per 0.3 s tick — deep headroom so ring-overflow
 # drops effectively never happen; the FIFO/reader is then the only realistic
-# drop point. Total trace RAM = _BUF_CAPACITY × (1 main + N workers) + one FIFO
-# pipe buffer → at 64 workers ≈ 512 MiB × 65 + 512 MiB ≈ 33 GiB (max; pages are
-# zero-fill-on-demand, so resident grows only as frames are written). Lower
+# drop point. The ring is an anonymous mmap, so the 512 MiB is a virtual
+# reservation whose pages are zero-fill-on-demand: resident memory grows only
+# as frames are actually written and is reclaimed by the OS at exit. Worst-case
+# virtual = _BUF_CAPACITY × (1 main + N workers) + one FIFO pipe buffer → at 64
+# workers ≈ 512 MiB × 65 + 512 MiB ≈ 33 GiB virtual (far less resident). Lower
 # _BUF_CAPACITY for tighter memory.
 _BUF_CAPACITY = 512 * 1024 * 1024  # 512 MiB ≈ 31M frames per 0.3 s tick
 _WRITE_CHUNK = 4080  # FRAME-aligned ≤ PIPE_BUF (4096) so writes are atomic
@@ -195,6 +198,11 @@ _WRITE_CHUNK = 4080  # FRAME-aligned ≤ PIPE_BUF (4096) so writes are atomic
 _KERNEL_PIPE_BUF = 512 * 1024 * 1024  # 512 MiB best-effort F_SETPIPE_SZ
 _F_SETPIPE_SZ = getattr(fcntl, "F_SETPIPE_SZ", 1031)  # Linux-only
 _DASHBOARD_READY_S = 0.5  # grace after spawn before opening FIFO
+# enable_tracing opens the FIFO write end non-blocking and retries this long
+# for the dashboard (reader) to appear; if none does it raises rather than
+# blocking forever on a dashboard that never opened (or already died).
+_FIFO_OPEN_TIMEOUT_S = 10.0
+_FIFO_OPEN_POLL_S = 0.02
 
 
 def _sid_from_uuid(req_id: str) -> int:
@@ -213,7 +221,10 @@ class _TraceEmitter:
 
     def __init__(self, fd: int) -> None:
         self._fd = fd
-        self._buf = bytearray(_BUF_CAPACITY)
+        # Anonymous mmap, not bytearray: pages fault in zero-filled on first
+        # write, so RSS tracks frames actually emitted instead of pinning the
+        # full _BUF_CAPACITY per process up front.
+        self._buf = mmap.mmap(-1, _BUF_CAPACITY, flags=mmap.MAP_PRIVATE)
         self._offset = 0
         self._dead = False
         self._dropped_bytes = 0
@@ -397,25 +408,40 @@ async def emit_loop_lag(worker_id: int, period_s: float = 0.3) -> None:
 
 
 def enable_tracing(pipe_path: str) -> None:
-    """Install the emitter; idempotent. No-op if the FIFO is gone
-    (dashboard exited between dispatch and open)."""
+    """Install the emitter; idempotent.
+
+    Opens the FIFO write end non-blocking and retries for up to
+    ``_FIFO_OPEN_TIMEOUT_S`` for the dashboard (reader) to appear. Raises
+    ``RuntimeError`` if the FIFO exists but no reader shows up in that window —
+    a fast, clean failure instead of the unbounded block a plain ``O_WRONLY``
+    open incurs when the dashboard has died. A genuinely absent FIFO (never
+    created, or already unlinked) is a no-op: tracing stays disabled.
+    """
     global emit_trace
     if emit_trace is not _noop:
         return
     if not os.path.exists(pipe_path):
         return
-    # Two-step open: blocking O_WRONLY first to synchronise with the
-    # reader (O_NONBLOCK would ENXIO if reader isn't up yet), then
-    # flip to non-blocking so subsequent writes never stall the loop.
-    try:
-        fd = os.open(pipe_path, os.O_WRONLY)
-    except OSError:
-        return  # pipe gone (dashboard exited before we opened)
-    try:
-        flags = fcntl.fcntl(fd, fcntl.F_GETFL)
-        fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
-    except OSError:
-        pass  # rare; non-blocking is best-effort
+    # O_WRONLY|O_NONBLOCK returns immediately, raising ENXIO until a reader has
+    # the FIFO open. Retry until the reader appears or the deadline passes, then
+    # raise so the caller exits cleanly rather than blocking forever on a
+    # dashboard that never opened. The fd stays non-blocking — exactly what the
+    # emitter wants (writes drop on EAGAIN, never stall the loop).
+    deadline = time.monotonic() + _FIFO_OPEN_TIMEOUT_S
+    while True:
+        try:
+            fd = os.open(pipe_path, os.O_WRONLY | os.O_NONBLOCK)
+            break
+        except FileNotFoundError:
+            return  # FIFO unlinked under us (dashboard exited + cleaned up)
+        except OSError as e:
+            if e.errno == errno.ENXIO and time.monotonic() < deadline:
+                time.sleep(_FIFO_OPEN_POLL_S)
+                continue
+            raise RuntimeError(
+                f"trace FIFO {pipe_path!r} has no reader after "
+                f"{_FIFO_OPEN_TIMEOUT_S:.0f}s — dashboard not running?"
+            ) from e
     try:
         fcntl.fcntl(fd, _F_SETPIPE_SZ, _KERNEL_PIPE_BUF)
     except OSError:
@@ -469,16 +495,16 @@ def bootstrap(verbose: int) -> str:
     # the original terminal fds.
     dashboard_proc = _spawn_dashboard(path)
     if dashboard_proc is None:
-        # Wheel install without scripts/. Don't enable_tracing — its
-        # blocking O_WRONLY would deadlock with no reader.
+        # Wheel install without scripts/. Don't enable_tracing — with no
+        # reader it would just burn the open-retry budget and then raise.
         sys.stderr.write(
             "trace: scripts/trace_dashboard.py not found — open the FIFO "
             f"manually: 'python scripts/trace_dashboard.py --trace-pipe {path}'\n"
         )
         return "TRACE"
 
-    # Grace window so a dashboard import error surfaces here instead
-    # of deadlocking the blocking O_WRONLY below.
+    # Grace window so a dashboard import error surfaces here (clean disable)
+    # rather than as a bounded-retry timeout in enable_tracing below.
     time.sleep(_DASHBOARD_READY_S)
     if dashboard_proc.poll() is not None:
         sys.stderr.write(
@@ -491,10 +517,23 @@ def bootstrap(verbose: int) -> str:
 
 
 def _activate_trace(trace_dir: str, path: str) -> str:  # pragma: no cover
-    """Redirect stdout/stderr to the per-pid logfile, then install the
-    emitter. Hijacks fds 1/2 and blocking-opens the FIFO for write."""
-    # Log file lives inside the per-pid 0o700 dir; O_NOFOLLOW is
-    # belt-and-suspenders against a symlink attack on /tmp.
+    """Install the emitter, then redirect stdout/stderr to the per-pid logfile.
+
+    Order matters: open the FIFO write end *before* hijacking fds 1/2. If the
+    dashboard never opened its read end, enable_tracing raises after a bounded
+    retry — surfacing on the real terminal with stdout/stderr still intact, so
+    tracing disables and the benchmark runs untraced (is_enabled() stays False
+    → workers skip it too), matching bootstrap()'s dashboard-unavailable paths.
+    """
+    try:
+        enable_tracing(path)
+    except RuntimeError as e:
+        sys.stderr.write(f"trace: {e} — trace events disabled this run\n")
+        return "TRACE"
+
+    # Emitter live. Redirect this proc's stdout/stderr into the per-pid logfile
+    # so app logs / tqdm don't fight the dashboard for the terminal. O_NOFOLLOW
+    # is belt-and-suspenders against a symlink attack on /tmp.
     log_path = os.path.join(trace_dir, "logs.txt")
     orig_stderr_fd = os.dup(2)
     os.write(
@@ -511,8 +550,6 @@ def _activate_trace(trace_dir: str, path: str) -> str:  # pragma: no cover
     os.close(log_fd)
     _state.orig_stderr_fd = orig_stderr_fd
     _state.log_path = log_path
-
-    enable_tracing(path)
     return "TRACE"
 
 
