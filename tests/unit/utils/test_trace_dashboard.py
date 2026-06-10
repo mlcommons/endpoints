@@ -1195,17 +1195,17 @@ class TestBackpressureCause:
             assert leaf[0][0] == phase  # phase label
             assert leaf[1][0] in (" ─┤", " ─┘")  # right-hand spine connector
 
-    def test_leaf_color_matches_its_stage_e2e_cell(self) -> None:
+    def test_leaf_heat_follows_individual_stage(self) -> None:
         d = _dash()
         d._metrics["e2e"].add(100)
-        # encode/tcp-acquire phases live in the (encode+pool) sub-row's
-        # stage: pool_wait. 30% ≥ 25% → critical.
-        d._metrics["pool_wait"].add(30)
-        d._metrics["stream_gen"].add(5)  # 5% < 15% → server side colour
+        d._metrics["ipc_wait"].add(30)  # pickup wait 30% ≥ 25% → critical
+        # Even a huge fused encode+pool share never highlights — the leaf is
+        # excluded from heat by design (no event separates its two halves).
+        d._metrics["pool_wait"].add(40)
+        d._metrics["stream_gen"].add(5)  # 5% < 15% → muted base
         leaf = {ln[0][0]: ln[0][1] for ln in d._backpressure_cause_lines()}
-        assert leaf["tcp-acquire"] == "critical"
-        assert leaf["encode"] == "critical"
-        # sse-decode follows stream_gen's heat (5% below heat → muted base)
+        assert leaf["pickup-ipc"] == "critical"
+        assert leaf["encode + tcp-acquire"] == "muted"
         assert leaf["sse-decode"] == "muted"
 
     def test_heat_scale_boundaries(self) -> None:
@@ -1370,67 +1370,3 @@ class TestTcpConnsCell:
         out = Text()
         d._render_loop_lag(out)
         assert "tcp conns  3,988" in out.plain
-
-
-@pytest.mark.unit
-class TestBackpressureSubRows:
-    """Render-only breakdown of the backpressure row: inbox/pickup wait vs
-    encode+pool-acquire, both folded from events already on the wire."""
-
-    def test_sub_rows_partition_parent(self) -> None:
-        d = _dash()
-        sid = _new_sid()
-        ts = {
-            Event.ISSUED: 0,
-            Event.WORKER_RECEIVED: 10,
-            Event.CONN_ACQUIRED: 40,
-            Event.WRITTEN: 50,
-            Event.RESPONSE_HEADERS: 60,
-            Event.RESPONSE_BYTES: 70,
-            Event.MAIN_RECEIVED: 80,
-            Event.COMPLETE: 90,
-        }
-        d.ingest_frames(b"".join(_frame(ev, sid, t) for ev, t in ts.items()))
-        d.finalize_completed()
-        assert d._metrics["ipc_wait"].sum_ns == 10.0
-        assert d._metrics["pool_wait"].sum_ns == 30.0
-        # The two sub-stages partition the parent exactly.
-        assert (
-            d._metrics["ipc_wait"].sum_ns + d._metrics["pool_wait"].sum_ns
-            == d._metrics["backpressure"].sum_ns
-        )
-
-    def test_sub_rows_render_and_parent_pct_blank(self) -> None:
-        d = _dash()
-        for _ in range(3):
-            d.ingest_frames(_full_lifecycle(_new_sid()))
-        d.finalize_completed()
-        plain = d.render().plain
-        assert "issue -> worker_pickup" in plain
-        assert "worker_pickup -> encode + conn acquired" in plain
-        lines = plain.splitlines()
-        parent = next(
-            ln for ln in lines if "-> conn acquired" in ln and "[client]" in ln
-        )
-        subs = [ln for ln in lines if "worker_pickup" in ln]
-        # Parent row: stats but NO %E2E cell (the share lives in the subs).
-        assert not parent.rstrip().endswith("%")
-        assert len(subs) == 2
-        assert all(ln.rstrip().endswith("%") for ln in subs)
-
-    def test_parent_keeps_pct_without_worker_frames(self) -> None:
-        # No WORKER_RECEIVED/CONN_ACQUIRED folds -> no sub-rows; the parent
-        # row keeps its own %E2E cell instead of a blank.
-        d = _dash()
-        sid = _new_sid()
-        d.ingest_frames(_frame(Event.ISSUED, sid, 0))
-        d.ingest_frames(_frame(Event.COMPLETE, sid, 100))
-        d.finalize_completed()
-        plain = d.render().plain
-        assert "worker_pickup" not in plain
-        parent = next(
-            ln
-            for ln in plain.splitlines()
-            if "-> conn acquired" in ln and "[client]" in ln
-        )
-        assert parent.rstrip().endswith("%")
