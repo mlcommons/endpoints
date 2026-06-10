@@ -169,7 +169,10 @@ async def main() -> None:
         default=-1,
         help=(
             "Number of tokenizer shard processes (-1 = auto: one per "
-            "8-core block of this machine; 0 = in-process tokenization)."
+            "8-core block of this machine, minimum one; 0 = explicit "
+            "in-process tokenization). An environment that cannot shard "
+            "(no fast tokenizer backend, no CPU affinity) is a startup "
+            "error unless 0 is passed."
         ),
     )
     parser.add_argument(
@@ -223,7 +226,15 @@ async def main() -> None:
             logger.info("metrics aggregator affinity: %d CPUs", len(cpus))
         except UnsupportedPlatformError:
             pass  # non-Linux: no inherited pin to undo.
-        tokenizer_cm = BatchTokenizer(args.tokenizer, n_workers=args.tokenizer_workers)
+        try:
+            tokenizer_cm = BatchTokenizer(
+                args.tokenizer, n_workers=args.tokenizer_workers
+            )
+        except RuntimeError as exc:
+            # Fail-fast contract: a tokenizer environment that cannot shard
+            # must surface as a clear service-launch failure, not a silent
+            # slow path that cannot keep up with completions.
+            raise SystemExit(f"FATAL: {exc}") from exc
     else:
         tokenizer_cm = nullcontext()
 

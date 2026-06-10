@@ -95,17 +95,17 @@ each block of `CORES_PER_WORKER` (8) cores. Why this shape:
   and stays NUMA-local) is how the whole machine is used.
 - Workers are spawn-context processes with module-level entry points (pickled
   by name), warmed in parallel at construction so N tokenizer loads do not
-  serialize (the warmup wait is bounded — a hung load degrades to the
-  in-process path instead of wedging startup), and they ignore SIGINT —
-  Ctrl-C goes to the whole process group, and worker lifetime must stay under
-  the parent drain's control.
+  serialize (the warmup wait is bounded — a hung load is a startup error, not
+  a wedge), and they ignore SIGINT — Ctrl-C goes to the whole process group,
+  and worker lifetime must stay under the parent drain's control.
 
 `--tokenizer-workers` controls the shard count: `-1` (default) auto-fits one
-shard per 8-core block of the process affinity mask, an explicit count is
-clamped to that capacity, and `0` disables sharding. Every fallback to the
-in-process path (no fast Rust backend, affinity unavailable, fewer than two
-blocks) is logged with its reason — a missing "shards" INFO line should never
-be the only signal that the batch path is running single-threaded.
+shard per 8-core block of the process affinity mask (always at least one), an
+explicit count is clamped to that capacity, and `0` explicitly selects
+in-process tokenization. There is no implicit fallback: an environment that
+cannot shard — no fast Rust backend, no CPU affinity, a failed or over-budget
+warmup — is a startup error, because a silent in-process slow path cannot
+keep up with completions and would surface much later as an incomplete drain.
 
 Chat-template items (tool-call outputs) take a separate in-process thread:
 they are rare relative to the batched flush, and `apply_chat_template` is

@@ -18,9 +18,10 @@
 ``BatchTokenizer`` tokenizes whole batches at once, sharded across worker
 processes each pinned to a block of ``CORES_PER_WORKER`` cores (a single BPE
 rayon pool is memory-bound and saturates ~8 cores). The aggregator buffers
-per-sample text and flushes the batch once per publish tick and at drain. Falls
-back to a single in-process thread when there is no fast Rust backend or fewer
-than two core blocks fit.
+per-sample text and flushes the batch once per publish tick and at drain.
+Sharding requires the fast (Rust) tokenizers backend and Linux CPU affinity;
+an environment that cannot shard is a startup error, never a silent slow
+path — ``--tokenizer-workers 0`` is the only (explicit) in-process mode.
 """
 
 from __future__ import annotations
@@ -191,7 +192,8 @@ class BatchTokenizer:
             max_workers=1, thread_name_prefix="tok-thread"
         )
         self._load_tokenizer()  # also computes the chat-template baseline
-        # Process shards for the batched text path (or empty -> in-process).
+        # Process shards for the batched text path. Empty only when
+        # in-process mode was explicitly requested (n_workers=0).
         self._procs: list[ProcessPoolExecutor] = []
         self._setup_shards(cores_per_worker, n_workers)
 
@@ -231,43 +233,34 @@ class BatchTokenizer:
     def _setup_shards(self, cores_per_worker: int, n_workers: int) -> None:
         """Spawn one pinned single-worker process per core block.
 
-        ``n_workers <= 0`` (auto) fits as many shards as this process's
-        affinity mask allows, one per ``cores_per_worker`` block; an explicit
-        count is clamped to that capacity. No-op (leaving the batch path
-        in-process) when the tokenizer has no fast Rust backend, affinity is
-        unavailable, or — in auto mode — fewer than two blocks fit (a single
-        shard is no faster than the in-process backend). Each fallback is
-        logged: a missing "shards" INFO line is the only other signal that
-        the batched path is running single-threaded.
+        ``n_workers == 0`` explicitly selects in-process tokenization. Auto
+        (``< 0``) fits one shard per ``cores_per_worker`` block of this
+        process's affinity mask, always at least one; an explicit count is
+        clamped to that capacity. An environment that cannot shard — no fast
+        Rust backend, no CPU affinity, a warmup that fails or exceeds its
+        budget — raises instead of silently degrading to a slow path that
+        cannot keep up with completions.
         """
         if cores_per_worker <= 0 or n_workers == 0:
-            logger.info("BatchTokenizer: sharding disabled")
+            logger.info("BatchTokenizer: in-process tokenization (explicit)")
             return
         if getattr(self._tokenizer, "backend_tokenizer", None) is None:
-            logger.info(
-                "BatchTokenizer: no fast tokenizer backend; using in-process "
-                "tokenization"
+            raise RuntimeError(
+                f"tokenizer {self._tokenizer_name!r} has no fast (Rust) "
+                "backend; token metrics require one to keep up with "
+                "completions. Pass --tokenizer-workers 0 to explicitly run "
+                "single-threaded in-process tokenization."
             )
-            return
         try:
             available = sorted(os.sched_getaffinity(0))
-        except (OSError, AttributeError):
-            logger.info(
-                "BatchTokenizer: CPU affinity unavailable; using in-process "
-                "tokenization"
-            )
-            return
-        capacity = len(available) // cores_per_worker
+        except (OSError, AttributeError) as exc:
+            raise RuntimeError(
+                "CPU affinity is unavailable; tokenizer sharding requires "
+                "Linux. Pass --tokenizer-workers 0 to explicitly run "
+                "in-process tokenization."
+            ) from exc
+        capacity = max(1, len(available) // cores_per_worker)
         n = capacity if n_workers < 0 else min(n_workers, capacity)
-        if n < (2 if n_workers < 0 else 1):
-            logger.info(
-                "BatchTokenizer: %d CPUs available (capacity %d blocks of %d); "
-                "using in-process tokenization",
-                len(available),
-                capacity,
-                cores_per_worker,
-            )
-            return
         t0 = time.perf_counter()
         ctx = multiprocessing.get_context("spawn")
         procs: list[ProcessPoolExecutor] = []
@@ -290,12 +283,13 @@ class BatchTokenizer:
             deadline = time.monotonic() + _SHARD_WARMUP_TIMEOUT_S
             for f in ready:
                 f.result(timeout=max(0.0, deadline - time.monotonic()))
-        except Exception:
+        except Exception as exc:
             _terminate_procs(procs)
-            logger.exception(
-                "tokenizer shard setup failed; using in-process tokenization"
-            )
-            return
+            raise RuntimeError(
+                "tokenizer shard warmup failed; refusing to fall back to a "
+                "slow path. Fix the environment (or pass --tokenizer-workers "
+                "0 to explicitly run in-process)."
+            ) from exc
         self._procs = procs
         logger.info(
             "BatchTokenizer: %d shards x %d cores (setup %.1fs)",
