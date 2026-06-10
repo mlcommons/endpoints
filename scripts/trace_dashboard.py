@@ -105,7 +105,7 @@ class _FrameReader(threading.Thread):
                     try:
                         chunk = os.read(self._fd, READ_CHUNK)
                     except OSError:
-                        return
+                        return  # FIFO closed/errored under us — stop reading
                     if not chunk:
                         return  # true EOF — all writers closed
                     self._pending.extend(chunk)
@@ -183,7 +183,7 @@ class _MetricsSubReader(threading.Thread):
                 except zmq.Again:
                     continue  # no snapshot within RCVTIMEO — re-check stop, retry
                 except zmq.ZMQError:
-                    return
+                    return  # socket closed/terminated — stop the SUB reader
                 if raw[:TOPIC_FRAME_SIZE] == BATCH_TOPIC:
                     continue  # metrics snapshots are never batched
                 payload = raw[TOPIC_FRAME_SIZE:] if len(raw) > TOPIC_FRAME_SIZE else raw
@@ -266,9 +266,16 @@ def main() -> int:
         # Join the SUB before the final render so no late snapshot attaches.
         sub_reader.stop()
         sub_reader.join(timeout=1.0)
-        # Exited without a terminal snapshot → the FIFO closed before teardown
-        # wrote it (main process SIGKILLed / OOM). The only genuine "did not
-        # finalize" case; otherwise the panel reads "(final)".
+        # One last sidecar poll: if the reader hit FIFO EOF between refresh
+        # ticks, teardown may have written the terminal snapshot just before
+        # closing the FIFO — don't flag "unavailable" without re-checking.
+        if not dash.has_terminal_loadgen:
+            snap = _try_load_snapshot(snap_path)
+            if snap is not None:
+                dash.attach_loadgen_snapshot(snap, force=True)
+        # Still no terminal snapshot → the FIFO closed before teardown wrote it
+        # (main process SIGKILLed / OOM). The only genuine "did not finalize"
+        # case; otherwise the panel reads "(final)".
         if not dash.has_terminal_loadgen:
             dash.mark_final_unavailable()
         # Bypass the per-tick fold-defer window so the final render

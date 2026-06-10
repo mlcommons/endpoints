@@ -1297,7 +1297,14 @@ class Dashboard:
         for wid, s in workers:
             _emit(f"w{wid}", s)
 
-        omitted = max(0, len(self._loop_lag) - 1 - self._LAG_TOP_N)
+        # Subtract main only when it actually has a LOOP_LAG entry; otherwise
+        # the "not shown" count under-reports by one.
+        omitted = max(
+            0,
+            len(self._loop_lag)
+            - (1 if main_entry is not None else 0)
+            - self._LAG_TOP_N,
+        )
         if omitted:
             out.append(
                 f"  … {omitted} worker(s) with lower max lag not shown\n",

@@ -623,6 +623,10 @@ def cleanup() -> None:
             )
         except OSError:
             pass  # terminal closed mid-run (nohup, detached)
+        try:
+            os.close(_state.orig_stderr_fd)  # release the dup'd stderr fd
+        except OSError:
+            pass  # already closed — nothing to free
         _state.orig_stderr_fd = None
         _state.log_path = None
 
