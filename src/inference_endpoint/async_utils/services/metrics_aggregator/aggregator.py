@@ -96,7 +96,7 @@ _NS_HDR_HIGH: Final[int] = 3_600_000_000_000  # 1 hour in ns
 _TOKEN_HDR_LOW: Final[int] = 1
 _TOKEN_HDR_HIGH: Final[int] = 10_000_000  # 10M tokens
 
-_DEFAULT_DRAIN_TIMEOUT_S: Final[float] = 60.0
+_DEFAULT_DRAIN_TIMEOUT_S: Final[float] = 300.0
 
 
 class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
@@ -134,9 +134,10 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
         self._registry = registry
         self._publisher = publisher
         self._publish_interval_s = publish_interval_s
-        # Token triggers enqueue onto this queue; it is flushed in batches at
-        # each publish tick and at end-of-run. None when no tokenizer is set
-        # (token metrics disabled), in which case those triggers are no-ops.
+        # Token triggers enqueue onto this queue; it is flushed by the
+        # queue's own live loop (start_live) and by the end-of-run drain.
+        # None when no tokenizer is set (token metrics disabled), in which
+        # case those triggers are no-ops.
         self._token_queue: TokenBatchQueue | None = (
             TokenBatchQueue(tokenizer, self.loop) if tokenizer is not None else None
         )

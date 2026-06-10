@@ -204,7 +204,7 @@ src/inference_endpoint/
 │   │       ├── publisher.py    # MetricsPublisher (tick task + atomic disk fallback)
 │   │       ├── subscriber.py   # MetricsSnapshotSubscriber (latest + COMPLETE snapshot capture)
 │   │       ├── metrics_table.py # In-flight sample rows + trigger dispatch (TTFT/TPOT/ISL/OSL)
-│   │       └── token_metrics.py # BatchTokenizer (sharded batch tokenization) + TokenBatchQueue (defer-to-flush buffer) for ISL/OSL/TPOT
+│   │       └── token_metrics.py # BatchTokenizer (live thread lane + drain-only sharded pool) + TokenBatchQueue (defer-to-flush buffer, owns the live flush loop) for ISL/OSL/TPOT
 │   └── transport/             # ZMQ-based IPC transport layer
 │       ├── protocol.py        # Transport protocols + TransportConfig + MessageCodec[T]
 │       └── zmq/               # ZMQ implementation (context, pubsub, transport, ZMQTransportConfig)

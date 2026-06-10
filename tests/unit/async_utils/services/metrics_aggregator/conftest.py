@@ -170,6 +170,7 @@ def make_aggregator(
     socket_name: str,
     *,
     tokenizer=None,
+    live_flush_interval_s: float | None = None,
     streaming: bool = True,
     shutdown_event: asyncio.Event | None = None,
 ) -> tuple[MetricsAggregatorService, MetricsRegistry, MagicMock]:
@@ -201,6 +202,7 @@ def make_aggregator(
         sig_figs=3,
         n_histogram_buckets=10,
         tokenizer=tokenizer,
+        live_flush_interval_s=live_flush_interval_s,
         streaming=streaming,
         shutdown_event=shutdown_event,
     )

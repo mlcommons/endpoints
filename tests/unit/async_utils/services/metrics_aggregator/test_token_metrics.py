@@ -273,7 +273,9 @@ class _SpawnlessExecutor:
 
 @pytest.mark.unit
 class TestSetupShardsDecisions:
-    """Pins the --tokenizer-workers contract: -1 auto / N clamped / 0 explicit.
+    """Pins the BatchTokenizer(n_workers=...) shard contract: -1 auto / N
+    clamped / 0 explicit in-process (auto-sized in production — the CLI's
+    --tokenizer-workers maps to the live thread lane, not to shards).
 
     An environment that cannot shard is a startup error — never a silent
     in-process fallback.
@@ -281,8 +283,20 @@ class TestSetupShardsDecisions:
 
     def _make(self, monkeypatch, cpus, n_workers, executor=_SpawnlessExecutor):
         monkeypatch.setattr(token_metrics_module, "ProcessPoolExecutor", executor)
+        # Patch the probe + the restore so no real affinity syscalls run.
         monkeypatch.setattr(
-            token_metrics_module.os, "sched_getaffinity", lambda pid: set(range(cpus))
+            token_metrics_module,
+            "expand_to_all_online_cpus",
+            lambda: set(range(cpus)),
+        )
+        monkeypatch.setattr(
+            token_metrics_module.os, "sched_getaffinity", lambda pid: {0, 1}
+        )
+        self.restored: list[set] = []
+        monkeypatch.setattr(
+            token_metrics_module.os,
+            "sched_setaffinity",
+            lambda pid, mask: self.restored.append(set(mask)),
         )
         with patch(_MOCK_TARGET, _FakeTokenizerWithBackend):
             return BatchTokenizer("fake", n_workers=n_workers)
@@ -308,6 +322,13 @@ class TestSetupShardsDecisions:
             blocks = [set(ex.initargs[1]) for ex in tok._procs]
             assert blocks == [set(range(0, 8)), set(range(8, 16))]
 
+    def test_probe_restores_the_inherited_mask(self, monkeypatch):
+        """The aggregator keeps the mask its parent gave it; only the probe
+        widens, and only the shard children pin elsewhere."""
+        with self._make(monkeypatch, 16, -1):
+            pass
+        assert self.restored == [{0, 1}]
+
     def test_no_fast_backend_is_a_startup_error(self, monkeypatch):
         monkeypatch.setattr(
             token_metrics_module, "ProcessPoolExecutor", _SpawnlessExecutor
@@ -322,8 +343,15 @@ class TestSetupShardsDecisions:
             token_metrics_module, "ProcessPoolExecutor", _SpawnlessExecutor
         )
 
+        def _unsupported():
+            raise RuntimeError("affinity requires Linux")
+
+        monkeypatch.setattr(
+            token_metrics_module, "expand_to_all_online_cpus", _unsupported
+        )
+
         def _raise(pid):
-            raise OSError("affinity unavailable")
+            raise AttributeError("no sched_getaffinity")
 
         monkeypatch.setattr(token_metrics_module.os, "sched_getaffinity", _raise)
         monkeypatch.setattr(token_metrics_module.os, "cpu_count", lambda: 16)
@@ -356,8 +384,8 @@ class _RecordingProc(_FakeProc):
 @pytest.mark.unit
 class TestLiveLane:
     @pytest.mark.asyncio
-    async def test_live_uses_only_the_last_shards(self):
-        """Mid-run flushes stay off the low core blocks (loadgen side)."""
+    async def test_live_never_touches_the_shard_pool(self):
+        """Mid-run flushes run in-process; the shards are drain-only."""
         with patch(_MOCK_TARGET, _FakeTokenizer):
             loop = asyncio.get_running_loop()
             with BatchTokenizer("fake", n_workers=0, live_workers=1) as tok:
@@ -365,8 +393,7 @@ class TestLiveLane:
                 tok._procs = procs
                 counts = await tok.count_texts_live_async(["a b", "c"], loop)
                 assert counts == [2, 1]
-                assert procs[0].chunks == [] and procs[1].chunks == []
-                assert procs[2].chunks == [["a b", "c"]]
+                assert all(p.chunks == [] for p in procs)
 
     @pytest.mark.asyncio
     async def test_drain_uses_every_shard(self):
@@ -420,6 +447,86 @@ class TestQueueLiveLoop:
         await queue.flush_remaining(timeout=1.0)
         assert queue._live_task is None
         assert task is not None and task.cancelled()
+
+
+@pytest.mark.unit
+class TestRayonCaps:
+    def test_ctor_caps_rayon_to_live_workers(self, monkeypatch):
+        monkeypatch.delenv("RAYON_NUM_THREADS", raising=False)
+        with patch(_MOCK_TARGET, _FakeTokenizer):
+            with BatchTokenizer("fake", n_workers=0, live_workers=3):
+                assert token_metrics_module.os.environ["RAYON_NUM_THREADS"] == "3"
+
+    def test_ctor_respects_operator_exported_cap(self, monkeypatch):
+        monkeypatch.setenv("RAYON_NUM_THREADS", "7")
+        with patch(_MOCK_TARGET, _FakeTokenizer):
+            with BatchTokenizer("fake", n_workers=0, live_workers=3):
+                assert token_metrics_module.os.environ["RAYON_NUM_THREADS"] == "7"
+
+    def test_init_worker_overrides_inherited_cap_with_block_size(self, monkeypatch):
+        """Spawn children inherit the parent's live cap; each shard must
+        re-size its rayon pool to its own core block."""
+        monkeypatch.setenv("RAYON_NUM_THREADS", "2")
+
+        def _no_affinity(pid, mask):
+            raise AttributeError("no sched_setaffinity")
+
+        monkeypatch.setattr(token_metrics_module.os, "sched_setaffinity", _no_affinity)
+        with patch(_MOCK_TARGET, _FakeTokenizer):
+            token_metrics_module._init_worker("fake", [0, 1, 2, 3, 4, 5, 6, 7])
+        assert token_metrics_module.os.environ["RAYON_NUM_THREADS"] == "8"
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+class TestLiveFlushBounds:
+    async def test_live_flush_takes_at_most_the_cap(self, monkeypatch):
+        monkeypatch.setattr(token_metrics_module, "_LIVE_FLUSH_MAX_ITEMS", 3)
+        loop = asyncio.get_running_loop()
+        queue = TokenBatchQueue(_CapturingTokenizer(), loop)
+        recorded: list[int] = []
+        for i in range(5):
+            queue.enqueue_text(f"t{i}", recorded.append)
+        await queue.flush(live=True)
+        assert len(recorded) == 3
+        assert queue.pending == 2
+        # The drain takes everything that remains.
+        assert await queue.flush_remaining(timeout=1.0) == 0
+        assert len(recorded) == 5
+
+    async def test_live_cancellation_requeues_texts(self):
+        class _Hanging(_CapturingTokenizer):
+            async def count_texts_live_async(self, texts, _loop):
+                await asyncio.sleep(30)
+                return [0] * len(texts)
+
+        loop = asyncio.get_running_loop()
+        queue = TokenBatchQueue(_Hanging(), loop)
+        recorded: list[int] = []
+        queue.enqueue_text("a b", recorded.append)
+        task = loop.create_task(queue.flush(live=True))
+        await asyncio.sleep(0.01)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert queue.pending == 1
+        assert len(queue._text) == 1, "cancelled live flush must give items back"
+        assert await queue.flush_remaining(timeout=1.0) == 0
+        assert recorded == [2]
+
+    async def test_live_message_failure_requeues_message(self):
+        class _MsgFailing(_CapturingTokenizer):
+            async def token_count_message_async(self, *args):
+                raise RuntimeError("template boom")
+
+        loop = asyncio.get_running_loop()
+        queue = TokenBatchQueue(_MsgFailing(), loop)
+        recorded: list[int] = []
+        queue.enqueue_message(("hello world", None, None), recorded.append)
+        with pytest.raises(RuntimeError, match="template boom"):
+            await queue.flush(live=True)
+        assert queue.pending == 1
+        assert len(queue._msg) == 1, "failed live message must be re-queued"
 
 
 @pytest.mark.unit
@@ -501,6 +608,9 @@ class TestTokenBatchQueue:
                 await asyncio.sleep(10.0)
                 return [0] * len(texts)
 
+            async def count_texts_live_async(self, texts, _loop):
+                return await self.count_texts_async(texts, _loop)
+
             async def token_count_message_async(self, *args):
                 return 0
 
@@ -519,6 +629,9 @@ class TestTokenBatchQueue:
             async def count_texts_async(self, texts, _loop):
                 raise RuntimeError("tokenizer boom")
 
+            async def count_texts_live_async(self, texts, _loop):
+                return await self.count_texts_async(texts, _loop)
+
             async def token_count_message_async(self, *args):
                 raise RuntimeError("tokenizer boom")
 
@@ -535,6 +648,9 @@ class TestTokenBatchQueue:
         class _TextFailingTokenizer:
             async def count_texts_async(self, texts, _loop):
                 raise RuntimeError("text shard died")
+
+            async def count_texts_live_async(self, texts, _loop):
+                return await self.count_texts_async(texts, _loop)
 
             async def token_count_message_async(
                 self, content, reasoning, tool_calls, _loop

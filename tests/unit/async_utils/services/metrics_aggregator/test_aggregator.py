@@ -990,6 +990,29 @@ class TestAsyncTriggers:
                 agg.close()
 
     @pytest.mark.asyncio
+    async def test_started_arms_the_live_flush_loop(self, tmp_path):
+        """STARTED starts the queue's live loop when an interval is set."""
+        loop = asyncio.get_event_loop()
+        with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
+            agg, _, _ = make_aggregator(
+                ctx,
+                loop,
+                "agg_live_arm",
+                tokenizer=MockBatchTokenizer(),
+                live_flush_interval_s=0.01,
+            )
+            try:
+                await agg.process([session_event(SessionEventType.STARTED, ts=0)])
+                assert agg._token_queue is not None
+                assert agg._token_queue._live_task is not None
+                await agg.process([session_event(SessionEventType.ENDED, ts=100)])
+                assert (
+                    agg._token_queue._live_task is None
+                ), "drain must stop the live loop"
+            finally:
+                agg.close()
+
+    @pytest.mark.asyncio
     async def test_flush_records_buffered_tokenizations(self, tmp_path):
         """fire() buffers tokenization; flush() tokenizes the batch and records."""
         loop = asyncio.get_event_loop()
@@ -1066,6 +1089,9 @@ class TestAsyncTriggers:
             async def count_texts_async(self, texts, _loop):
                 raise RuntimeError("tokenizer backend died")
 
+            async def count_texts_live_async(self, texts, _loop):
+                return await self.count_texts_async(texts, _loop)
+
             async def token_count_message_async(self, *args):
                 raise RuntimeError("tokenizer backend died")
 
@@ -1113,6 +1139,9 @@ class TestAsyncTriggers:
             async def count_texts_async(self, texts, _loop):
                 await asyncio.sleep(10.0)  # exceeds drain timeout
                 return [0] * len(texts)
+
+            async def count_texts_live_async(self, texts, _loop):
+                return await self.count_texts_async(texts, _loop)
 
             async def token_count_message_async(self, *args):
                 await asyncio.sleep(10.0)

@@ -88,7 +88,7 @@ class MetricsPublisher:
         self._final_snapshot_path = final_snapshot_path
         self._tick_task: asyncio.Task | None = None
         self._closed = False
-        # publish_final is idempotent: the SIGTERM/SIGINT handler in
+        # publish_final is idempotent: the SIGTERM handler in
         # __main__.py and the aggregator's ENDED-driven path can both
         # call it; the second call must not re-publish or re-write.
         self._finalized = False
@@ -164,7 +164,7 @@ class MetricsPublisher:
         Report consumers as ``state == COMPLETE and n_pending_tasks > 0``.
 
         ``interrupted=True`` is set by the signal handler in __main__.py
-        when SIGTERM/SIGINT triggers shutdown before ``ENDED`` arrived;
+        when SIGTERM triggers shutdown before ``ENDED`` arrived;
         the resulting snapshot is tagged ``state=INTERRUPTED`` so Report
         can distinguish "user killed the run mid-execution" from a clean
         end. Stats in an INTERRUPTED snapshot are best-effort partial
@@ -190,7 +190,7 @@ class MetricsPublisher:
         of the terminal state as the last message).
 
         Idempotent: only the first call writes/publishes; subsequent
-        calls early-return. The SIGTERM/SIGINT handler relies on this to
+        calls early-return. The SIGTERM handler relies on this to
         race safely with the ENDED-driven path.
         """
         if self._finalized:

@@ -306,7 +306,7 @@ stateDiagram-v2
 
 ### 6.2 Metrics aggregator
 
-- **Role**: Subscribes to EventRecords and derives real-time metrics (e.g. TTFT, sample latency, token counts). Token metrics (ISL/OSL/TPOT) are computed by a batched, process-sharded tokenizer — see [metrics_aggregator/DESIGN.md](metrics_aggregator/DESIGN.md). Shuts down on **session.ended**.
+- **Role**: Subscribes to EventRecords and derives real-time metrics (e.g. TTFT, sample latency, token counts). Token metrics (ISL/OSL/TPOT) are computed by a batched tokenizer (in-process threads live; process-sharded end-of-run drain) — see [metrics_aggregator/DESIGN.md](metrics_aggregator/DESIGN.md). Shuts down on **session.ended**.
 - **Outputs**: Live `MetricsSnapshot` frames over an IPC PUB socket, and an atomically written `final_snapshot.json` (the primary Report source). Planned is to push real time metrics to Prometheus via PushGateway.
 - **Process**: Run as a **subprocess**; given `--metrics-output-dir`, `--socket-dir`, `--socket-name`, `--metrics-socket`, and optional tokenizer options. Uses a dedicated event loop and `ManagedZMQContext.scoped(socket_dir=...)` so it can connect to the publisher's IPC address.
 

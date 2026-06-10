@@ -26,10 +26,6 @@ from pathlib import Path
 from inference_endpoint.async_utils.loop_manager import LoopManager
 from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
 from inference_endpoint.async_utils.transport.zmq.ready_check import send_ready_signal
-from inference_endpoint.endpoint_client.cpu_affinity import (
-    UnsupportedPlatformError,
-    expand_to_all_online_cpus,
-)
 from inference_endpoint.utils.logging import setup_logging
 
 from .aggregator import MetricCounterKey, MetricsAggregatorService
@@ -166,23 +162,12 @@ async def main() -> None:
     parser.add_argument(
         "--tokenizer-workers",
         type=int,
-        default=-1,
+        default=2,
         help=(
-            "Number of tokenizer shard processes (-1 = auto: one per "
-            "8-core block of this machine, minimum one; 0 = explicit "
-            "in-process tokenization). A tokenizer without a fast (Rust) "
-            "backend is a startup error unless 0 is passed; platforms "
-            "without CPU affinity (e.g. macOS) shard unpinned."
-        ),
-    )
-    parser.add_argument(
-        "--live-tokenizers",
-        type=int,
-        default=1,
-        help=(
-            "Shards used for mid-run (live) token-metric flushes (default: 1 "
-            "— the highest core block, away from the loadgen's cores; 0 = no "
-            "mid-run tokenization, everything defers to the end-of-run drain)."
+            "In-process tokenizer threads for live (mid-run) ISL/OSL/TPOT "
+            "(default: 2; 0 = no mid-run tokenization, everything defers "
+            "to the end-of-run drain). The drain always uses the auto-sized "
+            "sharded pool — one worker process per 8-core block."
         ),
     )
     parser.add_argument(
@@ -206,6 +191,9 @@ async def main() -> None:
     args = parser.parse_args()
     setup_logging(level="INFO")
 
+    if args.tokenizer_workers < 0:
+        raise SystemExit("FATAL: --tokenizer-workers must be >= 0")
+
     # The parent owns directory setup — `commands/benchmark/execute.py`
     # creates `<report_dir>/metrics/` and validates it before launching
     # this subprocess. Validate here as a fail-fast contract check so a
@@ -227,20 +215,9 @@ async def main() -> None:
     # (coalesces to 'object' not 'AbstractContextManager[BatchTokenizer | None]')
     tokenizer_cm: AbstractContextManager[BatchTokenizer | None]
     if args.tokenizer:
-        # Tokenization drains after the benchmark run, so the loadgen/worker
-        # affinity partition does not apply to this stage: drop the narrow
-        # mask inherited from the pinned parent so shards size to the whole
-        # machine (cgroup/Slurm CPU limits still apply).
-        try:
-            cpus = expand_to_all_online_cpus()
-            logger.info("metrics aggregator affinity: %d CPUs", len(cpus))
-        except UnsupportedPlatformError:
-            pass  # non-Linux: no inherited pin to undo.
         try:
             tokenizer_cm = BatchTokenizer(
-                args.tokenizer,
-                n_workers=args.tokenizer_workers,
-                live_workers=args.live_tokenizers,
+                args.tokenizer, live_workers=args.tokenizer_workers
             )
         except RuntimeError as exc:
             # Fail-fast contract: a tokenizer environment that cannot shard
@@ -275,7 +252,7 @@ async def main() -> None:
                 n_histogram_buckets=args.n_histogram_buckets,
                 tokenizer=tokenizer,
                 live_flush_interval_s=(
-                    args.publish_interval if args.live_tokenizers > 0 else None
+                    args.publish_interval if args.tokenizer_workers > 0 else None
                 ),
                 streaming=args.streaming,
                 shutdown_event=shutdown_event,
