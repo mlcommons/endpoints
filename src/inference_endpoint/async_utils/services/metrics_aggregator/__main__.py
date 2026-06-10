@@ -170,9 +170,9 @@ async def main() -> None:
         help=(
             "Number of tokenizer shard processes (-1 = auto: one per "
             "8-core block of this machine, minimum one; 0 = explicit "
-            "in-process tokenization). An environment that cannot shard "
-            "(no fast tokenizer backend, no CPU affinity) is a startup "
-            "error unless 0 is passed."
+            "in-process tokenization). A tokenizer without a fast (Rust) "
+            "backend is a startup error unless 0 is passed; platforms "
+            "without CPU affinity (e.g. macOS) shard unpinned."
         ),
     )
     parser.add_argument(

@@ -316,7 +316,8 @@ class TestSetupShardsDecisions:
             with pytest.raises(RuntimeError, match="fast"):
                 BatchTokenizer("fake")
 
-    def test_affinity_failure_is_a_startup_error(self, monkeypatch):
+    def test_affinity_unavailable_shards_unpinned(self, monkeypatch):
+        """No affinity API (e.g. macOS): shard from the CPU count, unpinned."""
         monkeypatch.setattr(
             token_metrics_module, "ProcessPoolExecutor", _SpawnlessExecutor
         )
@@ -325,9 +326,10 @@ class TestSetupShardsDecisions:
             raise OSError("affinity unavailable")
 
         monkeypatch.setattr(token_metrics_module.os, "sched_getaffinity", _raise)
+        monkeypatch.setattr(token_metrics_module.os, "cpu_count", lambda: 16)
         with patch(_MOCK_TARGET, _FakeTokenizerWithBackend):
-            with pytest.raises(RuntimeError, match="affinity"):
-                BatchTokenizer("fake")
+            with BatchTokenizer("fake") as tok:
+                assert len(tok._procs) == 2
 
     def test_warmup_failure_is_a_startup_error(self, monkeypatch):
         class _BrokenWarmup(_SpawnlessExecutor):

@@ -103,9 +103,12 @@ each block of `CORES_PER_WORKER` (8) cores. Why this shape:
 shard per 8-core block of the process affinity mask (always at least one), an
 explicit count is clamped to that capacity, and `0` explicitly selects
 in-process tokenization. There is no implicit fallback: an environment that
-cannot shard — no fast Rust backend, no CPU affinity, a failed or over-budget
-warmup — is a startup error, because a silent in-process slow path cannot
-keep up with completions and would surface much later as an incomplete drain.
+cannot shard — no fast Rust backend, a failed or over-budget warmup — is a
+startup error, because a silent in-process slow path cannot keep up with
+completions and would surface much later as an incomplete drain. Platforms
+without a CPU-affinity API (e.g. macOS) still shard at full speed, just
+unpinned: blocks are sized from the online CPU count and each worker caps its
+rayon pool to the block size instead of pinning.
 
 Chat-template items (tool-call outputs) take a separate in-process thread:
 they are rare relative to the batched flush, and `apply_chat_template` is

@@ -19,9 +19,10 @@
 processes each pinned to a block of ``CORES_PER_WORKER`` cores (a single BPE
 rayon pool is memory-bound and saturates ~8 cores). The aggregator buffers
 per-sample text and flushes the batch once per publish tick and at drain.
-Sharding requires the fast (Rust) tokenizers backend and Linux CPU affinity;
-an environment that cannot shard is a startup error, never a silent slow
-path — ``--tokenizer-workers 0`` is the only (explicit) in-process mode.
+Sharding requires the fast (Rust) tokenizers backend; an environment without
+one is a startup error, never a silent slow path — ``--tokenizer-workers 0``
+is the only (explicit) in-process mode. Platforms without CPU affinity (e.g.
+macOS) shard unpinned at full speed; only cache/NUMA locality is lost.
 """
 
 from __future__ import annotations
@@ -110,6 +111,9 @@ def _init_worker(tokenizer_name: str, core_set: list[int]) -> None:
         try:
             os.sched_setaffinity(0, set(core_set))
         except (OSError, AttributeError):
+            # No pinning (e.g. macOS): cap the rayon pool to the block size
+            # instead, so unpinned shards don't oversubscribe each other.
+            os.environ.setdefault("RAYON_NUM_THREADS", str(len(core_set)))
             logger.debug("could not pin tokenizer worker to %s", core_set)
     transformers_logging.set_verbosity_error()
     tok = AutoTokenizer.from_pretrained(tokenizer_name)
@@ -235,11 +239,12 @@ class BatchTokenizer:
 
         ``n_workers == 0`` explicitly selects in-process tokenization. Auto
         (``< 0``) fits one shard per ``cores_per_worker`` block of this
-        process's affinity mask, always at least one; an explicit count is
-        clamped to that capacity. An environment that cannot shard — no fast
-        Rust backend, no CPU affinity, a warmup that fails or exceeds its
-        budget — raises instead of silently degrading to a slow path that
-        cannot keep up with completions.
+        process's affinity mask (or the online CPU count when the platform
+        has no affinity API — shards then run unpinned), always at least one;
+        an explicit count is clamped to that capacity. An environment that
+        cannot shard — no fast Rust backend, a warmup that fails or exceeds
+        its budget — raises instead of silently degrading to a slow path
+        that cannot keep up with completions.
         """
         if cores_per_worker <= 0 or n_workers == 0:
             logger.info("BatchTokenizer: in-process tokenization (explicit)")
@@ -253,12 +258,12 @@ class BatchTokenizer:
             )
         try:
             available = sorted(os.sched_getaffinity(0))
-        except (OSError, AttributeError) as exc:
-            raise RuntimeError(
-                "CPU affinity is unavailable; tokenizer sharding requires "
-                "Linux. Pass --tokenizer-workers 0 to explicitly run "
-                "in-process tokenization."
-            ) from exc
+        except (OSError, AttributeError):
+            # No affinity API (e.g. macOS): shard unpinned — the OS scheduler
+            # spreads the workers; only cache/NUMA locality is lost. Workers
+            # cap their rayon pools to the block size instead (_init_worker).
+            available = list(range(os.cpu_count() or 1))
+            logger.info("BatchTokenizer: CPU affinity unavailable; sharding unpinned")
         capacity = max(1, len(available) // cores_per_worker)
         n = capacity if n_workers < 0 else min(n_workers, capacity)
         t0 = time.perf_counter()
