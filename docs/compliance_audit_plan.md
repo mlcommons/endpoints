@@ -129,20 +129,20 @@ benchmark from-config
 ### Program flow (TEST04, two phases)
 
 ```
-config.audit = {test: test04, samples: 50, sample_index: 0, threshold: 0.10}
+config.audit = {test: test04, samples: 64, sample_index: 0, threshold: 0.10}
 
  _run_audit
     │
     ├─ specs = Test04Audit.plan_runs(cfg)
-    │     → [ RunSpec("reference", n_samples=50, WITHOUT_REPLACEMENT),
-    │         RunSpec("test04",    n_samples=50, SINGLE(index=0))     ]   ← SAME count
+    │     → [ RunSpec("reference", n_samples=64, WITHOUT_REPLACEMENT),
+    │         RunSpec("test04",    n_samples=64, SINGLE(index=0))     ]   ← SAME count
     │
     ├─ setup phase 1 ─► validate ALL specs vs loaded dataset size      ← before any run
     │                   (sample_index in range?) — fail fast
     │
-    ├─ Phase 1  "reference"  ─ 50 distinct samples ───► RunArtifacts[0]   (qps_ref)
+    ├─ Phase 1  "reference"  ─ 64 distinct samples ───► RunArtifacts[0]   (qps_ref)
     │                                                   back-to-back, same endpoint
-    ├─ Phase 2  "test04"     ─ 50 × sample[0] ────────► RunArtifacts[1]   (qps_audit)
+    ├─ Phase 2  "test04"     ─ 64 × sample[0] ────────► RunArtifacts[1]   (qps_audit)
     │
     ├─ verdict = Test04Audit.verify([ref, audit])
     │     precondition: ref.n_completed ≈ audit.n_completed   (reject mismatch both ways)
@@ -289,13 +289,13 @@ CLI surface: an `audit:` block in the benchmark YAML, picked up by `benchmark fr
 # bench.yaml
 audit:
   test: test04
-  samples: 50
+  samples: 64
   threshold: 0.10
 ```
 
 ```
 inference-endpoint benchmark from-config --config bench.yaml
-# detects audit:, runs reference (50 distinct) + test04 (50 × fixed index) back-to-back,
+# detects audit:, runs reference (64 distinct) + test04 (64 × fixed index) back-to-back,
 # writes verify_TEST04.txt + audit_verdict.json, exits 0/1/2
 ```
 
@@ -363,12 +363,19 @@ Two scenarios must be covered: **Offline** (`max_throughput`) and **SingleStream
 | `min_query_count` (SingleStream = 20)             | `samples: 20`                 | one **shared** count drives both phases (§4)        |
 | `min_duration` (compliance ≥ 10 min)              | _not yet enforced_ (see note) | counts take priority in current stop logic          |
 
-> **Equal-count basis.** This design compares both phases at one shared `samples` count
-> (§3–§4), so the WAN2.2 configs set a single `samples` rather than the upstream's separate
-> `min_query_count` floors (248 reference / 20 audit). SingleStream's floor of 20 already
-> serves both phases; Offline uses a shared subset of the 248 prompts (tunable — large
-> enough for a stable throughput estimate, small enough to keep the audit phase short, the
-> maintainer's "don't force 248" concern).
+> **Design decision — equal-count comparison basis (deliberate divergence from upstream).**
+> Both phases issue one shared `samples` count and `verify` asserts the counts match, rather
+> than upstream TEST04's separate `min_query_count` floors (248 reference / 20 audit) under a
+> shared `min_duration`. Rationale: (1) `qps` is already rate-normalized, so caching still
+> surfaces as a throughput spike **without** equal counts — count-equality is a
+> simplification, not a correctness requirement; (2) it is implementable on the current load
+> generator, whose stop check is count-driven, whereas the `min_duration` floor that
+> duration-normalization needs is not yet supported (AND-semantics is future work).
+> **Chosen defaults:** Offline `samples: 64` (enough to stabilize throughput on
+> `max_throughput`, short enough to respect "don't force 248" for slow video generation),
+> SingleStream `samples: 20` (the MLCommons stream `min_query_count`). **Upgrade path:** when
+> the duration floor lands, the verdict can switch to duration-normalized for byte-faithful
+> MLCommons parity without changing the `AuditTest` / `RunSpec` shape.
 
 > **`min_duration` is not a duration floor (current limitation).** The load-generator stop
 > check (`session.py`) halts a phase on **sample count** or **`max_duration_ms`** only;
@@ -387,7 +394,7 @@ type: offline
 model_params: { name: wan22, streaming: off }
 audit:
   test: test04
-  samples: 64 # shared by reference + audit (subset of the 248-prompt dataset)
+  samples: 64 # default; shared by reference + audit (tunable subset of the 248-prompt dataset)
   sample_index: 3 # MLCommons performance_issue_same_index
   threshold: 0.10
 datasets:
