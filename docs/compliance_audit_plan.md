@@ -102,7 +102,7 @@ benchmark from-config
    ├─ run main benchmark: perf  [+ accuracy when accuracy datasets present]   (existing path)
    │
    └─ if config.audit is set ▼   (additive post-step, same report_dir)
-   _run_audit(config)                         commands/audit.py  ── the generic loop
+   run_audit(config)                         commands/audit.py  ── the generic loop
             │
             │ 1. get_audit_test(config.audit.test)
             ▼
@@ -131,7 +131,7 @@ benchmark from-config
 ```
 config.audit = {test: test04, samples: 64, sample_index: 0, threshold: 0.10}
 
- _run_audit
+ run_audit
     │
     ├─ specs = Test04Audit.plan_runs(cfg)
     │     → [ RunSpec("reference", n_samples=64, WITHOUT_REPLACEMENT),
@@ -155,7 +155,7 @@ config.audit = {test: test04, samples: 64, sample_index: 0, threshold: 0.10}
 Analyzer tests (TEST06/07/09) take the same path with a single-element `plan_runs`, so
 phase 2 simply doesn't exist and `verify` reads the one run's artifacts.
 
-In a `type: submission` config (see §5) this whole `_run_audit` block runs **after** the
+In a `type: submission` config (see §5) this whole `run_audit` block runs **after** the
 main perf [+ accuracy] run, under the same `report_dir`.
 
 ### The `AuditTest` abstraction
@@ -222,7 +222,7 @@ On `BenchmarkConfig`: `audit: AuditConfig | None = None`.
 
 `run_benchmark` first executes the main benchmark (performance, plus accuracy scoring when
 the config carries accuracy datasets) exactly as today. Then, when `config.audit is not
-None`, it runs `_run_audit(config, test_mode)` (in `commands/audit.py`) as an **additive
+None`, it runs `run_audit(config)` (in `commands/audit.py`) as an **additive
 post-step** under the same `report_dir`. The two stages are independent, self-contained
 operations sequenced at the top level — not per-phase config surgery — so one
 `type: submission` YAML can produce the full set: perf [+ accuracy] + the audit's reference
@@ -240,13 +240,13 @@ full-dataset) submission perf run. The generic loop never names a specific test:
    out-of-range index after a full reference run has already executed).
 4. Execute each spec back-to-back via the existing `setup_benchmark` /
    `run_benchmark_async` path (no duplicated report-dir or `config.yaml` logic). Each phase
-   config has `audit=None` to prevent re-entry into `_run_audit`. If any phase raises
-   (`SetupError` / `ExecutionError`), `_run_audit` aborts **without verifying** — a crashed
+   config has `audit=None` to prevent re-entry into `run_audit`. If any phase raises
+   (`SetupError` / `ExecutionError`), `run_audit` aborts **without verifying** — a crashed
    phase must never produce a verdict — and surfaces the error as exit `2`.
 5. `verdict = test.verify(runs)`
 6. Atomically write the verdict (`tmp → fsync → rename → fsync(parent)`).
 7. Return the typed `AuditVerdict`. Because `run_benchmark` currently returns `None` and
-   `cli.py` ignores its return, the audit path must **propagate** the verdict: `_run_audit`
+   `cli.py` ignores its return, the audit path must **propagate** the verdict: `run_audit`
    returns it, `run_benchmark` returns it for an audit config, and `cli.py` maps it to
    `sys.exit` — `0` (PASS) / `1` (FAIL) / `2` (setup/IO/phase error). The on-disk
    `audit_verdict.json` is the durable record; the exit code is the automation signal.
@@ -440,11 +440,11 @@ endpoint_config: { api_type: videogen, endpoints: ["http://localhost:8000"] }
 | `compliance/verdict.py`                                              | **new** — `AuditVerdict` + atomic `write_verdict` (reference `verify_TEST04.txt` wording + JSON)   |
 | `compliance/tests/__init__.py`                                       | **new** — imports submodules so registration fires                                                 |
 | `compliance/tests/test04.py`                                         | **new** — `Test04Audit.plan_runs` (2 equal-count specs) + `verify_test04` core                     |
-| `commands/audit.py`                                                  | **new** — generic `_run_audit` loop (plan → validate-all → execute → verify → write)               |
+| `commands/audit.py`                                                  | **new** — generic `run_audit` loop (plan → validate-all → execute → verify → write)                |
 | `config/schema.py`                                                   | **+** `AuditTestId`, `AuditConfig`, `audit: AuditConfig \| None` on `BenchmarkConfig`              |
 | `load_generator/sample_order.py`                                     | **+** `SampleOrderSpec` + `SingleSampleOrder`; `create_sample_order` switches on the spec          |
 | `config/runtime_settings.py`                                         | **+** `sample_order: SampleOrderSpec` (generic; default `WITHOUT_REPLACEMENT`)                     |
-| `commands/benchmark/execute.py`                                      | **+** typed `run_spec` seam in `setup_benchmark`; `run_benchmark` dispatches to `_run_audit`       |
+| `commands/benchmark/execute.py`                                      | **+** typed `run_spec` seam in `setup_benchmark`; `run_benchmark` dispatches to `run_audit`        |
 | `examples/09_Wan22_VideoGen_Example/offline_wan22_test04.yaml`       | **new** — WAN2.2 Offline TEST04 config                                                             |
 | `examples/09_Wan22_VideoGen_Example/single_stream_wan22_test04.yaml` | **new** — WAN2.2 SingleStream TEST04 config                                                        |
 
@@ -499,8 +499,8 @@ Covers **every** comment thread on PR #332 — the maintainer workflow threads
 
 | Comment                                                            | Resolution                                                                                          |
 | ------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------- |
-| Run **one command**, not two/three; phases back-to-back            | `_run_audit` generic loop; `audit:` block on `benchmark from-config`                                |
-| Perf + accuracy + audit from a single config                       | `type: submission` YAML; `run_benchmark` runs perf [+acc], then `_run_audit` additively (§5)        |
+| Run **one command**, not two/three; phases back-to-back            | `run_audit` generic loop; `audit:` block on `benchmark from-config`                                 |
+| Perf + accuracy + audit from a single config                       | `type: submission` YAML; `run_benchmark` runs perf [+acc], then `run_audit` additively (§5)         |
 | Comparing 50 distinct vs 20/25 repeated "doesn't seem fair"        | `RunSpec.n_samples` is shared by both phases; `verify` rejects a count mismatch in either direction |
 | "Forced to run 248 in audit … too long"                            | `AuditConfig.samples` picks the shared subset count; no full-dataset requirement                    |
 | Audit sample "shuffled or fixed?"                                  | fixed — reference = `WITHOUT_REPLACEMENT`, audit = `SINGLE(sample_index)` (MLPerf `issue_same`)     |
@@ -512,25 +512,25 @@ Covers **every** comment thread on PR #332 — the maintainer workflow threads
 
 ### Design-review findings (both Review Council passes)
 
-| Finding (severity)                                           | Resolution                                                         |
-| ------------------------------------------------------------ | ------------------------------------------------------------------ |
-| `ref_samples` dead write / mismatched counts (high)          | single `RunSpec.n_samples` for both phases; fairness in `verify`   |
-| No `AuditTest` abstraction; TEST04 hardcoded (high)          | `AuditTest` protocol + `get_audit_test` registry; generic loop     |
-| `DatasetType.AUDIT` abstraction leak (high)                  | dropped; phases derive from a normal PERFORMANCE dataset           |
-| `test04` boolean in `RuntimeSettings`/load-gen (high)        | generic `SampleOrderSpec`; load-gen has no test knowledge          |
-| `_OVERRIDE_TEST04_SAMPLE_INDEX` stringly-typed kwarg (med)   | typed `run_spec` seam                                              |
-| Two-phase `model_copy` surgery; ref skips validation (med)   | declarative `RunSpec`; validate all specs before any run           |
-| Orchestrator untested (med)                                  | unit tests assert per-phase counts + early-return paths            |
-| Scattered params / hardcoded threshold (med)                 | flat `AuditConfig` co-locates all knobs (test, counts, threshold)  |
-| Unfair QPS comparison across counts/contents (med)           | equal `n_samples`; `verify` rejects count mismatch both ways       |
-| Audit params belong in `AuditConfig`, not `Dataset` (med)    | `AuditConfig` sub-model on `BenchmarkConfig`; `Dataset` untouched  |
-| Two parallel verifier entry points (low)                     | one `verify_test04(RunStats, RunStats)` core + `from_*` adapters   |
-| `sample_index` bound-checked late (low)                      | validated vs loaded dataset size before any run                    |
-| `audit_config` re-entrancy trap (critical)                   | every phase config sets `audit=None`; cannot re-enter `_run_audit` |
-| Orchestrator returns `None`; PASS/FAIL indistinguishable     | `_run_audit` returns a typed `AuditVerdict`; CLI exits `0`/`1`/`2` |
-| Non-atomic verdict write (high)                              | `write_verdict` uses `tmp → fsync → rename → fsync(parent)`        |
-| Duplicates `setup_benchmark` dir / `config.yaml` logic (med) | phases reuse `setup_benchmark`; no recomputed report-dir           |
-| `_audit_marker` parsed twice in error path (low)             | n/a — orchestrator owns phase labels, so no directory-swap guard   |
+| Finding (severity)                                           | Resolution                                                        |
+| ------------------------------------------------------------ | ----------------------------------------------------------------- |
+| `ref_samples` dead write / mismatched counts (high)          | single `RunSpec.n_samples` for both phases; fairness in `verify`  |
+| No `AuditTest` abstraction; TEST04 hardcoded (high)          | `AuditTest` protocol + `get_audit_test` registry; generic loop    |
+| `DatasetType.AUDIT` abstraction leak (high)                  | dropped; phases derive from a normal PERFORMANCE dataset          |
+| `test04` boolean in `RuntimeSettings`/load-gen (high)        | generic `SampleOrderSpec`; load-gen has no test knowledge         |
+| `_OVERRIDE_TEST04_SAMPLE_INDEX` stringly-typed kwarg (med)   | typed `run_spec` seam                                             |
+| Two-phase `model_copy` surgery; ref skips validation (med)   | declarative `RunSpec`; validate all specs before any run          |
+| Orchestrator untested (med)                                  | unit tests assert per-phase counts + early-return paths           |
+| Scattered params / hardcoded threshold (med)                 | flat `AuditConfig` co-locates all knobs (test, counts, threshold) |
+| Unfair QPS comparison across counts/contents (med)           | equal `n_samples`; `verify` rejects count mismatch both ways      |
+| Audit params belong in `AuditConfig`, not `Dataset` (med)    | `AuditConfig` sub-model on `BenchmarkConfig`; `Dataset` untouched |
+| Two parallel verifier entry points (low)                     | one `verify_test04(RunStats, RunStats)` core + `from_*` adapters  |
+| `sample_index` bound-checked late (low)                      | validated vs loaded dataset size before any run                   |
+| `audit_config` re-entrancy trap (critical)                   | every phase config sets `audit=None`; cannot re-enter `run_audit` |
+| Orchestrator returns `None`; PASS/FAIL indistinguishable     | `run_audit` returns a typed `AuditVerdict`; CLI exits `0`/`1`/`2` |
+| Non-atomic verdict write (high)                              | `write_verdict` uses `tmp → fsync → rename → fsync(parent)`       |
+| Duplicates `setup_benchmark` dir / `config.yaml` logic (med) | phases reuse `setup_benchmark`; no recomputed report-dir          |
+| `_audit_marker` parsed twice in error path (low)             | n/a — orchestrator owns phase labels, so no directory-swap guard  |
 
 ### Robustness & API hygiene (Gemini + Review Council)
 
