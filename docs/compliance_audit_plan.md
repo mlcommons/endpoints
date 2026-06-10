@@ -240,10 +240,16 @@ full-dataset) submission perf run. The generic loop never names a specific test:
    out-of-range index after a full reference run has already executed).
 4. Execute each spec back-to-back via the existing `setup_benchmark` /
    `run_benchmark_async` path (no duplicated report-dir or `config.yaml` logic). Each phase
-   config has `audit=None` to prevent re-entry into `_run_audit`.
+   config has `audit=None` to prevent re-entry into `_run_audit`. If any phase raises
+   (`SetupError` / `ExecutionError`), `_run_audit` aborts **without verifying** — a crashed
+   phase must never produce a verdict — and surfaces the error as exit `2`.
 5. `verdict = test.verify(runs)`
 6. Atomically write the verdict (`tmp → fsync → rename → fsync(parent)`).
-7. Return the typed verdict; the CLI maps it to exit `0` (PASS) / `1` (FAIL) / `2` (error).
+7. Return the typed `AuditVerdict`. Because `run_benchmark` currently returns `None` and
+   `cli.py` ignores its return, the audit path must **propagate** the verdict: `_run_audit`
+   returns it, `run_benchmark` returns it for an audit config, and `cli.py` maps it to
+   `sys.exit` — `0` (PASS) / `1` (FAIL) / `2` (setup/IO/phase error). The on-disk
+   `audit_verdict.json` is the durable record; the exit code is the automation signal.
 
 ### Verifier — one core + thin adapters
 
@@ -349,13 +355,13 @@ Two scenarios must be covered: **Offline** (`max_throughput`) and **SingleStream
 
 **MLCommons knobs and how they map to `AuditConfig`:**
 
-| MLCommons (WAN2.2 `audit.config` / `mlperf.conf`) | `AuditConfig`                      | Notes                                               |
-| ------------------------------------------------- | ---------------------------------- | --------------------------------------------------- |
-| `performance_issue_same=1`                        | (implied by TEST04)                | audit phase issues one fixed prompt for every query |
-| `performance_issue_same_index=3`                  | `sample_index: 3`                  | which prompt is repeated                            |
-| TEST04 throughput tolerance                       | `threshold: 0.10`                  | `0.20` for the low-throughput SingleStream scenario |
-| `min_query_count` (SingleStream = 20)             | `samples: 20`                      | one **shared** count drives both phases (§4)        |
-| `min_duration` (compliance ≥ 10 min)              | `settings.runtime.min_duration_ms` | applied per phase                                   |
+| MLCommons (WAN2.2 `audit.config` / `mlperf.conf`) | `AuditConfig`                 | Notes                                               |
+| ------------------------------------------------- | ----------------------------- | --------------------------------------------------- |
+| `performance_issue_same=1`                        | (implied by TEST04)           | audit phase issues one fixed prompt for every query |
+| `performance_issue_same_index=3`                  | `sample_index: 3`             | which prompt is repeated                            |
+| TEST04 throughput tolerance                       | `threshold: 0.10`             | `0.20` for the low-throughput SingleStream scenario |
+| `min_query_count` (SingleStream = 20)             | `samples: 20`                 | one **shared** count drives both phases (§4)        |
+| `min_duration` (compliance ≥ 10 min)              | _not yet enforced_ (see note) | counts take priority in current stop logic          |
 
 > **Equal-count basis.** This design compares both phases at one shared `samples` count
 > (§3–§4), so the WAN2.2 configs set a single `samples` rather than the upstream's separate
@@ -363,6 +369,15 @@ Two scenarios must be covered: **Offline** (`max_throughput`) and **SingleStream
 > serves both phases; Offline uses a shared subset of the 248 prompts (tunable — large
 > enough for a stable throughput estimate, small enough to keep the audit phase short, the
 > maintainer's "don't force 248" concern).
+
+> **`min_duration` is not a duration floor (current limitation).** The load-generator stop
+> check (`session.py`) halts a phase on **sample count** or **`max_duration_ms`** only;
+> `min_duration_ms` merely _derives_ a count when no explicit count is set. Because TEST04
+> drives an explicit `samples` count, each phase stops at `samples` and `min_duration_ms` is
+> **not** honored as a "run for at least 10 minutes" floor. MLCommons' 10-minute compliance
+> minimum therefore is **not** enforced today; combining a count floor with a duration floor
+> ("AND-semantics") is future work. Set `samples` large enough that each phase reaches a
+> stable throughput on its own.
 
 **Offline (`max_throughput`):**
 
@@ -381,7 +396,7 @@ datasets:
       path: examples/09_Wan22_VideoGen_Example/wan22_prompts.jsonl,
     }
 settings:
-  runtime: { min_duration_ms: 600000 } # 10-min compliance minimum per phase
+  runtime: {} # count-driven: each phase issues `samples`; min_duration_ms is not a floor (see note)
   load_pattern: { type: max_throughput }
 endpoint_config: { api_type: videogen, endpoints: ["http://localhost:8000"] }
 ```
@@ -403,7 +418,7 @@ datasets:
       path: examples/09_Wan22_VideoGen_Example/wan22_prompts.jsonl,
     }
 settings:
-  runtime: { min_duration_ms: 600000 }
+  runtime: {} # count-driven (see note); min_duration_ms is not a floor
   load_pattern: { type: concurrency, target_concurrency: 1 }
 endpoint_config: { api_type: videogen, endpoints: ["http://localhost:8000"] }
 ```

@@ -49,7 +49,9 @@ audit:
 
 settings:
   runtime:
-    min_duration_ms: 600000 # 10-min compliance minimum per run/phase
+    # NOTE: runs are count-driven (n_samples_to_issue / audit.samples). min_duration_ms is
+    # NOT enforced as a duration floor by the current stop logic (counts take priority);
+    # MLCommons' 10-min minimum / AND-semantics is future work. Only max_duration_ms caps.
     max_duration_ms: 14400000 # 4-hour ceiling
     scheduler_random_seed: 42
     dataloader_random_seed: 42
