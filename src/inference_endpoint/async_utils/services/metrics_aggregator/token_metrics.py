@@ -54,8 +54,10 @@ CORES_PER_WORKER = 8
 
 # Budget for the parallel shard warmup (spawn + transformers import +
 # tokenizer load per worker). A hung load (e.g. a stuck network filesystem)
-# must become a bounded startup error, not wedge service startup.
-_SHARD_WARMUP_TIMEOUT_S = 120.0
+# must become a bounded startup error, not wedge service startup — and the
+# error must fire before the parent's 30 s service-launch budget kills the
+# subprocess, so the diagnostic wins the race.
+_SHARD_WARMUP_TIMEOUT_S = 25.0
 
 # Per-flush ceiling for the LIVE lane. Bounds three things at once: how long
 # the queue lock is held mid-run, how much work an unstoppable in-flight
@@ -355,33 +357,24 @@ class BatchTokenizer:
         return [len(tok.tokenize(t)) for t in texts]  # type: ignore[union-attr]
 
     async def count_texts_async(
-        self, texts: list[str], loop: asyncio.AbstractEventLoop
+        self,
+        texts: list[str],
+        loop: asyncio.AbstractEventLoop,
+        *,
+        live: bool = False,
     ) -> list[int]:
         """Per-text token counts for a whole batch without blocking the loop.
 
-        A worker-shard failure propagates and is treated as an incomplete drain.
+        ``live=True`` is the mid-run lane: it never touches the shard
+        processes — it runs on this process's small thread pool with a rayon
+        pool capped to ``live_workers`` cores. The default (drain) path fans
+        out across every shard; a worker-shard failure propagates and is
+        treated as an incomplete drain.
         """
         if not texts:
             return []
-        if self._procs:
+        if self._procs and not live:
             return await self._fan_out(self._procs, texts)
-        if self._thread is None:
-            raise RuntimeError("BatchTokenizer is closed")
-        return await loop.run_in_executor(
-            self._thread, self._encode_lengths_inproc, texts
-        )
-
-    async def count_texts_live_async(
-        self, texts: list[str], loop: asyncio.AbstractEventLoop
-    ) -> list[int]:
-        """Like ``count_texts_async``, bounded to the in-process live lane.
-
-        Mid-run flushes never touch the shard processes: they run on this
-        process's small thread pool with a rayon pool capped to
-        ``live_workers`` cores. The end-of-run drain uses every shard.
-        """
-        if not texts:
-            return []
         if self._thread is None:
             raise RuntimeError("BatchTokenizer is closed")
         return await loop.run_in_executor(
@@ -487,15 +480,14 @@ class TokenCounter(Protocol):
     """
 
     async def count_texts_async(
-        self, texts: list[str], loop: asyncio.AbstractEventLoop, /
+        self,
+        texts: list[str],
+        loop: asyncio.AbstractEventLoop,
+        /,
+        *,
+        live: bool = False,
     ) -> list[int]:
-        """Per-text token counts for a whole batch (full pool)."""
-        raise NotImplementedError
-
-    async def count_texts_live_async(
-        self, texts: list[str], loop: asyncio.AbstractEventLoop, /
-    ) -> list[int]:
-        """Per-text token counts via the bounded live lane."""
+        """Per-text token counts (``live=True`` = the bounded mid-run lane)."""
         raise NotImplementedError
 
     async def token_count_message_async(
@@ -594,18 +586,15 @@ class TokenBatchQueue:
         drain, not as silently dropped samples. Items are detached from the
         buffer up front so concurrent enqueues land in the next flush.
         """
-        count_texts = (
-            self._tokenizer.count_texts_live_async
-            if live
-            else self._tokenizer.count_texts_async
-        )
         async with self._lock:
             if not (self._text or self._msg):
                 return
             if live:
                 cap = _LIVE_FLUSH_MAX_ITEMS
-                text_items, self._text = self._text[:cap], self._text[cap:]
-                msg_items, self._msg = self._msg[:cap], self._msg[cap:]
+                text_items = self._text[:cap]
+                del self._text[:cap]  # in-place: O(cap), not O(backlog).
+                msg_items = self._msg[:cap]
+                del self._msg[:cap]
             else:
                 text_items, self._text = self._text, []
                 msg_items, self._msg = self._msg, []
@@ -616,10 +605,14 @@ class TokenBatchQueue:
             failure: Exception | None = None
             if text_items:
                 try:
-                    counts = await count_texts([t for t, _ in text_items], self._loop)
+                    counts = await self._tokenizer.count_texts_async(
+                        [t for t, _ in text_items], self._loop, live=live
+                    )
                 except asyncio.CancelledError:
                     if live:
                         self._text[:0] = text_items
+                        self._msg[:0] = msg_items
+                        msg_items = []
                     raise
                 except Exception as exc:  # noqa: BLE001 — isolate phases.
                     failure = exc

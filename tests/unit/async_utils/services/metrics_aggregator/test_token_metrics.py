@@ -391,7 +391,7 @@ class TestLiveLane:
             with BatchTokenizer("fake", n_workers=0, live_workers=1) as tok:
                 procs = [_RecordingProc(), _RecordingProc(), _RecordingProc()]
                 tok._procs = procs
-                counts = await tok.count_texts_live_async(["a b", "c"], loop)
+                counts = await tok.count_texts_async(["a b", "c"], loop, live=True)
                 assert counts == [2, 1]
                 assert all(p.chunks == [] for p in procs)
 
@@ -423,8 +423,10 @@ class TestQueueLiveLoop:
 
     async def test_live_loop_survives_tokenizer_failure(self):
         class _FailingLive(_CapturingTokenizer):
-            async def count_texts_live_async(self, texts, _loop):
-                raise RuntimeError("live lane boom")
+            async def count_texts_async(self, texts, _loop, live=False):
+                if live:
+                    raise RuntimeError("live lane boom")
+                return await super().count_texts_async(texts, _loop)
 
         loop = asyncio.get_running_loop()
         queue = TokenBatchQueue(_FailingLive(), loop)
@@ -496,9 +498,10 @@ class TestLiveFlushBounds:
 
     async def test_live_cancellation_requeues_texts(self):
         class _Hanging(_CapturingTokenizer):
-            async def count_texts_live_async(self, texts, _loop):
-                await asyncio.sleep(30)
-                return [0] * len(texts)
+            async def count_texts_async(self, texts, _loop, live=False):
+                if live:
+                    await asyncio.sleep(30)
+                return await super().count_texts_async(texts, _loop)
 
         loop = asyncio.get_running_loop()
         queue = TokenBatchQueue(_Hanging(), loop)
@@ -513,6 +516,31 @@ class TestLiveFlushBounds:
         assert len(queue._text) == 1, "cancelled live flush must give items back"
         assert await queue.flush_remaining(timeout=1.0) == 0
         assert recorded == [2]
+
+    async def test_live_cancellation_requeues_messages_too(self):
+        """A cancel landing in the text encode must give back BOTH kinds."""
+
+        class _Hanging(_CapturingTokenizer):
+            async def count_texts_async(self, texts, _loop, live=False):
+                if live:
+                    await asyncio.sleep(30)
+                return await super().count_texts_async(texts, _loop)
+
+        loop = asyncio.get_running_loop()
+        queue = TokenBatchQueue(_Hanging(), loop)
+        recorded: list[int] = []
+        queue.enqueue_text("a b", recorded.append)
+        queue.enqueue_message(("hello world", None, None), recorded.append)
+        task = loop.create_task(queue.flush(live=True))
+        await asyncio.sleep(0.01)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=1.0)
+        assert queue.pending == 2
+        assert len(queue._text) == 1
+        assert len(queue._msg) == 1, "detached messages must be re-queued"
+        assert await queue.flush_remaining(timeout=1.0) == 0
+        assert sorted(recorded) == [2, 2]
 
     async def test_live_message_failure_requeues_message(self):
         class _MsgFailing(_CapturingTokenizer):
@@ -553,11 +581,8 @@ class TestEvenChunks:
 class _CapturingTokenizer:
     """Minimal tokenizer stub for queue tests: whitespace counts, no procs."""
 
-    async def count_texts_async(self, texts, _loop):
+    async def count_texts_async(self, texts, _loop, live=False):
         return [len(t.split()) for t in texts]
-
-    async def count_texts_live_async(self, texts, _loop):
-        return await self.count_texts_async(texts, _loop)
 
     async def token_count_message_async(self, content, reasoning, tool_calls, _loop):
         parts = [p for p in (content, reasoning) if p]
@@ -604,12 +629,9 @@ class TestTokenBatchQueue:
         """A tokenizer slower than the budget leaves items pending."""
 
         class _BlockingTokenizer:
-            async def count_texts_async(self, texts, _loop):
+            async def count_texts_async(self, texts, _loop, live=False):
                 await asyncio.sleep(10.0)
                 return [0] * len(texts)
-
-            async def count_texts_live_async(self, texts, _loop):
-                return await self.count_texts_async(texts, _loop)
 
             async def token_count_message_async(self, *args):
                 return 0
@@ -626,11 +648,8 @@ class TestTokenBatchQueue:
         """A tokenizer error leaves items pending and never raises."""
 
         class _FailingTokenizer:
-            async def count_texts_async(self, texts, _loop):
+            async def count_texts_async(self, texts, _loop, live=False):
                 raise RuntimeError("tokenizer boom")
-
-            async def count_texts_live_async(self, texts, _loop):
-                return await self.count_texts_async(texts, _loop)
 
             async def token_count_message_async(self, *args):
                 raise RuntimeError("tokenizer boom")
@@ -646,11 +665,8 @@ class TestTokenBatchQueue:
         """The message phase runs (and records) even when the text batch fails."""
 
         class _TextFailingTokenizer:
-            async def count_texts_async(self, texts, _loop):
+            async def count_texts_async(self, texts, _loop, live=False):
                 raise RuntimeError("text shard died")
-
-            async def count_texts_live_async(self, texts, _loop):
-                return await self.count_texts_async(texts, _loop)
 
             async def token_count_message_async(
                 self, content, reasoning, tool_calls, _loop

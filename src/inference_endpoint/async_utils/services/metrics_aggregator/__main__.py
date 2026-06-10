@@ -33,7 +33,7 @@ from .metrics_table import MetricsTable
 from .publisher import MetricsPublisher
 from .registry import MetricsRegistry
 from .snapshot import MetricsSnapshotCodec
-from .token_metrics import BatchTokenizer
+from .token_metrics import BatchTokenizer, TokenBatchQueue
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +44,7 @@ def _make_sigterm_handler(
     registry: MetricsRegistry,
     publisher: MetricsPublisher,
     table: MetricsTable,
-    pending_tokens: Callable[[], int],
+    token_queue: TokenBatchQueue | None,
     shutdown_event: asyncio.Event,
 ) -> tuple[Callable[[], None], set[asyncio.Task]]:
     """Build the SIGTERM handler that writes the INTERRUPTED final snapshot.
@@ -76,7 +76,7 @@ def _make_sigterm_handler(
             )
             await publisher.publish_final(
                 registry,
-                n_pending_tasks=pending_tokens(),
+                n_pending_tasks=token_queue.pending if token_queue is not None else 0,
                 interrupted=True,
             )
         except Exception:  # noqa: BLE001 — best-effort.
@@ -288,7 +288,7 @@ async def main() -> None:
                 registry=registry,
                 publisher=publisher,
                 table=aggregator._table,
-                pending_tokens=lambda: aggregator.pending_tokens,
+                token_queue=aggregator._token_queue,
                 shutdown_event=shutdown_event,
             )
             loop.add_signal_handler(signal.SIGTERM, on_sigterm)

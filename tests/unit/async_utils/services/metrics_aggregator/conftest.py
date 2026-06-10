@@ -61,16 +61,14 @@ class MockBatchTokenizer:
         self._delay = delay
 
     async def count_texts_async(
-        self, texts: list[str], _loop: asyncio.AbstractEventLoop
+        self,
+        texts: list[str],
+        _loop: asyncio.AbstractEventLoop,
+        live: bool = False,
     ) -> list[int]:
         if self._delay:
             await asyncio.sleep(self._delay)
         return [len(t.split()) for t in texts]
-
-    async def count_texts_live_async(
-        self, texts: list[str], loop: asyncio.AbstractEventLoop
-    ) -> list[int]:
-        return await self.count_texts_async(texts, loop)
 
     async def token_count_message_async(
         self,

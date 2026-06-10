@@ -1086,11 +1086,8 @@ class TestAsyncTriggers:
         loop = asyncio.get_event_loop()
 
         class FailingBatchTokenizer:
-            async def count_texts_async(self, texts, _loop):
+            async def count_texts_async(self, texts, _loop, live=False):
                 raise RuntimeError("tokenizer backend died")
-
-            async def count_texts_live_async(self, texts, _loop):
-                return await self.count_texts_async(texts, _loop)
 
             async def token_count_message_async(self, *args):
                 raise RuntimeError("tokenizer backend died")
@@ -1136,12 +1133,9 @@ class TestAsyncTriggers:
         loop = asyncio.get_event_loop()
 
         class BlockingBatchTokenizer:
-            async def count_texts_async(self, texts, _loop):
+            async def count_texts_async(self, texts, _loop, live=False):
                 await asyncio.sleep(10.0)  # exceeds drain timeout
                 return [0] * len(texts)
-
-            async def count_texts_live_async(self, texts, _loop):
-                return await self.count_texts_async(texts, _loop)
 
             async def token_count_message_async(self, *args):
                 await asyncio.sleep(10.0)
