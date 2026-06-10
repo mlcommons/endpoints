@@ -29,7 +29,6 @@ shard unpinned at full speed; only cache/NUMA locality is lost.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import logging
 import multiprocessing
@@ -671,8 +670,7 @@ class TokenBatchQueue:
         """
         if self._live_task is not None:
             self._live_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._live_task
+            await asyncio.gather(self._live_task, return_exceptions=True)
             self._live_task = None
         if self._inflight == 0:
             return 0

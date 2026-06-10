@@ -508,7 +508,7 @@ class TestLiveFlushBounds:
         await asyncio.sleep(0.01)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
-            await task
+            await asyncio.wait_for(task, timeout=1.0)
         assert queue.pending == 1
         assert len(queue._text) == 1, "cancelled live flush must give items back"
         assert await queue.flush_remaining(timeout=1.0) == 0

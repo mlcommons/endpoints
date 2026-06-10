@@ -631,6 +631,59 @@ class TestAggregatorArgs:
         idx = args.index("--drain-timeout")
         assert args[idx + 1] == expected_flag
 
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_tokenizer_forwarded_and_live_args_left_to_service_defaults(
+        self, tmp_path
+    ):
+        """Pins the SUT-intrusion seam: the benchmark forwards --tokenizer but
+        deliberately no live/worker knobs — the service's own defaults govern
+        mid-run tokenization."""
+        config = OfflineConfig(**_OFFLINE_KWARGS, settings=OfflineSettings())
+        ctx = self._make_ctx(config, tmp_path)
+        ctx.tokenizer_name = "gpt2"
+
+        captured: list = []
+
+        async def _capture_launch(service_configs, *, timeout):
+            captured.extend(service_configs)
+            raise KeyboardInterrupt("stop after launch")
+
+        mock_zmq = MagicMock()
+        mock_zmq.socket_dir = str(tmp_path / "sockets")
+
+        with (
+            patch(
+                "inference_endpoint.commands.benchmark.execute.ManagedZMQContext"
+            ) as MockZMQ,
+            patch(
+                "inference_endpoint.commands.benchmark.execute.EventPublisherService"
+            ) as MockPub,
+            patch(
+                "inference_endpoint.commands.benchmark.execute.MetricsSnapshotSubscriber"
+            ) as MockSub,
+            patch(
+                "inference_endpoint.commands.benchmark.execute.ServiceLauncher"
+            ) as MockLauncher,
+            patch("inference_endpoint.commands.benchmark.execute.tqdm"),
+        ):
+            MockZMQ.scoped.return_value.__enter__ = MagicMock(return_value=mock_zmq)
+            MockZMQ.scoped.return_value.__exit__ = MagicMock(return_value=False)
+            MockPub.return_value.socket_name = "test_pub"
+            MockSub.return_value.start = MagicMock()
+            MockLauncher.return_value.launch = _capture_launch
+
+            loop = asyncio.get_event_loop()
+            with pytest.raises(KeyboardInterrupt):
+                await _run_benchmark_async(ctx, loop)
+
+        aggregator_cfg = next(c for c in captured if "metrics_aggregator" in c.module)
+        args = aggregator_cfg.args
+        idx = args.index("--tokenizer")
+        assert args[idx + 1] == "gpt2"
+        assert "--tokenizer-workers" not in args
+        assert "--live-tokenizers" not in args
+
 
 class TestBuildPhases:
     """Tests for _build_phases() in execute.py."""
