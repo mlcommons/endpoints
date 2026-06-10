@@ -60,9 +60,6 @@ class MockBatchTokenizer:
     def __init__(self, delay: float = 0.0) -> None:
         self._delay = delay
 
-    def token_count(self, text: str) -> int:
-        return len(text.split())
-
     async def count_texts_async(
         self, texts: list[str], _loop: asyncio.AbstractEventLoop
     ) -> list[int]:

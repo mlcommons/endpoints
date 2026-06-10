@@ -15,14 +15,12 @@
 
 """Tokenization for ISL/OSL/TPOT metrics.
 
-``BatchTokenizer`` tokenizes whole batches of text at once. A single BPE rayon
-pool saturates ~8 CPU cores (memory-bound), so to use the whole machine it
-shards each batch across worker *processes*, one pinned to each block of
-``CORES_PER_WORKER`` cores (their rayon pools stay NUMA-local). The aggregator
-buffers per-sample text as COMPLETE events arrive and calls ``count_texts`` once
-per flush (publish tick + drain) — so batching, not a per-request coalescer,
-keeps tokenization ahead of completions. Falls back to a single in-process
-thread when there is no fast Rust backend or fewer than two core blocks fit.
+``BatchTokenizer`` tokenizes whole batches at once, sharded across worker
+processes each pinned to a block of ``CORES_PER_WORKER`` cores (a single BPE
+rayon pool is memory-bound and saturates ~8 cores). The aggregator buffers
+per-sample text and flushes the batch once per publish tick and at drain. Falls
+back to a single in-process thread when there is no fast Rust backend or fewer
+than two core blocks fit.
 """
 
 from __future__ import annotations
@@ -109,13 +107,18 @@ def _init_worker(tokenizer_name: str, core_set: list[int]) -> None:
         _WORKER_BACKEND.encode("warmup", add_special_tokens=False)
 
 
+def _encode_batch_lengths(backend: Any, texts: list[str]) -> list[int]:
+    """Per-text token counts via the raw tokenizers backend, one rayon call."""
+    encode_batch = getattr(backend, "encode_batch_fast", None) or backend.encode_batch
+    return [len(e.ids) for e in encode_batch(texts, add_special_tokens=False)]
+
+
 def _worker_encode_lengths(texts: list[str]) -> list[int]:
     """Per-text token counts for a shard, in one rayon-parallel call."""
     backend = _WORKER_BACKEND
     if backend is None:
         raise RuntimeError("tokenizer worker backend unavailable")
-    encode_batch = getattr(backend, "encode_batch_fast", None) or backend.encode_batch
-    return [len(e.ids) for e in encode_batch(texts, add_special_tokens=False)]
+    return _encode_batch_lengths(backend, texts)
 
 
 def _worker_ready(_: int) -> bool:
@@ -138,10 +141,9 @@ def _even_chunks(items: list[str], n: int) -> list[list[str]]:
 class BatchTokenizer:
     """Counts tokens for batches of text, sharded across pinned CPU cores.
 
-    ``count_texts`` / ``count_texts_async`` tokenize a whole list in one shot.
-    The sync ``token_count`` and chat-template ``token_count_message`` paths run
-    on a small in-process thread pool — they are rare (single ISL probes, tool
-    calls) relative to the batched OSL/ISL/TPOT flush.
+    ``count_texts_async`` tokenizes a whole list in one sharded call. The
+    chat-template ``token_count_message_async`` path runs on a small in-process
+    thread — rare (tool calls) relative to the batched OSL/ISL/TPOT flush.
     """
 
     def __init__(
@@ -252,48 +254,31 @@ class BatchTokenizer:
         tok = self._tokenizer
         backend = getattr(tok, "backend_tokenizer", None)
         if backend is not None:
-            encode_batch = getattr(backend, "encode_batch_fast", None)
-            if encode_batch is None:
-                encode_batch = backend.encode_batch
-            return [len(e.ids) for e in encode_batch(texts, add_special_tokens=False)]
+            return _encode_batch_lengths(backend, texts)
         return [len(tok.tokenize(t)) for t in texts]  # type: ignore[union-attr]
-
-    def count_texts(self, texts: list[str]) -> list[int]:
-        """Per-text token counts for a whole batch (blocking)."""
-        if not texts:
-            return []
-        if not self._procs:
-            return self._encode_lengths_inproc(texts)
-        chunks = _even_chunks(texts, len(self._procs))
-        futures = [
-            self._procs[i].submit(_worker_encode_lengths, chunk)
-            for i, chunk in enumerate(chunks)
-        ]
-        out: list[int] = []
-        for f in futures:
-            out.extend(f.result())
-        return out
 
     async def count_texts_async(
         self, texts: list[str], loop: asyncio.AbstractEventLoop
     ) -> list[int]:
-        """Per-text token counts for a whole batch without blocking the loop."""
+        """Per-text token counts for a whole batch without blocking the loop.
+
+        A worker-shard failure propagates and is treated as an incomplete drain.
+        """
         if not texts:
             return []
-        if not self._procs:
-            return await loop.run_in_executor(
-                self._thread, self._encode_lengths_inproc, texts
-            )
-        chunks = _even_chunks(texts, len(self._procs))
-        futures = [
-            asyncio.wrap_future(self._procs[i].submit(_worker_encode_lengths, chunk))
-            for i, chunk in enumerate(chunks)
-        ]
-        results = await asyncio.gather(*futures)
-        out: list[int] = []
-        for r in results:
-            out.extend(r)
-        return out
+        if self._procs:
+            chunks = _even_chunks(texts, len(self._procs))
+            futures = [
+                asyncio.wrap_future(ex.submit(_worker_encode_lengths, chunk))
+                for ex, chunk in zip(self._procs, chunks, strict=False)
+            ]
+            results = await asyncio.gather(*futures)
+            return [n for r in results for n in r]
+        if self._thread is None:
+            raise RuntimeError("BatchTokenizer is closed")
+        return await loop.run_in_executor(
+            self._thread, self._encode_lengths_inproc, texts
+        )
 
     # -- sync + chat-template paths (in-process thread) ---------------------
 
@@ -336,25 +321,6 @@ class BatchTokenizer:
             ]
             return self._token_count_text("\n".join(parts))
 
-    def token_count(self, text: str) -> int:
-        """Token count for a single string (blocking)."""
-        if self._thread is None:
-            raise RuntimeError("BatchTokenizer is closed")
-        return self._thread.submit(self._token_count_text, text).result()
-
-    def token_count_message(
-        self,
-        content: str,
-        reasoning: str | None,
-        tool_calls: tuple[dict[str, Any], ...] | None,
-    ) -> int:
-        """Token count for an assistant message via the chat template (blocking)."""
-        if self._thread is None:
-            raise RuntimeError("BatchTokenizer is closed")
-        return self._thread.submit(
-            self._token_count_message, content, reasoning, tool_calls
-        ).result()
-
     async def token_count_message_async(
         self,
         content: str,
@@ -370,7 +336,11 @@ class BatchTokenizer:
         )
 
     def close(self) -> None:
-        """Shut down all workers. Idempotent."""
+        """Shut down all workers. Idempotent.
+
+        Shard shutdown uses ``wait=False``: a hung worker must not block
+        aggregator shutdown; idle workers exit on their own once signalled.
+        """
         for ex in self._procs:
             ex.shutdown(wait=False)
         self._procs = []
@@ -387,7 +357,7 @@ class BatchTokenizer:
 
 # Type alias for the (content, reasoning, tool_calls) tuple a message trigger
 # enqueues for chat-template tokenization.
-MessageParts = tuple[str, str | None, "tuple[dict[str, Any], ...] | None"]
+MessageParts = tuple[str, str | None, tuple[dict[str, Any], ...] | None]
 
 
 class TokenCounter(Protocol):
@@ -415,18 +385,15 @@ class TokenCounter(Protocol):
 class TokenBatchQueue:
     """Buffers per-sample tokenization work and clears it in batches.
 
-    Triggers call ``enqueue_text`` / ``enqueue_message`` at event time with a
+    Triggers call ``enqueue_text`` / ``enqueue_message`` at event time with an
     ``on_count`` callback that records the resulting metric. The aggregator
-    drains the buffer with ``flush`` (once per publish tick, so live ISL/OSL/
-    TPOT stay current) and with ``flush_remaining`` at end-of-run. Holding the
-    work until a flush lets the whole buffer go through ``BatchTokenizer`` in
-    one sharded call, instead of one event-loop task per completion — the latter
-    is what fell behind and stretched the drain on high-completion-rate runs.
+    flushes the buffer with ``flush`` once per publish tick (so live ISL/OSL/
+    TPOT stay current) and with ``flush_remaining`` at end-of-run, sending the
+    whole batch through ``BatchTokenizer`` in one sharded call.
 
     ``pending`` counts enqueued-but-not-yet-recorded items; it is the
-    ``n_pending_tasks`` surfaced on the snapshot, and a non-zero value in the
-    final snapshot means the end-of-run flush did not finish within the drain
-    budget.
+    ``n_pending_tasks`` on the snapshot. A non-zero value in the final snapshot
+    means the end-of-run flush did not finish within the drain budget or failed.
     """
 
     def __init__(
@@ -461,8 +428,9 @@ class TokenBatchQueue:
 
         Items are detached from the buffer up front so concurrent enqueues land
         in the next flush. ``_inflight`` is decremented only after a callback
-        runs, so a cancellation (drain timeout) leaves it reflecting exactly the
-        items that were not recorded.
+        runs, so a cancellation (drain timeout) or a tokenizer error leaves it
+        reflecting exactly the items that were not recorded — those surface as
+        ``pending`` (an incomplete drain), not as silently dropped samples.
         """
         async with self._lock:
             if not (self._text or self._msg):
@@ -490,8 +458,10 @@ class TokenBatchQueue:
     async def flush_remaining(self, timeout: float | None) -> int:
         """End-of-run flush, bounded by ``timeout`` seconds.
 
-        Returns the number of items still un-tokenized — non-zero only if the
-        budget was exhausted (``timeout`` reached). ``None`` waits indefinitely.
+        Returns the number of items still un-tokenized — non-zero if the budget
+        was exhausted (``timeout`` reached) or tokenization failed. ``None``
+        waits indefinitely. Never raises: a failure here must not stop the
+        aggregator from publishing the (incomplete) final snapshot.
         """
         if self._inflight == 0:
             return 0
@@ -505,5 +475,9 @@ class TokenBatchQueue:
                 "tokenizer drain timed out after %.1fs; %d items not counted",
                 timeout,
                 self._inflight,
+            )
+        except Exception:  # noqa: BLE001 — drain must not block finalize.
+            logger.exception(
+                "tokenizer drain failed; %d items not counted", self._inflight
             )
         return self._inflight

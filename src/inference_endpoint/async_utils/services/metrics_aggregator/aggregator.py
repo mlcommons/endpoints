@@ -241,6 +241,11 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
             table.add_trigger(SampleField.LAST_RECV_NS, ChunkDeltaTrigger(registry))
             table.add_trigger(SampleField.COMPLETE_NS, TpotTrigger(registry, queue))
 
+    @property
+    def pending_tokens(self) -> int:
+        """Enqueued tokenizations not yet recorded (the snapshot n_pending_tasks)."""
+        return self._token_queue.pending if self._token_queue is not None else 0
+
     async def _flush_tokens(self) -> None:
         """Flush buffered tokenizations so the next snapshot reflects them."""
         if self._token_queue is not None:
@@ -318,9 +323,7 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
                                 self._publish_interval_s,
                                 get_runtime_state=lambda: (
                                     self._session_state,
-                                    self._token_queue.pending
-                                    if self._token_queue is not None
-                                    else 0,
+                                    self.pending_tokens,
                                 ),
                                 pre_publish=self._flush_tokens,
                             )
@@ -377,47 +380,47 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
             # ENDED has been observed; transition to DRAINING so any tick
             # that fires before publish_final reflects the new state.
             self._session_state = SessionState.DRAINING
-            queue = self._token_queue
-            pending = queue.pending if queue is not None else 0
-            logger.info("Draining %d pending tokenizations...", pending)
-            # flush_remaining tokenizes the whole buffer in one batched pass,
-            # bounded by the drain budget; it returns the count it could not
-            # finish (non-zero only on a timeout), which becomes the snapshot's
-            # n_pending_tasks so Report can flag an incomplete drain.
-            n_pending = (
-                await queue.flush_remaining(self._drain_timeout_s)
-                if queue is not None
-                else 0
-            )
-            if n_pending > 0:
-                timeout_str = (
-                    f"{self._drain_timeout_s:.1f}s"
-                    if self._drain_timeout_s is not None
-                    else "unlimited"
-                )
-                logger.warning(
-                    "tokenizer drain timed out after %s; %d tokenizations "
-                    "did not complete",
-                    timeout_str,
-                    n_pending,
-                )
-            logger.info(
-                "Tokenizations drained (n_pending_tasks=%d at finalize)", n_pending
-            )
-            registry.set_counter(
-                MetricCounterKey.TRACKED_DURATION_NS.value,
-                table.total_tracked_duration_ns,
-            )
+            logger.info("Draining %d pending tokenizations...", self.pending_tokens)
+            # The drain and final publish are wrapped together so the aggregator
+            # ALWAYS reaches _finalize (which sets the shutdown event); a
+            # tokenizer failure during the drain must not skip publish_final and
+            # leave main()'s `await shutdown_event.wait()` hanging.
+            n_pending = self.pending_tokens
             try:
+                # flush_remaining tokenizes the whole buffer in one batched pass,
+                # bounded by the drain budget, and never raises: it returns the
+                # count it could not finish (timeout or failure), which becomes
+                # the snapshot's n_pending_tasks so Report flags an incomplete drain.
+                if self._token_queue is not None:
+                    n_pending = await self._token_queue.flush_remaining(
+                        self._drain_timeout_s
+                    )
+                if n_pending > 0:
+                    budget = (
+                        f"{self._drain_timeout_s:.1f}s"
+                        if self._drain_timeout_s is not None
+                        else "unlimited"
+                    )
+                    logger.warning(
+                        "tokenizer drain incomplete (budget %s); %d tokenizations "
+                        "did not complete",
+                        budget,
+                        n_pending,
+                    )
+                logger.info(
+                    "Tokenizations drained (n_pending_tasks=%d at finalize)", n_pending
+                )
+                registry.set_counter(
+                    MetricCounterKey.TRACKED_DURATION_NS.value,
+                    table.total_tracked_duration_ns,
+                )
                 await self._publisher.publish_final(registry, n_pending_tasks=n_pending)
             finally:
-                # Whatever happens above, the aggregator MUST close the
-                # publisher and signal shutdown — otherwise the main()
-                # entry point's `await shutdown_event.wait()` hangs
-                # forever and the subprocess never exits cleanly. Each
-                # cleanup step is independently wrapped: a failure in
-                # aclose must not prevent _finalize, since _finalize is
-                # what sets the shutdown event.
+                # The aggregator MUST close the publisher and signal shutdown even
+                # if the drain/publish above failed — otherwise main()'s
+                # `await shutdown_event.wait()` hangs forever. aclose is
+                # independently wrapped: its failure must not prevent _finalize,
+                # which is what sets the shutdown event.
                 try:
                     await self._publisher.aclose()
                 except Exception:  # noqa: BLE001 — best-effort cleanup.

@@ -50,8 +50,7 @@ async def test_sigterm_handler_holds_strong_reference_to_finalize_task():
     registry = MagicMock()
     table = MagicMock()
     table.total_tracked_duration_ns = 0
-    token_queue = MagicMock()
-    token_queue.pending = 0
+    n_pending = 0
 
     # publish_final blocks on an event so we can observe the task
     # mid-execution and exercise the strong-ref contract.
@@ -70,7 +69,7 @@ async def test_sigterm_handler_holds_strong_reference_to_finalize_task():
         registry=registry,
         publisher=publisher,
         table=table,
-        token_queue=token_queue,
+        pending_tokens=lambda: n_pending,
         shutdown_event=shutdown_event,
     )
 
@@ -124,8 +123,7 @@ async def test_sigterm_handler_refreshes_tracked_duration():
     registry = MagicMock()
     table = MagicMock()
     table.total_tracked_duration_ns = 12345
-    token_queue = MagicMock()
-    token_queue.pending = 3
+    n_pending = 3
 
     publisher = MagicMock()
     publisher.publish_final = AsyncMock()
@@ -137,7 +135,7 @@ async def test_sigterm_handler_refreshes_tracked_duration():
         registry=registry,
         publisher=publisher,
         table=table,
-        token_queue=token_queue,
+        pending_tokens=lambda: n_pending,
         shutdown_event=shutdown_event,
     )
     on_sigterm()

@@ -179,10 +179,9 @@ class TimeDeltaTrigger(EmitTrigger):
         baseline = pre_change.get(self._delta_start_fieldname)
         if baseline is not None:
             self.registry.record(self.metric_name, ev_rec.timestamp_ns - baseline)
-        return None
 
 
-class AsyncTokenTrigger(EmitTrigger):
+class TokenTrigger(EmitTrigger):
     """Base for triggers whose metric needs tokenization.
 
     Subclasses implement ``_extract_text()`` to pull the text to tokenize from
@@ -298,12 +297,12 @@ class SampleLatencyTrigger(TimeDeltaTrigger):
 
 
 # ---------------------------------------------------------------------------
-# Token triggers (async)
+# Token triggers (batched)
 # ---------------------------------------------------------------------------
 
 
-class IslTrigger(AsyncTokenTrigger):
-    """ISL from PromptData: len(token_ids) sync, or token_count(text) async."""
+class IslTrigger(TokenTrigger):
+    """ISL from PromptData: ``len(token_ids)`` or the tokenized prompt text."""
 
     def __init__(
         self,
@@ -327,7 +326,7 @@ class IslTrigger(AsyncTokenTrigger):
         return None
 
 
-class OslTrigger(AsyncTokenTrigger):
+class OslTrigger(TokenTrigger):
     """OSL = token_count(full output text) from COMPLETE event data."""
 
     def __init__(
@@ -352,19 +351,13 @@ class OslTrigger(AsyncTokenTrigger):
         return None
 
 
-class TpotTrigger(AsyncTokenTrigger):
-    """TPOT = (complete_ns - recv_first_ns) / token_count(text_after_first_chunk).
+class TpotTrigger(TokenTrigger):
+    """TPOT = (complete_ns - recv_first_ns) / output token count.
 
-    Only registered when streaming mode is enabled.
-
-    # NOTE(agents): This trigger tokenizes text_after_first_chunk independently
-    # from OslTrigger, which tokenizes the full output. This means the output is
-    # tokenized twice at COMPLETE time for streaming samples. This is intentional:
-    # OSL is always required (non-streaming and streaming), while TPOT is
-    # streaming-only. Keeping them as separate triggers allows conditional
-    # registration via the streaming flag. If tokenization throughput becomes a
-    # bottleneck, consider merging OSL and TPOT into a single trigger that
-    # tokenizes once and derives both metrics.
+    Streaming-only. Tokenizes the post-first-chunk output independently of
+    ``OslTrigger`` (full output), so streaming samples are tokenized twice —
+    intentional: OSL is always required, TPOT is conditional on the streaming
+    flag.
     """
 
     def __init__(

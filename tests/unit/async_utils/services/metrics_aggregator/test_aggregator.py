@@ -1052,10 +1052,50 @@ class TestAsyncTriggers:
             finally:
                 agg.close()
 
-    # NOTE(agents): Trigger exception handling (logger.exception paths) is not
-    # exercised here. A MockBatchTokenizer whose count_texts_async raises would
-    # let us assert the flush surfaces the error without crashing the
-    # aggregator and that the buffer is cleared.
+    @pytest.mark.asyncio
+    async def test_drain_failure_reports_pending_and_finalizes(self, tmp_path):
+        """A tokenizer error during the ENDED drain must not skip finalize.
+
+        flush_remaining swallows non-timeout failures and returns the stuck
+        count, so publish_final still runs with n_pending_tasks > 0 (incomplete
+        drain) instead of the error escaping process() and hanging main().
+        """
+        loop = asyncio.get_event_loop()
+
+        class FailingBatchTokenizer:
+            async def count_texts_async(self, texts, _loop):
+                raise RuntimeError("tokenizer backend died")
+
+            async def token_count_message_async(self, *args):
+                raise RuntimeError("tokenizer backend died")
+
+        with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
+            agg, _, publisher = make_aggregator(
+                ctx, loop, "agg_drain_failure", tokenizer=FailingBatchTokenizer()
+            )
+            try:
+                await agg.process(
+                    [
+                        session_event(
+                            SessionEventType.START_PERFORMANCE_TRACKING, ts=0
+                        ),
+                        sample_event(
+                            SampleEventType.ISSUED,
+                            "s1",
+                            ts=1000,
+                            data=PromptData(text="some text to tokenize"),
+                        ),
+                    ]
+                )
+                assert agg._token_queue is not None
+                assert agg._token_queue.pending > 0
+                await agg.process([session_event(SessionEventType.ENDED, ts=2000)])
+
+                publisher.publish_final.assert_awaited_once()
+                assert publisher.publish_final.await_args.kwargs["n_pending_tasks"] > 0
+                publisher.aclose.assert_awaited_once()
+            finally:
+                agg.close()
 
     @pytest.mark.asyncio
     async def test_drain_timeout_reports_pending_count(self, tmp_path):
