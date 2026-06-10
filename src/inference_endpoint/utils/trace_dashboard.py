@@ -939,12 +939,31 @@ class Dashboard:
         stage_data: list[tuple[str, float]] = []
         for side, label, key in layout:
             s = _get(key)
-            self._render_row_stats(out, side, label, s, e2e_avg)
+            sub_rows: list[tuple[str, Stats]] = []
+            if key == "backpressure":
+                sub_rows = [
+                    (lbl, ss)
+                    for lbl, k in self._BACKPRESSURE_SUB_ROWS
+                    if (ss := _get(k)).n > 0
+                ]
+            # When the breakdown renders, the parent's %E2E cell stays blank —
+            # the share lives in the sub-rows instead of being double-shown.
+            self._render_row_stats(out, side, label, s, e2e_avg, pct_cell=not sub_rows)
             pct = min(100.0, 100.0 * s.avg / e2e_avg) if e2e_avg and s.avg else 0.0
             # Backpressure (issue→conn-acquired) gets its own bar colour + key:
             # it's part of E2E but a distinct cause, not generic client work.
             bar_side = _SIDE_BACKPRESSURE if key == "backpressure" else side
             stage_data.append((bar_side, pct))
+            for i, (lbl, ss) in enumerate(sub_rows):
+                conn = "└" if i == len(sub_rows) - 1 else "├"
+                spct = (
+                    min(100.0, 100.0 * ss.avg / e2e_avg) if e2e_avg and ss.avg else 0.0
+                )
+                Dashboard._append_label(
+                    out, f"   {conn} {lbl}"[:LABEL_W], LABEL_W, "client_row", "  "
+                )
+                out.append(_fmt_row(ss), style="client_row")
+                out.append(f"{spct:>8.1f}%\n", style=_heat(spct) or "client_row")
         e2e_stats = _get("e2e")
         self._render_summary_stats(
             out,
@@ -957,8 +976,25 @@ class Dashboard:
         self._render_verdict(out, e2e_avg, frozen_stats)
         self._render_timeline(out, stage_data, frozen_stats)
 
+    # Render-only breakdown of the backpressure row from events already on
+    # the wire: inbox/pickup wait (ISSUED→WORKER_RECEIVED) vs encode + pool
+    # acquire (WORKER_RECEIVED→CONN_ACQUIRED, fused — the encode/acquire
+    # boundary has no event). Sub-rows hide when their frames never folded;
+    # the parent row then keeps its own %E2E cell.
+    _BACKPRESSURE_SUB_ROWS: tuple[tuple[str, str], ...] = (
+        ("issue -> worker_pickup", "ipc_wait"),
+        ("worker_pickup -> encode + conn acquired", "pool_wait"),
+    )
+
     def _render_row_stats(
-        self, out: Text, side: str, label: str, s: Stats, e2e_avg: float
+        self,
+        out: Text,
+        side: str,
+        label: str,
+        s: Stats,
+        e2e_avg: float,
+        *,
+        pct_cell: bool = True,
     ) -> None:
         # Clamp at 100: a stage is a sub-interval of E2E so it cannot
         # exceed it per request. The raw ratio can top 100% because the
@@ -970,6 +1006,9 @@ class Dashboard:
         prefix = f"[{side}] {label}"
         Dashboard._append_label(out, prefix[:LABEL_W], LABEL_W, side_style, "  ")
         out.append(_fmt_row(s), style=side_style)
+        if not pct_cell:
+            out.append("\n")
+            return
         # %E2E cell heat-graded so the hot stages pop (green/orange/red).
         out.append(f"{pct:>8.1f}%\n", style=_heat(pct) or side_style)
 
@@ -1063,8 +1102,8 @@ class Dashboard:
     # stage's %E2E-column colour so the tree matches the REQUEST LIFECYCLE table
     # above. ("tail" resolves to tail_stream / tail_offline by mode.)
     _PHASE_STAGE: dict[str, str] = {
-        "encode": "backpressure",
-        "tcp-acquire": "backpressure",
+        "encode": "pool_wait",
+        "tcp-acquire": "pool_wait",
         "sse-decode": "stream_gen",
         "final-decode": "tail",
         "complete-ipc": "tail",
