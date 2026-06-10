@@ -209,6 +209,7 @@ _METRIC_KEYS: tuple[str, ...] = tuple({k for k, _, _ in _STAGE_FOLDS}) + (
     "client_pre",
     "server_http",
     "client_post",
+    "client_work",
 )
 
 # Backpressure thresholds: trigger the chip when either the worker-side
@@ -511,9 +512,10 @@ class Dashboard:
     @property
     def is_backpressured(self) -> bool:
         """True when the first lifecycle stage (ISSUED → CONN_ACQUIRED)
-        takes ≥ _BACKPRESSURE_PCT of E2E — requests are backing up before
-        the socket write. Triggered off the stage's folded end-points, so
-        it survives intermediate-frame drops. Orthogonal to :attr:`is_tail`.
+        takes ≥ _BACKPRESSURE_PCT of E2E (mean share, same basis as the
+        %E2E column) — requests are backing up before the socket write.
+        Triggered off the stage's folded end-points, so it survives
+        intermediate-frame drops. Orthogonal to :attr:`is_tail`.
         """
         e2e_avg = _stats(self._metrics["e2e"]).avg
         if not e2e_avg:
@@ -757,6 +759,12 @@ class Dashboard:
                 self._metrics["client_pre"].add(written - worker_recv)
                 if body_done is not None:
                     self._metrics["server_http"].add(body_done - written)
+                    # Per-request combined client work (pre + post): folded as
+                    # one value so its percentiles are a true per-request
+                    # distribution for the verdict's p99 share.
+                    self._metrics["client_work"].add(
+                        (written - worker_recv) + (complete - body_done)
+                    )
         if body_done is not None:
             self._metrics["client_post"].add(complete - body_done)
         self._n_complete += 1
@@ -782,7 +790,7 @@ class Dashboard:
             self._render_lifecycle(out, frozen_stats=stats)
             if self._loadgen_snapshot is not None:
                 out.append("\n")
-                self._render_loadgen(out)
+                self._render_loadgen(out, frozen_stats=stats)
             out.append("\n")
             self._render_loop_lag(out)
             return out
@@ -989,10 +997,9 @@ class Dashboard:
     ) -> None:
         # Two plain rows; no section headers, no dividers, no footer.
         # Same 3-column grid as the header so everything anchors.
-        client = (
-            self._stat("client_pre", frozen_stats).avg
-            + self._stat("client_post", frozen_stats).avg
-        )
+        # client_work is folded per request as (pre + post), so its stats are
+        # a real per-request distribution rather than a sum of two series.
+        client = self._stat("client_work", frozen_stats).avg
         server = self._stat("server_http", frozen_stats).avg
         # "backpressure" = the whole ISSUED→CONN_ACQUIRED wait (inbox queue +
         # pool acquire), the same metric the timeline ▓ segment and the cause
@@ -1164,7 +1171,9 @@ class Dashboard:
         "e2e": "no completed samples yet",
     }
 
-    def _render_loadgen(self, out: Text) -> None:
+    def _render_loadgen(
+        self, out: Text, frozen_stats: dict[str, Stats] | None = None
+    ) -> None:
         """Authoritative loadgen panel: issued/completed counts + rates and
         the ttft/tpot/e2e latency table. Drop-immune (the trace's own counts
         undercount under FIFO drops) and reported over the perf window
@@ -1257,6 +1266,42 @@ class Dashboard:
             out.append(f"  {label:<{LABEL_W}}", style="default")
             out.append(_fmt_row(s), style="default")
             out.append("\n")
+        self._render_corrected(out, completed_s, frozen_stats)
+
+    def _render_corrected(
+        self,
+        out: Text,
+        completed_s: float,
+        frozen_stats: dict[str, Stats] | None = None,
+    ) -> None:
+        """Per-request 'corrected' (server-bound) e2e: client overhead removed.
+
+        By the lifecycle partition e2e = ipc_wait + client_pre + server_http +
+        client_post, so per request ``e2e - (all client overhead)`` is exactly
+        ``server_http`` (WRITTEN -> last body byte) — already folded with real
+        per-request percentiles, not an avg*ratio. ``corrected/s`` scales the
+        measured rate by the per-request latency reduction (Little's-law
+        ceiling at fixed concurrency). Trace-only: skipped until lifecycle
+        frames have folded (no -vvv -> no row, loadgen panel unchanged).
+        """
+        srv = self._stat("server_http", frozen_stats)
+        e2e_tr = self._stat("e2e", frozen_stats)
+        if srv.n <= 0 or e2e_tr.avg <= 0 or srv.avg <= 0:
+            return
+        overhead_ms = (e2e_tr.avg - srv.avg) / 1e6
+        speedup = e2e_tr.avg / srv.avg
+        corr_s = completed_s * speedup
+        out.append(f"  {'e2e corrected':<{LABEL_W}}", style="summary")
+        out.append(_fmt_row(srv), style="summary")
+        out.append("\n")
+        # Self-reconciling against the trace e2e (same folded population as
+        # server_http): trace_e2e - client_overhead == server_bound, exactly.
+        out.append(
+            f"  {'':<{LABEL_W}}server-bound = trace e2e {e2e_tr.avg / 1e6:.1f} − "
+            f"client {overhead_ms:.1f} ms/req  →  corrected/s {corr_s:>10,.1f}  "
+            f"(+{(speedup - 1) * 100:.0f}% over measured)\n",
+            style="rule",
+        )
 
     # Maximum worker rows shown (excl. main which is always first).
     _LAG_TOP_N = 16

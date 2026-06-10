@@ -1313,3 +1313,68 @@ class TestTimeline:
         _dash()._render_timeline(out, stage_pcts)
         bar = out.plain.splitlines()[0]
         assert len(bar.split("│")[1]) == Dashboard._TIMELINE_W
+
+
+@pytest.mark.unit
+class TestCorrectedRow:
+    """LOADGEN 'e2e corrected' row: per-request server-bound view.
+
+    By the lifecycle partition e2e = ipc_wait + client_pre + server_http +
+    client_post, the corrected distribution IS the folded server_http
+    metric (real per-request percentiles, not an avg*ratio estimate);
+    client_work folds (pre + post) per request for the verdict's client
+    share.
+    """
+
+    def test_client_work_folds_per_request_sum(self) -> None:
+        d = _dash()
+        sid = _new_sid()
+        ts = {
+            Event.ISSUED: 0,
+            Event.WORKER_RECEIVED: 10,
+            Event.CONN_ACQUIRED: 20,
+            Event.WRITTEN: 30,
+            Event.RESPONSE_HEADERS: 40,
+            Event.RESPONSE_BYTES: 50,
+            Event.MAIN_RECEIVED: 60,
+            Event.COMPLETE: 70,
+        }
+        d.ingest_frames(b"".join(_frame(ev, sid, t) for ev, t in ts.items()))
+        d.finalize_completed()
+        m = d._metrics["client_work"]
+        assert m.total == 1
+        # offline: body_done = RESPONSE_BYTES, so per request client_work =
+        # (WRITTEN - WORKER_RECEIVED) + (COMPLETE - RESPONSE_BYTES) = 20 + 20.
+        assert m.sum_ns == 40.0
+        # The four buckets partition e2e exactly: 10 + 20 + 20 + 20 = 70.
+        assert (
+            d._metrics["ipc_wait"].sum_ns
+            + d._metrics["client_work"].sum_ns
+            + d._metrics["server_http"].sum_ns
+            == d._metrics["e2e"].sum_ns
+        )
+
+    def test_corrected_row_renders_after_folds(self) -> None:
+        d = _dash()
+        for _ in range(5):
+            d.ingest_frames(_full_lifecycle(_new_sid()))
+        d.finalize_completed()
+        out = Text()
+        d._render_corrected(out, 100.0)
+        plain = out.plain
+        assert "e2e corrected" in plain
+        assert "corrected/s" in plain
+        # corrected/s scales completed/s by the per-request latency
+        # reduction: completed_s * (trace e2e avg / server_http avg).
+        e2e = d._metrics["e2e"]
+        srv = d._metrics["server_http"]
+        speedup = (e2e.sum_ns / e2e.total) / (srv.sum_ns / srv.total)
+        assert f"{100.0 * speedup:,.1f}" in plain
+
+    def test_corrected_row_absent_without_trace_folds(self) -> None:
+        # No -vvv lifecycle folds -> no corrected row; the loadgen panel
+        # stays exactly as it was (snapshot-only).
+        d = _dash()
+        out = Text()
+        d._render_corrected(out, 100.0)
+        assert out.plain == ""

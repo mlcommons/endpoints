@@ -451,7 +451,16 @@ def enable_tracing(pipe_path: str) -> None:
         # ring buffer absorbs short spikes on its own.
         pass
     global _active_emitter
-    emitter = _TraceEmitter(fd)
+    try:
+        emitter = _TraceEmitter(fd)
+    except Exception:
+        # The ring mmap (512 MiB virtual) can fail (e.g. ENOMEM) — don't
+        # leak the FIFO write fd we just opened.
+        try:
+            os.close(fd)
+        except OSError:
+            pass  # already closed — nothing to free
+        raise
     emit_trace = emitter.emit
     _active_emitter = emitter
 
@@ -687,10 +696,11 @@ async def teardown(*, final_snapshot: dict | None = None) -> None:
             task.cancel()
             try:
                 await task
-            except BaseException:  # noqa: BLE001
-                # Catches the cancellation we just triggered plus any
-                # telemetry error — trace teardown must never interrupt the
-                # benchmark's own shutdown.
+            except (asyncio.CancelledError, Exception):
+                # The cancellation we just triggered (CancelledError is
+                # BaseException-derived, so Exception alone misses it) plus
+                # any telemetry error — trace teardown must never interrupt
+                # the benchmark's own shutdown.
                 pass
     _state.tasks.clear()
     cleanup()
