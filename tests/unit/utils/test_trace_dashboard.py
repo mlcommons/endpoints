@@ -1188,35 +1188,20 @@ class TestBackpressureCause:
         lines = d._backpressure_cause_lines()
         assert len(lines) == len(d._BACKPRESSURE_PHASES)  # leaves only, no root
         for leaf, phase in zip(lines, d._BACKPRESSURE_PHASES, strict=False):
-            assert leaf[0][0] == phase  # phase label first
+            assert leaf[0][0] == phase  # phase label
             assert leaf[1][0] in (" ─┤", " ─┘")  # right-hand spine connector
 
-    def test_phase_highlighted_when_its_region_dominates(self) -> None:
+    def test_leaf_color_matches_its_stage_e2e_cell(self) -> None:
         d = _dash()
         d._metrics["e2e"].add(100)
-        d._metrics["backpressure"].add(20)  # issue→conn = 20% of E2E (15–25% → warn)
-        styles = {leaf[0][0]: leaf[0][1] for leaf in d._backpressure_cause_lines()}
-        assert styles["tcp-acquire"] == "warn"  # issue→conn region in warn band
-        assert styles["encode"] == "warn"
-        assert styles["final-decode"] == "muted"  # client_post region cold
-        assert styles["sse-decode"] == "muted"  # stream_gen region cold here
-        # sse-decode tracks the 1st→last-chunk (stream_gen) region:
-        d._metrics["stream_gen"].add(20)  # now 20% of E2E → warn
-        styles = {leaf[0][0]: leaf[0][1] for leaf in d._backpressure_cause_lines()}
-        assert styles["sse-decode"] == "warn"
-
-    def test_tcp_acquire_critical_on_connection_exhaustion(self) -> None:
-        # issue→conn-acquired stage dominating E2E = requests stuck reaching a
-        # connection (concurrency cap / OS ephemeral ports maxed) → tcp-acquire
-        # critical; encode (always tiny) is muted, as it can't account for a
-        # stage that large. The root style mirrors the worst leaf.
-        d = _dash()
-        d._metrics["e2e"].add(100)
-        d._metrics["backpressure"].add(60)  # issue→conn = 60% ≥ 25% (crit)
-        styles, root_style = d._backpressure_phase_styles()
-        assert styles["tcp-acquire"] == "critical"
-        assert styles["encode"] == "muted"
-        assert root_style == "critical"
+        d._metrics["backpressure"].add(30)  # issue→conn 30% ≥ 25% → critical
+        d._metrics["stream_gen"].add(5)  # 5% < 15% → server side colour
+        leaf = {ln[0][0]: ln[0][1] for ln in d._backpressure_cause_lines()}
+        # encode/tcp-acquire follow the backpressure stage's %E2E colour
+        assert leaf["tcp-acquire"] == "critical"
+        assert leaf["encode"] == "critical"
+        # sse-decode follows stream_gen's heat (5% below heat → muted base)
+        assert leaf["sse-decode"] == "muted"
 
     def test_heat_scale_boundaries(self) -> None:
         # Shared severity scale (pct 0-100): warn ≥15%, critical ≥25%.
@@ -1255,18 +1240,17 @@ class TestBackpressureCause:
         assert len(spine_lines) == len(d._BACKPRESSURE_PHASES)
         assert all(len(ln) == verdict_right for ln in spine_lines)
 
-    def test_backpressure_segment_is_heat_colored(self) -> None:
-        # ▓ backpressure segment shares the _heat scale with the cause tree:
-        # a ≥25% share renders it "critical" (red), in lockstep with its leaves.
+    def test_backpressure_segment_uses_key_color_never_red(self) -> None:
+        # The e2e bar uses ONLY the legend-key colors; severity/red lives in the
+        # verdict + cause tree, never in the bar.
         d = _dash()
         out = Text()
-        d._render_timeline(out, [("backpressure", 30.0), ("server", 70.0)])
-        bp_critical = [
-            out.plain[sp.start : sp.end]
-            for sp in out.spans
-            if sp.style == "critical" and "▓" in out.plain[sp.start : sp.end]
+        d._render_timeline(out, [("backpressure", 60.0), ("server", 40.0)])
+        bp_styles = [
+            sp.style for sp in out.spans if "▓" in out.plain[sp.start : sp.end]
         ]
-        assert bp_critical  # at least one ▓ run rendered critical
+        assert bp_styles and all(st == "warn" for st in bp_styles)
+        assert "critical" not in bp_styles
 
 
 @pytest.mark.unit

@@ -1026,59 +1026,38 @@ class Dashboard:
         "complete-ipc",
     )
 
-    @staticmethod
-    def _phase_heat(pct: float) -> str:
-        # Same warn/critical scale as the rest of the dashboard (_heat), but
-        # muted (grey) rather than blank for an idle phase. pct is a fraction.
-        return _heat(pct * 100.0) or "muted"
-
-    def _backpressure_phase_styles(self) -> tuple[dict[str, str], str]:
-        """Heat style per worker-loop phase, plus the root style (mirrors the
-        worst leaf). Each phase is graded by its region's share of E2E on the
-        shared _heat scale (warn ≥ 15%, critical ≥ 25%). Region map:
-        issue→conn-acquired → encode/tcp-acquire; stream_gen (1st→last chunk) →
-        sse-decode; client_post (body→complete) → final-decode/complete-ipc.
-        When the issue→conn-acquired region is critical it is connection/port
-        exhaustion (a region that large can't be encode), so tcp-acquire stays
-        red and encode is muted. Root: critical if any leaf is, else warn if
-        any is, else a plain section header."""
-        e2e = _stats(self._metrics["e2e"]).avg or 1.0
-        # Whole issue→conn-acquired stage (queue wait + acquire): when it
-        # dominates, requests are stuck reaching a connection regardless of
-        # whether the time shows as inbox-queue (ipc) or acquire-block.
-        acquire = self._phase_heat(_stats(self._metrics["backpressure"]).avg / e2e)
-        post = self._phase_heat(_stats(self._metrics["client_post"]).avg / e2e)
-        styles = {
-            "encode": "muted" if acquire == "critical" else acquire,
-            "tcp-acquire": acquire,
-            "sse-decode": self._phase_heat(
-                _stats(self._metrics["stream_gen"]).avg / e2e
-            ),
-            "final-decode": post,
-            "complete-ipc": post,
-        }
-        leaf_styles = set(styles.values())
-        if "critical" in leaf_styles:
-            root_style = "critical"
-        elif "warn" in leaf_styles:
-            root_style = "warn"
-        else:
-            root_style = "section"
-        return styles, root_style
+    # Each phase maps to the lifecycle stage it occurs in; the leaf takes that
+    # stage's %E2E-column colour so the tree matches the REQUEST LIFECYCLE table
+    # above. ("tail" resolves to tail_stream / tail_offline by mode.)
+    _PHASE_STAGE: dict[str, str] = {
+        "encode": "backpressure",
+        "tcp-acquire": "backpressure",
+        "sse-decode": "stream_gen",
+        "final-decode": "tail",
+        "complete-ipc": "tail",
+    }
 
     def _backpressure_cause_lines(self) -> list[list[tuple[str, str]]]:
-        """Lines of the cause tree, one per worker-loop phase, heat-styled by
-        :meth:`_backpressure_phase_styles`. The connector spine is on the RIGHT
-        (``label ─┤``; final ``─┘``) so when each line is right-aligned beside
-        the timeline the spine lands directly under the backpressure % value in
-        the verdict above — the tree visibly drops from the number. No root
-        line: the verdict's 'backpressure [workers busy]' cell is the root."""
-        styles, _root = self._backpressure_phase_styles()
+        """Reverse cause tree (right-aligned spine ``─┤`` / ``─┘``, dropping from
+        the verdict's backpressure value above), one leaf per worker-loop phase.
+        Every leaf starts at the muted base colour and takes its lifecycle
+        stage's heat (warn ≥ 15% / critical ≥ 25% of E2E), so it lights up in
+        step with that stage's %E2E cell in the table above."""
+        e2e = _stats(self._metrics["e2e"]).avg or 1.0
+        tail = (
+            "tail_stream"
+            if _stats(self._metrics["stream_gen"]).n > 0
+            else "tail_offline"
+        )
         lines: list[list[tuple[str, str]]] = []
         last = len(self._BACKPRESSURE_PHASES) - 1
         for i, phase in enumerate(self._BACKPRESSURE_PHASES):
             conn = " ─┘" if i == last else " ─┤"
-            lines.append([(phase, styles[phase]), (conn, "rule")])
+            stage_key = self._PHASE_STAGE[phase]
+            if stage_key == "tail":
+                stage_key = tail
+            pct = min(100.0, 100.0 * _stats(self._metrics[stage_key]).avg / e2e)
+            lines.append([(phase, _heat(pct) or "muted"), (conn, "rule")])
         return lines
 
     _TIMELINE_W = 80  # stacked-bar width in columns
@@ -1095,9 +1074,8 @@ class Dashboard:
         or shrinks between frames as the percentages drift. Sub-column stages
         round to width 0 and drop out rather than padding the total.
 
-        The ▓ backpressure segment is heat-graded on the shared _heat scale
-        (warn ≥ 15%, critical ≥ 25%), so when it lights up red its cause-tree
-        breakdown (hanging from the verdict above) lights up red too.
+        Segments use only the legend-key colors (▒ client / ▓ backpressure / █
+        server) — never heat red. Severity lives in the verdict + cause tree.
         """
         w = self._TIMELINE_W
         total = sum(pct for _side, pct in stage_data)
@@ -1127,7 +1105,7 @@ class Dashboard:
                         if side == _SIDE_SERVER:
                             glyph, gstyle = "█", "server_row"
                         elif side == _SIDE_BACKPRESSURE:
-                            glyph, gstyle = "▓", _heat(pct) or "warn"
+                            glyph, gstyle = "▓", "warn"  # fixed legend-key color
                         else:
                             glyph, gstyle = "▒", "client_row"
                         out.append(glyph * seg, style=gstyle)
