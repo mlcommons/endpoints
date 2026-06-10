@@ -46,7 +46,18 @@ from inference_endpoint.endpoint_client.http import (
     PooledConnection,
 )
 from inference_endpoint.profiling import profile
+from inference_endpoint.utils import trace
 from inference_endpoint.utils.logging import setup_logging
+from inference_endpoint.utils.trace import (
+    E_CONN_ACQUIRED,
+    E_RESPONSE_BYTES,
+    E_RESPONSE_DONE,
+    E_RESPONSE_HEADERS,
+    E_WORKER_RECEIVED,
+    E_WRITTEN,
+    emit_trace_id,
+    emit_trace_sid,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +92,15 @@ def worker_main(
 
     worker_log_format = f"%(asctime)s - %(name)s[W{worker_id}/%(process)d] - %(funcName)s - %(levelname)s - %(message)s"
     setup_logging(level=http_config.log_level, format_string=worker_log_format)
+    # -vvv: worker attaches to the FIFO main proc created at bootstrap.
+    # Missing here means the caller set trace_pipe_path but skipped
+    # mkfifo — fail loud rather than silently lose trace events.
+    if http_config.trace_pipe_path:
+        if not os.path.exists(http_config.trace_pipe_path):
+            raise FileNotFoundError(
+                f"trace_pipe_path={http_config.trace_pipe_path} missing"
+            )
+        trace.enable_tracing(http_config.trace_pipe_path)
 
     # Configure GC based on worker_gc_mode
     match http_config.worker_gc_mode:
@@ -174,6 +194,8 @@ class Worker:
 
         # Track active request tasks
         self._active_tasks: set[asyncio.Task] = set()
+        # Long-lived per-worker loop-lag sampler task (cancelled in _cleanup).
+        self._lag_task: asyncio.Task | None = None
 
         assert self.http_config.adapter is not None
         assert self.http_config.accumulator is not None
@@ -228,6 +250,13 @@ class Worker:
             # Signal handlers for graceful shutdown
             signal.signal(signal.SIGTERM, self.shutdown)
             signal.signal(signal.SIGINT, self.shutdown)
+
+            # Event-loop lag sampler also drains this worker's trace
+            # buffer on the loop thread — see `trace.emit_loop_lag`.
+            if trace.is_enabled():
+                self._lag_task = self._loop.create_task(
+                    trace.emit_loop_lag(self.worker_id)
+                )
 
             # Warmup connection pool if enabled
             warmup_cfg = self.http_config.warmup_connections
@@ -306,8 +335,10 @@ class Worker:
                     if query is None:
                         break
 
+                    sid = emit_trace_id(E_WORKER_RECEIVED, query.id)
+
                     # Prepare and fire request
-                    req = self._prepare_request(query)
+                    req = self._prepare_request(query, sid)
                     if not await self._fire_request(req):
                         continue
 
@@ -326,7 +357,7 @@ class Worker:
                     logger.error(f"Error in main loop: {type(e).__name__}: {str(e)}")
 
     @profile
-    def _prepare_request(self, query: Query) -> InFlightRequest:
+    def _prepare_request(self, query: Query, sid: int = 0) -> InFlightRequest:
         """Build InFlightRequest with serialized HTTP bytes."""
         # Encode Query into HTTP payload bytes using adapter
         body_bytes = self._adapter.encode_query(query)
@@ -339,11 +370,12 @@ class Worker:
             extra_headers=query.headers,
         )
 
-        # Create request context
+        # Create request context.
         req = InFlightRequest(
             query_id=query.id,
             http_bytes=http_bytes,
             is_streaming=is_streaming,
+            sid=sid,
         )
 
         return req
@@ -365,8 +397,11 @@ class Worker:
             # Acquire connection from pool
             conn = await self._pool.acquire()
 
+            emit_trace_sid(E_CONN_ACQUIRED, req.sid)
+
             # Write request bytes directly to transport
             conn.protocol.write(req.http_bytes)
+            emit_trace_sid(E_WRITTEN, req.sid)
 
             # Store connection on req for response processing
             req.connection = conn
@@ -386,6 +421,7 @@ class Worker:
         try:
             # Await headers and handle error status
             status_code, _ = await conn.protocol.read_headers()
+            emit_trace_sid(E_RESPONSE_HEADERS, req.sid)
             if status_code != 200:
                 error_body = await conn.protocol.read_body()
                 self._pool.release(conn)
@@ -423,13 +459,20 @@ class Worker:
         accumulator = self._accumulator(query_id, self.http_config.stream_all_chunks)
 
         # Process SSE stream - yields batches of chunks
+        first_chunk = True
         async for chunk_batch in self._iter_sse_lines(conn):
+            if first_chunk:
+                emit_trace_sid(E_RESPONSE_BYTES, req.sid)
+                first_chunk = False
             for delta in chunk_batch:
                 if stream_chunk := accumulator.add_chunk(delta):
                     self._responses.send(stream_chunk)
 
         # Release connection early - done with socket I/O (idempotent)
         self._pool.release(conn)
+
+        # Last chunk received — splits server token-gen from the client tail.
+        emit_trace_sid(E_RESPONSE_DONE, req.sid)
 
         # Send final complete back to main rank
         self._responses.send(accumulator.get_final_output())
@@ -442,6 +485,7 @@ class Worker:
 
         # Read entire response body
         response_bytes = await conn.protocol.read_body()
+        emit_trace_sid(E_RESPONSE_BYTES, req.sid)
 
         # Release connection early - done with socket I/O (idempotent)
         self._pool.release(conn)
@@ -529,10 +573,18 @@ class Worker:
         """Clean up resources."""
         # Cancel pending tasks to drop HTTP requests
         if not_done := len(self._active_tasks):
-            [task.cancel() for task in self._active_tasks]
+            for task in self._active_tasks:
+                task.cancel()
             await asyncio.gather(*self._active_tasks, return_exceptions=True)
             self._active_tasks.clear()
             logger.debug(f"Cancelled {not_done} pending requests.")
+
+        # Cancel the loop-lag sampler so its final ring flush runs (the main
+        # proc cancels its equivalent in trace.teardown; workers must too).
+        if self._lag_task is not None:
+            self._lag_task.cancel()
+            await asyncio.gather(self._lag_task, return_exceptions=True)
+            self._lag_task = None
 
         # Close connection pool
         if self._pool:
