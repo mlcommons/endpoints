@@ -67,16 +67,41 @@ def _try_load_snapshot(path: str) -> dict | None:
 
 def _benchmark_pids(root_pid: int) -> list[int]:
     """The benchmark process tree whose TCP conns we count: the main proc
-    plus its direct children (workers, aggregator, event logger), minus
-    this dashboard process itself."""
-    pids = [root_pid]
+    and ALL descendants, found by one pass over /proc/*/stat ppids + BFS.
+    Do NOT use /proc/<pid>/task/<tid>/children for this: entries live under
+    the child's spawning THREAD, so children whose spawning thread has
+    exited (the workers — multiprocessing spawn from a short-lived thread)
+    vanish from every children file while ppid in stat stays correct."""
+    children: dict[int, list[int]] = {}
     try:
-        with open(f"/proc/{root_pid}/task/{root_pid}/children") as f:
-            pids += [int(p) for p in f.read().split()]
-    except (OSError, ValueError):
-        pass  # parent exiting / non-Linux — count what we have
-    me = os.getpid()
-    return [p for p in pids if p != me]
+        entries = os.listdir("/proc")
+    except OSError:
+        return [root_pid]  # non-Linux — count the root alone
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/stat") as f:
+                stat = f.read()
+        except OSError:
+            continue  # raced a process exit
+        # stat is "pid (comm) state ppid ..." and comm may contain spaces —
+        # parse from after the LAST closing paren; ppid is the 2nd field.
+        try:
+            ppid = int(stat[stat.rindex(")") + 1 :].split()[1])
+        except (ValueError, IndexError):
+            continue
+        children.setdefault(ppid, []).append(int(entry))
+    seen: set[int] = set()
+    queue = [root_pid]
+    while queue:
+        pid = queue.pop()
+        if pid in seen:
+            continue
+        seen.add(pid)
+        queue.extend(children.get(pid, ()))
+    seen.discard(os.getpid())
+    return sorted(seen)
 
 
 def _count_established_tcp(pids: list[int]) -> int:
