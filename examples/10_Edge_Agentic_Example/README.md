@@ -226,6 +226,35 @@ print('Overall MT accuracy:',
 
 ---
 
+## Step 5 — Performance benchmark (optional)
+
+Steps 2–4 measure _accuracy_. To measure _performance_ (throughput, TTFT, TPOT,
+latency) on the same endpoint, replay recorded multi-turn agentic-coding
+trajectories as a performance workload:
+
+```bash
+# Run from the examples/10_Edge_Agentic_Example/ directory
+inference-endpoint benchmark from-config \
+  --config online_agentic_coding_perf.yaml
+```
+
+This is a **performance** dataset — it carries no ground truth and is not
+scored. The runner makes one single-stream pass (one in-flight conversation,
+matching a single-slot `llama-server -np 1`) over the trajectories and reports
+token-denominated latency/throughput metrics.
+
+| Dataset                   | Conversations | Generated turns | One single-stream pass |
+| ------------------------- | ------------- | --------------- | ---------------------- |
+| `agentic_coding_7.jsonl`  | 7 (default)   | 227             | ~45–50 min on Thor     |
+| `agentic_coding_16.jsonl` | 16 (master)   | 889             | longer, more samples   |
+
+The config defaults to the 7-conversation subset (sized for a ~1 h edge
+budget). Point `datasets[0].path` at `agentic_coding_16.jsonl` for a longer,
+more representative window. Raise `load_pattern.target_concurrency` only when
+pointing at a multi-slot endpoint.
+
+---
+
 ## Reproducible runs with `--seed`
 
 Pass `--seed <N>` to fix the RNG used for sampling. The same seed + same model +

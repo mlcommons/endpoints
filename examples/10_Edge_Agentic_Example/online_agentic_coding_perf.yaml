@@ -1,16 +1,25 @@
 # Agentic coding performance benchmark — edge device
 #
-# Replays recorded multi-turn agentic coding trajectories (SWE-bench-style) as a
-# performance workload against the same served endpoint used for BFCL v4
-# accuracy. This is a *performance* dataset (throughput/latency); it carries no
-# ground truth and is not scored.
+# Replays recorded multi-turn agentic-coding trajectories (SWE-bench-style) as a
+# *performance* workload (throughput / TTFT / TPOT / latency) against the same
+# served endpoint used for BFCL v4 accuracy. This is a performance dataset: it
+# carries no ground truth and is not scored.
 #
-# Each recorded conversation is replayed turn by turn: the recorded user/tool
+# Each recorded conversation is replayed turn by turn — the recorded user/tool
 # turns are issued to the endpoint and the model generates each assistant
-# response (use_dataset_history=True, the default — recorded assistant/tool
-# history is fed back so every turn sees the original context).
+# response (use_dataset_history=True, the default, so the recorded
+# assistant/tool history is fed back and every turn sees the original context).
+# The runner makes one pass over the dataset (each conversation once) and stops
+# when all conversations are exhausted.
 #
-# Run:
+# Scenario: single-stream (one in-flight conversation, single worker/connection)
+# — the honest measurement for an edge endpoint served single-slot
+# (llama.cpp -np 1, as in the README accuracy runs). The 7-conversation subset
+# is sized so one pass completes in ~45-50 min on a ~10 tok/s edge box (e.g.
+# Jetson Thor, Qwen3.6-27B Q4_K_M) — enough turns for stable TTFT/TPOT/latency
+# percentiles while staying inside a ~1 h edge window.
+#
+# Run (start the edge server first; see README.md):
 #   inference-endpoint benchmark from-config \
 #     --config online_agentic_coding_perf.yaml
 #
@@ -21,28 +30,47 @@ version: "1.0"
 type: "online"
 
 model_params:
-  name: "Qwen3.6-27B-Q4_K_M" # replace with your served model name
+  # HF repo id of the served model's tokenizer. The tool derives the tokenizer
+  # from this name to compute token-denominated metrics (ISL/OSL/TPOT); set it
+  # to a resolvable tokenizer (HF repo or local dir). llama-server ignores the
+  # request `model` field and serves the loaded GGUF, so routing is unaffected.
+  name: "Qwen/Qwen3.6-27B"
+  # Deterministic decoding so the run is reproducible and matches the BFCL v4
+  # accuracy setup. Reasoning is disabled server-side (llama-server
+  # --reasoning off), as in the accuracy runs.
+  temperature: 0
+  seed: 42
   max_new_tokens: 1024
 
 datasets:
   - name: agentic_coding
     type: performance
-    # 16 recorded agentic-coding conversations (~889 client turns).
-    path: examples/10_Edge_Agentic_Example/agentic_coding_16.jsonl
+    # 7 recorded agentic-coding conversations (227 generated turns), a subset of
+    # the 16-conversation master set, sized so one single-stream pass completes
+    # in ~45-50 min on a ~10 tok/s edge box. Swap in agentic_coding_16.jsonl for
+    # a longer, more representative window (~889 generated turns).
+    path: examples/10_Edge_Agentic_Example/agentic_coding_7.jsonl
     multi_turn:
+      # Per-turn deadline; a timeout aborts that turn and the rest of its
+      # conversation. 10 min is generous for slow edge decode.
       turn_timeout_s: 600.0
 
 settings:
   runtime:
     min_duration_ms: 0
-    # Cap the run at 1h so it stays within an edge-device budget; the dataset
-    # may finish sooner once all conversations are exhausted.
+    # Safety cap (1 h) so the run stays within an edge budget even if decode is
+    # slower than expected; one pass should finish in ~45-50 min.
     max_duration_ms: 3600000
   load_pattern:
     type: multi_turn
-    # Concurrent in-flight conversations. Tune to the edge endpoint's capacity;
-    # raise on larger hardware for higher throughput.
-    target_concurrency: 16
+    # Single-stream: one in-flight conversation at a time, matching a
+    # single-slot edge server (llama.cpp -np 1). Raise only when pointing at a
+    # multi-slot endpoint for higher throughput.
+    target_concurrency: 1
+  client:
+    num_workers: 1
+    max_connections: 1
+    warmup_connections: 0
 
 endpoint_config:
   endpoints:
