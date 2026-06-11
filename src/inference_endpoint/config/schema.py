@@ -97,6 +97,7 @@ class ScorerMethod(str, Enum):
     ROUGE = "rouge"
     CODE_BENCH = "code_bench_scorer"
     SHOPIFY_CATEGORY_F1 = "shopify_category_f1"
+    MULTI_TURN_INLINE = "multi_turn_inline"
     VBENCH = "vbench"
 
 
@@ -257,7 +258,6 @@ class MultiTurnConfig(BaseModel):
             response. A timeout aborts that turn and all remaining client
             turns of the same conversation because subsequent turns depend
             on the timed-out response.
-        use_dataset_history: If True, use pre-built message history from dataset.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -268,13 +268,6 @@ class MultiTurnConfig(BaseModel):
         description=(
             "Per-turn timeout in seconds. A timeout aborts that turn and all "
             "remaining turns in the same conversation."
-        ),
-    )
-    use_dataset_history: bool = Field(
-        True,
-        description=(
-            "Use dataset-provided message history for each turn instead of "
-            "reconstructing history from prior generated responses."
         ),
     )
     enable_salt: bool = Field(
@@ -289,13 +282,6 @@ class MultiTurnConfig(BaseModel):
         description=(
             "Pause for a predefined duration between turns. Duration is defined "
             "in dataset."
-        ),
-    )
-    inline_accuracy: bool = Field(
-        False,
-        description=(
-            "Score multi-turn inline accuracy from the performance dataset after "
-            "the benchmark run."
         ),
     )
     num_trajectories_to_issue: int | None = Field(

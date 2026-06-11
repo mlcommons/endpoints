@@ -15,6 +15,7 @@
 
 
 import inspect
+import json
 import logging
 import os
 import re
@@ -24,10 +25,11 @@ import sys
 import tempfile
 import uuid
 from abc import ABC, abstractmethod
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, ClassVar
 
+import msgspec
 import msgspec.json
 import numpy as np
 import pandas as pd
@@ -47,7 +49,9 @@ except ImportError:
     _nltk = None
 
 from ..core.record import EventRecord, EventType, SampleEventType
+from ..core.types import TextModelOutput
 from ..dataset_manager.dataset import Dataset
+from ..dataset_manager.multi_turn_dataset import MultiTurnDataset
 from ..dataset_manager.predefined.shopify_product_catalogue import ProductMetadata
 from .extractor import Extractor, PythonCodeExtractor
 
@@ -312,6 +316,512 @@ class RougeScorer(Scorer, scorer_id="rouge"):
         # TODO: return only rouge1 for now to align with other scorers
         # Return the rest of the metrics later
         return result, 1
+
+
+class MultiTurnInlineScorer(Scorer, scorer_id="multi_turn_inline"):
+    """Score multi-turn performance replay outputs without issuing another phase."""
+
+    REQUIRES_EXTRACTOR = False
+    _EXECUTABLE_ALIASES: ClassVar[dict[str, str]] = {
+        "python": "python",
+        "python2": "python",
+        "python3": "python",
+        "py": "python",
+        "pip": "pip",
+        "pip3": "pip",
+        "pytest": "pytest",
+        "pylint": "pylint",
+        "sphinx-build": "sphinx",
+        "sphinx-quickstart": "sphinx",
+        "cython": "cython",
+        "make": "make",
+        "conda": "conda",
+        "cat": "cat",
+        "head": "head",
+        "tail": "tail",
+        "less": "cat",
+        "more": "cat",
+        "wc": "wc",
+        "diff": "diff",
+        "grep": "grep",
+        "egrep": "grep",
+        "fgrep": "grep",
+        "rg": "grep",
+        "ag": "grep",
+        "sed": "sed",
+        "awk": "awk",
+        "gawk": "awk",
+        "tr": "tr",
+        "sort": "sort",
+        "uniq": "uniq",
+        "cut": "cut",
+        "find": "find",
+        "ls": "ls",
+        "locate": "find",
+        "xargs": "xargs",
+        "cp": "cp",
+        "mv": "mv",
+        "rm": "rm",
+        "mkdir": "mkdir",
+        "touch": "touch",
+        "tee": "tee",
+        "source": "source",
+        ".": "source",
+        "which": "which",
+        "alias": "alias",
+        "unset": "unset",
+        "export": "export",
+        "git": "git",
+        "curl": "curl",
+        "wget": "curl",
+        "true": "true",
+        "false": "false",
+        "timeout": "timeout",
+        "date": "date",
+        "apt-get": "apt",
+        "apt": "apt",
+        "yum": "yum",
+    }
+    _SHELL_WRAPPERS: ClassVar[set[str]] = {
+        "env",
+        "time",
+        "nice",
+        "sudo",
+        "exec",
+        "command",
+    }
+    _REPEAT_SUFFIX_RE: ClassVar[re.Pattern[str]] = re.compile(r"__repeat_(\d+)$")
+    _WORKFLOW_CONVERSATION_RE: ClassVar[re.Pattern[str]] = re.compile(r"^sim_\d+$")
+    _INTENT_RE: ClassVar[re.Pattern[str]] = re.compile(
+        r"\bintent:\s*(I\d{3})\b", re.IGNORECASE
+    )
+    _BARE_INTENT_RE: ClassVar[re.Pattern[str]] = re.compile(r"\bI(\d{3})\b")
+    _COMMAND_SEPARATOR_RE: ClassVar[re.Pattern[str]] = re.compile(r"\|\||\||&&|;|\n")
+    _QUOTED_RE: ClassVar[re.Pattern[str]] = re.compile(
+        r"'[^']*'|\"(?:[^\"\\]|\\.)*\"|`[^`]*`"
+    )
+    _ENV_ASSIGNMENT_RE: ClassVar[re.Pattern[str]] = re.compile(
+        r"^[A-Za-z_][A-Za-z0-9_]*="
+    )
+    _PY_VERSION_SUFFIX_RE: ClassVar[re.Pattern[str]] = re.compile(r"\.\d+(\.\d+)?$")
+
+    def __init__(
+        self,
+        dataset_name: str,
+        dataset: Dataset,
+        report_dir: os.PathLike,
+        extractor: type[Extractor] | None = None,
+        ground_truth_column: str | None = None,
+        scores_filename: str = "scores.json",
+    ):
+        """Initialize a scorer for already-issued multi-turn performance events.
+
+        The scorer intentionally does not use an extractor or a single
+        ``ground_truth`` column. Ground truth is derived from expected assistant
+        turns in the loaded ``MultiTurnDataset`` dataframe.
+
+        Example:
+            A performance dataset config such as
+            ``accuracy_config.eval_method: multi_turn_inline`` instantiates this
+            scorer with ``dataset_name="performance"`` so it reads the
+            performance phase's entries from ``sample_idx_map.json``.
+        """
+        if extractor is not None:
+            raise ValueError("MultiTurnInlineScorer does not use an extractor")
+        super().__init__(
+            dataset_name=dataset_name,
+            dataset=dataset,
+            report_dir=report_dir,
+            extractor=None,
+            ground_truth_column=ground_truth_column,
+        )
+        self.scores_filename = scores_filename
+
+    def score_single_sample(self, value: str, ground_truth: str) -> float:
+        """Reject single-sample scoring for the conversation-level scorer.
+
+        Multi-turn accuracy depends on neighboring turns and conversation ids,
+        so a single output string cannot be scored in isolation.
+
+        Example:
+            ``score_single_sample("answer", "expected")`` raises
+            ``RuntimeError``; callers should use ``score()``.
+        """
+        raise RuntimeError(
+            "MultiTurnInlineScorer scores whole conversations; call score()."
+        )
+
+    def score(self) -> tuple[float | None, int]:
+        """Score completed multi-turn performance outputs.
+
+        The method builds expected assistant turns from the loaded dataset,
+        reads model assistant turns from ``events.jsonl``, identifies each
+        conversation as workflow or coding, and averages only turns with
+        scorable ground truth.
+
+        Examples:
+            A workflow turn with ``intent_codes=["I042"]`` scores ``1.0`` when
+            the model text contains ``intent: I042``.
+
+            A coding turn with expected bash command ``{"cmd": "python test.py"}``
+            is scored by comparing normalized executables such as ``["python"]``
+            against the model's bash tool calls.
+        """
+        if not isinstance(self.dataset, MultiTurnDataset):
+            raise TypeError("MultiTurnInlineScorer requires a MultiTurnDataset")
+        assert (
+            self.dataset.dataframe is not None
+        ), f"Dataset {self.dataset} has no dataframe loaded"
+
+        expected = self._expected_assistant_turns()
+        scorable_expected: dict[tuple[str, int], dict[str, Any]] = {}
+        excluded_turns: list[dict[str, Any]] = []
+        for (conversation_id, client_turn), ground_truth in sorted(expected.items()):
+            domain = (
+                "workflow"
+                if self._WORKFLOW_CONVERSATION_RE.match(conversation_id)
+                else "coding"
+            )
+            has_ground_truth = (
+                bool(self._ground_truth_intents(ground_truth))
+                if domain == "workflow"
+                else bool(self._bash_actions(ground_truth))
+            )
+            if has_ground_truth:
+                scorable_expected[(conversation_id, client_turn)] = ground_truth
+            else:
+                excluded_turns.append(
+                    {
+                        "conversation_id": conversation_id,
+                        "turn": ground_truth["_assistant_turn"],
+                        "domain": domain,
+                        "exclude_reason": "no ground truth",
+                    }
+                )
+
+        model_turns = self._completed_model_turns(set(scorable_expected))
+        observed_repeats = sorted(
+            {key[1] for key, model in model_turns.items() if model}
+        )
+        repeats_to_score = observed_repeats or [1]
+
+        total_score = 0.0
+        n_scored = 0
+        domain_totals = {"coding": 0.0, "workflow": 0.0}
+        domain_counts = {"coding": 0, "workflow": 0}
+        per_turn: list[dict[str, Any]] = []
+
+        for repeat_id in repeats_to_score:
+            for (conversation_id, client_turn), ground_truth in sorted(
+                scorable_expected.items()
+            ):
+                key = (conversation_id, repeat_id, client_turn)
+                model = model_turns.get(key)
+                domain = (
+                    "workflow"
+                    if self._WORKFLOW_CONVERSATION_RE.match(conversation_id)
+                    else "coding"
+                )
+                score: float | None = None
+                row: dict[str, Any] = {
+                    "conversation_id": conversation_id,
+                    "repeat": repeat_id,
+                    "turn": ground_truth["_assistant_turn"],
+                    "domain": domain,
+                }
+
+                if model is None:
+                    row["missing"] = True
+                    model = {"role": "assistant"}
+
+                if domain == "workflow":
+                    gt_intents = self._ground_truth_intents(ground_truth)
+                    model_intent = self._model_intent(model)
+                    row["gt_intents"] = sorted(gt_intents)
+                    row["model_intent"] = model_intent
+                    if gt_intents:
+                        score = 1.0 if model_intent in gt_intents else 0.0
+                else:
+                    gt_actions = self._bash_actions(ground_truth)
+                    model_actions = self._bash_actions(model)
+                    row["gt_actions"] = gt_actions
+                    row["model_actions"] = model_actions
+                    if gt_actions:
+                        gt_counts = Counter(gt_actions)
+                        model_counts = Counter(model_actions)
+                        union = sum((gt_counts | model_counts).values())
+                        score = (
+                            sum((gt_counts & model_counts).values()) / union
+                            if union
+                            else None
+                        )
+
+                row["score"] = round(score, 4) if score is not None else None
+                per_turn.append(row)
+                if score is None:
+                    continue
+                total_score += score
+                n_scored += 1
+                domain_totals[domain] += score
+                domain_counts[domain] += 1
+
+        observed_outputs = {key for key, model in model_turns.items() if model}
+        expected_outputs = {
+            (conversation_id, repeat_id, turn)
+            for conversation_id, turn in scorable_expected
+            for repeat_id in repeats_to_score
+        }
+        missing_outputs = len(expected_outputs - observed_outputs)
+        valid = (
+            bool(scorable_expected)
+            and bool(observed_repeats)
+            and missing_outputs == 0
+            and n_scored > 0
+        )
+        score = round(total_score / n_scored, 4) if n_scored else None
+        result: dict[str, Any] = {
+            "score": score,
+            "valid": valid,
+            "turns": {
+                "expected_per_repeat": len(scorable_expected),
+                "excluded_per_repeat": len(excluded_turns),
+                "repeats": len(observed_repeats),
+                "expected": len(expected_outputs),
+                "observed": len(observed_outputs),
+                "missing": missing_outputs,
+                "scored": n_scored,
+            },
+            "domains": {
+                domain: {
+                    "score": round(domain_totals[domain] / domain_counts[domain], 4),
+                    "scored": domain_counts[domain],
+                }
+                for domain in ("coding", "workflow")
+                if domain_counts[domain]
+            },
+            "per_turn": per_turn,
+        }
+        if excluded_turns:
+            result["excluded_turns"] = excluded_turns
+        if not valid:
+            reasons: list[str] = []
+            if not expected:
+                reasons.append("no expected assistant turns found")
+            if not observed_repeats:
+                reasons.append("no matching completed turns found")
+            if missing_outputs:
+                reasons.append(
+                    f"{missing_outputs}/{len(expected_outputs)} expected turn(s) "
+                    "missing output"
+                )
+            if not n_scored:
+                reasons.append("no scorable turns found")
+            result["invalid_reason"] = "; ".join(reasons)
+
+        out_path = self.report_dir / self.scores_filename
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(result, indent=2))
+        return score if valid else None, len(observed_repeats)
+
+    def _expected_assistant_turns(self) -> dict[tuple[str, int], dict[str, Any]]:
+        """Return expected assistant turns keyed by source conversation and turn.
+
+        The dataset stores alternating client-side rows and expected assistant
+        rows. This method pairs each ``user`` or ``tool`` row with the following
+        ``assistant`` row and uses the client row's turn as the event-log turn
+        to match.
+
+        Example:
+            Rows ``conv1/user/turn=1`` followed by ``conv1/assistant/turn=2``
+            produce ``expected[("conv1", 1)]`` with ``"_assistant_turn": 2``.
+        """
+        assert (
+            self.dataset.dataframe is not None
+        ), f"Dataset {self.dataset} has no dataframe loaded"
+
+        rows_by_conversation: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for raw_row in self.dataset.dataframe.to_dict("records"):
+            row: dict[str, Any] = {}
+            for field, value in raw_row.items():
+                try:
+                    row[field] = None if value != value else value
+                except (TypeError, ValueError):
+                    row[field] = value
+            conversation_id = row.get("conversation_id")
+            if conversation_id is not None:
+                rows_by_conversation[str(conversation_id)].append(row)
+
+        expected: dict[tuple[str, int], dict[str, Any]] = {}
+        for conversation_id, rows in rows_by_conversation.items():
+            rows.sort(key=lambda row: int(row.get("turn") or 0))
+            for row, next_row in zip(rows, rows[1:], strict=False):
+                if row.get("role") not in ("user", "tool"):
+                    continue
+                if next_row.get("role") != "assistant":
+                    continue
+                try:
+                    client_turn = int(row.get("turn") or 0)
+                    assistant_turn = int(next_row.get("turn") or 0)
+                except (TypeError, ValueError):
+                    continue
+                expected[(conversation_id, client_turn)] = {
+                    **next_row,
+                    "_assistant_turn": assistant_turn,
+                }
+        return expected
+
+    def _completed_model_turns(
+        self, expected_keys: set[tuple[str, int]]
+    ) -> dict[tuple[str, int, int], dict[str, Any] | None]:
+        """Read completed model assistant turns from ``events.jsonl``.
+
+        Only COMPLETE records matching an expected ``(conversation_id, turn)``
+        are returned. Repeated trajectory ids are split from conversation ids
+        ending in ``__repeat_N``.
+
+        Example:
+            Event conversation id ``"conv1__repeat_3"`` and turn ``1`` becomes
+            key ``("conv1", 3, 1)``. Without a repeat suffix, the repeat id is
+            ``1``.
+        """
+        events_path = self.report_dir / "events.jsonl"
+        if not events_path.exists():
+            raise FileNotFoundError(f"Events log file not found at {events_path}")
+
+        decoder = msgspec.json.Decoder(type=EventRecord, dec_hook=EventType.decode_hook)
+        model_turns: dict[tuple[str, int, int], dict[str, Any] | None] = {}
+        with events_path.open() as f:
+            for line_no, line in enumerate(f, 1):
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                try:
+                    record = decoder.decode(stripped)
+                except msgspec.DecodeError as exc:
+                    logger.warning(
+                        "Skipping malformed event log line %d in %s: %s",
+                        line_no,
+                        events_path,
+                        exc,
+                    )
+                    continue
+                if record.event_type != SampleEventType.COMPLETE:
+                    continue
+                if record.turn is None or not record.conversation_id:
+                    continue
+
+                conversation_id = record.conversation_id
+                repeat_id = 1
+                repeat_match = self._REPEAT_SUFFIX_RE.search(conversation_id)
+                if repeat_match is not None:
+                    conversation_id = conversation_id[: repeat_match.start()]
+                    repeat_id = int(repeat_match.group(1))
+                turn = int(record.turn)
+                if (conversation_id, turn) not in expected_keys:
+                    continue
+
+                model: dict[str, Any] | None = None
+                if isinstance(record.data, TextModelOutput):
+                    content, reasoning, tool_calls = record.data.as_message_parts()
+                    model = {
+                        "role": "assistant",
+                        "content": content,
+                        "reasoning_content": reasoning,
+                        "tool_calls": list(tool_calls) if tool_calls else None,
+                    }
+
+                key = (conversation_id, repeat_id, turn)
+                if model is not None or key not in model_turns:
+                    model_turns[key] = model
+        return model_turns
+
+    def _ground_truth_intents(self, turn: dict[str, Any]) -> set[str]:
+        """Extract valid workflow intent codes from a ground-truth turn.
+
+        Example:
+            ``{"intent_codes": ["i001", "I002", None]}`` returns
+            ``{"I001", "I002"}``.
+        """
+        codes = turn.get("intent_codes")
+        if not isinstance(codes, list | tuple):
+            return set()
+        return {code.upper() for code in codes if isinstance(code, str) and code}
+
+    def _model_intent(self, turn: dict[str, Any]) -> str | None:
+        """Extract the model's workflow intent code from text fields.
+
+        The explicit ``intent: I123`` form is preferred. If absent, the last bare
+        ``I123`` token in ``reasoning_content`` or ``content`` is used.
+
+        Example:
+            ``{"content": "final intent: I042"}`` returns ``"I042"``.
+        """
+        for field in ("reasoning_content", "content"):
+            text = turn.get(field) or ""
+            if not isinstance(text, str):
+                continue
+            match = self._INTENT_RE.search(text)
+            if match is not None:
+                return match.group(1).upper()
+        for field in ("reasoning_content", "content"):
+            text = turn.get(field) or ""
+            if not isinstance(text, str):
+                continue
+            matches = list(self._BARE_INTENT_RE.finditer(text))
+            if matches:
+                return f"I{matches[-1].group(1)}"
+        return None
+
+    def _bash_actions(self, turn: dict[str, Any]) -> list[str]:
+        """Extract normalized bash executable names from assistant tool calls.
+
+        Only ``bash`` function tool calls are considered. Shell wrappers,
+        leading environment assignments, command paths, and common aliases are
+        normalized before scoring.
+
+        Example:
+            A tool call with ``{"cmd": "CUDA_VISIBLE_DEVICES=0 /usr/bin/python3 -m pytest"}``
+            returns ``["python"]``.
+        """
+        tool_calls = turn.get("tool_calls")
+        if not isinstance(tool_calls, list | tuple):
+            return []
+
+        actions: list[str] = []
+        for tool_call in tool_calls:
+            if not isinstance(tool_call, dict):
+                continue
+            fn = tool_call.get("function") or {}
+            if not isinstance(fn, dict) or fn.get("name") != "bash":
+                continue
+            args = fn.get("arguments")
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except json.JSONDecodeError:
+                    continue
+            if not isinstance(args, dict):
+                continue
+            command = args.get("command") or args.get("cmd")
+            if not isinstance(command, str):
+                continue
+
+            command = self._QUOTED_RE.sub(" ", command)
+            for stage in self._COMMAND_SEPARATOR_RE.split(command):
+                tokens = stage.split()
+                while tokens and (
+                    self._ENV_ASSIGNMENT_RE.match(tokens[0])
+                    or tokens[0] in self._SHELL_WRAPPERS
+                ):
+                    tokens = tokens[1:]
+                if not tokens:
+                    continue
+                executable = tokens[0].rsplit("/", 1)[-1].lower()
+                executable = self._PY_VERSION_SUFFIX_RE.sub("", executable)
+                action = self._EXECUTABLE_ALIASES.get(executable)
+                if action:
+                    actions.append(action)
+        return actions
 
 
 class LiveCodeBenchScorer(Scorer, scorer_id="code_bench_scorer"):

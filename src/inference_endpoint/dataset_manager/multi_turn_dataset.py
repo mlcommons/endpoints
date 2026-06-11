@@ -15,7 +15,6 @@
 
 """Multi-turn conversation dataset for conversational AI benchmarking."""
 
-import hashlib
 import logging
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -63,10 +62,6 @@ class ConversationMetadata:
     pre_built_messages_by_key: dict[tuple[str, int], list[dict]] = field(
         default_factory=dict
     )
-    current_turn_messages_by_key: dict[tuple[str, int], list[dict]] = field(
-        default_factory=dict
-    )
-    system_prompts_by_conv: dict[str, str | None] = field(default_factory=dict)
     delay_seconds_by_key: dict[tuple[str, int], float] = field(default_factory=dict)
 
 
@@ -116,20 +111,17 @@ def _expand_tool_results(row: dict | pd.Series) -> list[dict]:
 def _build_conversation_metadata(
     conv_id: Any,
     group: Any,
-    enable_salt: bool,
 ) -> tuple[
     str,
     dict[tuple[str, int], list[dict]],
-    dict[tuple[str, int], list[dict]],
-    str | None,
     dict[tuple[str, int], float],
     list[ConversationSampleEntry],
     int,
 ]:
     """Build message history for all client turns in a single conversation.
 
-    Returns a tuple of (str_conv_id, pre_built_messages, current_turn_messages,
-    system_prompt, delay_seconds, samples, client_turns_count).
+    Returns a tuple of (str_conv_id, pre_built_messages, delay_seconds, samples,
+    client_turns_count).
     """
     str_conv_id = str(conv_id)
     sorted_group = group.sort_values("turn")
@@ -141,25 +133,8 @@ def _build_conversation_metadata(
         if val and isinstance(val, str):
             system_content = val
             break
-    if enable_salt and system_content:
-        repeat_salt = hashlib.blake2b(b"1", digest_size=2).hexdigest()
-        conv_salt = hashlib.blake2b(
-            str_conv_id.encode("utf-8"), digest_size=2
-        ).hexdigest()
-        system_content = (
-            f"[salt: {repeat_salt}]\n\n"
-            f"{system_content}\n\n"
-            f"[salt: {conv_salt}]"
-        )
-    elif enable_salt:
-        logger.warning(
-            "multi_turn.enable_salt requested but conversation %s has no "
-            "system prompt; salt not applied",
-            conv_id,
-        )
 
     pre_built_messages_by_key: dict[tuple[str, int], list[dict]] = {}
-    current_turn_messages_by_key: dict[tuple[str, int], list[dict]] = {}
     delay_seconds_by_key: dict[tuple[str, int], float] = {}
     samples: list[ConversationSampleEntry] = []
 
@@ -206,7 +181,6 @@ def _build_conversation_metadata(
             pre_built_messages_by_key[(str_conv_id, t_n)] = (
                 list(history) + current_turn_msgs
             )
-            current_turn_messages_by_key[(str_conv_id, t_n)] = current_turn_msgs
             history.extend(current_turn_msgs)
 
             delay_val = row.get("delay_seconds")
@@ -231,8 +205,6 @@ def _build_conversation_metadata(
     return (
         str_conv_id,
         pre_built_messages_by_key,
-        current_turn_messages_by_key,
-        system_content,
         delay_seconds_by_key,
         samples,
         client_turns_count,
@@ -288,7 +260,6 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
                 self.dataframe = self.dataframe.loc[~metadata_rows].reset_index(
                     drop=True
                 )
-        self._enable_salt = False
         self._conv_groups = dict(
             list(self.dataframe.groupby("conversation_id", sort=False, dropna=False))
         )
@@ -297,9 +268,6 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
         self._validate_turn_numbering()
         # Populated by load() after transforms; None until then.
         self.conversation_metadata: ConversationMetadata | None = None
-
-    def enable_salt(self) -> None:
-        self._enable_salt = True
 
     def _validate_conversation_grouping(self) -> None:
         """Validate that all rows for each conversation_id appear consecutively in file order.
@@ -515,23 +483,17 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
         samples: list[ConversationSampleEntry] = []
         client_turns_per_conv: dict[str, int] = {}
         pre_built_messages_by_key: dict[tuple[str, int], list[dict]] = {}
-        current_turn_messages_by_key: dict[tuple[str, int], list[dict]] = {}
-        system_prompts_by_conv: dict[str, str | None] = {}
         delay_seconds_by_key: dict[tuple[str, int], float] = {}
 
         for conv_id, group in self._conv_groups.items():
             (
                 str_conv_id,
                 partial_pre_built,
-                partial_current_turn,
-                system_prompt,
                 partial_delay,
                 conv_samples,
                 client_turns_count,
-            ) = _build_conversation_metadata(conv_id, group, self._enable_salt)
+            ) = _build_conversation_metadata(conv_id, group)
             pre_built_messages_by_key.update(partial_pre_built)
-            current_turn_messages_by_key.update(partial_current_turn)
-            system_prompts_by_conv[str_conv_id] = system_prompt
             delay_seconds_by_key.update(partial_delay)
             samples.extend(conv_samples)
             client_turns_per_conv[str_conv_id] = client_turns_count
@@ -542,8 +504,6 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
             max_turns_per_conv=max(g["turn"].max() for g in self._conv_groups.values()),
             client_turns_per_conversation=client_turns_per_conv,
             pre_built_messages_by_key=pre_built_messages_by_key,
-            current_turn_messages_by_key=current_turn_messages_by_key,
-            system_prompts_by_conv=system_prompts_by_conv,
             delay_seconds_by_key=delay_seconds_by_key,
         )
 

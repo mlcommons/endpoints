@@ -290,7 +290,7 @@ def _load_datasets(
         logger.info(f"Loaded {ds} - {ds.num_samples()} samples")
 
     if not accuracy_cfgs:
-        logger.info("No accuracy datasets provided")
+        logger.info("No separate accuracy datasets provided")
     if len(performance_cfgs) > 1:
         raise InputValidationError("Multiple performance datasets not supported")
 
@@ -647,11 +647,6 @@ async def _run_benchmark_async(
                 num_trajectories_to_issue=(
                     mt_cfg.num_trajectories_to_issue if mt_cfg is not None else None
                 ),
-                stop_issuing_on_first_user_complete=(
-                    mt_cfg.stop_issuing_on_first_user_complete
-                    if mt_cfg is not None
-                    else None
-                ),
             )
 
         _on_sample_complete: Callable[[QueryResult], None]
@@ -833,44 +828,6 @@ def _salvage_tmpfs(report_dir: Path, tmpfs_dir: Path) -> None:
         logger.debug(f"Copied {src_events} -> {dst_events}")
 
 
-def _inline_score_multi_turn_if_enabled(
-    ctx: BenchmarkContext,
-) -> tuple[str, dict[str, Any]] | None:
-    if not isinstance(ctx.dataloader, MultiTurnDataset):
-        return None
-
-    perf_cfg = next(
-        (ds for ds in ctx.config.datasets if ds.type == DatasetType.PERFORMANCE),
-        None,
-    )
-    if perf_cfg is None or perf_cfg.multi_turn is None:
-        return None
-    if not perf_cfg.multi_turn.inline_accuracy:
-        return None
-    if perf_cfg.path is None:
-        raise InputValidationError(
-            "Multi-turn inline accuracy requires a performance dataset with "
-            "multi_turn.inline_accuracy: true and a dataset path"
-        )
-
-    from inference_endpoint.evaluation.multi_turn_inline_accuracy import score_report
-
-    score_result = score_report(
-        gt_jsonl=Path(perf_cfg.path),
-        report_dir=ctx.report_dir,
-        out_path=ctx.report_dir / "scores.json",
-    )
-    result_key = "multi_turn_inline"
-    valid = bool(score_result["valid"])
-    score_entry: dict[str, Any] = {
-        "score": score_result["score"],
-        "valid": valid,
-    }
-    if not valid:
-        score_entry["invalid_reason"] = score_result["invalid_reason"]
-    return result_key, score_entry
-
-
 def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
     """Score accuracy, aggregate results, write JSON."""
     config = ctx.config
@@ -891,7 +848,6 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
 
     # Write scoring artifacts + copy event log from tmpfs to disk
     _write_scoring_artifacts(ctx, result, bench.tmpfs_dir)
-    inline_accuracy_score = _inline_score_multi_turn_if_enabled(ctx)
 
     # Accuracy scoring
     accuracy_scores: dict[str, Any] = {}
@@ -918,15 +874,49 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
         }
         logger.info(f"Score for {eval_cfg.dataset_name}: {score} ({n_repeats} repeats)")
 
-    if inline_accuracy_score is not None:
-        result_key, score_entry = inline_accuracy_score
-        accuracy_scores[result_key] = score_entry
-        logger.info(
-            "Score for %s: %s (valid=%s)",
-            result_key,
-            score_entry["score"],
-            score_entry["valid"],
+    perf_cfg = next(
+        (ds for ds in config.datasets if ds.type == DatasetType.PERFORMANCE),
+        None,
+    )
+    if perf_cfg is not None and perf_cfg.accuracy_config is not None:
+        accuracy_config = perf_cfg.accuracy_config
+        if accuracy_config.eval_method is None:
+            raise InputValidationError(
+                f"Dataset '{perf_cfg.name}' requires accuracy_config with eval_method"
+            )
+        scorer_cls = Scorer.get(accuracy_config.eval_method)
+        extractor_name = accuracy_config.extractor
+        if extractor_name is None:
+            if scorer_cls.REQUIRES_EXTRACTOR:
+                raise InputValidationError(
+                    f"Dataset '{perf_cfg.name}' uses scorer "
+                    f"'{accuracy_config.eval_method}' which requires an extractor"
+                )
+            extractor_cls: type[Extractor] | None = None
+        else:
+            extractor_cls = Extractor.get(extractor_name)
+
+        scorer_instance = scorer_cls(
+            "performance",
+            ctx.dataloader,
+            ctx.report_dir,
+            extractor=extractor_cls,
+            ground_truth_column=accuracy_config.ground_truth,
+            **(accuracy_config.extras or {}),
         )
+        score, n_repeats = scorer_instance.score()
+        assert ctx.dataloader.data is not None
+        accuracy_scores[perf_cfg.name] = {
+            "dataset_name": perf_cfg.name,
+            "num_samples": len(ctx.dataloader.data),
+            "extractor": (
+                extractor_cls.__name__ if extractor_cls is not None else None
+            ),
+            "ground_truth_column": accuracy_config.ground_truth,
+            "score": score,
+            "n_repeats": n_repeats,
+        }
+        logger.info(f"Score for {perf_cfg.name}: {score} ({n_repeats} repeats)")
 
     # Report metrics: prefer Report from MetricsSnapshot, fall back to SessionResult
     if report is not None and report.duration_ns is not None:

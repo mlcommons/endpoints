@@ -1242,8 +1242,8 @@ def test_jsonl_round_trip_with_tools_field():
 
 
 @pytest.mark.unit
-def test_current_turn_messages_by_key_parallel_tools():
-    """current_turn_messages_by_key stores all expanded messages for a tool turn."""
+def test_pre_built_messages_parallel_tools():
+    """pre_built_messages_by_key stores all expanded messages for a tool turn."""
     df = pd.DataFrame(
         [
             {"conversation_id": "c1", "turn": 1, "role": "user", "content": "Go"},
@@ -1284,91 +1284,18 @@ def test_current_turn_messages_by_key_parallel_tools():
     )
     ds = MultiTurnDataset(df)
     ds.load()
-    ctm = ds.conversation_metadata.current_turn_messages_by_key
+    pbm = ds.conversation_metadata.pre_built_messages_by_key
 
     # user(1) current turn is 1 message
-    assert len(ctm[("c1", 1)]) == 1
-    assert ctm[("c1", 1)][0] == {"role": "user", "content": "Go"}
+    assert len(pbm[("c1", 1)]) == 1
+    assert pbm[("c1", 1)][0] == {"role": "user", "content": "Go"}
 
-    # tool(3) current turn has 2 expanded messages (parallel tool_results)
-    assert len(ctm[("c1", 3)]) == 2
-    assert ctm[("c1", 3)][0]["tool_call_id"] == "c_0"
-    assert ctm[("c1", 3)][1]["tool_call_id"] == "c_1"
-
-
-# ============================================================================
-# Fix 1: system_prompts_by_conv in metadata (live-history mode)
-# ============================================================================
-
-
-@pytest.mark.unit
-def test_metadata_contains_system_prompts_by_conv():
-    """_build_metadata exposes system_prompts_by_conv keyed by conversation_id."""
-    data = [
-        {
-            "conversation_id": "c1",
-            "turn": 1,
-            "role": "user",
-            "content": "Hi",
-            "system": "Be concise",
-        },
-        {"conversation_id": "c1", "turn": 2, "role": "assistant", "content": "Ok"},
-        # c2 has no system prompt
-        {"conversation_id": "c2", "turn": 1, "role": "user", "content": "Hello"},
-    ]
-    df = pd.DataFrame(data)
-    ds = MultiTurnDataset(df)
-    ds.load()
-
-    spc = ds.conversation_metadata.system_prompts_by_conv
-    assert spc["c1"] == "Be concise"
-    assert spc["c2"] is None
-
-
-@pytest.mark.unit
-def test_metadata_system_prompts_multiple_convs():
-    """Each conversation gets its own system prompt entry."""
-    data = [
-        {
-            "conversation_id": "c1",
-            "turn": 1,
-            "role": "user",
-            "content": "A",
-            "system": "Sys1",
-        },
-        {"conversation_id": "c1", "turn": 2, "role": "assistant", "content": "B"},
-        {
-            "conversation_id": "c2",
-            "turn": 1,
-            "role": "user",
-            "content": "C",
-            "system": "Sys2",
-        },
-        {"conversation_id": "c2", "turn": 2, "role": "assistant", "content": "D"},
-    ]
-    df = pd.DataFrame(data)
-    ds = MultiTurnDataset(df)
-    ds.load()
-
-    spc = ds.conversation_metadata.system_prompts_by_conv
-    assert spc["c1"] == "Sys1"
-    assert spc["c2"] == "Sys2"
-
-
-@pytest.mark.unit
-def test_enable_salt_warns_when_conversation_has_no_system_prompt(caplog):
-    rows = [
-        {"conversation_id": "c1", "turn": 1, "role": "user", "content": "Hi"},
-        {"conversation_id": "c1", "turn": 2, "role": "assistant", "content": "Ok"},
-    ]
-    df = pd.DataFrame(rows)
-    ds = MultiTurnDataset(df)
-    ds.enable_salt()
-
-    ds.load()
-
-    assert "salt not applied" in caplog.text
-    assert ds.conversation_metadata.system_prompts_by_conv["c1"] is None
+    # tool(3) pre-built history includes user, assistant tool call, and both
+    # expanded tool result messages.
+    tool_messages = pbm[("c1", 3)]
+    assert len(tool_messages) == 4
+    assert tool_messages[2]["tool_call_id"] == "c_0"
+    assert tool_messages[3]["tool_call_id"] == "c_1"
 
 
 # ============================================================================

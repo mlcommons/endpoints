@@ -502,7 +502,8 @@ class TestMultiTurnValidation:
         assert config.settings.load_pattern.target_concurrency == 16
 
     @pytest.mark.unit
-    def test_multi_turn_rejects_removed_stop_on_first_empty_slot_config(self):
+    def test_multi_turn_rejects_removed_stop_on_first_empty_slot_as_extra(self):
+        # Legacy multi-turn knobs should remain rejected by extra="forbid".
         with pytest.raises(ValueError, match="stop_on_first_empty_slot"):
             BenchmarkConfig(
                 **self._make_online_multi_turn(

@@ -16,8 +16,7 @@
 """Conversation state management for multi-turn benchmarking."""
 
 import logging
-from dataclasses import dataclass, field
-from typing import Any
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
@@ -28,15 +27,12 @@ class ConversationState:
 
     Attributes:
         conversation_id: Unique identifier for this conversation.
-        message_history: Accumulated message list (populated only when
-            use_dataset_history=False; empty otherwise).
         completed_turns: Turns with responses (success or failure) — observability only.
         failed_turns: Turns that failed — observability only.
         expected_client_turns: Expected total client turns (for completion detection).
     """
 
     conversation_id: str
-    message_history: list[dict[str, Any]] = field(default_factory=list)
     completed_turns: int = 0
     failed_turns: int = 0
     expected_client_turns: int | None = None
@@ -70,27 +66,20 @@ class ConversationManager:
         self,
         conversation_id: str,
         expected_client_turns: int | None = None,
-        system_message: dict[str, Any] | None = None,
     ) -> ConversationState:
         """Return existing state or create a new one.
 
         Args:
             conversation_id: Unique identifier for conversation.
             expected_client_turns: Expected number of client turns.
-            system_message: System message to prepend to message_history
-                (only used when use_dataset_history=False and state is new).
 
         Returns:
             ConversationState for this conversation.
         """
         if conversation_id not in self._conversations:
-            initial_history: list[dict[str, Any]] = (
-                [system_message] if system_message is not None else []
-            )
             self._conversations[conversation_id] = ConversationState(
                 conversation_id=conversation_id,
                 expected_client_turns=expected_client_turns,
-                message_history=initial_history,
             )
         return self._conversations[conversation_id]
 
@@ -114,18 +103,11 @@ class ConversationManager:
     def mark_turn_complete(
         self,
         conversation_id: str,
-        response: str,
-        store_in_history: bool = False,
-        metadata: dict[str, Any] | None = None,
     ) -> None:
         """Record a successful response.
 
         Args:
             conversation_id: Conversation ID.
-            response: Model output (appended to history when store_in_history=True).
-            store_in_history: When True, append response to message_history.
-            metadata: Optional response metadata; tool_calls are preserved in history
-                when present (only used when store_in_history=True).
 
         Raises:
             KeyError: If conversation_id not found.
@@ -133,20 +115,12 @@ class ConversationManager:
         state = self._conversations.get(conversation_id)
         if state is None:
             raise KeyError(f"Conversation {conversation_id} not initialized")
-        if store_in_history:
-            tool_calls = metadata.get("tool_calls") if metadata else None
-            if response or tool_calls:
-                msg: dict[str, Any] = {"role": "assistant", "content": response or None}
-                if tool_calls:
-                    msg["tool_calls"] = tool_calls
-                state.message_history.append(msg)
         state.completed_turns += 1
         self._log_if_complete(state, conversation_id)
 
     def mark_turn_failed(
         self,
         conversation_id: str,
-        store_in_history: bool = False,
     ) -> None:
         """Record a failed response.
 
@@ -154,7 +128,6 @@ class ConversationManager:
 
         Args:
             conversation_id: Conversation ID.
-            store_in_history: When True, append error placeholder to message_history.
 
         Raises:
             KeyError: If conversation_id not found.
@@ -162,10 +135,6 @@ class ConversationManager:
         state = self._conversations.get(conversation_id)
         if state is None:
             raise KeyError(f"Conversation {conversation_id} not initialized")
-        if store_in_history:
-            state.message_history.append(
-                {"role": "assistant", "content": "[ERROR: Turn failed or timed out]"}
-            )
         state.completed_turns += 1
         state.failed_turns += 1
         logger.warning(f"Turn failed for conversation {conversation_id}")

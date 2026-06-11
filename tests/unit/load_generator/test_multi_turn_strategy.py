@@ -27,6 +27,7 @@ from inference_endpoint.dataset_manager.multi_turn_dataset import (
     ConversationMetadata,
     ConversationSampleEntry,
 )
+from inference_endpoint.exceptions import InputValidationError
 from inference_endpoint.load_generator.conversation_manager import ConversationManager
 from inference_endpoint.load_generator.multi_turn_strategy import MultiTurnStrategy
 
@@ -254,12 +255,12 @@ async def test_stop_on_first_user_complete_refills_until_budget_exhausted():
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_repeated_dataset_history_turn_uses_repeat_and_conversation_salts():
-    """Prebuilt-history prompts get repeat and conversation salt markers."""
+async def test_salted_turns_use_repeat_and_conversation_salts():
+    """Pre-baked prompts get repeat and conversation salt markers when enabled."""
     conv_manager = ConversationManager()
     metadata = _make_dataset_metadata({"conv1": [1]})
     base_messages = [
-        {"role": "system", "content": "Be helpful\n\n[cache_salt: base]"},
+        {"role": "system", "content": "Be helpful"},
         {"role": "user", "content": "hello"},
     ]
     metadata.pre_built_messages_by_key = {("conv1", 1): base_messages}
@@ -286,20 +287,44 @@ async def test_repeated_dataset_history_turn_uses_repeat_and_conversation_salts(
 
     first_override = issuer.records[0][4]
     repeat_override = issuer.records[1][4]
-    assert first_override is None
+    assert first_override is not None
     assert repeat_override is not None
+    first_messages = first_override["messages"]
     repeat_messages = repeat_override["messages"]
+    first_system = first_messages[0]["content"]
     repeat_system = repeat_messages[0]["content"]
 
+    repeat1_salt = hashlib.blake2b(b"1", digest_size=2).hexdigest()
     repeat2_salt = hashlib.blake2b(b"2", digest_size=2).hexdigest()
     conversation_salt = hashlib.blake2b(b"conv1", digest_size=2).hexdigest()
+    assert first_system == (
+        f"[salt: {repeat1_salt}]\n\n" f"Be helpful\n\n" f"[salt: {conversation_salt}]"
+    )
     assert repeat_system == (
         f"[salt: {repeat2_salt}]\n\n" f"Be helpful\n\n" f"[salt: {conversation_salt}]"
     )
     assert repeat_system != base_messages[0]["content"]
-    assert "base" not in repeat_system
-    assert "cache_salt" not in repeat_system
-    assert base_messages[0]["content"] == "Be helpful\n\n[cache_salt: base]"
+    assert base_messages[0]["content"] == "Be helpful"
+
+
+@pytest.mark.unit
+def test_enable_salt_requires_system_prompt():
+    """Salting is invalid when the conversation has no system prompt."""
+    conv_manager = ConversationManager()
+    metadata = _make_dataset_metadata({"conv1": [1]})
+    cfg = MultiTurnConfig(enable_salt=True)
+    strategy = MultiTurnStrategy(
+        conv_manager,
+        metadata,
+        multi_turn_config=cfg,
+    )
+
+    with pytest.raises(InputValidationError, match="no system prompt"):
+        strategy._messages_with_trajectory_salt(
+            [{"role": "user", "content": "hello"}],
+            repeat_id=1,
+            conversation_id="conv1",
+        )
 
 
 @pytest.mark.unit
@@ -504,125 +529,6 @@ async def test_error_response_marks_turn_failed():
     assert state.failed_turns == 1
 
 
-def _make_metadata_with_system(
-    conversations: dict[str, list[int]],
-    system_prompts: dict[str, str | None] | None = None,
-) -> ConversationMetadata:
-    """Build ConversationMetadata including system_prompts_by_conv."""
-    samples = []
-    sample_index = 0
-    for conv_id, turns in conversations.items():
-        for turn in turns:
-            samples.append(
-                ConversationSampleEntry(
-                    conversation_id=conv_id,
-                    turn=turn,
-                    sample_index=sample_index,
-                )
-            )
-            sample_index += 1
-    return ConversationMetadata(
-        samples=samples,
-        num_conversations=len(conversations),
-        max_turns_per_conv=max((max(t) for t in conversations.values()), default=0),
-        client_turns_per_conversation={c: len(t) for c, t in conversations.items()},
-        system_prompts_by_conv=system_prompts or {},
-    )
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_live_history_initializes_system_prompt():
-    """In live-history mode, ConversationManager.message_history starts with system message."""
-    from inference_endpoint.config.schema import MultiTurnConfig
-
-    conv_manager = ConversationManager()
-    metadata = _make_metadata_with_system(
-        {"conv1": [1]},
-        system_prompts={"conv1": "Be helpful"},
-    )
-    mt_cfg = MultiTurnConfig(use_dataset_history=False, turn_timeout_s=10.0)
-    strategy = MultiTurnStrategy(conv_manager, metadata, multi_turn_config=mt_cfg)
-    issuer = FakePhaseIssuer()
-
-    async def complete_turn():
-        await asyncio.sleep(0.01)
-        result = QueryResult(
-            id="q0000", response_output=TextModelOutput(output="response")
-        )
-        strategy.on_sample_complete(result)
-
-    asyncio.create_task(complete_turn())
-    await strategy.execute(issuer)
-
-    state = conv_manager.get_state("conv1")
-    assert state is not None
-    # message_history[0] must be the system message
-    assert len(state.message_history) >= 1
-    assert state.message_history[0] == {"role": "system", "content": "Be helpful"}
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_live_history_no_system_prompt_when_none():
-    """In live-history mode, no system message is prepended when system_prompt is None."""
-    from inference_endpoint.config.schema import MultiTurnConfig
-
-    conv_manager = ConversationManager()
-    metadata = _make_metadata_with_system(
-        {"conv1": [1]},
-        system_prompts={"conv1": None},
-    )
-    mt_cfg = MultiTurnConfig(use_dataset_history=False, turn_timeout_s=10.0)
-    strategy = MultiTurnStrategy(conv_manager, metadata, multi_turn_config=mt_cfg)
-    issuer = FakePhaseIssuer()
-
-    async def complete_turn():
-        await asyncio.sleep(0.01)
-        result = QueryResult(
-            id="q0000", response_output=TextModelOutput(output="response")
-        )
-        strategy.on_sample_complete(result)
-
-    asyncio.create_task(complete_turn())
-    await strategy.execute(issuer)
-
-    state = conv_manager.get_state("conv1")
-    assert state is not None
-    # No system message should be in history
-    system_msgs = [m for m in state.message_history if m.get("role") == "system"]
-    assert len(system_msgs) == 0
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_dataset_history_mode_does_not_inject_system_prompt():
-    """In dataset-history mode (use_dataset_history=True), system_message is not passed."""
-    conv_manager = ConversationManager()
-    metadata = _make_metadata_with_system(
-        {"conv1": [1]},
-        system_prompts={"conv1": "Some system"},
-    )
-    # Default: use_dataset_history=True → _store_in_history=False
-    strategy = MultiTurnStrategy(conv_manager, metadata)
-    issuer = FakePhaseIssuer()
-
-    async def complete_turn():
-        await asyncio.sleep(0.01)
-        result = QueryResult(
-            id="q0000", response_output=TextModelOutput(output="response")
-        )
-        strategy.on_sample_complete(result)
-
-    asyncio.create_task(complete_turn())
-    await strategy.execute(issuer)
-
-    state = conv_manager.get_state("conv1")
-    assert state is not None
-    # message_history should be empty (dataset-history mode doesn't accumulate)
-    assert len(state.message_history) == 0
-
-
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_pipeline_error_propagated():
@@ -646,111 +552,6 @@ async def test_pipeline_error_propagated():
 
     with pytest.raises(RuntimeError, match="simulated pipeline error"):
         await strategy.execute(ErrorIssuer())
-
-
-@pytest.mark.unit
-def test_mark_turn_complete_preserves_tool_calls():
-    """mark_turn_complete stores tool_calls in history when metadata contains them."""
-    conv_manager = ConversationManager()
-    conv_manager.get_or_create("conv1", expected_client_turns=1)
-
-    tool_calls = [
-        {
-            "id": "call_1",
-            "type": "function",
-            "function": {"name": "bash", "arguments": '{"cmd": "ls"}'},
-        }
-    ]
-    conv_manager.mark_turn_complete(
-        "conv1",
-        response="",
-        store_in_history=True,
-        metadata={"tool_calls": tool_calls},
-    )
-
-    state = conv_manager.get_state("conv1")
-    assert state is not None
-    assert len(state.message_history) == 1
-    msg = state.message_history[0]
-    assert msg["role"] == "assistant"
-    assert msg["content"] is None
-    assert msg["tool_calls"] == tool_calls
-
-
-@pytest.mark.unit
-def test_mark_turn_complete_with_response_and_tool_calls():
-    """mark_turn_complete stores both content and tool_calls when both are present."""
-    conv_manager = ConversationManager()
-    conv_manager.get_or_create("conv1", expected_client_turns=1)
-
-    tool_calls = [
-        {
-            "id": "call_1",
-            "type": "function",
-            "function": {"name": "search", "arguments": "{}"},
-        }
-    ]
-    conv_manager.mark_turn_complete(
-        "conv1",
-        response="Calling search...",
-        store_in_history=True,
-        metadata={"tool_calls": tool_calls},
-    )
-
-    state = conv_manager.get_state("conv1")
-    assert state is not None
-    msg = state.message_history[0]
-    assert msg["content"] == "Calling search..."
-    assert msg["tool_calls"] == tool_calls
-
-
-@pytest.mark.unit
-def test_mark_turn_complete_no_history_when_empty():
-    """mark_turn_complete does not append when response is empty and no tool_calls."""
-    conv_manager = ConversationManager()
-    conv_manager.get_or_create("conv1", expected_client_turns=1)
-
-    conv_manager.mark_turn_complete("conv1", response="", store_in_history=True)
-
-    state = conv_manager.get_state("conv1")
-    assert state is not None
-    assert len(state.message_history) == 0
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_on_sample_complete_passes_metadata():
-    """on_sample_complete forwards result.metadata (including tool_calls) to ConversationManager."""
-    from inference_endpoint.config.schema import MultiTurnConfig
-
-    conv_manager = ConversationManager()
-    metadata_dict = _make_metadata_with_system({"conv1": [1]})
-    mt_cfg = MultiTurnConfig(use_dataset_history=False, turn_timeout_s=10.0)
-    strategy = MultiTurnStrategy(conv_manager, metadata_dict, multi_turn_config=mt_cfg)
-
-    conv_manager.get_or_create("conv1", expected_client_turns=1)
-    strategy._inflight["q0001"] = "conv1"
-
-    tool_calls = [
-        {
-            "id": "call_1",
-            "type": "function",
-            "function": {"name": "bash", "arguments": "{}"},
-        }
-    ]
-    result = QueryResult(
-        id="q0001",
-        response_output=TextModelOutput(output=""),
-        metadata={"tool_calls": tool_calls},
-    )
-    strategy.on_sample_complete(result)
-
-    state = conv_manager.get_state("conv1")
-    assert state is not None
-    assert state.completed_turns == 1
-    assert len(state.message_history) == 1
-    assert state.message_history[0]["tool_calls"] == tool_calls
-    assert state.message_history[0]["content"] is None
 
 
 @pytest.mark.unit

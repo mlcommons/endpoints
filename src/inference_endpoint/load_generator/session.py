@@ -241,7 +241,7 @@ class PhaseIssuer:
             sample_index: Index into the dataset.
             data_override: If provided, merged over the loaded sample data.
                 Keys in data_override take precedence. Used by MultiTurnStrategy
-                to substitute live-accumulated message history.
+                to override pre-baked messages when trajectory salting is enabled.
 
         Note: load_sample() runs synchronously before the ISSUED timestamp.
         For accurate timing, datasets MUST be pre-loaded into memory.

@@ -60,7 +60,7 @@ class PhaseIssuerProtocol(Protocol):
             sample_index: Index into the dataset.
             data_override: If provided, merged over the loaded sample — keys in
                 data_override take precedence. Used by MultiTurnStrategy to inject
-                a runtime-assembled `messages` array while still inheriting
+                a salted `messages` array while still inheriting
                 `model`/`max_completion_tokens`/`tools`/`stream` from the dataset row.
             conversation_id: Conversation identifier (multi-turn). Empty string
                 for single-turn issues; propagated onto the published EventRecords
