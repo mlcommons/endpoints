@@ -38,7 +38,7 @@ INITIALIZE ──STARTED──► LIVE ──ENDED──► DRAINING ──► C
 - **LIVE**: the publisher tick task emits a snapshot every
   `--publish-interval` seconds (default 0.25 s).
 - **DRAINING**: entered on `ENDED`; the buffered tokenizations are flushed,
-  bounded by the `--drain-timeout` budget (default 300 s; `0` = unlimited).
+  bounded by the `--drain-timeout` budget (default 60 s; `0` = unlimited).
 - The ENDED path runs inside a finalization boundary: whatever the drain does
   — finish, time out, or fail — `publish_final` and the shutdown signal always
   run. A tokenizer failure can degrade the snapshot (see the
@@ -174,7 +174,7 @@ COMPLETE event ─► TokenTrigger.fire ─► queue.enqueue(text, on_count)   [
 | `--metrics-socket`               | required | Snapshot PUB socket name                            |
 | `--metrics-output-dir`           | required | Directory for `final_snapshot.json`                 |
 | `--publish-interval`             | 0.25     | Live snapshot cadence (seconds)                     |
-| `--drain-timeout`                | 300.0    | End-of-run tokenize budget (`0` = unlimited)        |
+| `--drain-timeout`                | 60.0     | End-of-run tokenize budget (`0` = unlimited)        |
 | `--tokenizer`                    | none     | HF name or local path; unset disables token metrics |
 | `--tokenizer-workers`            | 2        | Live in-process threads (`0` = defer all to drain)  |
 | `--streaming`                    | off      | Register TTFT/chunk-delta/TPOT triggers             |

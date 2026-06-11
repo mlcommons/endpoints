@@ -489,7 +489,7 @@ class TestDrainConfig:
         assert cfg.warmup_timeout_s == 240.0
         assert cfg.performance_timeout_s == 240.0
         assert cfg.accuracy_timeout_s is None
-        assert cfg.metrics_drain_timeout_s == 300.0
+        assert cfg.metrics_drain_timeout_s == 60.0
 
     @pytest.mark.unit
     @pytest.mark.parametrize(

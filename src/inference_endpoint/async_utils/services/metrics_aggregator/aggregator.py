@@ -96,7 +96,7 @@ _NS_HDR_HIGH: Final[int] = 3_600_000_000_000  # 1 hour in ns
 _TOKEN_HDR_LOW: Final[int] = 1
 _TOKEN_HDR_HIGH: Final[int] = 10_000_000  # 10M tokens
 
-_DEFAULT_DRAIN_TIMEOUT_S: Final[float] = 300.0
+_DEFAULT_DRAIN_TIMEOUT_S: Final[float] = 60.0
 
 
 class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):

@@ -558,11 +558,11 @@ class DrainConfig(BaseModel):
             ),
         ),
     ] = Field(
-        300.0,
+        60.0,
         ge=0,
         description=(
             "Wall-clock budget (seconds) to finish tokenizing buffered samples "
-            "after ENDED (default: 300.0; 0 = unlimited)."
+            "after ENDED (default: 60.0; 0 = unlimited)."
         ),
     )
 

@@ -133,11 +133,11 @@ async def main() -> None:
     parser.add_argument(
         "--drain-timeout",
         type=float,
-        default=300.0,
+        default=60.0,
         help=(
             "Wall-clock budget (seconds) to finish tokenizing buffered samples "
             "after ENDED before the aggregator emits the final snapshot with "
-            "n_pending_tasks > 0 (default: 300.0; 0 = wait indefinitely). Increase "
+            "n_pending_tasks > 0 (default: 60.0; 0 = wait indefinitely). Increase "
             "for very large datasets where the end-of-run tokenize batch is big."
         ),
     )
