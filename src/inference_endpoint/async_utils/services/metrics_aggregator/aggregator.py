@@ -124,7 +124,7 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
     ):
         # drain_timeout_s is injected (not derived) because the right
         # value is workload-dependent: long-context tokenize-heavy runs
-        # need more headroom than the schema default 60 s, and the
+        # need more headroom than the schema default 300 s, and the
         # aggregator itself can't measure that ahead of time. Keeping it
         # as an arg lets the __main__ CLI flag plumb the user's choice
         # through without coupling this class to argparse.
