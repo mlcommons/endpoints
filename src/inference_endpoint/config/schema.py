@@ -580,6 +580,9 @@ class DrainConfig(BaseModel):
         2,
         ge=1,
         description="Number of tokenizer worker threads in the metrics aggregator (default: 2).",
+    )
+
+
 class ProfilerEngine(str, Enum):
     """Inference engine whose profiling protocol the client should drive.
 
