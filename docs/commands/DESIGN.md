@@ -114,8 +114,8 @@ commands/benchmark/execute.py::run_benchmark()
 > # or pass --extra sysinfo directly to uv run, e.g.:
 > uv run --extra sysinfo inference-endpoint benchmark from-config --config config.yaml
 >
-> # pip
-> pip install "inference-endpoint[sysinfo]"
+> # pip (from repo root)
+> pip install -e ".[sysinfo]"
 > ```
 >
 > If `mlc-scripts` is not installed and `system_info` is configured, the benchmark still completes and results are written first; system info capture is then attempted, fails with an error log, and the process exits 0.

@@ -81,7 +81,7 @@ def capture_system_info(
     except ImportError as exc:
         raise SetupError(
             "mlc-scripts is required for system_info. "
-            'Install it with: pip install "inference-endpoint[sysinfo]"'
+            "Install it with: pip install -e '.[sysinfo]' (from the repo root)"
         ) from exc
 
     tags: list[str] = ["get-mlperf-multi-node-system-info"]
