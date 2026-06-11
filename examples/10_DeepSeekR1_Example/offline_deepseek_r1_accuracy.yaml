@@ -10,7 +10,8 @@
 #
 # Accuracy is the official MLCommons combined-subset eval (math500 / aime /
 # gpqa / mmlu_pro / livecodebench) via the `deepseek_r1` scorer, which shells
-# out to the isolated subproject in ./accuracy/. Golden FP32 exact_match =
+# out to the isolated subproject at src/inference_endpoint/evaluation/deepseek_r1/.
+# Golden FP32 exact_match =
 # 81.3582; pass threshold = 99% of golden (>= 80.5246). tokens_per_sample
 # golden = 3886.2274 (pass band 90-110%).
 #

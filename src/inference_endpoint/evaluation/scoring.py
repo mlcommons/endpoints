@@ -120,6 +120,12 @@ class Scorer(ABC):
         )
         self.sample_index_map = self._load_sample_index_map()
 
+        # Whether the most recent score() covered every issued sample. Scorers
+        # that can return a partial headline number (e.g. DeepSeekR1Scorer when
+        # the lcb-service container is unreachable) set this False so callers
+        # can distinguish a partial result from a complete one. Default True.
+        self.complete: bool = True
+
     def _load_sample_index_map(self):
         sample_index_map_path = self.report_dir / "sample_idx_map.json"
         if not sample_index_map_path.exists():
@@ -1218,12 +1224,7 @@ class VBenchScorer(Scorer, scorer_id="vbench"):
         return mean_score, n_repeats
 
 
-_DEFAULT_DEEPSEEK_EVAL_PROJECT_PATH = (
-    Path(__file__).resolve().parents[3]
-    / "examples"
-    / "10_DeepSeekR1_Example"
-    / "accuracy"
-)
+_DEFAULT_DEEPSEEK_EVAL_PROJECT_PATH = Path(__file__).resolve().parent / "deepseek_r1"
 
 _DEEPSEEK_EVAL_PROJECT_PATH_ENV = "DEEPSEEK_EVAL_PROJECT_PATH"
 
@@ -1241,8 +1242,9 @@ class DeepSeekR1Scorer(Scorer, scorer_id="deepseek_r1"):
     ``prm800k`` math grader and ``LiveCodeBench`` code executor submodules)
     that are incompatible with the parent benchmark env, so - exactly like
     ``VBenchScorer`` - it runs out-of-process via ``uv run --project`` against
-    the isolated subproject at ``examples/10_DeepSeekR1_Example/accuracy/``.
-    The parent process never imports the evaluator.
+    the isolated subproject at ``src/inference_endpoint/evaluation/deepseek_r1/``
+    (a uv subproject, excluded from the parent wheel). The parent process never
+    imports the evaluator.
 
     This scorer builds the DataFrame the evaluator expects - ``model_output``
     (the full raw generation, including the ``<think>`` trace, taken verbatim
@@ -1449,6 +1451,7 @@ class DeepSeekR1Scorer(Scorer, scorer_id="deepseek_r1"):
             logger.warning(
                 "DeepSeekR1Scorer: no outputs to score; returning None score."
             )
+            self.complete = False
             return None, n_repeats
 
         df = df.apply(self.match_sample_index, axis=1)
@@ -1491,7 +1494,10 @@ class DeepSeekR1Scorer(Scorer, scorer_id="deepseek_r1"):
                     "returning None score. See %s",
                     out_json,
                 )
+                self.complete = False
                 return None, n_repeats
+            # The runner reports complete=False if any subset failed to grade.
+            self.complete = bool(results.get("complete", True))
             return float(exact_match), n_repeats
 
         # Grade the text subsets in the subprocess and the livecodebench subset
@@ -1567,6 +1573,7 @@ class DeepSeekR1Scorer(Scorer, scorer_id="deepseek_r1"):
                 expected_n,
             )
 
+        self.complete = complete
         per_dataset[self.lcb_subset] = lcb_entry
         results["per_dataset"] = per_dataset
         results["exact_match"] = combined

@@ -30,7 +30,7 @@ echo "=== node $(hostname) arch $(uname -m) @ $(date -u +%H:%M:%S) ==="
 EX="examples/10_DeepSeekR1_Example"
 OUTPUTS_PARQUET="${OUTPUTS_PARQUET:-${REPO_ROOT}/logs/deepseek_r1_fp4_accuracy/deepseek_eval/deepseek_r1_accuracy_outputs.parquet}"
 LCB_VARIANT="${LCB_VARIANT:-release_v6}"   # superset, so all question_ids resolve
-LCBDIR="${REPO_ROOT}/${EX}/accuracy/lcb_datasets"
+LCBDIR="${REPO_ROOT}/src/inference_endpoint/evaluation/deepseek_r1/lcb_datasets"
 LCBIN="${LCBDIR}/lcb_input.parquet"
 RESULTS="${LCBDIR}/lcb_results.json"
 

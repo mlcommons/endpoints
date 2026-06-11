@@ -7,8 +7,9 @@ accuracy dataset** (4388 samples) with this repo's `inference-endpoint` tool.
 Accuracy is the official MLCommons _combined-subset_ evaluation - `math500`,
 `aime`, `gpqa`, `mmlu_pro`, `livecodebench`, each graded by its own parser and
 aggregated into one `exact_match` plus `tokens_per_sample`, via the
-`deepseek_r1` scorer (which shells out to the isolated `accuracy/` subproject -
-see [`accuracy/RUNBOOK.md`](accuracy/RUNBOOK.md)).
+`deepseek_r1` scorer (which shells out to the isolated subproject at
+`src/inference_endpoint/evaluation/deepseek_r1/` - see
+[`RUNBOOK.md`](../../src/inference_endpoint/evaluation/deepseek_r1/RUNBOOK.md)).
 
 | Metric              | Golden (FP32) | Pass criterion             |
 | ------------------- | ------------- | -------------------------- |
@@ -17,16 +18,16 @@ see [`accuracy/RUNBOOK.md`](accuracy/RUNBOOK.md)).
 
 ## Files
 
-| File                                       | Purpose                                                           |
-| ------------------------------------------ | ----------------------------------------------------------------- |
-| `prepare_dataset.py`                       | pkl -> parquet (+ `--subset N` stratified slice, + tiny perf set) |
-| `trtllm_serve_config.yaml`                 | `trtllm-serve --extra_llm_api_options` for 4 GPUs (TP=4, EP=4)    |
-| `launch_and_run.sh`                        | SLURM launch: serve -> health -> (probe + run \| `SERVER_ONLY`)   |
-| `run_client.sh`                            | Drive the benchmark from the login node (cross-arch clusters)     |
-| `score_livecodebench.sh`                   | Score the LCB subset on a compute node (hardened sandbox)         |
-| `offline_deepseek_r1_accuracy.yaml`        | Full 4388-sample accuracy config                                  |
-| `offline_deepseek_r1_accuracy_subset.yaml` | ~385-sample representative config (quick estimate)                |
-| `accuracy/`                                | Isolated `uv` subproject wrapping the MLCommons evaluator         |
+| File                                             | Purpose                                                           |
+| ------------------------------------------------ | ----------------------------------------------------------------- |
+| `prepare_dataset.py`                             | pkl -> parquet (+ `--subset N` stratified slice, + tiny perf set) |
+| `trtllm_serve_config.yaml`                       | `trtllm-serve --extra_llm_api_options` for 4 GPUs (TP=4, EP=4)    |
+| `launch_and_run.sh`                              | SLURM launch: serve -> health -> (probe + run \| `SERVER_ONLY`)   |
+| `run_client.sh`                                  | Drive the benchmark from the login node (cross-arch clusters)     |
+| `score_livecodebench.sh`                         | Score the LCB subset on a compute node (hardened sandbox)         |
+| `offline_deepseek_r1_accuracy.yaml`              | Full 4388-sample accuracy config                                  |
+| `offline_deepseek_r1_accuracy_subset.yaml`       | ~385-sample representative config (quick estimate)                |
+| `src/inference_endpoint/evaluation/deepseek_r1/` | Isolated `uv` subproject wrapping the MLCommons evaluator         |
 
 ## WARNING Read first - verified gotchas on a GB200 SLURM cluster
 
@@ -75,7 +76,7 @@ unfinished`) and needs a ~21 GB dataset load that OOMs the login cgroup.
 - Parent env synced: `uv sync --extra dev` from the repo root; `uv` on `PATH`.
 - Accuracy subproject set up once (network needed):
   ```bash
-  cd examples/10_DeepSeekR1_Example/accuracy && uv sync && bash setup_eval.sh && cd -
+  cd src/inference_endpoint/evaluation/deepseek_r1 && uv sync && bash setup_eval.sh && cd -
   ```
 
 ## Prepare the dataset (once)
@@ -147,7 +148,7 @@ model id) in the chosen YAML, then:
 
 ```bash
 export MODEL_DIR=/path/to/deepseek_r1-torch-fp4
-export DEEPSEEK_EVAL_PROJECT_PATH=examples/10_DeepSeekR1_Example/accuracy  # only if not running from the repo root
+export DEEPSEEK_EVAL_PROJECT_PATH=src/inference_endpoint/evaluation/deepseek_r1  # only if not running from the repo root
 inference-endpoint benchmark from-config \
   --config examples/10_DeepSeekR1_Example/offline_deepseek_r1_accuracy.yaml --mode acc
 ```
@@ -237,7 +238,7 @@ score it afterward on a clean compute node:
 
 ```bash
 sbatch examples/10_DeepSeekR1_Example/score_livecodebench.sh
-# -> accuracy/lcb_datasets/lcb_results.json  {"total_samples": 349, "passed_samples": P, ...}
+# -> src/inference_endpoint/evaluation/deepseek_r1/lcb_datasets/lcb_results.json  {"total_samples": 349, "passed_samples": P, ...}
 ```
 
 It runs the same hardened `lcb_serve` (kill-on-timeout) directly on the node.

@@ -15,7 +15,7 @@
 # commits into ./mlperf_eval/. See RUNBOOK.md.
 #
 # Usage on the accuracy host:
-#   cd examples/10_DeepSeekR1_Example/accuracy
+#   cd src/inference_endpoint/evaluation/deepseek_r1
 #   uv sync
 #   bash setup_eval.sh
 #   # DeepSeekR1Scorer in the parent will shell out automatically.

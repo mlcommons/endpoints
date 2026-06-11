@@ -20,6 +20,16 @@ FP32 = `81.3582`) plus `tokens_per_sample` (golden = `3886.2274`):
 | `aime*`         | `\boxed{int}` / `Answer: int` | integer match (0-999)     |
 | `livecodebench` | ` ```python ... ``` `         | execute vs LCB test cases |
 
+> **`livecodebench` is graded by a container, not here.** In the
+> `DeepSeekR1Scorer` flow this subproject only _tokenizes_ the livecodebench
+> rows (keeping `tokens_per_sample` correct) and marks them `external`; the
+> generated code is executed out-of-band by the `lcb-service` WebSocket
+> container at `ws://localhost:13835/evaluate` (the scorer's default). See
+> [`../livecodebench/README.md`](../livecodebench/README.md) for launching the
+> container. Grading LCB inside this subproject would require a
+> 3.12-compatible `pyext` (intentionally omitted - see `pyproject.toml`) and is
+> not the supported path.
+
 ## Preconditions
 
 - **`uv`** on PATH (`curl -LsSf https://astral.sh/uv/install.sh | sh`).
@@ -32,7 +42,7 @@ FP32 = `81.3582`) plus `tokens_per_sample` (golden = `3886.2274`):
 ## Setup (run once on the accuracy host)
 
 ```bash
-cd examples/10_DeepSeekR1_Example/accuracy
+cd src/inference_endpoint/evaluation/deepseek_r1
 uv sync                       # resolves the isolated eval env into .venv/
 bash setup_eval.sh            # fetches eval_accuracy.py + prm800k + LiveCodeBench
 ```

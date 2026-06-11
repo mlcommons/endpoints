@@ -20,8 +20,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 export PATH="${HOME}/.local/bin:${PATH}"
 # The deepseek_r1 scorer shells out to the accuracy subproject (set up once with
-# `cd accuracy && uv sync && bash setup_eval.sh`).
-export DEEPSEEK_EVAL_PROJECT_PATH="${SCRIPT_DIR}/accuracy"
+# `cd src/inference_endpoint/evaluation/deepseek_r1 && uv sync && bash setup_eval.sh`).
+export DEEPSEEK_EVAL_PROJECT_PATH="${REPO_ROOT}/src/inference_endpoint/evaluation/deepseek_r1"
 # The benchmark config references ${MODEL_DIR} (tokenizer for tokens_per_sample);
 # it is resolved when the YAML is loaded, so it must be set in this environment.
 : "${MODEL_DIR:?Set MODEL_DIR to your DeepSeek-R1 FP4 checkpoint directory}"

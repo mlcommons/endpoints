@@ -137,6 +137,7 @@ class TestDeepSeekR1Scorer:
 
         assert score == pytest.approx(66.6667)
         assert n_repeats == 1
+        assert scorer.complete is True
 
         # Invoked via `uv run --project <subproject> python deepseek_eval_runner.py`.
         cmd = patch_subprocess["cmd"]
@@ -201,6 +202,7 @@ class TestDeepSeekR1Scorer:
         score, n_repeats = scorer.score()
         assert score is None
         assert n_repeats == 1
+        assert scorer.complete is False
 
 
 @pytest.mark.unit
@@ -329,10 +331,12 @@ class TestDeepSeekR1ScorerContainer:
                 "results": {"lcb-q0": [True]},
             },
         )
-        score, n_repeats = self._scorer(dataset, staged, project).score()
+        scorer = self._scorer(dataset, staged, project)
+        score, n_repeats = scorer.score()
 
         assert score == pytest.approx(100.0)  # (1 text + 1 LCB) / 2
         assert n_repeats == 1
+        assert scorer.complete is True
         # Subprocess ran exactly once, with livecodebench marked external.
         assert patch_subprocess["n"] == 1
         assert patch_subprocess["external"][0] == ["livecodebench"]
@@ -350,10 +354,14 @@ class TestDeepSeekR1ScorerContainer:
         monkeypatch.setattr(
             scoring_mod, "_lcb_ws_evaluate", lambda url, codes, timeout: None
         )
-        score, n_repeats = self._scorer(dataset, staged, project).score()
+        scorer = self._scorer(dataset, staged, project)
+        score, n_repeats = scorer.score()
 
         # No in-process LCB re-grade: subprocess still ran exactly once.
         assert patch_subprocess["n"] == 1
+        # The partial result is visible to callers via the scorer attribute,
+        # not only the sidecar JSON (execute.py stores this in accuracy_scores).
+        assert scorer.complete is False
         res = self._results(staged)
         assert res["complete"] is False
         assert res["per_dataset"]["livecodebench"]["status"] == "unscored"
@@ -403,6 +411,8 @@ class TestDeepSeekR1ScorerContainer:
                 "results": {"lcb-q0": [True]},
             },
         )
-        self._scorer(dataset, staged, project).score()
+        scorer = self._scorer(dataset, staged, project)
+        scorer.score()
         # math500 failed -> must be flagged incomplete (was forced True pre-fix).
         assert self._results(staged)["complete"] is False
+        assert scorer.complete is False

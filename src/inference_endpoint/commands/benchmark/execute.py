@@ -900,8 +900,15 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
             "ground_truth_column": eval_cfg.ground_truth_column,
             "score": score,
             "n_repeats": n_repeats,
+            # False when the scorer produced only a partial headline (e.g.
+            # DeepSeekR1Scorer when the lcb-service container was unreachable),
+            # so a partial number is never mistaken for a complete one.
+            "complete": scorer_instance.complete,
         }
-        logger.info(f"Score for {eval_cfg.dataset_name}: {score} ({n_repeats} repeats)")
+        logger.info(
+            f"Score for {eval_cfg.dataset_name}: {score} "
+            f"({n_repeats} repeats, complete={scorer_instance.complete})"
+        )
 
     # Report metrics: prefer Report from MetricsSnapshot, fall back to SessionResult
     if report is not None and report.duration_ns is not None:
