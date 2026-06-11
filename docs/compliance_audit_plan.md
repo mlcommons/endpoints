@@ -129,20 +129,20 @@ benchmark from-config
 ### Program flow (TEST04, two phases)
 
 ```
-config.audit = {test: test04, samples: 64, audit_samples: 32, sample_index: 0, threshold: 0.10}
+config.audit = {test: test04, samples: 64, audit_samples: 64, sample_index: 0, threshold: 0.10}
 
  run_audit
     │
     ├─ specs = Test04Audit.plan_runs(cfg)
     │     → [ RunSpec("reference", n_samples=64, WITHOUT_REPLACEMENT),
-    │         RunSpec("test04",    n_samples=32, SINGLE(index=0))     ]   ← counts may differ
+    │         RunSpec("test04",    n_samples=64, SINGLE(index=0))     ]   ← equal here; audit_samples may be lowered
     │
     ├─ setup phase 1 ─► validate ALL specs vs loaded dataset size      ← before any run
     │                   (sample_index in range?) — fail fast
     │
     ├─ Phase 1  "reference"  ─ 64 distinct samples ───► RunArtifacts[0]   (qps_ref)
     │                                                   back-to-back, same endpoint
-    ├─ Phase 2  "test04"     ─ 32 × sample[0] ────────► RunArtifacts[1]   (qps_audit)
+    ├─ Phase 2  "test04"     ─ 64 × sample[0] ────────► RunArtifacts[1]   (qps_audit)
     │
     ├─ verdict = Test04Audit.verify([ref, audit])
     │     guard: each phase completed >= requested × (1 - 0.10)   (else FAIL: phase failed)
@@ -231,8 +231,10 @@ union — no change to existing tests.
 
 **Independent counts (deliberate — see the decision record in §5).** `samples` sizes the
 reference phase, `audit_samples` the fixed-sample phase; `audit_samples=None` falls back to
-`samples` (equal counts). They may differ (e.g. 64 / 32). The verdict relies on `qps` being
-rate-normalized plus a per-phase completion guard rather than count-equality.
+`samples` (equal counts — the shipped examples). They **may** differ (set `audit_samples`
+lower, e.g. 64 / 32, to shorten the audit phase — upstream TEST04 does this; see §5). The
+verdict relies on `qps` being rate-normalized plus a per-phase completion guard, so it does
+not require equal counts.
 
 ### Generic orchestrator
 
@@ -341,7 +343,7 @@ The committed example is `examples/09_Wan22_VideoGen_Example/offline_wan22_submi
 # Execution order (run_benchmark):
 #   1. performance run  — full 248-prompt dataset (the submission perf result)
 #   2. accuracy scoring — VBench over the produced videos
-#   3. audit (TEST04)   — reference + fixed-sample phases (independent counts), then verdict
+#   3. audit (TEST04)   — reference + fixed-sample phases (equal counts here), then verdict
 #
 # NOTE: the `audit:` block reflects the PROPOSED schema in
 # docs/compliance_audit_plan.md and is not yet implemented on main. The
@@ -375,11 +377,11 @@ datasets:
       num_repeats: 1
 
 # TEST04 caching audit — additive post-step. Runs its OWN reference + fixed-sample
-# phases (independent counts), separate from the perf run above.
+# phases at equal counts (the audit count may be lowered to shorten the phase).
 audit:
   test: "test04"
   samples: 64 # reference phase count (subset of the 248 prompts)
-  audit_samples: 32 # audit (fixed-sample) phase count; omit to equal `samples`
+  audit_samples: 64 # audit (fixed-sample) phase count; lower (e.g. 32) to shorten the audit phase
   sample_index: 3 # MLCommons audit.config performance_issue_same_index=3
   threshold: 0.10 # audit qps must stay < reference qps * (1 + threshold)
 
@@ -440,22 +442,21 @@ Two scenarios must be covered: **Offline** (`max_throughput`) and **SingleStream
 | `min_query_count` (reference / audit)             | `samples` / `audit_samples`   | independent per-phase counts (§4)                   |
 | `min_duration` (compliance ≥ 10 min)              | _not yet enforced_ (see note) | counts take priority in current stop logic          |
 
-> **Design decision — independent reference/audit counts (deliberate; reverses the earlier
-> equal-count basis).** `samples` sizes the reference phase and `audit_samples` the
-> fixed-sample phase; they may differ (e.g. 64 / 32), with `audit_samples=None` falling back
-> to `samples` for the equal-count case. The verdict does **not** assert the two counts
-> match. Rationale: `qps` is rate-normalized, so caching surfaces as a throughput spike
-> regardless of absolute counts; validity instead comes from a **per-phase completion guard**
-> (each phase must complete ≥ `requested × (1 − threshold)`, catching a crashed run that
-> would post a misleadingly low qps). Defaults in the examples: Offline `samples: 64`,
-> `audit_samples: 32`; SingleStream `samples: 20` (audit defaults equal).
+> **Design decision — equal counts in the shipped examples; independent counts supported.** > `samples` sizes the reference phase and `audit_samples` the fixed-sample phase
+> (`audit_samples=None` falls back to `samples`). The **shipped examples use equal counts** —
+> Offline `samples: 64` / `audit_samples: 64`, SingleStream `samples: 20` — which addresses
+> the maintainer's fairness concern ("comparing QPS of 50 distinct vs 20 repeated … doesn't
+> seem fair", PR #332) by comparing like-for-like.
 >
-> **⚠ Reviewer-conflict flag.** This is the unequal-count comparison the maintainer pushed
-> back on ("comparing QPS of 50 dataset samples with 20 repeated samples … doesn't seem
-> fair", PR #332). It is re-introduced **deliberately** here for flexibility; the
-> per-phase completion guard + qps rate-normalization make it technically sound, but expect
-> the reviewer to challenge it. If equal counts are required for sign-off, set
-> `audit_samples == samples` (or omit `audit_samples`).
+> The schema still **supports** independent counts because upstream MLPerf TEST04 itself uses
+> them: the MLCommons `compliance/nvidia/TEST04/audit.config` overrides
+> `stable-diffusion-xl.Offline.min_query_count = 500` against a `mlperf.conf` reference of
+> `5000` — i.e. a **5000 reference / 500 audit** split, compared as samples-per-second. So
+> `audit_samples < samples` is a valid, upstream-faithful way to shorten the (expensive) audit
+> phase. The verdict does **not** require equal counts — `qps` is rate-normalized and a
+> **per-phase completion guard** (each phase must complete ≥ `requested × (1 − threshold)`)
+> catches a crashed run — but the examples default to equal for the clearest, least-contentious
+> comparison.
 
 > **`min_duration` is not a duration floor (current limitation).** The load-generator stop
 > check (`session.py`) halts a phase on **sample count** or **`max_duration_ms`** only;
@@ -476,7 +477,7 @@ model_params: { name: wan22, streaming: off }
 audit:
   test: test04
   samples: 64 # reference phase count (tunable subset of the 248-prompt dataset)
-  audit_samples: 32 # audit (fixed-sample) phase count; omit to equal `samples`
+  audit_samples: 64 # audit (fixed-sample) phase count; lower (e.g. 32) to shorten the audit phase
   sample_index: 3 # MLCommons performance_issue_same_index
   threshold: 0.10
 datasets:
@@ -581,40 +582,40 @@ Covers **every** comment thread on PR #332 — the maintainer workflow threads
 
 ### Maintainer workflow & example-config threads
 
-| Comment                                                            | Resolution                                                                                                                                                                                                        |
-| ------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Run **one command**, not two/three; phases back-to-back            | `run_audit` generic loop; `audit:` block on `benchmark from-config`                                                                                                                                               |
-| Perf + accuracy + audit from a single config                       | `type: submission` YAML; `run_benchmark` runs perf [+acc], then `run_audit` additively (§5)                                                                                                                       |
-| Comparing 50 distinct vs 20/25 repeated "doesn't seem fair"        | **⚠ knowingly re-introduced** — `samples`/`audit_samples` are independent (e.g. 64/32); soundness from qps rate-normalization + per-phase completion guard, not count-equality. Reviewer-conflict flagged in §5. |
-| "Forced to run 248 in audit … too long"                            | `samples` (reference) and `audit_samples` (audit) are independent subsets; no full-dataset requirement                                                                                                            |
-| Audit sample "shuffled or fixed?"                                  | fixed — reference = `WITHOUT_REPLACEMENT`, audit = `SINGLE(sample_index)` (MLPerf `issue_same`)                                                                                                                   |
-| Need an audit config for single-stream too                         | load-pattern validation admits `concurrency` (single-stream) and `max_throughput` (offline)                                                                                                                       |
-| Paced loads should not silently pass                               | `poisson` rejected up front (§4 step 3) — pacing caps throughput and masks caching                                                                                                                                |
-| Inconsistent / context-free example file names                     | example YAMLs land at implementation; verdict artifacts use fixed `verify_TEST04.txt` + JSON                                                                                                                      |
-| `num_workers` hard-coded in example YAMLs; use default             | dropped at implementation — examples carry only what TEST04 requires                                                                                                                                              |
-| README / unrelated dependency churn (`pip`, `aiohttp`) in the diff | redesign branch is `main` + the plan doc only — no README or dependency changes bundled                                                                                                                           |
+| Comment                                                            | Resolution                                                                                                                                                                                                                 |
+| ------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Run **one command**, not two/three; phases back-to-back            | `run_audit` generic loop; `audit:` block on `benchmark from-config`                                                                                                                                                        |
+| Perf + accuracy + audit from a single config                       | `type: submission` YAML; `run_benchmark` runs perf [+acc], then `run_audit` additively (§5)                                                                                                                                |
+| Comparing 50 distinct vs 20/25 repeated "doesn't seem fair"        | **resolved** — shipped examples use **equal** counts (Offline 64/64, SingleStream 20). `audit_samples` allows independent counts (upstream TEST04 uses 5000/500 for SDXL) as an opt-in to shorten the audit phase; see §5. |
+| "Forced to run 248 in audit … too long"                            | `samples` (reference) and `audit_samples` (audit) are independent subsets; no full-dataset requirement                                                                                                                     |
+| Audit sample "shuffled or fixed?"                                  | fixed — reference = `WITHOUT_REPLACEMENT`, audit = `SINGLE(sample_index)` (MLPerf `issue_same`)                                                                                                                            |
+| Need an audit config for single-stream too                         | load-pattern validation admits `concurrency` (single-stream) and `max_throughput` (offline)                                                                                                                                |
+| Paced loads should not silently pass                               | `poisson` rejected up front (§4 step 3) — pacing caps throughput and masks caching                                                                                                                                         |
+| Inconsistent / context-free example file names                     | example YAMLs land at implementation; verdict artifacts use fixed `verify_TEST04.txt` + JSON                                                                                                                               |
+| `num_workers` hard-coded in example YAMLs; use default             | dropped at implementation — examples carry only what TEST04 requires                                                                                                                                                       |
+| README / unrelated dependency churn (`pip`, `aiohttp`) in the diff | redesign branch is `main` + the plan doc only — no README or dependency changes bundled                                                                                                                                    |
 
 ### Design-review findings (both Review Council passes)
 
-| Finding (severity)                                           | Resolution                                                                                                                                                  |
-| ------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ref_samples` dead write / mismatched counts (high)          | each phase's count is an explicit `RunSpec.n_samples` honored via `n_samples_to_issue` (the bug was the reference count being silently dropped)             |
-| No `AuditTest` abstraction; TEST04 hardcoded (high)          | `AuditTest` protocol + `get_audit_test` registry; generic loop                                                                                              |
-| `DatasetType.AUDIT` abstraction leak (high)                  | dropped; phases derive from a normal PERFORMANCE dataset                                                                                                    |
-| `test04` boolean in `RuntimeSettings`/load-gen (high)        | generic `SampleOrderSpec`; load-gen has no test knowledge                                                                                                   |
-| `_OVERRIDE_TEST04_SAMPLE_INDEX` stringly-typed kwarg (med)   | typed `run_spec` seam                                                                                                                                       |
-| Two-phase `model_copy` surgery; ref skips validation (med)   | declarative `RunSpec`; validate all specs before any run                                                                                                    |
-| Orchestrator untested (med)                                  | unit tests assert per-phase counts + early-return paths                                                                                                     |
-| Scattered params / hardcoded threshold (med)                 | per-test config model (`Test04Config`), discriminated on `test` — each test carries only its own knobs                                                      |
-| Unfair QPS comparison across counts/contents (med)           | **⚠ deliberately allowed** — independent counts; per-phase completion guard + qps rate-normalization instead of count-equality (§5 reviewer-conflict flag) |
-| Audit params belong in `AuditConfig`, not `Dataset` (med)    | `AuditConfig` sub-model on `BenchmarkConfig`; `Dataset` untouched                                                                                           |
-| Two parallel verifier entry points (low)                     | one `verify_test04(RunStats, RunStats)` core + `from_*` adapters                                                                                            |
-| `sample_index` bound-checked late (low)                      | validated vs loaded dataset size before any run                                                                                                             |
-| `audit_config` re-entrancy trap (critical)                   | every phase config sets `audit=None`; cannot re-enter `run_audit`                                                                                           |
-| Orchestrator returns `None`; PASS/FAIL indistinguishable     | `run_audit` returns a typed `AuditVerdict`; CLI exits `0`/`1`/`2`                                                                                           |
-| Non-atomic verdict write (high)                              | `write_verdict` uses `tmp → fsync → rename → fsync(parent)`                                                                                                 |
-| Duplicates `setup_benchmark` dir / `config.yaml` logic (med) | phases reuse `setup_benchmark`; no recomputed report-dir                                                                                                    |
-| `_audit_marker` parsed twice in error path (low)             | n/a — orchestrator owns phase labels, so no directory-swap guard                                                                                            |
+| Finding (severity)                                           | Resolution                                                                                                                                           |
+| ------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ref_samples` dead write / mismatched counts (high)          | each phase's count is an explicit `RunSpec.n_samples` honored via `n_samples_to_issue` (the bug was the reference count being silently dropped)      |
+| No `AuditTest` abstraction; TEST04 hardcoded (high)          | `AuditTest` protocol + `get_audit_test` registry; generic loop                                                                                       |
+| `DatasetType.AUDIT` abstraction leak (high)                  | dropped; phases derive from a normal PERFORMANCE dataset                                                                                             |
+| `test04` boolean in `RuntimeSettings`/load-gen (high)        | generic `SampleOrderSpec`; load-gen has no test knowledge                                                                                            |
+| `_OVERRIDE_TEST04_SAMPLE_INDEX` stringly-typed kwarg (med)   | typed `run_spec` seam                                                                                                                                |
+| Two-phase `model_copy` surgery; ref skips validation (med)   | declarative `RunSpec`; validate all specs before any run                                                                                             |
+| Orchestrator untested (med)                                  | unit tests assert per-phase counts + early-return paths                                                                                              |
+| Scattered params / hardcoded threshold (med)                 | per-test config model (`Test04Config`), discriminated on `test` — each test carries only its own knobs                                               |
+| Unfair QPS comparison across counts/contents (med)           | examples use **equal** counts; per-phase completion guard + qps rate-normalization keep unequal counts sound when opted into (upstream-faithful, §5) |
+| Audit params belong in `AuditConfig`, not `Dataset` (med)    | `AuditConfig` sub-model on `BenchmarkConfig`; `Dataset` untouched                                                                                    |
+| Two parallel verifier entry points (low)                     | one `verify_test04(RunStats, RunStats)` core + `from_*` adapters                                                                                     |
+| `sample_index` bound-checked late (low)                      | validated vs loaded dataset size before any run                                                                                                      |
+| `audit_config` re-entrancy trap (critical)                   | every phase config sets `audit=None`; cannot re-enter `run_audit`                                                                                    |
+| Orchestrator returns `None`; PASS/FAIL indistinguishable     | `run_audit` returns a typed `AuditVerdict`; CLI exits `0`/`1`/`2`                                                                                    |
+| Non-atomic verdict write (high)                              | `write_verdict` uses `tmp → fsync → rename → fsync(parent)`                                                                                          |
+| Duplicates `setup_benchmark` dir / `config.yaml` logic (med) | phases reuse `setup_benchmark`; no recomputed report-dir                                                                                             |
+| `_audit_marker` parsed twice in error path (low)             | n/a — orchestrator owns phase labels, so no directory-swap guard                                                                                     |
 
 ### Robustness & API hygiene (Gemini + Review Council)
 
