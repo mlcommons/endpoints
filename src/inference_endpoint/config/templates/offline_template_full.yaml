@@ -15,6 +15,7 @@ model_params:
   max_new_tokens: 1024  # Max output tokens
   osl_distribution: null  # Output sequence length distribution
   streaming: 'off'  # Streaming mode: auto/on/off | options: auto, on, off
+  tokenizer_name: null  # HF repo ID or local path for the tokenizer. Overrides model name for client-side token metrics (ISL/OSL/TPOT).
 datasets:  # Dataset configs
 - name: perf
   type: performance  # Dataset purpose: performance or accuracy | options: performance, accuracy
