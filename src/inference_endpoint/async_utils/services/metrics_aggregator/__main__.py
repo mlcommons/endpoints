@@ -287,8 +287,8 @@ async def main() -> None:
                 loop=loop,
                 registry=registry,
                 publisher=publisher,
-                table=aggregator._table,
-                token_queue=aggregator._token_queue,
+                table=aggregator.table,
+                token_queue=aggregator.token_queue,
                 shutdown_event=shutdown_event,
             )
             loop.add_signal_handler(signal.SIGTERM, on_sigterm)

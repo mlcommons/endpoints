@@ -247,6 +247,16 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
             table.add_trigger(SampleField.COMPLETE_NS, TpotTrigger(registry, queue))
 
     @property
+    def table(self) -> MetricsTable:
+        """The per-sample metrics table (read-only; for service wiring)."""
+        return self._table
+
+    @property
+    def token_queue(self) -> TokenBatchQueue | None:
+        """The token batch queue, if token metrics are enabled."""
+        return self._token_queue
+
+    @property
     def pending_tokens(self) -> int:
         """Enqueued tokenizations not yet recorded (the snapshot n_pending_tasks)."""
         return self._token_queue.pending if self._token_queue is not None else 0
