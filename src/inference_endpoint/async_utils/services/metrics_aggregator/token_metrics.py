@@ -612,7 +612,6 @@ class TokenBatchQueue:
                     if live:
                         self._text[:0] = text_items
                         self._msg[:0] = msg_items
-                        msg_items = []
                     raise
                 except Exception as exc:  # noqa: BLE001 — isolate phases.
                     failure = exc
