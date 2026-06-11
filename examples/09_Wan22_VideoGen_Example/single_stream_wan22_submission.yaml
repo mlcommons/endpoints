@@ -40,7 +40,7 @@ datasets:
       num_repeats: 1
 
 # TEST04 caching audit — additive post-step. Runs its OWN reference + fixed-sample
-# phases (independent counts), separate from the perf run above.
+# phases at equal counts (the audit count may be lowered to shorten the phase).
 audit:
   test: "test04"
   samples: 20 # reference phase count (SingleStream min_query_count)
@@ -61,9 +61,6 @@ settings:
   load_pattern:
     type: "concurrency"
     target_concurrency: 1 # SingleStream: one request in-flight at a time
-
-  client:
-    num_workers: 1
 
 endpoint_config:
   endpoints:

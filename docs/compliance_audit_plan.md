@@ -398,9 +398,6 @@ settings:
   load_pattern:
     type: "max_throughput"
 
-  client:
-    num_workers: 4
-
 endpoint_config:
   endpoints:
     - "http://localhost:8000"
