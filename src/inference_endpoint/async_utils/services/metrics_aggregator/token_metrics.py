@@ -15,12 +15,15 @@
 
 """Tokenization for ISL/OSL/TPOT metrics.
 
-``BatchTokenizer`` runs two lanes: live mid-run flushes on a small in-process
-thread pool (``--tokenizer-workers``), and the end-of-run drain sharded
-across worker processes each pinned to a ``CORES_PER_WORKER`` block.
-``TokenBatchQueue`` buffers per-sample work and clears it in batches. A
-tokenizer without a fast (Rust) backend is a startup error, never a silent
-slow path; platforms without CPU affinity (e.g. macOS) shard unpinned.
+``BatchTokenizer`` tokenizes whole batches at once, sharded across worker
+processes each pinned to a block of ``CORES_PER_WORKER`` cores (a single BPE
+rayon pool is memory-bound and saturates ~8 cores). The aggregator buffers
+per-sample text. The sharded pool is the drain-phase accelerator and is
+auto-sized (one shard per core block); live mid-run flushes run on a small
+in-process thread pool (``--tokenizer-workers``, default 2) owned by the
+queue's live loop. A tokenizer without a fast (Rust) backend is a startup
+error, never a silent slow path. Platforms without CPU affinity (e.g. macOS)
+shard unpinned at full speed; only cache/NUMA locality is lost.
 """
 
 from __future__ import annotations
@@ -49,14 +52,18 @@ from transformers.utils import logging as transformers_logging
 # used. Measured on GB200: ~16k texts/s at 18 blocks vs ~1.5k single-process.
 CORES_PER_WORKER = 8
 
-# Warmup budget (spawn + transformers import + tokenizer load per worker).
-# A hung load must become a startup error that fires before the parent's
-# 30 s service-launch budget kills the subprocess.
+# Budget for the parallel shard warmup (spawn + transformers import +
+# tokenizer load per worker). A hung load (e.g. a stuck network filesystem)
+# must become a bounded startup error, not wedge service startup — and the
+# error must fire before the parent's 30 s service-launch budget kills the
+# subprocess, so the diagnostic wins the race.
 _SHARD_WARMUP_TIMEOUT_S = 25.0
 
-# Per-flush ceiling for the LIVE lane: bounds the lock-hold time and the
-# unstoppable in-flight encode a drain-start cancellation leaves behind.
-# The drain has no ceiling — it always takes the whole buffer.
+# Per-flush ceiling for the LIVE lane. Bounds three things at once: how long
+# the queue lock is held mid-run, how much work an unstoppable in-flight
+# thread encode can hold after a drain-start cancellation, and how much the
+# drain re-encodes for items the cancelled flush gave back. The drain has no
+# ceiling — it always takes the whole buffer.
 _LIVE_FLUSH_MAX_ITEMS = 1024
 
 # Minimal user message used to satisfy chat templates that reject assistant-only
@@ -197,11 +204,10 @@ class BatchTokenizer:
         n_workers: int = -1,
     ) -> None:
         self._tokenizer_name = tokenizer_name
-        # Cap this process's rayon pool so a live (in-process) batched encode
-        # uses ~live_workers cores, not the whole machine. Must be set before
-        # the first encode initializes the pool; setdefault lets an
-        # operator-exported RAYON_NUM_THREADS win. live_workers has no
-        # default — the one default lives in config/schema.py.
+        # The live lane runs in-process: cap this process's rayon pool so a
+        # mid-run batched encode uses ~live_workers cores, not the whole
+        # machine. Must be set before the first encode initializes the pool;
+        # setdefault lets an operator-exported RAYON_NUM_THREADS win.
         os.environ.setdefault("RAYON_NUM_THREADS", str(max(1, live_workers)))
         self._live_workers = live_workers
         self._fallback_warned: set[str] = set()
@@ -214,9 +220,10 @@ class BatchTokenizer:
             max_workers=max(1, live_workers), thread_name_prefix="tok-thread"
         )
         self._load_tokenizer()  # also computes the chat-template baseline
-        # Process shards for the drain. Empty only when in-process mode was
-        # explicitly requested (n_workers=0 / cores_per_worker<=0, test-only
-        # seams — production wiring always auto-sizes).
+        # Process shards for the batched text path. Empty only when
+        # in-process mode was explicitly requested (n_workers=0 or
+        # cores_per_worker<=0; ctor overrides used primarily by tests —
+        # production wiring passes live_workers only and shards auto-size).
         self._procs: list[ProcessPoolExecutor] = []
         self._setup_shards(cores_per_worker, n_workers)
 
@@ -256,11 +263,14 @@ class BatchTokenizer:
     def _setup_shards(self, cores_per_worker: int, n_workers: int) -> None:
         """Spawn one pinned single-worker process per core block.
 
-        ``n_workers == 0`` selects in-process tokenization; auto (``< 0``)
-        fits one shard per ``cores_per_worker`` block (at least one); an
-        explicit count is clamped to capacity. An environment that cannot
-        shard — no fast Rust backend, a failed or over-budget warmup —
-        raises instead of degrading to a slow path.
+        ``n_workers == 0`` explicitly selects in-process tokenization. Auto
+        (``< 0``) fits one shard per ``cores_per_worker`` block of this
+        process's affinity mask (or the online CPU count when the platform
+        has no affinity API — shards then run unpinned), always at least one;
+        an explicit count is clamped to that capacity. An environment that
+        cannot shard — no fast Rust backend, a warmup that fails or exceeds
+        its budget — raises instead of silently degrading to a slow path
+        that cannot keep up with completions.
         """
         if cores_per_worker <= 0 or n_workers == 0:
             logger.info("BatchTokenizer: in-process tokenization (explicit)")
@@ -271,9 +281,12 @@ class BatchTokenizer:
                 "backend; token metrics require one to keep up with "
                 "completions. Use a fast tokenizer, or disable token metrics."
             )
-        # Probe the full allowed CPU universe (cgroup-clamped) for the block
-        # math, then restore the inherited mask: the aggregator stays where
-        # the parent placed it; only the drain shards span the machine.
+        # Probe the full allowed CPU universe (cgroup-clamped) for the shard
+        # block math, then restore this process's inherited mask: the
+        # aggregator's event loop, publisher, and live tokenizer threads stay
+        # exactly where the parent placed them (the loadgen mask on a pinned
+        # Linux run). Only the drain-phase shard processes, pinned to their
+        # own blocks, span the whole machine.
         try:
             original = os.sched_getaffinity(0)
         except (OSError, AttributeError):
@@ -310,9 +323,11 @@ class BatchTokenizer:
                     initargs=(self._tokenizer_name, block),
                 )
                 procs.append(ex)
-            # Warm all shards in parallel (submit-then-await; awaiting each
-            # before the next would serialize N tokenizer loads). Bounded:
-            # one hung load must not wedge startup.
+            # Force spawn + pin + tokenizer-load now (not on the first batch).
+            # Submit to every shard first so the loads run in parallel, then
+            # await — waiting on each before submitting the next would
+            # serialize P tokenizer loads and can exceed the launch budget.
+            # The wait is bounded: one hung load must not wedge startup.
             ready = [ex.submit(_worker_ready, 0) for ex in procs]
             deadline = time.monotonic() + _SHARD_WARMUP_TIMEOUT_S
             for f in ready:
@@ -490,12 +505,16 @@ class TokenCounter(Protocol):
 class TokenBatchQueue:
     """Buffers per-sample tokenization work and clears it in batches.
 
-    Triggers call ``enqueue_text`` / ``enqueue_message`` at event time with
-    an ``on_count`` recorder callback. The queue owns its flush cadence:
-    ``start_live`` flushes periodically through the tokenizer's bounded live
-    lane; ``flush_remaining`` drains everything left at end-of-run through
-    every shard. ``pending`` is the snapshot's ``n_pending_tasks`` —
-    non-zero in the final snapshot means an incomplete drain.
+    Triggers call ``enqueue_text`` / ``enqueue_message`` at event time with an
+    ``on_count`` callback that records the resulting metric. The queue owns
+    its own flush cadence: ``start_live`` begins a periodic flush through the
+    tokenizer's bounded live lane (so live ISL/OSL/TPOT stay current without
+    touching the benchmark's cores), and ``flush_remaining`` drains everything
+    left at end-of-run through every shard.
+
+    ``pending`` counts enqueued-but-not-yet-recorded items; it is the
+    ``n_pending_tasks`` on the snapshot. A non-zero value in the final snapshot
+    means the end-of-run flush did not finish within the drain budget or failed.
     """
 
     def __init__(
@@ -556,12 +575,16 @@ class TokenBatchQueue:
     async def flush(self, live: bool = False) -> None:
         """Tokenize everything buffered so far and run each ``on_count``.
 
-        ``live=True`` routes text through the tokenizer's bounded live lane,
-        takes at most ``_LIVE_FLUSH_MAX_ITEMS`` per kind, and re-queues items
-        on failure or cancellation — a mid-run hiccup never loses samples.
-        Drain-mode failures are terminal: un-recorded items stay counted in
-        ``pending`` and surface as an incomplete drain. Items are detached up
-        front so concurrent enqueues land in the next flush.
+        ``live=True`` routes text batches through the tokenizer's bounded
+        live lane instead of the full shard pool, takes at most
+        ``_LIVE_FLUSH_MAX_ITEMS`` per kind (bounding lock-hold time and the
+        unstoppable in-flight encode a drain-start cancellation leaves
+        behind), and re-queues items on failure or cancellation so a mid-run
+        hiccup never loses samples — the end-of-run drain retries them. Drain-mode failures are terminal: the
+        un-recorded items stay counted in ``pending`` (``_inflight`` is
+        decremented only after a callback runs) and surface as an incomplete
+        drain, not as silently dropped samples. Items are detached from the
+        buffer up front so concurrent enqueues land in the next flush.
         """
         async with self._lock:
             if not (self._text or self._msg):

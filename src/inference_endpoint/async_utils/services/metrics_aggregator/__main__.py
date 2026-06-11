@@ -49,18 +49,27 @@ def _make_sigterm_handler(
 ) -> tuple[Callable[[], None], set[asyncio.Task]]:
     """Build the SIGTERM handler that writes the INTERRUPTED final snapshot.
 
-    Returns ``(handler, pending_tasks)``: asyncio holds tasks only by
-    weakref, so the handler's finalize task must live in this
-    strong-reference set until done. Module-level so the GC-safety
-    contract is unit-testable.
+    Returns ``(handler, pending_tasks)``. ``pending_tasks`` is the
+    strong-reference container that keeps spawned finalize tasks alive
+    while they run: asyncio tracks tasks only by weakref, so a task
+    whose only reference is the local variable inside the handler can
+    be garbage-collected mid-execution (per Python's asyncio docs).
+    Each spawned task self-removes from the set via
+    ``add_done_callback`` once it completes.
+
+    Exposed at module level (rather than nested in ``main()``) so the
+    GC-safety contract is unit-testable without driving the whole
+    subprocess lifecycle.
     """
     pending_tasks: set[asyncio.Task] = set()
 
     async def _signal_finalize() -> None:
         try:
-            # Refresh tracked_duration_ns before publish_final (mirrors the
-            # ENDED path) — otherwise an interrupted run whose
-            # STOP_PERFORMANCE_TRACKING never fired reports QPS=N/A.
+            # Mirror the ENDED-driven path: refresh tracked_duration_ns
+            # from the table BEFORE publish_final, otherwise an
+            # interrupted run whose STOP_PERFORMANCE_TRACKING never
+            # fired would report duration_ns=0 and QPS=N/A in the final
+            # report even after processing many tracked samples.
             registry.set_counter(
                 MetricCounterKey.TRACKED_DURATION_NS.value,
                 table.total_tracked_duration_ns,
@@ -127,8 +136,10 @@ async def main() -> None:
         required=True,
         help=(
             "Wall-clock budget (seconds) to finish tokenizing buffered samples "
-            "after ENDED (0 = wait indefinitely). The benchmark forwards "
-            "--metrics-drain-timeout; the default lives in config/schema.py."
+            "after ENDED before the aggregator emits the final snapshot with "
+            "n_pending_tasks > 0 (0 = wait indefinitely; the benchmark forwards "
+            "the schema default, see config/schema.py). Increase for very large "
+            "datasets where the end-of-run tokenize batch is big."
         ),
     )
     parser.add_argument(
@@ -155,9 +166,10 @@ async def main() -> None:
         required=True,
         help=(
             "In-process tokenizer threads for live (mid-run) ISL/OSL/TPOT "
-            "(0 = defer everything to the end-of-run drain, which always uses "
-            "the auto-sized sharded pool). The benchmark forwards "
-            "--metrics-tokenizer-workers; the default lives in config/schema.py."
+            "(0 = no mid-run tokenization, everything defers to the "
+            "end-of-run drain; the benchmark forwards the schema default, "
+            "see config/schema.py). The drain always uses the auto-sized "
+            "sharded pool — one worker process per 8-core block."
         ),
     )
     parser.add_argument(
@@ -184,8 +196,12 @@ async def main() -> None:
     if args.tokenizer_workers < 0:
         raise SystemExit("FATAL: --tokenizer-workers must be >= 0")
 
-    # The parent (commands/benchmark/execute.py) owns directory creation;
-    # fail fast here so a bad launcher errors now, not on the atomic write.
+    # The parent owns directory setup — `commands/benchmark/execute.py`
+    # creates `<report_dir>/metrics/` and validates it before launching
+    # this subprocess. Validate here as a fail-fast contract check so a
+    # misbehaving launcher (or a manual invocation) surfaces a clear
+    # error in this subprocess's stderr instead of crashing later on
+    # the atomic-write path.
     metrics_output_dir: Path = args.metrics_output_dir
     if not metrics_output_dir.is_dir():
         raise SystemExit(
@@ -206,8 +222,9 @@ async def main() -> None:
                 args.tokenizer, live_workers=args.tokenizer_workers
             )
         except RuntimeError as exc:
-            # An environment that cannot shard is a launch failure, not a
-            # silent slow path that cannot keep up with completions.
+            # Fail-fast contract: a tokenizer environment that cannot shard
+            # must surface as a clear service-launch failure, not a silent
+            # slow path that cannot keep up with completions.
             raise SystemExit(f"FATAL: {exc}") from exc
     else:
         tokenizer_cm = nullcontext()
@@ -245,12 +262,29 @@ async def main() -> None:
             )
             aggregator.start()
 
-            # SIGTERM (ServiceLauncher.kill_all) must still produce a final
-            # snapshot, tagged INTERRUPTED; publish_final is idempotent, so
-            # racing the ENDED-driven call is safe. SIGINT (^C hits the whole
-            # process group) is a no-op: finalizing eagerly at signal time
-            # would freeze the snapshot before the parent's graceful-shutdown
-            # samples land — the parent's ENDED drives finalize instead.
+            # SIGTERM only — the parent's ServiceLauncher.kill_all uses
+            # SIGTERM to kill the aggregator child before an ENDED event
+            # arrives; without this handler that path leaves the Report
+            # consumer with no final_snapshot file. The signal-triggered
+            # snapshot is tagged INTERRUPTED so Report can distinguish
+            # "parent killed the run" from a clean shutdown.
+            # publish_final is idempotent (see
+            # MetricsPublisher._finalized), so racing with the
+            # ENDED-driven call is safe.
+            #
+            # SIGINT is deliberately NOT handled in the same way. On an
+            # interactive ^C, the OS sends SIGINT to the whole
+            # foreground process group — parent + child both receive
+            # it. If we finalized eagerly here, the aggregator would
+            # write final_snapshot.json from whatever state it had at
+            # signal time, then exit; samples that completed during the
+            # parent's own graceful shutdown window would never reach
+            # the file (the parent eventually emits ENDED on its events
+            # channel, but `_finalized=True` makes that a no-op). The
+            # parent's clean-shutdown path is what we want to drive the
+            # aggregator's finalize — so we install a no-op handler for
+            # SIGINT here, which prevents Python's default
+            # KeyboardInterrupt and lets the parent control the lifecycle.
             on_sigterm, _sigterm_tasks = _make_sigterm_handler(
                 loop=loop,
                 registry=registry,
@@ -260,6 +294,8 @@ async def main() -> None:
                 shutdown_event=shutdown_event,
             )
             loop.add_signal_handler(signal.SIGTERM, on_sigterm)
+            # No-op SIGINT handler: silence the default KeyboardInterrupt
+            # and let the parent's ENDED-driven path drive shutdown.
             loop.add_signal_handler(
                 signal.SIGINT,
                 lambda: logger.info(
@@ -279,13 +315,24 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
+    # Surface startup / bind / tokenizer-load failures with structured
+    # context. Without this wrap, the parent's ServiceLauncher only sees
+    # the non-zero exit code and a raw traceback — no diagnostic context
+    # to correlate against the parent's logs. The except/raise pattern
+    # preserves the original exit code (1) and traceback while emitting
+    # the structured logger.exception line before the interpreter prints
+    # the trace.
     try:
         LoopManager().default_loop.run_until_complete(main())
     except SystemExit:
         # argparse / explicit sys.exit — already user-facing, don't dress up.
         raise
     except Exception as e:
-        # Structured log line so the crash is grep-able against the parent's
-        # logs; KeyboardInterrupt/SystemExit propagate untouched.
+        # Catch Exception (not BaseException) so KeyboardInterrupt /
+        # SystemExit propagate untouched — those are control-flow
+        # signals, not crashes, and labeling them as "crashed" would
+        # mislead operators. The exception type goes first in the log
+        # message so it's grep-able without scrolling through the
+        # traceback.
         logger.exception("metrics aggregator subprocess crashed (%s)", type(e).__name__)
         raise
