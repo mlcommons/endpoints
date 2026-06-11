@@ -306,29 +306,81 @@ inference-endpoint benchmark from-config --config bench.yaml
 — one command, one `report_dir`. Each piece is optional: drop `audit:` for perf+acc, or
 omit accuracy datasets for perf+audit.
 
+The committed example is `examples/09_Wan22_VideoGen_Example/submission_wan22_offline.yaml`:
+
 ```yaml
-# submission_wan22.yaml
-type: submission
-benchmark_mode: offline
-model_params: { name: wan22, streaming: off }
+# Full WAN 2.2 Offline submission: performance + VBench accuracy + TEST04 audit.
+# One command runs all three under a single report_dir:
+#   inference-endpoint benchmark from-config \
+#       examples/09_Wan22_VideoGen_Example/submission_wan22_offline.yaml
+#
+# Execution order (run_benchmark):
+#   1. performance run  — full 248-prompt dataset (the submission perf result)
+#   2. accuracy scoring — VBench over the produced videos
+#   3. audit (TEST04)   — reference + fixed-sample phases at a shared count, then verdict
+#
+# NOTE: the `audit:` block reflects the PROPOSED schema in
+# docs/compliance_audit_plan.md and is not yet implemented on main. The
+# performance + accuracy portion mirrors offline_wan22_accuracy.yaml.
+
+name: "submission-wan22-video-generation"
+version: "1.0"
+type: "submission"
+benchmark_mode: "offline" # required for type: submission
+
+model_params:
+  name: "wan22"
+  max_new_tokens: 1 # ignored by VideoGenAdapter; kept >0 for api_type debug swaps
+  streaming: "off" # WAN 2.2 uses non-streaming HTTP POST/response
+
 datasets:
-  - {
-      name: wan22_perf,
-      path: examples/09_Wan22_VideoGen_Example/wan22_prompts.jsonl,
-      type: performance,
-    }
-  - {
-      name: wan22_acc,
-      path: examples/09_Wan22_VideoGen_Example/wan22_prompts.jsonl,
-      type: accuracy,
-      accuracy_config: { eval_method: vbench },
-    }
-audit: # additive: runs after perf + accuracy
-  test: test04
-  samples: 64
-  sample_index: 3
-  threshold: 0.10
-endpoint_config: { api_type: videogen, endpoints: ["http://localhost:8000"] }
+  # Performance dataset drives request issuance (the submission perf run).
+  - name: wan22_perf
+    path: examples/09_Wan22_VideoGen_Example/wan22_prompts.jsonl
+    type: "performance"
+    samples: 248
+
+  # Accuracy dataset reuses the same prompts; videos are scored VBench-style.
+  - name: wan22_vbench
+    path: examples/09_Wan22_VideoGen_Example/wan22_prompts.jsonl
+    type: "accuracy"
+    samples: 248
+    accuracy_config:
+      eval_method: "vbench"
+      ground_truth: "prompt" # VBench input is (prompt, video), not a GT comparison
+      num_repeats: 1
+
+# TEST04 caching audit — additive post-step. Runs its OWN reference + fixed-sample
+# phases at a single shared count (equal-count basis), independent of the perf run above.
+audit:
+  test: "test04"
+  samples: 64 # shared by both audit phases (subset of the 248 prompts)
+  sample_index: 3 # MLCommons audit.config performance_issue_same_index=3
+  threshold: 0.10 # audit qps must stay < reference qps * (1 + threshold)
+
+settings:
+  runtime:
+    # NOTE: runs are count-driven (n_samples_to_issue / audit.samples). min_duration_ms is
+    # NOT enforced as a duration floor by the current stop logic (counts take priority);
+    # MLCommons' 10-min minimum / AND-semantics is future work. Only max_duration_ms caps.
+    max_duration_ms: 14400000 # 4-hour ceiling
+    scheduler_random_seed: 42
+    dataloader_random_seed: 42
+    n_samples_to_issue: 248 # applies to the perf/accuracy run; audit uses audit.samples
+
+  load_pattern:
+    type: "max_throughput"
+
+  client:
+    num_workers: 4
+
+endpoint_config:
+  endpoints:
+    - "http://localhost:8000"
+  api_type: "videogen"
+  api_key: null
+
+report_dir: logs/wan22_submission
 ```
 
 Resulting `report_dir/` (main perf/accuracy artifacts keep their current layout; the audit
