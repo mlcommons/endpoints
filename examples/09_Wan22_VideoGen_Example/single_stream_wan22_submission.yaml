@@ -1,21 +1,21 @@
-# Full WAN 2.2 Offline submission: performance + VBench accuracy + TEST04 audit.
+# Full WAN 2.2 SingleStream submission: performance + VBench accuracy + TEST04 audit.
+# SingleStream = one request in-flight at a time (concurrency=1).
 # One command runs all three under a single report_dir:
 #   inference-endpoint benchmark from-config \
-#       examples/09_Wan22_VideoGen_Example/submission_wan22_offline.yaml
+#       examples/09_Wan22_VideoGen_Example/single_stream_wan22_submission.yaml
 #
 # Execution order (run_benchmark):
-#   1. performance run  — full 248-prompt dataset (the submission perf result)
+#   1. performance run  — single-stream latency over the prompt set
 #   2. accuracy scoring — VBench over the produced videos
-#   3. audit (TEST04)   — reference + fixed-sample phases (independent counts), then verdict
+#   3. audit (TEST04)   — reference + fixed-sample phases, then verdict
 #
 # NOTE: the `audit:` block reflects the PROPOSED schema in
-# docs/compliance_audit_plan.md and is not yet implemented on main. The
-# performance + accuracy portion mirrors offline_wan22_accuracy.yaml.
+# docs/compliance_audit_plan.md and is not yet implemented on main.
 
-name: "submission-wan22-video-generation"
+name: "submission-wan22-video-generation-singlestream"
 version: "1.0"
 type: "submission"
-benchmark_mode: "offline" # required for type: submission
+benchmark_mode: "online" # required for type: submission
 
 model_params:
   name: "wan22"
@@ -27,13 +27,13 @@ datasets:
   - name: wan22_perf
     path: examples/09_Wan22_VideoGen_Example/wan22_prompts.jsonl
     type: "performance"
-    samples: 248
+    samples: 20 # MLCommons SingleStream min_query_count
 
   # Accuracy dataset reuses the same prompts; videos are scored VBench-style.
   - name: wan22_vbench
     path: examples/09_Wan22_VideoGen_Example/wan22_prompts.jsonl
     type: "accuracy"
-    samples: 248
+    samples: 20
     accuracy_config:
       eval_method: "vbench"
       ground_truth: "prompt" # VBench input is (prompt, video), not a GT comparison
@@ -43,26 +43,27 @@ datasets:
 # phases (independent counts), separate from the perf run above.
 audit:
   test: "test04"
-  samples: 64 # reference phase count (subset of the 248 prompts)
-  audit_samples: 32 # audit (fixed-sample) phase count; omit to equal `samples`
+  samples: 20 # reference phase count (SingleStream min_query_count)
+  audit_samples: 20 # audit (fixed-sample) phase count; omit to equal `samples`
   sample_index: 3 # MLCommons audit.config performance_issue_same_index=3
-  threshold: 0.10 # audit qps must stay < reference qps * (1 + threshold)
+  threshold: 0.20 # low-throughput stream tolerance (±20%)
 
 settings:
   runtime:
-    # NOTE: runs are count-driven (n_samples_to_issue / audit.samples). min_duration_ms is
+    # NOTE: runs are count-driven (n_samples_to_issue / audit counts). min_duration_ms is
     # NOT enforced as a duration floor by the current stop logic (counts take priority);
     # MLCommons' 10-min minimum / AND-semantics is future work. Only max_duration_ms caps.
-    max_duration_ms: 14400000 # 4-hour ceiling
+    max_duration_ms: 7200000 # 2-hour ceiling
     scheduler_random_seed: 42
     dataloader_random_seed: 42
-    n_samples_to_issue: 248 # applies to the perf/accuracy run; audit uses audit.samples
+    n_samples_to_issue: 20 # applies to the perf/accuracy run; audit uses its own counts
 
   load_pattern:
-    type: "max_throughput"
+    type: "concurrency"
+    target_concurrency: 1 # SingleStream: one request in-flight at a time
 
   client:
-    num_workers: 4
+    num_workers: 1
 
 endpoint_config:
   endpoints:
@@ -70,4 +71,4 @@ endpoint_config:
   api_type: "videogen"
   api_key: null
 
-report_dir: logs/wan22_submission
+report_dir: logs/wan22_singlestream_submission

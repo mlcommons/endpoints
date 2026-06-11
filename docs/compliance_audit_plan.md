@@ -330,13 +330,13 @@ inference-endpoint benchmark from-config --config bench.yaml
 — one command, one `report_dir`. Each piece is optional: drop `audit:` for perf+acc, or
 omit accuracy datasets for perf+audit.
 
-The committed example is `examples/09_Wan22_VideoGen_Example/submission_wan22_offline.yaml`:
+The committed example is `examples/09_Wan22_VideoGen_Example/offline_wan22_submission.yaml`:
 
 ```yaml
 # Full WAN 2.2 Offline submission: performance + VBench accuracy + TEST04 audit.
 # One command runs all three under a single report_dir:
 #   inference-endpoint benchmark from-config \
-#       examples/09_Wan22_VideoGen_Example/submission_wan22_offline.yaml
+#       examples/09_Wan22_VideoGen_Example/offline_wan22_submission.yaml
 #
 # Execution order (run_benchmark):
 #   1. performance run  — full 248-prompt dataset (the submission perf result)
@@ -470,7 +470,7 @@ Two scenarios must be covered: **Offline** (`max_throughput`) and **SingleStream
 
 ```yaml
 # Illustrative: Offline TEST04 audit-only (perf + audit, no accuracy datasets).
-# The committed file is submission_wan22_offline.yaml (perf + accuracy + audit).
+# The committed file is offline_wan22_submission.yaml (perf + accuracy + audit).
 type: offline
 model_params: { name: wan22, streaming: off }
 audit:
@@ -494,7 +494,7 @@ endpoint_config: { api_type: videogen, endpoints: ["http://localhost:8000"] }
 
 ```yaml
 # Illustrative: SingleStream TEST04 audit-only (perf + audit, no accuracy datasets).
-# The committed file is submission_wan22_singlestream.yaml (perf + accuracy + audit).
+# The committed file is single_stream_wan22_submission.yaml (perf + accuracy + audit).
 type: online
 model_params: { name: wan22, streaming: off }
 audit:
@@ -517,19 +517,19 @@ endpoint_config: { api_type: videogen, endpoints: ["http://localhost:8000"] }
 
 ## 6. File-by-file changes (against `main`)
 
-| File                                                                    | Change                                                                                             |
-| ----------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| `compliance/__init__.py`                                                | **new** — `AuditTest` protocol, `RunSpec`, `RunStats`, `AuditVerdict`, `get_audit_test()` registry |
-| `compliance/verdict.py`                                                 | **new** — `AuditVerdict` + atomic `write_verdict` (reference `verify_TEST04.txt` wording + JSON)   |
-| `compliance/tests/__init__.py`                                          | **new** — imports submodules so registration fires                                                 |
-| `compliance/tests/test04.py`                                            | **new** — `Test04Audit.plan_runs` (reference + audit specs) + `verify_test04` core                 |
-| `commands/audit.py`                                                     | **new** — generic `run_audit` loop (plan → validate-all → execute → verify → write)                |
-| `config/schema.py`                                                      | **+** `AuditTestId`, `AuditConfig`, `audit: AuditConfig \| None` on `BenchmarkConfig`              |
-| `load_generator/sample_order.py`                                        | **+** `SampleOrderSpec` + `SingleSampleOrder`; `create_sample_order` switches on the spec          |
-| `config/runtime_settings.py`                                            | **+** `sample_order: SampleOrderSpec` (generic; default `WITHOUT_REPLACEMENT`)                     |
-| `commands/benchmark/execute.py`                                         | **+** typed `run_spec` seam in `setup_benchmark`; `run_benchmark` dispatches to `run_audit`        |
-| `examples/09_Wan22_VideoGen_Example/submission_wan22_offline.yaml`      | **new** — WAN2.2 Offline submission (perf + accuracy + TEST04)                                     |
-| `examples/09_Wan22_VideoGen_Example/submission_wan22_singlestream.yaml` | **new** — WAN2.2 SingleStream submission (perf + accuracy + TEST04)                                |
+| File                                                                     | Change                                                                                             |
+| ------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------- |
+| `compliance/__init__.py`                                                 | **new** — `AuditTest` protocol, `RunSpec`, `RunStats`, `AuditVerdict`, `get_audit_test()` registry |
+| `compliance/verdict.py`                                                  | **new** — `AuditVerdict` + atomic `write_verdict` (reference `verify_TEST04.txt` wording + JSON)   |
+| `compliance/tests/__init__.py`                                           | **new** — imports submodules so registration fires                                                 |
+| `compliance/tests/test04.py`                                             | **new** — `Test04Audit.plan_runs` (reference + audit specs) + `verify_test04` core                 |
+| `commands/audit.py`                                                      | **new** — generic `run_audit` loop (plan → validate-all → execute → verify → write)                |
+| `config/schema.py`                                                       | **+** `AuditTestId`, `AuditConfig`, `audit: AuditConfig \| None` on `BenchmarkConfig`              |
+| `load_generator/sample_order.py`                                         | **+** `SampleOrderSpec` + `SingleSampleOrder`; `create_sample_order` switches on the spec          |
+| `config/runtime_settings.py`                                             | **+** `sample_order: SampleOrderSpec` (generic; default `WITHOUT_REPLACEMENT`)                     |
+| `commands/benchmark/execute.py`                                          | **+** typed `run_spec` seam in `setup_benchmark`; `run_benchmark` dispatches to `run_audit`        |
+| `examples/09_Wan22_VideoGen_Example/offline_wan22_submission.yaml`       | **new** — WAN2.2 Offline submission (perf + accuracy + TEST04)                                     |
+| `examples/09_Wan22_VideoGen_Example/single_stream_wan22_submission.yaml` | **new** — WAN2.2 SingleStream submission (perf + accuracy + TEST04)                                |
 
 ---
 
