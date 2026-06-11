@@ -44,7 +44,7 @@ from inference_endpoint.core.record import (
 from inference_endpoint.core.types import ErrorData, PromptData, TextModelOutput
 
 from .conftest import (
-    MockTokenizePool,
+    MockBatchTokenizer,
     make_aggregator,
     sample_event,
     session_event,
@@ -312,10 +312,10 @@ class TestTimingMetrics:
     async def test_non_streaming_latency_only(self, tmp_path):
         """Non-streaming: emits sample_latency_ns + OSL, no TTFT/chunk_delta/TPOT."""
         loop = asyncio.get_event_loop()
-        pool = MockTokenizePool(delay=0.0)
+        tokenizer = MockBatchTokenizer(delay=0.0)
         with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
             agg, registry, _ = make_aggregator(
-                ctx, loop, "agg_non_streaming", tokenize_pool=pool
+                ctx, loop, "agg_non_streaming", tokenizer=tokenizer
             )
             try:
                 await agg.process(
@@ -332,7 +332,7 @@ class TestTimingMetrics:
                         ),
                     ]
                 )
-                await agg._table.drain_tasks()
+                await agg._token_queue.flush()
                 # sample_latency = 3000-1000 = 2000
                 assert (
                     snapshot_series_total(
@@ -380,7 +380,7 @@ class TestTimingMetrics:
 
 
 # ---------------------------------------------------------------------------
-# ISL (token_ids path -- sync, no tokenize_pool needed)
+# ISL (token_ids path -- sync, no tokenizer needed)
 # ---------------------------------------------------------------------------
 
 
@@ -766,7 +766,7 @@ class TestCounterAccounting:
 
 
 # ---------------------------------------------------------------------------
-# Async trigger tests (with mock TokenizePool and real event loop)
+# Token trigger tests (with mock BatchTokenizer and real event loop)
 # ---------------------------------------------------------------------------
 
 
@@ -776,10 +776,10 @@ class TestAsyncTriggers:
     async def test_isl_text_path_async(self, tmp_path):
         """ISL with text prompt triggers async tokenization."""
         loop = asyncio.get_event_loop()
-        pool = MockTokenizePool(delay=0.01)
+        tokenizer = MockBatchTokenizer(delay=0.01)
         with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
             agg, registry, _ = make_aggregator(
-                ctx, loop, "agg_isl_text_async", tokenize_pool=pool
+                ctx, loop, "agg_isl_text_async", tokenizer=tokenizer
             )
             try:
                 await agg.process(
@@ -796,7 +796,7 @@ class TestAsyncTriggers:
                     ]
                 )
                 # ISL task is in-flight; drain it
-                await agg._table.drain_tasks()
+                await agg._token_queue.flush()
                 assert snapshot_series_total(registry, MetricSeriesKey.ISL.value) == 4
             finally:
                 agg.close()
@@ -805,10 +805,10 @@ class TestAsyncTriggers:
     async def test_osl_emitted_on_complete(self, tmp_path):
         """OSL is emitted via async tokenization when COMPLETE carries text."""
         loop = asyncio.get_event_loop()
-        pool = MockTokenizePool(delay=0.01)
+        tokenizer = MockBatchTokenizer(delay=0.01)
         with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
             agg, registry, _ = make_aggregator(
-                ctx, loop, "agg_osl_complete", tokenize_pool=pool
+                ctx, loop, "agg_osl_complete", tokenizer=tokenizer
             )
             try:
                 await agg.process(
@@ -825,7 +825,7 @@ class TestAsyncTriggers:
                         ),
                     ]
                 )
-                await agg._table.drain_tasks()
+                await agg._token_queue.flush()
                 # sample_latency_ns = 5000-1000 = 4000
                 assert (
                     snapshot_series_total(
@@ -842,10 +842,10 @@ class TestAsyncTriggers:
     async def test_tpot_emitted_for_streaming(self, tmp_path):
         """TPOT is emitted for streaming responses using text_after_first_chunk."""
         loop = asyncio.get_event_loop()
-        pool = MockTokenizePool(delay=0.0)
+        tokenizer = MockBatchTokenizer(delay=0.0)
         with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
             agg, registry, _ = make_aggregator(
-                ctx, loop, "agg_tpot_streaming", tokenize_pool=pool
+                ctx, loop, "agg_tpot_streaming", tokenizer=tokenizer
             )
             try:
                 await agg.process(
@@ -864,7 +864,7 @@ class TestAsyncTriggers:
                         ),
                     ]
                 )
-                await agg._table.drain_tasks()
+                await agg._token_queue.flush()
                 # OSL = "hello world foo" = 3 tokens
                 assert snapshot_series_total(registry, MetricSeriesKey.OSL.value) == 3
                 # tpot = (5000 - 2000) / token_count("world foo") = 3000 / 2 = 1500
@@ -878,10 +878,10 @@ class TestAsyncTriggers:
     async def test_tpot_skipped_when_single_chunk(self, tmp_path):
         """TPOT is not emitted when there are no tokens after the first chunk."""
         loop = asyncio.get_event_loop()
-        pool = MockTokenizePool(delay=0.0)
+        tokenizer = MockBatchTokenizer(delay=0.0)
         with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
             agg, registry, _ = make_aggregator(
-                ctx, loop, "agg_tpot_single_chunk", tokenize_pool=pool
+                ctx, loop, "agg_tpot_single_chunk", tokenizer=tokenizer
             )
             try:
                 await agg.process(
@@ -900,7 +900,7 @@ class TestAsyncTriggers:
                         ),
                     ]
                 )
-                await agg._table.drain_tasks()
+                await agg._token_queue.flush()
                 assert snapshot_series_total(registry, MetricSeriesKey.OSL.value) == 1
                 assert (
                     snapshot_series_count(registry, MetricSeriesKey.TPOT_NS.value) == 0
@@ -914,13 +914,13 @@ class TestAsyncTriggers:
         registered at all — the aggregator's snapshot has no entry for them.
         """
         loop = asyncio.get_event_loop()
-        pool = MockTokenizePool(delay=0.0)
+        tokenizer = MockBatchTokenizer(delay=0.0)
         with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
             agg, registry, _ = make_aggregator(
                 ctx,
                 loop,
                 "agg_tpot_no_streaming",
-                tokenize_pool=pool,
+                tokenizer=tokenizer,
                 streaming=False,
             )
             try:
@@ -939,7 +939,7 @@ class TestAsyncTriggers:
                         ),
                     ]
                 )
-                await agg._table.drain_tasks()
+                await agg._token_queue.flush()
                 # sample_latency / OSL still emitted in non-streaming mode.
                 assert (
                     snapshot_series_total(
@@ -959,10 +959,10 @@ class TestAsyncTriggers:
     async def test_tpot_non_streaming_output_skipped(self, tmp_path):
         """TPOT is not emitted for non-streaming (str) TextModelOutput."""
         loop = asyncio.get_event_loop()
-        pool = MockTokenizePool(delay=0.0)
+        tokenizer = MockBatchTokenizer(delay=0.0)
         with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
             agg, registry, _ = make_aggregator(
-                ctx, loop, "agg_tpot_str_output", tokenize_pool=pool
+                ctx, loop, "agg_tpot_str_output", tokenizer=tokenizer
             )
             try:
                 await agg.process(
@@ -981,7 +981,7 @@ class TestAsyncTriggers:
                         ),
                     ]
                 )
-                await agg._table.drain_tasks()
+                await agg._token_queue.flush()
                 assert snapshot_series_total(registry, MetricSeriesKey.OSL.value) == 3
                 assert (
                     snapshot_series_count(registry, MetricSeriesKey.TPOT_NS.value) == 0
@@ -990,13 +990,36 @@ class TestAsyncTriggers:
                 agg.close()
 
     @pytest.mark.asyncio
-    async def test_drain_tasks_awaits_in_flight(self, tmp_path):
-        """drain_tasks() properly awaits all in-flight async trigger tasks."""
+    async def test_started_arms_the_live_flush_loop(self, tmp_path):
+        """STARTED starts the queue's live loop when an interval is set."""
         loop = asyncio.get_event_loop()
-        pool = MockTokenizePool(delay=0.05)
+        with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
+            agg, _, _ = make_aggregator(
+                ctx,
+                loop,
+                "agg_live_arm",
+                tokenizer=MockBatchTokenizer(),
+                live_flush_interval_s=0.01,
+            )
+            try:
+                await agg.process([session_event(SessionEventType.STARTED, ts=0)])
+                assert agg._token_queue is not None
+                assert agg._token_queue._live_task is not None
+                await agg.process([session_event(SessionEventType.ENDED, ts=100)])
+                assert (
+                    agg._token_queue._live_task is None
+                ), "drain must stop the live loop"
+            finally:
+                agg.close()
+
+    @pytest.mark.asyncio
+    async def test_flush_records_buffered_tokenizations(self, tmp_path):
+        """fire() buffers tokenization; flush() tokenizes the batch and records."""
+        loop = asyncio.get_event_loop()
+        tokenizer = MockBatchTokenizer()
         with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
             agg, registry, _ = make_aggregator(
-                ctx, loop, "agg_drain_in_flight", tokenize_pool=pool
+                ctx, loop, "agg_flush_records", tokenizer=tokenizer
             )
             try:
                 await agg.process(
@@ -1012,23 +1035,24 @@ class TestAsyncTriggers:
                         ),
                     ]
                 )
-                # Tasks are in-flight but not yet complete
-                assert agg._table.in_flight_tasks_count > 0
+                assert agg._token_queue is not None
+                # Enqueued by fire(), not yet tokenized (no tick/drain flush).
+                assert agg._token_queue.pending > 0
 
-                await agg._table.drain_tasks()
-                assert agg._table.in_flight_tasks_count == 0
+                await agg._token_queue.flush()
+                assert agg._token_queue.pending == 0
                 assert snapshot_series_total(registry, MetricSeriesKey.ISL.value) == 5
             finally:
                 agg.close()
 
     @pytest.mark.asyncio
-    async def test_shutdown_drains_async_tasks(self, tmp_path):
-        """ENDED drains in-flight async tasks before finalizing."""
+    async def test_shutdown_flushes_buffered_tokenizations(self, tmp_path):
+        """ENDED flushes buffered tokenizations before finalizing."""
         loop = asyncio.get_event_loop()
-        pool = MockTokenizePool(delay=0.02)
+        tokenizer = MockBatchTokenizer(delay=0.02)
         with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
             agg, registry, publisher = make_aggregator(
-                ctx, loop, "agg_shutdown_drain", tokenize_pool=pool
+                ctx, loop, "agg_shutdown_drain", tokenizer=tokenizer
             )
             try:
                 await agg.process(
@@ -1045,16 +1069,56 @@ class TestAsyncTriggers:
                         session_event(SessionEventType.ENDED, ts=2000),
                     ]
                 )
-                # After ENDED, drain_tasks ran inside process() — ISL emitted.
+                # After ENDED, flush_remaining ran inside process() — ISL emitted.
                 assert snapshot_series_total(registry, MetricSeriesKey.ISL.value) == 3
                 publisher.publish_final.assert_awaited_once()
             finally:
                 agg.close()
 
-    # NOTE(agents): Trigger exception handling (logger.exception paths) is not
-    # exercised here. Adding a MockTokenizePool that raises on
-    # token_count_async would let us assert no metric is emitted, the
-    # aggregator does not crash, and the task set is cleaned up.
+    @pytest.mark.asyncio
+    async def test_drain_failure_reports_pending_and_finalizes(self, tmp_path):
+        """A tokenizer error during the ENDED drain must not skip finalize.
+
+        flush_remaining swallows non-timeout failures and returns the stuck
+        count, so publish_final still runs with n_pending_tasks > 0 (incomplete
+        drain) instead of the error escaping process() and hanging main().
+        """
+        loop = asyncio.get_event_loop()
+
+        class FailingBatchTokenizer:
+            async def count_texts_async(self, texts, _loop, live=False):
+                raise RuntimeError("tokenizer backend died")
+
+            async def token_count_message_async(self, *args):
+                raise RuntimeError("tokenizer backend died")
+
+        with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
+            agg, _, publisher = make_aggregator(
+                ctx, loop, "agg_drain_failure", tokenizer=FailingBatchTokenizer()
+            )
+            try:
+                await agg.process(
+                    [
+                        session_event(
+                            SessionEventType.START_PERFORMANCE_TRACKING, ts=0
+                        ),
+                        sample_event(
+                            SampleEventType.ISSUED,
+                            "s1",
+                            ts=1000,
+                            data=PromptData(text="some text to tokenize"),
+                        ),
+                    ]
+                )
+                assert agg._token_queue is not None
+                assert agg._token_queue.pending > 0
+                await agg.process([session_event(SessionEventType.ENDED, ts=2000)])
+
+                publisher.publish_final.assert_awaited_once()
+                assert publisher.publish_final.await_args.kwargs["n_pending_tasks"] > 0
+                publisher.aclose.assert_awaited_once()
+            finally:
+                agg.close()
 
     @pytest.mark.asyncio
     async def test_drain_timeout_reports_pending_count(self, tmp_path):
@@ -1068,29 +1132,21 @@ class TestAsyncTriggers:
         """
         loop = asyncio.get_event_loop()
 
-        class BlockingTokenizePool:
-            async def token_count_async(self, text, _loop):
+        class BlockingBatchTokenizer:
+            async def count_texts_async(self, texts, _loop, live=False):
                 await asyncio.sleep(10.0)  # exceeds drain timeout
+                return [0] * len(texts)
+
+            async def token_count_message_async(self, *args):
+                await asyncio.sleep(10.0)
                 return 0
-
-            def token_count(self, text):
-                return 0
-
-            def close(self):
-                pass
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *args):
-                self.close()
 
         with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
             agg, _, publisher = make_aggregator(
                 ctx,
                 loop,
                 "agg_drain_timeout",
-                tokenize_pool=BlockingTokenizePool(),
+                tokenizer=BlockingBatchTokenizer(),
             )
             agg._drain_timeout_s = 0.05
             try:
@@ -1107,9 +1163,10 @@ class TestAsyncTriggers:
                         ),
                     ]
                 )
+                assert agg._token_queue is not None
                 assert (
-                    agg._table.in_flight_tasks_count > 0
-                ), "precondition: ISL task must be in-flight before ENDED"
+                    agg._token_queue.pending > 0
+                ), "precondition: ISL must be buffered before ENDED"
                 await agg.process([session_event(SessionEventType.ENDED, ts=2000)])
 
                 publisher.publish_final.assert_awaited_once()
@@ -1125,10 +1182,10 @@ class TestAsyncTriggers:
     async def test_tpot_osl_for_tool_call_complete(self, tmp_path):
         """OSL and TPOT use message-path tokenization when COMPLETE carries tool_calls."""
         loop = asyncio.get_event_loop()
-        pool = MockTokenizePool(delay=0.0)
+        tokenizer = MockBatchTokenizer(delay=0.0)
         with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
             agg, registry, _ = make_aggregator(
-                ctx, loop, "agg_tpot_osl_tool_call", tokenize_pool=pool
+                ctx, loop, "agg_tpot_osl_tool_call", tokenizer=tokenizer
             )
             try:
                 tool_call = {
@@ -1151,7 +1208,7 @@ class TestAsyncTriggers:
                         ),
                     ]
                 )
-                await agg._table.drain_tasks()
+                await agg._token_queue.flush()
                 # OSL = token_count("ok" + tool_calls_json) = 2
                 assert snapshot_series_total(registry, MetricSeriesKey.OSL.value) == 2
                 # tpot = (5000 - 2000) / token_count(tool_calls_json) = 3000 / 1 = 3000

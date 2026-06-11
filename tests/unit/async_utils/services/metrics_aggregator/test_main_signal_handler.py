@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import gc
 import weakref
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -50,7 +51,7 @@ async def test_sigterm_handler_holds_strong_reference_to_finalize_task():
     registry = MagicMock()
     table = MagicMock()
     table.total_tracked_duration_ns = 0
-    table.in_flight_tasks_count = 0
+    token_queue = SimpleNamespace(pending=0)
 
     # publish_final blocks on an event so we can observe the task
     # mid-execution and exercise the strong-ref contract.
@@ -69,6 +70,7 @@ async def test_sigterm_handler_holds_strong_reference_to_finalize_task():
         registry=registry,
         publisher=publisher,
         table=table,
+        token_queue=token_queue,
         shutdown_event=shutdown_event,
     )
 
@@ -122,7 +124,7 @@ async def test_sigterm_handler_refreshes_tracked_duration():
     registry = MagicMock()
     table = MagicMock()
     table.total_tracked_duration_ns = 12345
-    table.in_flight_tasks_count = 3
+    token_queue = SimpleNamespace(pending=3)
 
     publisher = MagicMock()
     publisher.publish_final = AsyncMock()
@@ -134,6 +136,7 @@ async def test_sigterm_handler_refreshes_tracked_duration():
         registry=registry,
         publisher=publisher,
         table=table,
+        token_queue=token_queue,
         shutdown_event=shutdown_event,
     )
     on_sigterm()

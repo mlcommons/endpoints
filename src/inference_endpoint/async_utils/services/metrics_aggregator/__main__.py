@@ -33,7 +33,7 @@ from .metrics_table import MetricsTable
 from .publisher import MetricsPublisher
 from .registry import MetricsRegistry
 from .snapshot import MetricsSnapshotCodec
-from .token_metrics import TokenizePool
+from .token_metrics import BatchTokenizer, TokenBatchQueue
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +44,7 @@ def _make_sigterm_handler(
     registry: MetricsRegistry,
     publisher: MetricsPublisher,
     table: MetricsTable,
+    token_queue: TokenBatchQueue | None,
     shutdown_event: asyncio.Event,
 ) -> tuple[Callable[[], None], set[asyncio.Task]]:
     """Build the SIGTERM handler that writes the INTERRUPTED final snapshot.
@@ -75,7 +76,7 @@ def _make_sigterm_handler(
             )
             await publisher.publish_final(
                 registry,
-                n_pending_tasks=table.in_flight_tasks_count,
+                n_pending_tasks=token_queue.pending if token_queue is not None else 0,
                 interrupted=True,
             )
         except Exception:  # noqa: BLE001 — best-effort.
@@ -132,13 +133,13 @@ async def main() -> None:
     parser.add_argument(
         "--drain-timeout",
         type=float,
-        default=60.0,
+        required=True,
         help=(
-            "Wall-clock budget (seconds) to wait for in-flight async tokenize "
-            "tasks to finish after ENDED before the aggregator cancels them "
-            "and emits the final snapshot with n_pending_tasks > 0 "
-            "(default: 60.0; 0 = wait indefinitely). Increase for long-context "
-            "/ low-worker-count tokenize workloads."
+            "Wall-clock budget (seconds) to finish tokenizing buffered samples "
+            "after ENDED before the aggregator emits the final snapshot with "
+            "n_pending_tasks > 0 (0 = wait indefinitely; the benchmark forwards "
+            "the schema default, see config/schema.py). Increase for very large "
+            "datasets where the end-of-run tokenize batch is big."
         ),
     )
     parser.add_argument(
@@ -162,8 +163,14 @@ async def main() -> None:
     parser.add_argument(
         "--tokenizer-workers",
         type=int,
-        default=2,
-        help="Number of tokenizer worker threads (default: 2)",
+        required=True,
+        help=(
+            "In-process tokenizer threads for live (mid-run) ISL/OSL/TPOT "
+            "(0 = no mid-run tokenization, everything defers to the "
+            "end-of-run drain; the benchmark forwards the schema default, "
+            "see config/schema.py). The drain always uses the auto-sized "
+            "sharded pool — one worker process per 8-core block."
+        ),
     )
     parser.add_argument(
         "--streaming",
@@ -186,6 +193,9 @@ async def main() -> None:
     args = parser.parse_args()
     setup_logging(level="INFO")
 
+    if args.tokenizer_workers < 0:
+        raise SystemExit("FATAL: --tokenizer-workers must be >= 0")
+
     # The parent owns directory setup — `commands/benchmark/execute.py`
     # creates `<report_dir>/metrics/` and validates it before launching
     # this subprocess. Validate here as a fail-fast contract check so a
@@ -204,15 +214,23 @@ async def main() -> None:
     loop = LoopManager().default_loop
 
     # Using ternary operator causes errors in MyPy object type coalescing
-    # (coalesces to 'object' not 'AbstractContextManager[TokenizePool | None]')
-    pool_cm: AbstractContextManager[TokenizePool | None]
+    # (coalesces to 'object' not 'AbstractContextManager[BatchTokenizer | None]')
+    tokenizer_cm: AbstractContextManager[BatchTokenizer | None]
     if args.tokenizer:
-        pool_cm = TokenizePool(args.tokenizer, n_workers=args.tokenizer_workers)
+        try:
+            tokenizer_cm = BatchTokenizer(
+                args.tokenizer, live_workers=args.tokenizer_workers
+            )
+        except RuntimeError as exc:
+            # Fail-fast contract: a tokenizer environment that cannot shard
+            # must surface as a clear service-launch failure, not a silent
+            # slow path that cannot keep up with completions.
+            raise SystemExit(f"FATAL: {exc}") from exc
     else:
-        pool_cm = nullcontext()
+        tokenizer_cm = nullcontext()
 
     with (
-        pool_cm as pool,
+        tokenizer_cm as tokenizer,
         ManagedZMQContext.scoped(socket_dir=args.socket_dir) as zmq_ctx,
     ):
         registry = MetricsRegistry()
@@ -234,7 +252,10 @@ async def main() -> None:
                 publish_interval_s=args.publish_interval,
                 sig_figs=args.hdr_sig_figs,
                 n_histogram_buckets=args.n_histogram_buckets,
-                tokenize_pool=pool,
+                tokenizer=tokenizer,
+                live_flush_interval_s=(
+                    args.publish_interval if args.tokenizer_workers > 0 else None
+                ),
                 streaming=args.streaming,
                 shutdown_event=shutdown_event,
                 drain_timeout_s=None if args.drain_timeout == 0 else args.drain_timeout,
@@ -268,7 +289,8 @@ async def main() -> None:
                 loop=loop,
                 registry=registry,
                 publisher=publisher,
-                table=aggregator._table,
+                table=aggregator.table,
+                token_queue=aggregator.token_queue,
                 shutdown_event=shutdown_event,
             )
             loop.add_signal_handler(signal.SIGTERM, on_sigterm)

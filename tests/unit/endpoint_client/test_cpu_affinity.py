@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 from inference_endpoint.endpoint_client.cpu_affinity import (
     AffinityPlan,
     compute_affinity_plan,
+    expand_to_all_online_cpus,
     get_all_online_cpus,
     pin_loadgen,
     set_cpu_affinity,
@@ -146,3 +147,30 @@ class TestGetAllOnlineCpus:
         """Test that empty set is returned when all methods fail."""
         cpus = get_all_online_cpus()
         assert cpus == set()
+
+
+class TestExpandToAllOnlineCpus:
+    @patch("os.sched_getaffinity")
+    @patch("os.sched_setaffinity")
+    @patch("pathlib.Path.read_text")
+    def test_expands_inherited_mask_to_online(self, mock_read, mock_set, mock_get):
+        """The full sysfs online set is requested; the effective mask is returned."""
+        mock_read.return_value = "0-7\n"
+        mock_get.return_value = {0, 1, 2, 3, 4, 5, 6, 7}
+
+        cpus = expand_to_all_online_cpus()
+
+        mock_set.assert_called_once_with(0, {0, 1, 2, 3, 4, 5, 6, 7})
+        assert cpus == {0, 1, 2, 3, 4, 5, 6, 7}
+
+    @patch("os.sched_getaffinity")
+    @patch("os.sched_setaffinity", side_effect=OSError("cpuset denies"))
+    @patch("pathlib.Path.read_text")
+    def test_setaffinity_failure_returns_current_mask(
+        self, mock_read, mock_set, mock_get
+    ):
+        """A denied expansion is non-fatal: the current mask is reported."""
+        mock_read.return_value = "0-7\n"
+        mock_get.return_value = {0, 1}
+
+        assert expand_to_all_online_cpus() == {0, 1}

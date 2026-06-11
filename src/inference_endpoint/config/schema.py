@@ -552,18 +552,17 @@ class DrainConfig(BaseModel):
             alias="--metrics-drain-timeout",
             help=(
                 "Wall-clock budget (seconds) for the metrics aggregator to finish "
-                "in-flight async tokenize tasks after the run ends before cancelling "
-                "them. Set to 0 to wait indefinitely. Increase for large datasets or "
-                "long-context workloads where ISL/OSL/TPOT tokenization lags behind "
-                "request throughput."
+                "tokenizing buffered samples after the run ends. Set to 0 to wait "
+                "indefinitely. Increase for very large datasets where the end-of-run "
+                "tokenize batch is big."
             ),
         ),
     ] = Field(
-        60.0,
+        300.0,
         ge=0,
         description=(
-            "Wall-clock budget (seconds) for the metrics aggregator to drain "
-            "in-flight tokenize tasks after ENDED (default: 60.0; 0 = unlimited)."
+            "Wall-clock budget (seconds) to finish tokenizing buffered samples "
+            "after ENDED (default: 300.0; 0 = unlimited)."
         ),
     )
     metrics_tokenizer_workers: Annotated[
@@ -571,15 +570,18 @@ class DrainConfig(BaseModel):
         cyclopts.Parameter(
             alias="--metrics-tokenizer-workers",
             help=(
-                "Number of tokenizer worker threads in the metrics aggregator. "
-                "Increase if ISL/OSL/TPOT tokenization can't keep up with request "
-                "throughput (symptoms: large drain timeout warning at run end)."
+                "In-process tokenizer threads for live (mid-run) ISL/OSL/TPOT in "
+                "the metrics aggregator. 0 defers all tokenization to the "
+                "end-of-run drain, which always uses the auto-sized sharded pool."
             ),
         ),
     ] = Field(
         2,
-        ge=1,
-        description="Number of tokenizer worker threads in the metrics aggregator (default: 2).",
+        ge=0,
+        description=(
+            "In-process tokenizer threads for live (mid-run) ISL/OSL/TPOT "
+            "(default: 2; 0 = defer everything to the end-of-run drain)."
+        ),
     )
 
 
