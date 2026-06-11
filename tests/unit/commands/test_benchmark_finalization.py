@@ -39,6 +39,7 @@ _OFFLINE_KWARGS = {
     "model_params": {"name": "test-model"},
     "datasets": [{"path": "test.jsonl"}],
     "system_info": {
+        "system_name": "TestSystem",
         "ssh_ids": ["alice@10.0.0.1"],
         "accelerator_backend": "cuda",
     },
@@ -77,8 +78,8 @@ def _make_bench(tmp_path: Path, report: Report | None = None) -> BenchmarkResult
 
 class TestRunMetadataWriteNonBlocking:
     @pytest.mark.unit
-    def test_write_failure_does_not_abort_finalize(self, tmp_path: Path) -> None:
-        """A write error on run_metadata.json must not propagate out of finalize_benchmark."""
+    def test_disk_full_does_not_abort_finalize(self, tmp_path: Path) -> None:
+        """A disk-full OSError on any write must not propagate out of finalize_benchmark."""
         ctx = _make_ctx(tmp_path)
         bench = _make_bench(tmp_path)
 
@@ -261,6 +262,19 @@ class TestBuildRunMetadata:
 
         # Top-level ttft field is the p99.
         assert metadata["ttft"] == pytest.approx(990.0)
+
+        # mlcflow-owned fields must be present and start as None so mlcflow's
+        # postprocess() can patch them from the serving log.
+        for field in (
+            "disaggregated",
+            "tensor_parallel",
+            "pipeline_parallel",
+            "data_parallel",
+            "expert_parallel",
+            "batch",
+            "config_summary",
+        ):
+            assert metadata[field] is None, f"{field} must start as None"
 
     def test_integer_string_keys_silently_return_none(self) -> None:
         """Confirm that integer-string keys ("99", "50") do NOT resolve —

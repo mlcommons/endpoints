@@ -686,10 +686,16 @@ class SysInfoCaptureConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    exclude_current_system: bool = False
-    accelerator_backend: Literal["cuda", "rocm", "xpu", "none"] = "none"
-    skip_ssh_key_file: bool = False
+    system_name: str = Field(
+        description=(
+            "Name of the system under test (e.g. 'H100x8_vLLM'). "
+            "Used as the MLPerf submission system identifier."
+        ),
+    )
     ssh_ids: list[str]
+    accelerator_backend: Literal["cuda", "rocm", "xpu", "none"] = "none"
+    exclude_current_system: bool = False
+    skip_ssh_key_file: bool = False
     node_config: dict[str, list[NodeEntry]] | None = Field(
         default=None,
         description=(
@@ -701,7 +707,7 @@ class SysInfoCaptureConfig(BaseModel):
         default=None,
         description=(
             "Endpoint URL to probe for serving framework detection "
-            "(e.g. 'http://host:8000'). Must be set explicitly."
+            "(e.g. 'http://host:8000'). Must be set explicitly. "
             "Omitting it skips the HTTP "
             "serving-framework probe and reduces collected metadata."
         ),
@@ -710,16 +716,9 @@ class SysInfoCaptureConfig(BaseModel):
         default=None,
         description=(
             "SSH ID of the node running the serving framework "
-            "(e.g. 'root@host:8022'). Used together with log_path for "
-            "log-based framework detection when endpoint_url is unavailable."
-        ),
-    )
-    log_path: str | None = Field(
-        default=None,
-        description=(
-            "Absolute path on serving_node to which the server stdout/stderr "
-            "was redirected (e.g. '/tmp/vllm.log'). Used for log-based "
-            "serving framework detection."
+            "(e.g. 'root@host:8022'). When set, the capture SSHes into this "
+            "node to extract serving configuration from the startup log at "
+            "/tmp/serving.log (server stdout/stderr must be redirected there)."
         ),
     )
     serving_framework: Literal["auto", "vllm", "sglang", "trtllm"] = Field(

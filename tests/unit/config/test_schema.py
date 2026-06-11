@@ -492,6 +492,7 @@ class TestEndpointUrlNotPropagated:
         config = BenchmarkConfig(
             **self._BASE,
             system_info=SysInfoCaptureConfig(
+                system_name="TestSystem",
                 ssh_ids=["user@10.0.0.1"],
                 accelerator_backend="cuda",
             ),
@@ -504,6 +505,7 @@ class TestEndpointUrlNotPropagated:
         config = BenchmarkConfig(
             **self._BASE,
             system_info=SysInfoCaptureConfig(
+                system_name="TestSystem",
                 ssh_ids=["user@10.0.0.1"],
                 accelerator_backend="cuda",
                 endpoint_url="http://10.0.0.2:8000",

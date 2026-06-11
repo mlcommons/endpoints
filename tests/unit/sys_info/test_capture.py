@@ -35,6 +35,7 @@ from pydantic import ValidationError
 # ---------------------------------------------------------------------------
 
 _MINIMAL_SYS_INFO = {
+    "system_name": "TestSystem",
     "accelerator_backend": "cuda",
     "ssh_ids": ["alice@192.168.1.1"],
 }
@@ -93,6 +94,11 @@ class TestSshTargetParsing:
         with pytest.raises(ValidationError, match="non-empty"):
             _make_config(ssh_ids=[])
 
+    @pytest.mark.unit
+    def test_system_name_required(self) -> None:
+        with pytest.raises(ValidationError, match="system_name"):
+            SysInfoCaptureConfig(accelerator_backend="cuda", ssh_ids=["alice@10.0.0.1"])
+
     # 4. serving_node validation
     @pytest.mark.unit
     def test_serving_node_valid_no_port(self) -> None:
@@ -140,13 +146,19 @@ class TestVariationTags:
         tags = _build_tags(cfg)
         assert tags == "get-mlperf-multi-node-system-info,_rocm,_exclude_current_node"
 
+    # 6. Variation tags — none backend omits the backend tag entirely
+    @pytest.mark.unit
+    def test_none_backend_omits_tag(self) -> None:
+        cfg = _make_config(accelerator_backend="none", exclude_current_system=False)
+        tags = _build_tags(cfg)
+        assert tags == "get-mlperf-multi-node-system-info"
+
 
 def _build_tags(cfg: SysInfoCaptureConfig) -> str:
     """Mirror the tag-building logic from capture.py."""
-    tags: list[str] = [
-        "get-mlperf-multi-node-system-info",
-        f"_{cfg.accelerator_backend}",
-    ]
+    tags: list[str] = ["get-mlperf-multi-node-system-info"]
+    if cfg.accelerator_backend != "none":
+        tags.append(f"_{cfg.accelerator_backend}")
     if cfg.exclude_current_system:
         tags.append("_exclude_current_node")
     return ",".join(tags)
@@ -277,6 +289,7 @@ class TestCaptureSystemInfo:
     @pytest.mark.unit
     def test_mlcflow_access_called_with_correct_args(self, tmp_path: Path) -> None:
         cfg = SysInfoCaptureConfig(
+            system_name="TestSystem",
             accelerator_backend="cuda",
             exclude_current_system=True,
             skip_ssh_key_file=True,
@@ -302,10 +315,11 @@ class TestCaptureSystemInfo:
         )
         assert call_args["ssh_ids"] == "alice@10.0.0.1:2222,bob@10.0.0.2:22"
         assert call_args["skip_ssh_key_file"] == "yes"
-        assert call_args["out_dir_path"] == str(tmp_path)
+        assert call_args["out_dir_path"] == str(tmp_path.resolve())
         assert call_args["out_file_name"] == "system_desc.json"
         assert call_args["action"] == "run"
         assert call_args["automation"] == "script"
+        assert call_args["system_name"] == "TestSystem"
 
 
 # ---------------------------------------------------------------------------
@@ -327,6 +341,7 @@ class TestYamlRoundTrip:
             datasets:
               - path: dummy.jsonl
             system_info:
+              system_name: TestSystem
               accelerator_backend: cuda
               ssh_ids:
                 - alice@192.168.1.1

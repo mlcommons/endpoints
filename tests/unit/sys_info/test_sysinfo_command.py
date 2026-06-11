@@ -36,6 +36,7 @@ from pydantic import ValidationError
 # ---------------------------------------------------------------------------
 
 _BASE_SYSTEM_INFO = {
+    "system_name": "TestSystem",
     "accelerator_backend": "cuda",
     "ssh_ids": ["user@10.0.0.1"],
 }
@@ -150,6 +151,7 @@ class TestSysInfoFileConfig:
                 f"""\
                 report_dir: {tmp_path}/results/
                 system_info:
+                  system_name: TestSystem
                   ssh_ids:
                     - user@10.0.0.1
                   accelerator_backend: cuda
@@ -185,6 +187,7 @@ class TestSysInfoFileConfig:
                 """\
                 report_dir: results/my_system/
                 system_info:
+                  system_name: TestSystem
                   ssh_ids:
                     - user@10.0.0.1
                   accelerator_backend: cuda
@@ -204,6 +207,7 @@ class TestSysInfoFileConfig:
                 f"""\
                 report_dir: {tmp_path}/results/
                 system_info:
+                  system_name: TestSystem
                   ssh_ids:
                     - user@10.0.0.1
                   accelerator_backend: cuda
@@ -233,6 +237,7 @@ class TestSysInfoFileConfig:
                 f"""\
                 report_dir: {tmp_path}/results/
                 system_info:
+                  system_name: TestSystem
                   ssh_ids:
                     - user@10.0.0.1
                   accelerator_backend: cuda
@@ -264,6 +269,7 @@ class TestSysInfoFileConfig:
                   endpoints:
                     - http://10.0.0.1:8000
                 system_info:
+                  system_name: TestSystem
                   ssh_ids:
                     - user@10.0.0.1
                   accelerator_backend: cuda
@@ -285,6 +291,7 @@ class TestSysInfoFileConfig:
                 f"""\
                 report_dir: {tmp_path}/results/
                 system_info:
+                  system_name: TestSystem
                   ssh_ids:
                     - user@10.0.0.1
                   accelerator_backend: cuda
@@ -489,6 +496,7 @@ class TestReportDirResolution:
                 f"""\
                 report_dir: {tmp_path}/results/
                 system_info:
+                  system_name: TestSystem
                   ssh_ids:
                     - user@10.0.0.1
                   accelerator_backend: cuda
@@ -584,6 +592,7 @@ class TestFromConfigCLI:
                 f"""\
                 report_dir: {tmp_path}/results/
                 system_info:
+                  system_name: TestSystem
                   ssh_ids:
                     - user@10.0.0.1
                   accelerator_backend: cuda

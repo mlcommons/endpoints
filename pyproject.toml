@@ -73,11 +73,13 @@ dependencies = [
     # Fix pytz-2024 import warning
     "pytz==2026.1.post1",
     "urllib3==2.7.0",
-    # mlc-scripts for system info
-    "mlc-scripts==1.1.0",
 ]
 
 [project.optional-dependencies]
+sysinfo = [
+    # Required for system_info capture (mlperf submission workflow)
+    "mlc-scripts==1.1.0",
+]
 sql = [
     # SQL event logger (swappable backends, default sqlite)
     "sqlalchemy==2.0.48",
@@ -101,6 +103,7 @@ dev = [
 test = [
     # Includes optional dependencies for full test coverage
     "inference-endpoint[sql]",
+    "inference-endpoint[sysinfo]",
     # Testing framework
     "pytest==9.0.3",
     "pytest-asyncio==1.3.0",

@@ -43,11 +43,13 @@ def from_config(
 
     Example::
 
+        report_dir: results/my_system_info
+
         system_info:
+          system_name: H100x8_vLLM
           ssh_ids:
             - user@host
           accelerator_backend: cuda
-          output_path: /tmp/sys_info
           node_config:
             Prefill:
               - node_name: H100

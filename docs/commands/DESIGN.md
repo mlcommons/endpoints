@@ -106,6 +106,20 @@ commands/benchmark/execute.py::run_benchmark()
 
 ## System Info Capture
 
+> **Requires the `sysinfo` optional dependency.** Install it with:
+>
+> ```bash
+> # uv (recommended)
+> uv sync --extra sysinfo
+> # or pass --extra sysinfo directly to uv run, e.g.:
+> uv run --extra sysinfo inference-endpoint benchmark from-config --config config.yaml
+>
+> # pip
+> pip install "inference-endpoint[sysinfo]"
+> ```
+>
+> If `mlc-scripts` is not installed and `system_info` is configured, the benchmark still completes and results are written first; system info capture is then attempted, fails with an error log, and the process exits 0.
+
 System info capture collects hardware/software details from one or more nodes and writes a structured JSON file for MLPerf inference submissions. It runs in two contexts:
 
 - **Standalone** (`sysinfo from-config`): triggered manually, independent of any benchmark run. See [Standalone Command (`sysinfo from-config`)](#standalone-command-sysinfo-from-config) below for a full example.
@@ -152,13 +166,13 @@ System info capture collects hardware/software details from one or more nodes an
   report_dir: sglang_perf_c1000
 
   system_info:
+    system_name: H100x8_SGLang
     ssh_ids:
-      - anandhusooraj@mlc2
+      - user@inference-node
     accelerator_backend: cuda
     exclude_current_system: true
     skip_ssh_key_file: false
-    serving_node: anandhusooraj@mlc2
-    log_path: /home/anandhusooraj/sglang_logs.log
+    serving_node: user@inference-node
     endpoint_url: http://localhost:11001
     serving_framework: sglang
   ```
@@ -177,13 +191,13 @@ Both paths call `sys_info/capture.py::capture_system_info()` and produce the sam
 
 | Field                    | Type                                             | Description                                                                                                                                                                                                                  |
 | ------------------------ | ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `system_name`            | str                                              | **Required.** Name of the system under test (e.g. `"H100x8_vLLM"`). Used as the MLPerf submission system identifier.                                                                                                         |
 | `ssh_ids`                | `list[str]`                                      | **Required.** Nodes to collect hardware info from. Format: `user@host` or `user@host:port`.                                                                                                                                  |
 | `accelerator_backend`    | `"cuda"` \| `"rocm"` \| `"xpu"` \| `"none"`      | GPU backend on the target nodes. Default: `"none"`.                                                                                                                                                                          |
 | `exclude_current_system` | bool                                             | Skip the machine running this command; collect from `ssh_ids` only. Default: `false`.                                                                                                                                        |
 | `skip_ssh_key_file`      | bool                                             | Assume SSH key auth is pre-configured (skips mlcflow key-file lookup). Default: `false`.                                                                                                                                     |
 | `node_config`            | object                                           | Optional function-based node groupings (Prefill/Decode/etc). Maps function names to lists of `{node_name, no_of_nodes}` entries. `node_name` is matched as a case-insensitive substring against the detected GPU model name. |
-| `serving_node`           | str                                              | SSH target for the inference server (`user@host` or `user@host:port`). When set, the capture also SSHes into this node to extract serving configuration from the startup log.                                                |
-| `log_path`               | str                                              | Path to the vLLM or SGLang server log **on the serving node**. Required when `serving_node` is set and serving config extraction is desired.                                                                                 |
+| `serving_node`           | str                                              | SSH target for the inference server (`user@host` or `user@host:port`). When set, the capture SSHes into this node and reads `/tmp/serving.log` to extract serving config. Server stdout/stderr **must** be redirected there. |
 | `endpoint_url`           | str                                              | Base URL of the running inference server. Probed via HTTP to detect the serving framework name and version (e.g. `"vLLM 0.9.0"`).                                                                                            |
 | `serving_framework`      | `"auto"` \| `"vllm"` \| `"sglang"` \| `"trtllm"` | Serving engine type used for startup log parsing. Default: `"auto"` (detected from the endpoint).                                                                                                                            |
 
@@ -209,6 +223,7 @@ inference-endpoint sysinfo from-config -c examples/sysinfo_example.yaml
 report_dir: results/h100_sysinfo/ # output directory
 
 system_info:
+  system_name: H100x7_vLLM
   ssh_ids:
     - root@ssh1:22 # prefill node 1
     - root@ssh2:22 # prefill node 2
@@ -223,10 +238,10 @@ system_info:
   skip_ssh_key_file: false
 
   # serving_node: where the inference server process is running.
+  # Server stdout/stderr must be redirected to /tmp/serving.log on that node.
   # If multiple serving nodes exist, point to any one — all nodes are assumed
   # to run the same serving framework version.
   serving_node: root@ssh1:22
-  log_path: /tmp/vllm.log # path on serving_node where server output was redirected
 
   node_config: # optional: function-based node groupings
     Prefill:

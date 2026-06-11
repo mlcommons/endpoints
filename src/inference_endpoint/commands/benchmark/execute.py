@@ -1009,15 +1009,14 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
 
     if ctx.config.system_info is not None:
         try:
-            # Local import: mlcflow is optional and only needed when system_info is configured.
-            from inference_endpoint.sys_info.capture import (
-                capture_system_info,
-            )
+            # mlc-scripts is an optional dep; only import when system_info is configured.
+            from inference_endpoint.sys_info.capture import capture_system_info
 
+            metadata_path = ctx.report_dir / "run_metadata.json"
             output_path = capture_system_info(
                 ctx.config.system_info,
                 output_dir=ctx.report_dir,
-                run_metadata_path=ctx.report_dir / "run_metadata.json",
+                run_metadata_path=metadata_path if metadata_path.exists() else None,
             )
             logger.info("System info captured at: %s", output_path)
         except ExecutionError as e:
@@ -1053,17 +1052,6 @@ def _build_run_metadata(ctx: BenchmarkContext, report: Report | None) -> dict[st
     def _pct(metric: dict[str, Any], p: str) -> float | None:
         return _ns_to_ms((metric.get("percentiles") or {}).get(p)) if metric else None
 
-    # node_config and disaggregated from system_info
-    node_config: Any = None
-    disaggregated: bool | None = None
-    sic = ctx.config.system_info
-    if sic is not None and sic.node_config is not None:
-        node_config = {
-            fn: [ne.model_dump() for ne in nodes]
-            for fn, nodes in sic.node_config.items()
-        }
-        disaggregated = len(sic.node_config) > 1
-
     ttft: dict[str, Any] = {}
     tpot: dict[str, Any] = {}
     latency: dict[str, Any] = {}
@@ -1093,15 +1081,13 @@ def _build_run_metadata(ctx: BenchmarkContext, report: Report | None) -> dict[st
 
     metadata: dict[str, Any] = {
         "run_date": datetime.now(UTC).isoformat(),
-        "node_config": node_config,
-        "config_summary": {
-            "disaggregated": disaggregated,
-            "expert_parallel": None,
-            "tensor_parallel": None,
-            "pipeline_parallel": None,
-            "data_parallel": None,
-            "batch": None,
-        },
+        "disaggregated": None,
+        "expert_parallel": None,
+        "tensor_parallel": None,
+        "pipeline_parallel": None,
+        "data_parallel": None,
+        "batch": None,
+        "config_summary": None,
         "config_summary_notes": None,
         "concurrency": concurrency,
         "system_tps": system_tps,

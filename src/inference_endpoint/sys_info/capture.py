@@ -54,8 +54,12 @@ def _write_node_config_tmp(config: SysInfoCaptureConfig) -> str:
         }
     }
     fd, path = tempfile.mkstemp(suffix=".yaml", prefix="mlperf_node_cfg_")
-    with os.fdopen(fd, "w") as fh:
-        yaml.dump(data, fh, default_flow_style=False)
+    try:
+        with os.fdopen(fd, "w") as fh:
+            yaml.dump(data, fh, default_flow_style=False)
+    except Exception:
+        os.unlink(path)
+        raise
     return path
 
 
@@ -73,11 +77,11 @@ def capture_system_info(
     # Optional dependency — only imported when this function is actually called.
     # mlc-scripts (PyPI) installs its runtime under the 'mlc' module name.
     try:
-        import mlc  # noqa: PLC0415
+        import mlc
     except ImportError as exc:
         raise SetupError(
             "mlc-scripts is required for system_info. "
-            "Install it with: pip install mlc-scripts"
+            'Install it with: pip install "inference-endpoint[sysinfo]"'
         ) from exc
 
     tags: list[str] = ["get-mlperf-multi-node-system-info"]
@@ -96,25 +100,26 @@ def capture_system_info(
 
     logger.info("Capturing system info from %d node(s)...", len(config.parsed_ssh_ids))
 
+    # mlcflow changes cwd during script execution; resolve both paths to
+    # absolute here so postprocess() os.path.exists() checks work correctly.
     mlc_kwargs: dict[str, object] = {
         "action": "run",
         "automation": "script",
         "tags": tags_str,
         "ssh_ids": ssh_ids_str,
-        "out_dir_path": str(output_dir),
+        "out_dir_path": str(output_dir.resolve()),
         "out_file_name": _OUT_FILE_NAME,
         "skip_ssh_key_file": skip_ssh_key_file_value,
         "serving_framework_type": config.serving_framework,
+        "system_name": config.system_name,
         "quiet": True,
     }
     if config.endpoint_url:
         mlc_kwargs["endpoint_url"] = config.endpoint_url
     if config.serving_node:
         mlc_kwargs["serving_node"] = config.serving_node
-    if config.log_path:
-        mlc_kwargs["log_path"] = config.log_path
     if run_metadata_path is not None:
-        mlc_kwargs["run_metadata_path"] = str(run_metadata_path)
+        mlc_kwargs["run_metadata_path"] = str(run_metadata_path.resolve())
 
     node_config_tmp: str | None = None
     if config.node_config is not None:
