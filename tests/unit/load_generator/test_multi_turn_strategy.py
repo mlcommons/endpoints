@@ -924,7 +924,6 @@ async def test_error_turn_aborts_remaining_turns():
     remaining_turns = ("conv1", [(1, 2), (2, 3)], 0, 1)
     strategy._active_iters["conv1"] = remaining_turns
     strategy._inflight["q0001"] = "conv1"
-    strategy._conv_states["conv1"] = conv_manager.get_state("conv1")
 
     result = QueryResult(
         id="q0001",
