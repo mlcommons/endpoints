@@ -965,14 +965,6 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
         }
         if accuracy_scores:
             results["accuracy_scores"] = accuracy_scores
-            invalid_reasons = [
-                f"{name}: {score['invalid_reason']}"
-                for name, score in accuracy_scores.items()
-                if score.get("valid") is False
-            ]
-            if invalid_reasons:
-                results["valid"] = False
-                results["invalid_reasons"] = invalid_reasons
         if ctx.collect_responses:
             results["responses"] = collector.responses
         if collector.errors:

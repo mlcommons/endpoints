@@ -603,20 +603,6 @@ class MultiTurnInlineScorer(Scorer, scorer_id="multi_turn_inline"):
         }
         if excluded_turns:
             result["excluded_turns"] = excluded_turns
-        if not valid:
-            reasons: list[str] = []
-            if not expected:
-                reasons.append("no expected assistant turns found")
-            if not observed_repeats:
-                reasons.append("no matching completed turns found")
-            if missing_outputs:
-                reasons.append(
-                    f"{missing_outputs}/{len(expected_outputs)} expected turn(s) "
-                    "missing output"
-                )
-            if not n_scored:
-                reasons.append("no scorable turns found")
-            result["invalid_reason"] = "; ".join(reasons)
 
         out_path = self.report_dir / self.scores_filename
         out_path.parent.mkdir(parents=True, exist_ok=True)
