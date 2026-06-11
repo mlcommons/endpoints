@@ -81,6 +81,7 @@ from inference_endpoint.endpoint_client.cpu_affinity import AffinityPlan, pin_lo
 from inference_endpoint.endpoint_client.http_client import HTTPEndpointClient
 from inference_endpoint.endpoint_client.http_sample_issuer import HttpClientSampleIssuer
 from inference_endpoint.evaluation import Extractor
+from inference_endpoint.evaluation.multi_turn_inline_accuracy import score_report
 from inference_endpoint.evaluation.scoring import Scorer
 from inference_endpoint.exceptions import (
     ExecutionError,
@@ -951,8 +952,6 @@ def _inline_score_multi_turn_if_enabled(
             "multi_turn.inline_accuracy: true and a dataset path"
         )
 
-    from inference_endpoint.evaluation.multi_turn_inline_accuracy import score_report
-
     score_result = score_report(
         gt_jsonl=Path(perf_cfg.path),
         report_dir=ctx.report_dir,
@@ -965,7 +964,7 @@ def _inline_score_multi_turn_if_enabled(
         "valid": valid,
     }
     if not valid:
-        score_entry["invalid_reason"] = score_result["invalid_reason"]
+        score_entry["invalid_reason"] = score_result.get("invalid_reason", "")
     return result_key, score_entry
 
 

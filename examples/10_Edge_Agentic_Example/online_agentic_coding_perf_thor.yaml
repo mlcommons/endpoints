@@ -43,7 +43,7 @@ datasets:
     # the smallest trajectories from the 16-conversation set so one single-stream
     # pass fits a ~30-45 min edge window. Swap in agentic_coding_16.jsonl (or a
     # larger subset from datasets/) for a longer, more representative window.
-    path: examples/10_Edge_Agentic_Example/agentic_coding_8.jsonl
+    path: examples/10_Edge_Agentic_Example/agentic_coding_2_thor.jsonl
     multi_turn:
       # Per-turn deadline; a timeout aborts that turn and the rest of its
       # conversation. 10 min is generous for slow edge decode.
@@ -51,7 +51,7 @@ datasets:
       # Online checker: score generated tool calls vs the recorded ones.
       inline_accuracy: true
       # One pass over the 8-conversation subset (no trajectory repeats).
-      num_trajectories_to_issue: 8
+      num_trajectories_to_issue: 2
 
 settings:
   runtime:
@@ -75,4 +75,4 @@ endpoint_config:
     - "http://localhost:8080"
   api_type: openai
 
-report_dir: results/agentic_coding_perf/
+report_dir: results/agentic_coding_perf_thor/

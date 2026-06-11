@@ -226,6 +226,62 @@ print('Overall MT accuracy:',
 
 ---
 
+## Step 5 — Run the agentic-coding performance benchmark (with online checker)
+
+Steps 2–4 measure **accuracy**. This step measures **performance**
+(throughput / TTFT / TPOT) by replaying recorded multi-turn agentic-coding
+trajectories (SWE-bench-style) against the same endpoint, while an **inline
+"online checker"** scores the model's generated tool calls against the recorded
+ones in the dataset. The dataset is therefore both the performance workload and
+its own ground truth — no separate scoring pass is needed.
+
+The online checker is the multi-turn inline accuracy scorer
+(`multi_turn.inline_accuracy: true`); it runs at finalization, reading the run's
+event log plus the dataset, and writes `scores.json` into the report directory.
+
+```bash
+# Run from the examples/10_Edge_Agentic_Example/ directory, against the same
+# server used for accuracy (start it first; see Step 0).
+cd examples/10_Edge_Agentic_Example/
+
+inference-endpoint benchmark from-config \
+  --config online_agentic_coding_perf.yaml
+```
+
+Before running, open `online_agentic_coding_perf.yaml` and set
+`model_params.name` to your served model name. The defaults are tuned for an
+edge endpoint:
+
+| Setting                                | Value                    | Why                                                                                |
+| -------------------------------------- | ------------------------ | ---------------------------------------------------------------------------------- |
+| `load_pattern.target_concurrency`      | `1` (single-stream)      | Honest measurement for a single-slot edge server (`llama-server -np 1`).           |
+| dataset                                | `agentic_coding_8.jsonl` | 8 smallest trajectories (265 generated turns); one pass ≈ 30–45 min single-stream. |
+| `multi_turn.inline_accuracy`           | `true`                   | Enables the online checker.                                                        |
+| `multi_turn.num_trajectories_to_issue` | `8`                      | One pass over the subset (no trajectory repeats).                                  |
+| `model_params.temperature` / `seed`    | `0` / `42`               | Deterministic decoding so the online check is reproducible.                        |
+| `settings.runtime.max_duration_ms`     | `3600000` (1 h)          | Safety cap so the run stays within an edge budget.                                 |
+
+To run a longer, more representative window, point `path:` at
+`agentic_coding_16.jsonl` (16 conversations, 888 turns; ≈ 2.5 h single-stream)
+or a larger subset, and raise `num_trajectories_to_issue` to match. Only raise
+`target_concurrency` when pointing at a multi-slot endpoint.
+
+### Verify the performance + online-check results
+
+```bash
+# Inline accuracy (online checker) score
+python3 -c "
+import json, pathlib
+s = json.loads(pathlib.Path('results/agentic_coding_perf/scores.json').read_text())
+print('Inline accuracy score:', s['score'], '| valid:', s['valid'])
+"
+```
+
+Performance metrics (throughput, TTFT, TPOT, per-turn latency) are written to
+`results/agentic_coding_perf/` alongside `scores.json`.
+
+---
+
 ## Reproducible runs with `--seed`
 
 Pass `--seed <N>` to fix the RNG used for sampling. The same seed + same model +
