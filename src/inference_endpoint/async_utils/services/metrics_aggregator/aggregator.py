@@ -96,8 +96,6 @@ _NS_HDR_HIGH: Final[int] = 3_600_000_000_000  # 1 hour in ns
 _TOKEN_HDR_LOW: Final[int] = 1
 _TOKEN_HDR_HIGH: Final[int] = 10_000_000  # 10M tokens
 
-_DEFAULT_DRAIN_TIMEOUT_S: Final[float] = 60.0
-
 
 class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
     """Subscribes to EventRecords and computes per-sample metrics in real time.
@@ -121,15 +119,11 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
         live_flush_interval_s: float | None = None,
         streaming: bool = False,
         shutdown_event: asyncio.Event | None = None,
-        drain_timeout_s: float | None = _DEFAULT_DRAIN_TIMEOUT_S,
+        drain_timeout_s: float | None,
         **kwargs,
     ):
-        # drain_timeout_s is injected (not derived) because the right
-        # value is workload-dependent: long-context tokenize-heavy runs
-        # need more headroom than the default 60 s, and the aggregator
-        # itself can't measure that ahead of time. Keeping it as an arg
-        # lets the __main__ CLI flag plumb the user's choice through
-        # without coupling this class to argparse.
+        # drain_timeout_s has no default here: the one default lives in
+        # config/schema.py (metrics_drain_timeout_s). None = wait forever.
         super().__init__(EventRecordCodec(), *args, **kwargs)
         self._registry = registry
         self._publisher = publisher
@@ -304,15 +298,9 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
                 else:
                     if ev == SessionEventType.STARTED:
                         if self._session_start_ns is not None:
-                            # A duplicate STARTED is a producer bug:
-                            # re-assigning _session_start_ns would freeze
-                            # total_duration_ns (the max-of-elapsed guard
-                            # never updates once the start moves forward)
-                            # and corrupt every downstream rate calc for
-                            # the rest of the run. Surface loudly and
-                            # ignore — the publisher.start guard already
-                            # rejects the second tick-task spawn, but
-                            # session-state must also be defended here.
+                            # Producer bug: re-assigning _session_start_ns
+                            # would freeze total_duration_ns (max-of-elapsed
+                            # guard) and corrupt every downstream rate calc.
                             logger.error(
                                 "Duplicate STARTED event received "
                                 "(original at ts=%d, duplicate at ts=%d); "
@@ -397,16 +385,13 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
             # that fires before publish_final reflects the new state.
             self._session_state = SessionState.DRAINING
             logger.info("Draining %d pending tokenizations...", self.pending_tokens)
-            # The drain and final publish are wrapped together so the aggregator
-            # ALWAYS reaches _finalize (which sets the shutdown event); a
-            # tokenizer failure during the drain must not skip publish_final and
-            # leave main()'s `await shutdown_event.wait()` hanging.
+            # Drain + final publish run inside one finalization boundary: a
+            # tokenizer failure must not skip publish_final and leave
+            # main()'s `await shutdown_event.wait()` hanging.
             n_pending = self.pending_tokens
             try:
-                # flush_remaining tokenizes the whole buffer in one batched pass,
-                # bounded by the drain budget, and never raises: it returns the
-                # count it could not finish (timeout or failure), which becomes
-                # the snapshot's n_pending_tasks so Report flags an incomplete drain.
+                # flush_remaining never raises; it returns the count it could
+                # not finish, which becomes the snapshot's n_pending_tasks.
                 if self._token_queue is not None:
                     n_pending = await self._token_queue.flush_remaining(
                         self._drain_timeout_s
@@ -432,11 +417,8 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
                 )
                 await self._publisher.publish_final(registry, n_pending_tasks=n_pending)
             finally:
-                # The aggregator MUST close the publisher and signal shutdown even
-                # if the drain/publish above failed — otherwise main()'s
-                # `await shutdown_event.wait()` hangs forever. aclose is
-                # independently wrapped: its failure must not prevent _finalize,
-                # which is what sets the shutdown event.
+                # aclose is independently wrapped: its failure must not
+                # prevent _finalize, which sets the shutdown event.
                 try:
                     await self._publisher.aclose()
                 except Exception:  # noqa: BLE001 — best-effort cleanup.

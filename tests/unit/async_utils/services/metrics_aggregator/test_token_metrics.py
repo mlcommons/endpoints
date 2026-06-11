@@ -84,7 +84,7 @@ class TestBatchTokenizer:
     async def test_count_texts_async(self):
         with patch(_MOCK_TARGET, _FakeTokenizer):
             loop = asyncio.get_running_loop()
-            with BatchTokenizer("fake", n_workers=0) as tok:
+            with BatchTokenizer("fake", n_workers=0, live_workers=2) as tok:
                 counts = await tok.count_texts_async(["Hello world foo", "a"], loop)
                 assert counts == [3, 1]
 
@@ -92,7 +92,7 @@ class TestBatchTokenizer:
     async def test_count_texts_async_empty(self):
         with patch(_MOCK_TARGET, _FakeTokenizer):
             loop = asyncio.get_running_loop()
-            with BatchTokenizer("fake", n_workers=0) as tok:
+            with BatchTokenizer("fake", n_workers=0, live_workers=2) as tok:
                 assert await tok.count_texts_async([], loop) == []
 
     @pytest.mark.asyncio
@@ -100,7 +100,7 @@ class TestBatchTokenizer:
         """With shards present, chunks are reassembled in original order."""
         with patch(_MOCK_TARGET, _FakeTokenizer):
             loop = asyncio.get_running_loop()
-            with BatchTokenizer("fake", n_workers=0) as tok:
+            with BatchTokenizer("fake", n_workers=0, live_workers=2) as tok:
                 tok._procs = [_FakeProc(), _FakeProc()]
                 counts = await tok.count_texts_async(["a", "b b", "c c c", "d"], loop)
                 assert counts == [1, 2, 3, 1]
@@ -110,14 +110,14 @@ class TestBatchTokenizer:
         """A dead shard surfaces as an error, not a silent in-process fallback."""
         with patch(_MOCK_TARGET, _FakeTokenizer):
             loop = asyncio.get_running_loop()
-            with BatchTokenizer("fake", n_workers=0) as tok:
+            with BatchTokenizer("fake", n_workers=0, live_workers=2) as tok:
                 tok._procs = [_BrokenProc()]
                 with pytest.raises(BrokenProcessPool):
                     await tok.count_texts_async(["a b"], loop)
 
     def test_close_is_idempotent(self):
         with patch(_MOCK_TARGET, _FakeTokenizer):
-            tok = BatchTokenizer("fake", n_workers=0)
+            tok = BatchTokenizer("fake", n_workers=0, live_workers=2)
             tok.close()
             tok.close()  # must not raise
 
@@ -125,7 +125,7 @@ class TestBatchTokenizer:
     async def test_use_after_close_raises(self):
         with patch(_MOCK_TARGET, _FakeTokenizer):
             loop = asyncio.get_running_loop()
-            tok = BatchTokenizer("fake", n_workers=0)
+            tok = BatchTokenizer("fake", n_workers=0, live_workers=2)
             tok.close()
             with pytest.raises(RuntimeError, match="closed"):
                 await tok.count_texts_async(["hello"], loop)
@@ -162,7 +162,7 @@ class TestBatchTokenizerMessageTokenization:
         """token_count_message_async returns full_tokens - baseline."""
         with patch(_MOCK_TARGET, _FakeTokenizerWithTemplate):
             loop = asyncio.get_running_loop()
-            with BatchTokenizer("fake", n_workers=0) as tok:
+            with BatchTokenizer("fake", n_workers=0, live_workers=2) as tok:
                 # "hello world" -> 2 content + 2 wrapper = 4; baseline = 0, prefix = 2
                 count = await tok.token_count_message_async(
                     "hello world", None, None, loop
@@ -174,7 +174,7 @@ class TestBatchTokenizerMessageTokenization:
         """Tool-call JSON tokens are included in the count."""
         with patch(_MOCK_TARGET, _FakeTokenizerWithTemplate):
             loop = asyncio.get_running_loop()
-            with BatchTokenizer("fake", n_workers=0) as tok:
+            with BatchTokenizer("fake", n_workers=0, live_workers=2) as tok:
                 tool_calls = (
                     {
                         "id": "c1",
@@ -198,7 +198,7 @@ class TestBatchTokenizerMessageTokenization:
 
         with patch(_MOCK_TARGET, _BadTemplateTokenizer):
             loop = asyncio.get_running_loop()
-            with BatchTokenizer("fake", n_workers=0) as tok:
+            with BatchTokenizer("fake", n_workers=0, live_workers=2) as tok:
                 tool_calls = (
                     {
                         "id": "c1",
@@ -299,7 +299,7 @@ class TestSetupShardsDecisions:
             lambda pid, mask: self.restored.append(set(mask)),
         )
         with patch(_MOCK_TARGET, _FakeTokenizerWithBackend):
-            return BatchTokenizer("fake", n_workers=n_workers)
+            return BatchTokenizer("fake", n_workers=n_workers, live_workers=2)
 
     @pytest.mark.parametrize(
         "cpus, n_workers, expected_shards",
@@ -335,7 +335,7 @@ class TestSetupShardsDecisions:
         )
         with patch(_MOCK_TARGET, _FakeTokenizer):  # no backend_tokenizer
             with pytest.raises(RuntimeError, match="fast"):
-                BatchTokenizer("fake")
+                BatchTokenizer("fake", live_workers=2)
 
     def test_affinity_unavailable_shards_unpinned(self, monkeypatch):
         """No affinity API (e.g. macOS): shard from the CPU count, unpinned."""
@@ -356,7 +356,7 @@ class TestSetupShardsDecisions:
         monkeypatch.setattr(token_metrics_module.os, "sched_getaffinity", _raise)
         monkeypatch.setattr(token_metrics_module.os, "cpu_count", lambda: 16)
         with patch(_MOCK_TARGET, _FakeTokenizerWithBackend):
-            with BatchTokenizer("fake") as tok:
+            with BatchTokenizer("fake", live_workers=2) as tok:
                 assert len(tok._procs) == 2
 
     def test_warmup_failure_is_a_startup_error(self, monkeypatch):

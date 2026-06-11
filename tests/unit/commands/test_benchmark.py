@@ -633,12 +633,10 @@ class TestAggregatorArgs:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
-    async def test_tokenizer_forwarded_and_live_args_left_to_service_defaults(
-        self, tmp_path
-    ):
-        """Pins the SUT-intrusion seam: the benchmark forwards --tokenizer but
-        deliberately no live/worker knobs — the service's own defaults govern
-        mid-run tokenization."""
+    async def test_tokenizer_and_workers_forwarded_from_schema(self, tmp_path):
+        """The benchmark forwards --tokenizer and --tokenizer-workers; the
+        workers value comes from the schema default
+        (drain.metrics_tokenizer_workers), the single source of truth."""
         config = OfflineConfig(**_OFFLINE_KWARGS, settings=OfflineSettings())
         ctx = self._make_ctx(config, tmp_path)
         ctx.tokenizer_name = "gpt2"
@@ -681,8 +679,9 @@ class TestAggregatorArgs:
         args = aggregator_cfg.args
         idx = args.index("--tokenizer")
         assert args[idx + 1] == "gpt2"
-        assert "--tokenizer-workers" not in args
-        assert "--live-tokenizers" not in args
+        idx = args.index("--tokenizer-workers")
+        expected = str(config.settings.drain.metrics_tokenizer_workers)
+        assert args[idx + 1] == expected
 
 
 class TestBuildPhases:

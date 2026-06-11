@@ -565,6 +565,24 @@ class DrainConfig(BaseModel):
             "after ENDED (default: 60.0; 0 = unlimited)."
         ),
     )
+    metrics_tokenizer_workers: Annotated[
+        int,
+        cyclopts.Parameter(
+            alias="--metrics-tokenizer-workers",
+            help=(
+                "In-process tokenizer threads for live (mid-run) ISL/OSL/TPOT in "
+                "the metrics aggregator. 0 defers all tokenization to the "
+                "end-of-run drain, which always uses the auto-sized sharded pool."
+            ),
+        ),
+    ] = Field(
+        2,
+        ge=0,
+        description=(
+            "In-process tokenizer threads for live (mid-run) ISL/OSL/TPOT "
+            "(default: 2; 0 = defer everything to the end-of-run drain)."
+        ),
+    )
 
 
 @cyclopts.Parameter(name="*")

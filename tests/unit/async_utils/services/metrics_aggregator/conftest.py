@@ -171,6 +171,7 @@ def make_aggregator(
     live_flush_interval_s: float | None = None,
     streaming: bool = True,
     shutdown_event: asyncio.Event | None = None,
+    drain_timeout_s: float | None = None,
 ) -> tuple[MetricsAggregatorService, MetricsRegistry, MagicMock]:
     """Construct an aggregator wired to a real SUB socket and a mocked publisher.
 
@@ -203,5 +204,6 @@ def make_aggregator(
         live_flush_interval_s=live_flush_interval_s,
         streaming=streaming,
         shutdown_event=shutdown_event,
+        drain_timeout_s=drain_timeout_s,
     )
     return agg, registry, publisher
