@@ -35,6 +35,7 @@ from inference_endpoint.commands.benchmark.execute import (
     ResponseCollector,
     _build_phases,
     _run_benchmark_async,
+    setup_benchmark,
 )
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import (
@@ -63,7 +64,7 @@ from inference_endpoint.core.types import QueryResult
 from inference_endpoint.dataset_manager.dataset import Dataset
 from inference_endpoint.endpoint_client.config import HTTPClientConfig
 from inference_endpoint.evaluation.scoring import Scorer
-from inference_endpoint.exceptions import InputValidationError
+from inference_endpoint.exceptions import InputValidationError, SetupError
 from inference_endpoint.load_generator.sample_order import create_sample_order
 from inference_endpoint.load_generator.session import PhaseType
 from inference_endpoint.metrics.metric import Throughput
@@ -1137,3 +1138,142 @@ class TestErrorFormatter:
 
         panel = _error_formatter(FakeError())
         assert "something went wrong" in panel.renderable
+
+
+class TestSetupBenchmarkTokenizer:
+    """Tests for tokenizer resolution logic in setup_benchmark."""
+
+    @pytest.fixture()
+    def _base_patches(self):
+        with (
+            patch(
+                "inference_endpoint.commands.benchmark.execute.pin_loadgen",
+                return_value=None,
+            ),
+            patch(
+                "inference_endpoint.config.schema.BenchmarkConfig.to_yaml_file",
+                return_value=None,
+            ),
+        ):
+            yield
+
+    @pytest.fixture()
+    def _simple_dataset(self):
+        ds = Dataset(pd.DataFrame({"prompt": ["q0"]}))
+        ds.load()
+        return ds
+
+    @pytest.fixture()
+    def _rt_settings(self):
+        return RuntimeSettings(
+            metric_target=Throughput(10.0),
+            reported_metrics=[Throughput(10.0)],
+            min_duration_ms=0,
+            max_duration_ms=None,
+            n_samples_from_dataset=1,
+            n_samples_to_issue=None,
+            min_sample_count=1,
+            rng_sched=random.Random(0),
+            rng_sample_index=random.Random(0),
+            load_pattern=LoadPattern(type=LoadPatternType.MAX_THROUGHPUT),
+        )
+
+    @pytest.mark.unit
+    def test_invalid_tokenizer_override_raises(self, tmp_path, _base_patches):
+        config = OfflineConfig(
+            **_OFFLINE_KWARGS
+            | {
+                "model_params": {"name": "test-model", "tokenizer_name": "bad/override"}
+            },
+            report_dir=str(tmp_path),
+        )
+        with (
+            patch(
+                "inference_endpoint.commands.benchmark.execute._check_tokenizer_exists",
+                return_value=False,
+            ),
+            pytest.raises(SetupError, match="bad/override"),
+        ):
+            setup_benchmark(config, TestMode.PERF)
+
+    @pytest.mark.unit
+    def test_valid_tokenizer_override_stored_in_context(
+        self, tmp_path, _base_patches, _simple_dataset, _rt_settings
+    ):
+        config = OfflineConfig(
+            **_OFFLINE_KWARGS
+            | {
+                "model_params": {
+                    "name": "test-model",
+                    "tokenizer_name": "good/override",
+                }
+            },
+            report_dir=str(tmp_path),
+        )
+        mock_check = MagicMock(return_value=True)
+        with (
+            patch(
+                "inference_endpoint.commands.benchmark.execute._check_tokenizer_exists",
+                mock_check,
+            ),
+            patch(
+                "inference_endpoint.commands.benchmark.execute._load_datasets",
+                return_value=(_simple_dataset, [], []),
+            ),
+            patch(
+                "inference_endpoint.commands.benchmark.execute.RuntimeSettings.from_config",
+                return_value=_rt_settings,
+            ),
+        ):
+            ctx = setup_benchmark(config, TestMode.PERF)
+
+        mock_check.assert_called_once_with("good/override")
+        assert ctx.tokenizer_name == "good/override"
+
+    @pytest.mark.unit
+    def test_no_override_uses_model_name_when_tokenizer_exists(
+        self, tmp_path, _base_patches, _simple_dataset, _rt_settings
+    ):
+        config = OfflineConfig(**_OFFLINE_KWARGS, report_dir=str(tmp_path))
+        mock_check = MagicMock(return_value=True)
+        with (
+            patch(
+                "inference_endpoint.commands.benchmark.execute._check_tokenizer_exists",
+                mock_check,
+            ),
+            patch(
+                "inference_endpoint.commands.benchmark.execute._load_datasets",
+                return_value=(_simple_dataset, [], []),
+            ),
+            patch(
+                "inference_endpoint.commands.benchmark.execute.RuntimeSettings.from_config",
+                return_value=_rt_settings,
+            ),
+        ):
+            ctx = setup_benchmark(config, TestMode.PERF)
+
+        mock_check.assert_called_once_with("test-model")
+        assert ctx.tokenizer_name == "test-model"
+
+    @pytest.mark.unit
+    def test_no_override_yields_none_when_model_has_no_tokenizer(
+        self, tmp_path, _base_patches, _simple_dataset, _rt_settings
+    ):
+        config = OfflineConfig(**_OFFLINE_KWARGS, report_dir=str(tmp_path))
+        with (
+            patch(
+                "inference_endpoint.commands.benchmark.execute._check_tokenizer_exists",
+                return_value=False,
+            ),
+            patch(
+                "inference_endpoint.commands.benchmark.execute._load_datasets",
+                return_value=(_simple_dataset, [], []),
+            ),
+            patch(
+                "inference_endpoint.commands.benchmark.execute.RuntimeSettings.from_config",
+                return_value=_rt_settings,
+            ),
+        ):
+            ctx = setup_benchmark(config, TestMode.PERF)
+
+        assert ctx.tokenizer_name is None

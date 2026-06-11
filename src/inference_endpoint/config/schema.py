@@ -205,6 +205,13 @@ class ModelParams(BaseModel):
         StreamingMode,
         cyclopts.Parameter(alias="--streaming", help="Streaming mode: auto/on/off"),
     ] = StreamingMode.AUTO
+    tokenizer_name: Annotated[
+        str | None,
+        cyclopts.Parameter(
+            alias="--tokenizer",
+            help="HF repo ID or local path for the tokenizer. Overrides model name for client-side token metrics (ISL/OSL/TPOT).",
+        ),
+    ] = None
 
 
 class SubmissionReference(BaseModel):
