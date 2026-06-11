@@ -203,7 +203,7 @@ class TestCaptureSystemInfo:
             from inference_endpoint.sys_info import capture as capture_mod
 
             importlib.reload(capture_mod)
-            with pytest.raises(SetupError, match="pip install mlc-scripts"):
+            with pytest.raises(SetupError, match=r"pip install.*inference-endpoint\[sysinfo\]"):
                 capture_mod.capture_system_info(cfg, output_dir=tmp_path)
 
     @pytest.mark.unit
