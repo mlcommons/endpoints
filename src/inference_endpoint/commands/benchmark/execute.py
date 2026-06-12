@@ -921,7 +921,7 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
         perf_elapsed = report.duration_ns / 1e9
         total_issued = report.n_samples_issued
         n_errors = report.n_samples_failed
-        qps = report.qps() or 0.0
+        qps = report.qps or 0.0
     else:
         perf = result.perf_results[0] if result.perf_results else None
         if perf:
