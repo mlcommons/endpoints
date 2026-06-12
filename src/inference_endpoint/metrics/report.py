@@ -211,11 +211,13 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
         )
 
     def to_json(self, save_to: os.PathLike | None = None) -> bytes:
-        # Serialize the struct, then add the derived throughput metrics so the
-        # JSON is self-complete (consumers don't recompute qps/tps from
-        # duration + counts). They are methods, not stored fields, to avoid
-        # duplicating data already present in duration_ns / counters / osl.
-        payload: dict[str, Any] = msgspec.json.decode(msgspec.json.encode(self))
+        # Convert the struct to the same dict shape the wire format produces,
+        # then add the derived throughput metrics so the JSON is self-complete
+        # (consumers don't recompute qps/tps from duration + counts). They are
+        # methods, not stored fields, to avoid duplicating data already present
+        # in duration_ns / counters / osl. `to_builtins` honors the encoder's
+        # config (so the schema matches a plain encode) without a JSON round-trip.
+        payload: dict[str, Any] = msgspec.to_builtins(self)
         payload["qps"] = self.qps()
         payload["tps"] = self.tps()
         json_bytes = msgspec.json.format(msgspec.json.encode(payload), indent=2)
