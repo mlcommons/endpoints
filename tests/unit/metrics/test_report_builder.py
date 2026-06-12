@@ -238,6 +238,21 @@ class TestReportDisplayAndSerialize:
         assert data["n_samples_completed"] == 5
         assert "ttft" in data
 
+    def test_to_json_serializes_qps_and_tps(self):
+        """result_summary.json is self-complete: qps/tps are serialized so
+        consumers don't recompute them from duration + counts."""
+        report = _build_report(_make_registry(n_samples=50))
+        data = json.loads(report.to_json())
+        assert data["qps"] == pytest.approx(5.0)  # 50 completed / 10s
+        assert data["tps"] == pytest.approx(report.tps())
+        assert data["tps"] > 0  # OSL was recorded, so TPS is computable
+
+    def test_to_json_qps_tps_null_without_duration(self):
+        """No duration -> qps/tps serialize as null, not omitted or crashing."""
+        data = json.loads(_build_report(_make_registry(n_samples=0)).to_json())
+        assert data["qps"] is None
+        assert data["tps"] is None
+
     def test_to_json_save(self, tmp_path: Path):
         registry = _make_registry(n_samples=5)
         report = _build_report(registry)

@@ -152,6 +152,22 @@ class TestBenchmarkCommandIntegration:
         assert results["results"]["successful"] >= 0
 
     @pytest.mark.integration
+    def test_result_summary_self_complete_and_no_report_txt(
+        self, mock_http_echo_server, ds_dataset_path, tmp_path
+    ):
+        """result_summary.json carries qps/tps (self-complete) and is the only
+        summary written — report.txt is no longer produced."""
+        run_benchmark(
+            _config(mock_http_echo_server.url, ds_dataset_path, report_dir=tmp_path),
+            TestMode.PERF,
+        )
+
+        summary = json.loads((tmp_path / "result_summary.json").read_text())
+        assert summary["qps"] > 0
+        assert "tps" in summary
+        assert not (tmp_path / "report.txt").exists()
+
+    @pytest.mark.integration
     def test_mode_logging(self, mock_http_echo_server, ds_dataset_path, caplog):
         config = _config(
             mock_http_echo_server.url,
