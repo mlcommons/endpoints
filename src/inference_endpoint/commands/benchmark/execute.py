@@ -901,15 +901,17 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
         )
         score, n_repeats = scorer_instance.score()
         assert eval_cfg.dataset.data is not None
+        num_samples = len(eval_cfg.dataset.data)
+        if eval_cfg.dataset_name == "performance":
+            num_samples = sum(phase.issued_count for phase in result.perf_results)
         accuracy_scores[eval_cfg.dataset_name] = {
             "dataset_name": eval_cfg.dataset_name,
-            "num_samples": len(eval_cfg.dataset.data),
+            "num_samples": num_samples,
             "extractor": (
                 eval_cfg.extractor.__name__ if eval_cfg.extractor is not None else None
             ),
             "ground_truth_column": eval_cfg.ground_truth_column,
             "score": score,
-            "n_repeats": n_repeats,
         }
         logger.info(f"Score for {eval_cfg.dataset_name}: {score} ({n_repeats} repeats)")
 
