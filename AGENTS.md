@@ -31,6 +31,9 @@ uv run inference-endpoint probe --endpoints http://localhost:8765 --model test-m
 uv run inference-endpoint benchmark offline --endpoints URL --model NAME --dataset PATH
 uv run inference-endpoint benchmark online --endpoints URL --model NAME --dataset PATH --load-pattern poisson --target-qps 100
 uv run inference-endpoint benchmark from-config --config config.yaml
+
+# Shrink a large accuracy results.json (keep a few full responses + a hash of every response)
+uv run inference-endpoint truncate-results results.json --keep-n 5
 ```
 
 ### Backward-compatible setup (pip + venv)
@@ -60,6 +63,9 @@ inference-endpoint probe --endpoints http://localhost:8765 --model test-model
 inference-endpoint benchmark offline --endpoints URL --model NAME --dataset PATH
 inference-endpoint benchmark online --endpoints URL --model NAME --dataset PATH --load-pattern poisson --target-qps 100
 inference-endpoint benchmark from-config --config config.yaml
+
+# Shrink a large accuracy results.json (keep a few full responses + a hash of every response)
+inference-endpoint truncate-results results.json --keep-n 5
 ```
 
 ## Architecture
@@ -168,6 +174,7 @@ src/inference_endpoint/
 │   ├── probe.py               # ProbeConfig + execute_probe()
 │   ├── info.py                # execute_info()
 │   ├── validate.py            # execute_validate()
+│   ├── truncate_results.py    # TruncateConfig + execute_truncate() — shrink results.json (keep N full + hash rest)
 │   └── init.py                # execute_init()
 ├── core/
 │   ├── types.py               # APIType, Query, QueryResult, StreamChunk, QueryStatus (msgspec Structs)
