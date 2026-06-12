@@ -1,0 +1,7 @@
+# Fetched third-party evaluator + submodules (populated by setup_eval.sh)
+mlperf_eval/
+# uv virtualenv
+.venv/
+
+# Generated LiveCodeBench test cases + results (score_livecodebench.sh).
+lcb_datasets/

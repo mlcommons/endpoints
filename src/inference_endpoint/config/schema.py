@@ -101,6 +101,7 @@ class ScorerMethod(str, Enum):
     SHOPIFY_CATEGORY_F1 = "shopify_category_f1"
     AGENTIC_INFERENCE_INLINE = "agentic_inference_inline"
     VBENCH = "vbench"
+    DEEPSEEK_R1 = "deepseek_r1"
 
 
 class TestMode(str, Enum):
