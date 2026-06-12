@@ -253,6 +253,35 @@ budget). Point `datasets[0].path` at `agentic_coding_16.jsonl` for a longer,
 more representative window. Raise `load_pattern.target_concurrency` only when
 pointing at a multi-slot endpoint.
 
+### Reference performance (Thor, Q4_K_M + llama.cpp, reasoning off)
+
+Measured on the same **Jetson Thor** edge setup as the accuracy runs:
+`Qwen3.6-27B-Q4_K_M` served by **llama.cpp single-slot** (`-np 1`,
+`--reasoning off`, `--ctx-size 32768`, `--flash-attn on`, `-ngl 99`), driven
+single-stream (`target_concurrency: 1`) over `agentic_coding_7.jsonl`
+(227 generated turns). One pass completed in **~44 min**, 227/227 turns, 0
+failed.
+
+| Metric                       | Median | Avg     | p90     | p99     |
+| ---------------------------- | ------ | ------- | ------- | ------- |
+| TTFT                         | 2.16 s | 2.93 s  | 5.18 s  | 12.55 s |
+| TPOT (per-output-token)      | 88 ms  | 87 ms   | 92 ms   | 94 ms   |
+| Per-turn end-to-end latency  | 6.07 s | 11.64 s | 19.34 s | 72.43 s |
+| Output tokens per turn (OSL) | 47     | 104     | 191     | 723     |
+
+Run-level: aggregate output throughput **~8.96 tok/s** (≈ 11.4 tok/s per-stream
+decode from the median TPOT).
+
+> ⚠️ **Reference baseline — not the final optimized numbers.** These figures
+> characterize an _unoptimized_ edge serving path: stock `llama.cpp` with a
+> `Q4_K_M` GGUF, a single slot, and no speculative decoding / multi-token
+> prediction. They exist to give a **reproducible baseline** and to validate the
+> workload and methodology — they are **not** the performance target. Optimized
+> backends (e.g. TensorRT-based serving, NVFP4, multi-token prediction) are
+> expected to be substantially faster and will be reported separately. Absolute
+> latency/throughput are hardware-specific (measured on Jetson Thor) and will
+> differ on other edge devices; only accuracy is hardware-independent.
+
 ---
 
 ## Reproducible runs with `--seed`
