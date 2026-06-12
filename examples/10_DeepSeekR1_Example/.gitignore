@@ -1,9 +1,0 @@
-# Local run notes with cluster/account/path values - not for public commit.
-RUN_REPORT.md
-
-# Generated benchmark data (built by prepare_dataset.py from the source .pkl).
-data/
-
-# Scratch working dir and stray host-substituted run configs.
-.scratch/
-_*_login.yaml
