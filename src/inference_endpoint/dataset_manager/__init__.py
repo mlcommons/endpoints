@@ -24,6 +24,7 @@ from .factory import DataLoaderFactory
 from .multi_turn_dataset import MultiTurnDataset
 from .predefined.aime25 import AIME25
 from .predefined.cnndailymail import CNNDailyMail
+from .predefined.deepseek_r1 import DeepSeekR1
 from .predefined.gpqa import GPQA
 from .predefined.livecodebench import LiveCodeBench
 from .predefined.open_orca import OpenOrca
@@ -56,6 +57,7 @@ __all__ = [
     "MakeAdapterCompatible",
     "apply_transforms",
     "AIME25",
+    "DeepSeekR1",
     "GPQA",
     "OpenOrca",
     "LiveCodeBench",
