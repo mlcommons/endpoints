@@ -453,6 +453,7 @@ class TestMultiTurnInlineScorer:
                         "conversation_id": "sim_1",
                         "turn": 2,
                         "role": "assistant",
+                        "content": "expected workflow action",
                         "intent_codes": ["I042"],
                     },
                 ]
