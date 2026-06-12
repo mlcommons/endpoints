@@ -301,6 +301,17 @@ class Dataset(BaseModel):
     ] = None
     format: str | None = Field(None, description="Dataset format (auto-detected)")
     samples: int | None = Field(None, gt=0, description="Number of samples to use")
+    max_new_tokens: int | None = Field(
+        None,
+        gt=0,
+        description=(
+            "Per-dataset override of model_params.max_new_tokens (sent as the "
+            "per-request max_tokens). Lets a performance dataset use a small cap "
+            "(to avoid server-side KV over-reservation/overload at high concurrency) "
+            "while accuracy datasets use a larger cap (to avoid truncating long "
+            "reasoning output). Falls back to model_params.max_new_tokens when unset."
+        ),
+    )
     eval_method: EvalMethod | None = Field(
         None, description="Accuracy evaluation method"
     )
