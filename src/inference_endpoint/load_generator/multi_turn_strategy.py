@@ -76,7 +76,6 @@ class MultiTurnStrategy:
         dataset_metadata: ConversationMetadata,
         multi_turn_config: MultiTurnConfig | None = None,
         target_concurrency: int | None = None,
-        num_trajectories_to_issue: int | None = None,
     ):
         """Initialize multi-turn strategy.
 
@@ -86,13 +85,15 @@ class MultiTurnStrategy:
             multi_turn_config: Multi-turn conversation configuration.
             target_concurrency: Maximum number of simultaneously active conversations.
                 None means all conversations run concurrently.
-            num_trajectories_to_issue: Number of complete conversation trajectories
-                to run. Defaults to one pass over the dataset conversations.
         """
         self._conv_manager = conversation_manager
         self._dataset_metadata = dataset_metadata
         self._multi_turn_config = multi_turn_config
-        self._num_trajectories_to_issue = num_trajectories_to_issue
+        self._num_trajectories_to_issue = (
+            multi_turn_config.num_trajectories_to_issue
+            if multi_turn_config is not None
+            else None
+        )
         self._stop_issuing_on_first_user_complete = (
             multi_turn_config.stop_issuing_on_first_user_complete
             if multi_turn_config is not None
@@ -158,6 +159,7 @@ class MultiTurnStrategy:
             (conv_id, sorted(turns, key=lambda x: x[1]))
             for conv_id, turns in conv_samples.items()
         ]
+        self._validate_salt_system_prompts()
         n_to_start = self._initial_conversations_to_start()
         try:
             for _ in range(n_to_start):
@@ -278,11 +280,21 @@ class MultiTurnStrategy:
         if delay > 0.0:
             assert self._loop is not None
             handle = self._loop.call_later(
-                delay, self._issue_turn_now, conv_id, idx, turn
+                delay, self._issue_turn_now_safely, conv_id, idx, turn
             )
             self._delay_handles[conv_id] = handle
         else:
             self._issue_turn_now(conv_id, idx, turn)
+
+    def _issue_turn_now_safely(self, conv_id: str, idx: int, turn: int) -> None:
+        """Issue a delayed turn and surface callback failures to execute()."""
+        try:
+            self._issue_turn_now(conv_id, idx, turn)
+        except Exception as exc:
+            logger.exception("Error issuing delayed turn for %s", conv_id)
+            self._error = exc
+            if self._all_done is not None:
+                self._all_done.set()
 
     def _issue_turn_now(self, conv_id: str, idx: int, turn: int) -> None:
         """Issue a single turn to the phase issuer."""
@@ -305,7 +317,6 @@ class MultiTurnStrategy:
                 turn,
             )
             return
-        self._active_iters[conv_id] = (source_id, turns, cursor + 1, repeat_id)
 
         data_override = self._build_data_override(
             source_id=source_id,
@@ -326,6 +337,7 @@ class MultiTurnStrategy:
             self._request_stop_issuing()
             return
 
+        self._active_iters[conv_id] = (source_id, turns, cursor + 1, repeat_id)
         self._inflight[query_id] = conv_id
 
         assert self._loop is not None
@@ -347,7 +359,10 @@ class MultiTurnStrategy:
             (source_id, turn)
         )
         if not messages:
-            return None
+            raise InputValidationError(
+                "multi_turn.enable_salt requires pre-built messages for every "
+                f"client turn; conversation {source_id!r} turn {turn} has none"
+            )
 
         salted_messages = self._messages_with_trajectory_salt(
             messages,
@@ -387,6 +402,24 @@ class MultiTurnStrategy:
             f"conversation; conversation {conversation_id!r} has no system prompt"
         )
 
+    def _validate_salt_system_prompts(self) -> None:
+        """Fail before issuing if salting cannot be applied to every turn."""
+        if not self._enable_salt:
+            return
+        for source_id, turns in self._base_convs:
+            for _idx, turn in turns:
+                messages = self._dataset_metadata.pre_built_messages_by_key.get(
+                    (source_id, turn)
+                )
+                if not messages or not any(
+                    message.get("role") == "system" for message in messages
+                ):
+                    raise InputValidationError(
+                        "multi_turn.enable_salt requires a system prompt for every "
+                        f"conversation; conversation {source_id!r} turn {turn} "
+                        "has no system prompt"
+                    )
+
     def _fill_slot(self) -> None:
         """Start a new conversation from the pending queue, or signal all done."""
         # Errors here must not leave _all_done unset — that would hang execute().
@@ -421,9 +454,7 @@ class MultiTurnStrategy:
         self._performance_tracking_stopped = True
         if self._phase_issuer is None:
             return
-        stop_tracking = getattr(self._phase_issuer, "stop_performance_tracking", None)
-        if stop_tracking is not None:
-            stop_tracking()
+        self._phase_issuer.stop_performance_tracking()
 
     def _request_stop_issuing(self) -> None:
         """Stop issuing future turns and wait only for already in-flight work."""

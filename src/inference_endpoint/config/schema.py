@@ -835,6 +835,14 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
             raise ValueError(
                 "load_pattern.type=multi_turn requires the performance dataset to have multi_turn config"
             )
+        if (
+            lp.type == LoadPatternType.MULTI_TURN
+            and self.settings.runtime.n_samples_to_issue is not None
+        ):
+            raise ValueError(
+                "runtime.n_samples_to_issue is not supported for multi-turn runs; "
+                "use datasets[].multi_turn.num_trajectories_to_issue instead"
+            )
         if has_multi_turn_perf_dataset and lp.type != LoadPatternType.MULTI_TURN:
             raise ValueError(
                 f"Performance dataset with multi_turn config requires load_pattern.type=multi_turn, "

@@ -455,9 +455,10 @@ class MultiTurnInlineScorer(Scorer, scorer_id="multi_turn_inline"):
         """Score completed multi-turn performance outputs.
 
         The method builds expected assistant turns from the loaded dataset,
-        reads model assistant turns from ``events.jsonl``, identifies each
-        conversation as workflow or coding, and averages only turns with
-        scorable ground truth.
+        reads issued turns and model assistant completions from ``events.jsonl``,
+        identifies each conversation as workflow or coding, and averages issued
+        turns with scorable ground truth. Issued turns without a model output
+        contribute score ``0``.
 
         Examples:
             A workflow turn with ``intent_codes=["I042"]`` scores ``1.0`` when
@@ -499,11 +500,13 @@ class MultiTurnInlineScorer(Scorer, scorer_id="multi_turn_inline"):
                     }
                 )
 
-        model_turns = self._completed_model_turns(set(scorable_expected))
-        observed_repeats = sorted(
-            {key[1] for key, model in model_turns.items() if model}
+        issued_turns, model_turns = self._issued_and_completed_model_turns(
+            set(expected)
         )
-        repeats_to_score = observed_repeats or [1]
+        issued_repeats = sorted({key[1] for key in issued_turns})
+        scorable_issued_turns = sorted(
+            key for key in issued_turns if (key[0], key[2]) in scorable_expected
+        )
 
         total_score = 0.0
         n_scored = 0
@@ -511,81 +514,62 @@ class MultiTurnInlineScorer(Scorer, scorer_id="multi_turn_inline"):
         domain_counts = {"coding": 0, "workflow": 0}
         per_turn: list[dict[str, Any]] = []
 
-        for repeat_id in repeats_to_score:
-            for (conversation_id, client_turn), ground_truth in sorted(
-                scorable_expected.items()
-            ):
-                key = (conversation_id, repeat_id, client_turn)
-                model = model_turns.get(key)
-                domain = (
-                    "workflow"
-                    if self._WORKFLOW_CONVERSATION_RE.match(conversation_id)
-                    else "coding"
-                )
-                score: float | None = None
-                row: dict[str, Any] = {
-                    "conversation_id": conversation_id,
-                    "repeat": repeat_id,
-                    "turn": ground_truth["_assistant_turn"],
-                    "domain": domain,
-                }
+        for conversation_id, repeat_id, client_turn in scorable_issued_turns:
+            ground_truth = scorable_expected[(conversation_id, client_turn)]
+            key = (conversation_id, repeat_id, client_turn)
+            model = model_turns.get(key)
+            domain = (
+                "workflow"
+                if self._WORKFLOW_CONVERSATION_RE.match(conversation_id)
+                else "coding"
+            )
+            row: dict[str, Any] = {
+                "conversation_id": conversation_id,
+                "repeat": repeat_id,
+                "turn": ground_truth["_assistant_turn"],
+                "domain": domain,
+            }
 
-                if model is None:
-                    row["missing"] = True
-                    model = {"role": "assistant"}
+            if model is None:
+                row["missing"] = True
+                model = {"role": "assistant"}
 
-                if domain == "workflow":
-                    gt_intents = self._ground_truth_intents(ground_truth)
-                    model_intent = self._model_intent(model)
-                    row["gt_intents"] = sorted(gt_intents)
-                    row["model_intent"] = model_intent
-                    if gt_intents:
-                        score = 1.0 if model_intent in gt_intents else 0.0
-                else:
-                    gt_actions = self._bash_actions(ground_truth)
-                    model_actions = self._bash_actions(model)
-                    row["gt_actions"] = gt_actions
-                    row["model_actions"] = model_actions
-                    if gt_actions:
-                        gt_counts = Counter(gt_actions)
-                        model_counts = Counter(model_actions)
-                        union = sum((gt_counts | model_counts).values())
-                        score = (
-                            sum((gt_counts & model_counts).values()) / union
-                            if union
-                            else None
-                        )
+            score: float
+            if domain == "workflow":
+                gt_intents = self._ground_truth_intents(ground_truth)
+                model_intent = self._model_intent(model)
+                row["gt_intents"] = sorted(gt_intents)
+                row["model_intent"] = model_intent
+                score = 1.0 if model_intent in gt_intents else 0.0
+            else:
+                gt_actions = self._bash_actions(ground_truth)
+                model_actions = self._bash_actions(model)
+                row["gt_actions"] = gt_actions
+                row["model_actions"] = model_actions
+                gt_counts = Counter(gt_actions)
+                model_counts = Counter(model_actions)
+                union = sum((gt_counts | model_counts).values())
+                score = sum((gt_counts & model_counts).values()) / union
 
-                row["score"] = round(score, 4) if score is not None else None
-                per_turn.append(row)
-                if score is None:
-                    continue
-                total_score += score
-                n_scored += 1
-                domain_totals[domain] += score
-                domain_counts[domain] += 1
+            row["score"] = round(score, 4)
+            per_turn.append(row)
+            total_score += score
+            n_scored += 1
+            domain_totals[domain] += score
+            domain_counts[domain] += 1
 
-        observed_outputs = {key for key, model in model_turns.items() if model}
-        expected_outputs = {
-            (conversation_id, repeat_id, turn)
-            for conversation_id, turn in scorable_expected
-            for repeat_id in repeats_to_score
+        expected_outputs = set(scorable_issued_turns)
+        observed_outputs = {
+            key
+            for key, model in model_turns.items()
+            if model and key in expected_outputs
         }
         missing_outputs = len(expected_outputs - observed_outputs)
-        valid = (
-            bool(scorable_expected)
-            and bool(observed_repeats)
-            and missing_outputs == 0
-            and n_scored > 0
-        )
-        score = round(total_score / n_scored, 4) if n_scored else None
+        final_score = round(total_score / n_scored, 4) if n_scored else None
         result: dict[str, Any] = {
-            "score": score,
-            "valid": valid,
+            "score": final_score,
             "turns": {
-                "expected_per_repeat": len(scorable_expected),
-                "excluded_per_repeat": len(excluded_turns),
-                "repeats": len(observed_repeats),
+                "issued": len(issued_turns),
                 "expected": len(expected_outputs),
                 "observed": len(observed_outputs),
                 "missing": missing_outputs,
@@ -607,7 +591,7 @@ class MultiTurnInlineScorer(Scorer, scorer_id="multi_turn_inline"):
         out_path = self.report_dir / self.scores_filename
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(json.dumps(result, indent=2))
-        return score if valid else None, len(observed_repeats)
+        return final_score, len(issued_repeats)
 
     def _expected_assistant_turns(self) -> dict[tuple[str, int], dict[str, Any]]:
         """Return expected assistant turns keyed by source conversation and turn.
@@ -656,25 +640,31 @@ class MultiTurnInlineScorer(Scorer, scorer_id="multi_turn_inline"):
                 }
         return expected
 
-    def _completed_model_turns(
+    def _issued_and_completed_model_turns(
         self, expected_keys: set[tuple[str, int]]
-    ) -> dict[tuple[str, int, int], dict[str, Any] | None]:
-        """Read completed model assistant turns from ``events.jsonl``.
+    ) -> tuple[
+        set[tuple[str, int, int]],
+        dict[tuple[str, int, int], dict[str, Any] | None],
+    ]:
+        """Read issued turns and completed model outputs from ``events.jsonl``.
 
-        Only COMPLETE records matching an expected ``(conversation_id, turn)``
-        are returned. Repeated trajectory ids are split from conversation ids
-        ending in ``__repeat_N``.
+        ISSUED records define the scoring denominator. COMPLETE records are
+        joined by ``sample_uuid`` and may carry ``None`` data for failed turns,
+        which keeps those turns in the denominator with score ``0``.
 
         Example:
-            Event conversation id ``"conv1__repeat_3"`` and turn ``1`` becomes
-            key ``("conv1", 3, 1)``. Without a repeat suffix, the repeat id is
-            ``1``.
+            ISSUED conversation id ``"conv1__repeat_3"`` and turn ``1`` becomes
+            issued key ``("conv1", 3, 1)``. A matching COMPLETE record with
+            ``data=None`` is returned as ``model_turns[("conv1", 3, 1)] = None``.
         """
         events_path = self.report_dir / "events.jsonl"
         if not events_path.exists():
             raise FileNotFoundError(f"Events log file not found at {events_path}")
 
         decoder = msgspec.json.Decoder(type=EventRecord, dec_hook=EventType.decode_hook)
+        uuid_to_key: dict[str, tuple[str, int, int]] = {}
+        completed_by_uuid: dict[str, dict[str, Any] | None] = {}
+        issued_turns: set[tuple[str, int, int]] = set()
         model_turns: dict[tuple[str, int, int], dict[str, Any] | None] = {}
         with events_path.open() as f:
             for line_no, line in enumerate(f, 1):
@@ -691,7 +681,10 @@ class MultiTurnInlineScorer(Scorer, scorer_id="multi_turn_inline"):
                         exc,
                     )
                     continue
-                if record.event_type != SampleEventType.COMPLETE:
+                if record.event_type not in (
+                    SampleEventType.ISSUED,
+                    SampleEventType.COMPLETE,
+                ):
                     continue
                 if record.turn is None or not record.conversation_id:
                     continue
@@ -706,6 +699,14 @@ class MultiTurnInlineScorer(Scorer, scorer_id="multi_turn_inline"):
                 if (conversation_id, turn) not in expected_keys:
                     continue
 
+                key = (conversation_id, repeat_id, turn)
+                if record.event_type == SampleEventType.ISSUED:
+                    uuid_to_key[record.sample_uuid] = key
+                    issued_turns.add(key)
+                    if record.sample_uuid in completed_by_uuid:
+                        model_turns[key] = completed_by_uuid[record.sample_uuid]
+                    continue
+
                 model: dict[str, Any] | None = None
                 if isinstance(record.data, TextModelOutput):
                     content, reasoning, tool_calls = record.data.as_message_parts()
@@ -715,11 +716,13 @@ class MultiTurnInlineScorer(Scorer, scorer_id="multi_turn_inline"):
                         "reasoning_content": reasoning,
                         "tool_calls": list(tool_calls) if tool_calls else None,
                     }
-
-                key = (conversation_id, repeat_id, turn)
-                if model is not None or key not in model_turns:
-                    model_turns[key] = model
-        return model_turns
+                if model is not None or record.sample_uuid not in completed_by_uuid:
+                    completed_by_uuid[record.sample_uuid] = model
+                if record.sample_uuid in uuid_to_key:
+                    key = uuid_to_key[record.sample_uuid]
+                    if model is not None or key not in model_turns:
+                        model_turns[key] = model
+        return issued_turns, model_turns
 
     def _ground_truth_intents(self, turn: dict[str, Any]) -> set[str]:
         """Extract valid workflow intent codes from a ground-truth turn.

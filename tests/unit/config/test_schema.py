@@ -544,6 +544,23 @@ class TestMultiTurnValidation:
                 settings={"load_pattern": {"type": "poisson", "target_qps": 10}},
             )
 
+    @pytest.mark.unit
+    def test_multi_turn_rejects_runtime_num_samples_override(self):
+        with pytest.raises(ValueError, match="num_trajectories_to_issue"):
+            BenchmarkConfig(
+                type=TestType.ONLINE,
+                model_params={"name": "M"},
+                endpoint_config={"endpoints": ["http://x"]},
+                datasets=[{"path": "D", "multi_turn": {}}],
+                settings={
+                    "load_pattern": {
+                        "type": "multi_turn",
+                        "target_concurrency": 4,
+                    },
+                    "runtime": {"n_samples_to_issue": 200},
+                },
+            )
+
 
 class TestMultiTurnTotalSamples:
     """Tests for total_samples_to_issue() with multi_turn load pattern."""

@@ -45,6 +45,7 @@ class FakePhaseIssuer:
         self.uuid_to_conv_info: dict[str, tuple[str, int | None]] = {}
         self.completed_uuids: set[str] = set()
         self.drained = False
+        self.stop_tracking_count = 0
 
     def issue(
         self,
@@ -79,6 +80,9 @@ class FakePhaseIssuer:
         self.inflight -= 1
         if self.inflight <= 0:
             self.drained = True
+
+    def stop_performance_tracking(self) -> None:
+        self.stop_tracking_count += 1
 
 
 class RecordingPhaseIssuer:
@@ -152,11 +156,12 @@ def _make_dataset_metadata(conversations: dict[str, list[int]]) -> ConversationM
 async def test_first_user_complete_stops_tracking_but_can_continue_for_accuracy():
     conv_manager = ConversationManager()
     metadata = _make_dataset_metadata({"conv1": [1], "conv2": [1, 2]})
+    cfg = MultiTurnConfig(num_trajectories_to_issue=2)
     strategy = MultiTurnStrategy(
         conv_manager,
         metadata,
+        multi_turn_config=cfg,
         target_concurrency=2,
-        num_trajectories_to_issue=2,
     )
     issuer = RecordingPhaseIssuer()
 
@@ -201,13 +206,15 @@ async def test_first_user_complete_stops_tracking_but_can_continue_for_accuracy(
 async def test_stop_on_first_user_complete_refills_until_budget_exhausted():
     conv_manager = ConversationManager()
     metadata = _make_dataset_metadata({"conv1": [1], "conv2": [1], "conv3": [1]})
-    cfg = MultiTurnConfig(stop_issuing_on_first_user_complete=True)
+    cfg = MultiTurnConfig(
+        stop_issuing_on_first_user_complete=True,
+        num_trajectories_to_issue=3,
+    )
     strategy = MultiTurnStrategy(
         conv_manager,
         metadata,
         multi_turn_config=cfg,
         target_concurrency=2,
-        num_trajectories_to_issue=3,
     )
     issuer = RecordingPhaseIssuer()
 
@@ -264,12 +271,11 @@ async def test_salted_turns_use_repeat_and_conversation_salts():
         {"role": "user", "content": "hello"},
     ]
     metadata.pre_built_messages_by_key = {("conv1", 1): base_messages}
-    cfg = MultiTurnConfig(enable_salt=True)
+    cfg = MultiTurnConfig(enable_salt=True, num_trajectories_to_issue=2)
     strategy = MultiTurnStrategy(
         conv_manager,
         metadata,
         target_concurrency=1,
-        num_trajectories_to_issue=2,
         multi_turn_config=cfg,
     )
     issuer = RecordingPhaseIssuer()
@@ -325,6 +331,23 @@ def test_enable_salt_requires_system_prompt():
             repeat_id=1,
             conversation_id="conv1",
         )
+
+
+@pytest.mark.unit
+def test_enable_salt_requires_pre_built_messages():
+    """Salting is invalid when metadata has no pre-built messages for a turn."""
+    conv_manager = ConversationManager()
+    metadata = _make_dataset_metadata({"conv1": [1]})
+    metadata.pre_built_messages_by_key = {}
+    cfg = MultiTurnConfig(enable_salt=True)
+    strategy = MultiTurnStrategy(
+        conv_manager,
+        metadata,
+        multi_turn_config=cfg,
+    )
+
+    with pytest.raises(InputValidationError, match="pre-built messages"):
+        strategy._build_data_override("conv1", 1, repeat_id=1)
 
 
 @pytest.mark.unit

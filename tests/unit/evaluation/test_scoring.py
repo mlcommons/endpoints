@@ -291,6 +291,12 @@ class TestMultiTurnInlineScorer:
             report_dir,
             [
                 EventRecord(
+                    event_type=SampleEventType.ISSUED,
+                    sample_uuid="code-response",
+                    conversation_id="code1",
+                    turn=1,
+                ),
+                EventRecord(
                     event_type=SampleEventType.COMPLETE,
                     sample_uuid="code-response",
                     conversation_id="code1",
@@ -300,6 +306,12 @@ class TestMultiTurnInlineScorer:
                             self._bash_tool_call("model-code", "python test.py")
                         ]
                     ),
+                ),
+                EventRecord(
+                    event_type=SampleEventType.ISSUED,
+                    sample_uuid="workflow-response",
+                    conversation_id="sim_1",
+                    turn=1,
                 ),
                 EventRecord(
                     event_type=SampleEventType.COMPLETE,
@@ -318,7 +330,7 @@ class TestMultiTurnInlineScorer:
         assert score == 1.0
         assert repeats == 1
         scores = json.loads((report_dir / "scores.json").read_text())
-        assert scores["valid"] is True
+        assert "valid" not in scores
         assert scores["turns"]["scored"] == 2
         assert scores["domains"] == {
             "coding": {"score": 1.0, "scored": 1},
@@ -364,6 +376,12 @@ class TestMultiTurnInlineScorer:
             report_dir,
             [
                 EventRecord(
+                    event_type=SampleEventType.ISSUED,
+                    sample_uuid="code-response",
+                    conversation_id="code1",
+                    turn=1,
+                ),
+                EventRecord(
                     event_type=SampleEventType.COMPLETE,
                     sample_uuid="code-response",
                     conversation_id="code1",
@@ -373,6 +391,12 @@ class TestMultiTurnInlineScorer:
                             self._bash_tool_call("model-code", "python test.py")
                         ]
                     ),
+                ),
+                EventRecord(
+                    event_type=SampleEventType.ISSUED,
+                    sample_uuid="unscored-code-response",
+                    conversation_id="code2",
+                    turn=1,
                 ),
             ],
         )
@@ -384,11 +408,9 @@ class TestMultiTurnInlineScorer:
         assert score == 1.0
         assert repeats == 1
         scores = json.loads((report_dir / "scores.json").read_text())
-        assert scores["valid"] is True
+        assert "valid" not in scores
         assert scores["turns"] == {
-            "expected_per_repeat": 1,
-            "excluded_per_repeat": 1,
-            "repeats": 1,
+            "issued": 2,
             "expected": 1,
             "observed": 1,
             "missing": 0,
@@ -402,6 +424,108 @@ class TestMultiTurnInlineScorer:
                 "exclude_reason": "no ground truth",
             }
         ]
+
+    def test_scores_issued_turns_without_rounding_to_full_repeats(self, tmp_path):
+        dataset = MultiTurnDataset(
+            pd.DataFrame(
+                [
+                    {
+                        "conversation_id": "code1",
+                        "turn": 1,
+                        "role": "user",
+                        "content": "run the tests",
+                    },
+                    {
+                        "conversation_id": "code1",
+                        "turn": 2,
+                        "role": "assistant",
+                        "tool_calls": [
+                            self._bash_tool_call("expected-code", "python -m pytest")
+                        ],
+                    },
+                    {
+                        "conversation_id": "sim_1",
+                        "turn": 1,
+                        "role": "user",
+                        "content": "choose the next workflow action",
+                    },
+                    {
+                        "conversation_id": "sim_1",
+                        "turn": 2,
+                        "role": "assistant",
+                        "intent_codes": ["I042"],
+                    },
+                ]
+            )
+        )
+        report_dir = tmp_path / "report"
+        self._write_report(
+            report_dir,
+            [
+                EventRecord(
+                    event_type=SampleEventType.ISSUED,
+                    sample_uuid="code-r1",
+                    conversation_id="code1",
+                    turn=1,
+                ),
+                EventRecord(
+                    event_type=SampleEventType.COMPLETE,
+                    sample_uuid="code-r1",
+                    conversation_id="code1",
+                    turn=1,
+                    data=TextModelOutput(
+                        tool_calls=[
+                            self._bash_tool_call("model-code-r1", "python test.py")
+                        ]
+                    ),
+                ),
+                EventRecord(
+                    event_type=SampleEventType.ISSUED,
+                    sample_uuid="workflow-r1",
+                    conversation_id="sim_1",
+                    turn=1,
+                ),
+                EventRecord(
+                    event_type=SampleEventType.COMPLETE,
+                    sample_uuid="workflow-r1",
+                    conversation_id="sim_1",
+                    turn=1,
+                    data=None,
+                ),
+                EventRecord(
+                    event_type=SampleEventType.ISSUED,
+                    sample_uuid="code-r2",
+                    conversation_id="code1__repeat_2",
+                    turn=1,
+                ),
+                EventRecord(
+                    event_type=SampleEventType.COMPLETE,
+                    sample_uuid="code-r2",
+                    conversation_id="code1__repeat_2",
+                    turn=1,
+                    data=TextModelOutput(
+                        tool_calls=[
+                            self._bash_tool_call("model-code-r2", "python test.py")
+                        ]
+                    ),
+                ),
+            ],
+        )
+
+        score, repeats = MultiTurnInlineScorer(
+            "performance", dataset, report_dir
+        ).score()
+
+        assert score == 0.6667
+        assert repeats == 2
+        scores = json.loads((report_dir / "scores.json").read_text())
+        assert scores["turns"] == {
+            "issued": 3,
+            "expected": 3,
+            "observed": 2,
+            "missing": 1,
+            "scored": 3,
+        }
 
 
 @pytest.mark.unit
