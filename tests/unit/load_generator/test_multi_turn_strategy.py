@@ -466,6 +466,9 @@ async def test_turn_ordering_enforced():
             self.issued_count += 1
             return f"q{idx:04d}"
 
+        def stop_performance_tracking(self) -> None:
+            pass
+
     issuer = TimedIssuer()
 
     async def simulate_responses():
@@ -572,6 +575,9 @@ async def test_pipeline_error_propagated():
             turn: int | None = None,
         ) -> str | None:
             raise RuntimeError("simulated pipeline error")
+
+        def stop_performance_tracking(self) -> None:
+            pass
 
     with pytest.raises(RuntimeError, match="simulated pipeline error"):
         await strategy.execute(ErrorIssuer())
@@ -911,6 +917,9 @@ async def test_fill_slot_failure_does_not_hang_execute():
                 return query_id
             # Raises on the second call, which is triggered by _fill_slot after conv1 completes.
             raise RuntimeError("simulated slot-refill failure")
+
+        def stop_performance_tracking(self) -> None:
+            pass
 
     issuer = RaisingIssuer()
 
