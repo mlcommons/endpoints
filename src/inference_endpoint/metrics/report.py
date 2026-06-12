@@ -211,7 +211,14 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
         )
 
     def to_json(self, save_to: os.PathLike | None = None) -> bytes:
-        json_bytes = msgspec.json.format(msgspec.json.encode(self), indent=2)
+        # Serialize the struct, then add the derived throughput metrics so the
+        # JSON is self-complete (consumers don't recompute qps/tps from
+        # duration + counts). They are methods, not stored fields, to avoid
+        # duplicating data already present in duration_ns / counters / osl.
+        payload: dict[str, Any] = msgspec.json.decode(msgspec.json.encode(self))
+        payload["qps"] = self.qps()
+        payload["tps"] = self.tps()
+        json_bytes = msgspec.json.format(msgspec.json.encode(payload), indent=2)
         if save_to is not None:
             with Path(save_to).open("wb") as f:
                 f.write(json_bytes)

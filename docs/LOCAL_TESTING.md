@@ -161,8 +161,10 @@ uv run inference-endpoint benchmark offline \
 ### 6. View Results
 
 A report directory is always created (at `--report-dir` if specified, or at a default path
-otherwise), containing benchmark artifacts: `result_summary.json`, `runtime_settings.json`,
-`sample_idx_map.json`, `report.txt`, and `events.jsonl`.
+otherwise), containing benchmark artifacts: `result_summary.json`, `sample_idx_map.json`,
+and `events.jsonl`. `result_summary.json` is the primary, self-complete metrics report —
+counts, durations, QPS, TPS, and the TTFT/TPOT/latency/OSL distributions (with histogram
+buckets); the same summary is also printed to the console.
 
 ### 7. Stop the Echo Server
 
