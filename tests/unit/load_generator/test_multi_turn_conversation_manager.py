@@ -29,7 +29,6 @@ def test_conversation_state_initialization():
     state = ConversationState(conversation_id="conv_001")
 
     assert state.conversation_id == "conv_001"
-    assert state.message_history == []
     assert state.completed_turns == 0
     assert state.failed_turns == 0
     assert state.expected_client_turns is None
@@ -86,7 +85,7 @@ def test_conversation_manager_multiple_conversations():
 
     assert state1 is not state2
 
-    manager.mark_turn_complete("conv_001", "Response to conv_001")
+    manager.mark_turn_complete("conv_001")
 
     assert state1.completed_turns == 1
     assert state2.completed_turns == 0
@@ -94,26 +93,14 @@ def test_conversation_manager_multiple_conversations():
 
 @pytest.mark.unit
 def test_conversation_manager_mark_turn_complete():
-    """mark_turn_complete increments counter and appends history."""
+    """mark_turn_complete increments the completion counter."""
     manager = ConversationManager()
     state = manager.get_or_create("conv_001")
 
-    manager.mark_turn_complete("conv_001", "Assistant response")
+    manager.mark_turn_complete("conv_001")
 
     assert state.completed_turns == 1
     assert state.failed_turns == 0
-    assert state.message_history == []  # store_in_history=False by default
-
-
-@pytest.mark.unit
-def test_conversation_manager_mark_turn_complete_stores_history():
-    """mark_turn_complete appends to history when store_in_history=True."""
-    manager = ConversationManager()
-    state = manager.get_or_create("conv_001")
-
-    manager.mark_turn_complete("conv_001", "Hello", store_in_history=True)
-
-    assert state.message_history == [{"role": "assistant", "content": "Hello"}]
 
 
 @pytest.mark.unit
@@ -135,9 +122,9 @@ def test_conversation_completion_tracking():
     state = manager.get_or_create("conv_001", expected_client_turns=2)
 
     assert not state.is_complete()
-    manager.mark_turn_complete("conv_001", "r1")
+    manager.mark_turn_complete("conv_001")
     assert not state.is_complete()
-    manager.mark_turn_complete("conv_001", "r2")
+    manager.mark_turn_complete("conv_001")
     assert state.is_complete()
 
 
@@ -147,7 +134,7 @@ def test_conversation_completion_without_expected_turns():
     manager = ConversationManager()
     state = manager.get_or_create("conv_001", expected_client_turns=None)
 
-    manager.mark_turn_complete("conv_001", "r1")
+    manager.mark_turn_complete("conv_001")
 
     assert not state.is_complete()
 
@@ -158,13 +145,13 @@ def test_conversation_completion_with_failures():
     manager = ConversationManager()
     state = manager.get_or_create("conv1", expected_client_turns=3)
 
-    manager.mark_turn_complete("conv1", "Hi")
+    manager.mark_turn_complete("conv1")
     assert not state.is_complete()
 
     manager.mark_turn_failed("conv1")
     assert not state.is_complete()
 
-    manager.mark_turn_complete("conv1", "Bye")
+    manager.mark_turn_complete("conv1")
     assert state.is_complete()
     assert state.failed_turns == 1
     assert state.completed_turns == 3
@@ -202,7 +189,7 @@ async def test_conversation_manager_concurrent_access():
             state = manager.get_state(conv_id)
             assert state is not None
             for _ in range(turns_per_conv):
-                manager.mark_turn_complete(conv_id, "response")
+                manager.mark_turn_complete(conv_id)
                 await asyncio.sleep(0.001)
         except Exception as e:
             errors.append(f"{conv_id} error: {e}")

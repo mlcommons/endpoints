@@ -18,12 +18,15 @@ import pytest
 from inference_endpoint.config.schema import Dataset as DatasetConfig
 from inference_endpoint.config.schema import MultiTurnConfig
 from inference_endpoint.dataset_manager.dataset import Dataset
-from inference_endpoint.exceptions import InputValidationError
+from inference_endpoint.dataset_manager.multi_turn_dataset import MultiTurnDataset
 
 
 @pytest.mark.unit
-def test_enable_salt_requires_multi_turn_loader(monkeypatch):
+def test_multi_turn_config_selects_multi_turn_loader(monkeypatch):
+    captured: dict[str, object] = {}
+
     def fake_load_from_file(*args, **kwargs):
+        captured["dataset_id"] = kwargs.get("dataset_id")
         return Dataset()
 
     monkeypatch.setattr(
@@ -38,5 +41,6 @@ def test_enable_salt_requires_multi_turn_loader(monkeypatch):
         multi_turn=MultiTurnConfig(enable_salt=True),
     )
 
-    with pytest.raises(InputValidationError, match="enable_salt"):
-        factory_module.DataLoaderFactory.create_loader(config)
+    factory_module.DataLoaderFactory.create_loader(config)
+
+    assert captured["dataset_id"] == MultiTurnDataset.DATASET_ID

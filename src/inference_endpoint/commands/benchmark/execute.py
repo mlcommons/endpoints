@@ -228,6 +228,35 @@ def _check_tokenizer_exists(model_name: str) -> bool:
         return False
 
 
+def _resolve_accuracy_components(
+    dataset_name: str, accuracy_config: Any | None
+) -> tuple[type[Scorer], type[Extractor] | None]:
+    """Validate scorer/extractor config and return resolved classes."""
+    if accuracy_config is None or accuracy_config.eval_method is None:
+        raise InputValidationError(
+            f"Dataset '{dataset_name}' requires accuracy_config with eval_method"
+        )
+
+    try:
+        scorer_cls = Scorer.get(accuracy_config.eval_method)
+    except KeyError as exc:
+        raise InputValidationError(str(exc)) from exc
+    extractor_name = accuracy_config.extractor
+    if extractor_name is None:
+        if scorer_cls.REQUIRES_EXTRACTOR:
+            raise InputValidationError(
+                f"Dataset '{dataset_name}' uses scorer "
+                f"'{accuracy_config.eval_method}' which requires an extractor"
+            )
+        extractor_cls: type[Extractor] | None = None
+    else:
+        try:
+            extractor_cls = Extractor.get(extractor_name)
+        except KeyError as exc:
+            raise InputValidationError(str(exc)) from exc
+    return scorer_cls, extractor_cls
+
+
 def _load_datasets(
     config: BenchmarkConfig, report_dir: Path
 ) -> tuple[Dataset, list[Dataset], list[AccuracyConfiguration]]:
@@ -247,25 +276,10 @@ def _load_datasets(
 
     # Pack the evaluation parameters for each accuracy dataset
     for acc_cfg in accuracy_cfgs:
-        if (
-            acc_cfg.accuracy_config is None
-            or acc_cfg.accuracy_config.eval_method is None
-        ):
-            raise InputValidationError(
-                f"Dataset '{acc_cfg.name}' requires accuracy_config with eval_method"
-            )
-
-        scorer_cls = Scorer.get(acc_cfg.accuracy_config.eval_method)
-        extractor_name = acc_cfg.accuracy_config.extractor
-        if extractor_name is None:
-            if scorer_cls.REQUIRES_EXTRACTOR:
-                raise InputValidationError(
-                    f"Dataset '{acc_cfg.name}' uses scorer "
-                    f"'{acc_cfg.accuracy_config.eval_method}' which requires an extractor"
-                )
-            extractor_cls: type[Extractor] | None = None
-        else:
-            extractor_cls = Extractor.get(extractor_name)
+        scorer_cls, extractor_cls = _resolve_accuracy_components(
+            acc_cfg.name, acc_cfg.accuracy_config
+        )
+        assert acc_cfg.accuracy_config is not None
 
         ds = DataLoaderFactory.create_loader(
             acc_cfg, num_repeats=acc_cfg.accuracy_config.num_repeats
@@ -290,12 +304,13 @@ def _load_datasets(
         logger.info(f"Loaded {ds} - {ds.num_samples()} samples")
 
     if not accuracy_cfgs:
-        logger.info("No accuracy datasets provided")
+        logger.info("No separate accuracy datasets provided")
     if len(performance_cfgs) > 1:
         raise InputValidationError("Multiple performance datasets not supported")
 
+    perf_cfg = performance_cfgs[0]
     try:
-        dataloader = DataLoaderFactory.create_loader(performance_cfgs[0])
+        dataloader = DataLoaderFactory.create_loader(perf_cfg)
         dataloader.load(
             api_type=config.endpoint_config.api_type, model_params=config.model_params
         )
@@ -306,6 +321,31 @@ def _load_datasets(
         ) from e
     except Exception as e:
         raise SetupError(f"Failed to load dataset: {e}") from e
+
+    if perf_cfg.accuracy_config is not None:
+        accuracy_config = perf_cfg.accuracy_config
+        if accuracy_config.num_repeats != 1:
+            raise InputValidationError(
+                f"Dataset '{perf_cfg.name}' is a performance dataset; "
+                "accuracy_config.num_repeats must be 1 because scoring runs on "
+                "already-issued performance outputs"
+            )
+        scorer_cls, extractor_cls = _resolve_accuracy_components(
+            perf_cfg.name, accuracy_config
+        )
+
+        eval_configs.append(
+            AccuracyConfiguration(
+                scorer_cls,
+                extractor_cls,
+                "performance",
+                dataloader,
+                report_dir,
+                accuracy_config.ground_truth,
+                accuracy_config.num_repeats,
+                accuracy_config.extras or {},
+            )
+        )
 
     return dataloader, accuracy_datasets, eval_configs
 
@@ -433,6 +473,8 @@ def _build_phases(
     # Accuracy phases — use eval_cfg.dataset_name as phase name so it matches
     # what Scorer._load_sample_index_map() looks up in sample_idx_map.json
     for eval_cfg in ctx.eval_configs:
+        if eval_cfg.dataset_name == "performance":
+            continue
         acc_ds = eval_cfg.dataset
         if isinstance(acc_ds, MultiTurnDataset):
             raise InputValidationError(
@@ -859,15 +901,17 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
         )
         score, n_repeats = scorer_instance.score()
         assert eval_cfg.dataset.data is not None
+        num_samples = len(eval_cfg.dataset.data)
+        if eval_cfg.dataset_name == "performance":
+            num_samples = sum(phase.issued_count for phase in result.perf_results)
         accuracy_scores[eval_cfg.dataset_name] = {
             "dataset_name": eval_cfg.dataset_name,
-            "num_samples": len(eval_cfg.dataset.data),
+            "num_samples": num_samples,
             "extractor": (
                 eval_cfg.extractor.__name__ if eval_cfg.extractor is not None else None
             ),
             "ground_truth_column": eval_cfg.ground_truth_column,
             "score": score,
-            "n_repeats": n_repeats,
         }
         logger.info(f"Score for {eval_cfg.dataset_name}: {score} ({n_repeats} repeats)")
 

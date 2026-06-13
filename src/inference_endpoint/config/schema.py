@@ -97,6 +97,7 @@ class ScorerMethod(str, Enum):
     ROUGE = "rouge"
     CODE_BENCH = "code_bench_scorer"
     SHOPIFY_CATEGORY_F1 = "shopify_category_f1"
+    MULTI_TURN_INLINE = "multi_turn_inline"
     VBENCH = "vbench"
 
 
@@ -257,18 +258,23 @@ class MultiTurnConfig(BaseModel):
             response. A timeout aborts that turn and all remaining client
             turns of the same conversation because subsequent turns depend
             on the timed-out response.
-        use_dataset_history: If True, use pre-built message history from dataset.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    turn_timeout_s: float = Field(default=300.0, gt=0)
-    use_dataset_history: bool = True
+    turn_timeout_s: float = Field(
+        default=86400.0,
+        gt=0,
+        description=(
+            "Per-turn timeout in seconds. A timeout aborts that turn and all "
+            "remaining turns in the same conversation."
+        ),
+    )
     enable_salt: bool = Field(
         False,
         description=(
-            "Enable salt addition after system prompt to prevent KV cache reuse "
-            "across trajectories in multi-turn setting."
+            "Add deterministic salt markers before and after the system prompt "
+            "to prevent KV cache reuse across trajectories in multi-turn setting."
         ),
     )
     inject_tool_delay: bool = Field(
@@ -276,6 +282,24 @@ class MultiTurnConfig(BaseModel):
         description=(
             "Pause for a predefined duration between turns. Duration is defined "
             "in dataset."
+        ),
+    )
+    num_trajectories_to_issue: int | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Number of conversation trajectories to start. Defaults to one pass "
+            "over the dataset; values above the dataset size repeat trajectories "
+            "with unique logical conversation ids."
+        ),
+    )
+    stop_issuing_on_first_user_complete: bool = Field(
+        False,
+        description=(
+            "When performance tracking stops because the first concurrency slot "
+            "has no next trajectory left to assign, also stop issuing future "
+            "turns. If false, replay continues outside the performance window "
+            "for accuracy/log coverage."
         ),
     )
 
@@ -810,6 +834,14 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
         if lp.type == LoadPatternType.MULTI_TURN and not has_multi_turn_perf_dataset:
             raise ValueError(
                 "load_pattern.type=multi_turn requires the performance dataset to have multi_turn config"
+            )
+        if (
+            lp.type == LoadPatternType.MULTI_TURN
+            and self.settings.runtime.n_samples_to_issue is not None
+        ):
+            raise ValueError(
+                "runtime.n_samples_to_issue is not supported for multi-turn runs; "
+                "use datasets[].multi_turn.num_trajectories_to_issue instead"
             )
         if has_multi_turn_perf_dataset and lp.type != LoadPatternType.MULTI_TURN:
             raise ValueError(

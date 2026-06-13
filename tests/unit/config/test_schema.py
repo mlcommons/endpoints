@@ -502,6 +502,17 @@ class TestMultiTurnValidation:
         assert config.settings.load_pattern.target_concurrency == 16
 
     @pytest.mark.unit
+    def test_multi_turn_rejects_removed_stop_on_first_empty_slot_as_extra(self):
+        # Legacy multi-turn knobs should remain rejected by extra="forbid".
+        with pytest.raises(ValueError, match="stop_on_first_empty_slot"):
+            BenchmarkConfig(
+                **self._make_online_multi_turn(
+                    concurrency=16,
+                    multi_turn={"stop_on_first_empty_slot": True},
+                )
+            )
+
+    @pytest.mark.unit
     def test_multi_turn_requires_target_concurrency(self):
         with pytest.raises(ValueError, match="Multi-turn requires --concurrency"):
             BenchmarkConfig(**self._make_online_multi_turn(concurrency=None))
@@ -531,6 +542,23 @@ class TestMultiTurnValidation:
                 endpoint_config={"endpoints": ["http://x"]},
                 datasets=[{"path": "D", "multi_turn": {}}],
                 settings={"load_pattern": {"type": "poisson", "target_qps": 10}},
+            )
+
+    @pytest.mark.unit
+    def test_multi_turn_rejects_runtime_num_samples_override(self):
+        with pytest.raises(ValueError, match="num_trajectories_to_issue"):
+            BenchmarkConfig(
+                type=TestType.ONLINE,
+                model_params={"name": "M"},
+                endpoint_config={"endpoints": ["http://x"]},
+                datasets=[{"path": "D", "multi_turn": {}}],
+                settings={
+                    "load_pattern": {
+                        "type": "multi_turn",
+                        "target_concurrency": 4,
+                    },
+                    "runtime": {"n_samples_to_issue": 200},
+                },
             )
 
 

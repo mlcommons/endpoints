@@ -16,15 +16,18 @@
 """Unit tests for MultiTurnStrategy."""
 
 import asyncio
+import hashlib
 from unittest.mock import MagicMock
 
 import pytest
+from inference_endpoint.config.schema import MultiTurnConfig
 from inference_endpoint.core.record import ErrorEventType, SampleEventType
 from inference_endpoint.core.types import ErrorData, QueryResult, TextModelOutput
 from inference_endpoint.dataset_manager.multi_turn_dataset import (
     ConversationMetadata,
     ConversationSampleEntry,
 )
+from inference_endpoint.exceptions import InputValidationError
 from inference_endpoint.load_generator.conversation_manager import ConversationManager
 from inference_endpoint.load_generator.multi_turn_strategy import MultiTurnStrategy
 
@@ -42,6 +45,7 @@ class FakePhaseIssuer:
         self.uuid_to_conv_info: dict[str, tuple[str, int | None]] = {}
         self.completed_uuids: set[str] = set()
         self.drained = False
+        self.stop_tracking_count = 0
 
     def issue(
         self,
@@ -77,6 +81,53 @@ class FakePhaseIssuer:
         if self.inflight <= 0:
             self.drained = True
 
+    def stop_performance_tracking(self) -> None:
+        self.stop_tracking_count += 1
+
+
+class RecordingPhaseIssuer:
+    """Phase issuer with unique query IDs for repeated sample indices."""
+
+    def __init__(self):
+        self.issued_count = 0
+        self.issued: list[int] = []
+        self.records: list[tuple[str, int, str, int | None, dict | None]] = []
+        self.uuid_to_conv_info: dict[str, tuple[str, int | None]] = {}
+        self.uuid_to_index: dict[str, int] = {}
+        self.completed_uuids: set[str] = set()
+        self.stop_tracking_count = 0
+
+    def issue(
+        self,
+        sample_index: int,
+        data_override: dict | None = None,
+        conversation_id: str = "",
+        turn: int | None = None,
+    ) -> str | None:
+        query_id = f"q{self.issued_count:04d}"
+        self.issued_count += 1
+        self.issued.append(sample_index)
+        self.records.append(
+            (query_id, sample_index, conversation_id, turn, data_override)
+        )
+        self.uuid_to_index[query_id] = sample_index
+        self.uuid_to_conv_info[query_id] = (conversation_id, turn)
+        return query_id
+
+    def register_skipped(
+        self,
+        sample_index: int,
+        conversation_id: str = "",
+        turn: int | None = None,
+    ) -> str | None:
+        raise AssertionError("budget stops must not register skipped turns")
+
+    def mark_inflight_complete(self) -> None:
+        pass
+
+    def stop_performance_tracking(self) -> None:
+        self.stop_tracking_count += 1
+
 
 def _make_dataset_metadata(conversations: dict[str, list[int]]) -> ConversationMetadata:
     """Build ConversationMetadata from {conv_id: [turn_numbers]} mapping."""
@@ -98,6 +149,205 @@ def _make_dataset_metadata(conversations: dict[str, list[int]]) -> ConversationM
         max_turns_per_conv=max((max(t) for t in conversations.values()), default=0),
         client_turns_per_conversation={c: len(t) for c, t in conversations.items()},
     )
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_first_user_complete_stops_tracking_but_can_continue_for_accuracy():
+    conv_manager = ConversationManager()
+    metadata = _make_dataset_metadata({"conv1": [1], "conv2": [1, 2]})
+    cfg = MultiTurnConfig(num_trajectories_to_issue=2)
+    strategy = MultiTurnStrategy(
+        conv_manager,
+        metadata,
+        multi_turn_config=cfg,
+        target_concurrency=2,
+    )
+    issuer = RecordingPhaseIssuer()
+
+    execute_task = asyncio.create_task(strategy.execute(issuer))
+    await asyncio.sleep(0.01)
+
+    assert [(idx, conv, turn) for _, idx, conv, turn, _ in issuer.records] == [
+        (0, "conv1", 1),
+        (1, "conv2", 1),
+    ]
+
+    strategy.on_sample_complete(
+        QueryResult(id="q0000", response_output=TextModelOutput(output="conv1"))
+    )
+    await asyncio.sleep(0.01)
+
+    assert issuer.stop_tracking_count == 1
+    assert not execute_task.done()
+
+    strategy.on_sample_complete(
+        QueryResult(id="q0001", response_output=TextModelOutput(output="conv2-turn1"))
+    )
+    await asyncio.sleep(0.01)
+
+    assert [(idx, conv, turn) for _, idx, conv, turn, _ in issuer.records] == [
+        (0, "conv1", 1),
+        (1, "conv2", 1),
+        (2, "conv2", 2),
+    ]
+
+    strategy.on_sample_complete(
+        QueryResult(id="q0002", response_output=TextModelOutput(output="conv2-turn2"))
+    )
+    count = await asyncio.wait_for(execute_task, timeout=1.0)
+
+    assert count == 3
+    assert issuer.stop_tracking_count == 1
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_stop_on_first_user_complete_refills_until_budget_exhausted():
+    conv_manager = ConversationManager()
+    metadata = _make_dataset_metadata({"conv1": [1], "conv2": [1], "conv3": [1]})
+    cfg = MultiTurnConfig(
+        stop_issuing_on_first_user_complete=True,
+        num_trajectories_to_issue=3,
+    )
+    strategy = MultiTurnStrategy(
+        conv_manager,
+        metadata,
+        multi_turn_config=cfg,
+        target_concurrency=2,
+    )
+    issuer = RecordingPhaseIssuer()
+
+    execute_task = asyncio.create_task(strategy.execute(issuer))
+    await asyncio.sleep(0.01)
+
+    assert [(idx, conv, turn) for _, idx, conv, turn, _ in issuer.records] == [
+        (0, "conv1", 1),
+        (1, "conv2", 1),
+    ]
+
+    strategy.on_sample_complete(
+        QueryResult(id="q0000", response_output=TextModelOutput(output="conv1"))
+    )
+    await asyncio.sleep(0.01)
+
+    assert issuer.stop_tracking_count == 0
+    assert [(idx, conv, turn) for _, idx, conv, turn, _ in issuer.records] == [
+        (0, "conv1", 1),
+        (1, "conv2", 1),
+        (2, "conv3", 1),
+    ]
+
+    strategy.on_sample_complete(
+        QueryResult(id="q0001", response_output=TextModelOutput(output="conv2"))
+    )
+    await asyncio.sleep(0.01)
+
+    assert issuer.stop_tracking_count == 1
+    assert not execute_task.done()
+
+    strategy.on_sample_complete(
+        QueryResult(id="q0002", response_output=TextModelOutput(output="conv3"))
+    )
+    count = await asyncio.wait_for(execute_task, timeout=1.0)
+
+    assert count == 3
+    assert issuer.stop_tracking_count == 1
+    assert [(idx, conv, turn) for _, idx, conv, turn, _ in issuer.records] == [
+        (0, "conv1", 1),
+        (1, "conv2", 1),
+        (2, "conv3", 1),
+    ]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_salted_turns_use_repeat_and_conversation_salts():
+    """Pre-baked prompts get repeat and conversation salt markers when enabled."""
+    conv_manager = ConversationManager()
+    metadata = _make_dataset_metadata({"conv1": [1]})
+    base_messages = [
+        {"role": "system", "content": "Be helpful"},
+        {"role": "user", "content": "hello"},
+    ]
+    metadata.pre_built_messages_by_key = {("conv1", 1): base_messages}
+    cfg = MultiTurnConfig(enable_salt=True, num_trajectories_to_issue=2)
+    strategy = MultiTurnStrategy(
+        conv_manager,
+        metadata,
+        target_concurrency=1,
+        multi_turn_config=cfg,
+    )
+    issuer = RecordingPhaseIssuer()
+
+    execute_task = asyncio.create_task(strategy.execute(issuer))
+    await asyncio.sleep(0.01)
+    strategy.on_sample_complete(
+        QueryResult(id="q0000", response_output=TextModelOutput(output="first"))
+    )
+    await asyncio.sleep(0.01)
+    strategy.on_sample_complete(
+        QueryResult(id="q0001", response_output=TextModelOutput(output="repeat"))
+    )
+    await asyncio.wait_for(execute_task, timeout=1.0)
+
+    first_override = issuer.records[0][4]
+    repeat_override = issuer.records[1][4]
+    assert first_override is not None
+    assert repeat_override is not None
+    first_messages = first_override["messages"]
+    repeat_messages = repeat_override["messages"]
+    first_system = first_messages[0]["content"]
+    repeat_system = repeat_messages[0]["content"]
+
+    repeat1_salt = hashlib.blake2b(b"1", digest_size=2).hexdigest()
+    repeat2_salt = hashlib.blake2b(b"2", digest_size=2).hexdigest()
+    conversation_salt = hashlib.blake2b(b"conv1", digest_size=2).hexdigest()
+    assert first_system == (
+        f"[salt: {repeat1_salt}]\n\n" f"Be helpful\n\n" f"[salt: {conversation_salt}]"
+    )
+    assert repeat_system == (
+        f"[salt: {repeat2_salt}]\n\n" f"Be helpful\n\n" f"[salt: {conversation_salt}]"
+    )
+    assert repeat_system != base_messages[0]["content"]
+    assert base_messages[0]["content"] == "Be helpful"
+
+
+@pytest.mark.unit
+def test_enable_salt_requires_system_prompt():
+    """Salting is invalid when the conversation has no system prompt."""
+    conv_manager = ConversationManager()
+    metadata = _make_dataset_metadata({"conv1": [1]})
+    cfg = MultiTurnConfig(enable_salt=True)
+    strategy = MultiTurnStrategy(
+        conv_manager,
+        metadata,
+        multi_turn_config=cfg,
+    )
+
+    with pytest.raises(InputValidationError, match="no system prompt"):
+        strategy._messages_with_trajectory_salt(
+            [{"role": "user", "content": "hello"}],
+            repeat_id=1,
+            conversation_id="conv1",
+        )
+
+
+@pytest.mark.unit
+def test_enable_salt_requires_pre_built_messages():
+    """Salting is invalid when metadata has no pre-built messages for a turn."""
+    conv_manager = ConversationManager()
+    metadata = _make_dataset_metadata({"conv1": [1]})
+    metadata.pre_built_messages_by_key = {}
+    cfg = MultiTurnConfig(enable_salt=True)
+    strategy = MultiTurnStrategy(
+        conv_manager,
+        metadata,
+        multi_turn_config=cfg,
+    )
+
+    with pytest.raises(InputValidationError, match="pre-built messages"):
+        strategy._build_data_override("conv1", 1, repeat_id=1)
 
 
 @pytest.mark.unit
@@ -216,6 +466,9 @@ async def test_turn_ordering_enforced():
             self.issued_count += 1
             return f"q{idx:04d}"
 
+        def stop_performance_tracking(self) -> None:
+            pass
+
     issuer = TimedIssuer()
 
     async def simulate_responses():
@@ -302,125 +555,6 @@ async def test_error_response_marks_turn_failed():
     assert state.failed_turns == 1
 
 
-def _make_metadata_with_system(
-    conversations: dict[str, list[int]],
-    system_prompts: dict[str, str | None] | None = None,
-) -> ConversationMetadata:
-    """Build ConversationMetadata including system_prompts_by_conv."""
-    samples = []
-    sample_index = 0
-    for conv_id, turns in conversations.items():
-        for turn in turns:
-            samples.append(
-                ConversationSampleEntry(
-                    conversation_id=conv_id,
-                    turn=turn,
-                    sample_index=sample_index,
-                )
-            )
-            sample_index += 1
-    return ConversationMetadata(
-        samples=samples,
-        num_conversations=len(conversations),
-        max_turns_per_conv=max((max(t) for t in conversations.values()), default=0),
-        client_turns_per_conversation={c: len(t) for c, t in conversations.items()},
-        system_prompts_by_conv=system_prompts or {},
-    )
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_live_history_initializes_system_prompt():
-    """In live-history mode, ConversationManager.message_history starts with system message."""
-    from inference_endpoint.config.schema import MultiTurnConfig
-
-    conv_manager = ConversationManager()
-    metadata = _make_metadata_with_system(
-        {"conv1": [1]},
-        system_prompts={"conv1": "Be helpful"},
-    )
-    mt_cfg = MultiTurnConfig(use_dataset_history=False, turn_timeout_s=10.0)
-    strategy = MultiTurnStrategy(conv_manager, metadata, multi_turn_config=mt_cfg)
-    issuer = FakePhaseIssuer()
-
-    async def complete_turn():
-        await asyncio.sleep(0.01)
-        result = QueryResult(
-            id="q0000", response_output=TextModelOutput(output="response")
-        )
-        strategy.on_sample_complete(result)
-
-    asyncio.create_task(complete_turn())
-    await strategy.execute(issuer)
-
-    state = conv_manager.get_state("conv1")
-    assert state is not None
-    # message_history[0] must be the system message
-    assert len(state.message_history) >= 1
-    assert state.message_history[0] == {"role": "system", "content": "Be helpful"}
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_live_history_no_system_prompt_when_none():
-    """In live-history mode, no system message is prepended when system_prompt is None."""
-    from inference_endpoint.config.schema import MultiTurnConfig
-
-    conv_manager = ConversationManager()
-    metadata = _make_metadata_with_system(
-        {"conv1": [1]},
-        system_prompts={"conv1": None},
-    )
-    mt_cfg = MultiTurnConfig(use_dataset_history=False, turn_timeout_s=10.0)
-    strategy = MultiTurnStrategy(conv_manager, metadata, multi_turn_config=mt_cfg)
-    issuer = FakePhaseIssuer()
-
-    async def complete_turn():
-        await asyncio.sleep(0.01)
-        result = QueryResult(
-            id="q0000", response_output=TextModelOutput(output="response")
-        )
-        strategy.on_sample_complete(result)
-
-    asyncio.create_task(complete_turn())
-    await strategy.execute(issuer)
-
-    state = conv_manager.get_state("conv1")
-    assert state is not None
-    # No system message should be in history
-    system_msgs = [m for m in state.message_history if m.get("role") == "system"]
-    assert len(system_msgs) == 0
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_dataset_history_mode_does_not_inject_system_prompt():
-    """In dataset-history mode (use_dataset_history=True), system_message is not passed."""
-    conv_manager = ConversationManager()
-    metadata = _make_metadata_with_system(
-        {"conv1": [1]},
-        system_prompts={"conv1": "Some system"},
-    )
-    # Default: use_dataset_history=True → _store_in_history=False
-    strategy = MultiTurnStrategy(conv_manager, metadata)
-    issuer = FakePhaseIssuer()
-
-    async def complete_turn():
-        await asyncio.sleep(0.01)
-        result = QueryResult(
-            id="q0000", response_output=TextModelOutput(output="response")
-        )
-        strategy.on_sample_complete(result)
-
-    asyncio.create_task(complete_turn())
-    await strategy.execute(issuer)
-
-    state = conv_manager.get_state("conv1")
-    assert state is not None
-    # message_history should be empty (dataset-history mode doesn't accumulate)
-    assert len(state.message_history) == 0
-
-
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_pipeline_error_propagated():
@@ -442,113 +576,11 @@ async def test_pipeline_error_propagated():
         ) -> str | None:
             raise RuntimeError("simulated pipeline error")
 
+        def stop_performance_tracking(self) -> None:
+            pass
+
     with pytest.raises(RuntimeError, match="simulated pipeline error"):
         await strategy.execute(ErrorIssuer())
-
-
-@pytest.mark.unit
-def test_mark_turn_complete_preserves_tool_calls():
-    """mark_turn_complete stores tool_calls in history when metadata contains them."""
-    conv_manager = ConversationManager()
-    conv_manager.get_or_create("conv1", expected_client_turns=1)
-
-    tool_calls = [
-        {
-            "id": "call_1",
-            "type": "function",
-            "function": {"name": "bash", "arguments": '{"cmd": "ls"}'},
-        }
-    ]
-    conv_manager.mark_turn_complete(
-        "conv1",
-        response="",
-        store_in_history=True,
-        metadata={"tool_calls": tool_calls},
-    )
-
-    state = conv_manager.get_state("conv1")
-    assert state is not None
-    assert len(state.message_history) == 1
-    msg = state.message_history[0]
-    assert msg["role"] == "assistant"
-    assert msg["content"] is None
-    assert msg["tool_calls"] == tool_calls
-
-
-@pytest.mark.unit
-def test_mark_turn_complete_with_response_and_tool_calls():
-    """mark_turn_complete stores both content and tool_calls when both are present."""
-    conv_manager = ConversationManager()
-    conv_manager.get_or_create("conv1", expected_client_turns=1)
-
-    tool_calls = [
-        {
-            "id": "call_1",
-            "type": "function",
-            "function": {"name": "search", "arguments": "{}"},
-        }
-    ]
-    conv_manager.mark_turn_complete(
-        "conv1",
-        response="Calling search...",
-        store_in_history=True,
-        metadata={"tool_calls": tool_calls},
-    )
-
-    state = conv_manager.get_state("conv1")
-    assert state is not None
-    msg = state.message_history[0]
-    assert msg["content"] == "Calling search..."
-    assert msg["tool_calls"] == tool_calls
-
-
-@pytest.mark.unit
-def test_mark_turn_complete_no_history_when_empty():
-    """mark_turn_complete does not append when response is empty and no tool_calls."""
-    conv_manager = ConversationManager()
-    conv_manager.get_or_create("conv1", expected_client_turns=1)
-
-    conv_manager.mark_turn_complete("conv1", response="", store_in_history=True)
-
-    state = conv_manager.get_state("conv1")
-    assert state is not None
-    assert len(state.message_history) == 0
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_on_sample_complete_passes_metadata():
-    """on_sample_complete forwards result.metadata (including tool_calls) to ConversationManager."""
-    from inference_endpoint.config.schema import MultiTurnConfig
-
-    conv_manager = ConversationManager()
-    metadata_dict = _make_metadata_with_system({"conv1": [1]})
-    mt_cfg = MultiTurnConfig(use_dataset_history=False, turn_timeout_s=10.0)
-    strategy = MultiTurnStrategy(conv_manager, metadata_dict, multi_turn_config=mt_cfg)
-
-    conv_manager.get_or_create("conv1", expected_client_turns=1)
-    strategy._inflight["q0001"] = "conv1"
-
-    tool_calls = [
-        {
-            "id": "call_1",
-            "type": "function",
-            "function": {"name": "bash", "arguments": "{}"},
-        }
-    ]
-    result = QueryResult(
-        id="q0001",
-        response_output=TextModelOutput(output=""),
-        metadata={"tool_calls": tool_calls},
-    )
-    strategy.on_sample_complete(result)
-
-    state = conv_manager.get_state("conv1")
-    assert state is not None
-    assert state.completed_turns == 1
-    assert len(state.message_history) == 1
-    assert state.message_history[0]["tool_calls"] == tool_calls
-    assert state.message_history[0]["content"] is None
 
 
 @pytest.mark.unit
@@ -645,7 +677,7 @@ async def test_timeout_publishes_error_and_complete_events():
 
     # Seed: turn 1 in-flight, turns 2+3 still pending
     strategy._inflight["q-x"] = "conv-x"
-    strategy._active_iters["conv-x"] = ([(1, 2), (2, 3)], 0)
+    strategy._active_iters["conv-x"] = ("conv-x", [(1, 2), (2, 3)], 0, 1)
 
     issuer = FakePhaseIssuer()
     issuer.uuid_to_index["q-x"] = 0
@@ -742,7 +774,7 @@ async def test_abort_remaining_turns_includes_pending_delayed_turn():
     strategy._phase_issuer = issuer
     strategy._session_publisher = publisher
     strategy._session_on_sample_complete = on_sample_complete
-    strategy._active_iters["c1"] = ([(0, 1), (1, 2), (2, 3)], 1)
+    strategy._active_iters["c1"] = ("c1", [(0, 1), (1, 2), (2, 3)], 1, 1)
 
     strategy._issue_next_turn("c1")
 
@@ -886,6 +918,9 @@ async def test_fill_slot_failure_does_not_hang_execute():
             # Raises on the second call, which is triggered by _fill_slot after conv1 completes.
             raise RuntimeError("simulated slot-refill failure")
 
+        def stop_performance_tracking(self) -> None:
+            pass
+
     issuer = RaisingIssuer()
 
     async def complete_conv1():
@@ -918,10 +953,9 @@ async def test_error_turn_aborts_remaining_turns():
     strategy._phase_issuer = issuer
 
     # Seed: conv1 is active with turns 2 and 3 still pending
-    remaining_turns = ([(1, 2), (2, 3)], 0)
+    remaining_turns = ("conv1", [(1, 2), (2, 3)], 0, 1)
     strategy._active_iters["conv1"] = remaining_turns
     strategy._inflight["q0001"] = "conv1"
-    strategy._conv_states["conv1"] = conv_manager.get_state("conv1")
 
     result = QueryResult(
         id="q0001",

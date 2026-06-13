@@ -1,26 +1,28 @@
 name: "kimi-agentic-benchmark"
 version: "1.0"
-type: "online"
+type: "online" # do not change.
 
 model_params:
   name: "/model"
-  temperature: 1.0
-  top_p: 0.95
-  max_new_tokens: 20000 # covers longest observed assistant turn (~18k tokens)
+  temperature: 1.0 # do not change.
+  top_p: 0.95 # do not change.
+  max_new_tokens: 8192 # do not change.
   chat_template_kwargs:
-    thinking: true
-    preserve_thinking: true
+    thinking: true # do not change.
+    preserve_thinking: true # do not change.
 
 datasets:
-  # Select the dataset to run by updating both `name` and `path`.
-  # Use agentic_coding for coding traces or agentic_workflow for workflow traces.
-  - name: agentic_coding
-    type: performance
-    path: /path/to/agentic_dataset.jsonl
+  - name: agentic_combined
+    type: performance # do not change.
+    path: /path/to/agentic_combined.jsonl
+    accuracy_config:
+      eval_method: multi_turn_inline # required benchmark default.
     multi_turn:
-      turn_timeout_s: 600.0
-      enable_salt: true # add salt after system prompt to prevent cache reuse across trajectories
-      inject_tool_delay: true # add delay before user/tool turns
+      enable_salt: true # required benchmark default.
+      inject_tool_delay: true # required benchmark default.
+      num_trajectories_to_issue: 990 # Should be integer multiple of 990.
+      # Required benchmark default; set to true only for faster optimization/debug runs.
+      stop_issuing_on_first_user_complete: false
 
 settings:
   runtime:
@@ -28,10 +30,8 @@ settings:
 
   load_pattern:
     type: multi_turn
-    target_concurrency: 8
+    target_concurrency: 8 # Submission-specific concurrency.
 
-  # Mandatory: with the default warmup behaviour, every request fails with
-  # ConnectionResetError because uvicorn closes pre-warmed idle sockets after 5s.
   client:
     warmup_connections: 0
     max_idle_time: 0.5
@@ -39,6 +39,6 @@ settings:
 endpoint_config:
   endpoints:
     - "http://localhost:8000"
-  api_type: openai
+  api_type: openai # do not change.
 
 report_dir: logs/kimi_agentic
