@@ -63,7 +63,7 @@ class TestRecordToRow:
         assert row.event_type == "session.ended"
         assert row.sample_uuid == ""
         assert row.timestamp_ns == 42
-        # Defaults for non-multi-turn events: empty conversation_id, NULL turn.
+        # Defaults for non-agentic inference events: empty conversation_id, NULL turn.
         assert row.conversation_id == ""
         assert row.turn is None
 

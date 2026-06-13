@@ -70,9 +70,11 @@ from inference_endpoint.config.schema import (
     TestType,
 )
 from inference_endpoint.core.types import QueryResult
+from inference_endpoint.dataset_manager.agentic_inference_dataset import (
+    AgenticInferenceDataset,
+)
 from inference_endpoint.dataset_manager.dataset import Dataset
 from inference_endpoint.dataset_manager.factory import DataLoaderFactory
-from inference_endpoint.dataset_manager.multi_turn_dataset import MultiTurnDataset
 from inference_endpoint.endpoint_client.cpu_affinity import AffinityPlan, pin_loadgen
 from inference_endpoint.endpoint_client.http_client import HTTPEndpointClient
 from inference_endpoint.endpoint_client.http_sample_issuer import HttpClientSampleIssuer
@@ -83,8 +85,10 @@ from inference_endpoint.exceptions import (
     InputValidationError,
     SetupError,
 )
+from inference_endpoint.load_generator.agentic_inference_strategy import (
+    AgenticInferenceStrategy,
+)
 from inference_endpoint.load_generator.conversation_manager import ConversationManager
-from inference_endpoint.load_generator.multi_turn_strategy import MultiTurnStrategy
 from inference_endpoint.load_generator.session import (
     BenchmarkSession,
     PhaseConfig,
@@ -422,7 +426,7 @@ def setup_benchmark(config: BenchmarkConfig, test_mode: TestMode) -> BenchmarkCo
 
 def _build_phases(
     ctx: BenchmarkContext,
-    perf_strategy: MultiTurnStrategy | None = None,
+    perf_strategy: AgenticInferenceStrategy | None = None,
 ) -> list[PhaseConfig]:
     """Build the phase list from BenchmarkContext."""
     phases: list[PhaseConfig] = []
@@ -476,13 +480,14 @@ def _build_phases(
         if eval_cfg.dataset_name == "performance":
             continue
         acc_ds = eval_cfg.dataset
-        if isinstance(acc_ds, MultiTurnDataset):
+        if isinstance(acc_ds, AgenticInferenceDataset):
             raise InputValidationError(
-                f"Accuracy dataset '{eval_cfg.dataset_name}' is a MultiTurnDataset, "
-                "which is not yet supported for accuracy evaluation."
+                f"Accuracy dataset '{eval_cfg.dataset_name}' is an "
+                "AgenticInferenceDataset, which is not yet supported for "
+                "accuracy evaluation."
             )
         # Accuracy phases run at MAX_THROUGHPUT; inheriting perf_lp (e.g. POISSON)
-        # would silently rate-limit evaluation until a multi-turn accuracy strategy
+        # would silently rate-limit evaluation until an agentic inference accuracy strategy
         # and QPS-budgeting support are added.
         acc_load_pattern: LoadPattern | None = LoadPattern(
             type=LoadPatternType.MAX_THROUGHPUT
@@ -665,10 +670,10 @@ async def _run_benchmark_async(
             launcher.kill_all()
             raise SetupError(f"Failed to connect to endpoint: {e}") from e
 
-        # Build multi-turn strategy if the performance dataset is a MultiTurnDataset.
-        multi_turn_strategy: MultiTurnStrategy | None = None
-        if isinstance(ctx.dataloader, MultiTurnDataset):
-            mt_cfg = None
+        # Build agentic inference strategy if the performance dataset uses it.
+        agentic_inference_strategy: AgenticInferenceStrategy | None = None
+        if isinstance(ctx.dataloader, AgenticInferenceDataset):
+            agentic_cfg = None
             if ctx.config.datasets:
                 perf_ds_cfg = next(
                     (
@@ -679,24 +684,24 @@ async def _run_benchmark_async(
                     None,
                 )
                 if perf_ds_cfg is not None:
-                    mt_cfg = perf_ds_cfg.multi_turn
+                    agentic_cfg = perf_ds_cfg.agentic_inference
             assert ctx.dataloader.conversation_metadata is not None
-            multi_turn_strategy = MultiTurnStrategy(
+            agentic_inference_strategy = AgenticInferenceStrategy(
                 conversation_manager=ConversationManager(),
                 dataset_metadata=ctx.dataloader.conversation_metadata,
-                multi_turn_config=mt_cfg,
+                agentic_inference_config=agentic_cfg,
                 target_concurrency=ctx.config.settings.load_pattern.target_concurrency,
             )
 
         _on_sample_complete: Callable[[QueryResult], None]
-        if multi_turn_strategy is not None:
+        if agentic_inference_strategy is not None:
 
             def _on_sample_complete(result: QueryResult) -> None:
                 try:
-                    multi_turn_strategy.on_sample_complete(result)
+                    agentic_inference_strategy.on_sample_complete(result)
                 except Exception:
                     logger.exception(
-                        "multi_turn_strategy.on_sample_complete failed (result=%s)",
+                        "agentic_inference_strategy.on_sample_complete failed (result=%s)",
                         result.id,
                     )
                 try:
@@ -706,8 +711,8 @@ async def _run_benchmark_async(
                         "collector.on_complete_hook failed (result=%s)", result.id
                     )
 
-            multi_turn_strategy._session_on_sample_complete = _on_sample_complete
-            multi_turn_strategy._session_publisher = publisher
+            agentic_inference_strategy._session_on_sample_complete = _on_sample_complete
+            agentic_inference_strategy._session_publisher = publisher
 
         else:
             _on_sample_complete = collector.on_complete_hook
@@ -721,7 +726,7 @@ async def _run_benchmark_async(
             session_id=session_id,
         )
 
-        phases = _build_phases(ctx, perf_strategy=multi_turn_strategy)
+        phases = _build_phases(ctx, perf_strategy=agentic_inference_strategy)
         report: Report | None = None
 
         # Timer starts when the performance phase begins (after warmup drains),

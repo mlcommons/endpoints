@@ -22,7 +22,7 @@ pytestmark = pytest.mark.unit
 
 
 def _schema() -> dict:
-    with Path("scripts/multi_turn_dataset_schema.json").open() as fh:
+    with Path("scripts/agentic_inference_dataset_schema.json").open() as fh:
         return json.load(fh)
 
 

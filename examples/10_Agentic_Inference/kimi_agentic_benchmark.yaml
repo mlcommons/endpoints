@@ -16,8 +16,8 @@ datasets:
     type: performance # do not change.
     path: /path/to/agentic_combined.jsonl
     accuracy_config:
-      eval_method: multi_turn_inline # required benchmark default.
-    multi_turn:
+      eval_method: agentic_inference_inline # required benchmark default.
+    agentic_inference:
       enable_salt: true # required benchmark default.
       inject_tool_delay: true # required benchmark default.
       num_trajectories_to_issue: 990 # Should be integer multiple of 990.
@@ -29,7 +29,7 @@ settings:
     min_duration_ms: 0
 
   load_pattern:
-    type: multi_turn
+    type: agentic_inference
     target_concurrency: 8 # Submission-specific concurrency.
 
   client:

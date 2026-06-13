@@ -20,14 +20,16 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
+from inference_endpoint.dataset_manager.agentic_inference_dataset import (
+    AgenticInferenceDataset,
+)
 from inference_endpoint.dataset_manager.dataset import DatasetFormat
-from inference_endpoint.dataset_manager.multi_turn_dataset import MultiTurnDataset
 from inference_endpoint.exceptions import InputValidationError
 
 
 @pytest.fixture
-def valid_multi_turn_jsonl() -> Generator[str, None, None]:
-    """Create valid multi-turn conversation JSONL data."""
+def valid_agentic_inference_jsonl() -> Generator[str, None, None]:
+    """Create valid agentic inference conversation JSONL data."""
     data = [
         {
             "conversation_id": "conv_001",
@@ -122,10 +124,10 @@ def missing_fields_jsonl() -> Generator[str, None, None]:
 
 
 @pytest.mark.unit
-def test_multi_turn_dataset_load_valid_data(valid_multi_turn_jsonl):
-    """Test loading valid multi-turn conversation data."""
-    dataset = MultiTurnDataset.load_from_file(
-        valid_multi_turn_jsonl, format=DatasetFormat.JSONL
+def test_agentic_inference_dataset_load_valid_data(valid_agentic_inference_jsonl):
+    """Test loading valid agentic inference conversation data."""
+    dataset = AgenticInferenceDataset.load_from_file(
+        valid_agentic_inference_jsonl, format=DatasetFormat.JSONL
     )
     dataset.load()
 
@@ -137,10 +139,10 @@ def test_multi_turn_dataset_load_valid_data(valid_multi_turn_jsonl):
 
 
 @pytest.mark.unit
-def test_multi_turn_dataset_user_turn_indexing(valid_multi_turn_jsonl):
+def test_agentic_inference_dataset_user_turn_indexing(valid_agentic_inference_jsonl):
     """Test that only client turns (user + tool) are stored as samples."""
-    dataset = MultiTurnDataset.load_from_file(
-        valid_multi_turn_jsonl, format=DatasetFormat.JSONL
+    dataset = AgenticInferenceDataset.load_from_file(
+        valid_agentic_inference_jsonl, format=DatasetFormat.JSONL
     )
     dataset.load()
 
@@ -153,10 +155,10 @@ def test_multi_turn_dataset_user_turn_indexing(valid_multi_turn_jsonl):
 
 
 @pytest.mark.unit
-def test_multi_turn_dataset_load_sample(valid_multi_turn_jsonl):
+def test_agentic_inference_dataset_load_sample(valid_agentic_inference_jsonl):
     """Test load_sample returns correct user turns with dense indexing."""
-    dataset = MultiTurnDataset.load_from_file(
-        valid_multi_turn_jsonl, format=DatasetFormat.JSONL
+    dataset = AgenticInferenceDataset.load_from_file(
+        valid_agentic_inference_jsonl, format=DatasetFormat.JSONL
     )
     dataset.load()
 
@@ -186,10 +188,10 @@ def test_multi_turn_dataset_load_sample(valid_multi_turn_jsonl):
 
 
 @pytest.mark.unit
-def test_multi_turn_dataset_conversation_metadata(valid_multi_turn_jsonl):
+def test_agentic_inference_dataset_conversation_metadata(valid_agentic_inference_jsonl):
     """Test conversation metadata generation."""
-    dataset = MultiTurnDataset.load_from_file(
-        valid_multi_turn_jsonl, format=DatasetFormat.JSONL
+    dataset = AgenticInferenceDataset.load_from_file(
+        valid_agentic_inference_jsonl, format=DatasetFormat.JSONL
     )
     dataset.load()
 
@@ -211,30 +213,30 @@ def test_multi_turn_dataset_conversation_metadata(valid_multi_turn_jsonl):
 
 
 @pytest.mark.unit
-def test_multi_turn_dataset_validation_invalid_role_sequence(
+def test_agentic_inference_dataset_validation_invalid_role_sequence(
     invalid_role_sequence_jsonl,
 ):
     """Test validation rejects invalid role sequences."""
     # Validation happens during load_from_file (in __init__), not during load()
     with pytest.raises(ValueError, match="invalid role sequence"):
-        MultiTurnDataset.load_from_file(
+        AgenticInferenceDataset.load_from_file(
             invalid_role_sequence_jsonl, format=DatasetFormat.JSONL
         )
 
 
 @pytest.mark.unit
-def test_multi_turn_dataset_validation_missing_fields(missing_fields_jsonl):
+def test_agentic_inference_dataset_validation_missing_fields(missing_fields_jsonl):
     """User rows with missing content are rejected at construction time."""
     with pytest.raises(
         InputValidationError, match="user rows must have non-empty 'content'"
     ):
-        MultiTurnDataset.load_from_file(
+        AgenticInferenceDataset.load_from_file(
             missing_fields_jsonl, format=DatasetFormat.JSONL
         )
 
 
 @pytest.mark.unit
-def test_multi_turn_dataset_multiple_conversations():
+def test_agentic_inference_dataset_multiple_conversations():
     """Test dataset with multiple conversations of varying lengths."""
     data = [
         # Conversation 1: 3 turns (user-assistant-user, missing final assistant)
@@ -257,7 +259,9 @@ def test_multi_turn_dataset_multiple_conversations():
         temp_path = f.name
 
     try:
-        dataset = MultiTurnDataset.load_from_file(temp_path, format=DatasetFormat.JSONL)
+        dataset = AgenticInferenceDataset.load_from_file(
+            temp_path, format=DatasetFormat.JSONL
+        )
         dataset.load()
 
         # data contains only client turns: 5 user turns (c1:t1, c1:t3, c2:t1, c2:t3, c3:t1)
@@ -282,14 +286,16 @@ def test_multi_turn_dataset_multiple_conversations():
 
 
 @pytest.mark.unit
-def test_multi_turn_dataset_system_prompt_handling(valid_multi_turn_jsonl):
+def test_agentic_inference_dataset_system_prompt_handling(
+    valid_agentic_inference_jsonl,
+):
     """Test system prompt is included as the first message in the messages array.
 
     The system prompt is pre-baked into every client turn's message list so the
     conversation manager no longer needs to track it separately.
     """
-    dataset = MultiTurnDataset.load_from_file(
-        valid_multi_turn_jsonl, format=DatasetFormat.JSONL
+    dataset = AgenticInferenceDataset.load_from_file(
+        valid_agentic_inference_jsonl, format=DatasetFormat.JSONL
     )
     dataset.load()
 
@@ -308,7 +314,7 @@ def test_multi_turn_dataset_system_prompt_handling(valid_multi_turn_jsonl):
 
 
 @pytest.mark.unit
-def test_multi_turn_dataset_single_turn_conversations():
+def test_agentic_inference_dataset_single_turn_conversations():
     """Test conversations with only one turn."""
     data = [
         {"conversation_id": "c1", "turn": 1, "role": "user", "content": "Single turn"},
@@ -327,7 +333,9 @@ def test_multi_turn_dataset_single_turn_conversations():
         temp_path = f.name
 
     try:
-        dataset = MultiTurnDataset.load_from_file(temp_path, format=DatasetFormat.JSONL)
+        dataset = AgenticInferenceDataset.load_from_file(
+            temp_path, format=DatasetFormat.JSONL
+        )
         dataset.load()
 
         # 2 rows, 2 user turns
@@ -343,20 +351,22 @@ def test_multi_turn_dataset_single_turn_conversations():
 
 
 @pytest.mark.unit
-def test_multi_turn_dataset_empty_conversation():
+def test_agentic_inference_dataset_empty_conversation():
     """Empty JSONL file raises ValueError (no columns to validate against)."""
     with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
         temp_path = f.name
 
     try:
         with pytest.raises(ValueError):
-            MultiTurnDataset.load_from_file(temp_path, format=DatasetFormat.JSONL)
+            AgenticInferenceDataset.load_from_file(
+                temp_path, format=DatasetFormat.JSONL
+            )
     finally:
         Path(temp_path).unlink()
 
 
 @pytest.mark.unit
-def test_multi_turn_dataset_conversation_grouping():
+def test_agentic_inference_dataset_conversation_grouping():
     """Test that properly grouped conversations load correctly."""
     data = [
         {"conversation_id": "c1", "turn": 1, "role": "user", "content": "c1t1"},
@@ -372,7 +382,9 @@ def test_multi_turn_dataset_conversation_grouping():
         temp_path = f.name
 
     try:
-        dataset = MultiTurnDataset.load_from_file(temp_path, format=DatasetFormat.JSONL)
+        dataset = AgenticInferenceDataset.load_from_file(
+            temp_path, format=DatasetFormat.JSONL
+        )
         dataset.load()
 
         # data contains only client turns: 3 user turns (c1t1, c1t3, c2t1)
@@ -391,7 +403,7 @@ def test_multi_turn_dataset_conversation_grouping():
 
 
 @pytest.mark.unit
-def test_multi_turn_dataset_interleaved_conversations_rejected():
+def test_agentic_inference_dataset_interleaved_conversations_rejected():
     """Test that interleaved conversation rows raise InputValidationError."""
     from inference_endpoint.exceptions import InputValidationError
 
@@ -408,7 +420,9 @@ def test_multi_turn_dataset_interleaved_conversations_rejected():
 
     try:
         with pytest.raises(InputValidationError, match="not consecutive"):
-            MultiTurnDataset.load_from_file(temp_path, format=DatasetFormat.JSONL)
+            AgenticInferenceDataset.load_from_file(
+                temp_path, format=DatasetFormat.JSONL
+            )
     finally:
         Path(temp_path).unlink()
 
@@ -448,11 +462,11 @@ def test_multi_turn_dataset_interleaved_conversations_rejected():
 def test_validation_rejects_invalid_role_sequence(rows):
     """Invalid role sequences raise ValueError regardless of turn numbering."""
     with pytest.raises(ValueError, match="invalid role sequence"):
-        MultiTurnDataset(pd.DataFrame(rows))
+        AgenticInferenceDataset(pd.DataFrame(rows))
 
 
 @pytest.mark.unit
-def test_multi_turn_dataset_additional_fields():
+def test_agentic_inference_dataset_additional_fields():
     """Test that additional fields (model, max_new_tokens, etc.) are preserved."""
     data = [
         {
@@ -473,7 +487,9 @@ def test_multi_turn_dataset_additional_fields():
         temp_path = f.name
 
     try:
-        dataset = MultiTurnDataset.load_from_file(temp_path, format=DatasetFormat.JSONL)
+        dataset = AgenticInferenceDataset.load_from_file(
+            temp_path, format=DatasetFormat.JSONL
+        )
         dataset.load()
 
         sample = dataset.load_sample(0)
@@ -487,7 +503,7 @@ def test_multi_turn_dataset_additional_fields():
 
 
 @pytest.mark.unit
-def test_multi_turn_dataset_openai_field_forwarding():
+def test_agentic_inference_dataset_openai_field_forwarding():
     """Test that OpenAI-specific fields are preserved and forwarded."""
     data = [
         {
@@ -511,7 +527,9 @@ def test_multi_turn_dataset_openai_field_forwarding():
         temp_path = f.name
 
     try:
-        dataset = MultiTurnDataset.load_from_file(temp_path, format=DatasetFormat.JSONL)
+        dataset = AgenticInferenceDataset.load_from_file(
+            temp_path, format=DatasetFormat.JSONL
+        )
         dataset.load()
 
         sample = dataset.load_sample(0)
@@ -527,7 +545,7 @@ def test_multi_turn_dataset_openai_field_forwarding():
 
 
 @pytest.mark.unit
-def test_multi_turn_dataset_all_generation_params():
+def test_agentic_inference_dataset_all_generation_params():
     """Test that dataset-supplied generation parameters are forwarded to the sample."""
     # Create dataset with a representative set of generation params
     row_params = {
@@ -570,7 +588,9 @@ def test_multi_turn_dataset_all_generation_params():
         temp_path = f.name
 
     try:
-        dataset = MultiTurnDataset.load_from_file(temp_path, format=DatasetFormat.JSONL)
+        dataset = AgenticInferenceDataset.load_from_file(
+            temp_path, format=DatasetFormat.JSONL
+        )
         dataset.load()
 
         sample = dataset.load_sample(0)
@@ -592,7 +612,7 @@ def test_validation_rejects_non_contiguous_turns():
         {"conversation_id": "c1", "turn": 6, "role": "assistant", "content": "d"},
     ]
     with pytest.raises(ValueError, match="consecutive"):
-        MultiTurnDataset(pd.DataFrame(rows))
+        AgenticInferenceDataset(pd.DataFrame(rows))
 
 
 @pytest.mark.unit
@@ -610,7 +630,9 @@ def test_validation_rejects_turns_not_starting_at_one():
 
     try:
         with pytest.raises(ValueError, match="consecutive"):
-            MultiTurnDataset.load_from_file(temp_path, format=DatasetFormat.JSONL)
+            AgenticInferenceDataset.load_from_file(
+                temp_path, format=DatasetFormat.JSONL
+            )
     finally:
         Path(temp_path).unlink()
 
@@ -631,7 +653,9 @@ def test_validation_accepts_valid_contiguous_turns():
         temp_path = f.name
 
     try:
-        dataset = MultiTurnDataset.load_from_file(temp_path, format=DatasetFormat.JSONL)
+        dataset = AgenticInferenceDataset.load_from_file(
+            temp_path, format=DatasetFormat.JSONL
+        )
         dataset.load()
         assert dataset.num_samples() == 2
     finally:
@@ -653,7 +677,9 @@ def test_validation_rejects_turn_starting_at_zero():
 
     try:
         with pytest.raises(ValueError, match="consecutive"):
-            MultiTurnDataset.load_from_file(temp_path, format=DatasetFormat.JSONL)
+            AgenticInferenceDataset.load_from_file(
+                temp_path, format=DatasetFormat.JSONL
+            )
     finally:
         Path(temp_path).unlink()
 
@@ -677,7 +703,9 @@ def test_validation_rejects_duplicate_turn_numbers():
 
     try:
         with pytest.raises(ValueError, match="consecutive"):
-            MultiTurnDataset.load_from_file(temp_path, format=DatasetFormat.JSONL)
+            AgenticInferenceDataset.load_from_file(
+                temp_path, format=DatasetFormat.JSONL
+            )
     finally:
         Path(temp_path).unlink()
 
@@ -708,7 +736,7 @@ def test_validation_rejects_assistant_tc_role_literal():
         {"conversation_id": "c1", "turn": 4, "role": "assistant", "content": "A"},
     ]
     with pytest.raises(ValueError, match="invalid role sequence"):
-        MultiTurnDataset(pd.DataFrame(rows))
+        AgenticInferenceDataset(pd.DataFrame(rows))
 
 
 # ============================================================================
@@ -772,7 +800,7 @@ def _make_tool_sequence_df():
 def test_validation_accepts_tool_sequence():
     """user → assistant → tool → assistant → user passes validation."""
     df = _make_tool_sequence_df()
-    ds = MultiTurnDataset(df)
+    ds = AgenticInferenceDataset(df)
     ds.load()
     assert ds.num_samples() == 3  # user(1), tool(3), user(5) are all client turns
 
@@ -818,7 +846,7 @@ def test_validation_accepts_parallel_tool_calls():
             },
         ]
     )
-    ds = MultiTurnDataset(df)
+    ds = AgenticInferenceDataset(df)
     ds.load()
     assert ds.num_samples() == 2  # user(1), tool(3) are client turns
 
@@ -864,7 +892,7 @@ def test_load_sample_merged_tool_row_has_no_content_key():
             },
         ]
     )
-    ds = MultiTurnDataset(df)
+    ds = AgenticInferenceDataset(df)
     ds.load()
 
     # Sample 1 is the merged tool row (turn 3)
@@ -891,7 +919,7 @@ def test_build_metadata_pre_built_messages():
       client turn 3 (t=5): [system, user(1), asst_tc(2), tool(3), asst(4), user(5)]
     """
     df = _make_tool_sequence_df()
-    ds = MultiTurnDataset(df)
+    ds = AgenticInferenceDataset(df)
     ds.load()
 
     pbm = ds.conversation_metadata.pre_built_messages_by_key
@@ -930,7 +958,7 @@ def test_build_metadata_pre_built_messages_no_tools():
             {"conversation_id": "c1", "turn": 3, "role": "user", "content": "C"},
         ]
     )
-    ds = MultiTurnDataset(df)
+    ds = AgenticInferenceDataset(df)
     ds.load()
     pbm = ds.conversation_metadata.pre_built_messages_by_key
 
@@ -949,7 +977,7 @@ def test_build_metadata_pre_built_messages_no_tools():
 def test_load_sample_includes_messages():
     """load_sample returns messages with the complete message list."""
     df = _make_tool_sequence_df()
-    ds = MultiTurnDataset(df)
+    ds = AgenticInferenceDataset(df)
     ds.load()
 
     s0 = ds.load_sample(0)  # user turn 1
@@ -975,7 +1003,7 @@ def test_load_sample_includes_messages():
 def test_client_turns_include_tool_rows():
     """Tool rows are counted in num_samples() as client turns."""
     df = _make_tool_sequence_df()
-    ds = MultiTurnDataset(df)
+    ds = AgenticInferenceDataset(df)
     ds.load()
     # 5 rows total: user(1), assistant(2), tool(3), assistant(4), user(5)
     # Client turns: user(1), tool(3), user(5) → 3
@@ -988,10 +1016,10 @@ def test_client_turns_include_tool_rows():
 
 
 @pytest.mark.unit
-def test_messages_include_prior_assistant_response(valid_multi_turn_jsonl):
+def test_messages_include_prior_assistant_response(valid_agentic_inference_jsonl):
     """The terminal assistant response before each user turn is included in messages."""
-    dataset = MultiTurnDataset.load_from_file(
-        valid_multi_turn_jsonl, format=DatasetFormat.JSONL
+    dataset = AgenticInferenceDataset.load_from_file(
+        valid_agentic_inference_jsonl, format=DatasetFormat.JSONL
     )
     dataset.load()
 
@@ -1029,7 +1057,9 @@ def test_messages_no_cross_conversation_bleed():
         temp_path = f.name
 
     try:
-        dataset = MultiTurnDataset.load_from_file(temp_path, format=DatasetFormat.JSONL)
+        dataset = AgenticInferenceDataset.load_from_file(
+            temp_path, format=DatasetFormat.JSONL
+        )
         dataset.load()
 
         # c1: only its own user message
@@ -1048,7 +1078,7 @@ def test_messages_no_cross_conversation_bleed():
 def test_messages_with_tool_sequence_terminal_assistant():
     """Terminal assistant response (turn 4) appears in messages for user(5)."""
     df = _make_tool_sequence_df()
-    ds = MultiTurnDataset(df)
+    ds = AgenticInferenceDataset(df)
     ds.load()
 
     s2 = ds.load_sample(2)  # user turn 5
@@ -1067,7 +1097,7 @@ def test_messages_with_tool_sequence_terminal_assistant():
 def test_prior_tool_row_expanded_with_tool_call_id():
     """Prior tool rows must expand to messages with tool_call_id and content (BUG 1)."""
     df = _make_tool_sequence_df()
-    ds = MultiTurnDataset(df)
+    ds = AgenticInferenceDataset(df)
     ds.load()
     pbm = ds.conversation_metadata.pre_built_messages_by_key
 
@@ -1122,7 +1152,7 @@ def test_prior_parallel_tool_results_expand_to_multiple_messages():
             {"conversation_id": "c1", "turn": 5, "role": "user", "content": "Ok"},
         ]
     )
-    ds = MultiTurnDataset(df)
+    ds = AgenticInferenceDataset(df)
     ds.load()
     pbm = ds.conversation_metadata.pre_built_messages_by_key
 
@@ -1140,7 +1170,7 @@ def test_prior_parallel_tool_results_expand_to_multiple_messages():
 def test_assistant_content_null_preserved_in_history():
     """Assistant messages with tool_calls and content:null include content key (BUG 2)."""
     df = _make_tool_sequence_df()
-    ds = MultiTurnDataset(df)
+    ds = AgenticInferenceDataset(df)
     ds.load()
     pbm = ds.conversation_metadata.pre_built_messages_by_key
 
@@ -1224,7 +1254,9 @@ def test_jsonl_round_trip_with_tools_field():
         temp_path = f.name
 
     try:
-        dataset = MultiTurnDataset.load_from_file(temp_path, format=DatasetFormat.JSONL)
+        dataset = AgenticInferenceDataset.load_from_file(
+            temp_path, format=DatasetFormat.JSONL
+        )
         dataset.load()
 
         # user(1) has tools
@@ -1282,7 +1314,7 @@ def test_pre_built_messages_parallel_tools():
             },
         ]
     )
-    ds = MultiTurnDataset(df)
+    ds = AgenticInferenceDataset(df)
     ds.load()
     pbm = ds.conversation_metadata.pre_built_messages_by_key
 
@@ -1307,7 +1339,7 @@ def test_pre_built_messages_parallel_tools():
 def test_tool_results_not_in_sample_dict():
     """tool_results must not appear in the pre-baked sample dict for tool turns."""
     df = _make_tool_sequence_df()
-    ds = MultiTurnDataset(df)
+    ds = AgenticInferenceDataset(df)
     ds.load()
 
     # Sample 1 is the tool turn (turn 3)
@@ -1332,7 +1364,7 @@ def test_tool_calls_not_in_sample_dict():
         {"conversation_id": "c1", "turn": 2, "role": "assistant", "content": "Done"},
     ]
     df = pd.DataFrame(data)
-    ds = MultiTurnDataset(df)
+    ds = AgenticInferenceDataset(df)
     ds.load()
 
     s0 = ds.load_sample(0)
@@ -1348,7 +1380,7 @@ def test_tool_calls_not_in_sample_dict():
 def test_no_dead_current_turn_message_field():
     """current_turn_message must not appear in pre-baked sample dicts."""
     df = _make_tool_sequence_df()
-    ds = MultiTurnDataset(df)
+    ds = AgenticInferenceDataset(df)
     ds.load()
 
     for i in range(ds.num_samples()):
@@ -1362,7 +1394,7 @@ def test_no_dead_current_turn_message_field():
 def test_no_dead_system_content_field():
     """system_content must not appear in pre-baked sample dicts."""
     df = _make_tool_sequence_df()
-    ds = MultiTurnDataset(df)
+    ds = AgenticInferenceDataset(df)
     ds.load()
 
     for i in range(ds.num_samples()):
@@ -1376,11 +1408,11 @@ def test_no_dead_system_content_field():
     [None, "", float("nan")],
     ids=["none", "empty_string", "nan_float"],
 )
-def test_multi_turn_dataset_null_conversation_id_rejected(conv_id):
+def test_agentic_inference_dataset_null_conversation_id_rejected(conv_id):
     rows = [{"conversation_id": conv_id, "turn": 1, "role": "user", "content": "Hi"}]
     df = pd.DataFrame(rows)
     with pytest.raises(InputValidationError, match="conversation_id"):
-        MultiTurnDataset(df)
+        AgenticInferenceDataset(df)
 
 
 @pytest.mark.unit
@@ -1389,11 +1421,11 @@ def test_multi_turn_dataset_null_conversation_id_rejected(conv_id):
     ["conv\nInjected: x", "conv\r\nInjected: x", "conv\tbad", "conv\x00bad", "conv-é"],
     ids=["lf", "crlf", "tab", "nul", "non_ascii"],
 )
-def test_multi_turn_dataset_non_printable_conversation_id_rejected(conv_id):
+def test_agentic_inference_dataset_non_printable_conversation_id_rejected(conv_id):
     rows = [{"conversation_id": conv_id, "turn": 1, "role": "user", "content": "Hi"}]
     df = pd.DataFrame(rows)
     with pytest.raises(InputValidationError, match="non-printable or non-ASCII"):
-        MultiTurnDataset(df)
+        AgenticInferenceDataset(df)
 
 
 @pytest.mark.unit
@@ -1429,7 +1461,9 @@ def test_multi_turn_dataset_non_printable_conversation_id_rejected(conv_id):
         ),
     ],
 )
-def test_multi_turn_dataset_malformed_tool_calls_rejected(tool_calls, expected_match):
+def test_agentic_inference_dataset_malformed_tool_calls_rejected(
+    tool_calls, expected_match
+):
     rows = [
         {
             "conversation_id": "c1",
@@ -1449,7 +1483,7 @@ def test_multi_turn_dataset_malformed_tool_calls_rejected(tool_calls, expected_m
     ]
     df = pd.DataFrame(rows)
     with pytest.raises(InputValidationError, match=expected_match):
-        MultiTurnDataset(df)
+        AgenticInferenceDataset(df)
 
 
 @pytest.mark.unit
@@ -1462,7 +1496,7 @@ def test_multi_turn_dataset_malformed_tool_calls_rejected(tool_calls, expected_m
         ([{"tool_call_id": "x"}], "content"),
     ],
 )
-def test_multi_turn_dataset_malformed_tool_results_rejected(
+def test_agentic_inference_dataset_malformed_tool_results_rejected(
     tool_results, expected_match
 ):
     rows = [
@@ -1488,18 +1522,18 @@ def test_multi_turn_dataset_malformed_tool_results_rejected(
     ]
     df = pd.DataFrame(rows)
     with pytest.raises(InputValidationError, match=expected_match):
-        MultiTurnDataset(df)
+        AgenticInferenceDataset(df)
 
 
 @pytest.mark.unit
-def test_multi_turn_dataset_load_with_adapter_only_raises():
+def test_agentic_inference_dataset_load_with_adapter_only_raises():
     """load(adapter=...) without api_type/model_params must raise NotImplementedError."""
     rows = [
         {"conversation_id": "c1", "turn": 1, "role": "user", "content": "Hi"},
         {"conversation_id": "c1", "turn": 2, "role": "assistant", "content": "Yo"},
     ]
     df = pd.DataFrame(rows)
-    ds = MultiTurnDataset(df)
+    ds = AgenticInferenceDataset(df)
     sentinel_adapter = object()
     with pytest.raises(NotImplementedError, match="api_type"):
         ds.load(adapter=sentinel_adapter)

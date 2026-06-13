@@ -175,7 +175,7 @@ src/inference_endpoint/
 ├── load_generator/
 │   ├── session.py             # BenchmarkSession, PhaseIssuer, PhaseConfig, PhaseResult, SessionResult
 │   ├── strategy.py            # TimedIssueStrategy, BurstStrategy, ConcurrencyStrategy, LoadStrategy
-│   ├── multi_turn_strategy.py # MultiTurnStrategy
+│   ├── agentic_inference_strategy.py # AgenticInferenceStrategy
 │   ├── conversation_manager.py # ConversationManager, ConversationState
 │   ├── sample_order.py        # SampleOrder, WithoutReplacementSampleOrder, WithReplacementSampleOrder
 │   └── delay.py               # poisson_delay_fn, make_delay_fn

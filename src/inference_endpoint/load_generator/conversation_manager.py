@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Conversation state management for multi-turn benchmarking."""
+"""Conversation state management for agentic inference benchmarking."""
 
 import logging
 from dataclasses import dataclass
@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class ConversationState:
-    """Per-conversation state for multi-turn benchmarking.
+    """Per-conversation state for agentic inference benchmarking.
 
     Attributes:
         conversation_id: Unique identifier for this conversation.
@@ -45,12 +45,12 @@ class ConversationState:
 
 
 class ConversationManager:
-    """Manages per-conversation state for multi-turn benchmarking.
+    """Manages per-conversation state for agentic inference benchmarking.
 
-    All methods are synchronous. Turn sequencing is driven by MultiTurnStrategy
+    All methods are synchronous. Turn sequencing is driven by AgenticInferenceStrategy
     which calls on_sample_complete() → _issue_next_turn() directly.
 
-    All states are pre-created by MultiTurnStrategy.execute() before any turns
+    All states are pre-created by AgenticInferenceStrategy.execute() before any turns
     are issued, so get_or_create() requires no locking.
     """
 

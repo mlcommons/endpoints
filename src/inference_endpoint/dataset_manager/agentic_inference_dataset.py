@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Multi-turn conversation dataset for conversational AI benchmarking."""
+"""Agentic inference conversation dataset for conversational AI benchmarking."""
 
 import logging
 from dataclasses import dataclass, field, replace
@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 class ConversationSampleEntry:
     """One client-turn entry in ConversationMetadata.samples.
 
-    sample_index is populated after transforms in MultiTurnDataset.load();
+    sample_index is populated after transforms in AgenticInferenceDataset.load();
     None before load() is called.
     """
 
@@ -48,9 +48,9 @@ class ConversationSampleEntry:
 
 @dataclass
 class ConversationMetadata:
-    """Bundle of maps/lists consumed by MultiTurnStrategy.
+    """Bundle of maps/lists consumed by AgenticInferenceStrategy.
 
-    Produced by MultiTurnDataset._build_metadata() from the post-transform dataframe.
+    Produced by AgenticInferenceDataset._build_metadata() from the post-transform dataframe.
     Keys in the *_by_key dicts are (str(conversation_id), int(turn)).
     Populated by load(); None before load() is called.
     """
@@ -211,8 +211,8 @@ def _build_conversation_metadata(
     )
 
 
-class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
-    """Dataset for multi-turn conversations.
+class AgenticInferenceDataset(Dataset, dataset_id="agentic_inference_conversations"):
+    """Dataset for agentic inference conversations.
 
     Supports conversational AI benchmarking with turn sequencing and conversation history.
     Validates that conversations have proper structure (alternating user/assistant roles)
@@ -243,7 +243,7 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
     COLUMN_NAMES = ["conversation_id", "turn", "role", "content"]
 
     def __init__(self, dataframe: pd.DataFrame, **kwargs):
-        """Initialize multi-turn dataset.
+        """Initialize agentic inference dataset.
 
         Args:
             dataframe: DataFrame with conversation data.
@@ -528,9 +528,9 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
 
         if adapter is not None and (api_type is None or model_params is None):
             raise NotImplementedError(
-                "MultiTurnDataset.load(adapter=...) is not supported; "
+                "AgenticInferenceDataset.load(adapter=...) is not supported; "
                 "pass api_type=... and model_params=... instead. "
-                "Multi-turn datasets cherry-pick AddStaticColumns defaults from "
+                "Agentic inference datasets cherry-pick AddStaticColumns defaults from "
                 "the api_type's transforms because rows lack a 'prompt' column "
                 "and the full adapter pipeline (ColumnFilter) does not apply."
             )

@@ -13,9 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Integration tests for multi-turn benchmarking end-to-end.
+"""Integration tests for agentic inference benchmarking end-to-end.
 
-Validates that MultiTurnDataset + MultiTurnStrategy + BenchmarkSession work
+Validates that AgenticInferenceDataset + AgenticInferenceStrategy + BenchmarkSession work
 correctly together against a real HTTP echo server.
 
 Tests cover:
@@ -35,18 +35,22 @@ import pytest
 from inference_endpoint import metrics
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import (
+    AgenticInferenceConfig,
     LoadPattern,
     LoadPatternType,
-    MultiTurnConfig,
 )
 from inference_endpoint.core.record import EventRecord, SampleEventType
 from inference_endpoint.core.types import QueryResult
-from inference_endpoint.dataset_manager.multi_turn_dataset import MultiTurnDataset
+from inference_endpoint.dataset_manager.agentic_inference_dataset import (
+    AgenticInferenceDataset,
+)
 from inference_endpoint.endpoint_client.config import HTTPClientConfig
 from inference_endpoint.endpoint_client.http_client import HTTPEndpointClient
 from inference_endpoint.endpoint_client.http_sample_issuer import HttpClientSampleIssuer
+from inference_endpoint.load_generator.agentic_inference_strategy import (
+    AgenticInferenceStrategy,
+)
 from inference_endpoint.load_generator.conversation_manager import ConversationManager
-from inference_endpoint.load_generator.multi_turn_strategy import MultiTurnStrategy
 from inference_endpoint.load_generator.session import (
     BenchmarkSession,
     EventPublisher,
@@ -75,36 +79,36 @@ class _RecordingPublisher:
         pass
 
 
-def _make_dataset(rows: list[dict]) -> MultiTurnDataset:
-    """Build a loaded MultiTurnDataset from a list of row dicts."""
+def _make_dataset(rows: list[dict]) -> AgenticInferenceDataset:
+    """Build a loaded AgenticInferenceDataset from a list of row dicts."""
     df = pd.DataFrame(rows)
-    ds = MultiTurnDataset(dataframe=df)
+    ds = AgenticInferenceDataset(dataframe=df)
     ds.load()
     return ds
 
 
 def _make_strategy(
-    ds: MultiTurnDataset,
+    ds: AgenticInferenceDataset,
     target_concurrency: int | None = None,
     inject_tool_delay: bool = False,
-) -> MultiTurnStrategy:
-    mt_cfg = MultiTurnConfig(
+) -> AgenticInferenceStrategy:
+    agentic_cfg = AgenticInferenceConfig(
         turn_timeout_s=10.0,
         inject_tool_delay=inject_tool_delay,
     )
     assert ds.conversation_metadata is not None
-    return MultiTurnStrategy(
+    return AgenticInferenceStrategy(
         conversation_manager=ConversationManager(),
         dataset_metadata=ds.conversation_metadata,
-        multi_turn_config=mt_cfg,
+        agentic_inference_config=agentic_cfg,
         target_concurrency=target_concurrency,
     )
 
 
 async def _run_session(
     server_url: str,
-    ds: MultiTurnDataset,
-    strategy: MultiTurnStrategy,
+    ds: AgenticInferenceDataset,
+    strategy: AgenticInferenceStrategy,
     responses_out: dict,
     event_records_out: list[EventRecord] | None = None,
 ) -> int:
@@ -373,12 +377,12 @@ async def test_turn_ordering_enforced_end_to_end(echo_server):
         {"conversation_id": "c1", "turn": 3, "role": "user", "content": "Second"},
     ]
     ds = _make_dataset(rows)
-    mt_cfg = MultiTurnConfig(turn_timeout_s=10.0)
+    agentic_cfg = AgenticInferenceConfig(turn_timeout_s=10.0)
     conv_manager = ConversationManager()
-    strategy = MultiTurnStrategy(
+    strategy = AgenticInferenceStrategy(
         conversation_manager=conv_manager,
         dataset_metadata=ds.conversation_metadata,
-        multi_turn_config=mt_cfg,
+        agentic_inference_config=agentic_cfg,
     )
 
     # Wrap on_sample_complete to record completion timestamps
@@ -625,7 +629,9 @@ async def test_concurrent_conversations_stress(echo_server):
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_multi_turn_active_conversations_respects_target_concurrency(echo_server):
+async def test_agentic_inference_active_conversations_respects_target_concurrency(
+    echo_server,
+):
     num_convs = 20
     rows = []
     for i in range(num_convs):
@@ -672,7 +678,7 @@ async def test_multi_turn_active_conversations_respects_target_concurrency(echo_
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_multi_turn_pipeline_exception_propagates(echo_server):
+async def test_agentic_inference_pipeline_exception_propagates(echo_server):
     rows = [
         {"conversation_id": "err_c1", "turn": 1, "role": "user", "content": "Q1"},
         {"conversation_id": "err_c1", "turn": 2, "role": "assistant", "content": "A1"},
