@@ -123,6 +123,32 @@ class TestDataset:
         ds = Dataset(path="datasets/my_data.jsonl")
         assert ds.name == "my_data"
 
+    @pytest.mark.unit
+    def test_max_new_tokens_defaults_none(self):
+        ds = Dataset(name="perf", type=DatasetType.PERFORMANCE, path="data.jsonl")
+        assert ds.max_new_tokens is None
+
+    @pytest.mark.unit
+    def test_per_dataset_max_new_tokens_override(self):
+        ds = Dataset(
+            name="aime25",
+            type=DatasetType.ACCURACY,
+            path="aime25.jsonl",
+            eval_method=EvalMethod.EXACT_MATCH,
+            max_new_tokens=32768,
+        )
+        assert ds.max_new_tokens == 32768
+
+    @pytest.mark.unit
+    def test_max_new_tokens_rejects_non_positive(self):
+        with pytest.raises(ValueError, match="greater than 0"):
+            Dataset(
+                name="perf",
+                type=DatasetType.PERFORMANCE,
+                path="data.jsonl",
+                max_new_tokens=0,
+            )
+
 
 class TestBenchmarkConfig:
     @pytest.mark.unit
