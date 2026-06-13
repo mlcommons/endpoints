@@ -45,11 +45,7 @@ Pass if the audit run is **not more than 10% faster** than the reference (20% fo
 low-throughput streams). If the SUT caches responses for duplicate queries, throughput
 inflates → FAIL.
 
-> **LLM nuance.** MLPerf exempts variable-length-input LLMs from TEST04 because prefix
-> caching legitimately speeds up identical prompts. On an LLM endpoint, TEST04 will see
-> real prefix-cache gains; the tolerance (and whether the audit run disables prefix cache)
-> is a deliberate knob. We build it faithfully to the reference (±10% / ±20%) and expose
-> the tolerance.
+
 
 ---
 
@@ -66,15 +62,7 @@ _intent_ over this repo's own artifacts.
 | LoadGen runs both phases of a test     | a **generic orchestrator** runs `plan_runs()` back-to-back  |
 | compliance submission dir layout       | mirrored under the run's report dir                         |
 
-### Feasibility note for the token-level tests (TEST06/09)
 
-A finished run captures decoded **text** + `finish_reason` for all adapters, but **raw
-output token IDs only for the SGLang adapter** (`QueryResult.metadata["token_ids"]`).
-OpenAI/completions runs lose the token-ID stream. TEST06's EOS/first-token checks and exact
-TEST09 need token IDs, so faithful TEST06/09 will require a small, localized data-path
-addition (capture token IDs under an audit-capture flag when the server can return them —
-logprobs / SGLang `token_delta`). **This only matters when TEST06/09 are implemented;**
-TEST04 (throughput-only) and TEST01 need none of it.
 
 ---
 
