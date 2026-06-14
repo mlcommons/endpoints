@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "Multi-Turn Conversation Dataset Schema",
+  "title": "Agentic Inference Dataset Schema",
   "description": "JSON schema describing the structure and requirements for agentic inference conversation datasets in the MLPerf Inference Endpoint Benchmarking System",
   "version": "1.0.0",
 

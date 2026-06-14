@@ -150,7 +150,7 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
     parser = argparse.ArgumentParser(
-        description="Compute ISL distribution for a agentic inference dataset."
+        description="Compute ISL distribution for an agentic inference dataset."
     )
     parser.add_argument("--dataset", required=True, help="Path to JSONL dataset file.")
     parser.add_argument(

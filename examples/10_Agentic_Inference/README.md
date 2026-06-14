@@ -1,6 +1,6 @@
 # Multi-Turn Agentic Benchmark
 
-This example runs agentic inference agentic conversations through an OpenAI-compatible
+This example runs agentic inference conversations through an OpenAI-compatible
 endpoint. The client preserves conversation order, sends one in-flight turn per
 active conversation, and adds `X-Session-ID: <conversation_id>` on every request
 so a router can keep a conversation on the same backend.
