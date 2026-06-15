@@ -552,3 +552,29 @@ class TestSWEBenchScorerPreflight:
         monkeypatch.setattr(scoring_mod.subprocess, "run", fake_run)
         with pytest.raises(SetupError, match="Docker daemon is not running"):
             SWEBenchScorer.preflight(self._extras(swe_bench_project))
+
+
+class TestPatchConfigMissingName:
+    def test_missing_model_name_raises_clear_error(self, swe_bench_project, tmp_path):
+        """_patch_config raises ValueError with a clear message when model_params.name is absent."""
+        tmpl = {
+            "model": {
+                "model_name": "",
+                "model_kwargs": {"api_base": ""},
+            }
+        }
+        template_path = tmp_path / "tmpl.yaml"
+        template_path.write_text(yaml.dump(tmpl))
+
+        scorer = SWEBenchScorer(
+            dataset_name=_DATASET_NAME,
+            dataset=_make_dataset(),
+            report_dir=tmp_path,
+            swe_bench_project_path=swe_bench_project,
+            swebench_config_template=template_path,
+        )
+        output_dir = tmp_path / "out"
+        output_dir.mkdir()
+
+        with pytest.raises(ValueError, match="model_params.name is required"):
+            scorer._patch_config(output_dir, {"model_params": {}})

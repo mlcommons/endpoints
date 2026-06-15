@@ -506,6 +506,40 @@ class TestAccuracyOnlyDataset:
         assert acc_ds.accuracy_config.extras is not None
         assert acc_ds.accuracy_config.extras.get("workers") == 5
 
+    @pytest.mark.unit
+    def test_perf_dataset_with_accuracy_config_does_not_crash_load_datasets(
+        self, tmp_path
+    ):
+        """_load_datasets must not crash when perf dataset carries accuracy_config.
+
+        The perf-with-accuracy-config branch appends to eval_configs but not to
+        accuracy_datasets; a zip(strict=True) over both lists would raise ValueError.
+        """
+        dummy_jsonl = tmp_path / "dummy.jsonl"
+        dummy_jsonl.write_text('{"prompt": "hello"}\n')
+        config = OfflineConfig(
+            endpoint_config={"endpoints": ["http://test:8000"]},
+            model_params={"name": "test-model"},
+            datasets=[
+                {
+                    "type": "performance",
+                    "path": str(dummy_jsonl),
+                    "accuracy_config": {"eval_method": "swe_bench_scorer"},
+                },
+            ],
+        )
+        with patch.object(
+            execute_mod,
+            "_resolve_accuracy_components",
+            return_value=(_SelfContainedScorer, None),
+        ):
+            _, accuracy_datasets, eval_configs = _load_datasets(config, tmp_path)
+
+        # The perf dataset appends to eval_configs only, not accuracy_datasets.
+        assert len(accuracy_datasets) == 0
+        assert len(eval_configs) == 1
+        assert eval_configs[0].dataset_name == "performance"
+
 
 class TestYAMLTemplateValidation:
     """Validate all bundled YAML templates parse correctly."""

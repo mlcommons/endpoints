@@ -1398,6 +1398,20 @@ _DEFAULT_VBENCH_PROJECT_PATH = (
 
 _VBENCH_PROJECT_PATH_ENV = "VBENCH_PROJECT_PATH"
 
+
+def _resolve_subproject_path(
+    explicit: str | os.PathLike | None,
+    env_var: str,
+    default: Path,
+) -> Path:
+    if explicit is not None:
+        return Path(explicit)
+    from_env = os.environ.get(env_var)
+    if from_env:
+        return Path(from_env)
+    return default
+
+
 # Filenames in `vbench_standard` mode key on the prompt verbatim — VBench looks
 # the filename's prompt-prefix up in vbench_full_info.json. We can therefore
 # only reshape unsafe characters, not replace the prompt with a UUID. Slashes
@@ -1499,18 +1513,10 @@ class VBenchScorer(Scorer, scorer_id="vbench"):
     def _resolve_project_path(
         explicit: os.PathLike | None,
     ) -> Path:
-        """Resolve the VBench subproject path.
-
-        Lookup order: explicit ctor arg → ``$VBENCH_PROJECT_PATH`` env var →
-        editable-checkout fallback. The env var lets wheel-installed users
-        point at a synced subproject without patching source.
-        """
-        if explicit is not None:
-            return Path(explicit)
-        from_env = os.environ.get(_VBENCH_PROJECT_PATH_ENV)
-        if from_env:
-            return Path(from_env)
-        return Path(_DEFAULT_VBENCH_PROJECT_PATH)
+        """Lookup order: explicit ctor arg → ``$VBENCH_PROJECT_PATH`` env var → editable-checkout fallback."""
+        return _resolve_subproject_path(
+            explicit, _VBENCH_PROJECT_PATH_ENV, Path(_DEFAULT_VBENCH_PROJECT_PATH)
+        )
 
     def score_single_sample(self, value: str, ground_truth: str) -> float:
         raise RuntimeError(
@@ -1805,12 +1811,9 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
         explicit: str | os.PathLike | None,
     ) -> Path:
         """Lookup order: explicit ctor arg → ``$SWE_BENCH_PROJECT_PATH`` env var → in-repo default."""
-        if explicit is not None:
-            return Path(explicit)
-        from_env = os.environ.get(_SWE_BENCH_PROJECT_PATH_ENV)
-        if from_env:
-            return Path(from_env)
-        return Path(_DEFAULT_SWE_BENCH_PROJECT_PATH)
+        return _resolve_subproject_path(
+            explicit, _SWE_BENCH_PROJECT_PATH_ENV, Path(_DEFAULT_SWE_BENCH_PROJECT_PATH)
+        )
 
     @classmethod
     def external_sample_count(cls, extras: dict[str, Any]) -> int | None:
@@ -1898,7 +1901,12 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
             "endpoints", []
         )
 
-        cfg["model"]["model_name"] = model_params["name"]
+        model_name = model_params.get("name")
+        if not model_name:
+            raise ValueError(
+                "model_params.name is required in the benchmark config but is missing or empty"
+            )
+        cfg["model"]["model_name"] = model_name
         if endpoints:
             base = endpoints[0].rstrip("/")
             if base.endswith("/v1"):
@@ -1967,6 +1975,13 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
             )
 
         n_rows = len(self.dataset.dataframe)
+        if self.num_instances > n_rows:
+            logger.warning(
+                "num_instances=%d exceeds dataset size %d; evaluating %d instances",
+                self.num_instances,
+                n_rows,
+                n_rows,
+            )
         slice_str = f"0:{min(self.num_instances, n_rows)}"
 
         output_dir = self.report_dir / "swe_bench_output"
