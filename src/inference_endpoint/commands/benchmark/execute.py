@@ -494,11 +494,29 @@ def _build_phases(
                 "AgenticInferenceDataset, which is not yet supported for "
                 "accuracy evaluation."
             )
-        # Accuracy phases run at MAX_THROUGHPUT; inheriting perf_lp (e.g. POISSON)
-        # would silently rate-limit evaluation until an agentic inference accuracy strategy
-        # and QPS-budgeting support are added.
-        acc_load_pattern: LoadPattern | None = LoadPattern(
-            type=LoadPatternType.MAX_THROUGHPUT
+        # When the perf phase runs CONCURRENCY (online), the accuracy phase
+        # mirrors that fixed concurrency so evaluation exercises the endpoint
+        # the same way. Every other pattern keeps MAX_THROUGHPUT — inheriting
+        # POISSON would silently rate-limit evaluation to the perf QPS, which
+        # has no QPS-budgeting support for accuracy yet.
+        perf_lp = ctx.rt_settings.load_pattern
+        acc_load_pattern: LoadPattern | None
+        if perf_lp is not None and perf_lp.type == LoadPatternType.CONCURRENCY:
+            acc_load_pattern = LoadPattern(
+                type=LoadPatternType.CONCURRENCY,
+                target_concurrency=perf_lp.target_concurrency,
+            )
+        else:
+            acc_load_pattern = LoadPattern(type=LoadPatternType.MAX_THROUGHPUT)
+        logger.info(
+            "Accuracy issuer '%s' load mode: %s%s",
+            eval_cfg.dataset_name,
+            acc_load_pattern.type.value,
+            (
+                f" (target_concurrency={acc_load_pattern.target_concurrency})"
+                if acc_load_pattern.type == LoadPatternType.CONCURRENCY
+                else ""
+            ),
         )
         acc_settings = RuntimeSettings(
             metric_target=ctx.rt_settings.metric_target,
