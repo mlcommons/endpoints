@@ -855,11 +855,12 @@ async def _run_benchmark_async(
         profile_starts: list[dict[str, Any]] = []
         profile_stops: list[dict[str, Any]] = []
         if profiling_cfg.engine is not None:
+            profile_endpoints = profiling_cfg.urls or config.endpoint_config.endpoints
             profile_start_urls = _derive_profile_urls(
-                config.endpoint_config.endpoints, profiling_cfg.engine, "start"
+                profile_endpoints, profiling_cfg.engine, "start"
             )
             profile_stop_urls = _derive_profile_urls(
-                config.endpoint_config.endpoints, profiling_cfg.engine, "stop"
+                profile_endpoints, profiling_cfg.engine, "stop"
             )
         session_completed_normally = False
 

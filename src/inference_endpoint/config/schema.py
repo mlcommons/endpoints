@@ -627,7 +627,8 @@ class ProfilingConfig(BaseModel):
 
     When ``engine`` is set, fires POST ``<start_path>`` at performance-phase
     begin and POST ``<stop_path>`` at performance-phase end. URLs are derived
-    from ``endpoint_config.endpoints`` using the engine-specific protocol.
+    using the engine-specific protocol from ``urls`` when set, otherwise
+    from ``endpoint_config.endpoints``.
     Server must be launched with profiling enabled (e.g. vLLM's
     ``--profiler-config.profiler=cuda|torch``); the schedule
     (``delay_iterations``, ``max_iterations``) is set there, not here.
@@ -645,6 +646,33 @@ class ProfilingConfig(BaseModel):
         None,
         description="Profile the named inference engine around the performance phase",
     )
+    urls: Annotated[
+        list[str] | None,
+        cyclopts.Parameter(
+            alias="--profile-urls",
+            help="Override URL(s) for profiler triggers; "
+            "defaults to endpoint_config.endpoints",
+            negative="",
+        ),
+    ] = Field(
+        None,
+        description="URL(s) the profiler start/stop triggers are derived from. "
+        "When None, derived from endpoint_config.endpoints instead. Use when "
+        "the profiler admin endpoint differs from the inference endpoint.",
+    )
+
+    @field_validator("urls", mode="after")
+    @classmethod
+    def _validate_url_scheme(cls, v: list[str] | None) -> list[str] | None:
+        if v is None:
+            return v
+        for url in v:
+            if not url.startswith(("http://", "https://")):
+                raise ValueError(
+                    f"Profiling endpoint URL must include scheme "
+                    f"(http:// or https://), got: {url!r}"
+                )
+        return v
 
 
 @cyclopts.Parameter(name="*")
