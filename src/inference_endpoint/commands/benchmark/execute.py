@@ -302,6 +302,7 @@ def _load_datasets(
                 acc_cfg.accuracy_config.extras or {},
             )
         )
+        scorer_cls.preflight(acc_cfg.accuracy_config.extras or {})
         ds.load(
             api_type=config.endpoint_config.api_type, model_params=config.model_params
         )
@@ -313,6 +314,14 @@ def _load_datasets(
         raise InputValidationError("Multiple performance datasets not supported")
 
     perf_cfg = performance_cfgs[0]
+    perf_cls = Dataset.PREDEFINED.get(perf_cfg.name)
+    if perf_cls is not None and perf_cls.ACCURACY_ONLY:
+        raise InputValidationError(
+            f"Dataset '{perf_cfg.name}' is accuracy-only and cannot be used "
+            "as a performance dataset. Use a different dataset (e.g. 'random') for the "
+            "performance phase."
+        )
+
     try:
         dataloader = DataLoaderFactory.create_loader(perf_cfg)
         dataloader.load(
@@ -320,9 +329,7 @@ def _load_datasets(
         )
         logger.info(f"Loaded {dataloader.num_samples()} samples")
     except FileNotFoundError as e:
-        raise InputValidationError(
-            f"Dataset file not found: {performance_cfgs[0].path}"
-        ) from e
+        raise InputValidationError(f"Dataset file not found: {perf_cfg.path}") from e
     except Exception as e:
         raise SetupError(f"Failed to load dataset: {e}") from e
 
@@ -399,8 +406,18 @@ def setup_benchmark(config: BenchmarkConfig, test_mode: TestMode) -> BenchmarkCo
 
     # Calculate and display expected sample count
     total_samples = rt_settings.total_samples_to_issue()
-    if accuracy_datasets:
-        total_samples += sum(ds.num_samples() * ds.repeats for ds in accuracy_datasets)
+    for ds, ec in zip(accuracy_datasets, eval_configs, strict=True):
+        if not ec.scorer.SKIP_ENDPOINT_PHASE:
+            total_samples += ds.num_samples() * ds.repeats
+        else:
+            n = ec.scorer.external_sample_count(ec.extras)
+            if n is not None:
+                logger.info(
+                    "Accuracy dataset '%s' (%s): %d instances evaluated externally",
+                    ec.dataset_name,
+                    ec.scorer.SCORER_ID,
+                    n,
+                )
 
     collect_responses = test_mode in (TestMode.ACC, TestMode.BOTH)
     logger.info(
@@ -477,6 +494,8 @@ def _build_phases(
     # Accuracy phases — use eval_cfg.dataset_name as phase name so it matches
     # what Scorer._load_sample_index_map() looks up in sample_idx_map.json
     for eval_cfg in ctx.eval_configs:
+        if eval_cfg.scorer.SKIP_ENDPOINT_PHASE:
+            continue
         if eval_cfg.dataset_name == "performance":
             continue
         acc_ds = eval_cfg.dataset
@@ -905,8 +924,9 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
             **eval_cfg.extras,
         )
         score, n_repeats = scorer_instance.score()
-        assert eval_cfg.dataset.data is not None
-        num_samples = len(eval_cfg.dataset.data)
+        num_samples = (
+            len(eval_cfg.dataset.data) if eval_cfg.dataset.data is not None else 0
+        )
         if eval_cfg.dataset_name == "performance":
             num_samples = sum(phase.issued_count for phase in result.perf_results)
         accuracy_scores[eval_cfg.dataset_name] = {

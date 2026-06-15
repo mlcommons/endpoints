@@ -1,0 +1,29 @@
+# Isolated uv project for the SWE-bench accuracy evaluator.
+#
+# mini-swe-agent and swebench pin specific versions of litellm, docker,
+# and other packages that are not part of the parent endpoints env. Keeping
+# the swebench env separate means the parent lockfile stays solvable and
+# the evaluation env stays reproducible.
+#
+# `inference_endpoint.evaluation.scoring.SWEBenchScorer` invokes
+# mini-extra and swebench.harness.run_evaluation via `uv run --project`,
+# so the main benchmark process never needs to import these packages.
+#
+# Usage on the accuracy host:
+#   cd examples/10_SWEBench_Example/accuracy
+#   uv sync
+#   # SWEBenchScorer in the parent will shell out automatically.
+
+[project]
+name = "swe-bench-accuracy"
+version = "0.1.0"
+description = "Isolated SWE-bench accuracy environment for the SWE-bench example."
+requires-python = ">=3.12"
+dependencies = [
+    "mini-swe-agent==2.3.0",
+    "swebench==4.1.0",
+]
+
+[tool.uv]
+# Script-runner env: no build, no install of this project itself.
+package = false

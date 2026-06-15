@@ -33,6 +33,7 @@ import msgspec
 import msgspec.json
 import numpy as np
 import pandas as pd
+import yaml
 from pydantic import ValidationError
 from tqdm import tqdm
 
@@ -53,6 +54,8 @@ from ..core.types import TextModelOutput
 from ..dataset_manager.agentic_inference_dataset import AgenticInferenceDataset
 from ..dataset_manager.dataset import Dataset
 from ..dataset_manager.predefined.shopify_product_catalogue import ProductMetadata
+from ..dataset_manager.predefined.swe_bench import _REPO_MAP as _SWE_BENCH_HF_MAP
+from ..exceptions import SetupError
 from .extractor import Extractor, PythonCodeExtractor
 
 logger = logging.getLogger(__name__)
@@ -67,6 +70,7 @@ class Scorer(ABC):
     PREDEFINED: ClassVar[dict[str, type["Scorer"]]] = {}
     SCORER_ID: ClassVar[str]
     REQUIRES_EXTRACTOR: ClassVar[bool] = True
+    SKIP_ENDPOINT_PHASE: ClassVar[bool] = False
 
     def __init_subclass__(
         cls,
@@ -106,6 +110,20 @@ class Scorer(ABC):
         """Return the list of registered scorer names."""
         return list(Scorer.PREDEFINED.keys())
 
+    @classmethod
+    def external_sample_count(cls, extras: dict[str, Any]) -> int | None:
+        """Return the number of samples the scorer will evaluate externally, or None.
+
+        Used to surface sample counts for scorers that skip the endpoint phase and
+        manage their own evaluation (e.g. SWEBenchScorer running via mini-extra).
+        The default returns None (scorer uses the endpoint accuracy phase normally).
+        """
+        return None
+
+    @classmethod  # noqa: B027
+    def preflight(cls, extras: dict[str, Any]) -> None:
+        """Verify external dependencies before the benchmark starts. No-op by default."""
+
     def __init__(
         self,
         dataset_name: str,
@@ -122,7 +140,9 @@ class Scorer(ABC):
         self.ground_truth_column = (
             ground_truth_column if ground_truth_column is not None else "ground_truth"
         )
-        self.sample_index_map = self._load_sample_index_map()
+        self.sample_index_map = (
+            None if self.SKIP_ENDPOINT_PHASE else self._load_sample_index_map()
+        )
 
     def _load_sample_index_map(self):
         sample_index_map_path = self.report_dir / "sample_idx_map.json"
@@ -177,6 +197,10 @@ class Scorer(ABC):
             tuple[float | None, int]: The mean score and the number of repeats.
                 Returns None as the score if evaluation fails.
         """
+        assert self.sample_index_map is not None, (
+            f"{self.__class__.__name__} sets SKIP_ENDPOINT_PHASE=True but did not "
+            "override score(); either override score() or set SKIP_ENDPOINT_PHASE=False."
+        )
         df = self.get_outputs()
 
         # Outputs are for all samples, not just the target dataset
@@ -1542,35 +1566,12 @@ class VBenchScorer(Scorer, scorer_id="vbench"):
             cmd += ["--full-info-json", self.full_info_json_path]
 
         log_path = self.report_dir / "vbench_subprocess.log"
-        try:
-            completed = subprocess.run(
-                cmd,
-                check=False,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                timeout=self.subprocess_timeout_s,
-            )
-        except subprocess.TimeoutExpired as e:
-            partial = (
-                e.stdout
-                if isinstance(e.stdout, str)
-                else (e.stdout or b"").decode("utf-8", errors="replace")
-            )
-            log_path.write_text(partial)
-            raise RuntimeError(
-                f"VBench subprocess timed out after {self.subprocess_timeout_s}s; "
-                f"see {log_path} for partial output."
-            ) from e
-
-        log_path.write_text(completed.stdout or "")
-        if completed.returncode != 0:
-            tail = "\n".join((completed.stdout or "").splitlines()[-50:])
-            raise RuntimeError(
-                f"VBench subprocess exited with code {completed.returncode}; "
-                f"full log at {log_path}. Last 50 lines:\n{tail}"
-            )
+        _run_subprocess_with_log(
+            cmd,
+            log_path,
+            timeout_s=self.subprocess_timeout_s,
+            label="VBench",
+        )
 
     def _extract_per_dim_scores(self, results: dict[str, Any]) -> list[float]:
         """Pull each requested dim's aggregate score, with clear errors.
@@ -1658,3 +1659,394 @@ class VBenchScorer(Scorer, scorer_id="vbench"):
         per_dim_scores = self._extract_per_dim_scores(results)
         mean_score = float(np.mean(per_dim_scores))
         return mean_score, n_repeats
+
+
+def _run_subprocess_with_log(
+    cmd: list[str],
+    log_path: Path,
+    *,
+    timeout_s: int,
+    label: str,
+    cwd: Path | None = None,
+) -> None:
+    """Run *cmd*, capture stdout+stderr to *log_path*, raise on timeout or non-zero exit."""
+    try:
+        completed = subprocess.run(
+            cmd,
+            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=timeout_s,
+            cwd=str(cwd) if cwd is not None else None,
+        )
+    except subprocess.TimeoutExpired as e:
+        partial = (
+            e.stdout
+            if isinstance(e.stdout, str)
+            else (e.stdout or b"").decode("utf-8", errors="replace")
+        )
+        log_path.write_text(partial)
+        raise RuntimeError(
+            f"{label} subprocess timed out after {timeout_s}s; "
+            f"see {log_path} for partial output."
+        ) from e
+    log_path.write_text(completed.stdout or "")
+    if completed.returncode != 0:
+        tail = "\n".join((completed.stdout or "").splitlines()[-50:])
+        raise RuntimeError(
+            f"{label} subprocess exited with code {completed.returncode}; "
+            f"full log at {log_path}. Last 50 lines:\n{tail}"
+        )
+
+
+_DEFAULT_SWE_BENCH_PROJECT_PATH = (
+    Path(__file__).resolve().parents[3]
+    / "examples"
+    / "10_SWEBench_Example"
+    / "accuracy"
+)
+_SWE_BENCH_PROJECT_PATH_ENV = "SWE_BENCH_PROJECT_PATH"
+_DEFAULT_SWE_BENCH_TEMPLATE = (
+    Path(__file__).resolve().parents[3]
+    / "examples"
+    / "10_SWEBench_Example"
+    / "swebench_template.yaml"
+)
+
+
+class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
+    """SWE-bench accuracy scorer using mini-swe-agent.
+
+    Invokes mini-extra and swebench via ``uv run --project <swe_bench_project_path>``
+    so the parent process never imports them directly. Run ``uv sync`` in the subproject
+    directory once before use.
+    """
+
+    REQUIRES_EXTRACTOR: ClassVar[bool] = False
+    SKIP_ENDPOINT_PHASE: ClassVar[bool] = True
+    DEFAULT_SUBPROCESS_TIMEOUT_S: ClassVar[int] = 8 * 60 * 60
+
+    def __init__(
+        self,
+        dataset_name: str,
+        dataset: Dataset,
+        report_dir: os.PathLike,
+        extractor: type[Extractor] | None = None,
+        ground_truth_column: str | None = "instance_id",
+        swe_bench_project_path: str | os.PathLike | None = None,
+        swebench_config_template: str | os.PathLike | None = None,
+        subset: str = "verified",
+        split: str = "test",
+        num_instances: int = 100,
+        workers: int = 10,
+        max_eval_workers: int = 10,
+        subprocess_timeout_s: int | None = None,
+    ):
+        super().__init__(
+            dataset_name=dataset_name,
+            dataset=dataset,
+            report_dir=report_dir,
+            extractor=extractor,
+            ground_truth_column=ground_truth_column,
+        )
+        self.report_dir = self.report_dir.resolve()
+        self.swe_bench_project_path = self._resolve_project_path(swe_bench_project_path)
+        self.swebench_config_template = (
+            Path(swebench_config_template)
+            if swebench_config_template is not None
+            else _DEFAULT_SWE_BENCH_TEMPLATE
+        )
+        if subset not in _SWE_BENCH_HF_MAP:
+            raise ValueError(
+                f"Unknown SWE-bench subset {subset!r}; "
+                f"choose from: {list(_SWE_BENCH_HF_MAP)}"
+            )
+        self.subset = subset
+        self.split = split
+        self.num_instances = num_instances
+        self.workers = workers
+        self.max_eval_workers = max_eval_workers
+        self.subprocess_timeout_s = (
+            subprocess_timeout_s
+            if subprocess_timeout_s is not None
+            else self.DEFAULT_SUBPROCESS_TIMEOUT_S
+        )
+
+        if not self.swebench_config_template.exists():
+            raise FileNotFoundError(
+                f"swebench template not found: {self.swebench_config_template}. "
+                f"Pass swebench_config_template= in accuracy_config.extras."
+            )
+        with self.swebench_config_template.open() as _f:
+            _tmpl = yaml.safe_load(_f)
+        if not isinstance((_tmpl or {}).get("model", {}).get("model_kwargs"), dict):
+            raise ValueError(
+                f"swebench template {self.swebench_config_template} must have a "
+                "'model.model_kwargs' dict; check the template structure."
+            )
+        pyproject = self.swe_bench_project_path / "pyproject.toml"
+        if not pyproject.exists():
+            raise FileNotFoundError(
+                f"SWE-bench subproject not found at {self.swe_bench_project_path}. "
+                f"Set ${_SWE_BENCH_PROJECT_PATH_ENV} to the subproject path, "
+                f"then run: cd {self.swe_bench_project_path} && uv sync"
+            )
+
+    @staticmethod
+    def _resolve_project_path(
+        explicit: str | os.PathLike | None,
+    ) -> Path:
+        """Lookup order: explicit ctor arg → ``$SWE_BENCH_PROJECT_PATH`` env var → in-repo default."""
+        if explicit is not None:
+            return Path(explicit)
+        from_env = os.environ.get(_SWE_BENCH_PROJECT_PATH_ENV)
+        if from_env:
+            return Path(from_env)
+        return Path(_DEFAULT_SWE_BENCH_PROJECT_PATH)
+
+    @classmethod
+    def external_sample_count(cls, extras: dict[str, Any]) -> int | None:
+        try:
+            return int(extras["num_instances"])
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    @classmethod
+    def preflight(cls, extras: dict[str, Any]) -> None:
+        """Check uv, mini-extra, swebench, and Docker before the benchmark starts."""
+        swe_bench_project_path = cls._resolve_project_path(
+            extras.get("swe_bench_project_path")
+        )
+
+        if shutil.which("uv") is None:
+            raise SetupError(
+                "uv is not on PATH; install it with: "
+                "curl -LsSf https://astral.sh/uv/install.sh | sh"
+            )
+
+        result = subprocess.run(
+            [
+                "uv",
+                "run",
+                "--project",
+                str(swe_bench_project_path),
+                "mini-extra",
+                "--help",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            raise SetupError(
+                f"mini-extra is not available in the SWE-bench subproject at "
+                f"{swe_bench_project_path}. Run: cd {swe_bench_project_path} && uv sync"
+            )
+
+        swebench_result = subprocess.run(
+            [
+                "uv",
+                "run",
+                "--project",
+                str(swe_bench_project_path),
+                "python",
+                "-c",
+                "import swebench",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            timeout=30,
+        )
+        if swebench_result.returncode != 0:
+            raise SetupError(
+                f"swebench is not available in the SWE-bench subproject at "
+                f"{swe_bench_project_path}. Run: cd {swe_bench_project_path} && uv sync"
+            )
+
+        docker_result = subprocess.run(
+            ["docker", "version"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            timeout=10,
+        )
+        if docker_result.returncode != 0:
+            raise SetupError(
+                "Docker daemon is not running or docker is not on PATH. "
+                "Start Docker and retry."
+            )
+
+    def score_single_sample(self, value: str, ground_truth: str) -> float:
+        raise RuntimeError(
+            "SWEBenchScorer uses subprocess evaluation; call score() instead."
+        )
+
+    def _patch_config(self, output_dir: Path, benchmark_config_dict: dict) -> Path:
+        """Load template YAML, patch model fields from benchmark config, write to output_dir."""
+        with self.swebench_config_template.open() as f:
+            cfg = yaml.safe_load(f)
+
+        model_params = benchmark_config_dict.get("model_params", {})
+        endpoints = benchmark_config_dict.get("endpoint_config", {}).get(
+            "endpoints", []
+        )
+
+        cfg["model"]["model_name"] = model_params["name"]
+        if endpoints:
+            base = endpoints[0].rstrip("/")
+            if base.endswith("/v1"):
+                base = base[:-3]
+            cfg["model"]["model_kwargs"]["api_base"] = base + "/v1"
+        else:
+            cfg["model"]["model_kwargs"]["api_base"] = ""
+
+        for field in (
+            "temperature",
+            "top_p",
+            "top_k",
+            "repetition_penalty",
+            "presence_penalty",
+            "frequency_penalty",
+        ):
+            val = model_params.get(field)
+            if val is not None:
+                cfg["model"]["model_kwargs"][field] = val
+            else:
+                cfg["model"]["model_kwargs"].pop(field, None)
+
+        chat_tmpl = model_params.get("chat_template_kwargs")
+        if chat_tmpl is not None:
+            cfg["model"]["model_kwargs"]["chat_template_kwargs"] = chat_tmpl
+        else:
+            cfg["model"]["model_kwargs"].pop("chat_template_kwargs", None)
+
+        patched_path = output_dir / "swebench_patched.yaml"
+        with patched_path.open("w") as f:
+            yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)
+        return patched_path
+
+    def _run_subprocess(self, cmd: list[str], log_path: Path, cwd: Path) -> None:
+        """Run a command inside the accuracy subproject via ``uv run --project``."""
+        full_cmd = [
+            "uv",
+            "run",
+            "--project",
+            str(self.swe_bench_project_path),
+        ] + cmd
+        _run_subprocess_with_log(
+            full_cmd,
+            log_path,
+            timeout_s=self.subprocess_timeout_s,
+            label="SWE-bench",
+            cwd=cwd,
+        )
+
+    def score(self) -> tuple[float | None, int]:
+        """Run mini-swe-agent + swebench evaluation. Returns (resolved_rate, 1)."""
+        config_path = self.report_dir / "config.yaml"
+        if not config_path.exists():
+            raise FileNotFoundError(
+                f"config.yaml not found at {config_path}. "
+                "SWEBenchScorer.score() must be called from within a benchmark run "
+                "that has already written its config, or the path must be pre-populated."
+            )
+        with config_path.open() as f:
+            benchmark_cfg = yaml.safe_load(f)
+
+        model_name: str = benchmark_cfg["model_params"]["name"]
+        assert self.dataset.dataframe is not None
+
+        n_rows = len(self.dataset.dataframe)
+        slice_str = f"0:{min(self.num_instances, n_rows)}"
+
+        output_dir = self.report_dir / "swe_bench_output"
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        patched_config = self._patch_config(output_dir, benchmark_cfg)
+
+        agent_cmd = [
+            "mini-extra",
+            "swebench",
+            "--model",
+            model_name,
+            "--config",
+            str(patched_config),
+            "--subset",
+            self.subset,
+            "--split",
+            self.split,
+            "--slice",
+            slice_str,
+            "--workers",
+            str(self.workers),
+            "--output",
+            str(output_dir),
+        ]
+        logger.info("Running mini-swe-agent: %s", " ".join(agent_cmd))
+        self._run_subprocess(
+            agent_cmd,
+            self.report_dir / "swe_bench_agent.log",
+            cwd=output_dir,
+        )
+
+        preds_path = output_dir / "preds.json"
+        if not preds_path.exists():
+            logger.error(
+                "preds.json not found after mini-swe-agent run; returning None score"
+            )
+            return None, 1
+
+        hf_dataset_name = _SWE_BENCH_HF_MAP[self.subset]
+        run_id = f"endpoints_{uuid.uuid4().hex[:8]}"
+        eval_cmd = [
+            "python",
+            "-m",
+            "swebench.harness.run_evaluation",
+            "--dataset_name",
+            hf_dataset_name,
+            "--split",
+            self.split,
+            "--predictions_path",
+            str(preds_path),
+            "--max_workers",
+            str(self.max_eval_workers),
+            "--run_id",
+            run_id,
+        ]
+        logger.info("Running swebench evaluation: %s", " ".join(eval_cmd))
+        self._run_subprocess(
+            eval_cmd,
+            self.report_dir / "swe_bench_eval.log",
+            cwd=output_dir,
+        )
+
+        safe_model = model_name.replace("/", "__")
+        result_path = output_dir / f"{safe_model}.{run_id}.json"
+        if not result_path.exists():
+            candidates = list(output_dir.glob(f"*{run_id}*.json"))
+            if not candidates:
+                logger.error(
+                    "SWE-bench result file not found (run_id=%s); returning None",
+                    run_id,
+                )
+                return None, 1
+            result_path = candidates[0]
+
+        shutil.copy2(result_path, self.report_dir / "swe_bench_results.json")
+
+        result = msgspec.json.decode(result_path.read_bytes(), type=dict)
+        submitted = result.get("submitted_instances", 0)
+        resolved = result.get("resolved_instances", 0)
+        if submitted == 0:
+            logger.warning("SWE-bench: submitted_instances=0; returning None score")
+            return None, 1
+
+        resolved_rate = resolved / submitted
+        logger.info(
+            "SWE-bench: resolved %d / %d submitted (%.1f%%)",
+            resolved,
+            submitted,
+            resolved_rate * 100,
+        )
+        return resolved_rate, 1

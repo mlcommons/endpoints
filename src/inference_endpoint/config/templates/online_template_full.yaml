@@ -37,7 +37,7 @@ datasets:  # Dataset configs
     prompt: question
     system: system_prompt
   accuracy_config:  # Accuracy evaluation settings
-    eval_method: pass_at_1  # Scorer method | options: pass_at_1, string_match, rouge, code_bench_scorer, shopify_category_f1, agentic_inference_inline, vbench
+    eval_method: pass_at_1  # Scorer method | options: pass_at_1, string_match, rouge, code_bench_scorer, shopify_category_f1, agentic_inference_inline, vbench, swe_bench_scorer
     ground_truth: ground_truth  # Ground truth column name
     extractor: boxed_math_extractor  # Answer extractor (abcd_extractor, boxed_math_extractor, identity_extractor, python_code_extractor)
     num_repeats: 1  # Repeat dataset N times for evaluation

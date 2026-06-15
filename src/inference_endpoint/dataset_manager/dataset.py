@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 import numpy as np
 import pandas as pd
+
 from datasets import load_dataset, load_from_disk
 
 from ..config.schema import APIType, ModelParams
@@ -275,6 +276,10 @@ class Dataset:
 
     DATASET_ID: ClassVar[str]
     """The unique identifier for the dataset. Automatically set by __init_subclass__."""
+
+    ACCURACY_ONLY: ClassVar[bool] = False
+    """If True, this dataset may only be used as an accuracy dataset (type: accuracy).
+    Using it as a performance dataset raises InputValidationError at load time."""
 
     def __init_subclass__(
         cls,

@@ -1,0 +1,46 @@
+type: "offline"
+
+model_params:
+  name: "Qwen/Qwen3.6-35B-A3B"
+  temperature: 1.0
+  top_p: 0.95
+  top_k: 20
+  repetition_penalty: 1.0
+  presence_penalty: 1.5
+  chat_template_kwargs:
+    preserve_thinking: true
+  max_new_tokens: 1
+  streaming: "off"
+
+datasets:
+  # Minimal performance dataset required by the framework. Replace with any
+  # dataset representative of your workload — or a multi-turn dataset if you
+  # want to measure multi-turn throughput alongside SWE-bench accuracy.
+  # swe_bench cannot be used here: problem statements sent without an agent
+  # framework do not reflect real SWE-bench usage.
+  - name: swe_bench_perf
+    type: "performance"
+    path: "tests/assets/datasets/dummy_1k.jsonl"
+
+  # Accuracy dataset — instance_id rows tell mini-swe-agent which instances to run.
+  - name: swe_bench
+    type: "accuracy"
+    accuracy_config:
+      eval_method: "swe_bench_scorer"
+      num_repeats: 1
+      extras:
+        # Defaults to $SWE_BENCH_PROJECT_PATH or the in-repo subproject.
+        # swe_bench_project_path: "/path/to/examples/10_SWEBench_Example/accuracy"
+        swebench_config_template: "examples/10_SWEBench_Example/swebench_template.yaml"
+        num_instances: 100
+
+settings:
+  load_pattern:
+    type: "max_throughput"
+  client:
+    num_workers: 1
+
+endpoint_config:
+  endpoints:
+    - "http://localhost:30000"
+  api_type: "openai"
