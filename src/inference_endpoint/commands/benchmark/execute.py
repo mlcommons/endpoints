@@ -310,8 +310,16 @@ def _load_datasets(
                 acc_cfg.accuracy_config.extras or {},
             )
         )
+        # Per-dataset max_new_tokens override (falls back to global model_params).
+        acc_model_params = (
+            config.model_params
+            if acc_cfg.max_new_tokens is None
+            else config.model_params.model_copy(
+                update={"max_new_tokens": acc_cfg.max_new_tokens}
+            )
+        )
         ds.load(
-            api_type=config.endpoint_config.api_type, model_params=config.model_params
+            api_type=config.endpoint_config.api_type, model_params=acc_model_params
         )
         logger.info(f"Loaded {ds} - {ds.num_samples()} samples")
 
@@ -321,9 +329,18 @@ def _load_datasets(
         raise InputValidationError("Multiple performance datasets not supported")
 
     try:
-        dataloader = DataLoaderFactory.create_loader(performance_cfgs[0])
+        perf_cfg = performance_cfgs[0]
+        # Per-dataset max_new_tokens override (falls back to global model_params).
+        perf_model_params = (
+            config.model_params
+            if perf_cfg.max_new_tokens is None
+            else config.model_params.model_copy(
+                update={"max_new_tokens": perf_cfg.max_new_tokens}
+            )
+        )
+        dataloader = DataLoaderFactory.create_loader(perf_cfg)
         dataloader.load(
-            api_type=config.endpoint_config.api_type, model_params=config.model_params
+            api_type=config.endpoint_config.api_type, model_params=perf_model_params
         )
         logger.info(f"Loaded {dataloader.num_samples()} samples")
     except FileNotFoundError as e:
