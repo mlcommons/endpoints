@@ -244,41 +244,88 @@ event log plus the dataset, and writes `scores.json` into the report directory.
 # server used for accuracy (start it first; see Step 0).
 cd examples/10_Edge_Agentic_Example/
 
+# Recommended reference run (~2.5 h single-stream on a Jetson Thor):
 inference-endpoint benchmark from-config \
-  --config online_agentic_coding_perf.yaml
+  --config online_agentic_coding_2.5h.yaml
+
+# Quick smoke variant (~1 h):
+#   inference-endpoint benchmark from-config --config online_agentic_coding_1h.yaml
 ```
 
-Before running, open `online_agentic_coding_perf.yaml` and set
-`model_params.name` to your served model name. The defaults are tuned for an
-edge endpoint:
+Before running, open the chosen config and set `model_params.name` to your
+served model name. Two ready-to-run configs are provided; both are single-stream
+(`target_concurrency: 1`, matching `llama-server -np 1`), deterministic
+(`temperature 0`, `seed 42`), reasoning **off**, with the online checker enabled
+(`multi_turn.inline_accuracy: true`):
 
-| Setting                                | Value                    | Why                                                                                |
-| -------------------------------------- | ------------------------ | ---------------------------------------------------------------------------------- |
-| `load_pattern.target_concurrency`      | `1` (single-stream)      | Honest measurement for a single-slot edge server (`llama-server -np 1`).           |
-| dataset                                | `agentic_coding_8.jsonl` | 8 smallest trajectories (265 generated turns); one pass ≈ 30–45 min single-stream. |
-| `multi_turn.inline_accuracy`           | `true`                   | Enables the online checker.                                                        |
-| `multi_turn.num_trajectories_to_issue` | `8`                      | One pass over the subset (no trajectory repeats).                                  |
-| `model_params.temperature` / `seed`    | `0` / `42`               | Deterministic decoding so the online check is reproducible.                        |
-| `settings.runtime.max_duration_ms`     | `3600000` (1 h)          | Safety cap so the run stays within an edge budget.                                 |
+| Config                                              | Dataset                     | Conversations | Generated turns | Peak ISL       | One single-stream pass (Thor, reasoning off) |
+| --------------------------------------------------- | --------------------------- | ------------- | --------------- | -------------- | -------------------------------------------- |
+| `online_agentic_coding_2.5h.yaml` **(recommended)** | `agentic_coding_2.5h.jsonl` | 20            | 1007            | ~23.5K (< 32K) | **~2 h 37 m**, IoU 0.6335                    |
+| `online_agentic_coding_1h.yaml` (quick)             | `agentic_coding_1h.jsonl`   | 9             | 483             | ~22.8K (< 32K) | **~73 min**, IoU 0.6189                      |
 
-To run a longer, more representative window, point `path:` at
-`agentic_coding_16.jsonl` (16 conversations, 888 turns; ≈ 2.5 h single-stream)
-or a larger subset, and raise `num_trajectories_to_issue` to match. Only raise
+Both datasets are built so that **no conversation overflows the 32K served
+context** — every turn completes and the run is _valid_ (0 dropped turns). The
+`_2.5h` set is the recommended reference: ~2× the sample of `_1h`, giving a more
+stable inline-accuracy estimate. With serving optimizations (e.g. MTP
+speculative decoding) the `_2.5h` pass drops toward ~1.5 h. Only raise
 `target_concurrency` when pointing at a multi-slot endpoint.
+
+> **Keep reasoning off.** On this tool-calling workload, enabling server-side
+> reasoning gives no inline-accuracy benefit and costs ~60% more wall-clock (see
+> the reference table below). Launch `llama-server` with `--reasoning off`.
 
 ### Verify the performance + online-check results
 
 ```bash
-# Inline accuracy (online checker) score
+# Inline accuracy (online checker) score — adjust the dir for the config you ran
 python3 -c "
 import json, pathlib
-s = json.loads(pathlib.Path('results/agentic_coding_perf/scores.json').read_text())
+s = json.loads(pathlib.Path('results/agentic_coding_perf_2.5h/scores.json').read_text())
 print('Inline accuracy score:', s['score'], '| valid:', s['valid'])
 "
 ```
 
-Performance metrics (throughput, TTFT, TPOT, per-turn latency) are written to
-`results/agentic_coding_perf/` alongside `scores.json`.
+Performance metrics (throughput, TTFT, TPOT, per-turn latency, ISL/OSL) are
+written to `results/agentic_coding_perf_2.5h/` (or `..._1h/`) alongside
+`scores.json`.
+
+### Reference performance + accuracy (Jetson Thor, Q4_K_M + llama.cpp, reasoning off)
+
+Measured on **NVIDIA Jetson Thor**, `Qwen3.6-27B-Q4_K_M` served single-slot
+(`-np 1`, `--reasoning off`, `--ctx-size 32768`, `--flash-attn on`, `-ngl 99`),
+driven single-stream over `agentic_coding_2.5h.jsonl` (1007 generated turns).
+One pass: **2 h 37 m**, 1007/1007 turns, 0 dropped/failed, inline IoU **0.6335**,
+aggregate ~11.8 tok/s.
+
+| Metric                         | p50    | p90    | p99    | max    |
+| ------------------------------ | ------ | ------ | ------ | ------ |
+| **ISL** (input tokens / turn)  | 9,834  | 18,181 | 22,314 | 23,456 |
+| **OSL** (output tokens / turn) | 68     | 203    | 849    | 1,245  |
+| **TTFT**                       | 2.15 s | 4.27 s | 8.47 s | 22.3 s |
+| **TPOT** (per output token)    | ~91 ms | ~95 ms | ~97 ms | ~98 ms |
+| **End-to-end latency / turn**  | 5.9 s  | 16.5 s | 65 s   | 96.9 s |
+
+ISL grows monotonically within a conversation (the deep coding turns reach
+~22–23K, still under 32K); TTFT scales with it, and the latency tail comes from
+the high-ISL + high-OSL turns late in a trajectory.
+
+**Reasoning ON vs OFF** (identical datasets, same Thor class) — reasoning ON
+gives no accuracy benefit for ~60% more wall-clock:
+
+| Dataset              | reasoning OFF                | reasoning ON         |
+| -------------------- | ---------------------------- | -------------------- |
+| `_2.5h` (1007 turns) | IoU **0.6335**, **2 h 37 m** | IoU 0.6374, 4 h 13 m |
+| `_1h` (483 turns)    | IoU **0.6189**, **~73 min**  | IoU 0.6134, 1 h 59 m |
+
+> ⚠️ **Reference baseline — not the final optimized numbers.** These figures
+> characterize an _unoptimized_ edge serving path: stock `llama.cpp` with a
+> `Q4_K_M` GGUF, a single slot, and no speculative decoding / multi-token
+> prediction. They give a **reproducible baseline** and validate the workload and
+> methodology — they are **not** the performance target. Optimized backends
+> (TensorRT-based serving, NVFP4, MTP) are expected to be substantially faster
+> and will be reported separately. Absolute latency/throughput are
+> hardware-specific (measured on Jetson Thor); only accuracy is
+> hardware-independent.
 
 ---
 
