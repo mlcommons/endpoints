@@ -1,6 +1,6 @@
 # Multi-Turn Agentic Benchmark
 
-This example runs multi-turn agentic conversations through an OpenAI-compatible
+This example runs agentic inference conversations through an OpenAI-compatible
 endpoint. The client preserves conversation order, sends one in-flight turn per
 active conversation, and adds `X-Session-ID: <conversation_id>` on every request
 so a router can keep a conversation on the same backend.
@@ -21,7 +21,7 @@ Required fields are `conversation_id`, `turn`, and `role`. User rows normally
 include `content`; agentic rows can also include `system`, `tools`,
 `tool_calls`, `tool_results`, `reasoning_content`, and `delay_seconds`.
 
-Place the dataset under `examples/09_MultiTurn/datasets/` or point the YAML at
+Place the dataset under `examples/10_Agentic_Inference/datasets/` or point the YAML at
 another accessible JSONL path.
 
 ## Start A Server
@@ -46,10 +46,24 @@ visible to the server container or a Hugging Face model id, depending on your
 SGLang environment. `--served-model-name` is the OpenAI model name exposed to
 clients; set `model_params.name` in the YAML to the same value.
 
+To enable Kimi Eagle3 speculative decoding in SGLang, use the
+[`nvidia/Kimi-K2.6-Eagle3`](https://huggingface.co/nvidia/Kimi-K2.6-Eagle3)
+draft checkpoint. Add the following optional flags to the server command and set
+`--speculative-draft-model-path` to that Eagle3 checkpoint path as visible
+inside the server container:
+
+```bash
+  --speculative-algorithm EAGLE3 \
+  --speculative-draft-model-path /path/to/Kimi-K2.6-Eagle3 \
+  --speculative-num-steps 3 \
+  --speculative-eagle-topk 1 \
+  --speculative-num-draft-tokens 4
+```
+
 ## Client YAML
 
 The runnable config is
-`examples/09_MultiTurn/kimi_agentic_benchmark.yaml`.
+`examples/10_Agentic_Inference/kimi_agentic_benchmark.yaml`.
 
 ### Fields
 
@@ -71,16 +85,16 @@ The runnable config is
 - First dataset `path`: JSONL dataset path to run. Set this to a real local or
   mounted dataset path, for example `/path/to/agentic_combined.jsonl`.
 - First dataset `accuracy_config.eval_method`: scorer used during finalization.
-  `multi_turn_inline` scores the performance replay outputs without issuing a
+  `agentic_inference_inline` scores the performance replay outputs without issuing a
   separate accuracy phase.
-- First dataset `multi_turn.enable_salt`: applies deterministic salt
+- First dataset `agentic_inference.enable_salt`: applies deterministic salt
   markers when issuing conversation instances so repeats do not reuse KV cache
   by accident.
-- First dataset `multi_turn.inject_tool_delay`: honors positive
+- First dataset `agentic_inference.inject_tool_delay`: honors positive
   `delay_seconds` values from the dataset before issuing user/tool turns.
-- First dataset `multi_turn.num_trajectories_to_issue`: total number of
+- First dataset `agentic_inference.num_trajectories_to_issue`: total number of
   trajectories to start. Change this to scale runtime.
-- First dataset `multi_turn.stop_issuing_on_first_user_complete`: controls only
+- First dataset `agentic_inference.stop_issuing_on_first_user_complete`: controls only
   whether the client keeps issuing after the measurement window ends. Performance
   tracking always stops when the first concurrency slot finishes a trajectory and
   there is no next trajectory left to assign. If this field is `true`, the client
@@ -88,7 +102,7 @@ The runnable config is
   this field is `false`, the client keeps replaying already-started active
   trajectories to completion for accuracy/log coverage, but those later-issued
   turns are outside the performance measurement window.
-- `settings.runtime.min_duration_ms`: minimum run duration. Multi-turn replay
+- `settings.runtime.min_duration_ms`: minimum run duration. Agentic inference replay
   completion is controlled by trajectory budget and active conversation drain.
 - `settings.load_pattern.type`: enables conversation-aware issuing.
 - `settings.load_pattern.target_concurrency`: maximum active conversations. Each
@@ -114,27 +128,27 @@ For official Kimi agentic benchmark runs, keep these values fixed:
 - `model_params.chat_template_kwargs.thinking: true`
 - `model_params.chat_template_kwargs.preserve_thinking: true`
 - First dataset `type: performance`
-- First dataset `accuracy_config.eval_method: multi_turn_inline`
+- First dataset `accuracy_config.eval_method: agentic_inference_inline`
 - `settings.runtime.min_duration_ms: 0`
-- `settings.load_pattern.type: multi_turn`
+- `settings.load_pattern.type: agentic_inference`
 - `settings.client.warmup_connections: 0`
 - `settings.client.max_idle_time: 0.5`
 - `endpoint_config.api_type: openai`
 
-The multi-turn dataset required defaults are:
+The agentic inference dataset required defaults are:
 
-- First dataset `multi_turn.enable_salt: true`
-- First dataset `multi_turn.inject_tool_delay: true`
-- First dataset `multi_turn.stop_issuing_on_first_user_complete: false`
+- First dataset `agentic_inference.enable_salt: true`
+- First dataset `agentic_inference.inject_tool_delay: true`
+- First dataset `agentic_inference.stop_issuing_on_first_user_complete: false`
 
-Set `multi_turn.num_trajectories_to_issue` to an integer multiple of the
+Set `agentic_inference.num_trajectories_to_issue` to an integer multiple of the
 dataset trajectory count so each repeat has the same representation. Use
-`multi_turn.stop_issuing_on_first_user_complete: true` only for faster
+`agentic_inference.stop_issuing_on_first_user_complete: true` only for faster
 optimization/debug runs, not official benchmark runs.
 
 ### Salting Mechanism
 
-When `multi_turn.enable_salt: true`, the strategy adds a short deterministic
+When `agentic_inference.enable_salt: true`, the strategy adds a short deterministic
 `[salt: ...]` marker before the system prompt for the trajectory repeat and
 another after the system prompt for the conversation. Each salt is four hex characters.
 This restricts kv-cache reuse to:
@@ -145,16 +159,16 @@ This restricts kv-cache reuse to:
 
 ### Inline Accuracy
 
-When `accuracy_config.eval_method: multi_turn_inline` is set on the performance
+When `accuracy_config.eval_method: agentic_inference_inline` is set on the performance
 dataset, the benchmark scores the generated `events.jsonl` during finalization
 and writes `scores.json` under `report_dir`. The scorer uses the loaded
-multi-turn dataset as ground truth, matches completed assistant responses back
+agentic inference dataset as ground truth, matches completed assistant responses back
 to their conversation/turn ids, and compares them with the expected assistant
 turns embedded in the dataset. It does not issue a separate accuracy phase.
 
 ### Tail Management
 
-Multi-turn benchmarks can have a long tail because different users receive
+Agentic inference benchmarks can have a long tail because different users receive
 trajectories with very different turn counts, delays, and generated lengths. In
 large runs this tail can last up to an hour after steady-state work has already
 ended, so the benchmark separates the performance window from the remaining
@@ -167,7 +181,7 @@ performance window even if they finish later; turns issued after it are excluded
 from performance metrics.
 
 For final submissions, keep
-`multi_turn.stop_issuing_on_first_user_complete: false` so the client finishes
+`agentic_inference.stop_issuing_on_first_user_complete: false` so the client finishes
 already-started trajectories for accuracy. During optimization, set it to `true`
 to stop issuing future turns at the performance boundary and shorten the tail.
 
@@ -178,5 +192,5 @@ Update the first `datasets` entry (`name` and `path`), `model_params.name`, and
 
 ```bash
 uv run inference-endpoint benchmark from-config \
-  --config examples/09_MultiTurn/kimi_agentic_benchmark.yaml
+  --config examples/10_Agentic_Inference/kimi_agentic_benchmark.yaml
 ```

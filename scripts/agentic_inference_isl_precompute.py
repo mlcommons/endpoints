@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Offline ISL (Input Sequence Length) computation for multi-turn datasets.
+"""Offline ISL (Input Sequence Length) computation for agentic inference datasets.
 
 Run from the repo root to print the ISL distribution for a dataset::
 
@@ -34,14 +34,16 @@ import pandas as pd
 from inference_endpoint.async_utils.services.metrics_aggregator.token_metrics import (
     _normalize_tool_calls_for_template,
 )
-from inference_endpoint.dataset_manager.multi_turn_dataset import MultiTurnDataset
+from inference_endpoint.dataset_manager.agentic_inference_dataset import (
+    AgenticInferenceDataset,
+)
 from tqdm import tqdm
 from transformers import AutoTokenizer
 
 logger = logging.getLogger(__name__)
 
 
-def _precompute_isl(dataloader: MultiTurnDataset, tokenizer_name: str) -> None:
+def _precompute_isl(dataloader: AgenticInferenceDataset, tokenizer_name: str) -> None:
     samples_with_messages = [s for s in (dataloader.data or []) if s.get("messages")]
     if not samples_with_messages:
         return
@@ -118,7 +120,7 @@ def _precompute_isl(dataloader: MultiTurnDataset, tokenizer_name: str) -> None:
         )
 
 
-def _isl_distribution(dataloader: MultiTurnDataset) -> dict[str, float]:
+def _isl_distribution(dataloader: AgenticInferenceDataset) -> dict[str, float]:
     values = sorted(
         len(s["input_tokens"])
         for s in (dataloader.data or [])
@@ -148,7 +150,7 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
     parser = argparse.ArgumentParser(
-        description="Compute ISL distribution for a multi-turn dataset."
+        description="Compute ISL distribution for an agentic inference dataset."
     )
     parser.add_argument("--dataset", required=True, help="Path to JSONL dataset file.")
     parser.add_argument(
@@ -156,7 +158,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    ds = MultiTurnDataset(pd.read_json(args.dataset, lines=True))
+    ds = AgenticInferenceDataset(pd.read_json(args.dataset, lines=True))
     ds.load()
     _precompute_isl(ds, args.tokenizer)
 

@@ -60,7 +60,9 @@ class LoadPatternType(str, Enum):
     MAX_THROUGHPUT = "max_throughput"  # Offline: all queries at t=0
     POISSON = "poisson"  # Online: fixed QPS with Poisson distribution
     CONCURRENCY = "concurrency"  # Online: fixed concurrent requests
-    MULTI_TURN = "multi_turn"  # Multi-turn conversations with turn sequencing
+    AGENTIC_INFERENCE = (
+        "agentic_inference"  # Agentic inference conversations with turn sequencing
+    )
     BURST = "burst"  # Burst pattern (TODO)
     STEP = "step"  # Step pattern (TODO)
 
@@ -97,7 +99,7 @@ class ScorerMethod(str, Enum):
     ROUGE = "rouge"
     CODE_BENCH = "code_bench_scorer"
     SHOPIFY_CATEGORY_F1 = "shopify_category_f1"
-    MULTI_TURN_INLINE = "multi_turn_inline"
+    AGENTIC_INFERENCE_INLINE = "agentic_inference_inline"
     VBENCH = "vbench"
 
 
@@ -246,12 +248,12 @@ class SubmissionReference(BaseModel):
         return get_ruleset(self.ruleset)
 
 
-class MultiTurnConfig(BaseModel):
-    """Multi-turn conversation configuration.
+class AgenticInferenceConfig(BaseModel):
+    """Agentic inference conversation configuration.
 
     Configuration for benchmarking conversational AI workloads with turn sequencing.
-    Enables testing multi-turn conversations where each turn depends on previous responses.
-    Presence of this block in the dataset config enables multi-turn mode.
+    Enables testing agentic inference conversations where each turn depends on previous responses.
+    Presence of this block in the dataset config enables agentic inference mode.
 
     Attributes:
         turn_timeout_s: Deadline between issuing a turn and receiving its
@@ -274,7 +276,7 @@ class MultiTurnConfig(BaseModel):
         False,
         description=(
             "Add deterministic salt markers before and after the system prompt "
-            "to prevent KV cache reuse across trajectories in multi-turn setting."
+            "to prevent KV cache reuse across trajectories in agentic inference setting."
         ),
     )
     inject_tool_delay: bool = Field(
@@ -334,8 +336,8 @@ class Dataset(BaseModel):
     accuracy_config: AccuracyConfig | None = Field(
         None, description="Accuracy evaluation settings"
     )
-    multi_turn: MultiTurnConfig | None = Field(
-        None, description="Multi-turn conversation configuration"
+    agentic_inference: AgenticInferenceConfig | None = Field(
+        None, description="Agentic inference conversation configuration"
     )
 
     @model_validator(mode="after")
@@ -476,11 +478,11 @@ class LoadPattern(BaseModel):
             raise ValueError(
                 "Concurrency requires --concurrency (e.g., --concurrency 10)"
             )
-        if self.type == LoadPatternType.MULTI_TURN and (
+        if self.type == LoadPatternType.AGENTIC_INFERENCE and (
             not self.target_concurrency or self.target_concurrency <= 0
         ):
             raise ValueError(
-                "Multi-turn requires --concurrency (e.g., --concurrency 96)"
+                "Agentic inference requires --concurrency (e.g., --concurrency 96)"
             )
         return self
 
@@ -809,43 +811,52 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
             if lp.type not in (
                 LoadPatternType.POISSON,
                 LoadPatternType.CONCURRENCY,
-                LoadPatternType.MULTI_TURN,
+                LoadPatternType.AGENTIC_INFERENCE,
             ):
                 raise ValueError(
-                    "Online mode requires --load-pattern (poisson, concurrency, or multi_turn)"
+                    "Online mode requires --load-pattern (poisson, concurrency, or agentic_inference)"
                 )
 
-        # Cross-validate load_pattern.type=multi_turn ↔ performance dataset.multi_turn config
-        has_multi_turn_perf_dataset = any(
-            d.multi_turn is not None
+        # Cross-validate load_pattern.type=agentic_inference against the
+        # performance dataset agentic_inference config.
+        has_agentic_inference_perf_dataset = any(
+            d.agentic_inference is not None
             for d in (self.datasets or [])
             if d.type == DatasetType.PERFORMANCE
         )
-        has_multi_turn_non_perf_dataset = any(
-            d.multi_turn is not None
+        has_agentic_inference_non_perf_dataset = any(
+            d.agentic_inference is not None
             for d in (self.datasets or [])
             if d.type != DatasetType.PERFORMANCE
         )
-        if has_multi_turn_non_perf_dataset:
+        if has_agentic_inference_non_perf_dataset:
             raise ValueError(
-                "multi_turn config is only supported on performance datasets; "
-                "accuracy datasets with multi_turn are not supported"
-            )
-        if lp.type == LoadPatternType.MULTI_TURN and not has_multi_turn_perf_dataset:
-            raise ValueError(
-                "load_pattern.type=multi_turn requires the performance dataset to have multi_turn config"
+                "agentic_inference config is only supported on performance datasets; "
+                "accuracy datasets with agentic_inference are not supported"
             )
         if (
-            lp.type == LoadPatternType.MULTI_TURN
+            lp.type == LoadPatternType.AGENTIC_INFERENCE
+            and not has_agentic_inference_perf_dataset
+        ):
+            raise ValueError(
+                "load_pattern.type=agentic_inference requires the performance "
+                "dataset to have agentic_inference config"
+            )
+        if (
+            lp.type == LoadPatternType.AGENTIC_INFERENCE
             and self.settings.runtime.n_samples_to_issue is not None
         ):
             raise ValueError(
-                "runtime.n_samples_to_issue is not supported for multi-turn runs; "
-                "use datasets[].multi_turn.num_trajectories_to_issue instead"
+                "runtime.n_samples_to_issue is not supported for agentic inference runs; "
+                "use datasets[].agentic_inference.num_trajectories_to_issue instead"
             )
-        if has_multi_turn_perf_dataset and lp.type != LoadPatternType.MULTI_TURN:
+        if (
+            has_agentic_inference_perf_dataset
+            and lp.type != LoadPatternType.AGENTIC_INFERENCE
+        ):
             raise ValueError(
-                f"Performance dataset with multi_turn config requires load_pattern.type=multi_turn, "
+                "Performance dataset with agentic_inference config requires "
+                "load_pattern.type=agentic_inference, "
                 f"got '{lp.type}'"
             )
 

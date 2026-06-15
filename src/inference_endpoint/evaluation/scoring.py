@@ -50,8 +50,8 @@ except ImportError:
 
 from ..core.record import EventRecord, EventType, SampleEventType
 from ..core.types import TextModelOutput
+from ..dataset_manager.agentic_inference_dataset import AgenticInferenceDataset
 from ..dataset_manager.dataset import Dataset
-from ..dataset_manager.multi_turn_dataset import MultiTurnDataset
 from ..dataset_manager.predefined.shopify_product_catalogue import ProductMetadata
 from .extractor import Extractor, PythonCodeExtractor
 
@@ -318,8 +318,8 @@ class RougeScorer(Scorer, scorer_id="rouge"):
         return result, 1
 
 
-class MultiTurnInlineScorer(Scorer, scorer_id="multi_turn_inline"):
-    """Score multi-turn performance replay outputs without issuing another phase."""
+class AgenticInferenceInlineScorer(Scorer, scorer_id="agentic_inference_inline"):
+    """Score agentic inference performance replay outputs without issuing another phase."""
 
     REQUIRES_EXTRACTOR = False
     _EXECUTABLE_ALIASES: ClassVar[dict[str, str]] = {
@@ -414,20 +414,20 @@ class MultiTurnInlineScorer(Scorer, scorer_id="multi_turn_inline"):
         ground_truth_column: str | None = None,
         scores_filename: str = "scores.json",
     ):
-        """Initialize a scorer for already-issued multi-turn performance events.
+        """Initialize a scorer for already-issued agentic inference performance events.
 
         The scorer intentionally does not use an extractor or a single
         ``ground_truth`` column. Ground truth is derived from expected assistant
-        turns in the loaded ``MultiTurnDataset`` dataframe.
+        turns in the loaded ``AgenticInferenceDataset`` dataframe.
 
         Example:
             A performance dataset config such as
-            ``accuracy_config.eval_method: multi_turn_inline`` instantiates this
+            ``accuracy_config.eval_method: agentic_inference_inline`` instantiates this
             scorer with ``dataset_name="performance"`` so it reads the
             performance phase's entries from ``sample_idx_map.json``.
         """
         if extractor is not None:
-            raise ValueError("MultiTurnInlineScorer does not use an extractor")
+            raise ValueError("AgenticInferenceInlineScorer does not use an extractor")
         super().__init__(
             dataset_name=dataset_name,
             dataset=dataset,
@@ -440,7 +440,7 @@ class MultiTurnInlineScorer(Scorer, scorer_id="multi_turn_inline"):
     def score_single_sample(self, value: str, ground_truth: str) -> float:
         """Reject single-sample scoring for the conversation-level scorer.
 
-        Multi-turn accuracy depends on neighboring turns and conversation ids,
+        Agentic inference accuracy depends on neighboring turns and conversation ids,
         so a single output string cannot be scored in isolation.
 
         Example:
@@ -448,11 +448,11 @@ class MultiTurnInlineScorer(Scorer, scorer_id="multi_turn_inline"):
             ``RuntimeError``; callers should use ``score()``.
         """
         raise RuntimeError(
-            "MultiTurnInlineScorer scores whole conversations; call score()."
+            "AgenticInferenceInlineScorer scores whole conversations; call score()."
         )
 
     def score(self) -> tuple[float | None, int]:
-        """Score completed multi-turn performance outputs.
+        """Score completed agentic inference performance outputs.
 
         The method builds expected assistant turns from the loaded dataset,
         reads issued turns and model assistant completions from ``events.jsonl``,
@@ -468,8 +468,10 @@ class MultiTurnInlineScorer(Scorer, scorer_id="multi_turn_inline"):
             is scored by comparing normalized executables such as ``["python"]``
             against the model's bash tool calls.
         """
-        if not isinstance(self.dataset, MultiTurnDataset):
-            raise TypeError("MultiTurnInlineScorer requires a MultiTurnDataset")
+        if not isinstance(self.dataset, AgenticInferenceDataset):
+            raise TypeError(
+                "AgenticInferenceInlineScorer requires an AgenticInferenceDataset"
+            )
         assert (
             self.dataset.dataframe is not None
         ), f"Dataset {self.dataset} has no dataframe loaded"

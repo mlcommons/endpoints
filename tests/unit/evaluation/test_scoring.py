@@ -24,14 +24,16 @@ import pandas as pd
 import pytest
 from inference_endpoint.core.record import EventRecord, EventType, SampleEventType
 from inference_endpoint.core.types import TextModelOutput
-from inference_endpoint.dataset_manager.multi_turn_dataset import MultiTurnDataset
+from inference_endpoint.dataset_manager.agentic_inference_dataset import (
+    AgenticInferenceDataset,
+)
 from inference_endpoint.dataset_manager.predefined.shopify_product_catalogue import (
     ProductMetadata,
 )
 from inference_endpoint.evaluation import scoring as scoring_mod
 from inference_endpoint.evaluation.scoring import (
     _PRED_CATEGORY_PAD,
-    MultiTurnInlineScorer,
+    AgenticInferenceInlineScorer,
     Scorer,
     ShopifyCategoryF1Scorer,
     VBenchScorer,
@@ -226,8 +228,8 @@ class TestShopifyCategoryF1Scorer:
 
 
 @pytest.mark.unit
-class TestMultiTurnInlineScorer:
-    """MultiTurnInlineScorer unit tests."""
+class TestAgenticInferenceInlineScorer:
+    """AgenticInferenceInlineScorer unit tests."""
 
     @staticmethod
     def _bash_tool_call(call_id: str, command: str) -> dict:
@@ -252,7 +254,7 @@ class TestMultiTurnInlineScorer:
                 f.write(encoder.encode(record) + b"\n")
 
     def test_scores_coding_and_workflow_turns(self, tmp_path):
-        dataset = MultiTurnDataset(
+        dataset = AgenticInferenceDataset(
             pd.DataFrame(
                 [
                     {
@@ -323,7 +325,7 @@ class TestMultiTurnInlineScorer:
             ],
         )
 
-        score, repeats = MultiTurnInlineScorer(
+        score, repeats = AgenticInferenceInlineScorer(
             "performance", dataset, report_dir
         ).score()
 
@@ -338,7 +340,7 @@ class TestMultiTurnInlineScorer:
         }
 
     def test_turns_without_ground_truth_are_excluded(self, tmp_path):
-        dataset = MultiTurnDataset(
+        dataset = AgenticInferenceDataset(
             pd.DataFrame(
                 [
                     {
@@ -401,7 +403,7 @@ class TestMultiTurnInlineScorer:
             ],
         )
 
-        score, repeats = MultiTurnInlineScorer(
+        score, repeats = AgenticInferenceInlineScorer(
             "performance", dataset, report_dir
         ).score()
 
@@ -426,7 +428,7 @@ class TestMultiTurnInlineScorer:
         ]
 
     def test_scores_issued_turns_without_rounding_to_full_repeats(self, tmp_path):
-        dataset = MultiTurnDataset(
+        dataset = AgenticInferenceDataset(
             pd.DataFrame(
                 [
                     {
@@ -513,7 +515,7 @@ class TestMultiTurnInlineScorer:
             ],
         )
 
-        score, repeats = MultiTurnInlineScorer(
+        score, repeats = AgenticInferenceInlineScorer(
             "performance", dataset, report_dir
         ).score()
 

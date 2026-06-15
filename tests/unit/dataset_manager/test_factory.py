@@ -15,14 +15,16 @@
 
 import inference_endpoint.dataset_manager.factory as factory_module
 import pytest
+from inference_endpoint.config.schema import AgenticInferenceConfig
 from inference_endpoint.config.schema import Dataset as DatasetConfig
-from inference_endpoint.config.schema import MultiTurnConfig
+from inference_endpoint.dataset_manager.agentic_inference_dataset import (
+    AgenticInferenceDataset,
+)
 from inference_endpoint.dataset_manager.dataset import Dataset
-from inference_endpoint.dataset_manager.multi_turn_dataset import MultiTurnDataset
 
 
 @pytest.mark.unit
-def test_multi_turn_config_selects_multi_turn_loader(monkeypatch):
+def test_agentic_inference_config_selects_agentic_inference_loader(monkeypatch):
     captured: dict[str, object] = {}
 
     def fake_load_from_file(*args, **kwargs):
@@ -38,9 +40,9 @@ def test_multi_turn_config_selects_multi_turn_loader(monkeypatch):
     config = DatasetConfig(
         path="data.jsonl",
         format=".jsonl",
-        multi_turn=MultiTurnConfig(enable_salt=True),
+        agentic_inference=AgenticInferenceConfig(enable_salt=True),
     )
 
     factory_module.DataLoaderFactory.create_loader(config)
 
-    assert captured["dataset_id"] == MultiTurnDataset.DATASET_ID
+    assert captured["dataset_id"] == AgenticInferenceDataset.DATASET_ID

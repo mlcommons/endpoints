@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Async multi-turn load strategy implementing the LoadStrategy protocol."""
+"""Async agentic inference load strategy implementing the LoadStrategy protocol."""
 
 import asyncio
 import hashlib
@@ -22,17 +22,17 @@ import time
 from collections import defaultdict
 from typing import Any
 
-from ..config.schema import MultiTurnConfig
+from ..config.schema import AgenticInferenceConfig
 from ..core.record import ErrorEventType, EventRecord, SampleEventType
 from ..core.types import ErrorData, QueryResult
-from ..dataset_manager.multi_turn_dataset import ConversationMetadata
+from ..dataset_manager.agentic_inference_dataset import ConversationMetadata
 from ..exceptions import InputValidationError
 from .conversation_manager import ConversationManager
 from .strategy import PhaseIssuerProtocol
 
 logger = logging.getLogger(__name__)
 
-# Default turn timeout when no MultiTurnConfig is provided.
+# Default turn timeout when no AgenticInferenceConfig is provided.
 _DEFAULT_TURN_TIMEOUT_S = 86400.0
 
 ConversationTurn = tuple[int, int]
@@ -41,8 +41,8 @@ ActiveConversationState = tuple[str, ConversationTurns, int, int]
 ConversationInstance = tuple[str, str, ConversationTurns, int]
 
 
-class MultiTurnStrategy:
-    """Event-driven multi-turn strategy. Completion of each turn triggers the next.
+class AgenticInferenceStrategy:
+    """Event-driven agentic inference strategy. Completion of each turn triggers the next.
 
     execute() seeds the first N conversations (issues turn 1 for each), then
     awaits _all_done. on_sample_complete() is called synchronously from the
@@ -74,39 +74,41 @@ class MultiTurnStrategy:
         self,
         conversation_manager: ConversationManager,
         dataset_metadata: ConversationMetadata,
-        multi_turn_config: MultiTurnConfig | None = None,
+        agentic_inference_config: AgenticInferenceConfig | None = None,
         target_concurrency: int | None = None,
     ):
-        """Initialize multi-turn strategy.
+        """Initialize agentic inference strategy.
 
         Args:
             conversation_manager: Manages conversation sequencing state.
-            dataset_metadata: ConversationMetadata from MultiTurnDataset (after load()).
-            multi_turn_config: Multi-turn conversation configuration.
+            dataset_metadata: ConversationMetadata from AgenticInferenceDataset (after load()).
+            agentic_inference_config: Agentic inference conversation configuration.
             target_concurrency: Maximum number of simultaneously active conversations.
                 None means all conversations run concurrently.
         """
         self._conv_manager = conversation_manager
         self._dataset_metadata = dataset_metadata
-        self._multi_turn_config = multi_turn_config
+        self._agentic_inference_config = agentic_inference_config
         self._num_trajectories_to_issue = (
-            multi_turn_config.num_trajectories_to_issue
-            if multi_turn_config is not None
+            agentic_inference_config.num_trajectories_to_issue
+            if agentic_inference_config is not None
             else None
         )
         self._stop_issuing_on_first_user_complete = (
-            multi_turn_config.stop_issuing_on_first_user_complete
-            if multi_turn_config is not None
+            agentic_inference_config.stop_issuing_on_first_user_complete
+            if agentic_inference_config is not None
             else False
         )
         self._turn_timeout_s = (
-            multi_turn_config.turn_timeout_s
-            if multi_turn_config is not None
+            agentic_inference_config.turn_timeout_s
+            if agentic_inference_config is not None
             else _DEFAULT_TURN_TIMEOUT_S
         )
         self._target_concurrency = target_concurrency
         self._enable_salt = (
-            multi_turn_config.enable_salt if multi_turn_config is not None else False
+            agentic_inference_config.enable_salt
+            if agentic_inference_config is not None
+            else False
         )
 
         # Composite on_sample_complete callback set by execute.py; used by
@@ -131,7 +133,7 @@ class MultiTurnStrategy:
         self._performance_tracking_stopped = False
 
     async def execute(self, phase_issuer: PhaseIssuerProtocol) -> int:
-        """Drive multi-turn sample issuance.
+        """Drive agentic inference sample issuance.
 
         Args:
             phase_issuer: Interface for issuing samples to the endpoint.
@@ -271,8 +273,8 @@ class MultiTurnStrategy:
 
         delay = 0.0
         if (
-            self._multi_turn_config is not None
-            and self._multi_turn_config.inject_tool_delay
+            self._agentic_inference_config is not None
+            and self._agentic_inference_config.inject_tool_delay
         ):
             delay_map = self._dataset_metadata.delay_seconds_by_key
             delay = float(delay_map.get((source_id, turn), 0.0))
@@ -360,7 +362,7 @@ class MultiTurnStrategy:
         )
         if not messages:
             raise InputValidationError(
-                "multi_turn.enable_salt requires pre-built messages for every "
+                "agentic_inference.enable_salt requires pre-built messages for every "
                 f"client turn; conversation {source_id!r} turn {turn} has none"
             )
 
@@ -398,7 +400,7 @@ class MultiTurnStrategy:
                 )
                 return salted_messages
         raise InputValidationError(
-            "multi_turn.enable_salt requires a system prompt for every "
+            "agentic_inference.enable_salt requires a system prompt for every "
             f"conversation; conversation {conversation_id!r} has no system prompt"
         )
 
@@ -415,7 +417,7 @@ class MultiTurnStrategy:
                     message.get("role") == "system" for message in messages
                 ):
                     raise InputValidationError(
-                        "multi_turn.enable_salt requires a system prompt for every "
+                        "agentic_inference.enable_salt requires a system prompt for every "
                         f"conversation; conversation {source_id!r} turn {turn} "
                         "has no system prompt"
                     )
