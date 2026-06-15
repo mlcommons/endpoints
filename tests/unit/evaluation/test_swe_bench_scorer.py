@@ -230,7 +230,6 @@ class TestSWEBenchScorer:
                 "chat_template_kwargs": {"preserve_thinking": True},
             },
         )
-        _write_sample_idx_map(report_dir)
 
         scorer = SWEBenchScorer(
             dataset_name=_DATASET_NAME,
@@ -271,7 +270,6 @@ class TestSWEBenchScorer:
 
         # model_params has no top_k — should be removed from patched config
         _write_benchmark_config(report_dir)
-        _write_sample_idx_map(report_dir)
 
         scorer = SWEBenchScorer(
             dataset_name=_DATASET_NAME,

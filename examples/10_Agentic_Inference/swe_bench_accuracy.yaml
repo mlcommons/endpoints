@@ -24,6 +24,7 @@ datasets:
       prompt: text_input
 
   # Accuracy dataset — instance_id rows tell mini-swe-agent which instances to run.
+  # First run downloads ~10 MB from HuggingFace and caches to datasets_dir.
   - name: swe_bench
     type: "accuracy"
     accuracy_config:

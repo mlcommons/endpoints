@@ -861,6 +861,34 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
                 f"got '{lp.type}'"
             )
 
+        # For swe_bench_scorer, forward target_concurrency as workers when the
+        # user has not set it explicitly. mini-swe-agent's parallelism should
+        # match the endpoint's concurrency budget.
+        concurrency = (
+            lp.target_concurrency
+            if lp.type
+            in (LoadPatternType.CONCURRENCY, LoadPatternType.AGENTIC_INFERENCE)
+            and lp.target_concurrency
+            else None
+        )
+        if concurrency is not None and self.datasets:
+            updated_datasets = []
+            changed = False
+            for ds in self.datasets:
+                acc = ds.accuracy_config
+                if (
+                    acc is not None
+                    and acc.eval_method == ScorerMethod.SWE_BENCH
+                    and (acc.extras is None or "workers" not in acc.extras)
+                ):
+                    new_extras = {**(acc.extras or {}), "workers": concurrency}
+                    new_acc = acc.model_copy(update={"extras": new_extras})
+                    ds = ds.model_copy(update={"accuracy_config": new_acc})
+                    changed = True
+                updated_datasets.append(ds)
+            if changed:
+                object.__setattr__(self, "datasets", updated_datasets)
+
         return self
 
     @model_validator(mode="after")

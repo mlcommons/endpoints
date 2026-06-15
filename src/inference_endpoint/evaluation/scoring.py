@@ -115,7 +115,7 @@ class Scorer(ABC):
         """Return the number of samples the scorer will evaluate externally, or None.
 
         Used to surface sample counts for scorers that skip the endpoint phase and
-        manage their own evaluation (e.g. SWEBenchScorer running via mini-extra).
+        manage their own evaluation (e.g. `SWEBenchScorer`).
         The default returns None (scorer uses the endpoint accuracy phase normally).
         """
         return None
@@ -200,8 +200,8 @@ class Scorer(ABC):
                 Returns None as the score if evaluation fails.
         """
         assert self.sample_index_map is not None, (
-            f"{self.__class__.__name__} sets SKIP_ENDPOINT_PHASE=True but did not "
-            "override score(); either override score() or set SKIP_ENDPOINT_PHASE=False."
+            f"{self.__class__.__name__}.SKIP_ENDPOINT_PHASE is True but score() was not "
+            "overridden; override score() to implement external evaluation."
         )
         df = self.get_outputs()
 
@@ -1723,11 +1723,11 @@ _DEFAULT_SWE_BENCH_TEMPLATE = (
 
 
 class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
-    """SWE-bench accuracy scorer using mini-swe-agent.
+    """SWE-bench accuracy scorer using the mini-extra CLI (mini-swe-agent package).
 
-    Invokes mini-extra and swebench via ``uv run --project <swe_bench_project_path>``
-    so the parent process never imports them directly. Run ``uv sync`` in the subproject
-    directory once before use.
+    Invokes ``mini-extra swebench`` and ``swebench.harness.run_evaluation`` via
+    ``uv run --project <swe_bench_project_path>`` so the parent process never imports
+    them directly. Run ``uv sync`` in the subproject directory once before use.
     """
 
     REQUIRES_EXTRACTOR: ClassVar[bool] = False
@@ -1961,7 +1961,10 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
             benchmark_cfg = yaml.safe_load(f)
 
         model_name: str = benchmark_cfg["model_params"]["name"]
-        assert self.dataset.dataframe is not None
+        if self.dataset.dataframe is None:
+            raise RuntimeError(
+                "SWEBench dataset must be loaded before scoring; call dataset.load() first."
+            )
 
         n_rows = len(self.dataset.dataframe)
         slice_str = f"0:{min(self.num_instances, n_rows)}"
@@ -1989,7 +1992,7 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
             "--output",
             str(output_dir),
         ]
-        logger.info("Running mini-swe-agent: %s", " ".join(agent_cmd))
+        logger.info("Running mini-extra swebench: %s", " ".join(agent_cmd))
         self._run_subprocess(
             agent_cmd,
             self.report_dir / "swe_bench_agent.log",

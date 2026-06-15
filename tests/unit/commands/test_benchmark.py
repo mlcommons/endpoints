@@ -82,8 +82,9 @@ TEMPLATE_DIR = (
 )
 
 
-# Test-only scorer used by TestBuildPhases.test_skip_endpoint_phase_omits_accuracy_phase.
-# Registered with a leading underscore so TestScorerMethodSync can exclude it.
+# Test-only scorers registered with leading-underscore IDs so TestScorerMethodSync excludes them.
+
+
 class _SelfContainedScorer(Scorer, scorer_id="_test_skip_endpoint_phase"):
     SKIP_ENDPOINT_PHASE = True
 
@@ -92,6 +93,15 @@ class _SelfContainedScorer(Scorer, scorer_id="_test_skip_endpoint_phase"):
 
     def score(self):
         return 1.0, 1
+
+
+class _FailingPreflightScorer(Scorer, scorer_id="_test_failing_preflight"):
+    @classmethod
+    def preflight(cls, extras):
+        raise SetupError("mock preflight failure")
+
+    def score_single_sample(self, value, ground_truth):
+        return 0.0
 
 
 # Reusable minimal config kwargs
@@ -419,45 +429,82 @@ class TestAccuracyOnlyDataset:
     @pytest.mark.unit
     def test_preflight_error_propagates(self, tmp_path):
         """A scorer whose preflight() raises SetupError must stop _load_datasets."""
+        dummy_jsonl = tmp_path / "dummy.jsonl"
+        dummy_jsonl.write_text('{"prompt": "hello"}\n')
+        fake_acc_df = pd.DataFrame(
+            [{"instance_id": "repo__repo-0", "prompt": "Fix bug 0"}]
+        )
+        config = OfflineConfig(
+            endpoint_config={"endpoints": ["http://test:8000"]},
+            model_params={"name": "test-model"},
+            datasets=[
+                {"type": "performance", "path": str(dummy_jsonl)},
+                {
+                    "name": "swe_bench",
+                    "type": "accuracy",
+                    "accuracy_config": {"eval_method": "swe_bench_scorer"},
+                },
+            ],
+        )
+        with (
+            patch.object(SWEBench, "generate", return_value=fake_acc_df),
+            patch.object(
+                execute_mod,
+                "_resolve_accuracy_components",
+                return_value=(_FailingPreflightScorer, None),
+            ),
+            pytest.raises(SetupError, match="mock preflight failure"),
+        ):
+            _load_datasets(config, tmp_path)
 
-        class _FailingPreflight(Scorer, scorer_id="_test_failing_preflight2"):
-            @classmethod
-            def preflight(cls, extras):
-                raise SetupError("mock preflight failure")
+    @pytest.mark.unit
+    def test_concurrency_injected_into_swe_bench_extras(self):
+        """target_concurrency is forwarded as workers into swe_bench_scorer extras."""
+        config = OnlineConfig(
+            endpoint_config={"endpoints": ["http://test:8000"]},
+            model_params={"name": "test-model"},
+            datasets=[
+                {
+                    "name": "swe_bench",
+                    "type": "accuracy",
+                    "accuracy_config": {"eval_method": "swe_bench_scorer"},
+                },
+                {"type": "performance", "path": "tests/assets/datasets/dummy_1k.jsonl"},
+            ],
+            settings={
+                "load_pattern": {"type": "concurrency", "target_concurrency": 32}
+            },
+        )
+        acc_ds = next(d for d in config.datasets if d.type == DatasetType.ACCURACY)
+        assert acc_ds.accuracy_config is not None
+        assert acc_ds.accuracy_config.extras is not None
+        assert acc_ds.accuracy_config.extras.get("workers") == 32
 
-            def score_single_sample(self, value, ground_truth):
-                return 0.0
-
-        try:
-            dummy_jsonl = tmp_path / "dummy.jsonl"
-            dummy_jsonl.write_text('{"prompt": "hello"}\n')
-            fake_acc_df = pd.DataFrame(
-                [{"instance_id": "repo__repo-0", "prompt": "Fix bug 0"}]
-            )
-            config = OfflineConfig(
-                endpoint_config={"endpoints": ["http://test:8000"]},
-                model_params={"name": "test-model"},
-                datasets=[
-                    {"type": "performance", "path": str(dummy_jsonl)},
-                    {
-                        "name": "swe_bench",
-                        "type": "accuracy",
-                        "accuracy_config": {"eval_method": "swe_bench_scorer"},
+    @pytest.mark.unit
+    def test_explicit_workers_not_overridden_by_concurrency(self):
+        """An explicit workers= in extras is not overwritten by target_concurrency."""
+        config = OnlineConfig(
+            endpoint_config={"endpoints": ["http://test:8000"]},
+            model_params={"name": "test-model"},
+            datasets=[
+                {
+                    "name": "swe_bench",
+                    "type": "accuracy",
+                    "accuracy_config": {
+                        "eval_method": "swe_bench_scorer",
+                        "extras": {"workers": 5},
                     },
-                ],
-            )
-            with (
-                patch.object(SWEBench, "generate", return_value=fake_acc_df),
-                patch.object(
-                    execute_mod,
-                    "_resolve_accuracy_components",
-                    return_value=(_FailingPreflight, None),
-                ),
-                pytest.raises(SetupError, match="mock preflight failure"),
-            ):
-                _load_datasets(config, tmp_path)
-        finally:
-            Scorer.PREDEFINED.pop("_test_failing_preflight2", None)
+                },
+                {"type": "performance", "path": "tests/assets/datasets/dummy_1k.jsonl"},
+            ],
+            settings={
+                "load_pattern": {"type": "concurrency", "target_concurrency": 32}
+            },
+        )
+        acc_ds = next(d for d in config.datasets if d.type == DatasetType.ACCURACY)
+        assert acc_ds.accuracy_config is not None
+        assert acc_ds.accuracy_config.extras is not None
+        assert acc_ds.accuracy_config.extras.get("workers") == 5
 
 
 class TestYAMLTemplateValidation:

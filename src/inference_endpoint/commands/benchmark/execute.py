@@ -285,6 +285,10 @@ def _load_datasets(
         )
         assert acc_cfg.accuracy_config is not None
 
+        extras = acc_cfg.accuracy_config.extras or {}
+
+        scorer_cls.preflight(extras)
+
         ds = DataLoaderFactory.create_loader(
             acc_cfg, num_repeats=acc_cfg.accuracy_config.num_repeats
         )
@@ -299,10 +303,9 @@ def _load_datasets(
                 report_dir,
                 acc_cfg.accuracy_config.ground_truth,
                 acc_cfg.accuracy_config.num_repeats,
-                acc_cfg.accuracy_config.extras or {},
+                extras,
             )
         )
-        scorer_cls.preflight(acc_cfg.accuracy_config.extras or {})
         ds.load(
             api_type=config.endpoint_config.api_type, model_params=config.model_params
         )
