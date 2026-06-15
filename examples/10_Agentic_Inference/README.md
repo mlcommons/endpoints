@@ -194,3 +194,28 @@ Update the first `datasets` entry (`name` and `path`), `model_params.name`, and
 uv run inference-endpoint benchmark from-config \
   --config examples/10_Agentic_Inference/kimi_agentic_benchmark.yaml
 ```
+
+## SWE-bench Accuracy
+
+`swe_bench_accuracy.yaml` runs the SWE-bench accuracy evaluation alongside a
+minimal performance dataset. The accuracy phase is handled entirely by
+`SWEBenchScorer`, which shells out to `mini-swe-agent` and the `swebench`
+evaluation harness — no endpoint traffic is sent for accuracy samples.
+
+The isolated `uv` environment for those tools lives in `accuracy/`. Sync it
+once before running:
+
+```bash
+cd examples/10_Agentic_Inference/accuracy
+uv sync
+```
+
+Then run the benchmark from the repo root:
+
+```bash
+uv run inference-endpoint benchmark from-config \
+  --config examples/10_Agentic_Inference/swe_bench_accuracy.yaml
+```
+
+See `accuracy/RUNBOOK.md` for preconditions, sanity checks, and common failure
+modes.

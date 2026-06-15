@@ -1708,13 +1708,16 @@ def _run_subprocess_with_log(
 
 
 _DEFAULT_SWE_BENCH_PROJECT_PATH = (
-    Path(__file__).resolve().parents[3] / "examples" / "09_MultiTurn" / "accuracy"
+    Path(__file__).resolve().parents[3]
+    / "examples"
+    / "10_Agentic_Inference"
+    / "accuracy"
 )
 _SWE_BENCH_PROJECT_PATH_ENV = "SWE_BENCH_PROJECT_PATH"
 _DEFAULT_SWE_BENCH_TEMPLATE = (
     Path(__file__).resolve().parents[3]
     / "examples"
-    / "09_MultiTurn"
+    / "10_Agentic_Inference"
     / "swebench_template.yaml"
 )
 

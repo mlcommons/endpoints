@@ -10,7 +10,7 @@
 # so the main benchmark process never needs to import these packages.
 #
 # Usage on the accuracy host:
-#   cd examples/09_MultiTurn/accuracy
+#   cd examples/10_Agentic_Inference/accuracy
 #   uv sync
 #   # SWEBenchScorer in the parent will shell out automatically.
 
