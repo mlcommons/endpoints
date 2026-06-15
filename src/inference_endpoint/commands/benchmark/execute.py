@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import random
 import shutil
 import signal
@@ -96,6 +97,31 @@ from inference_endpoint.metrics.report import Report
 transformers_logging.set_verbosity_error()
 
 logger = logging.getLogger(__name__)
+
+_SERVICE_READY_TIMEOUT_ENV = "INFERENCE_ENDPOINT_SERVICE_READY_TIMEOUT_S"
+_SERVICE_READY_TIMEOUT_DEFAULT = 30.0
+
+
+def _service_ready_timeout() -> float:
+    """Service-startup readiness timeout, overridable via env.
+
+    Service imports off a shared/Lustre FS can exceed the default under heavy
+    login-node I/O contention. A non-numeric override is ignored with a warning
+    rather than crashing setup.
+    """
+    raw = os.environ.get(_SERVICE_READY_TIMEOUT_ENV)
+    if raw is None:
+        return _SERVICE_READY_TIMEOUT_DEFAULT
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning(
+            "Ignoring non-numeric %s=%r; using default %.0fs",
+            _SERVICE_READY_TIMEOUT_ENV,
+            raw,
+            _SERVICE_READY_TIMEOUT_DEFAULT,
+        )
+        return _SERVICE_READY_TIMEOUT_DEFAULT
 
 
 def _default_report_path() -> Path:
@@ -456,11 +482,29 @@ def _build_phases(
                 f"Accuracy dataset '{eval_cfg.dataset_name}' is a MultiTurnDataset, "
                 "which is not yet supported for accuracy evaluation."
             )
-        # Accuracy phases run at MAX_THROUGHPUT; inheriting perf_lp (e.g. POISSON)
-        # would silently rate-limit evaluation until a multi-turn accuracy strategy
-        # and QPS-budgeting support are added.
-        acc_load_pattern: LoadPattern | None = LoadPattern(
-            type=LoadPatternType.MAX_THROUGHPUT
+        # When the perf phase runs CONCURRENCY (online), the accuracy phase
+        # mirrors that fixed concurrency so evaluation exercises the endpoint
+        # the same way. Every other pattern keeps MAX_THROUGHPUT — inheriting
+        # POISSON would silently rate-limit evaluation to the perf QPS, which
+        # has no QPS-budgeting support for accuracy yet.
+        perf_lp = ctx.rt_settings.load_pattern
+        acc_load_pattern: LoadPattern | None
+        if perf_lp is not None and perf_lp.type == LoadPatternType.CONCURRENCY:
+            acc_load_pattern = LoadPattern(
+                type=LoadPatternType.CONCURRENCY,
+                target_concurrency=perf_lp.target_concurrency,
+            )
+        else:
+            acc_load_pattern = LoadPattern(type=LoadPatternType.MAX_THROUGHPUT)
+        logger.info(
+            "Accuracy issuer '%s' load mode: %s%s",
+            eval_cfg.dataset_name,
+            acc_load_pattern.type.value,
+            (
+                f" (target_concurrency={acc_load_pattern.target_concurrency})"
+                if acc_load_pattern.type == LoadPatternType.CONCURRENCY
+                else ""
+            ),
         )
         acc_settings = RuntimeSettings(
             metric_target=ctx.rt_settings.metric_target,
@@ -612,7 +656,7 @@ async def _run_benchmark_async(
                     args=event_logger_args,
                 ),
             ],
-            timeout=30.0,
+            timeout=_service_ready_timeout(),
         )
 
         # Create endpoint client on the shared loop
@@ -866,14 +910,20 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
     # Accuracy scoring
     accuracy_scores: dict[str, Any] = {}
     for eval_cfg in ctx.eval_configs:
-        scorer_instance = eval_cfg.scorer(
-            eval_cfg.dataset_name,
-            eval_cfg.dataset,
-            eval_cfg.report_dir,
-            extractor=eval_cfg.extractor,
-            ground_truth_column=eval_cfg.ground_truth_column,
-            **eval_cfg.extras,
-        )
+        try:
+            scorer_instance = eval_cfg.scorer(
+                eval_cfg.dataset_name,
+                eval_cfg.dataset,
+                eval_cfg.report_dir,
+                extractor=eval_cfg.extractor,
+                ground_truth_column=eval_cfg.ground_truth_column,
+                **eval_cfg.extras,
+            )
+        except TypeError as e:
+            raise InputValidationError(
+                f"Dataset '{eval_cfg.dataset_name}': invalid accuracy_config.extras "
+                f"for scorer '{eval_cfg.scorer.__name__}': {e}"
+            ) from e
         score, n_repeats = scorer_instance.score()
         assert eval_cfg.dataset.data is not None
         accuracy_scores[eval_cfg.dataset_name] = {
@@ -885,8 +935,15 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
             "ground_truth_column": eval_cfg.ground_truth_column,
             "score": score,
             "n_repeats": n_repeats,
+            # False when the scorer produced only a partial headline (e.g.
+            # DeepSeekR1Scorer when the lcb-service container was unreachable),
+            # so a partial number is never mistaken for a complete one.
+            "complete": scorer_instance.complete,
         }
-        logger.info(f"Score for {eval_cfg.dataset_name}: {score} ({n_repeats} repeats)")
+        logger.info(
+            f"Score for {eval_cfg.dataset_name}: {score} "
+            f"({n_repeats} repeats, complete={scorer_instance.complete})"
+        )
 
     # Report metrics: prefer Report from MetricsSnapshot, fall back to SessionResult
     if report is not None and report.duration_ns is not None:
