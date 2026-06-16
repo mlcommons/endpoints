@@ -16,11 +16,14 @@
 """Tests for benchmark CLI models, config building, and command handlers."""
 
 import asyncio
+import io
+import json
 import random
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+from urllib import error as urllib_error
 
 import pandas as pd
 import pytest
@@ -34,7 +37,11 @@ from inference_endpoint.commands.benchmark.execute import (
     BenchmarkContext,
     ResponseCollector,
     _build_phases,
+    _derive_profile_urls,
+    _post_profile,
+    _render_profile_status,
     _run_benchmark_async,
+    _write_profiling_section,
     setup_benchmark,
 )
 from inference_endpoint.config.runtime_settings import RuntimeSettings
@@ -46,6 +53,7 @@ from inference_endpoint.config.schema import (
     LoadPatternType,
     OfflineSettings,
     OnlineSettings,
+    ProfilerEngine,
     RuntimeConfig,
     ScorerMethod,
     StreamingMode,
@@ -1277,3 +1285,108 @@ class TestSetupBenchmarkTokenizer:
             ctx = setup_benchmark(config, TestMode.PERF)
 
         assert ctx.tokenizer_name is None
+
+
+class TestProfilingHelpers:
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "endpoint,expected",
+        [
+            ("http://h:8000/v1", "http://h:8000/start_profile"),
+            ("http://h:8000/v1/", "http://h:8000/start_profile"),
+            ("http://h:8000", "http://h:8000/start_profile"),
+        ],
+    )
+    def test_derive_strips_v1(self, endpoint, expected):
+        out = _derive_profile_urls([endpoint], ProfilerEngine.VLLM, "start")
+        assert out == [expected]
+
+    @pytest.mark.unit
+    def test_derive_stop_path_and_fanout(self):
+        out = _derive_profile_urls(
+            ["http://a/v1", "http://b/v1"], ProfilerEngine.VLLM, "stop"
+        )
+        assert out == ["http://a/stop_profile", "http://b/stop_profile"]
+
+    @pytest.mark.unit
+    def test_derive_empty_endpoints_raises(self):
+        with pytest.raises(ValueError):
+            _derive_profile_urls([], ProfilerEngine.VLLM, "start")
+
+    @pytest.mark.unit
+    def test_post_profile_200(self):
+        resp = MagicMock()
+        resp.__enter__.return_value.status = 200
+        with patch(
+            "inference_endpoint.commands.benchmark.execute.urllib_request.urlopen",
+            return_value=resp,
+        ):
+            rec = _post_profile("http://h/start_profile")
+        assert rec["status"] == 200
+        assert rec["error"] is None
+        assert "sent_at_ns" in rec
+        assert "sent_at_iso" in rec
+
+    @pytest.mark.unit
+    def test_post_profile_http_error(self):
+        err = urllib_error.HTTPError("http://h", 404, "Not Found", {}, None)
+        with patch(
+            "inference_endpoint.commands.benchmark.execute.urllib_request.urlopen",
+            side_effect=err,
+        ):
+            rec = _post_profile("http://h/start_profile")
+        assert rec["status"] == 404
+        assert "404" in rec["error"]
+
+    @pytest.mark.unit
+    def test_post_profile_connection_failure_never_raises(self):
+        with patch(
+            "inference_endpoint.commands.benchmark.execute.urllib_request.urlopen",
+            side_effect=OSError("refused"),
+        ):
+            rec = _post_profile("http://h/start_profile")
+        assert rec["status"] is None
+        assert "OSError" in rec["error"]
+
+    @pytest.mark.unit
+    def test_render_status_200(self):
+        assert _render_profile_status({"status": 200, "error": None}) == "200 OK"
+
+    @pytest.mark.unit
+    def test_render_status_404_hint(self):
+        out = _render_profile_status({"status": 404, "error": "404 Not Found"})
+        assert "profiling not enabled" in out
+
+    @pytest.mark.unit
+    def test_write_section_and_json_roundtrip(self):
+        payload = {
+            "engine": "vllm",
+            "starts": [
+                {
+                    "url": "http://h/start_profile",
+                    "status": 200,
+                    "error": None,
+                    "sent_at_ns": 1,
+                    "sent_at_iso": "2026-01-01T00:00:00.000",
+                }
+            ],
+            "stops": [
+                {
+                    "url": "http://h/stop_profile",
+                    "status": 200,
+                    "error": None,
+                    "stop_reason": "phase_end",
+                    "sent_at_ns": 2,
+                    "sent_at_iso": "2026-01-01T00:00:01.000",
+                }
+            ],
+        }
+        buf = io.StringIO()
+        _write_profiling_section(buf, payload)
+        text = buf.getvalue()
+        assert "Profiling" in text
+        assert "http://h/start_profile" in text
+        assert "http://h/stop_profile" in text
+        assert "Trigger span" in text
+        # Mirrors what finalize_benchmark dumps to profiling.json
+        assert json.loads(json.dumps(payload))["engine"] == "vllm"
