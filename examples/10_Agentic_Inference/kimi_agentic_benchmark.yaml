@@ -23,6 +23,13 @@ datasets:
       num_trajectories_to_issue: 990 # Should be integer multiple of 990.
       # Required benchmark default; set to true only for faster optimization/debug runs.
       stop_issuing_on_first_user_complete: false
+  - name: swe_bench
+    type: "accuracy"
+    accuracy_config:
+      eval_method: "swe_bench_scorer"
+      num_repeats: 1
+      extras:
+        num_instances: 200
 
 settings:
   runtime:
