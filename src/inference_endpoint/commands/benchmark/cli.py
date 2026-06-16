@@ -18,7 +18,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated
 
 import cyclopts
 import yaml
@@ -29,7 +29,6 @@ from inference_endpoint.config.schema import (
     BenchmarkConfig,
     OfflineBenchmarkConfig,
     OnlineBenchmarkConfig,
-    ProfilerEngine,
     TestMode,
     TestType,
 )
@@ -99,22 +98,6 @@ def from_config(
     config: Annotated[Path, cyclopts.Parameter(name=["--config", "-c"])],
     timeout: float | None = None,
     mode: TestMode | None = None,
-    profile: Annotated[
-        ProfilerEngine | None,
-        cyclopts.Parameter(
-            name="--profile",
-            help="Profile the named inference engine around the performance phase",
-        ),
-    ] = None,
-    profile_urls: Annotated[
-        list[str] | None,
-        cyclopts.Parameter(
-            name="--profile-urls",
-            help="Override URL(s) for profiler triggers; "
-            "defaults to endpoint_config.endpoints",
-            negative="",
-        ),
-    ] = None,
 ):
     """Run benchmark from YAML config file."""
     try:
@@ -123,15 +106,6 @@ def from_config(
         raise InputValidationError(f"Config error: {e}") from e
     if timeout is not None:
         resolved = resolved.with_updates(timeout=timeout)
-    profiling_update: dict[str, Any] = {}
-    if profile is not None:
-        profiling_update["engine"] = profile
-    if profile_urls is not None:
-        profiling_update["urls"] = profile_urls
-    if profiling_update:
-        new_profiling = resolved.settings.profiling.model_copy(update=profiling_update)
-        new_settings = resolved.settings.model_copy(update={"profiling": new_profiling})
-        resolved = resolved.with_updates(settings=new_settings)
     test_mode = mode or (
         TestMode.BOTH if resolved.type == TestType.SUBMISSION else TestMode.PERF
     )
