@@ -20,7 +20,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 from collections.abc import Callable
 from pathlib import Path
 
@@ -35,6 +34,7 @@ from inference_endpoint.async_utils.services.metrics_aggregator.snapshot import 
 )
 from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
 from inference_endpoint.async_utils.transport.zmq.pubsub import ZmqMessagePublisher
+from inference_endpoint.utils import write_json_atomic
 
 logger = logging.getLogger(__name__)
 
@@ -244,37 +244,7 @@ class MetricsPublisher:
             logger.exception("metrics: pub/sub final signal failed")
 
     def _write_atomic_json(self, payload: bytes) -> None:
-        """Write payload atomically to ``final_snapshot_path``.
-
-        Sequence: write tmp + fsync(tmp) → rename → fsync(parent dir) so
-        the rename itself is durable across crashes. The path either
-        contains the new snapshot or contains the old contents (if any)
-        — never partial bytes. The parent directory is the caller's
-        responsibility — `__main__.py` validates it on startup so a
-        missing directory surfaces in the subprocess's own context
-        rather than as a 30 s parent-side launch timeout.
-        """
-        path = self._final_snapshot_path
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        # Wrap so a failure between tmp-write and rename doesn't leak
-        # the .tmp file across runs (e.g. EXDEV cross-device, parent
-        # directory removed mid-write, permission change). The rename
-        # is the atomicity boundary: before it, .tmp is partial state;
-        # after it, .tmp doesn't exist (rename consumed it).
-        try:
-            with tmp.open("wb") as f:
-                f.write(payload)
-                f.flush()
-                os.fsync(f.fileno())
-            os.rename(tmp, path)
-        except BaseException:
-            tmp.unlink(missing_ok=True)
-            raise
-        dir_fd = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(dir_fd)
-        finally:
-            os.close(dir_fd)
+        write_json_atomic(self._final_snapshot_path, payload)
 
     # ------------------------------------------------------------------
     # Lifecycle

@@ -22,10 +22,12 @@ This module contains common utilities used throughout the system.
 from __future__ import annotations
 
 import ctypes
+import os
 import threading
 import time
 import warnings
 from datetime import datetime
+from pathlib import Path
 from typing import Any, ClassVar
 
 try:
@@ -139,3 +141,27 @@ class SingletonMixin:
                     obj._initialized = False  # type: ignore[attr-defined]
                     cls._instance = obj
         return cls._instance
+
+
+def write_json_atomic(path: Path, payload: bytes) -> None:
+    """Write pre-encoded JSON bytes atomically to path.
+
+    Sequence: write to .tmp + fsync(tmp) → rename → fsync(parent dir).
+    The target is either fully written or absent — never partial bytes.
+    The .tmp file is removed on any failure so it never leaks across runs.
+    """
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    try:
+        with tmp.open("wb") as f:
+            f.write(payload)
+            f.flush()
+            os.fsync(f.fileno())
+        os.rename(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    dir_fd = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
