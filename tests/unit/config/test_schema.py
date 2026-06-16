@@ -123,6 +123,59 @@ class TestDataset:
         ds = Dataset(path="datasets/my_data.jsonl")
         assert ds.name == "my_data"
 
+    @pytest.mark.unit
+    def test_max_new_tokens_defaults_none(self):
+        ds = Dataset(name="perf", type=DatasetType.PERFORMANCE, path="data.jsonl")
+        assert ds.max_new_tokens is None
+
+    @pytest.mark.unit
+    def test_per_dataset_max_new_tokens_override(self):
+        ds = Dataset(
+            name="aime25",
+            type=DatasetType.ACCURACY,
+            path="aime25.jsonl",
+            eval_method=EvalMethod.EXACT_MATCH,
+            max_new_tokens=32768,
+        )
+        assert ds.max_new_tokens == 32768
+
+    @pytest.mark.unit
+    def test_max_new_tokens_rejects_non_positive(self):
+        with pytest.raises(ValueError, match="greater than 0"):
+            Dataset(
+                name="perf",
+                type=DatasetType.PERFORMANCE,
+                path="data.jsonl",
+                max_new_tokens=0,
+            )
+
+    @pytest.mark.unit
+    def test_get_model_params_falls_back_when_unset(self):
+        ds = Dataset(name="perf", type=DatasetType.PERFORMANCE, path="data.jsonl")
+        base = ModelParams(name="m", max_new_tokens=1024)
+        result = ds.get_model_params(base)
+        # No per-dataset override -> returns the global params unchanged.
+        assert result is base
+        assert result.max_new_tokens == 1024
+
+    @pytest.mark.unit
+    def test_get_model_params_applies_override(self):
+        ds = Dataset(
+            name="aime25",
+            type=DatasetType.ACCURACY,
+            path="aime25.jsonl",
+            eval_method=EvalMethod.EXACT_MATCH,
+            max_new_tokens=32768,
+        )
+        base = ModelParams(name="m", max_new_tokens=1024, temperature=0.7)
+        result = ds.get_model_params(base)
+        # Override replaces max_new_tokens but leaves other params and the
+        # original (frozen) instance untouched.
+        assert result is not base
+        assert result.max_new_tokens == 32768
+        assert result.temperature == 0.7
+        assert base.max_new_tokens == 1024
+
 
 class TestBenchmarkConfig:
     @pytest.mark.unit

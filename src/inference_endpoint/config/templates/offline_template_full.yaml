@@ -12,7 +12,7 @@ model_params:
   presence_penalty: null  # Presence penalty
   frequency_penalty: null  # Frequency penalty
   chat_template_kwargs: null  # Per-request chat-template kwargs forwarded to compatible servers.
-  max_new_tokens: 1024  # Max output tokens
+  max_new_tokens: 1024
   osl_distribution: null  # Output sequence length distribution
   streaming: 'off'  # Streaming mode: auto/on/off | options: auto, on, off
   tokenizer_name: null  # HF repo ID or local path for the tokenizer. Overrides model name for client-side token metrics (ISL/OSL/TPOT).
@@ -22,6 +22,7 @@ datasets:  # Dataset configs
   path: '<DATASET_PATH eg: tests/assets/datasets/dummy_1k.jsonl>'  # Dataset file path
   format: null  # Dataset format (auto-detected)
   samples: null  # Number of samples to use
+  max_new_tokens: null
   eval_method: null
   parser:  # Column remapping: {prompt: <col>, system: <col>}
     prompt: text_input
@@ -32,6 +33,7 @@ datasets:  # Dataset configs
   path: '<DATASET_PATH eg: tests/assets/datasets/ds_samples.jsonl>'  # Dataset file path
   format: null  # Dataset format (auto-detected)
   samples: null  # Number of samples to use
+  max_new_tokens: null
   eval_method: exact_match  # Accuracy evaluation method | options: exact_match, contains, judge
   parser:  # Column remapping: {prompt: <col>, system: <col>}
     prompt: question
