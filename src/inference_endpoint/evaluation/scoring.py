@@ -1959,6 +1959,10 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
         else:
             cfg["model"]["model_kwargs"]["api_base"] = ""
 
+        api_key = benchmark_config_dict.get("endpoint_config", {}).get("api_key")
+        if api_key:
+            cfg["model"]["model_kwargs"]["api_key"] = api_key
+
         for field in (
             "temperature",
             "top_p",
