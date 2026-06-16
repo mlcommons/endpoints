@@ -302,6 +302,17 @@ class Dataset(BaseModel):
     ] = None
     format: str | None = Field(None, description="Dataset format (auto-detected)")
     samples: int | None = Field(None, gt=0, description="Number of samples to use")
+    max_new_tokens: int | None = Field(
+        None,
+        gt=0,
+        description=(
+            "Per-dataset override of model_params.max_new_tokens (sent as the "
+            "per-request max_tokens). Lets a performance dataset use a small cap "
+            "(to avoid server-side KV over-reservation/overload at high concurrency) "
+            "while accuracy datasets use a larger cap (to avoid truncating long "
+            "reasoning output). Falls back to model_params.max_new_tokens when unset."
+        ),
+    )
     eval_method: EvalMethod | None = Field(
         None, description="Accuracy evaluation method"
     )
@@ -321,6 +332,17 @@ class Dataset(BaseModel):
         if not self.name and self.path:
             object.__setattr__(self, "name", Path(self.path).stem)
         return self
+
+    def get_model_params(self, model_params: ModelParams) -> ModelParams:
+        """Apply this dataset's per-dataset max_new_tokens override.
+
+        Returns ``model_params`` unchanged when the dataset does not set a
+        max_new_tokens; otherwise returns a copy with max_new_tokens replaced
+        by the per-dataset value.
+        """
+        if self.max_new_tokens is None:
+            return model_params
+        return model_params.model_copy(update={"max_new_tokens": self.max_new_tokens})
 
 
 class AccuracyConfig(BaseModel):
