@@ -34,6 +34,10 @@ from inference_endpoint import __version__
 from inference_endpoint.commands.info import execute_info
 from inference_endpoint.commands.init import execute_init
 from inference_endpoint.commands.probe import ProbeConfig, execute_probe
+from inference_endpoint.commands.truncate_results import (
+    TruncateConfig,
+    execute_truncate,
+)
 from inference_endpoint.commands.validate import execute_validate
 from inference_endpoint.config.utils import cli_error_formatter
 from inference_endpoint.exceptions import (
@@ -84,6 +88,12 @@ app.command("inference_endpoint.commands.benchmark.cli:benchmark_app", name="ben
 def probe(*, config: ProbeConfig):
     """Test endpoint connectivity."""
     execute_probe(config)
+
+
+@app.command(name="truncate-results")
+def truncate_results(*, config: TruncateConfig):
+    """Shrink a results.json: keep a few full responses + hash the rest."""
+    execute_truncate(config)
 
 
 @app.command
