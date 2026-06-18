@@ -150,6 +150,7 @@ class ChatCompletionResponseMessage(
     refusal: str | None = None
     tool_calls: list[dict[str, Any]] | None = None
     reasoning_content: str | None = None
+    reasoning: str | None = None  # vLLM field name
 
 
 class ChatCompletionChoice(
