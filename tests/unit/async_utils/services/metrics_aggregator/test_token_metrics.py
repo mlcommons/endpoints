@@ -40,7 +40,8 @@ class _FakeTokenizer:
         return text.split()
 
     @classmethod
-    def from_pretrained(cls, name: str) -> "_FakeTokenizer":
+    def from_pretrained(cls, name: str, **kwargs: object) -> "_FakeTokenizer":
+        assert kwargs == {"trust_remote_code": True}
         return cls()
 
 

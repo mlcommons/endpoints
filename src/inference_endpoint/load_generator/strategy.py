@@ -59,13 +59,13 @@ class PhaseIssuerProtocol(Protocol):
         Args:
             sample_index: Index into the dataset.
             data_override: If provided, merged over the loaded sample — keys in
-                data_override take precedence. Used by MultiTurnStrategy to inject
-                a runtime-assembled `messages` array while still inheriting
+                data_override take precedence. Used by AgenticInferenceStrategy to inject
+                a salted `messages` array while still inheriting
                 `model`/`max_completion_tokens`/`tools`/`stream` from the dataset row.
-            conversation_id: Conversation identifier (multi-turn). Empty string
+            conversation_id: Conversation identifier (agentic inference). Empty string
                 for single-turn issues; propagated onto the published EventRecords
                 so downstream consumers can group by conversation.
-            turn: Turn number within a conversation (multi-turn), or None.
+            turn: Turn number within a conversation (agentic inference), or None.
         """
         ...
 
@@ -82,6 +82,10 @@ class PhaseIssuerProtocol(Protocol):
 
     def mark_inflight_complete(self) -> None:
         """Record completion of one HTTP-issued sample."""
+        ...
+
+    def stop_performance_tracking(self) -> None:
+        """Stop counting subsequently issued samples in tracked metrics."""
         ...
 
     issued_count: int
@@ -330,10 +334,11 @@ def create_load_strategy(
                 )
             return ConcurrencyStrategy(lp.target_concurrency, sample_order)
 
-        case LoadPatternType.MULTI_TURN:
+        case LoadPatternType.AGENTIC_INFERENCE:
             raise ValueError(
-                "MULTI_TURN load pattern requires a MultiTurnDataset — "
-                "use 'inference-endpoint benchmark from-config' with a multi-turn dataset"
+                "AGENTIC_INFERENCE load pattern requires an AgenticInferenceDataset; "
+                "use 'inference-endpoint benchmark from-config' with an "
+                "agentic inference dataset"
             )
 
         case _:

@@ -23,9 +23,8 @@ from pathlib import Path
 
 from inference_endpoint.config.schema import Dataset as DatasetConfig
 from inference_endpoint.dataset_manager.dataset import Dataset, DatasetFormat
-from inference_endpoint.exceptions import InputValidationError
 
-from .multi_turn_dataset import MultiTurnDataset
+from .agentic_inference_dataset import AgenticInferenceDataset
 from .transforms import ColumnRemap, MakeAdapterCompatible, Transform
 
 logger = logging.getLogger(__name__)
@@ -98,16 +97,16 @@ class DataLoaderFactory:
             format_enum = DatasetFormat(file_format)
 
         dataset_id = None
-        if config.multi_turn is not None:
-            dataset_id = MultiTurnDataset.DATASET_ID
+        if config.agentic_inference is not None:
+            dataset_id = AgenticInferenceDataset.DATASET_ID
 
         transforms: list[Transform] = []
-        if remap is not None and dataset_id != MultiTurnDataset.DATASET_ID:
+        if remap is not None and dataset_id != AgenticInferenceDataset.DATASET_ID:
             # Parser convention is {target: source} (e.g. {prompt: article}).
             # ColumnRemap expects {source: target} — flip it.
             flipped = {src: dst for dst, src in remap.items()}
             transforms.append(ColumnRemap(flipped))  # type: ignore[arg-type]
-        if dataset_id != MultiTurnDataset.DATASET_ID:
+        if dataset_id != AgenticInferenceDataset.DATASET_ID:
             transforms.append(MakeAdapterCompatible())
 
         assert dataset_path is not None
@@ -118,10 +117,4 @@ class DataLoaderFactory:
             dataset_id=dataset_id,
             num_repeats=num_repeats,
         )
-        if config.multi_turn is not None and config.multi_turn.enable_salt:
-            if not isinstance(dataloader, MultiTurnDataset):
-                raise InputValidationError(
-                    "enable_salt requires a multi-turn dataset loader"
-                )
-            dataloader.enable_salt()
         return dataloader

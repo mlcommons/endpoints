@@ -31,6 +31,7 @@ from enum import Enum
 from typing import Any, Protocol
 
 from ..config.runtime_settings import RuntimeSettings
+from ..config.schema import LoadPatternType
 from ..core.record import (
     ErrorEventType,
     EventRecord,
@@ -177,6 +178,7 @@ class PhaseIssuer:
         "_dataset",
         "_issuer",
         "_on_inflight_drained",
+        "_performance_tracking_stopped",
         "_publisher",
         "_stop_check",
         "uuid_to_index",
@@ -204,11 +206,25 @@ class PhaseIssuer:
         self.completed_uuids: set[str] = set()
         self.inflight: int = 0
         self.issued_count: int = 0
+        self._performance_tracking_stopped = False
 
     def mark_inflight_complete(self) -> None:
         self.inflight -= 1
         if self.inflight <= 0:
             self._on_inflight_drained()
+
+    def stop_performance_tracking(self) -> None:
+        """Publish STOP_PERFORMANCE_TRACKING once for this phase."""
+        if self._performance_tracking_stopped:
+            return
+        self._performance_tracking_stopped = True
+        self._publisher.publish(
+            EventRecord(
+                event_type=SessionEventType.STOP_PERFORMANCE_TRACKING,
+                timestamp_ns=time.monotonic_ns(),
+            )
+        )
+        self._publisher.flush()
 
     def issue(
         self,
@@ -224,8 +240,8 @@ class PhaseIssuer:
         Args:
             sample_index: Index into the dataset.
             data_override: If provided, merged over the loaded sample data.
-                Keys in data_override take precedence. Used by MultiTurnStrategy
-                to substitute live-accumulated message history.
+                Keys in data_override take precedence. Used by AgenticInferenceStrategy
+                to override pre-baked messages when trajectory salting is enabled.
 
         Note: load_sample() runs synchronously before the ISSUED timestamp.
         For accurate timing, datasets MUST be pre-loaded into memory.
@@ -445,7 +461,7 @@ class BenchmarkSession:
             await self._drain_inflight(phase_issuer, phase.drain_timeout)
 
         if phase.phase_type == PhaseType.PERFORMANCE:
-            self._publish_session_event(SessionEventType.STOP_PERFORMANCE_TRACKING)
+            phase_issuer.stop_performance_tracking()
 
         phase_end = time.monotonic_ns()
         logger.info(
@@ -529,7 +545,7 @@ class BenchmarkSession:
         if isinstance(resp, QueryResult):
             query_id = resp.id
             # Drop late responses for queries already synthetically terminated
-            # (e.g. by MultiTurnStrategy._handle_timeout). Without this gate,
+            # (e.g. by AgenticInferenceStrategy._handle_timeout). Without this gate,
             # a real response arriving after timeout double-publishes ERROR/COMPLETE
             # and double-decrements inflight (no per-request HTTP timeout
             # exists in endpoint_client; late arrivals are possible).
@@ -626,12 +642,17 @@ class BenchmarkSession:
             else 0
         )
         total_samples = settings.total_samples_to_issue()
+        stop_on_sample_count = not (
+            settings.load_pattern is not None
+            and settings.load_pattern.type == LoadPatternType.AGENTIC_INFERENCE
+        )
 
         def check() -> bool:
             if self._stop_requested:
                 return True
             if (
-                self._current_phase_issuer
+                stop_on_sample_count
+                and self._current_phase_issuer
                 and self._current_phase_issuer.issued_count >= total_samples
             ):
                 return True
