@@ -27,6 +27,7 @@ from pydantic import ValidationError  # noqa: F401 (used in from_config)
 from inference_endpoint.commands.benchmark.execute import run_benchmark
 from inference_endpoint.config.schema import (
     BenchmarkConfig,
+    DatasetType,
     OfflineBenchmarkConfig,
     OnlineBenchmarkConfig,
     TestMode,
@@ -106,7 +107,12 @@ def from_config(
         raise InputValidationError(f"Config error: {e}") from e
     if timeout is not None:
         resolved = resolved.with_updates(timeout=timeout)
-    test_mode = mode or (
-        TestMode.BOTH if resolved.type == TestType.SUBMISSION else TestMode.PERF
-    )
+    if mode is not None:
+        test_mode = mode
+    elif resolved.type == TestType.SUBMISSION:
+        test_mode = TestMode.BOTH
+    elif any(ds.type == DatasetType.ACCURACY for ds in resolved.datasets):
+        test_mode = TestMode.BOTH
+    else:
+        test_mode = TestMode.PERF
     _run(resolved, [], test_mode)

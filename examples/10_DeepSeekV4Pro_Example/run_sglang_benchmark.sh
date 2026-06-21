@@ -5,7 +5,10 @@
 #   3. inference-endpoint benchmark from-config
 set -euo pipefail
 
-ENDPOINTS_DIR="${ENDPOINTS_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ENDPOINTS_DIR="${ENDPOINTS_DIR:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"
+# shellcheck source=docker_common.sh
+source "${SCRIPT_DIR}/docker_common.sh"
 CONFIG="${CONFIG:-${ENDPOINTS_DIR}/examples/10_DeepSeekV4Pro_Example/sglang_deepseek_v4_pro_example.yaml}"
 SGLANG_PORT="${SGLANG_PORT:-30000}"
 LCB_PORT="${LCB_PORT:-13835}"
@@ -20,12 +23,16 @@ fi
 
 echo "=== Pre-flight checks ==="
 
-if ! curl --output /dev/null --silent --fail "http://127.0.0.1:${SGLANG_PORT}/health"; then
-  echo "ERROR: SGLang is not healthy on port ${SGLANG_PORT}."
-  echo "Start the server first (see README.md — SGLang section)."
+SGLANG_BASE_URL="${SGLANG_BASE_URL:-http://127.0.0.1:${SGLANG_PORT}}"
+WAIT_FOR_SGLANG_S="${WAIT_FOR_SGLANG_S:-0}"
+
+if ! wait_openai_compatible_server "${SGLANG_BASE_URL}" "${WAIT_FOR_SGLANG_S}"; then
+  echo "ERROR: Inference server not reachable at ${SGLANG_BASE_URL} (tried GET /health and GET /v1/models)." >&2
+  echo "  Start SGLang first (see examples/10_DeepSeekV4Pro_Example/README.md)." >&2
+  echo "  Smoke test: uv run python -m inference_endpoint.testing.echo_server --host 127.0.0.1 --port ${SGLANG_PORT}" >&2
+  echo "  If the server is slow to bind: export WAIT_FOR_SGLANG_S=120" >&2
   exit 1
 fi
-echo "SGLang OK on port ${SGLANG_PORT}"
 
 if ! curl --output /dev/null --silent --fail "http://127.0.0.1:${LCB_PORT}/info"; then
   echo "ERROR: lcb-service is not running on port ${LCB_PORT}."

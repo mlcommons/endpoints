@@ -28,6 +28,16 @@ export MODEL_PATH=${MODEL_DIR}/deepseek-ai/DeepSeek-V4-Pro
 export TOKENIZER_MODEL_PATH=${MODEL_PATH}  # host path for ISL/OSL/TPOT metrics
 ```
 
+Preflight scripts (`run_benchmark.sh`, `run_sglang_benchmark.sh`, `run_*_accuracy_benchmark.sh`) probe the inference server with `GET /health` and `GET /v1/models`. Override the base URL or wait time while a server is starting:
+
+```bash
+export VLLM_BASE_URL=http://127.0.0.1:8000      # default when VLLM_PORT=8000
+export WAIT_FOR_VLLM_S=120                       # seconds; 0 = single attempt
+
+export SGLANG_BASE_URL=http://127.0.0.1:30000    # default when SGLANG_PORT=30000
+export WAIT_FOR_SGLANG_S=120
+```
+
 ## Download Model
 
 Download weights to the shared model store and mount them into the serving container:
@@ -119,15 +129,15 @@ Python script (legacy `run_accuracy.py` path):
 USE_PYTHON_SCRIPT=true ./examples/10_DeepSeekV4Pro_Example/run_vllm_accuracy_benchmark.sh
 ```
 
-| Argument / env | Default | Description |
-| -------------- | ------- | ----------- |
-| `HF_TOKEN` | _(required)_ | HuggingFace token for GPQA download |
-| `VLLM_PORT` | `8000` | vLLM HTTP port |
-| `TIMEOUT` | `3600` | Benchmark timeout (seconds) |
-| `ALLOW_LCB_LOCAL_EVAL` | `true` | Subprocess LCB scoring when `lcb-service` is unavailable |
-| `USE_PYTHON_SCRIPT` | `false` | Use `run_accuracy.py` instead of YAML |
+| Argument / env         | Default      | Description                                              |
+| ---------------------- | ------------ | -------------------------------------------------------- |
+| `HF_TOKEN`             | _(required)_ | HuggingFace token for GPQA download                      |
+| `VLLM_PORT`            | `8000`       | vLLM HTTP port                                           |
+| `TIMEOUT`              | `3600`       | Benchmark timeout (seconds)                              |
+| `ALLOW_LCB_LOCAL_EVAL` | `true`       | Subprocess LCB scoring when `lcb-service` is unavailable |
+| `USE_PYTHON_SCRIPT`    | `false`      | Use `run_accuracy.py` instead of YAML                    |
 
-Accuracy config uses `max_new_tokens: 32000`, concurrency `num_workers: 64`, and phase order
+Accuracy config uses `max_new_tokens: 88000`, concurrency `num_workers: 64`, and phase order
 AIME25 ×8 → GPQA ×5 → LiveCodeBench ×3 so math scores are recorded before the LCB phase.
 
 ---
@@ -163,15 +173,15 @@ export SGLANG_IMAGE=rocm/sgl-dev:rocm720-mi35x-f96ac98-20260526-DSv4
 
 Optional overrides:
 
-| Variable | Default | Description |
-| -------- | ------- | ----------- |
-| `SGLANG_PORT` / `HTTP_PORT` | `30000` | HTTP listen port (`start_sglang_server.sh` unsets `SGLANG_PORT` before launch — SGLang uses that name for internal ZMQ ports) |
-| `TP` | `8` | Tensor parallel size |
-| `CONC` | `512` | `--max-running-requests` |
-| `MAX_MODEL_LEN` | `65536` | `--context-length` |
-| `DP_ATTENTION` | `false` | Set `true` to enable DP attention |
-| `EP_SIZE` | `1` | Expert parallel size (`>1` adds `--ep-size`) |
-| `CHAT_TEMPLATE` | _(unset)_ | Optional path to `deepseek_v4_thinking.jinja` |
+| Variable                    | Default   | Description                                                                                                                   |
+| --------------------------- | --------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `SGLANG_PORT` / `HTTP_PORT` | `30000`   | HTTP listen port (`start_sglang_server.sh` unsets `SGLANG_PORT` before launch — SGLang uses that name for internal ZMQ ports) |
+| `TP`                        | `8`       | Tensor parallel size                                                                                                          |
+| `CONC`                      | `512`     | `--max-running-requests`                                                                                                      |
+| `MAX_MODEL_LEN`             | `98304`   | `--context-length`                                                                                                            |
+| `DP_ATTENTION`              | `false`   | Set `true` to enable DP attention                                                                                             |
+| `EP_SIZE`                   | `1`       | Expert parallel size (`>1` adds `--ep-size`)                                                                                  |
+| `CHAT_TEMPLATE`             | _(unset)_ | Optional path to `deepseek_v4_thinking.jinja`                                                                                 |
 
 The script exports the FP4-experts ROCm flags (`SGLANG_DSV4_FP4_EXPERTS=True`,
 `SGLANG_FORCE_TRITON_MOE_FP8=0`, `SGLANG_REASONING_EFFORT=max`, etc.) and launches:
@@ -283,14 +293,14 @@ Python script (GPT-OSS `run.py` style):
 USE_PYTHON_SCRIPT=true ./examples/10_DeepSeekV4Pro_Example/run_sglang_accuracy_benchmark.sh
 ```
 
-| Argument / env | Default | Description |
-| -------------- | ------- | ----------- |
-| `HF_TOKEN` | _(required)_ | HuggingFace token for GPQA download |
-| `TIMEOUT` | `3600` | Benchmark timeout (seconds) |
-| `USE_PYTHON_SCRIPT` | `false` | Use `run_accuracy_sglang.py` instead of YAML |
-| `DOCKER_LOG_STORAGE_GB` | `16` | Container writable layer size when supported |
+| Argument / env          | Default      | Description                                  |
+| ----------------------- | ------------ | -------------------------------------------- |
+| `HF_TOKEN`              | _(required)_ | HuggingFace token for GPQA download          |
+| `TIMEOUT`               | `3600`       | Benchmark timeout (seconds)                  |
+| `USE_PYTHON_SCRIPT`     | `false`      | Use `run_accuracy_sglang.py` instead of YAML |
+| `DOCKER_LOG_STORAGE_GB` | `16`         | Container writable layer size when supported |
 
-Accuracy config uses `max_new_tokens: 32000`, concurrency `num_workers: 64`, and phase order
+Accuracy config uses `max_new_tokens: 88000`, concurrency `num_workers: 64`, and phase order
 AIME25 ×8 → GPQA ×5 → LiveCodeBench ×3.
 
 ### Docker log storage

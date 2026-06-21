@@ -1171,7 +1171,9 @@ class LiveCodeBenchScorer(Scorer, scorer_id="code_bench_scorer"):
                 )
 
             if not ws_failed and merged_results:
-                pass_at_1 = total_passed / total_samples if total_samples > 0 else 0.0
+                pass_at_1: float | None = (
+                    total_passed / total_samples if total_samples > 0 else 0.0
+                )
                 return pass_at_1, n_repeats
 
         # Fall back to subprocess evaluation

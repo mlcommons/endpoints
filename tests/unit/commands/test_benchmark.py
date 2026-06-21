@@ -317,8 +317,31 @@ submission_ref:
         _, called_mode = mock_run.call_args[0]
         assert called_mode == TestMode.BOTH
 
+    @pytest.mark.unit
+    @patch("inference_endpoint.commands.benchmark.cli.run_benchmark")
+    def test_from_config_offline_accuracy_defaults_to_both(self, mock_run, tmp_path):
+        yaml_content = """
+type: "offline"
+model_params:
+  name: "test-model"
+endpoint_config:
+  endpoints: ["http://test:8000"]
+datasets:
+  - path: "tests/assets/datasets/dummy_1k.jsonl"
+    type: "performance"
+  - name: "gpqa::test"
+    type: "accuracy"
+    accuracy_config:
+      eval_method: "pass_at_1"
+      ground_truth: "answer"
+      num_repeats: 1
+"""
+        config_file = tmp_path / "acc.yaml"
+        config_file.write_text(yaml_content)
+        from_config(config=config_file)
+        _, called_mode = mock_run.call_args[0]
+        assert called_mode == TestMode.BOTH
 
-class TestBenchmarkValidation:
     """Test BenchmarkConfig validation paths."""
 
     @pytest.mark.unit

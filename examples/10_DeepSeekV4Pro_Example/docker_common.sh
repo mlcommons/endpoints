@@ -23,3 +23,28 @@ docker_storage_args() {
     echo --storage-opt "size=${DOCKER_LOG_STORAGE_GB}G"
   fi
 }
+
+# Wait for an OpenAI-compatible or SGLang HTTP server (example script preflight).
+# Tries GET /health (SGLang native, vLLM), then GET /v1/models (OpenAI compatibility).
+# Args: base_url [max_wait_seconds]
+wait_openai_compatible_server() {
+  local base="${1%/}"
+  local max_wait="${2:-0}"
+  local start
+  start=$(date +%s)
+  while true; do
+    for path in /health /v1/models; do
+      if curl --output /dev/null --silent --fail --max-time 5 "${base}${path}"; then
+        echo "Inference server ready (${base}${path})"
+        return 0
+      fi
+    done
+    if (( max_wait <= 0 )); then
+      return 1
+    fi
+    if (( $(date +%s) - start >= max_wait )); then
+      return 1
+    fi
+    sleep 2
+  done
+}

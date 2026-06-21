@@ -1,14 +1,12 @@
-name: "deepseek-v4-pro-sglang-accuracy"
+name: "deepseek-v4-pro-sglang-aime25"
 version: "1.0"
 type: "offline"
-# Wall-clock CLI budget (seconds) for the full multi-phase run (GPQA + AIME + LCB).
-timeout: 86400
+timeout: 7200
 
 model_params:
-  # Must match the model id served by SGLang (see GET /v1/models).
   name: "/data/workloads-inference/models/DeepSeek-V4-Pro"
   temperature: 1.0
-  max_new_tokens: 88000
+  max_new_tokens: 64000
   top_k: -1
   top_p: 1.0
   streaming: "on"
@@ -27,19 +25,6 @@ datasets:
       ground_truth: "answer"
       extractor: "boxed_math_extractor"
       num_repeats: 8
-  - name: "gpqa::deepseek_v4"
-    type: "accuracy"
-    accuracy_config:
-      eval_method: "pass_at_1"
-      extractor: "abcd_extractor"
-      ground_truth: "ground_truth"
-      num_repeats: 5
-  - name: "livecodebench::deepseek_v4"
-    type: "accuracy"
-    accuracy_config:
-      eval_method: "code_bench_scorer"
-      extractor: "python_code_extractor"
-      num_repeats: 3
 
 settings:
   runtime:
@@ -53,15 +38,10 @@ settings:
 
   client:
     num_workers: 64
-    # Large worker counts + cold model can exceed the default 60s init budget.
-    worker_initialization_timeout: 600.0
+    worker_initialization_timeout: 300.0
 
   warmup:
     enabled: false
-
-  drain:
-    metrics_drain_timeout_s: 900.0
-    metrics_tokenizer_workers: 8
 
 endpoint_config:
   endpoints:
@@ -69,4 +49,4 @@ endpoint_config:
   api_key: null
   api_type: "openai"
 
-report_dir: "results/sglang_deepseek_v4_pro_accuracy/"
+report_dir: "results/sglang_deepseek_v4_pro_aime25/"

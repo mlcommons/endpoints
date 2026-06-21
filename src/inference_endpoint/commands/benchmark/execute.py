@@ -930,11 +930,14 @@ def _complete_uuids_in_event_log(events_path: Path) -> set[str]:
             stripped = line.strip()
             if not stripped:
                 continue
-            record = decoder.decode(stripped)
-            if (
-                record.event_type == SampleEventType.COMPLETE
-                and record.sample_uuid
-            ):
+            try:
+                record = decoder.decode(stripped)
+            except msgspec.DecodeError:
+                # events.jsonl is written concurrently by EventLoggerService; the
+                # final line may be partially flushed. Skip it — it will decode on
+                # a subsequent poll once fully written.
+                continue
+            if record.event_type == SampleEventType.COMPLETE and record.sample_uuid:
                 complete.add(record.sample_uuid)
     return complete
 
@@ -985,9 +988,7 @@ def _score_accuracy_phase_incremental(
     last_error: Exception | None = None
     entry: dict[str, Any] | None = None
     while time.monotonic() < deadline:
-        if not _wait_for_phase_event_log(
-            events_path, phase_result, timeout_s=30.0
-        ):
+        if not _wait_for_phase_event_log(events_path, phase_result, timeout_s=30.0):
             last_error = TimeoutError(
                 f"Timed out waiting for {phase_result.issued_count} COMPLETE events"
             )

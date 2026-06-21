@@ -56,7 +56,8 @@ def score_livecodebench(
     report_dir: Path, lcb_version: str, timeout: int
 ) -> tuple[str, float, int]:
     ds = LiveCodeBench.load_from_file(
-        DATASET_CACHE / f"livecodebench/{lcb_version}/livecodebench_{lcb_version}.parquet"
+        DATASET_CACHE
+        / f"livecodebench/{lcb_version}/livecodebench_{lcb_version}.parquet"
     )
     ds.load()
     name = "livecodebench::deepseek_v4"
@@ -106,12 +107,15 @@ def main() -> None:
     report_dir = args.report_dir.resolve()
     accuracy_scores: dict[str, dict] = {}
 
+    def fmt_score(score: float | None) -> str:
+        return f"{score:.4f}" if score is not None else "None (scoring failed)"
+
     for label, fn in (
         ("GPQA", lambda: score_gpqa(report_dir)),
         ("AIME25", lambda: score_aime25(report_dir)),
     ):
         name, score, n_repeats = fn()
-        print(f"{label} Pass@1 ({n_repeats} repeats): {score:.4f}")
+        print(f"{label} Pass@1 ({n_repeats} repeats): {fmt_score(score)}")
         accuracy_scores[name] = {
             "dataset_name": name,
             "score": score,
@@ -122,7 +126,7 @@ def main() -> None:
         name, score, n_repeats = score_livecodebench(
             report_dir, args.lcb_version, args.lcb_timeout
         )
-        print(f"LiveCodeBench Pass@1 ({n_repeats} repeats): {score:.4f}")
+        print(f"LiveCodeBench Pass@1 ({n_repeats} repeats): {fmt_score(score)}")
         accuracy_scores[name] = {
             "dataset_name": name,
             "score": score,

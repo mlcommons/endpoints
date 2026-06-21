@@ -155,6 +155,9 @@ if [[ "${RUN_MODE}" == "docker" && ! -f /.dockerenv ]]; then
     echo "ERROR: RUN_MODE=docker requires a local model directory at MODEL=${MODEL}"
     exit 1
   fi
+  # Writable layer budget for server logs under /workspace (opt-in --storage-opt).
+  DOCKER_LOG_STORAGE_GB="${DOCKER_LOG_STORAGE_GB:-64}"
+  export DOCKER_LOG_STORAGE_GB
   HF_HOME="${HF_HOME:-${HOME}/.cache/huggingface}"
   # shellcheck disable=SC2207
   STORAGE_OPTS=($(docker_storage_args))
