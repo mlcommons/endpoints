@@ -93,6 +93,24 @@ For streaming workloads, also watch **SSE-pkts/s** — a small stream interval (
 
 ---
 
+## Diagnosing client overhead with `-vvv` trace
+
+`Stall%` (above) tells you _that_ the client is the bottleneck; the `-vvv` trace dashboard tells you _where_. Add `-vvv` to any `benchmark` command to spawn a live dashboard that breaks each request into per-stage timings and samples per-worker event-loop lag:
+
+```bash
+inference-endpoint benchmark offline --endpoints URL --model NAME --dataset PATH -vvv
+```
+
+The dashboard renders to the terminal; the run's own stdout/stderr are redirected to `/tmp/endpoints_trace_<pid>/logs.txt` for the duration. Reading the panels:
+
+- **REQUEST LIFECYCLE** — each row is a stage's share of end-to-end (`%E2E`), with a `client work / server work / backpressure` verdict and a stacked timeline below it. A high `issue -> conn acquired` share is client-side IPC/back-pressure; high `payload written -> headers/response` is server-bound (not your client). This is the per-stage view behind a high `Stall%`.
+- **EVENT LOOP LAG** — per-worker loop drift. A worker with p99 above a few ms is loop-saturated (GIL / GC / a blocking syscall) even if its CPU% looks modest — the canonical "add workers won't help, the loop is stalled" signal.
+- **LOADGEN** — drop-immune issued/completed counts + rates and e2e/ttft/tpot latencies, sourced from the metrics aggregator.
+
+The trace channel is intentionally lossy: at high QPS the FIFO can't carry every frame, so the producer adaptively samples and the LIFECYCLE row counts (`N`) are a representative subset, not the totals. Use the lifecycle panel for the _distribution_ of where time goes; use the LOADGEN totals (and the sweep's `Recv Rate`) for exact throughput. Overhead of `-vvv` itself is negligible against a real endpoint and a few percent only at the CPU-bound roofline (local `MaxThroughputServer`).
+
+---
+
 ## IPC Transport Buffer Sizes
 
 The ZMQ transport uses a pre-allocated receive buffer (`bytearray`) for zero-copy message deserialization. If a serialized message exceeds this buffer, the worker crashes with:
