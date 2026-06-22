@@ -2,16 +2,16 @@
 
 ## Quick start
 
-To reproduce all reference accuracy numbers (~2.5 h on an edge device), set
-your model name and endpoint URL, then run:
+To reproduce the reference accuracy number (~3 h on an edge device), set your
+model name and endpoint URL, then run:
 
 ```bash
 MODEL=Qwen3.6-27B-Q4_K_M ENDPOINT=http://localhost:8080 bash run_accuracy.sh
 ```
 
-`run_accuracy.sh` runs both single-turn and multi-turn phases end-to-end with
-the exact validated parameters. See the steps below if you prefer to run each
-phase individually or need to customise the configuration.
+`run_accuracy.sh` runs the finalized single-turn accuracy benchmark (~995
+samples) with the exact validated parameters. See the steps below if you prefer
+to run it directly or need to customise the configuration.
 
 ---
 
@@ -26,8 +26,11 @@ covering single-turn requests (one prompt → one structured tool call) and
 agentic multi-turn conversations (parse call → execute locally → feed result
 back → repeat).
 
-The sampling rates here are tuned so single-turn (3 categories) plus a sampled
-multi-turn run finish on an edge device in **~2.5–3 hours**.
+The **finalized accuracy benchmark is single-turn only** (3 categories), with
+per-category sampling tuned to draw **~995 samples** — a sample size large
+enough for a stable point estimate — finishing on an edge device in **~3 hours**.
+Multi-turn remains available as an optional exploratory run (Step 3) but is not
+part of the accuracy gate.
 
 ---
 
@@ -49,20 +52,14 @@ CLI that comes with it.
 | Git                                 | To clone the repo                                                                                     |
 | A running model server              | Any OpenAI-compatible endpoint. Validated with `Qwen3.6-27B-Q4_K_M` via llama.cpp (see below)         |
 | ~24 GB memory (GPU/VRAM or unified) | The Q4 GGUF is ~16.8 GB on disk; the rest is KV cache at `--ctx-size 32768`. 16 GB is **not** enough. |
-| ~2.5–3 hours wall-clock             | Single-turn (3 categories) + sampled multi-turn                                                       |
+| ~3 hours wall-clock                 | Single-turn (3 categories), ~995 samples                                                              |
 
 ### Starting a model server
 
 If you already have an OpenAI-compatible server running, skip this section.
 
-This example was validated on an **NVIDIA Jetson Thor** (aarch64, Blackwell GPU,
+This example was validated on an **NVIDIA Jetson AGX Thor** (aarch64, Blackwell GPU,
 JetPack 7 / CUDA 13) using a **natively-built llama.cpp `llama-server`**.
-
-> ⚠️ The prebuilt `ghcr.io/ggerganov/llama.cpp` Docker images do **not** work for
-> GPU inference on Thor: the plain `:server` tag is CPU-only (so `-ngl` is a
-> no-op and the 27B model runs entirely on CPU), and the CUDA tags are `x86_64`
-> builds that do not target Thor's `sm_110` / aarch64-SBSA. On Thor, build
-> llama.cpp from source.
 
 **Build llama.cpp with CUDA on Thor (one time):**
 
@@ -72,6 +69,9 @@ git clone https://github.com/ggml-org/llama.cpp && cd llama.cpp
 cmake -B build -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=110   # Thor = sm_110 (cc 11.0)
 cmake --build build --config Release -j --target llama-server
 ```
+
+> **Other edge devices:** the steps above are the NVIDIA Jetson AGX Thor baseline; for other devices change accordingly. For example, for **DGX Spark (GB10)**
+> set `-DCMAKE_CUDA_ARCHITECTURES=121` (`sm_121`, cc 12.1).
 
 **Start the server (matches the validated reproducibility runs):**
 
@@ -157,20 +157,27 @@ Before running, open `offline_bfcl_v4_single_turn.yaml` and set
 `Qwen3.6-27B-Q4_K_M`). The `endpoint_config.endpoints` list defaults to
 `http://localhost:8080`.
 
-**Sampling rates** (validated for ~82 min single-turn on an edge device):
+**Sampling rates** (validated at ~995 samples, ~3 h single-turn on an edge device):
 
 | Category      | Sample rate               | Notes        |
 | ------------- | ------------------------- | ------------ |
-| non_live      | 20%                       | ~230 samples |
+| non_live      | 62%                       | ~712 samples |
 | live          | 10% (tiny subsets → 100%) | ~171 samples |
-| hallucination | 5%                        | ~56 samples  |
+| hallucination | 10%                       | ~112 samples |
 
-Total ≈ 456 single-turn samples. Results are written to
-`results/bfcl_v4_single_turn_accuracy/`.
+Subsets of size ≤ 25 are taken in full (`subset_floor: 25`) so their scores are
+not reduced to one or two noisy samples. Total ≈ **995** single-turn samples.
+Results are written to `results/bfcl_v4_single_turn_accuracy/`.
 
 ---
 
-## Step 3 — Run multi-turn evaluation
+## Step 3 — Run multi-turn evaluation (optional, not part of the accuracy gate)
+
+> The finalized accuracy benchmark is **single-turn only** (Step 2). The
+> multi-turn run below is **optional and exploratory** — it is not part of the
+> reported accuracy gate. Its small sampled subsets are dominated by
+> per-entry granularity noise, which is why single-turn (~995 samples) is the
+> gateable metric.
 
 Multi-turn is an agentic loop: the model calls a function, the runner executes
 it locally, feeds the result back, and the loop continues until all turns in
@@ -210,7 +217,7 @@ print('Overall ST accuracy:',
       r['accuracy_scores']['bfcl_v4::function_calling']['score']['overall_accuracy'], '%')
 "
 
-# Multi-turn overall accuracy
+# Multi-turn overall accuracy (only if you ran the optional Step 3)
 python3 -c "
 import json, pathlib
 r = json.loads(pathlib.Path('results/bfcl_v4_multi_turn/results.json').read_text())
@@ -291,7 +298,7 @@ written to `results/agentic_coding_perf_2.5h/` (or `..._1h/`) alongside
 
 ### Reference performance + accuracy (Jetson Thor, Q4_K_M + llama.cpp, reasoning off)
 
-Measured on **NVIDIA Jetson Thor**, `Qwen3.6-27B-Q4_K_M` served single-slot
+Measured on **NVIDIA Jetson AGX Thor**, `Qwen3.6-27B-Q4_K_M` served single-slot
 (`-np 1`, `--reasoning off`, `--ctx-size 32768`, `--flash-attn on`, `-ngl 99`),
 driven single-stream over `agentic_coding_2.5h.jsonl` (1007 generated turns).
 One pass: **2 h 37 m**, 1007/1007 turns, 0 dropped/failed, inline IoU **0.6335**,
@@ -361,36 +368,26 @@ run-to-run variation even with a fixed client seed.
 
 ---
 
-## Reference results (Thor edge device)
+## Reference results (single-turn, ~995 samples)
 
-Validated on Thor (`Qwen3.6-27B-Q4_K_M`, `temperature=0`, `seed=42`).
+Validated with `Qwen3.6-27B-Q4_K_M`, `temperature=0`, `seed=42`, server launched
+`--reasoning off --ctx-size 32768 -np 1` on llama.cpp `cfff1fc`. The single-turn
+benchmark was run **twice, with a freshly restarted server each pass**.
 
-### Determinism — two independent seed runs
+| Device                  | Pass | Overall    | Normalized | non_live | live  | hallucination | Runtime |
+| ----------------------- | ---- | ---------- | ---------- | -------- | ----- | ------------- | ------- |
+| Jetson Thor (reference) | run1 | **86.23%** | **87.96%** | 82.59    | 84.12 | 97.16         | 3.09 h  |
+| Jetson Thor (reference) | run2 | **86.23%** | **87.96%** | 82.59    | 84.12 | 97.16         | 3.12 h  |
 
-The full sampled suite (single-turn + `--sample-pct 3` multi-turn) was run twice,
-end to end, with a freshly restarted server each pass. Every score was identical.
+- **Run-to-run:** accuracy is **identical** across passes (deterministic
+  decoding at `temperature 0` + fixed seeds); wall-clock varied < 1%.
 
-| Metric                                      | Run 1        | Run 2        | Match? |
-| ------------------------------------------- | ------------ | ------------ | ------ |
-| Single-turn `non_live` (AST, ~230 samples)  | 86.98%       | 86.98%       | ✓      |
-| Single-turn `live` (~171 samples)           | 84.12%       | 84.12%       | ✓      |
-| Single-turn `hallucination` (~56 samples)   | 94.32%       | 94.32%       | ✓      |
-| **Single-turn overall (456 samples)**       | **87.50%**   | **87.50%**   | ✓      |
-| Multi-turn `multi_turn_base`                | 66.67% (4/6) | 66.67% (4/6) | ✓      |
-| Multi-turn `multi_turn_miss_func`           | 33.33% (2/6) | 33.33% (2/6) | ✓      |
-| Multi-turn `multi_turn_miss_param`          | 16.67% (1/6) | 16.67% (1/6) | ✓      |
-| Multi-turn `multi_turn_long_context`        | 66.67% (4/6) | 66.67% (4/6) | ✓      |
-| **Multi-turn overall (24 sampled entries)** | **45.84%**   | **45.84%**   | ✓      |
+### Optional: multi-turn parity
 
-Wall-clock per pass: ~82 min single-turn (~10.8 s/sample) + ~64 min multi-turn
-(~159 s/entry) ≈ **2.4–2.5 h**. Run-to-run timing varied < 1.1%; accuracy did
-not vary at all.
-
-### Accuracy parity — full `multi_turn_base`
-
-A separate single run of the full 200-entry `multi_turn_base` (no sampling)
-scored **140/200 = 70.00%**, in exact parity with evalscope. This run takes
-~80 min on an edge device and is not part of the determinism check above.
+The optional multi-turn run (Step 3) is **not gated**. For reference, a single
+run of the full 200-entry `multi_turn_base` (no sampling) scored
+**140/200 = 70.00%**, in exact parity with evalscope (~80 min on an edge
+device).
 
 ### Notes
 

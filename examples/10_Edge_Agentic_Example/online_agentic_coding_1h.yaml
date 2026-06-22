@@ -16,7 +16,7 @@
 # Qwen3.6-27B Q4_K_M, reasoning off). This is the quick "smoke" variant; use
 # online_agentic_coding_2.5h.yaml for a larger, statistically solid run.
 #
-# Reference (Jetson Thor, Q4_K_M + llama.cpp, reasoning off): ~73 min,
+# Reference (NVIDIA Jetson AGX Thor, Q4_K_M + llama.cpp, reasoning off): ~73 min,
 # 483/483 turns, 0 dropped, inline IoU 0.6189.
 #
 # Run (start the edge server first; see README.md):

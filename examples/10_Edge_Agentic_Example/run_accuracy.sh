@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Reproduce BFCL v4 edge-agentic accuracy reference results (~2.5 h on an edge device).
+# Reproduce the BFCL v4 edge-agentic accuracy reference result (~3 h on an edge
+# device). The finalized accuracy benchmark is single-turn only, sampled to ~995
+# samples (see offline_bfcl_v4_single_turn.yaml).
 #
 # Usage:
 #   1. Edit MODEL and ENDPOINT below to match your server.
@@ -7,7 +9,9 @@
 #
 # Results are written to:
 #   results/bfcl_v4_single_turn_accuracy/   (single-turn)
-#   results/bfcl_v4_multi_turn/             (multi-turn)
+#
+# Multi-turn is no longer part of the accuracy gate; see README Step 3 for the
+# optional exploratory multi-turn run.
 
 set -euo pipefail
 
@@ -33,22 +37,11 @@ sed -E \
     -e "s|^( *- ).*(# set to your endpoint URL\.)|\1\"${ENDPOINT}\" \2|" \
     offline_bfcl_v4_single_turn.yaml > "$ST_CONFIG"
 
-# Single-turn: non_live (20%), live (10%), hallucination (5%) — ~82 min
-echo "--- Single-turn (~82 min) ---"
+# Single-turn: non_live (62%), live (10%), hallucination (10%) — ~995 samples, ~3 h
+echo "--- Single-turn (~995 samples, ~3 h) ---"
 inference-endpoint benchmark from-config \
     --config "$ST_CONFIG" \
     --accuracy-only
 
-# Multi-turn: 3% sample across all four subsets — ~64 min
-echo "--- Multi-turn (~64 min) ---"
-python -m inference_endpoint.evaluation.bfcl_v4_multi_turn_cli \
-    --endpoint "$ENDPOINT" \
-    --model "$MODEL" \
-    --sample-pct 3 \
-    --temperature 0 \
-    --seed 42 \
-    --max-steps-per-turn 25 \
-    --report-dir results/bfcl_v4_multi_turn/
-
 echo ""
-echo "=== Done. Results in results/ ==="
+echo "=== Done. Results in results/bfcl_v4_single_turn_accuracy/ ==="

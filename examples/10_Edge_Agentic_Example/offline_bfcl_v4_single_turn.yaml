@@ -1,8 +1,10 @@
-# BFCL v4 single-turn accuracy — edge device (<3h) budget
+# BFCL v4 single-turn accuracy — edge device (~3h) budget
 #
 # Runs the three single-turn BFCL v4 categories (non_live, live, hallucination)
-# through the accuracy pipeline with per-category sampling tuned to finish on an
-# edge device within ~3 hours. Multi-turn is run separately via run_accuracy.sh.
+# through the accuracy pipeline with per-category sampling tuned to draw ~995
+# samples — large enough that the point estimate is stable across draws while
+# still finishing on an edge device in ~3 hours. This single-turn run is the
+# finalized accuracy benchmark.
 #
 # For final submission, fields marked "do not change" must be kept as-is.
 # Fields marked "set to your value" must be updated for your environment.
@@ -27,9 +29,9 @@ datasets:
     params:
       categories: ["non_live", "live", "hallucination"] # do not change.
       category_sample_pct:
-        non_live: 20 # do not change.
+        non_live: 62 # do not change.
         live: 10 # do not change.
-        hallucination: 5 # do not change.
+        hallucination: 10 # do not change.
       # Subsets with total size <= 25 are always taken in full so their scores
       # are not reduced to one or two noisy samples.
       subset_floor: 25 # do not change.

@@ -18,7 +18,7 @@
 # reasoning off); with serving optimizations (e.g. MTP speculative decoding)
 # this drops toward ~1.5 h.
 #
-# Reference (Jetson Thor, Q4_K_M + llama.cpp, reasoning off): ~2 h 37 m,
+# Reference (NVIDIA Jetson AGX Thor, Q4_K_M + llama.cpp, reasoning off): ~2 h 37 m,
 # 1007/1007 turns, 0 dropped, inline IoU 0.6335.
 #
 # Run (start the edge server first; see README.md):
