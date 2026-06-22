@@ -54,6 +54,26 @@ CLI that comes with it.
 | ~24 GB memory (GPU/VRAM or unified) | The Q4 GGUF is ~16.8 GB on disk; the rest is KV cache at `--ctx-size 32768`. 16 GB is **not** enough. |
 | ~3 hours wall-clock                 | Single-turn (3 categories), ~995 samples                                                              |
 
+### Obtaining the model
+
+The reference runs use **Qwen3.6-27B** ([`Qwen/Qwen3.6-27B`](https://huggingface.co/Qwen/Qwen3.6-27B),
+Apache 2.0) quantized to **Q4_K_M GGUF** (~16.8 GB). Pull the GGUF from a public
+Hugging Face quant repo — e.g. [`unsloth/Qwen3.6-27B-GGUF`](https://huggingface.co/unsloth/Qwen3.6-27B-GGUF):
+
+```bash
+pip install -U "huggingface_hub[cli]"
+hf download unsloth/Qwen3.6-27B-GGUF Qwen3.6-27B-Q4_K_M.gguf --local-dir ./models
+# -> ./models/Qwen3.6-27B-Q4_K_M.gguf
+```
+
+Alternatively, `llama-server` can fetch it directly with
+`-hf unsloth/Qwen3.6-27B-GGUF:Q4_K_M` (requires a `LLAMA_CURL`-enabled build).
+
+> Accuracy is reproducible from any correct Q4_K_M build of this model
+> (deterministic decoding at `temperature 0` + fixed seed); exact GGUF byte size
+> may differ slightly between quantizer versions. Use a model name / `--alias`
+> of `Qwen3.6-27B-Q4_K_M` so it matches the config defaults below.
+
 ### Starting a model server
 
 If you already have an OpenAI-compatible server running, skip this section.
