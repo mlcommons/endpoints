@@ -586,9 +586,10 @@ async def _run_benchmark_async(
         # ~1-2 second subprocess-launch window. This eliminates the
         # slow-joiner risk of dropping early live ticks (or the worst
         # case: missing COMPLETE if the SUB handshake never warms up).
+        # Only create the subscriber if live metrics publishing is enabled.
         if zmq_ctx.socket_dir is None:
             raise RuntimeError("ZMQ socket_dir must be set after publisher bind")
-        metrics_subscriber = MetricsSnapshotSubscriber(
+        metrics_subscriber: MetricsSnapshotSubscriber | None = MetricsSnapshotSubscriber(
             metrics_socket_name, zmq_ctx, loop
         )
         metrics_subscriber.start()
@@ -618,6 +619,10 @@ async def _run_benchmark_async(
                 str(config.settings.drain.metrics_tokenizer_workers),
             ]
         )
+        # Control live metrics publishing via config parameter
+        # publish_interval_s = 0 disables live tick task in publisher.start()
+        publish_interval_s = 0.25 if ctx.rt_settings.enable_live_metrics else 0.0
+        aggregator_args.extend(["--publish-interval", str(publish_interval_s)])
 
         # EventLoggerService writes events.jsonl to tmpfs (high-frequency writes)
         event_logger_args: list[str] = [
@@ -791,7 +796,7 @@ async def _run_benchmark_async(
             )
             if snap_dict is not None:
                 logger.info("Built report from final_snapshot.json")
-            elif metrics_subscriber.latest is not None:
+            elif metrics_subscriber is not None and metrics_subscriber.latest is not None:
                 snap_dict = snapshot_to_dict(metrics_subscriber.latest)
                 logger.warning(
                     "No final_snapshot.json on disk; falling back to last "
@@ -812,7 +817,8 @@ async def _run_benchmark_async(
                 except Exception as e:  # noqa: BLE001 — best-effort report build.
                     logger.warning(f"Failed to build report from snapshot: {e}")
 
-            metrics_subscriber.close()
+            if metrics_subscriber is not None:
+                metrics_subscriber.close()
             pbar.close()
 
     return BenchmarkResult(

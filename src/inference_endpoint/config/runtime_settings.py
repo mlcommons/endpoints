@@ -85,6 +85,9 @@ class RuntimeSettings:
     load_pattern: LoadPattern | None
     """Load pattern configuration"""
 
+    enable_live_metrics: bool = True
+    """Enable live metrics publishing (periodic snapshots)"""
+
     @classmethod
     def from_config(
         cls,
@@ -162,6 +165,7 @@ class RuntimeSettings:
             "rng_sched": random.Random(runtime_cfg.scheduler_random_seed),
             "rng_sample_index": random.Random(runtime_cfg.dataloader_random_seed),
             "load_pattern": load_pattern_cfg,
+            "enable_live_metrics": runtime_cfg.enable_live_metrics,
         }
 
         # Apply overrides
