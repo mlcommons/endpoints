@@ -121,18 +121,18 @@ class MetricsPublisher:
         the tick task is not created. Final snapshots will still be
         published via ``publish_final``.
         """
-        if publish_interval_s <= 0:
-            logger.info(
-                "Live metrics publishing disabled "
-                "(publish_interval_s=%s, skipping tick task)",
-                publish_interval_s,
-            )
-            return
         if self._tick_task is not None:
             logger.warning(
                 "MetricsPublisher.start called again while tick task is "
                 "still running (id=%r); ignoring the second start.",
                 id(self._tick_task),
+            )
+            return
+        if publish_interval_s <= 0:
+            logger.info(
+                "Live metrics publishing disabled "
+                "(publish_interval_s=%s, skipping tick task)",
+                publish_interval_s,
             )
             return
 
