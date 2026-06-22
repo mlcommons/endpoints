@@ -149,7 +149,8 @@ class ChatCompletionResponseMessage(
     content: str | None = None
     refusal: str | None = None
     tool_calls: list[dict[str, Any]] | None = None
-    reasoning_content: str | None = None
+    reasoning_content: str | None = None  # SGLang / DeepSeek field name
+    reasoning: str | None = None  # vLLM field name
 
 
 class ChatCompletionChoice(
