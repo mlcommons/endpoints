@@ -107,6 +107,27 @@ class HTTPClientConfig(WithUpdatesMixin, BaseModel):
         ),
     ] = Field(-1, ge=-1)
 
+    # Client source IPs to bind outbound connections to, round-robined per new
+    # connection (see ConnectionPool._create_connection).
+    #
+    # Each distinct source IP has an independent ephemeral-port space to a given
+    # destination — TCP 4-tuple (src_ip, src_port, dst_ip, dst_port) uniqueness
+    # is per src_ip — so binding across N source IPs multiplies the usable
+    # connection budget by ~N on a single host, lifting the ~28k single-IP
+    # ephemeral-port ceiling that otherwise caps concurrency for streaming runs.
+    #
+    # IPs must be assigned to local interfaces (multiple NICs, or loopback
+    # aliases in 127.0.0.0/8 on Linux). Empty = OS default source selection
+    # (unchanged single-IP behavior).
+    source_ips: Annotated[
+        list[str],
+        cyclopts.Parameter(
+            alias="--source-ips",
+            help="Client source IPs to round-robin connections across "
+            "(multiplies ephemeral-port budget by IP count). Empty=OS default.",
+        ),
+    ] = Field(default_factory=list)
+
     # Transport configuration
     transport: AnyTransportConfig = Field(
         default_factory=TransportConfig.create_default
@@ -222,6 +243,12 @@ class HTTPClientConfig(WithUpdatesMixin, BaseModel):
             raise ValueError(f"{info.field_name} must be -1 (auto) or >= 1, got 0")
         return v
 
+    @field_validator("source_ips")
+    @classmethod
+    def _clean_source_ips(cls, v: list[str]) -> list[str]:
+        # Drop blank entries so a stray "" can't bind to INADDR_ANY (all interfaces).
+        return [ip.strip() for ip in v if ip and ip.strip()]
+
     @model_validator(mode="after")
     def _resolve_defaults(self) -> HTTPClientConfig:
         """Resolve auto-detect values and lazy defaults."""
@@ -253,13 +280,21 @@ class HTTPClientConfig(WithUpdatesMixin, BaseModel):
             system_maximum_ports = high - low + 1
             available_ports = get_ephemeral_port_limit()
 
+            # Each distinct source IP has its own ephemeral-port space to a given
+            # destination (4-tuple uniqueness is per src_ip), so binding across N
+            # source IPs scales the connection budget by ~N. See `source_ips`.
+            source_ip_multiplier = max(1, len(self.source_ips))
+            port_budget = available_ports * source_ip_multiplier
+
             if self.max_connections == -1:
-                object.__setattr__(self, "max_connections", available_ports)
+                object.__setattr__(self, "max_connections", port_budget)
             elif self.max_connections > 0:
-                if self.max_connections > available_ports:
+                if self.max_connections > port_budget:
                     raise RuntimeError(
-                        f"--max-connections ({self.max_connections}) exceeds ephemeral port limit ({available_ports}). "
-                        f"Either reduce --max-connections or increase system port limit."
+                        f"--max-connections ({self.max_connections}) exceeds ephemeral port "
+                        f"budget ({port_budget} = {available_ports} ports x {source_ip_multiplier} "
+                        f"source IP(s)). Either reduce --max-connections, add --source-ips, or "
+                        f"increase the system port limit."
                     )
 
             if self.min_required_connections == -1:

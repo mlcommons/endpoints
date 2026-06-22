@@ -471,6 +471,8 @@ class ConnectionPool:
         max_connections: int | None = None,  # None means no limit
         max_idle_time: float = 4.0,  # Discard connections idle longer than this
         ssl_context: ssl.SSLContext | None = None,
+        source_ips: list[str]
+        | None = None,  # round-robin bind src IPs; None=OS default
     ):
         self._host = host
         self._port = port
@@ -478,6 +480,11 @@ class ConnectionPool:
         self._max_connections = max_connections
         self._max_idle_time = max_idle_time
         self._ssl_context = ssl_context
+        # Round-robin outbound binds across these source IPs to multiply the
+        # ephemeral-port budget (one independent port space per src_ip). Empty
+        # list normalized to None so the hot path stays a single is-None check.
+        self._source_ips: list[str] | None = source_ips or None
+        self._source_ip_idx: int = 0
         # Connection tracking
         self._idle_stack: list[PooledConnection] = []
         self._all_connections: set[PooledConnection] = set()
@@ -560,12 +567,22 @@ class ConnectionPool:
             def protocol_factory() -> HttpResponseProtocol:
                 return HttpResponseProtocol(self._loop)
 
+            # Round-robin the outbound source IP so each new connection draws
+            # from a different src_ip's ephemeral-port space. port 0 => kernel
+            # picks the ephemeral port; None => OS default source selection.
+            local_addr: tuple[str, int] | None = None
+            if self._source_ips:
+                src_ip = self._source_ips[self._source_ip_idx % len(self._source_ips)]
+                self._source_ip_idx += 1
+                local_addr = (src_ip, 0)
+
             # Create connection without timeout
             transport, protocol = await self._loop.create_connection(
                 protocol_factory,
                 host=self._host,
                 port=self._port,
                 ssl=self._ssl_context,
+                local_addr=local_addr,
             )
 
             # Apply/Override socket defaults

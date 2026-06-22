@@ -811,3 +811,93 @@ class MockTransport:
 
     def get_extra_info(self, name: str, default=None):
         return default
+
+
+class _RecordingLoop:
+    """Wraps a real event loop, records the ``local_addr`` passed to
+    create_connection, then delegates WITHOUT it so the real connection to the
+    echo server still succeeds even when the recorded source IPs are fake."""
+
+    def __init__(self, real):
+        self._real = real
+        self.local_addrs: list = []
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+    async def create_connection(
+        self,
+        protocol_factory,
+        host=None,
+        port=None,
+        ssl=None,
+        local_addr=None,
+        **kwargs,
+    ):
+        self.local_addrs.append(local_addr)
+        return await self._real.create_connection(
+            protocol_factory, host=host, port=port, ssl=ssl
+        )
+
+
+class TestConnectionPoolSourceIps:
+    """source_ips round-robin binding (multiplies the ephemeral-port budget)."""
+
+    @pytest.mark.asyncio
+    async def test_round_robins_local_addr_across_source_ips(self, echo_server):
+        loop = _RecordingLoop(asyncio.get_running_loop())
+        parsed = urlparse(echo_server.url)
+        pool = ConnectionPool(
+            host=parsed.hostname,
+            port=parsed.port,
+            loop=loop,
+            max_connections=8,
+            source_ips=["10.0.0.1", "10.0.0.2", "10.0.0.3"],
+        )
+        conns = []
+        try:
+            conns = [await pool.acquire() for _ in range(7)]
+            # Cycles through the IPs in order, wrapping around.
+            assert loop.local_addrs == [
+                ("10.0.0.1", 0),
+                ("10.0.0.2", 0),
+                ("10.0.0.3", 0),
+                ("10.0.0.1", 0),
+                ("10.0.0.2", 0),
+                ("10.0.0.3", 0),
+                ("10.0.0.1", 0),
+            ]
+        finally:
+            for c in conns:
+                pool.release(c)
+            await pool.close()
+
+    @pytest.mark.asyncio
+    async def test_no_source_ips_uses_default_local_addr_none(self, echo_server):
+        loop = _RecordingLoop(asyncio.get_running_loop())
+        parsed = urlparse(echo_server.url)
+        pool = ConnectionPool(
+            host=parsed.hostname, port=parsed.port, loop=loop, max_connections=4
+        )
+        conns = []
+        try:
+            conns = [await pool.acquire() for _ in range(2)]
+            assert loop.local_addrs == [None, None]
+        finally:
+            for c in conns:
+                pool.release(c)
+            await pool.close()
+
+    @pytest.mark.asyncio
+    async def test_empty_source_ips_normalized_to_none(self, echo_server):
+        loop = asyncio.get_running_loop()
+        parsed = urlparse(echo_server.url)
+        pool = ConnectionPool(
+            host=parsed.hostname,
+            port=parsed.port,
+            loop=loop,
+            max_connections=2,
+            source_ips=[],
+        )
+        assert pool._source_ips is None
+        await pool.close()
