@@ -586,10 +586,9 @@ async def _run_benchmark_async(
         # ~1-2 second subprocess-launch window. This eliminates the
         # slow-joiner risk of dropping early live ticks (or the worst
         # case: missing COMPLETE if the SUB handshake never warms up).
-        # Only create the subscriber if live metrics publishing is enabled.
         if zmq_ctx.socket_dir is None:
             raise RuntimeError("ZMQ socket_dir must be set after publisher bind")
-        metrics_subscriber: MetricsSnapshotSubscriber | None = MetricsSnapshotSubscriber(
+        metrics_subscriber = MetricsSnapshotSubscriber(
             metrics_socket_name, zmq_ctx, loop
         )
         metrics_subscriber.start()
@@ -796,7 +795,7 @@ async def _run_benchmark_async(
             )
             if snap_dict is not None:
                 logger.info("Built report from final_snapshot.json")
-            elif metrics_subscriber is not None and metrics_subscriber.latest is not None:
+            elif metrics_subscriber.latest is not None:
                 snap_dict = snapshot_to_dict(metrics_subscriber.latest)
                 logger.warning(
                     "No final_snapshot.json on disk; falling back to last "
@@ -817,8 +816,7 @@ async def _run_benchmark_async(
                 except Exception as e:  # noqa: BLE001 — best-effort report build.
                     logger.warning(f"Failed to build report from snapshot: {e}")
 
-            if metrics_subscriber is not None:
-                metrics_subscriber.close()
+            metrics_subscriber.close()
             pbar.close()
 
     return BenchmarkResult(
