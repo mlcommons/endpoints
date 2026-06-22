@@ -435,6 +435,7 @@ class RuntimeConfig(BaseModel):
         bool,
         cyclopts.Parameter(
             alias="--enable-live-metrics",
+            negative="--no-live-metrics",
             help="Enable live metrics publishing (periodic snapshots); disable for endpoints running on CPUs",
         ),
     ] = Field(True, description="Enable live metrics publishing (periodic snapshots)")
