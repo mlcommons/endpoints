@@ -86,7 +86,7 @@ settings:
   warmup:
     enabled: false  # Enable warmup phase before performance run
     n_requests: null  # Warmup request count (None = full dataset once)
-    salt: false  # Prepend a unique random hex salt to each warmup prompt
+    salt: true  # Prepend a unique random hex salt to each warmup prompt
     drain: false
     warmup_random_seed: 42  # RNG seed for warmup scheduling and sample ordering
 endpoint_config:
