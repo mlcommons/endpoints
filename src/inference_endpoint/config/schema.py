@@ -513,7 +513,7 @@ class WarmupConfig(BaseModel):
             help="Prepend a unique random hex salt to each warmup prompt",
         ),
     ] = Field(
-        False, description="Prepend a unique random hex salt to each warmup prompt"
+        True, description="Prepend a unique random hex salt to each warmup prompt"
     )
     drain: Annotated[
         bool,

@@ -412,7 +412,7 @@ class TestWarmupConfig:
         cfg = WarmupConfig()
         assert cfg.enabled is False
         assert cfg.n_requests is None
-        assert cfg.salt is False
+        assert cfg.salt is True
         assert cfg.drain is False
 
     @pytest.mark.unit
@@ -836,6 +836,17 @@ class TestBuildPhases:
         phases = _build_phases(ctx)
 
         assert phases[0].runtime_settings.n_samples_to_issue is None
+
+    @pytest.mark.unit
+    def test_warmup_defaults_uses_salt(self, base_rt_settings, simple_dataset):
+        config = OfflineConfig(
+            **_OFFLINE_KWARGS,
+            settings=OfflineSettings(warmup=WarmupConfig(enabled=True)),
+        )
+        ctx = self._make_ctx(config, base_rt_settings, simple_dataset)
+        phases = _build_phases(ctx)
+
+        assert phases[0].dataset._salt_rng is not None
 
     @pytest.mark.unit
     def test_warmup_without_salt_uses_raw_dataloader(
