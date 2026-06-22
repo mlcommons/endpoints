@@ -1,0 +1,40 @@
+name: "qwen-agentic-benchmark"
+version: "1.0"
+type: "online"
+
+model_params:
+  name: "Qwen/Qwen3.6-35B-A3B"
+  temperature: 1.0
+  top_k: 20
+  top_p: 0.95
+  repetition_penalty: 1.0
+  presence_penalty: 1.5
+  max_new_tokens: 8192
+  chat_template_kwargs:
+    preserve_thinking: true
+
+datasets:
+  - name: agentic_coding
+    type: performance
+    path: /path/to/agentic_combined.jsonl
+    accuracy_config:
+      eval_method: agentic_inference_inline # required benchmark default.
+    agentic_inference:
+      enable_salt: true # do not change.
+      inject_tool_delay: true # do not change.
+
+settings:
+  runtime:
+    min_duration_ms: 0
+    max_duration_ms: 36000000
+
+  load_pattern:
+    type: agentic_inference
+    target_concurrency: 8 # Submission-specific concurrency.
+
+endpoint_config:
+  endpoints:
+    - "http://localhost:30000"
+  api_type: openai
+
+report_dir: logs/qwen_agentic
