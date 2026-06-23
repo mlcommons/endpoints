@@ -606,7 +606,9 @@ class TestSWEBenchScorerPreflight:
             return MagicMock(returncode=0)
 
         monkeypatch.setattr(scoring_mod.subprocess, "run", fake_run)
-        with pytest.raises(SetupError, match="mini-extra is not available"):
+        with pytest.raises(
+            SetupError, match=r"mini-extra is not available.*stderr: not found"
+        ):
             SWEBenchScorer.preflight(self._extras(swe_bench_project))
 
     def test_preflight_fails_swebench_missing(self, swe_bench_project, monkeypatch):
@@ -620,7 +622,10 @@ class TestSWEBenchScorerPreflight:
             return MagicMock(returncode=0)
 
         monkeypatch.setattr(scoring_mod.subprocess, "run", fake_run)
-        with pytest.raises(SetupError, match="swebench is not available"):
+        with pytest.raises(
+            SetupError,
+            match=r"swebench is not available.*stderr: ModuleNotFoundError",
+        ):
             SWEBenchScorer.preflight(self._extras(swe_bench_project))
 
     def test_preflight_fails_docker_not_running(self, swe_bench_project, monkeypatch):

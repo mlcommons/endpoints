@@ -43,6 +43,20 @@ class TestSWEBenchRegistration:
     def test_accuracy_only_flag(self):
         assert SWEBench.ACCURACY_ONLY is True
 
+    @pytest.mark.parametrize(
+        ("subset", "expected"),
+        [
+            ("verified", "princeton-nlp/SWE-bench_Verified"),
+            ("lite", "princeton-nlp/SWE-bench_Lite"),
+        ],
+    )
+    def test_hf_dataset_name(self, subset: str, expected: str):
+        assert SWEBench.hf_dataset_name(subset) == expected
+
+    def test_hf_dataset_name_invalid_subset_raises(self):
+        with pytest.raises(ValueError, match="Unknown SWE-bench subset"):
+            SWEBench.hf_dataset_name("invalid")
+
 
 class TestSWEBenchGenerate:
     def test_downloads_and_caches(self, tmp_path: Path):

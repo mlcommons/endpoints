@@ -54,6 +54,15 @@ class SWEBench(
     COLUMN_NAMES = ["instance_id", "prompt"]
 
     @classmethod
+    def hf_dataset_name(cls, subset: str) -> str:
+        hf_path = _REPO_MAP.get(subset)
+        if hf_path is None:
+            raise ValueError(
+                f"Unknown SWE-bench subset {subset!r}; choose from: {list(_REPO_MAP)}"
+            )
+        return hf_path
+
+    @classmethod
     def generate(
         cls,
         datasets_dir: Path,
@@ -71,11 +80,7 @@ class SWEBench(
         Returns:
             DataFrame with columns ``instance_id`` and ``prompt``.
         """
-        hf_path = _REPO_MAP.get(subset)
-        if hf_path is None:
-            raise ValueError(
-                f"Unknown SWE-bench subset {subset!r}; choose from: {list(_REPO_MAP)}"
-            )
+        hf_path = cls.hf_dataset_name(subset)
 
         dst_path = datasets_dir / "swe_bench" / subset / f"swe_bench_{subset}.parquet"
         if dst_path.exists() and not force:

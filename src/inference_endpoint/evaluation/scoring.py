@@ -55,7 +55,7 @@ from ..core.types import TextModelOutput
 from ..dataset_manager.agentic_inference_dataset import AgenticInferenceDataset
 from ..dataset_manager.dataset import Dataset
 from ..dataset_manager.predefined.shopify_product_catalogue import ProductMetadata
-from ..dataset_manager.predefined.swe_bench import _REPO_MAP as _SWE_BENCH_HF_MAP
+from ..dataset_manager.predefined.swe_bench import SWEBench
 from ..exceptions import SetupError
 from .extractor import Extractor, PythonCodeExtractor
 
@@ -1775,6 +1775,14 @@ def _poll_swebench_progress(
             bar.set_postfix({k: len(v) for k, v in sorted(statuses.items())})
 
 
+def _decode_subprocess_stderr(stderr: bytes | str | None) -> str:
+    if stderr is None:
+        return ""
+    if isinstance(stderr, bytes):
+        return stderr.decode(errors="replace").strip()
+    return str(stderr).strip()
+
+
 class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
     """SWE-bench accuracy scorer using the mini-extra CLI (mini-swe-agent package).
 
@@ -1817,11 +1825,7 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
             if swebench_config_template is not None
             else _DEFAULT_SWE_BENCH_TEMPLATE
         )
-        if subset not in _SWE_BENCH_HF_MAP:
-            raise ValueError(
-                f"Unknown SWE-bench subset {subset!r}; "
-                f"choose from: {list(_SWE_BENCH_HF_MAP)}"
-            )
+        SWEBench.hf_dataset_name(subset)
         self.subset = subset
         self.split = split
         self.num_instances = num_instances
@@ -1899,9 +1903,11 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
             timeout=30,
         )
         if result.returncode != 0:
+            stderr_text = _decode_subprocess_stderr(result.stderr)
             raise SetupError(
                 f"mini-extra is not available in the SWE-bench subproject at "
                 f"{swe_bench_project_path}. Run: cd {swe_bench_project_path} && uv sync"
+                + (f". stderr: {stderr_text}" if stderr_text else "")
             )
 
         swebench_result = subprocess.run(
@@ -1919,9 +1925,11 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
             timeout=30,
         )
         if swebench_result.returncode != 0:
+            stderr_text = _decode_subprocess_stderr(swebench_result.stderr)
             raise SetupError(
                 f"swebench is not available in the SWE-bench subproject at "
                 f"{swe_bench_project_path}. Run: cd {swe_bench_project_path} && uv sync"
+                + (f". stderr: {stderr_text}" if stderr_text else "")
             )
 
         if shutil.which("docker") is None:
@@ -2000,7 +2008,7 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
 
         patched_path = output_dir / "swebench_patched.yaml"
         with patched_path.open("w") as f:
-            yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)
+            yaml.safe_dump(cfg, f, default_flow_style=False, sort_keys=False)
         return patched_path
 
     def _run_subprocess(self, cmd: list[str], log_path: Path, cwd: Path) -> None:
@@ -2098,7 +2106,7 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
             )
             return None, 1
 
-        hf_dataset_name = _SWE_BENCH_HF_MAP[self.subset]
+        hf_dataset_name = SWEBench.hf_dataset_name(self.subset)
         run_id = f"endpoints_{uuid.uuid4().hex[:8]}"
         eval_cmd = [
             "python",

@@ -198,9 +198,10 @@ uv run inference-endpoint benchmark from-config \
 ## SWE-bench Accuracy
 
 `swe_bench_accuracy.yaml` runs the SWE-bench accuracy evaluation alongside a
-minimal performance dataset. The accuracy phase is handled entirely by
-`SWEBenchScorer`, which shells out to `mini-swe-agent` and the `swebench`
-evaluation harness — no endpoint traffic is sent for accuracy samples.
+minimal performance dataset. The benchmark framework skips its built-in
+accuracy phase for this dataset; instead, `SWEBenchScorer` shells out to
+`mini-swe-agent` and the `swebench` evaluation harness, and that external flow
+drives requests to the configured endpoint.
 
 The isolated `uv` environment for those tools lives in `accuracy/`. Sync it
 once before running:

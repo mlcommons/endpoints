@@ -32,7 +32,7 @@ datasets:
 settings:
   load_pattern:
     type: "concurrency"
-    target_concurrency: 10 # mini-extra inherit target_concurrency from performance dataset
+    target_concurrency: 10 # mini-extra inherits target_concurrency from performance dataset
   runtime:
     n_samples_to_issue: 10
 
