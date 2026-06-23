@@ -26,6 +26,7 @@ import functools
 from importlib import import_module
 from pathlib import Path
 from typing import Annotated, Any, Literal
+from urllib.parse import urlparse
 
 import cyclopts
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -253,13 +254,28 @@ class HTTPClientConfig(WithUpdatesMixin, BaseModel):
             system_maximum_ports = high - low + 1
             available_ports = get_ephemeral_port_limit()
 
+            # The ephemeral-port limit is per (source IP, destination) pair: the
+            # TCP 4-tuple (src_ip, src_port, dst_ip, dst_port) only needs to be
+            # unique, so the kernel reuses local ports across distinct
+            # destinations. Each distinct endpoint therefore has its own
+            # ~`available_ports` budget. Workers are round-robined across
+            # endpoints, so scale the cap by the distinct-endpoint count;
+            # otherwise concurrency is needlessly throttled to a single
+            # endpoint's budget when several endpoints are configured.
+            distinct_endpoints = len(
+                {(urlparse(u).hostname, urlparse(u).port) for u in self.endpoint_urls}
+            )
+            port_budget = available_ports * max(1, distinct_endpoints)
+
             if self.max_connections == -1:
-                object.__setattr__(self, "max_connections", available_ports)
+                object.__setattr__(self, "max_connections", port_budget)
             elif self.max_connections > 0:
-                if self.max_connections > available_ports:
+                if self.max_connections > port_budget:
                     raise RuntimeError(
-                        f"--max-connections ({self.max_connections}) exceeds ephemeral port limit ({available_ports}). "
-                        f"Either reduce --max-connections or increase system port limit."
+                        f"--max-connections ({self.max_connections}) exceeds the ephemeral "
+                        f"port budget ({port_budget} = {available_ports} ports x "
+                        f"{max(1, distinct_endpoints)} distinct endpoint(s)). Reduce "
+                        f"--max-connections, add endpoints, or raise the system port range."
                     )
 
             if self.min_required_connections == -1:
