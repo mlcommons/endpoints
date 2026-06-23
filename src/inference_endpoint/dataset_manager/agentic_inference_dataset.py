@@ -13,9 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Multi-turn conversation dataset for conversational AI benchmarking."""
+"""Agentic inference conversation dataset for conversational AI benchmarking."""
 
-import hashlib
 import logging
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -38,7 +37,7 @@ logger = logging.getLogger(__name__)
 class ConversationSampleEntry:
     """One client-turn entry in ConversationMetadata.samples.
 
-    sample_index is populated after transforms in MultiTurnDataset.load();
+    sample_index is populated after transforms in AgenticInferenceDataset.load();
     None before load() is called.
     """
 
@@ -49,9 +48,9 @@ class ConversationSampleEntry:
 
 @dataclass
 class ConversationMetadata:
-    """Bundle of maps/lists consumed by MultiTurnStrategy.
+    """Bundle of maps/lists consumed by AgenticInferenceStrategy.
 
-    Produced by MultiTurnDataset._build_metadata() from the post-transform dataframe.
+    Produced by AgenticInferenceDataset._build_metadata() from the post-transform dataframe.
     Keys in the *_by_key dicts are (str(conversation_id), int(turn)).
     Populated by load(); None before load() is called.
     """
@@ -63,14 +62,10 @@ class ConversationMetadata:
     pre_built_messages_by_key: dict[tuple[str, int], list[dict]] = field(
         default_factory=dict
     )
-    current_turn_messages_by_key: dict[tuple[str, int], list[dict]] = field(
-        default_factory=dict
-    )
-    system_prompts_by_conv: dict[str, str | None] = field(default_factory=dict)
     delay_seconds_by_key: dict[tuple[str, int], float] = field(default_factory=dict)
 
 
-def _expand_tool_results(row: dict) -> list[dict]:
+def _expand_tool_results(row: dict | pd.Series) -> list[dict]:
     """Expand a tool row into one OpenAI tool message per result.
 
     All ``role: "tool"`` rows carry a ``tool_results`` array. Each entry expands to
@@ -113,8 +108,111 @@ def _expand_tool_results(row: dict) -> list[dict]:
     return messages
 
 
-class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
-    """Dataset for multi-turn conversations.
+def _build_conversation_metadata(
+    conv_id: Any,
+    group: Any,
+) -> tuple[
+    str,
+    dict[tuple[str, int], list[dict]],
+    dict[tuple[str, int], float],
+    list[ConversationSampleEntry],
+    int,
+]:
+    """Build message history for all client turns in a single conversation.
+
+    Returns a tuple of (str_conv_id, pre_built_messages, delay_seconds, samples,
+    client_turns_count).
+    """
+    str_conv_id = str(conv_id)
+    sorted_group = group.sort_values("turn")
+    client_rows = sorted_group[sorted_group["role"].isin(["user", "tool"])]
+
+    system_content: str | None = None
+    for _, srow in sorted_group.iterrows():
+        val = srow.get("system")
+        if val and isinstance(val, str):
+            system_content = val
+            break
+
+    pre_built_messages_by_key: dict[tuple[str, int], list[dict]] = {}
+    delay_seconds_by_key: dict[tuple[str, int], float] = {}
+    samples: list[ConversationSampleEntry] = []
+
+    # Single pass over all rows in turn order, carrying a running history list.
+    # Each row is formatted once; client turns snapshot (history + current_msgs)
+    # before extending history.
+    history: list[dict] = []
+    if system_content:
+        history.append({"role": "system", "content": system_content})
+
+    for _, row in sorted_group.iterrows():
+        role = row.get("role")
+
+        # Format this row into message(s) using the same field extraction as before.
+        expanded = _expand_tool_results(row)
+        if expanded:
+            row_msgs: list[dict] = expanded
+        else:
+            msg: dict[str, Any] = {}
+            for key in (
+                "role",
+                "content",
+                "name",
+                "tool_calls",
+                "tool_results",
+                "reasoning_content",
+            ):
+                val = row.get(key)
+                if val is not None and not (isinstance(val, float) and pd.isna(val)):
+                    msg[key] = val
+            if (
+                msg.get("role") == "assistant"
+                and "tool_calls" in msg
+                and "content" not in msg
+            ):
+                msg["content"] = None
+            row_msgs = [msg] if msg.get("role") else []
+
+        if role in ("user", "tool"):
+            t_n = int(row["turn"])
+            current_turn_msgs: list[dict] = row_msgs
+            # Snapshot: history holds everything before this turn; create new lists
+            # so stored snapshots are not mutated by later history extensions.
+            pre_built_messages_by_key[(str_conv_id, t_n)] = (
+                list(history) + current_turn_msgs
+            )
+            history.extend(current_turn_msgs)
+
+            delay_val = row.get("delay_seconds")
+            if delay_val is not None and not (
+                isinstance(delay_val, float) and pd.isna(delay_val)
+            ):
+                try:
+                    delay_f = float(delay_val)
+                except (TypeError, ValueError):
+                    delay_f = 0.0
+                if delay_f > 0.0:
+                    delay_seconds_by_key[(str_conv_id, t_n)] = delay_f
+
+            samples.append(
+                ConversationSampleEntry(conversation_id=str_conv_id, turn=t_n)
+            )
+        else:
+            # Non-client row (assistant, etc.): extend history for future client turns.
+            history.extend(row_msgs)
+
+    client_turns_count = int(client_rows.shape[0])
+    return (
+        str_conv_id,
+        pre_built_messages_by_key,
+        delay_seconds_by_key,
+        samples,
+        client_turns_count,
+    )
+
+
+class AgenticInferenceDataset(Dataset, dataset_id="agentic_inference_conversations"):
+    """Dataset for agentic inference conversations.
 
     Supports conversational AI benchmarking with turn sequencing and conversation history.
     Validates that conversations have proper structure (alternating user/assistant roles)
@@ -145,7 +243,7 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
     COLUMN_NAMES = ["conversation_id", "turn", "role", "content"]
 
     def __init__(self, dataframe: pd.DataFrame, **kwargs):
-        """Initialize multi-turn dataset.
+        """Initialize agentic inference dataset.
 
         Args:
             dataframe: DataFrame with conversation data.
@@ -162,7 +260,6 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
                 self.dataframe = self.dataframe.loc[~metadata_rows].reset_index(
                     drop=True
                 )
-        self._enable_salt = False
         self._conv_groups = dict(
             list(self.dataframe.groupby("conversation_id", sort=False, dropna=False))
         )
@@ -171,9 +268,6 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
         self._validate_turn_numbering()
         # Populated by load() after transforms; None until then.
         self.conversation_metadata: ConversationMetadata | None = None
-
-    def enable_salt(self) -> None:
-        self._enable_salt = True
 
     def _validate_conversation_grouping(self) -> None:
         """Validate that all rows for each conversation_id appear consecutively in file order.
@@ -384,134 +478,25 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
         Returns:
             ConversationMetadata with samples, counts, and pre-built message maps.
         """
-        samples: list[ConversationSampleEntry] = []
-
-        # Count client turns (user + tool) per conversation for completion tracking
-        client_turns_per_conv = {
-            str(conv_id): int(group["role"].isin(["user", "tool"]).sum())
-            for conv_id, group in self._conv_groups.items()
-        }
-
-        # Map (conversation_id, turn) → complete message list ready to send to endpoint.
-        # Each entry is: [system (optional)] + all prior rows formatted as messages
-        #                + the current client turn message.
-        # This includes assistant rows (tool dispatches or terminal responses)
-        # so no runtime injection is required.
-        pre_built_messages_by_key: dict[tuple, list[dict]] = {}
-        current_turn_messages_by_key: dict[tuple, list[dict]] = {}
-        system_prompts_by_conv: dict[str, str | None] = {}
-        delay_seconds_by_key: dict[tuple, float] = {}
-
         assert self.dataframe is not None, "Dataframe must be initialized"
+
+        samples: list[ConversationSampleEntry] = []
+        client_turns_per_conv: dict[str, int] = {}
+        pre_built_messages_by_key: dict[tuple[str, int], list[dict]] = {}
+        delay_seconds_by_key: dict[tuple[str, int], float] = {}
+
         for conv_id, group in self._conv_groups.items():
-            sorted_group = group.sort_values("turn")
-            client_rows = sorted_group[sorted_group["role"].isin(["user", "tool"])]
-
-            # Extract system prompt from the first row that has it (typically turn 1)
-            system_content: str | None = None
-            for _, srow in sorted_group.iterrows():
-                val = srow.get("system")
-                if val and isinstance(val, str):
-                    system_content = val
-                    break
-            if self._enable_salt and system_content:
-                repeat_salt = hashlib.blake2b(b"1", digest_size=2).hexdigest()
-                conv_salt = hashlib.blake2b(
-                    str(conv_id).encode("utf-8"), digest_size=2
-                ).hexdigest()
-                system_content = (
-                    f"[salt: {repeat_salt}]\n\n"
-                    f"{system_content}\n\n"
-                    f"[salt: {conv_salt}]"
-                )
-            elif self._enable_salt:
-                logger.warning(
-                    "multi_turn.enable_salt requested but conversation %s has no "
-                    "system prompt; salt not applied",
-                    conv_id,
-                )
-            system_prompts_by_conv[str(conv_id)] = system_content
-
-            for _, row in client_rows.iterrows():
-                t_n = int(row["turn"])
-
-                messages: list[dict] = []
-                if system_content:
-                    messages.append({"role": "system", "content": system_content})
-
-                # All dataset rows strictly before this client turn (includes
-                # assistant rows and prior tool results).
-                prior_rows = sorted_group[sorted_group["turn"] < t_n]
-                for _, prior_row in prior_rows.iterrows():
-                    msg: dict[str, Any] = {}
-                    for key in (
-                        "role",
-                        "content",
-                        "name",
-                        "tool_calls",
-                        "tool_results",
-                        "reasoning_content",
-                    ):
-                        val = prior_row.get(key)
-                        if val is not None and not (
-                            isinstance(val, float) and pd.isna(val)
-                        ):
-                            msg[key] = val
-                    if (
-                        msg.get("role") == "assistant"
-                        and "tool_calls" in msg
-                        and "content" not in msg
-                    ):
-                        msg["content"] = None
-                    if msg.get("role"):
-                        # Expand merged parallel tool results: a single row with
-                        # tool_results: [{tool_call_id, content}, ...] expands into
-                        # one OpenAI tool message per result entry.
-                        expanded = _expand_tool_results(msg)
-                        if expanded:
-                            messages.extend(expanded)
-                        else:
-                            messages.append(msg)
-
-                # Append the current client turn message.
-                # A merged parallel-tool row carries tool_results instead of a
-                # single tool_call_id/content pair; expand to one message per result.
-                current_turn_msgs: list[dict] = []
-                expanded = _expand_tool_results(row)
-                if expanded:
-                    current_turn_msgs = expanded
-                else:
-                    cur: dict[str, Any] = {}
-                    for key in ("role", "content", "name"):
-                        val = row.get(key)
-                        if val is not None and not (
-                            isinstance(val, float) and pd.isna(val)
-                        ):
-                            cur[key] = val
-                    current_turn_msgs = [cur]
-                messages.extend(current_turn_msgs)
-
-                str_conv_id = str(conv_id)
-                pre_built_messages_by_key[(str_conv_id, t_n)] = messages
-                current_turn_messages_by_key[(str_conv_id, t_n)] = current_turn_msgs
-
-                delay_val = row.get("delay_seconds")
-                if delay_val is not None and not (
-                    isinstance(delay_val, float) and pd.isna(delay_val)
-                ):
-                    try:
-                        delay_f = float(delay_val)
-                    except (TypeError, ValueError):
-                        delay_f = 0.0
-                    if delay_f > 0.0:
-                        delay_seconds_by_key[(str_conv_id, t_n)] = delay_f
-
-                samples.append(
-                    ConversationSampleEntry(
-                        conversation_id=str_conv_id,
-                        turn=t_n,
-                    )
-                )
+            (
+                str_conv_id,
+                partial_pre_built,
+                partial_delay,
+                conv_samples,
+                client_turns_count,
+            ) = _build_conversation_metadata(conv_id, group)
+            pre_built_messages_by_key.update(partial_pre_built)
+            delay_seconds_by_key.update(partial_delay)
+            samples.extend(conv_samples)
+            client_turns_per_conv[str_conv_id] = client_turns_count
 
         return ConversationMetadata(
             samples=samples,
@@ -519,8 +504,6 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
             max_turns_per_conv=max(g["turn"].max() for g in self._conv_groups.values()),
             client_turns_per_conversation=client_turns_per_conv,
             pre_built_messages_by_key=pre_built_messages_by_key,
-            current_turn_messages_by_key=current_turn_messages_by_key,
-            system_prompts_by_conv=system_prompts_by_conv,
             delay_seconds_by_key=delay_seconds_by_key,
         )
 
@@ -545,9 +528,9 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
 
         if adapter is not None and (api_type is None or model_params is None):
             raise NotImplementedError(
-                "MultiTurnDataset.load(adapter=...) is not supported; "
+                "AgenticInferenceDataset.load(adapter=...) is not supported; "
                 "pass api_type=... and model_params=... instead. "
-                "Multi-turn datasets cherry-pick AddStaticColumns defaults from "
+                "Agentic inference datasets cherry-pick AddStaticColumns defaults from "
                 "the api_type's transforms because rows lack a 'prompt' column "
                 "and the full adapter pipeline (ColumnFilter) does not apply."
             )

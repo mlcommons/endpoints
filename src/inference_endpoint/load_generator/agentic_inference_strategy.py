@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Async multi-turn load strategy implementing the LoadStrategy protocol."""
+"""Async agentic inference load strategy implementing the LoadStrategy protocol."""
 
 import asyncio
 import hashlib
@@ -22,17 +22,17 @@ import time
 from collections import defaultdict
 from typing import Any
 
-from ..config.schema import MultiTurnConfig
+from ..config.schema import AgenticInferenceConfig
 from ..core.record import ErrorEventType, EventRecord, SampleEventType
-from ..core.types import ErrorData, QueryResult, TextModelOutput
-from ..dataset_manager.multi_turn_dataset import ConversationMetadata
+from ..core.types import ErrorData, QueryResult
+from ..dataset_manager.agentic_inference_dataset import ConversationMetadata
 from ..exceptions import InputValidationError
-from .conversation_manager import ConversationManager, ConversationState
+from .conversation_manager import ConversationManager
 from .strategy import PhaseIssuerProtocol
 
 logger = logging.getLogger(__name__)
 
-# Default turn timeout when no MultiTurnConfig is provided.
+# Default turn timeout when no AgenticInferenceConfig is provided.
 _DEFAULT_TURN_TIMEOUT_S = 86400.0
 
 ConversationTurn = tuple[int, int]
@@ -41,8 +41,8 @@ ActiveConversationState = tuple[str, ConversationTurns, int, int]
 ConversationInstance = tuple[str, str, ConversationTurns, int]
 
 
-class MultiTurnStrategy:
-    """Event-driven multi-turn strategy. Completion of each turn triggers the next.
+class AgenticInferenceStrategy:
+    """Event-driven agentic inference strategy. Completion of each turn triggers the next.
 
     execute() seeds the first N conversations (issues turn 1 for each), then
     awaits _all_done. on_sample_complete() is called synchronously from the
@@ -74,75 +74,42 @@ class MultiTurnStrategy:
         self,
         conversation_manager: ConversationManager,
         dataset_metadata: ConversationMetadata,
-        multi_turn_config: MultiTurnConfig | None = None,
+        agentic_inference_config: AgenticInferenceConfig | None = None,
         target_concurrency: int | None = None,
-        num_trajectories_to_issue: int | None = None,
-        stop_issuing_on_first_user_complete: bool | None = None,
     ):
-        """Initialize multi-turn strategy.
+        """Initialize agentic inference strategy.
 
         Args:
             conversation_manager: Manages conversation sequencing state.
-            dataset_metadata: ConversationMetadata from MultiTurnDataset (after load()).
-            multi_turn_config: Multi-turn conversation configuration.
+            dataset_metadata: ConversationMetadata from AgenticInferenceDataset (after load()).
+            agentic_inference_config: Agentic inference conversation configuration.
             target_concurrency: Maximum number of simultaneously active conversations.
                 None means all conversations run concurrently.
-            num_trajectories_to_issue: Number of complete conversation trajectories
-                to run. Defaults to one pass over the dataset conversations.
-            stop_issuing_on_first_user_complete: If True, stop issuing new work
-                as soon as a finished conversation slot cannot be refilled.
         """
         self._conv_manager = conversation_manager
         self._dataset_metadata = dataset_metadata
-        self._multi_turn_config = multi_turn_config
-        self._num_trajectories_to_issue = num_trajectories_to_issue
+        self._agentic_inference_config = agentic_inference_config
+        self._num_trajectories_to_issue = (
+            agentic_inference_config.num_trajectories_to_issue
+            if agentic_inference_config is not None
+            else None
+        )
         self._stop_issuing_on_first_user_complete = (
-            stop_issuing_on_first_user_complete
-            if stop_issuing_on_first_user_complete is not None
-            else (
-                multi_turn_config.stop_issuing_on_first_user_complete
-                if multi_turn_config is not None
-                else False
-            )
+            agentic_inference_config.stop_issuing_on_first_user_complete
+            if agentic_inference_config is not None
+            else False
         )
         self._turn_timeout_s = (
-            multi_turn_config.turn_timeout_s
-            if multi_turn_config is not None
+            agentic_inference_config.turn_timeout_s
+            if agentic_inference_config is not None
             else _DEFAULT_TURN_TIMEOUT_S
         )
         self._target_concurrency = target_concurrency
-        self._store_in_history = (
-            not multi_turn_config.use_dataset_history
-            if multi_turn_config is not None
+        self._enable_salt = (
+            agentic_inference_config.enable_salt
+            if agentic_inference_config is not None
             else False
         )
-        self._enable_salt = (
-            multi_turn_config.enable_salt if multi_turn_config is not None else False
-        )
-
-        # Dataset-supplied `role: tool` turns carry baked tool_call_ids that
-        # cannot reference the live model's freshly generated ids — reject them.
-        # Datasets that only declare `tools` on user turns or have `tool_calls`
-        # in scripted assistant rows are fine: live history never replays
-        # scripted assistant rows, so model-generated ids stay self-consistent.
-        if self._store_in_history:
-            tool_turn_keys = [
-                key
-                for key, msgs in dataset_metadata.current_turn_messages_by_key.items()
-                if any(m.get("role") == "tool" for m in msgs)
-            ]
-            if tool_turn_keys:
-                raise InputValidationError(
-                    "Multi-turn with tool result rows requires use_dataset_history=True. "
-                    "Live-history mode cannot replay dataset tool_call_ids against "
-                    "freshly generated model responses. "
-                    f"Offending turn(s): {tool_turn_keys[:5]}"
-                    + (
-                        f" (+{len(tool_turn_keys) - 5} more)"
-                        if len(tool_turn_keys) > 5
-                        else ""
-                    )
-                )
 
         # Composite on_sample_complete callback set by execute.py; used by
         # _handle_timeout to route synthetic failure results.
@@ -151,8 +118,6 @@ class MultiTurnStrategy:
 
         # Maps query_id -> conversation_id for routing completions.
         self._inflight: dict[str, str] = {}
-        # Cached ConversationState refs for O(1) lookup in on_sample_complete.
-        self._conv_states: dict[str, ConversationState] = {}
 
         # Event-driven state — populated in execute().
         self._base_convs: list[tuple[str, ConversationTurns]] = []
@@ -168,7 +133,7 @@ class MultiTurnStrategy:
         self._performance_tracking_stopped = False
 
     async def execute(self, phase_issuer: PhaseIssuerProtocol) -> int:
-        """Drive multi-turn sample issuance.
+        """Drive agentic inference sample issuance.
 
         Args:
             phase_issuer: Interface for issuing samples to the endpoint.
@@ -181,7 +146,6 @@ class MultiTurnStrategy:
         self._all_done = asyncio.Event()
         self._error = None
         self._stopping = False
-        self._conv_states.clear()
         self._active_iters.clear()
         self._inflight.clear()
         self._started_trajectory_count = 0
@@ -197,6 +161,7 @@ class MultiTurnStrategy:
             (conv_id, sorted(turns, key=lambda x: x[1]))
             for conv_id, turns in conv_samples.items()
         ]
+        self._validate_salt_system_prompts()
         n_to_start = self._initial_conversations_to_start()
         try:
             for _ in range(n_to_start):
@@ -277,50 +242,19 @@ class MultiTurnStrategy:
             self._fill_slot()
             return
         logical_id, source_id, turns, repeat_id = instance
-        self._create_conversation_state(logical_id, source_id, turns, repeat_id)
+        self._create_conversation_state(logical_id, turns)
         self._active_iters[logical_id] = (source_id, turns, 0, repeat_id)
         self._issue_next_turn(logical_id)
 
     def _create_conversation_state(
         self,
         logical_id: str,
-        source_id: str,
         turns: ConversationTurns,
-        repeat_id: int,
     ) -> None:
-        sys_content = None
-        if self._store_in_history:
-            sys_content = self._dataset_metadata.system_prompts_by_conv.get(source_id)
-            if sys_content is not None and self._enable_salt:
-                if sys_content.startswith("[salt: "):
-                    marker_end = sys_content.find("]\n\n")
-                    if marker_end >= 0:
-                        sys_content = sys_content[marker_end + 3 :]
-                salt_start = sys_content.rfind("\n\n[salt: ")
-                if salt_start >= 0:
-                    sys_content = sys_content[:salt_start]
-                repeat_salt = hashlib.blake2b(
-                    str(repeat_id).encode("utf-8"), digest_size=2
-                ).hexdigest()
-                conv_salt = hashlib.blake2b(
-                    source_id.encode("utf-8"), digest_size=2
-                ).hexdigest()
-                sys_content = (
-                    f"[salt: {repeat_salt}]\n\n"
-                    f"{sys_content}\n\n"
-                    f"[salt: {conv_salt}]"
-                )
-        system_message = (
-            {"role": "system", "content": sys_content}
-            if sys_content is not None
-            else None
-        )
-        state = self._conv_manager.get_or_create(
+        self._conv_manager.get_or_create(
             logical_id,
             expected_client_turns=len(turns),
-            system_message=system_message,
         )
-        self._conv_states[logical_id] = state
 
     def _issue_next_turn(self, conv_id: str) -> None:
         """Schedule the next turn for conv_id, applying inter-turn delay if set."""
@@ -339,8 +273,8 @@ class MultiTurnStrategy:
 
         delay = 0.0
         if (
-            self._multi_turn_config is not None
-            and self._multi_turn_config.inject_tool_delay
+            self._agentic_inference_config is not None
+            and self._agentic_inference_config.inject_tool_delay
         ):
             delay_map = self._dataset_metadata.delay_seconds_by_key
             delay = float(delay_map.get((source_id, turn), 0.0))
@@ -348,11 +282,21 @@ class MultiTurnStrategy:
         if delay > 0.0:
             assert self._loop is not None
             handle = self._loop.call_later(
-                delay, self._issue_turn_now, conv_id, idx, turn
+                delay, self._issue_turn_now_safely, conv_id, idx, turn
             )
             self._delay_handles[conv_id] = handle
         else:
             self._issue_turn_now(conv_id, idx, turn)
+
+    def _issue_turn_now_safely(self, conv_id: str, idx: int, turn: int) -> None:
+        """Issue a delayed turn and surface callback failures to execute()."""
+        try:
+            self._issue_turn_now(conv_id, idx, turn)
+        except Exception as exc:
+            logger.exception("Error issuing delayed turn for %s", conv_id)
+            self._error = exc
+            if self._all_done is not None:
+                self._all_done.set()
 
     def _issue_turn_now(self, conv_id: str, idx: int, turn: int) -> None:
         """Issue a single turn to the phase issuer."""
@@ -375,15 +319,10 @@ class MultiTurnStrategy:
                 turn,
             )
             return
-        self._active_iters[conv_id] = (source_id, turns, cursor + 1, repeat_id)
 
-        state = self._conv_states[conv_id]
-
-        data_override, current_turn_messages = self._build_data_override(
-            conv_id=conv_id,
+        data_override = self._build_data_override(
             source_id=source_id,
             turn=turn,
-            state=state,
             repeat_id=repeat_id,
         )
 
@@ -400,10 +339,8 @@ class MultiTurnStrategy:
             self._request_stop_issuing()
             return
 
+        self._active_iters[conv_id] = (source_id, turns, cursor + 1, repeat_id)
         self._inflight[query_id] = conv_id
-
-        if self._store_in_history and current_turn_messages:
-            state.message_history.extend(current_turn_messages)
 
         assert self._loop is not None
         handle = self._loop.call_later(
@@ -413,51 +350,34 @@ class MultiTurnStrategy:
 
     def _build_data_override(
         self,
-        conv_id: str,
         source_id: str,
         turn: int,
-        state: ConversationState,
         repeat_id: int,
-    ) -> tuple[dict[str, Any] | None, list[dict[str, Any]] | None]:
-        current_turn_messages: list[dict[str, Any]] | None = None
-        if self._store_in_history:
-            current_turn_messages = (
-                self._dataset_metadata.current_turn_messages_by_key.get(
-                    (source_id, turn)
-                )
-            )
-            if current_turn_messages:
-                live_messages = state.message_history.copy() + current_turn_messages
-                return (
-                    {
-                        "messages": live_messages,
-                        "input_tokens": None,
-                        "token_ids": None,
-                    },
-                    current_turn_messages,
-                )
-            return None, None
+    ) -> dict[str, Any] | None:
+        if not self._enable_salt:
+            return None
 
-        if self._enable_salt and conv_id != source_id:
-            messages = self._dataset_metadata.pre_built_messages_by_key.get(
-                (source_id, turn)
+        messages = self._dataset_metadata.pre_built_messages_by_key.get(
+            (source_id, turn)
+        )
+        if not messages:
+            raise InputValidationError(
+                "agentic_inference.enable_salt requires pre-built messages for every "
+                f"client turn; conversation {source_id!r} turn {turn} has none"
             )
-            if messages:
-                return (
-                    {
-                        "messages": self._messages_with_logical_id_salt(
-                            messages,
-                            repeat_id=repeat_id,
-                            conversation_id=source_id,
-                        ),
-                        "input_tokens": None,
-                        "token_ids": None,
-                    },
-                    None,
-                )
-        return None, None
 
-    def _messages_with_logical_id_salt(
+        salted_messages = self._messages_with_trajectory_salt(
+            messages,
+            repeat_id=repeat_id,
+            conversation_id=source_id,
+        )
+        return {
+            "messages": salted_messages,
+            "input_tokens": None,
+            "token_ids": None,
+        }
+
+    def _messages_with_trajectory_salt(
         self,
         messages: list[dict],
         repeat_id: int,
@@ -469,19 +389,6 @@ class MultiTurnStrategy:
                 continue
             content = message.get("content")
             if isinstance(content, str):
-                for prefix in ("[salt: ", "[cache_salt: "):
-                    if content.startswith(prefix):
-                        marker_end = content.find("]\n\n")
-                        if marker_end >= 0:
-                            content = content[marker_end + 3 :]
-                        break
-                for marker in ("\n\n[salt: ", "\n\n[cache_salt: "):
-                    salt_start = content.rfind(marker)
-                    if salt_start >= 0:
-                        salt_end = content.find("]", salt_start)
-                        if salt_end == len(content) - 1:
-                            content = content[:salt_start]
-                            break
                 repeat_salt = hashlib.blake2b(
                     str(repeat_id).encode("utf-8"), digest_size=2
                 ).hexdigest()
@@ -491,8 +398,29 @@ class MultiTurnStrategy:
                 message["content"] = (
                     f"[salt: {repeat_salt}]\n\n" f"{content}\n\n" f"[salt: {conv_salt}]"
                 )
-            break
-        return salted_messages
+                return salted_messages
+        raise InputValidationError(
+            "agentic_inference.enable_salt requires a system prompt for every "
+            f"conversation; conversation {conversation_id!r} has no system prompt"
+        )
+
+    def _validate_salt_system_prompts(self) -> None:
+        """Fail before issuing if salting cannot be applied to every turn."""
+        if not self._enable_salt:
+            return
+        for source_id, turns in self._base_convs:
+            for _idx, turn in turns:
+                messages = self._dataset_metadata.pre_built_messages_by_key.get(
+                    (source_id, turn)
+                )
+                if not messages or not any(
+                    message.get("role") == "system" for message in messages
+                ):
+                    raise InputValidationError(
+                        "agentic_inference.enable_salt requires a system prompt for every "
+                        f"conversation; conversation {source_id!r} turn {turn} "
+                        "has no system prompt"
+                    )
 
     def _fill_slot(self) -> None:
         """Start a new conversation from the pending queue, or signal all done."""
@@ -528,9 +456,7 @@ class MultiTurnStrategy:
         self._performance_tracking_stopped = True
         if self._phase_issuer is None:
             return
-        stop_tracking = getattr(self._phase_issuer, "stop_performance_tracking", None)
-        if stop_tracking is not None:
-            stop_tracking()
+        self._phase_issuer.stop_performance_tracking()
 
     def _request_stop_issuing(self) -> None:
         """Stop issuing future turns and wait only for already in-flight work."""
@@ -573,9 +499,7 @@ class MultiTurnStrategy:
             "Turn timed out for conversation %s (query=%s)", conv_id, query_id
         )
 
-        self._conv_manager.mark_turn_failed(
-            conv_id, store_in_history=self._store_in_history
-        )
+        self._conv_manager.mark_turn_failed(conv_id)
 
         self._publish_synthetic_failure(
             query_id,
@@ -656,9 +580,7 @@ class MultiTurnStrategy:
         assert self._phase_issuer is not None
         dropped = 0
         for idx, turn in turns[cursor:]:
-            self._conv_manager.mark_turn_failed(
-                conv_id, store_in_history=self._store_in_history
-            )
+            self._conv_manager.mark_turn_failed(conv_id)
             skipped_id = self._phase_issuer.register_skipped(
                 idx, conversation_id=conv_id, turn=turn
             )
@@ -700,28 +622,11 @@ class MultiTurnStrategy:
         if handle is not None:
             handle.cancel()
 
-        output = result.response_output
-        if isinstance(output, TextModelOutput):
-            response_text: str | None = (
-                "".join(output.output)
-                if isinstance(output.output, tuple)
-                else output.output
-            ) or None
-        else:
-            response_text = output if isinstance(output, str) else None
-
         try:
             if result.error is not None:
-                self._conv_manager.mark_turn_failed(
-                    conv_id, store_in_history=self._store_in_history
-                )
+                self._conv_manager.mark_turn_failed(conv_id)
             else:
-                self._conv_manager.mark_turn_complete(
-                    conv_id,
-                    response_text or "",
-                    store_in_history=self._store_in_history,
-                    metadata=result.metadata,
-                )
+                self._conv_manager.mark_turn_complete(conv_id)
         except KeyError:
             self._active_iters.pop(conv_id, None)
             self._fill_slot()
@@ -732,9 +637,9 @@ class MultiTurnStrategy:
             )
             return
 
-        # If this turn failed, abandon the rest of the conversation: replaying
-        # later turns against a corrupt history (assistant placeholder /
-        # missing tool result) is meaningless and matches the timeout path.
+        # If this turn failed, abandon the rest of the conversation: later
+        # client turns depend on the failed prior response, matching timeout
+        # handling.
         if result.error is not None:
             err_type = (
                 result.error.error_type if result.error is not None else "unknown"

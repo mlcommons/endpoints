@@ -15,15 +15,20 @@
 
 import inference_endpoint.dataset_manager.factory as factory_module
 import pytest
+from inference_endpoint.config.schema import AgenticInferenceConfig
 from inference_endpoint.config.schema import Dataset as DatasetConfig
-from inference_endpoint.config.schema import MultiTurnConfig
+from inference_endpoint.dataset_manager.agentic_inference_dataset import (
+    AgenticInferenceDataset,
+)
 from inference_endpoint.dataset_manager.dataset import Dataset
-from inference_endpoint.exceptions import InputValidationError
 
 
 @pytest.mark.unit
-def test_enable_salt_requires_multi_turn_loader(monkeypatch):
+def test_agentic_inference_config_selects_agentic_inference_loader(monkeypatch):
+    captured: dict[str, object] = {}
+
     def fake_load_from_file(*args, **kwargs):
+        captured["dataset_id"] = kwargs.get("dataset_id")
         return Dataset()
 
     monkeypatch.setattr(
@@ -35,8 +40,9 @@ def test_enable_salt_requires_multi_turn_loader(monkeypatch):
     config = DatasetConfig(
         path="data.jsonl",
         format=".jsonl",
-        multi_turn=MultiTurnConfig(enable_salt=True),
+        agentic_inference=AgenticInferenceConfig(enable_salt=True),
     )
 
-    with pytest.raises(InputValidationError, match="enable_salt"):
-        factory_module.DataLoaderFactory.create_loader(config)
+    factory_module.DataLoaderFactory.create_loader(config)
+
+    assert captured["dataset_id"] == AgenticInferenceDataset.DATASET_ID

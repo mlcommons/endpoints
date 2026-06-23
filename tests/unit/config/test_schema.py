@@ -68,6 +68,7 @@ class TestModelParams:
         params = ModelParams(name="test")
         assert params.temperature is None
         assert params.max_new_tokens == 1024
+        assert params.tokenizer_name is None
 
     @pytest.mark.unit
     def test_with_osl_distribution(self):
@@ -83,6 +84,14 @@ class TestModelParams:
         )
         assert params.temperature == 0.5
         assert params.osl_distribution.type == OSLDistributionType.NORMAL
+
+    @pytest.mark.unit
+    def test_tokenizer_name_override(self):
+        params = ModelParams(
+            name="qwen/qwen3.6-35b-a3b", tokenizer_name="Qwen/Qwen3.6-35B-A3B"
+        )
+        assert params.tokenizer_name == "Qwen/Qwen3.6-35B-A3B"
+        assert params.name == "qwen/qwen3.6-35b-a3b"
 
 
 class TestAPIType:
@@ -471,47 +480,50 @@ class TestClientAPITypePropagation:
         assert config.settings.client.accumulator is OpenAISSEAccumulator
 
 
-class TestMultiTurnValidation:
-    """Tests for multi-turn config validation and cross-validation."""
+class TestAgenticInferenceValidation:
+    """Tests for agentic inference config validation and cross-validation."""
 
-    def _make_online_multi_turn(self, concurrency: int | None = 4, **ds_kwargs):
-        lp: dict = {"type": "multi_turn"}
+    def _make_online_agentic_inference(self, concurrency: int | None = 4, **ds_kwargs):
+        lp: dict = {"type": "agentic_inference"}
         if concurrency is not None:
             lp["target_concurrency"] = concurrency
         return {
             "type": TestType.ONLINE,
             "model_params": {"name": "M"},
             "endpoint_config": {"endpoints": ["http://x"]},
-            "datasets": [{"path": "D", "multi_turn": {}, **ds_kwargs}],
+            "datasets": [{"path": "D", "agentic_inference": {}, **ds_kwargs}],
             "settings": {"load_pattern": lp},
         }
 
     @pytest.mark.unit
-    def test_multi_turn_valid_config(self):
-        config = BenchmarkConfig(**self._make_online_multi_turn(concurrency=16))
-        assert config.settings.load_pattern.type == LoadPatternType.MULTI_TURN
+    def test_agentic_inference_valid_config(self):
+        config = BenchmarkConfig(**self._make_online_agentic_inference(concurrency=16))
+        assert config.settings.load_pattern.type == LoadPatternType.AGENTIC_INFERENCE
         assert config.settings.load_pattern.target_concurrency == 16
 
     @pytest.mark.unit
-    def test_multi_turn_rejects_removed_stop_on_first_empty_slot_config(self):
+    def test_agentic_inference_rejects_removed_stop_on_first_empty_slot_as_extra(self):
+        # Legacy agentic inference knobs should remain rejected by extra="forbid".
         with pytest.raises(ValueError, match="stop_on_first_empty_slot"):
             BenchmarkConfig(
-                **self._make_online_multi_turn(
+                **self._make_online_agentic_inference(
                     concurrency=16,
-                    multi_turn={"stop_on_first_empty_slot": True},
+                    agentic_inference={"stop_on_first_empty_slot": True},
                 )
             )
 
     @pytest.mark.unit
-    def test_multi_turn_requires_target_concurrency(self):
-        with pytest.raises(ValueError, match="Multi-turn requires --concurrency"):
-            BenchmarkConfig(**self._make_online_multi_turn(concurrency=None))
+    def test_agentic_inference_requires_target_concurrency(self):
+        with pytest.raises(
+            ValueError, match="Agentic inference requires --concurrency"
+        ):
+            BenchmarkConfig(**self._make_online_agentic_inference(concurrency=None))
 
     @pytest.mark.unit
-    def test_multi_turn_without_multi_turn_dataset_rejected(self):
+    def test_agentic_inference_without_agentic_inference_dataset_rejected(self):
         with pytest.raises(
             ValueError,
-            match="requires the performance dataset to have multi_turn config",
+            match="requires the performance dataset to have agentic_inference config",
         ):
             BenchmarkConfig(
                 type=TestType.ONLINE,
@@ -519,34 +531,58 @@ class TestMultiTurnValidation:
                 endpoint_config={"endpoints": ["http://x"]},
                 datasets=[{"path": "D"}],
                 settings={
-                    "load_pattern": {"type": "multi_turn", "target_concurrency": 4}
+                    "load_pattern": {
+                        "type": "agentic_inference",
+                        "target_concurrency": 4,
+                    }
                 },
             )
 
     @pytest.mark.unit
-    def test_multi_turn_dataset_without_multi_turn_load_pattern_rejected(self):
-        with pytest.raises(ValueError, match="requires load_pattern.type=multi_turn"):
+    def test_agentic_inference_dataset_without_agentic_inference_load_pattern_rejected(
+        self,
+    ):
+        with pytest.raises(
+            ValueError, match="requires load_pattern.type=agentic_inference"
+        ):
             BenchmarkConfig(
                 type=TestType.ONLINE,
                 model_params={"name": "M"},
                 endpoint_config={"endpoints": ["http://x"]},
-                datasets=[{"path": "D", "multi_turn": {}}],
+                datasets=[{"path": "D", "agentic_inference": {}}],
                 settings={"load_pattern": {"type": "poisson", "target_qps": 10}},
             )
 
+    @pytest.mark.unit
+    def test_agentic_inference_rejects_runtime_num_samples_override(self):
+        with pytest.raises(ValueError, match="num_trajectories_to_issue"):
+            BenchmarkConfig(
+                type=TestType.ONLINE,
+                model_params={"name": "M"},
+                endpoint_config={"endpoints": ["http://x"]},
+                datasets=[{"path": "D", "agentic_inference": {}}],
+                settings={
+                    "load_pattern": {
+                        "type": "agentic_inference",
+                        "target_concurrency": 4,
+                    },
+                    "runtime": {"n_samples_to_issue": 200},
+                },
+            )
 
-class TestMultiTurnTotalSamples:
-    """Tests for total_samples_to_issue() with multi_turn load pattern."""
+
+class TestAgenticInferenceTotalSamples:
+    """Tests for total_samples_to_issue() with agentic_inference load pattern."""
 
     @pytest.mark.unit
-    def test_multi_turn_uses_dataset_size_ignoring_duration(self):
+    def test_agentic_inference_uses_dataset_size_ignoring_duration(self):
         config = BenchmarkConfig(
             type=TestType.ONLINE,
             model_params={"name": "M"},
             endpoint_config={"endpoints": ["http://x"]},
-            datasets=[{"path": "D", "multi_turn": {}}],
+            datasets=[{"path": "D", "agentic_inference": {}}],
             settings={
-                "load_pattern": {"type": "multi_turn", "target_concurrency": 4},
+                "load_pattern": {"type": "agentic_inference", "target_concurrency": 4},
                 "runtime": {"min_duration_ms": 600000},
             },
         )
@@ -554,8 +590,8 @@ class TestMultiTurnTotalSamples:
         assert rt.total_samples_to_issue() == 4316
 
     @pytest.mark.unit
-    def test_multi_turn_clamps_to_dataset_size(self):
-        lp = LoadPattern(type=LoadPatternType.MULTI_TURN, target_concurrency=4)
+    def test_agentic_inference_clamps_to_dataset_size(self):
+        lp = LoadPattern(type=LoadPatternType.AGENTIC_INFERENCE, target_concurrency=4)
         rt = RuntimeSettings(
             metric_target=metrics.Throughput(10.0),
             reported_metrics=[metrics.Throughput(10.0)],
@@ -571,8 +607,8 @@ class TestMultiTurnTotalSamples:
         assert rt.total_samples_to_issue() == 5
 
     @pytest.mark.unit
-    def test_multi_turn_explicit_n_samples_takes_precedence(self):
-        lp = LoadPattern(type=LoadPatternType.MULTI_TURN, target_concurrency=4)
+    def test_agentic_inference_explicit_n_samples_takes_precedence(self):
+        lp = LoadPattern(type=LoadPatternType.AGENTIC_INFERENCE, target_concurrency=4)
         rt = RuntimeSettings(
             metric_target=metrics.Throughput(10.0),
             reported_metrics=[metrics.Throughput(10.0)],

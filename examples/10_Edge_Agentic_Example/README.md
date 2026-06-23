@@ -262,9 +262,10 @@ trajectories (SWE-bench-style) against the same endpoint, while an **inline
 ones in the dataset. The dataset is therefore both the performance workload and
 its own ground truth — no separate scoring pass is needed.
 
-The online checker is the multi-turn inline accuracy scorer
-(`multi_turn.inline_accuracy: true`); it runs at finalization, reading the run's
-event log plus the dataset, and writes `scores.json` into the report directory.
+The online checker is the agentic-inference inline accuracy scorer
+(`accuracy_config.eval_method: agentic_inference_inline` on the performance
+dataset); it runs at finalization, reading the run's event log plus the dataset,
+and writes its score into the report directory.
 
 ```bash
 # Run from the examples/10_Edge_Agentic_Example/ directory, against the same
@@ -283,7 +284,7 @@ Before running, open the chosen config and set `model_params.name` to your
 served model name. Two ready-to-run configs are provided; both are single-stream
 (`target_concurrency: 1`, matching `llama-server -np 1`), deterministic
 (`temperature 0`, `seed 42`), reasoning **off**, with the online checker enabled
-(`multi_turn.inline_accuracy: true`):
+(`accuracy_config.eval_method: agentic_inference_inline`):
 
 | Config                                              | Dataset                     | Conversations | Generated turns | Peak ISL       | One single-stream pass (Thor, reasoning off) |
 | --------------------------------------------------- | --------------------------- | ------------- | --------------- | -------------- | -------------------------------------------- |

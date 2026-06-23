@@ -13,22 +13,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for MultiTurnStrategy."""
+"""Unit tests for AgenticInferenceStrategy."""
 
 import asyncio
 import hashlib
 from unittest.mock import MagicMock
 
 import pytest
-from inference_endpoint.config.schema import MultiTurnConfig
+from inference_endpoint.config.schema import AgenticInferenceConfig
 from inference_endpoint.core.record import ErrorEventType, SampleEventType
 from inference_endpoint.core.types import ErrorData, QueryResult, TextModelOutput
-from inference_endpoint.dataset_manager.multi_turn_dataset import (
+from inference_endpoint.dataset_manager.agentic_inference_dataset import (
     ConversationMetadata,
     ConversationSampleEntry,
 )
+from inference_endpoint.exceptions import InputValidationError
+from inference_endpoint.load_generator.agentic_inference_strategy import (
+    AgenticInferenceStrategy,
+)
 from inference_endpoint.load_generator.conversation_manager import ConversationManager
-from inference_endpoint.load_generator.multi_turn_strategy import MultiTurnStrategy
 
 
 class FakePhaseIssuer:
@@ -44,6 +47,7 @@ class FakePhaseIssuer:
         self.uuid_to_conv_info: dict[str, tuple[str, int | None]] = {}
         self.completed_uuids: set[str] = set()
         self.drained = False
+        self.stop_tracking_count = 0
 
     def issue(
         self,
@@ -78,6 +82,9 @@ class FakePhaseIssuer:
         self.inflight -= 1
         if self.inflight <= 0:
             self.drained = True
+
+    def stop_performance_tracking(self) -> None:
+        self.stop_tracking_count += 1
 
 
 class RecordingPhaseIssuer:
@@ -151,11 +158,12 @@ def _make_dataset_metadata(conversations: dict[str, list[int]]) -> ConversationM
 async def test_first_user_complete_stops_tracking_but_can_continue_for_accuracy():
     conv_manager = ConversationManager()
     metadata = _make_dataset_metadata({"conv1": [1], "conv2": [1, 2]})
-    strategy = MultiTurnStrategy(
+    cfg = AgenticInferenceConfig(num_trajectories_to_issue=2)
+    strategy = AgenticInferenceStrategy(
         conv_manager,
         metadata,
+        agentic_inference_config=cfg,
         target_concurrency=2,
-        num_trajectories_to_issue=2,
     )
     issuer = RecordingPhaseIssuer()
 
@@ -200,13 +208,15 @@ async def test_first_user_complete_stops_tracking_but_can_continue_for_accuracy(
 async def test_stop_on_first_user_complete_refills_until_budget_exhausted():
     conv_manager = ConversationManager()
     metadata = _make_dataset_metadata({"conv1": [1], "conv2": [1], "conv3": [1]})
-    cfg = MultiTurnConfig(stop_issuing_on_first_user_complete=True)
-    strategy = MultiTurnStrategy(
+    cfg = AgenticInferenceConfig(
+        stop_issuing_on_first_user_complete=True,
+        num_trajectories_to_issue=3,
+    )
+    strategy = AgenticInferenceStrategy(
         conv_manager,
         metadata,
-        multi_turn_config=cfg,
+        agentic_inference_config=cfg,
         target_concurrency=2,
-        num_trajectories_to_issue=3,
     )
     issuer = RecordingPhaseIssuer()
 
@@ -254,22 +264,21 @@ async def test_stop_on_first_user_complete_refills_until_budget_exhausted():
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_repeated_dataset_history_turn_uses_repeat_and_conversation_salts():
-    """Prebuilt-history prompts get repeat and conversation salt markers."""
+async def test_salted_turns_use_repeat_and_conversation_salts():
+    """Pre-baked prompts get repeat and conversation salt markers when enabled."""
     conv_manager = ConversationManager()
     metadata = _make_dataset_metadata({"conv1": [1]})
     base_messages = [
-        {"role": "system", "content": "Be helpful\n\n[cache_salt: base]"},
+        {"role": "system", "content": "Be helpful"},
         {"role": "user", "content": "hello"},
     ]
     metadata.pre_built_messages_by_key = {("conv1", 1): base_messages}
-    cfg = MultiTurnConfig(enable_salt=True)
-    strategy = MultiTurnStrategy(
+    cfg = AgenticInferenceConfig(enable_salt=True, num_trajectories_to_issue=2)
+    strategy = AgenticInferenceStrategy(
         conv_manager,
         metadata,
         target_concurrency=1,
-        num_trajectories_to_issue=2,
-        multi_turn_config=cfg,
+        agentic_inference_config=cfg,
     )
     issuer = RecordingPhaseIssuer()
 
@@ -286,20 +295,61 @@ async def test_repeated_dataset_history_turn_uses_repeat_and_conversation_salts(
 
     first_override = issuer.records[0][4]
     repeat_override = issuer.records[1][4]
-    assert first_override is None
+    assert first_override is not None
     assert repeat_override is not None
+    first_messages = first_override["messages"]
     repeat_messages = repeat_override["messages"]
+    first_system = first_messages[0]["content"]
     repeat_system = repeat_messages[0]["content"]
 
+    repeat1_salt = hashlib.blake2b(b"1", digest_size=2).hexdigest()
     repeat2_salt = hashlib.blake2b(b"2", digest_size=2).hexdigest()
     conversation_salt = hashlib.blake2b(b"conv1", digest_size=2).hexdigest()
+    assert first_system == (
+        f"[salt: {repeat1_salt}]\n\n" f"Be helpful\n\n" f"[salt: {conversation_salt}]"
+    )
     assert repeat_system == (
         f"[salt: {repeat2_salt}]\n\n" f"Be helpful\n\n" f"[salt: {conversation_salt}]"
     )
     assert repeat_system != base_messages[0]["content"]
-    assert "base" not in repeat_system
-    assert "cache_salt" not in repeat_system
-    assert base_messages[0]["content"] == "Be helpful\n\n[cache_salt: base]"
+    assert base_messages[0]["content"] == "Be helpful"
+
+
+@pytest.mark.unit
+def test_enable_salt_requires_system_prompt():
+    """Salting is invalid when the conversation has no system prompt."""
+    conv_manager = ConversationManager()
+    metadata = _make_dataset_metadata({"conv1": [1]})
+    cfg = AgenticInferenceConfig(enable_salt=True)
+    strategy = AgenticInferenceStrategy(
+        conv_manager,
+        metadata,
+        agentic_inference_config=cfg,
+    )
+
+    with pytest.raises(InputValidationError, match="no system prompt"):
+        strategy._messages_with_trajectory_salt(
+            [{"role": "user", "content": "hello"}],
+            repeat_id=1,
+            conversation_id="conv1",
+        )
+
+
+@pytest.mark.unit
+def test_enable_salt_requires_pre_built_messages():
+    """Salting is invalid when metadata has no pre-built messages for a turn."""
+    conv_manager = ConversationManager()
+    metadata = _make_dataset_metadata({"conv1": [1]})
+    metadata.pre_built_messages_by_key = {}
+    cfg = AgenticInferenceConfig(enable_salt=True)
+    strategy = AgenticInferenceStrategy(
+        conv_manager,
+        metadata,
+        agentic_inference_config=cfg,
+    )
+
+    with pytest.raises(InputValidationError, match="pre-built messages"):
+        strategy._build_data_override("conv1", 1, repeat_id=1)
 
 
 @pytest.mark.unit
@@ -308,7 +358,7 @@ async def test_single_conversation_single_turn():
     """Single conversation, single turn — should issue exactly one sample."""
     conv_manager = ConversationManager()
     metadata = _make_dataset_metadata({"conv1": [1]})
-    strategy = MultiTurnStrategy(conv_manager, metadata)
+    strategy = AgenticInferenceStrategy(conv_manager, metadata)
     issuer = FakePhaseIssuer()
 
     async def complete_turns():
@@ -327,11 +377,11 @@ async def test_single_conversation_single_turn():
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_single_conversation_multi_turn():
+async def test_single_conversation_agentic_inference():
     """Single conversation, 3 turns — turns must be issued sequentially."""
     conv_manager = ConversationManager()
     metadata = _make_dataset_metadata({"conv1": [1, 3, 5]})
-    strategy = MultiTurnStrategy(conv_manager, metadata)
+    strategy = AgenticInferenceStrategy(conv_manager, metadata)
     issuer = FakePhaseIssuer()
 
     issued_order: list[str] = []
@@ -372,7 +422,7 @@ async def test_multiple_conversations_concurrent():
     """Two conversations run concurrently, each with 2 turns."""
     conv_manager = ConversationManager()
     metadata = _make_dataset_metadata({"conv1": [1, 3], "conv2": [1, 3]})
-    strategy = MultiTurnStrategy(conv_manager, metadata)
+    strategy = AgenticInferenceStrategy(conv_manager, metadata)
     issuer = FakePhaseIssuer()
 
     async def simulate_responses():
@@ -395,7 +445,7 @@ async def test_turn_ordering_enforced():
     """Turn 2 must not be issued before Turn 1 completes."""
     conv_manager = ConversationManager()
     metadata = _make_dataset_metadata({"conv1": [1, 3]})
-    strategy = MultiTurnStrategy(conv_manager, metadata)
+    strategy = AgenticInferenceStrategy(conv_manager, metadata)
 
     issue_timestamps: dict[int, float] = {}
     complete_timestamps: dict[int, float] = {}
@@ -417,6 +467,9 @@ async def test_turn_ordering_enforced():
             self.issued.append(idx)
             self.issued_count += 1
             return f"q{idx:04d}"
+
+        def stop_performance_tracking(self) -> None:
+            pass
 
     issuer = TimedIssuer()
 
@@ -446,7 +499,7 @@ async def test_turn_timeout_triggers_failure():
     """A turn that never completes should timeout and abort remaining turns."""
     conv_manager = ConversationManager()
     metadata = _make_dataset_metadata({"conv1": [1, 3]})
-    strategy = MultiTurnStrategy(conv_manager, metadata, target_concurrency=None)
+    strategy = AgenticInferenceStrategy(conv_manager, metadata, target_concurrency=None)
     strategy._turn_timeout_s = 0.1  # Very short timeout for testing
     issuer = FakePhaseIssuer()
 
@@ -464,7 +517,7 @@ async def test_on_sample_complete_routes_to_manager():
     conv_manager = ConversationManager()
     conv_manager.get_or_create("conv1", expected_client_turns=1)
     metadata = _make_dataset_metadata({"conv1": [1]})
-    strategy = MultiTurnStrategy(conv_manager, metadata)
+    strategy = AgenticInferenceStrategy(conv_manager, metadata)
 
     # Simulate issuer registering conv_id in _inflight
     strategy._inflight["q0001"] = "conv1"
@@ -487,7 +540,7 @@ async def test_error_response_marks_turn_failed():
     conv_manager = ConversationManager()
     conv_manager.get_or_create("conv1", expected_client_turns=1)
     metadata = _make_dataset_metadata({"conv1": [1]})
-    strategy = MultiTurnStrategy(conv_manager, metadata)
+    strategy = AgenticInferenceStrategy(conv_manager, metadata)
 
     strategy._inflight["q0001"] = "conv1"
     strategy._all_done = asyncio.Event()
@@ -504,132 +557,13 @@ async def test_error_response_marks_turn_failed():
     assert state.failed_turns == 1
 
 
-def _make_metadata_with_system(
-    conversations: dict[str, list[int]],
-    system_prompts: dict[str, str | None] | None = None,
-) -> ConversationMetadata:
-    """Build ConversationMetadata including system_prompts_by_conv."""
-    samples = []
-    sample_index = 0
-    for conv_id, turns in conversations.items():
-        for turn in turns:
-            samples.append(
-                ConversationSampleEntry(
-                    conversation_id=conv_id,
-                    turn=turn,
-                    sample_index=sample_index,
-                )
-            )
-            sample_index += 1
-    return ConversationMetadata(
-        samples=samples,
-        num_conversations=len(conversations),
-        max_turns_per_conv=max((max(t) for t in conversations.values()), default=0),
-        client_turns_per_conversation={c: len(t) for c, t in conversations.items()},
-        system_prompts_by_conv=system_prompts or {},
-    )
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_live_history_initializes_system_prompt():
-    """In live-history mode, ConversationManager.message_history starts with system message."""
-    from inference_endpoint.config.schema import MultiTurnConfig
-
-    conv_manager = ConversationManager()
-    metadata = _make_metadata_with_system(
-        {"conv1": [1]},
-        system_prompts={"conv1": "Be helpful"},
-    )
-    mt_cfg = MultiTurnConfig(use_dataset_history=False, turn_timeout_s=10.0)
-    strategy = MultiTurnStrategy(conv_manager, metadata, multi_turn_config=mt_cfg)
-    issuer = FakePhaseIssuer()
-
-    async def complete_turn():
-        await asyncio.sleep(0.01)
-        result = QueryResult(
-            id="q0000", response_output=TextModelOutput(output="response")
-        )
-        strategy.on_sample_complete(result)
-
-    asyncio.create_task(complete_turn())
-    await strategy.execute(issuer)
-
-    state = conv_manager.get_state("conv1")
-    assert state is not None
-    # message_history[0] must be the system message
-    assert len(state.message_history) >= 1
-    assert state.message_history[0] == {"role": "system", "content": "Be helpful"}
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_live_history_no_system_prompt_when_none():
-    """In live-history mode, no system message is prepended when system_prompt is None."""
-    from inference_endpoint.config.schema import MultiTurnConfig
-
-    conv_manager = ConversationManager()
-    metadata = _make_metadata_with_system(
-        {"conv1": [1]},
-        system_prompts={"conv1": None},
-    )
-    mt_cfg = MultiTurnConfig(use_dataset_history=False, turn_timeout_s=10.0)
-    strategy = MultiTurnStrategy(conv_manager, metadata, multi_turn_config=mt_cfg)
-    issuer = FakePhaseIssuer()
-
-    async def complete_turn():
-        await asyncio.sleep(0.01)
-        result = QueryResult(
-            id="q0000", response_output=TextModelOutput(output="response")
-        )
-        strategy.on_sample_complete(result)
-
-    asyncio.create_task(complete_turn())
-    await strategy.execute(issuer)
-
-    state = conv_manager.get_state("conv1")
-    assert state is not None
-    # No system message should be in history
-    system_msgs = [m for m in state.message_history if m.get("role") == "system"]
-    assert len(system_msgs) == 0
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_dataset_history_mode_does_not_inject_system_prompt():
-    """In dataset-history mode (use_dataset_history=True), system_message is not passed."""
-    conv_manager = ConversationManager()
-    metadata = _make_metadata_with_system(
-        {"conv1": [1]},
-        system_prompts={"conv1": "Some system"},
-    )
-    # Default: use_dataset_history=True → _store_in_history=False
-    strategy = MultiTurnStrategy(conv_manager, metadata)
-    issuer = FakePhaseIssuer()
-
-    async def complete_turn():
-        await asyncio.sleep(0.01)
-        result = QueryResult(
-            id="q0000", response_output=TextModelOutput(output="response")
-        )
-        strategy.on_sample_complete(result)
-
-    asyncio.create_task(complete_turn())
-    await strategy.execute(issuer)
-
-    state = conv_manager.get_state("conv1")
-    assert state is not None
-    # message_history should be empty (dataset-history mode doesn't accumulate)
-    assert len(state.message_history) == 0
-
-
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_pipeline_error_propagated():
     """execute() re-raises when _issue_next_turn raises an exception."""
     conv_manager = ConversationManager()
     metadata = _make_dataset_metadata({"conv1": [1]})
-    strategy = MultiTurnStrategy(conv_manager, metadata)
+    strategy = AgenticInferenceStrategy(conv_manager, metadata)
 
     class ErrorIssuer:
         issued_count = 0
@@ -644,113 +578,11 @@ async def test_pipeline_error_propagated():
         ) -> str | None:
             raise RuntimeError("simulated pipeline error")
 
+        def stop_performance_tracking(self) -> None:
+            pass
+
     with pytest.raises(RuntimeError, match="simulated pipeline error"):
         await strategy.execute(ErrorIssuer())
-
-
-@pytest.mark.unit
-def test_mark_turn_complete_preserves_tool_calls():
-    """mark_turn_complete stores tool_calls in history when metadata contains them."""
-    conv_manager = ConversationManager()
-    conv_manager.get_or_create("conv1", expected_client_turns=1)
-
-    tool_calls = [
-        {
-            "id": "call_1",
-            "type": "function",
-            "function": {"name": "bash", "arguments": '{"cmd": "ls"}'},
-        }
-    ]
-    conv_manager.mark_turn_complete(
-        "conv1",
-        response="",
-        store_in_history=True,
-        metadata={"tool_calls": tool_calls},
-    )
-
-    state = conv_manager.get_state("conv1")
-    assert state is not None
-    assert len(state.message_history) == 1
-    msg = state.message_history[0]
-    assert msg["role"] == "assistant"
-    assert msg["content"] is None
-    assert msg["tool_calls"] == tool_calls
-
-
-@pytest.mark.unit
-def test_mark_turn_complete_with_response_and_tool_calls():
-    """mark_turn_complete stores both content and tool_calls when both are present."""
-    conv_manager = ConversationManager()
-    conv_manager.get_or_create("conv1", expected_client_turns=1)
-
-    tool_calls = [
-        {
-            "id": "call_1",
-            "type": "function",
-            "function": {"name": "search", "arguments": "{}"},
-        }
-    ]
-    conv_manager.mark_turn_complete(
-        "conv1",
-        response="Calling search...",
-        store_in_history=True,
-        metadata={"tool_calls": tool_calls},
-    )
-
-    state = conv_manager.get_state("conv1")
-    assert state is not None
-    msg = state.message_history[0]
-    assert msg["content"] == "Calling search..."
-    assert msg["tool_calls"] == tool_calls
-
-
-@pytest.mark.unit
-def test_mark_turn_complete_no_history_when_empty():
-    """mark_turn_complete does not append when response is empty and no tool_calls."""
-    conv_manager = ConversationManager()
-    conv_manager.get_or_create("conv1", expected_client_turns=1)
-
-    conv_manager.mark_turn_complete("conv1", response="", store_in_history=True)
-
-    state = conv_manager.get_state("conv1")
-    assert state is not None
-    assert len(state.message_history) == 0
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_on_sample_complete_passes_metadata():
-    """on_sample_complete forwards result.metadata (including tool_calls) to ConversationManager."""
-    from inference_endpoint.config.schema import MultiTurnConfig
-
-    conv_manager = ConversationManager()
-    metadata_dict = _make_metadata_with_system({"conv1": [1]})
-    mt_cfg = MultiTurnConfig(use_dataset_history=False, turn_timeout_s=10.0)
-    strategy = MultiTurnStrategy(conv_manager, metadata_dict, multi_turn_config=mt_cfg)
-
-    conv_manager.get_or_create("conv1", expected_client_turns=1)
-    strategy._inflight["q0001"] = "conv1"
-
-    tool_calls = [
-        {
-            "id": "call_1",
-            "type": "function",
-            "function": {"name": "bash", "arguments": "{}"},
-        }
-    ]
-    result = QueryResult(
-        id="q0001",
-        response_output=TextModelOutput(output=""),
-        metadata={"tool_calls": tool_calls},
-    )
-    strategy.on_sample_complete(result)
-
-    state = conv_manager.get_state("conv1")
-    assert state is not None
-    assert state.completed_turns == 1
-    assert len(state.message_history) == 1
-    assert state.message_history[0]["tool_calls"] == tool_calls
-    assert state.message_history[0]["content"] is None
 
 
 @pytest.mark.unit
@@ -767,7 +599,7 @@ async def test_concurrency_limits_active_conversations():
     metadata = _make_dataset_metadata(
         {"conv1": [1, 2], "conv2": [1, 2], "conv3": [1, 2], "conv4": [1, 2]}
     )
-    strategy = MultiTurnStrategy(conv_manager, metadata, target_concurrency=2)
+    strategy = AgenticInferenceStrategy(conv_manager, metadata, target_concurrency=2)
     issuer = FakePhaseIssuer()
 
     async def auto_respond():
@@ -807,7 +639,7 @@ async def test_conversation_slot_reuse():
     conv_manager = ConversationManager()
     # 2 two-turn conversations; sample indices: conv1→[0,1], conv2→[2,3]
     metadata = _make_dataset_metadata({"conv1": [1, 2], "conv2": [1, 2]})
-    strategy = MultiTurnStrategy(conv_manager, metadata, target_concurrency=1)
+    strategy = AgenticInferenceStrategy(conv_manager, metadata, target_concurrency=1)
     issuer = FakePhaseIssuer()
 
     async def auto_respond():
@@ -838,7 +670,7 @@ async def test_timeout_publishes_error_and_complete_events():
     conv_manager = ConversationManager()
     conv_manager.get_or_create("conv-x", expected_client_turns=3)
     metadata = _make_dataset_metadata({"conv-x": [1, 2, 3]})
-    strategy = MultiTurnStrategy(conv_manager, metadata)
+    strategy = AgenticInferenceStrategy(conv_manager, metadata)
 
     publisher = MagicMock()
     on_sample_complete = MagicMock()
@@ -887,11 +719,11 @@ async def test_timeout_publishes_error_and_complete_events():
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_issue_passes_conversation_id_and_turn_to_phase_issuer():
-    """MultiTurnStrategy must forward (conv_id, turn) to phase_issuer.issue()."""
+    """AgenticInferenceStrategy must forward (conv_id, turn) to phase_issuer.issue()."""
     conv_manager = ConversationManager()
     conversations = {"conv-A": [1, 2], "conv-B": [1]}
     metadata = _make_dataset_metadata(conversations)
-    strategy = MultiTurnStrategy(conv_manager, metadata)
+    strategy = AgenticInferenceStrategy(conv_manager, metadata)
     issuer = FakePhaseIssuer()
 
     # Build the expected (query_id -> (conv_id, turn)) map from the same
@@ -929,13 +761,15 @@ def _metadata_with_delay(
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_abort_remaining_turns_includes_pending_delayed_turn():
-    from inference_endpoint.config.schema import MultiTurnConfig
+    from inference_endpoint.config.schema import AgenticInferenceConfig
 
     conv_manager = ConversationManager()
     conv_manager.get_or_create("c1", expected_client_turns=3)
     metadata = _metadata_with_delay("c1", [1, 2, 3], delay_turn=2, delay=60.0)
-    cfg = MultiTurnConfig(turn_timeout_s=5.0, inject_tool_delay=True)
-    strategy = MultiTurnStrategy(conv_manager, metadata, multi_turn_config=cfg)
+    cfg = AgenticInferenceConfig(turn_timeout_s=5.0, inject_tool_delay=True)
+    strategy = AgenticInferenceStrategy(
+        conv_manager, metadata, agentic_inference_config=cfg
+    )
     issuer = FakePhaseIssuer()
     publisher = MagicMock()
     on_sample_complete = MagicMock()
@@ -975,16 +809,16 @@ async def test_abort_remaining_turns_includes_pending_delayed_turn():
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_execute_waits_for_delayed_first_turns():
-    from inference_endpoint.config.schema import MultiTurnConfig
+    from inference_endpoint.config.schema import AgenticInferenceConfig
 
     conv_manager = ConversationManager()
     metadata = _make_dataset_metadata({"c1": [1], "c2": [1]})
     metadata.delay_seconds_by_key = {("c1", 1): 0.02, ("c2", 1): 0.02}
-    cfg = MultiTurnConfig(turn_timeout_s=5.0, inject_tool_delay=True)
-    strategy = MultiTurnStrategy(
+    cfg = AgenticInferenceConfig(turn_timeout_s=5.0, inject_tool_delay=True)
+    strategy = AgenticInferenceStrategy(
         conv_manager,
         metadata,
-        multi_turn_config=cfg,
+        agentic_inference_config=cfg,
         target_concurrency=2,
     )
     issuer = FakePhaseIssuer()
@@ -1013,12 +847,14 @@ async def test_execute_waits_for_delayed_first_turns():
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_inject_tool_delay_defers_issue_via_call_later():
-    from inference_endpoint.config.schema import MultiTurnConfig
+    from inference_endpoint.config.schema import AgenticInferenceConfig
 
     conv_manager = ConversationManager()
     metadata = _metadata_with_delay("c1", [1, 2], delay_turn=2, delay=0.05)
-    cfg = MultiTurnConfig(turn_timeout_s=5.0, inject_tool_delay=True)
-    strategy = MultiTurnStrategy(conv_manager, metadata, multi_turn_config=cfg)
+    cfg = AgenticInferenceConfig(turn_timeout_s=5.0, inject_tool_delay=True)
+    strategy = AgenticInferenceStrategy(
+        conv_manager, metadata, agentic_inference_config=cfg
+    )
     issuer = FakePhaseIssuer()
 
     issue_times: dict[int, float] = {}
@@ -1066,7 +902,7 @@ async def test_fill_slot_failure_does_not_hang_execute():
     conv_manager = ConversationManager()
     # Two 1-turn conversations; target_concurrency=1 so conv2 only starts via _fill_slot.
     metadata = _make_dataset_metadata({"conv1": [1], "conv2": [1]})
-    strategy = MultiTurnStrategy(conv_manager, metadata, target_concurrency=1)
+    strategy = AgenticInferenceStrategy(conv_manager, metadata, target_concurrency=1)
 
     call_count = 0
 
@@ -1088,6 +924,9 @@ async def test_fill_slot_failure_does_not_hang_execute():
             # Raises on the second call, which is triggered by _fill_slot after conv1 completes.
             raise RuntimeError("simulated slot-refill failure")
 
+        def stop_performance_tracking(self) -> None:
+            pass
+
     issuer = RaisingIssuer()
 
     async def complete_conv1():
@@ -1107,7 +946,7 @@ async def test_error_turn_aborts_remaining_turns():
     conv_manager = ConversationManager()
     conv_manager.get_or_create("conv1", expected_client_turns=3)
     metadata = _make_dataset_metadata({"conv1": [1, 2, 3]})
-    strategy = MultiTurnStrategy(conv_manager, metadata)
+    strategy = AgenticInferenceStrategy(conv_manager, metadata)
     issuer = FakePhaseIssuer()
 
     publisher = MagicMock()
@@ -1123,7 +962,6 @@ async def test_error_turn_aborts_remaining_turns():
     remaining_turns = ("conv1", [(1, 2), (2, 3)], 0, 1)
     strategy._active_iters["conv1"] = remaining_turns
     strategy._inflight["q0001"] = "conv1"
-    strategy._conv_states["conv1"] = conv_manager.get_state("conv1")
 
     result = QueryResult(
         id="q0001",
@@ -1156,12 +994,14 @@ async def test_error_turn_aborts_remaining_turns():
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_inject_tool_delay_disabled_issues_immediately():
-    from inference_endpoint.config.schema import MultiTurnConfig
+    from inference_endpoint.config.schema import AgenticInferenceConfig
 
     conv_manager = ConversationManager()
     metadata = _metadata_with_delay("c1", [1, 2], delay_turn=2, delay=2.0)
-    cfg = MultiTurnConfig(turn_timeout_s=5.0, inject_tool_delay=False)
-    strategy = MultiTurnStrategy(conv_manager, metadata, multi_turn_config=cfg)
+    cfg = AgenticInferenceConfig(turn_timeout_s=5.0, inject_tool_delay=False)
+    strategy = AgenticInferenceStrategy(
+        conv_manager, metadata, agentic_inference_config=cfg
+    )
     issuer = FakePhaseIssuer()
 
     issue_times: dict[int, float] = {}
@@ -1205,12 +1045,14 @@ async def test_inject_tool_delay_disabled_issues_immediately():
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_inject_tool_delay_no_dataset_field_back_compat():
-    from inference_endpoint.config.schema import MultiTurnConfig
+    from inference_endpoint.config.schema import AgenticInferenceConfig
 
     conv_manager = ConversationManager()
     metadata = _make_dataset_metadata({"c1": [1, 2]})
-    cfg = MultiTurnConfig(turn_timeout_s=5.0, inject_tool_delay=True)
-    strategy = MultiTurnStrategy(conv_manager, metadata, multi_turn_config=cfg)
+    cfg = AgenticInferenceConfig(turn_timeout_s=5.0, inject_tool_delay=True)
+    strategy = AgenticInferenceStrategy(
+        conv_manager, metadata, agentic_inference_config=cfg
+    )
     issuer = FakePhaseIssuer()
 
     async def auto_respond():
@@ -1236,12 +1078,14 @@ async def test_inject_tool_delay_no_dataset_field_back_compat():
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_inject_tool_delay_cancels_on_timeout():
-    from inference_endpoint.config.schema import MultiTurnConfig
+    from inference_endpoint.config.schema import AgenticInferenceConfig
 
     conv_manager = ConversationManager()
     metadata = _metadata_with_delay("c1", [1, 2, 3], delay_turn=3, delay=1.0)
-    cfg = MultiTurnConfig(turn_timeout_s=0.1, inject_tool_delay=True)
-    strategy = MultiTurnStrategy(conv_manager, metadata, multi_turn_config=cfg)
+    cfg = AgenticInferenceConfig(turn_timeout_s=0.1, inject_tool_delay=True)
+    strategy = AgenticInferenceStrategy(
+        conv_manager, metadata, agentic_inference_config=cfg
+    )
     issuer = FakePhaseIssuer()
 
     async def respond_first_only():

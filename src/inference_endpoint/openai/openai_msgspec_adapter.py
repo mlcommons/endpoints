@@ -221,8 +221,13 @@ class OpenAIMsgspecAdapter(HttpRequestAdapter):
             metadata["finish_reason"] = response.choices[0].finish_reason
         if message.tool_calls:
             metadata["tool_calls"] = message.tool_calls
-        if message.reasoning_content:
-            metadata["reasoning_content"] = message.reasoning_content
+
+        assert not (
+            message.reasoning_content and message.reasoning
+        ), "Response contains both 'reasoning_content' and 'reasoning'; expected exactly one"
+        reasoning = message.reasoning_content or message.reasoning
+        if reasoning:
+            metadata["reasoning_content"] = reasoning
 
         # Keep `output` as the textual content only. Structured tool calls live in
         # the dedicated `tool_calls` field; TextModelOutput.__str__ serializes them
@@ -235,7 +240,7 @@ class OpenAIMsgspecAdapter(HttpRequestAdapter):
             id=result_id or response.id,
             response_output=TextModelOutput(
                 output=output_text,
-                reasoning=message.reasoning_content,
+                reasoning=reasoning,
                 tool_calls=tool_calls_tuple,
             ),
             metadata=metadata,

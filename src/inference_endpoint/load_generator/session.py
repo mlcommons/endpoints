@@ -240,8 +240,8 @@ class PhaseIssuer:
         Args:
             sample_index: Index into the dataset.
             data_override: If provided, merged over the loaded sample data.
-                Keys in data_override take precedence. Used by MultiTurnStrategy
-                to substitute live-accumulated message history.
+                Keys in data_override take precedence. Used by AgenticInferenceStrategy
+                to override pre-baked messages when trajectory salting is enabled.
 
         Note: load_sample() runs synchronously before the ISSUED timestamp.
         For accurate timing, datasets MUST be pre-loaded into memory.
@@ -535,7 +535,7 @@ class BenchmarkSession:
         if isinstance(resp, QueryResult):
             query_id = resp.id
             # Drop late responses for queries already synthetically terminated
-            # (e.g. by MultiTurnStrategy._handle_timeout). Without this gate,
+            # (e.g. by AgenticInferenceStrategy._handle_timeout). Without this gate,
             # a real response arriving after timeout double-publishes ERROR/COMPLETE
             # and double-decrements inflight (no per-request HTTP timeout
             # exists in endpoint_client; late arrivals are possible).
@@ -634,7 +634,7 @@ class BenchmarkSession:
         total_samples = settings.total_samples_to_issue()
         stop_on_sample_count = not (
             settings.load_pattern is not None
-            and settings.load_pattern.type == LoadPatternType.MULTI_TURN
+            and settings.load_pattern.type == LoadPatternType.AGENTIC_INFERENCE
         )
 
         def check() -> bool:
