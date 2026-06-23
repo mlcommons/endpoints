@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import builtins
 import json
+from datetime import date
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -36,6 +37,8 @@ from inference_endpoint.commands.benchmark.execute import (
 from inference_endpoint.config.schema import OfflineBenchmarkConfig, TestMode
 from inference_endpoint.load_generator.session import SessionResult
 from inference_endpoint.metrics.report import Report
+
+_START_NS = 1_000_000_000
 
 _OFFLINE_KWARGS = {
     "endpoint_config": {"endpoints": ["http://localhost:8000"]},
@@ -172,7 +175,9 @@ class TestBuildRunMetadata:
         ctx = MagicMock()
         ctx.config.settings.load_pattern.target_concurrency = None
 
-        metadata = _build_run_metadata(ctx, _make_populated_report(), qps=20.0)
+        metadata = _build_run_metadata(
+            ctx, _make_populated_report(), qps=20.0, start_time_ns=_START_NS
+        )
 
         for field, expected_ms in [
             ("measured_latency_ttft_p50", 500.0),
@@ -203,7 +208,9 @@ class TestBuildRunMetadata:
         ctx = MagicMock()
         ctx.config.settings.load_pattern.target_concurrency = None
 
-        metadata = _build_run_metadata(ctx, _make_populated_report(), qps=20.0)
+        metadata = _build_run_metadata(
+            ctx, _make_populated_report(), qps=20.0, start_time_ns=_START_NS
+        )
 
         # duration_ns=10_000_000_000 → 10.0 s
         assert metadata["measured_run_duration"] == pytest.approx(10.0)
@@ -217,7 +224,7 @@ class TestBuildRunMetadata:
         ctx = MagicMock()
         ctx.config.settings.load_pattern.target_concurrency = None
 
-        metadata = _build_run_metadata(ctx, None, qps=None)
+        metadata = _build_run_metadata(ctx, None, qps=None, start_time_ns=_START_NS)
 
         assert metadata["qps"] is None
         assert metadata["system_tps"] is None
@@ -231,7 +238,7 @@ class TestBuildRunMetadata:
         ctx = MagicMock()
         ctx.config.settings.load_pattern.target_concurrency = None
 
-        metadata = _build_run_metadata(ctx, None, qps=None)
+        metadata = _build_run_metadata(ctx, None, qps=None, start_time_ns=_START_NS)
 
         for field in (
             "disaggregated",
@@ -256,7 +263,7 @@ class TestBuildRunMetadata:
         report = _make_populated_report()
         report.tps.return_value = 200.0
 
-        metadata = _build_run_metadata(ctx, report, qps=20.0)
+        metadata = _build_run_metadata(ctx, report, qps=20.0, start_time_ns=_START_NS)
 
         assert metadata["tps_per_user"] == pytest.approx(20.0)
 
@@ -264,7 +271,9 @@ class TestBuildRunMetadata:
         ctx = MagicMock()
         ctx.config.settings.load_pattern.target_concurrency = None
 
-        metadata = _build_run_metadata(ctx, _make_populated_report(), qps=20.0)
+        metadata = _build_run_metadata(
+            ctx, _make_populated_report(), qps=20.0, start_time_ns=_START_NS
+        )
 
         assert metadata["tps_per_user"] is None
 
@@ -276,7 +285,7 @@ class TestBuildRunMetadata:
         report = _make_populated_report()
         report.tps.return_value = None
 
-        metadata = _build_run_metadata(ctx, report, qps=20.0)
+        metadata = _build_run_metadata(ctx, report, qps=20.0, start_time_ns=_START_NS)
 
         assert metadata["tps_per_user"] is None
 
@@ -285,7 +294,9 @@ class TestBuildRunMetadata:
         ctx = MagicMock()
         ctx.config.settings.load_pattern.target_concurrency = None
 
-        metadata = _build_run_metadata(ctx, _make_populated_report(), qps=42.5)
+        metadata = _build_run_metadata(
+            ctx, _make_populated_report(), qps=42.5, start_time_ns=_START_NS
+        )
 
         assert metadata["qps"] == pytest.approx(42.5)
 
@@ -304,23 +315,22 @@ class TestBuildRunMetadata:
         report.tpot = {}
         report.latency = {}
 
-        metadata = _build_run_metadata(ctx, report, qps=20.0)
+        metadata = _build_run_metadata(ctx, report, qps=20.0, start_time_ns=_START_NS)
 
         assert metadata["measured_latency_ttft_p50"] is None
         assert metadata["measured_latency_ttft_p99"] is None
 
-    def test_run_date_is_iso_format(self) -> None:
-        """run_date must be a valid ISO 8601 string."""
-        from datetime import datetime
-
+    def test_run_date_is_date_string(self) -> None:
+        """run_date must be a YYYY-MM-DD date string derived from the session start time."""
         ctx = MagicMock()
         ctx.config.settings.load_pattern.target_concurrency = None
 
-        metadata = _build_run_metadata(ctx, None, qps=None)
+        metadata = _build_run_metadata(ctx, None, qps=None, start_time_ns=_START_NS)
 
-        # Will raise ValueError if the string is not a valid ISO datetime.
-        parsed = datetime.fromisoformat(metadata["run_date"])
-        assert parsed.tzinfo is not None
+        # Will raise ValueError if the string is not a valid ISO date.
+        date.fromisoformat(metadata["run_date"])
+        # Must be date-only, not a full datetime.
+        assert "T" not in metadata["run_date"]
 
 
 @pytest.mark.unit

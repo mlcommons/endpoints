@@ -34,7 +34,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from dataclasses import replace as dataclass_replace
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin
@@ -96,6 +96,7 @@ from inference_endpoint.load_generator.session import (
     SessionResult,
 )
 from inference_endpoint.metrics.report import Report
+from inference_endpoint.utils import monotime_to_datetime
 
 transformers_logging.set_verbosity_error()
 
@@ -981,7 +982,9 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
 
     try:
         metadata_path = ctx.report_dir / "run_metadata.json"
-        run_metadata = _build_run_metadata(ctx, report, qps=qps)
+        run_metadata = _build_run_metadata(
+            ctx, report, qps=qps, start_time_ns=bench.session.start_time_ns
+        )
         with open(metadata_path, "w") as f:
             json.dump(run_metadata, f, indent=2)
         logger.info("Run metadata written to %s", metadata_path)
@@ -1002,7 +1005,11 @@ def _metric_pct(metric: dict[str, Any], p: str) -> float | None:
 
 
 def _build_run_metadata(
-    ctx: BenchmarkContext, report: Report | None, *, qps: float | None
+    ctx: BenchmarkContext,
+    report: Report | None,
+    *,
+    qps: float | None,
+    start_time_ns: int,
 ) -> dict[str, Any]:
     """Build the run_metadata.json payload from a completed benchmark run.
 
@@ -1022,7 +1029,7 @@ def _build_run_metadata(
     latency = report.latency if report is not None else {}
 
     return {
-        "run_date": datetime.now(UTC).isoformat(),
+        "run_date": monotime_to_datetime(start_time_ns).date().isoformat(),
         "qps": qps,
         "system_tps": system_tps,
         "tps_per_user": tps_per_user,
