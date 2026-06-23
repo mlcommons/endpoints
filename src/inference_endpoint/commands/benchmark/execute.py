@@ -802,7 +802,14 @@ async def _run_benchmark_async(
 
             if snap_dict is not None:
                 try:
-                    report = Report.from_snapshot(snap_dict)
+                    runtime = ctx.config.settings.runtime
+                    report = Report.from_snapshot(
+                        snap_dict,
+                        seeds={
+                            "scheduler_random_seed": runtime.scheduler_random_seed,
+                            "dataloader_random_seed": runtime.dataloader_random_seed,
+                        },
+                    )
                     if not report.complete:
                         logger.warning(
                             "Report is incomplete (state=%s, n_pending_tasks=%d)",

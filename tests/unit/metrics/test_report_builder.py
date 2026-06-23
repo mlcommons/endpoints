@@ -168,6 +168,17 @@ class TestFromSnapshot:
         # OSL data was written → tps is computable.
         assert report.tps is not None
 
+    def test_seeds_keyword_only_passthrough(self):
+        """seeds is config, not a snapshot metric: None unless the caller
+        supplies it, and carried verbatim into the report when it does."""
+        registry = _make_registry(n_samples=5)
+        snap = snapshot_to_dict(
+            registry.build_snapshot(state=SessionState.COMPLETE, n_pending_tasks=0)
+        )
+        assert Report.from_snapshot(snap).seeds is None
+        seeds = {"scheduler_random_seed": 42, "dataloader_random_seed": 7}
+        assert Report.from_snapshot(snap, seeds=seeds).seeds == seeds
+
     def test_failed_uses_tracked_counter(self):
         """``n_samples_failed`` reads from ``tracked_samples_failed``, not
         ``total_samples_failed``. The two diverge when an ERROR fires for
@@ -254,6 +265,24 @@ class TestReportDisplayAndSerialize:
         data = json.loads(_build_report(_make_registry(n_samples=0)).to_json())
         assert data["qps"] is None
         assert data["tps"] is None
+
+    def test_to_json_serializes_seeds(self):
+        """result_summary.json carries the run's RNG seeds so a run can be
+        validated as reproducible; absent seeds serialize as null."""
+        registry = _make_registry(n_samples=5)
+        snap = snapshot_to_dict(
+            registry.build_snapshot(state=SessionState.COMPLETE, n_pending_tasks=0)
+        )
+        seeds = {"scheduler_random_seed": 42, "dataloader_random_seed": 42}
+        report = Report.from_snapshot(snap, seeds=seeds)
+        assert json.loads(report.to_json())["seeds"] == seeds
+
+        lines: list[str] = []
+        report.display(fn=lines.append, summary_only=True)
+        assert any("Seeds:" in ln for ln in lines)
+
+        # Absent seeds -> null, not omitted.
+        assert json.loads(Report.from_snapshot(snap).to_json())["seeds"] is None
 
     def test_to_json_save(self, tmp_path: Path):
         registry = _make_registry(n_samples=5)

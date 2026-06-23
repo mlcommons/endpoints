@@ -138,9 +138,21 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
     qps: float | None = None
     tps: float | None = None
 
+    # RNG seeds for this run (from RuntimeConfig). Carried so result_summary
+    # .json is self-validating: a reproducible run is identified by its seeds.
+    # These are config, not a measured metric, so the from_snapshot caller
+    # supplies them rather than reading them from the metrics snapshot.
+    seeds: dict[str, int] | None = None
+
     @classmethod
-    def from_snapshot(cls, snap: dict[str, Any]) -> Report:
+    def from_snapshot(
+        cls, snap: dict[str, Any], *, seeds: dict[str, int] | None = None
+    ) -> Report:
         """Build a Report from a snapshot dict.
+
+        ``seeds`` (optional) carries the run's RNG seeds from config into the
+        report so result_summary.json is self-validating; it is keyword-only
+        because it is config, not part of the metrics snapshot.
 
         Input is the dict form produced by
         ``inference_endpoint.async_utils.services.metrics_aggregator.snapshot
@@ -216,6 +228,7 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
             output_sequence_lengths=osl,
             qps=qps,
             tps=tps,
+            seeds=seeds,
         )
 
     def to_json(self, save_to: os.PathLike | None = None) -> bytes:
@@ -245,6 +258,9 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
         fn(f"Version: {self.version}{newline}")
         if self.git_sha:
             fn(f"Git SHA: {self.git_sha}{newline}")
+        if self.seeds:
+            seed_str = ", ".join(f"{k}={v}" for k, v in self.seeds.items())
+            fn(f"Seeds: {seed_str}{newline}")
         if self.test_started_at > 0:
             approx = monotime_to_datetime(self.test_started_at)
             fn(f"Test started at: {approx.strftime('%Y-%m-%d %H:%M:%S')}{newline}")
