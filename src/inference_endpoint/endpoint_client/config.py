@@ -46,6 +46,21 @@ from .cpu_affinity import (
 )
 from .utils import get_ephemeral_port_limit, get_ephemeral_port_range
 
+
+def _endpoint_destination(url: str) -> tuple[str | None, int]:
+    """Resolve an endpoint URL to its ``(host, port)`` destination identity.
+
+    Used to count distinct destinations for the ephemeral-port budget. A
+    bare ``host:port`` (no scheme) is parsed as http so the host/port land
+    in the right fields instead of collapsing to ``(None, None)``; a missing
+    port resolves to the scheme default (443 for https, else 80) so that
+    http and https to the same host count as distinct destinations.
+    """
+    parsed = urlparse(url if "://" in url else f"http://{url}")
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    return (parsed.hostname, port)
+
+
 ADAPTER_MAP = {
     APIType.OPENAI: "inference_endpoint.openai.openai_msgspec_adapter.OpenAIMsgspecAdapter",
     APIType.OPENAI_COMPLETIONS: "inference_endpoint.openai.completions_adapter.OpenAITextCompletionsAdapter",
@@ -263,7 +278,7 @@ class HTTPClientConfig(WithUpdatesMixin, BaseModel):
             # otherwise concurrency is needlessly throttled to a single
             # endpoint's budget when several endpoints are configured.
             distinct_endpoints = len(
-                {(urlparse(u).hostname, urlparse(u).port) for u in self.endpoint_urls}
+                {_endpoint_destination(u) for u in self.endpoint_urls}
             )
             port_budget = available_ports * max(1, distinct_endpoints)
 

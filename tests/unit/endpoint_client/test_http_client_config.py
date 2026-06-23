@@ -10,7 +10,6 @@ gracefully so HTTPClientConfig() can be constructed anywhere.
 from unittest.mock import patch
 
 import pytest
-
 from inference_endpoint.endpoint_client import config as cfg
 from inference_endpoint.endpoint_client.cpu_affinity import UnsupportedPlatformError
 
@@ -125,3 +124,44 @@ class TestEndpointBudgetScaling:
                     num_workers=10,
                     max_connections=40000,  # > 2 x 10000
                 )
+
+
+@pytest.mark.unit
+class TestEndpointDestination:
+    """Distinct-destination identity used for the ephemeral-port budget."""
+
+    @pytest.mark.parametrize(
+        ("url", "expected"),
+        [
+            ("http://10.0.0.1:8000", ("10.0.0.1", 8000)),
+            ("https://host:9000", ("host", 9000)),
+            ("http://host", ("host", 80)),
+            ("https://host", ("host", 443)),
+            ("10.0.0.1:8000", ("10.0.0.1", 8000)),  # schemeless host:port
+            ("host:9000", ("host", 9000)),
+            ("http://[::1]:8000", ("::1", 8000)),  # IPv6
+        ],
+    )
+    def test_resolves_host_and_port(self, url, expected):
+        assert cfg._endpoint_destination(url) == expected
+
+    def test_schemeless_urls_count_as_distinct(self):
+        # Bare host:port must not collapse to (None, None) and inflate to 1.
+        keys = {cfg._endpoint_destination(u) for u in ("a:8000", "b:8000")}
+        assert len(keys) == 2
+
+    def test_http_and_https_same_host_are_distinct(self):
+        # Default ports differ (80 vs 443) -> two destinations, not one.
+        keys = {cfg._endpoint_destination(u) for u in ("http://h", "https://h")}
+        assert len(keys) == 2
+
+    def test_schemeless_budget_scales_with_distinct_hosts(self):
+        with (
+            patch.object(cfg, "get_ephemeral_port_range", return_value=(32768, 60999)),
+            patch.object(cfg, "get_ephemeral_port_limit", return_value=10000),
+        ):
+            c = cfg.HTTPClientConfig(
+                endpoint_urls=["10.0.0.1:8000", "10.0.0.2:8000"],
+                num_workers=10,
+            )
+        assert c.max_connections == 20000  # 10000 ports x 2 distinct hosts
