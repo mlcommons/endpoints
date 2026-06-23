@@ -256,11 +256,6 @@ class MetricsPublisher:
         """
         path = self._final_snapshot_path
         tmp = path.with_suffix(path.suffix + ".tmp")
-        # Wrap so a failure between tmp-write and rename doesn't leak
-        # the .tmp file across runs (e.g. EXDEV cross-device, parent
-        # directory removed mid-write, permission change). The rename
-        # is the atomicity boundary: before it, .tmp is partial state;
-        # after it, .tmp doesn't exist (rename consumed it).
         try:
             with tmp.open("wb") as f:
                 f.write(payload)

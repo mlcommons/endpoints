@@ -979,11 +979,9 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
     except Exception as e:
         logger.error(f"Save failed: {e}")
 
-    # Write run_metadata.json before sys_info capture so mlcflow's postprocess
-    # can read and patch it in-place with serving config values.
     try:
         metadata_path = ctx.report_dir / "run_metadata.json"
-        run_metadata = _build_run_metadata(ctx, report)
+        run_metadata = _build_run_metadata(ctx, report, qps=qps)
         with open(metadata_path, "w") as f:
             json.dump(run_metadata, f, indent=2)
         logger.info("Run metadata written to %s", metadata_path)
@@ -1021,46 +1019,49 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
             )
 
 
-def _build_run_metadata(ctx: BenchmarkContext, report: Report | None) -> dict[str, Any]:
+def _ns_to_ms(val: float | int | None) -> float | None:
+    return float(val) / 1e6 if val is not None else None
+
+
+def _metric_stat(metric: dict[str, Any], key: str) -> float | None:
+    return _ns_to_ms(metric.get(key)) if metric else None
+
+
+def _metric_pct(metric: dict[str, Any], p: str) -> float | None:
+    return _ns_to_ms((metric.get("percentiles") or {}).get(p)) if metric else None
+
+
+def _build_run_metadata(
+    ctx: BenchmarkContext, report: Report | None, *, qps: float | None
+) -> dict[str, Any]:
     """Build and return the run metadata dict."""
     load_pattern = ctx.config.settings.load_pattern
     concurrency = load_pattern.target_concurrency
-
-    def _ns_to_ms(val: float | int | None) -> float | None:
-        return float(val) / 1e6 if val is not None else None
-
-    def _stat(metric: dict[str, Any], key: str) -> float | None:
-        return _ns_to_ms(metric.get(key)) if metric else None
-
-    def _pct(metric: dict[str, Any], p: str) -> float | None:
-        return _ns_to_ms((metric.get("percentiles") or {}).get(p)) if metric else None
 
     ttft: dict[str, Any] = {}
     tpot: dict[str, Any] = {}
     latency: dict[str, Any] = {}
     system_tps: float | None = None
     tps_per_user: float | None = None
-    qps: float | None = None
     measured_total_output_tokens: int | None = None
     measured_run_duration: float | None = None
     measured_total_requests: int | None = None
 
     if report is not None:
         system_tps = report.tps()
-        qps = report.qps()
         measured_total_requests = report.n_samples_completed
         if report.duration_ns is not None:
             measured_run_duration = report.duration_ns / 1e9
-        osl = report.output_sequence_lengths or {}
+        osl = report.output_sequence_lengths
         if osl:
             total_tokens = osl.get("total")
             if total_tokens is not None:
                 measured_total_output_tokens = int(total_tokens)
         if concurrency is not None and concurrency > 0 and system_tps is not None:
             tps_per_user = system_tps / concurrency
-        ttft = report.ttft or {}
-        tpot = report.tpot or {}
-        latency = report.latency or {}
+        ttft = report.ttft
+        tpot = report.tpot
+        latency = report.latency
 
     metadata: dict[str, Any] = {
         "run_date": datetime.now(UTC).isoformat(),
@@ -1075,7 +1076,9 @@ def _build_run_metadata(ctx: BenchmarkContext, report: Report | None) -> dict[st
         "concurrency": concurrency,
         "system_tps": system_tps,
         "tps_per_user": tps_per_user,
-        "ttft": _pct(ttft, "99.0"),
+        "ttft": _metric_pct(
+            ttft, "99.0"
+        ),  # data-dictionary top-level alias for measured_latency_ttft_p99
         "qps": qps,
         "tps_utilization": None,
         "measured_total_output_tokens": measured_total_output_tokens,
@@ -1083,30 +1086,30 @@ def _build_run_metadata(ctx: BenchmarkContext, report: Report | None) -> dict[st
         "measured_total_requests": measured_total_requests,
         "link_config": None,
         "link_logs": None,
-        "measured_latency_ttft_min": _stat(ttft, "min"),
-        "measured_latency_ttft_average": _stat(ttft, "avg"),
-        "measured_latency_ttft_p50": _pct(ttft, "50.0"),
-        "measured_latency_ttft_p90": _pct(ttft, "90.0"),
-        "measured_latency_ttft_p95": _pct(ttft, "95.0"),
-        "measured_latency_ttft_p99": _pct(ttft, "99.0"),
-        "measured_latency_ttft_p999": _pct(ttft, "99.9"),
-        "measured_latency_ttft_max": _stat(ttft, "max"),
-        "measured_latency_tpot_min": _stat(tpot, "min"),
-        "measured_latency_tpot_average": _stat(tpot, "avg"),
-        "measured_latency_tpot_p50": _pct(tpot, "50.0"),
-        "measured_latency_tpot_p90": _pct(tpot, "90.0"),
-        "measured_latency_tpot_p95": _pct(tpot, "95.0"),
-        "measured_latency_tpot_p99": _pct(tpot, "99.0"),
-        "measured_latency_tpot_p999": _pct(tpot, "99.9"),
-        "measured_latency_tpot_max": _stat(tpot, "max"),
-        "measured_latency_request_min": _stat(latency, "min"),
-        "measured_latency_request_average": _stat(latency, "avg"),
-        "measured_latency_request_p50": _pct(latency, "50.0"),
-        "measured_latency_request_p90": _pct(latency, "90.0"),
-        "measured_latency_request_p95": _pct(latency, "95.0"),
-        "measured_latency_request_p99": _pct(latency, "99.0"),
-        "measured_latency_request_p999": _pct(latency, "99.9"),
-        "measured_latency_request_max": _stat(latency, "max"),
+        "measured_latency_ttft_min": _metric_stat(ttft, "min"),
+        "measured_latency_ttft_average": _metric_stat(ttft, "avg"),
+        "measured_latency_ttft_p50": _metric_pct(ttft, "50.0"),
+        "measured_latency_ttft_p90": _metric_pct(ttft, "90.0"),
+        "measured_latency_ttft_p95": _metric_pct(ttft, "95.0"),
+        "measured_latency_ttft_p99": _metric_pct(ttft, "99.0"),
+        "measured_latency_ttft_p999": _metric_pct(ttft, "99.9"),
+        "measured_latency_ttft_max": _metric_stat(ttft, "max"),
+        "measured_latency_tpot_min": _metric_stat(tpot, "min"),
+        "measured_latency_tpot_average": _metric_stat(tpot, "avg"),
+        "measured_latency_tpot_p50": _metric_pct(tpot, "50.0"),
+        "measured_latency_tpot_p90": _metric_pct(tpot, "90.0"),
+        "measured_latency_tpot_p95": _metric_pct(tpot, "95.0"),
+        "measured_latency_tpot_p99": _metric_pct(tpot, "99.0"),
+        "measured_latency_tpot_p999": _metric_pct(tpot, "99.9"),
+        "measured_latency_tpot_max": _metric_stat(tpot, "max"),
+        "measured_latency_request_min": _metric_stat(latency, "min"),
+        "measured_latency_request_average": _metric_stat(latency, "avg"),
+        "measured_latency_request_p50": _metric_pct(latency, "50.0"),
+        "measured_latency_request_p90": _metric_pct(latency, "90.0"),
+        "measured_latency_request_p95": _metric_pct(latency, "95.0"),
+        "measured_latency_request_p99": _metric_pct(latency, "99.0"),
+        "measured_latency_request_p999": _metric_pct(latency, "99.9"),
+        "measured_latency_request_max": _metric_stat(latency, "max"),
     }
 
     return metadata
