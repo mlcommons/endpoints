@@ -1033,58 +1033,59 @@ def _build_run_metadata(
         .astimezone(UTC)
         .date()
         .isoformat(),
-        "qps": qps,
+        "config_summary": None,
+        "disaggregated": None,
+        "expert_parallel": None,
+        "tensor_parallel": None,
+        "pipeline_parallel": None,
+        "data_parallel": None,
+        "batch": None,
+        "config_summary_notes": None,
+        "concurrency": concurrency,
         "system_tps": system_tps,
         "tps_per_user": tps_per_user,
-        "measured_total_requests": (
-            report.n_samples_completed if report is not None else None
+        "ttft": _metric_pct(ttft, "99.0"),
+        "qps": qps,
+        "tps_utilization": None,
+        "measured_total_output_tokens": (
+            (report.output_sequence_lengths or {}).get("total")
+            if report is not None
+            else None
         ),
         "measured_run_duration": (
             report.duration_ns / 1e9
             if (report is not None and report.duration_ns is not None)
             else None
         ),
-        "measured_total_output_tokens": (
-            (report.output_sequence_lengths or {}).get("total")
-            if report is not None
-            else None
+        "measured_total_requests": (
+            report.n_samples_completed if report is not None else None
         ),
-        "ttft": _metric_pct(ttft, "99.0"),
+        "link_config": None,
+        "link_logs": None,
+        "measured_latency_ttft_min": _metric_stat(ttft, "min"),
+        "measured_latency_ttft_average": _metric_stat(ttft, "avg"),
         "measured_latency_ttft_p50": _metric_pct(ttft, "50.0"),
         "measured_latency_ttft_p90": _metric_pct(ttft, "90.0"),
         "measured_latency_ttft_p95": _metric_pct(ttft, "95.0"),
         "measured_latency_ttft_p99": _metric_pct(ttft, "99.0"),
         "measured_latency_ttft_p999": _metric_pct(ttft, "99.9"),
+        "measured_latency_ttft_max": _metric_stat(ttft, "max"),
+        "measured_latency_tpot_min": _metric_stat(tpot, "min"),
+        "measured_latency_tpot_average": _metric_stat(tpot, "avg"),
         "measured_latency_tpot_p50": _metric_pct(tpot, "50.0"),
         "measured_latency_tpot_p90": _metric_pct(tpot, "90.0"),
         "measured_latency_tpot_p95": _metric_pct(tpot, "95.0"),
         "measured_latency_tpot_p99": _metric_pct(tpot, "99.0"),
         "measured_latency_tpot_p999": _metric_pct(tpot, "99.9"),
+        "measured_latency_tpot_max": _metric_stat(tpot, "max"),
+        "measured_latency_request_min": _metric_stat(latency, "min"),
+        "measured_latency_request_average": _metric_stat(latency, "avg"),
         "measured_latency_request_p50": _metric_pct(latency, "50.0"),
         "measured_latency_request_p90": _metric_pct(latency, "90.0"),
         "measured_latency_request_p95": _metric_pct(latency, "95.0"),
         "measured_latency_request_p99": _metric_pct(latency, "99.0"),
         "measured_latency_request_p999": _metric_pct(latency, "99.9"),
-        "measured_latency_ttft_min": _metric_stat(ttft, "min"),
-        "measured_latency_ttft_max": _metric_stat(ttft, "max"),
-        "measured_latency_ttft_avg": _metric_stat(ttft, "avg"),
-        "measured_latency_tpot_min": _metric_stat(tpot, "min"),
-        "measured_latency_tpot_max": _metric_stat(tpot, "max"),
-        "measured_latency_tpot_avg": _metric_stat(tpot, "avg"),
-        "measured_latency_request_min": _metric_stat(latency, "min"),
         "measured_latency_request_max": _metric_stat(latency, "max"),
-        "measured_latency_request_avg": _metric_stat(latency, "avg"),
-        "disaggregated": None,
-        "tensor_parallel": None,
-        "pipeline_parallel": None,
-        "data_parallel": None,
-        "expert_parallel": None,
-        "batch": None,
-        "config_summary": None,
-        "config_summary_notes": None,
-        "tps_utilization": None,
-        "link_config": None,
-        "link_logs": None,
     }
 
 

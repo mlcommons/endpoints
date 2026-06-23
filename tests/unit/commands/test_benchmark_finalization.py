@@ -241,13 +241,13 @@ class TestBuildRunMetadata:
         metadata = _build_run_metadata(ctx, None, qps=None, start_time_ns=_START_NS)
 
         for field in (
+            "config_summary",
             "disaggregated",
+            "expert_parallel",
             "tensor_parallel",
             "pipeline_parallel",
             "data_parallel",
-            "expert_parallel",
             "batch",
-            "config_summary",
             "config_summary_notes",
             "tps_utilization",
             "link_config",
