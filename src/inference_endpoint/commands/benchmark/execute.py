@@ -985,7 +985,7 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
         run_metadata = _build_run_metadata(
             ctx, report, qps=qps, start_time_ns=bench.session.start_time_ns
         )
-        with open(metadata_path, "w") as f:
+        with open(metadata_path, "w", encoding="utf-8") as f:
             json.dump(run_metadata, f, indent=2)
         logger.info("Run metadata written to %s", metadata_path)
     except Exception as e:
@@ -1019,9 +1019,7 @@ def _build_run_metadata(
     system_tps = report.tps() if report is not None else None
     concurrency = ctx.config.settings.load_pattern.target_concurrency
     tps_per_user = (
-        (system_tps / concurrency)
-        if (system_tps is not None and concurrency is not None)
-        else None
+        (system_tps / concurrency) if (system_tps is not None and concurrency) else None
     )
 
     ttft = report.ttft if report is not None else {}
