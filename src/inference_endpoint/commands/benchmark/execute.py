@@ -34,7 +34,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from dataclasses import replace as dataclass_replace
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin
@@ -1014,7 +1014,7 @@ def _build_run_metadata(
     """Build the run_metadata.json payload from a completed benchmark run.
 
     Infrastructure fields (tensor_parallel, config_summary, etc.) are left as
-    None — they are populated by a separate sysinfo step after the run.
+    None
     """
     system_tps = report.tps() if report is not None else None
     concurrency = ctx.config.settings.load_pattern.target_concurrency
@@ -1029,7 +1029,10 @@ def _build_run_metadata(
     latency = report.latency if report is not None else {}
 
     return {
-        "run_date": monotime_to_datetime(start_time_ns).date().isoformat(),
+        "run_date": monotime_to_datetime(start_time_ns)
+        .astimezone(UTC)
+        .date()
+        .isoformat(),
         "qps": qps,
         "system_tps": system_tps,
         "tps_per_user": tps_per_user,
