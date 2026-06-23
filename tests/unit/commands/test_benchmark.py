@@ -34,6 +34,7 @@ from inference_endpoint.commands.benchmark.execute import (
     BenchmarkContext,
     ResponseCollector,
     _build_phases,
+    _load_datasets,
     _run_benchmark_async,
     setup_benchmark,
 )
@@ -729,6 +730,79 @@ class TestAggregatorArgs:
         assert "--tokenizer-workers" in args
         idx = args.index("--tokenizer-workers")
         assert args[idx + 1] == expected_flag
+
+
+class TestAccuracyOnlyDatasetLoading:
+    """`--accuracy-only` must skip the performance dataset even when the config
+    carries one, so a single combined config can run accuracy on its own."""
+
+    def _config_with_perf_and_acc(self):
+        return OfflineConfig(
+            **_OFFLINE_KWARGS
+            | {
+                "datasets": [
+                    {"path": "perf.jsonl", "type": "performance"},
+                    {
+                        "path": "acc.jsonl",
+                        "type": "accuracy",
+                        "accuracy_config": {
+                            "eval_method": "pass_at_1",
+                            "ground_truth": "gt",
+                        },
+                    },
+                ]
+            }
+        )
+
+    @pytest.mark.unit
+    def test_accuracy_only_skips_performance_dataset(self, tmp_path):
+        config = self._config_with_perf_and_acc()
+        with (
+            patch(
+                "inference_endpoint.commands.benchmark.execute."
+                "DataLoaderFactory.create_loader",
+                return_value=MagicMock(),
+            ) as mock_create,
+            patch(
+                "inference_endpoint.commands.benchmark.execute."
+                "_resolve_accuracy_components",
+                return_value=(Scorer.get("pass_at_1"), None),
+            ),
+        ):
+            dataloader, acc_datasets, eval_configs = _load_datasets(
+                config, tmp_path, accuracy_only=True
+            )
+
+        assert dataloader is None
+        assert len(acc_datasets) == 1
+        # Only the accuracy dataset is loaded; the perf dataset is never touched.
+        assert mock_create.call_count == 1
+        # No inline "performance" eval is registered in accuracy-only mode.
+        assert all(ec.dataset_name != "performance" for ec in eval_configs)
+
+    @pytest.mark.unit
+    def test_default_run_loads_performance_dataset(self, tmp_path):
+        config = self._config_with_perf_and_acc()
+        with (
+            patch(
+                "inference_endpoint.commands.benchmark.execute."
+                "DataLoaderFactory.create_loader",
+                return_value=MagicMock(),
+            ) as mock_create,
+            patch(
+                "inference_endpoint.commands.benchmark.execute."
+                "_resolve_accuracy_components",
+                return_value=(Scorer.get("pass_at_1"), None),
+            ),
+        ):
+            dataloader, acc_datasets, _ = _load_datasets(
+                config, tmp_path, accuracy_only=False
+            )
+
+        assert dataloader is not None
+        assert len(acc_datasets) == 1
+        # Both the perf and accuracy datasets are loaded.
+        assert mock_create.call_count == 2
 
 
 class TestBuildPhases:

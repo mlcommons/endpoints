@@ -317,7 +317,10 @@ def _load_datasets(
         logger.info("No separate accuracy datasets provided")
 
     dataloader: Dataset | None = None
-    if performance_cfgs:
+    # --accuracy-only skips the performance dataset entirely (including its inline
+    # accuracy scorer), so a single config carrying both a performance and an
+    # accuracy dataset can run accuracy on its own.
+    if performance_cfgs and not accuracy_only:
         if len(performance_cfgs) > 1:
             raise InputValidationError("Multiple performance datasets not supported")
         perf_cfg = performance_cfgs[0]

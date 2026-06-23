@@ -2,16 +2,21 @@
 
 ## Quick start
 
-To reproduce the reference accuracy number (~3 h on an edge device), set your
-model name and endpoint URL, then run:
+To reproduce the reference accuracy number (~3 h on an edge device), edit
+`model_params.name` and `endpoint_config.endpoints` in `online_edge_full_run.yaml`
+to match your server, then run:
 
 ```bash
-MODEL=Qwen3.6-27B-Q4_K_M ENDPOINT=http://localhost:8080 bash run_accuracy.sh
+cd examples/10_Edge_Agentic_Example/
+inference-endpoint benchmark from-config \
+  --config online_edge_full_run.yaml \
+  --accuracy-only
 ```
 
-`run_accuracy.sh` runs the finalized single-turn accuracy benchmark (~995
-samples) with the exact validated parameters. See the steps below if you prefer
-to run it directly or need to customise the configuration.
+`--accuracy-only` runs the finalized single-turn accuracy benchmark (~995
+samples) with the exact validated parameters and skips the performance phase. Drop
+the flag to run performance + accuracy back-to-back (Step 5). See the steps below
+for details.
 
 ---
 
@@ -158,24 +163,25 @@ inference-endpoint --help
 
 Single-turn covers three BFCL v4 categories: `non_live`, `live`, and
 `hallucination`. Each sample is one prompt → one structured tool-call response.
-The YAML config in this directory has the sampling rates pre-configured.
+The single example config, `online_edge_full_run.yaml`, has the sampling rates
+pre-configured; `--accuracy-only` runs just its accuracy phase.
 
 ```bash
 # Run from the examples/10_Edge_Agentic_Example/ directory
 cd examples/10_Edge_Agentic_Example/
 
 inference-endpoint benchmark from-config \
-  --config offline_bfcl_v4_single_turn.yaml \
+  --config online_edge_full_run.yaml \
   --accuracy-only
 ```
 
-`--accuracy-only` skips the performance (throughput) phase and forces a single
-worker and single connection for deterministic per-sample ordering.
+`--accuracy-only` skips the performance (throughput) phase entirely and forces a
+single worker and single connection for deterministic per-sample ordering. To run
+accuracy **and** performance back-to-back, drop the flag (see **Step 5**).
 
-Before running, open `offline_bfcl_v4_single_turn.yaml` and set
-`model_params.name` to match the model name your server reports (e.g.
-`Qwen3.6-27B-Q4_K_M`). The `endpoint_config.endpoints` list defaults to
-`http://localhost:8080`.
+Before running, open `online_edge_full_run.yaml` and set `model_params.name` to
+match the model name your server reports (e.g. `Qwen3.6-27B-Q4_K_M`). The
+`endpoint_config.endpoints` list defaults to `http://localhost:8080`.
 
 **Sampling rates** (validated at ~995 samples, ~3 h single-turn on an edge device):
 
@@ -187,7 +193,7 @@ Before running, open `offline_bfcl_v4_single_turn.yaml` and set
 
 Subsets of size ≤ 25 are taken in full (`subset_floor: 25`) so their scores are
 not reduced to one or two noisy samples. Total ≈ **995** single-turn samples.
-Results are written to `results/bfcl_v4_single_turn_accuracy/`.
+Results are written to `results/edge_agentic_full_run/`.
 
 ---
 
@@ -232,7 +238,7 @@ Results are written to `results/bfcl_v4_multi_turn/`.
 # Single-turn overall accuracy
 python3 -c "
 import json, pathlib
-r = json.loads(pathlib.Path('results/bfcl_v4_single_turn_accuracy/results.json').read_text())
+r = json.loads(pathlib.Path('results/edge_agentic_full_run/results.json').read_text())
 print('Overall ST accuracy:',
       r['accuracy_scores']['bfcl_v4::function_calling']['score']['overall_accuracy'], '%')
 "
@@ -249,73 +255,76 @@ print('Overall MT accuracy:',
 > Note: the single-turn pipeline writes `results.json` (accuracy nested under
 > `accuracy_scores['bfcl_v4::function_calling']`). There is no separate
 > `accuracy_scores.json`. A human-readable summary is also written to
-> `results/bfcl_v4_single_turn_accuracy/report.txt`.
+> `results/edge_agentic_full_run/report.txt`.
 
 ---
 
-## Step 5 — Run the agentic-coding performance benchmark (with online checker)
+## Step 5 — Run the combined benchmark (performance + accuracy)
 
-Steps 2–4 measure **accuracy**. This step measures **performance**
-(throughput / TTFT / TPOT) by replaying recorded multi-turn agentic-coding
-trajectories (SWE-bench-style) against the same endpoint, while an **inline
-"online checker"** scores the model's generated tool calls against the recorded
-ones in the dataset. The dataset is therefore both the performance workload and
-its own ground truth — no separate scoring pass is needed.
+A single config, `online_edge_full_run.yaml`, runs the performance phase and the
+accuracy phase back-to-back against the same server.
 
-The online checker is the agentic-inference inline accuracy scorer
+The **performance phase** replays recorded multi-turn agentic-coding trajectories
+(SWE-bench-style) while an inline **"online checker"** scores the model's
+generated tool calls against the recorded ones
 (`accuracy_config.eval_method: agentic_inference_inline` on the performance
-dataset); it runs at finalization, reading the run's event log plus the dataset,
-and writes its score into the report directory.
+dataset); the dataset is both the performance workload and its own ground truth.
+The **accuracy phase** is the BFCL v4 single-turn gate from Step 2.
 
 ```bash
 # Run from the examples/10_Edge_Agentic_Example/ directory, against the same
-# server used for accuracy (start it first; see Step 0).
+# server used in Step 0 (start it first).
 cd examples/10_Edge_Agentic_Example/
 
-# Recommended reference run (~2.5 h single-stream on a Jetson Thor):
 inference-endpoint benchmark from-config \
-  --config online_agentic_coding_2.5h.yaml
-
-# Quick smoke variant (~1 h):
-#   inference-endpoint benchmark from-config --config online_agentic_coding_1h.yaml
+  --config online_edge_full_run.yaml
 ```
 
-Before running, open the chosen config and set `model_params.name` to your
-served model name. Two ready-to-run configs are provided; both are single-stream
-(`target_concurrency: 1`, matching `llama-server -np 1`), deterministic
-(`temperature 0`, `seed 42`), reasoning **off**, with the online checker enabled
-(`accuracy_config.eval_method: agentic_inference_inline`):
+Before running, open `online_edge_full_run.yaml` and set `model_params.name` to
+your served model name. The config is single-stream (`target_concurrency: 1`,
+matching `llama-server -np 1`), deterministic (`temperature 0`, `seed 42`),
+reasoning **off**, runs **performance first, then accuracy**, and writes both
+scores into one report directory (`results/edge_agentic_full_run/`). Total
+wall-clock ~5.5 h on a single-stream edge box (~2.5 h perf + ~3 h accuracy).
 
-| Config                                              | Dataset                     | Conversations | Generated turns | Peak ISL       | One single-stream pass (Thor, reasoning off) |
-| --------------------------------------------------- | --------------------------- | ------------- | --------------- | -------------- | -------------------------------------------- |
-| `online_agentic_coding_2.5h.yaml` **(recommended)** | `agentic_coding_2.5h.jsonl` | 20            | 1007            | ~23.5K (< 32K) | **~2 h 37 m**, IoU 0.6335                    |
-| `online_agentic_coding_1h.yaml` (quick)             | `agentic_coding_1h.jsonl`   | 9             | 483             | ~22.8K (< 32K) | **~73 min**, IoU 0.6189                      |
+| Phase       | Dataset                     | Conversations | Generated turns | Peak ISL       | One single-stream pass (Thor, reasoning off) |
+| ----------- | --------------------------- | ------------- | --------------- | -------------- | -------------------------------------------- |
+| performance | `agentic_coding_2.5h.jsonl` | 20            | 1007            | ~23.5K (< 32K) | **~2 h 37 m**, IoU 0.6335                    |
+| accuracy    | BFCL v4 single-turn (~995)  | —             | —               | < 32K          | **~3 h**, overall 86.23%                     |
 
-Both datasets are built so that **no conversation overflows the 32K served
-context** — every turn completes and the run is _valid_ (0 dropped turns). The
-`_2.5h` set is the recommended reference: ~2× the sample of `_1h`, giving a more
-stable inline-accuracy estimate. With serving optimizations (e.g. MTP
-speculative decoding) the `_2.5h` pass drops toward ~1.5 h. Only raise
-`target_concurrency` when pointing at a multi-slot endpoint.
+The performance dataset is built so that **no conversation overflows the 32K
+served context** — every turn completes and the run is _valid_ (0 dropped
+turns). With serving optimizations (e.g. MTP speculative decoding) the perf phase
+drops toward ~1.5 h. Only raise `target_concurrency` when pointing at a
+multi-slot endpoint.
 
 > **Keep reasoning off.** On this tool-calling workload, enabling server-side
 > reasoning gives no inline-accuracy benefit and costs ~60% more wall-clock (see
 > the reference table below). Launch `llama-server` with `--reasoning off`.
 
-### Verify the performance + online-check results
+### Verify the combined results
 
 ```bash
-# Inline accuracy (online checker) score — adjust the dir for the config you ran
+# Performance inline-checker score
 python3 -c "
 import json, pathlib
-s = json.loads(pathlib.Path('results/agentic_coding_perf_2.5h/scores.json').read_text())
+s = json.loads(pathlib.Path('results/edge_agentic_full_run/scores.json').read_text())
 print('Inline accuracy score:', s['score'], '| valid:', s['valid'])
+"
+
+# BFCL v4 single-turn accuracy (the gated metric)
+python3 -c "
+import json, pathlib
+r = json.loads(pathlib.Path('results/edge_agentic_full_run/results.json').read_text())
+print('Overall ST accuracy:',
+      r['accuracy_scores']['bfcl_v4::function_calling']['score']['overall_accuracy'], '%')
 "
 ```
 
-Performance metrics (throughput, TTFT, TPOT, per-turn latency, ISL/OSL) are
-written to `results/agentic_coding_perf_2.5h/` (or `..._1h/`) alongside
-`scores.json`.
+Both scores land in `results/edge_agentic_full_run/`: the BFCL gate under
+`results.json` (`accuracy_scores['bfcl_v4::function_calling']`) and the inline
+performance checker in `scores.json`, alongside the performance metrics
+(throughput, TTFT, TPOT, per-turn latency, ISL/OSL).
 
 ### Reference performance + accuracy (Jetson Thor, Q4_K_M + llama.cpp, reasoning off)
 
@@ -343,7 +352,6 @@ gives no accuracy benefit for ~60% more wall-clock:
 | Dataset              | reasoning OFF                | reasoning ON         |
 | -------------------- | ---------------------------- | -------------------- |
 | `_2.5h` (1007 turns) | IoU **0.6335**, **2 h 37 m** | IoU 0.6374, 4 h 13 m |
-| `_1h` (483 turns)    | IoU **0.6189**, **~73 min**  | IoU 0.6134, 1 h 59 m |
 
 > ⚠️ **Reference baseline — not the final optimized numbers.** These figures
 > characterize an _unoptimized_ edge serving path: stock `llama.cpp` with a
@@ -365,7 +373,7 @@ a deterministic server produce identical outputs across runs.
 ```bash
 # Single-turn with seed
 inference-endpoint benchmark from-config \
-  --config offline_bfcl_v4_single_turn.yaml \
+  --config online_edge_full_run.yaml \
   --accuracy-only \
   --seed 42
 
@@ -402,6 +410,23 @@ benchmark was run **twice, with a freshly restarted server each pass**.
 
 - **Run-to-run:** accuracy is **identical** across passes (deterministic
   decoding at `temperature 0` + fixed seeds); wall-clock varied < 1%.
+
+### Accuracy gate
+
+The pass/fail criterion is a **3% one-sided band** anchored on the Jetson Thor
+`Qwen3.6-27B-Q4_K_M` reference above: a submission passes if its single-turn
+score is **≥ 0.97 × reference**, with no upper bound (a higher score never
+fails).
+
+| Metric          | Reference | Pass threshold (0.97 ×) |
+| --------------- | --------- | ----------------------- |
+| Overall         | 86.23%    | **≥ 83.64%**            |
+| Normalized (ST) | 87.96%    | **≥ 85.32%**            |
+
+Accuracy is hardware-independent (deterministic at `temperature 0` + fixed seed),
+so the same thresholds apply on any device. This gate is encoded in the ruleset
+at `src/inference_endpoint/config/rulesets/mlcommons/models.py`
+(`Qwen3_6_27B.accuracy_target_settings`).
 
 ### Optional: multi-turn parity
 

@@ -1,0 +1,103 @@
+# Edge-Agentic full reference run — performance + accuracy, back-to-back
+#
+# Runs both edge-agentic phases against the same served endpoint in a single
+# `from-config` invocation, writing both scores into one report dir:
+#
+#   1. Performance phase (~2.5 h): replays the agentic-coding trajectories
+#      (agentic_coding_2.5h.jsonl) as a single-stream performance workload and
+#      scores them inline (multiset IoU of executables vs. the recorded tool
+#      calls, accuracy_config.eval_method: agentic_inference_inline).
+#   2. Accuracy phase (~3 h): the BFCL v4 single-turn gate (~995 samples across
+#      non_live / live / hallucination). The accuracy phase always runs at
+#      max_throughput, regardless of the global agentic_inference load pattern.
+#
+# Phases run perf -> accuracy (framework order). Both are deterministic
+# (temperature 0, seed 42) against a reasoning-off server, so order does not
+# affect results. Total wall-clock ~5.5 h on a single-stream edge box
+# (e.g. NVIDIA Jetson AGX Thor, Qwen3.6-27B Q4_K_M, reasoning off); `timeout`
+# below is sized to 6 h.
+#
+# Requires: pip install -e ".[bfcl]"  (the BFCL accuracy dataset pulls bfcl-eval)
+#
+# Run (start the edge server first; see README.md):
+#   inference-endpoint benchmark from-config \
+#     --config online_edge_full_run.yaml
+#
+# To run only the accuracy phase (skip performance) from this same config, add
+# --accuracy-only:
+#   inference-endpoint benchmark from-config \
+#     --config online_edge_full_run.yaml --accuracy-only
+name: "edge-agentic-full-run"
+version: "1.0"
+type: "online"
+timeout: 21600 # 6 h: ~2.5 h perf + ~3 h accuracy, with headroom.
+
+model_params:
+  name: "Qwen3.6-27B-Q4_K_M" # set to your served model name.
+  # Deterministic decoding so both the inline accuracy check and the BFCL gate
+  # are reproducible. Reasoning is disabled server-side
+  # (llama-server --reasoning off). max_new_tokens 1024 is generous for BFCL's
+  # short function-call outputs and required for the agentic turns.
+  temperature: 0
+  seed: 42
+  max_new_tokens: 1024
+
+datasets:
+  - name: agentic_coding
+    type: performance
+    path: examples/10_Edge_Agentic_Example/agentic_coding_2.5h.jsonl
+    accuracy_config:
+      # Inline "online checker": score the replayed performance outputs against
+      # the recorded tool calls (multiset IoU of executables). The dataset is
+      # both the performance workload and its own ground truth.
+      eval_method: agentic_inference_inline
+    agentic_inference:
+      # Per-turn deadline; a timeout aborts that turn and the rest of its
+      # conversation. 10 min is generous for slow edge decode.
+      turn_timeout_s: 600.0
+      # One pass over the 20 conversations (no trajectory repeats).
+      num_trajectories_to_issue: 20
+
+  - name: bfcl_v4::function_calling # do not change.
+    type: "accuracy" # do not change.
+    params:
+      categories: ["non_live", "live", "hallucination"] # do not change.
+      category_sample_pct:
+        non_live: 62 # do not change.
+        live: 10 # do not change.
+        hallucination: 10 # do not change.
+      # Subsets with total size <= 25 are always taken in full so their scores
+      # are not reduced to one or two noisy samples.
+      subset_floor: 25 # do not change.
+    accuracy_config:
+      eval_method: "bfcl_v4" # do not change.
+      ground_truth: "ground_truth" # do not change.
+      extractor: "function_call_extractor" # do not change.
+      num_repeats: 1 # do not change.
+
+settings:
+  runtime:
+    min_duration_ms: 0
+    # Safety cap (4 h) so the performance phase stays bounded even if decode is
+    # slower than expected; one pass should finish in ~2.5 h on an edge box.
+    max_duration_ms: 14400000
+    dataloader_random_seed: 42 # BFCL accuracy sampling — do not change.
+  load_pattern:
+    # Drives the performance phase; the accuracy phase self-overrides to
+    # max_throughput.
+    type: agentic_inference
+    # Single-stream: one in-flight conversation at a time, matching a single-slot
+    # edge server (llama.cpp -np 1). Raise only for a multi-slot endpoint.
+    target_concurrency: 1
+  client:
+    num_workers: 1
+    max_connections: 1
+    warmup_connections: 0
+
+endpoint_config:
+  endpoints:
+    - "http://localhost:8080" # set to your endpoint URL.
+  api_type: openai
+  api_key: null
+
+report_dir: results/edge_agentic_full_run/

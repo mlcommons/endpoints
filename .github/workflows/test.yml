@@ -66,6 +66,25 @@ jobs:
       - name: Audit dependencies for known vulnerabilities
         run: uv run pip-audit
 
+  bfcl-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@e58605a9b6da7c637471fab8847a5e5a6b8df081 # v5
+        with:
+          python-version-file: .python-version
+
+      # bfcl conflicts with dev/test/performance (see [tool.uv].conflicts), so it
+      # is resolved in its own fork and installed standalone — the one config the
+      # other jobs never exercise.
+      - name: Install bfcl extra (isolated resolution fork)
+        run: uv sync --frozen --extra bfcl
+
+      - name: Smoke-check bfcl-eval import/resolution
+        run: uv run --frozen --extra bfcl python scripts/bfcl_import_smoke.py
+
   schema-updated:
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
