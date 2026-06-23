@@ -120,9 +120,16 @@ class TokenizePool:
     def _get_thread_tokenizer(self) -> PreTrainedTokenizerBase:
         """Return the tokenizer for the current thread, loading it if needed."""
         if getattr(self._thread_local, "tokenizer", None) is None:
-            self._thread_local.tokenizer = AutoTokenizer.from_pretrained(
-                self._tokenizer_name, trust_remote_code=True
-            )
+            try:
+                self._thread_local.tokenizer = AutoTokenizer.from_pretrained(
+                    self._tokenizer_name, trust_remote_code=True
+                )
+            except Exception:
+                from transformers import PreTrainedTokenizerFast
+
+                self._thread_local.tokenizer = PreTrainedTokenizerFast.from_pretrained(
+                    self._tokenizer_name
+                )
             # Baseline = tokens contributed by a [user, empty-assistant] pair minus
             # the [user] prefix alone. Some templates (Qwen3-Coder, etc.) reject
             # assistant-only message lists, so a user prefix is required; we

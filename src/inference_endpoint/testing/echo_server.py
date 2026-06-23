@@ -36,6 +36,11 @@ from inference_endpoint.utils.logging import setup_logging
 RequestHandler = Callable[[web.Request], web.Response | Awaitable[web.Response]]
 
 
+async def _echo_server_health(_request: web.Request) -> web.Response:
+    """Liveness probe compatible with SGLang / vLLM-style ``GET /health`` checks."""
+    return web.json_response({"status": "ok"})
+
+
 class HTTPServer:
     @property
     @abstractmethod
@@ -343,6 +348,7 @@ class EchoServer(HTTPServer):
         Subclasses can override to swap out the OpenAI-shaped routes for
         a different wire contract while reusing the lifecycle plumbing.
         """
+        app.router.add_get("/health", _echo_server_health)
         app.router.add_post(
             "/v1/chat/completions", self._handle_echo_chat_completions_request
         )
