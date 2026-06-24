@@ -15,6 +15,7 @@
 
 """Unit tests for SWEBenchScorer."""
 
+import concurrent.futures
 import json
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -23,6 +24,7 @@ import msgspec
 import pandas as pd
 import pytest
 import yaml
+
 from inference_endpoint.evaluation import scoring as scoring_mod
 from inference_endpoint.evaluation.scoring import (
     Scorer,
@@ -142,6 +144,88 @@ class _FakeTqdm:
     @classmethod
     def reset(cls) -> None:
         cls.instances = []
+
+
+class _FakeFuture:
+    def __init__(self, fn, image: str):
+        self._fn = fn
+        self.image = image
+        self.started = False
+        self.cancelled = False
+        self.done = False
+        self.result_value = None
+        self.error: BaseException | None = None
+
+    def run(self) -> None:
+        if self.done or self.cancelled:
+            return
+        self.started = True
+        try:
+            self.result_value = self._fn(self.image)
+        except BaseException as exc:  # pragma: no cover - exercised via result()
+            self.error = exc
+        self.done = True
+
+    def result(self):
+        if not self.done:
+            self.run()
+        if self.cancelled:
+            raise concurrent.futures.CancelledError()
+        if self.error is not None:
+            raise self.error
+        return self.result_value
+
+    def cancel(self) -> bool:
+        if self.started:
+            return False
+        self.cancelled = True
+        return True
+
+
+class _FakeThreadPoolExecutor:
+    instances: list["_FakeThreadPoolExecutor"] = []
+    completion_order: list[str] | None = None
+
+    def __init__(self, *, max_workers: int):
+        self.max_workers = max_workers
+        self.submitted: list[_FakeFuture] = []
+        self.shutdown_calls: list[dict[str, bool]] = []
+        type(self).instances.append(self)
+
+    def submit(self, fn, image: str) -> _FakeFuture:
+        future = _FakeFuture(fn, image)
+        self.submitted.append(future)
+        return future
+
+    def shutdown(self, wait: bool = True, cancel_futures: bool = False) -> None:
+        self.shutdown_calls.append({"wait": wait, "cancel_futures": cancel_futures})
+        if cancel_futures:
+            for future in self.submitted:
+                future.cancel()
+
+    @classmethod
+    def reset(cls) -> None:
+        cls.instances = []
+        cls.completion_order = None
+
+
+def _fake_as_completed(futures):
+    executor = _FakeThreadPoolExecutor.instances[-1]
+    future_by_image = {future.image: future for future in executor.submitted}
+    order = _FakeThreadPoolExecutor.completion_order or [
+        future.image for future in executor.submitted
+    ]
+    pending = executor.submitted[executor.max_workers :]
+    for future in executor.submitted[: executor.max_workers]:
+        future.started = True
+    for image in order:
+        future = future_by_image[image]
+        if future.cancelled or not future.started:
+            continue
+        future.run()
+        yield future
+        if pending:
+            pending.pop(0).started = True
 
 
 @pytest.fixture
@@ -606,13 +690,32 @@ class TestSWEBenchScorerPreflight:
     def _extras(self, swe_bench_project: Path, **overrides) -> dict:
         return {"swe_bench_project_path": str(swe_bench_project), **overrides}
 
-    def test_preflight_passes(self, swe_bench_project, monkeypatch):
+    def _patch_fake_executor(self, monkeypatch) -> None:
+        _FakeThreadPoolExecutor.reset()
+        monkeypatch.setattr(
+            scoring_mod.concurrent.futures,
+            "ThreadPoolExecutor",
+            _FakeThreadPoolExecutor,
+        )
+        monkeypatch.setattr(
+            scoring_mod.concurrent.futures, "as_completed", _fake_as_completed
+        )
+
+    def test_preflight_parallelizes_cached_and_missing_images(
+        self, swe_bench_project, monkeypatch
+    ):
         monkeypatch.setattr(
             scoring_mod.shutil, "which", lambda name: f"/usr/bin/{name}"
         )
         _FakeTqdm.reset()
+        self._patch_fake_executor(monkeypatch)
         monkeypatch.setattr(scoring_mod, "tqdm", _FakeTqdm)
         captured: list[list[str]] = []
+        _FakeThreadPoolExecutor.completion_order = [
+            "docker.io/swebench/missing-a:latest",
+            "docker.io/swebench/cached:latest",
+            "docker.io/swebench/missing-b:latest",
+        ]
 
         def fake_run(cmd, **kw):
             captured.append(list(cmd))
@@ -626,7 +729,8 @@ class TestSWEBenchScorerPreflight:
                         + json.dumps(
                             [
                                 "docker.io/swebench/cached:latest",
-                                "docker.io/swebench/missing:latest",
+                                "docker.io/swebench/missing-a:latest",
+                                "docker.io/swebench/missing-b:latest",
                             ]
                         )
                     ),
@@ -647,7 +751,8 @@ class TestSWEBenchScorerPreflight:
                 swe_bench_project,
                 subset="lite",
                 split="test",
-                num_instances=2,
+                num_instances=3,
+                workers=5,
             )
         )
 
@@ -655,14 +760,20 @@ class TestSWEBenchScorerPreflight:
             cmd for cmd in captured if "get_swebench_docker_image_name" in " ".join(cmd)
         )
         compile(derive_cmd[6], "<swebench-derive-images>", "exec")
-        assert derive_cmd[-3:] == ["lite", "test", "2"]
+        assert derive_cmd[-3:] == ["lite", "test", "3"]
         assert ["docker", "pull", "docker.io/swebench/cached:latest"] not in captured
-        assert ["docker", "pull", "docker.io/swebench/missing:latest"] in captured
+        assert ["docker", "pull", "docker.io/swebench/missing-a:latest"] in captured
+        assert ["docker", "pull", "docker.io/swebench/missing-b:latest"] in captured
         assert len(_FakeTqdm.instances) == 1
-        assert _FakeTqdm.instances[0].total == 2
+        assert _FakeTqdm.instances[0].total == 3
         assert _FakeTqdm.instances[0].desc == "SWE-bench images"
-        assert _FakeTqdm.instances[0].updates == [1, 1]
+        assert _FakeTqdm.instances[0].updates == [1, 1, 1]
         assert _FakeTqdm.instances[0].closed is True
+        assert len(_FakeThreadPoolExecutor.instances) == 1
+        assert _FakeThreadPoolExecutor.instances[0].max_workers == 3
+        assert _FakeThreadPoolExecutor.instances[0].shutdown_calls == [
+            {"wait": True, "cancel_futures": False}
+        ]
 
     def test_preflight_all_cached_still_completes_progress_bar(
         self, swe_bench_project, monkeypatch
@@ -671,6 +782,7 @@ class TestSWEBenchScorerPreflight:
             scoring_mod.shutil, "which", lambda name: f"/usr/bin/{name}"
         )
         _FakeTqdm.reset()
+        self._patch_fake_executor(monkeypatch)
         monkeypatch.setattr(scoring_mod, "tqdm", _FakeTqdm)
         captured: list[list[str]] = []
 
@@ -693,13 +805,14 @@ class TestSWEBenchScorerPreflight:
             return MagicMock(returncode=0, stdout="", stderr=b"")
 
         monkeypatch.setattr(scoring_mod.subprocess, "run", fake_run)
-        SWEBenchScorer.preflight(self._extras(swe_bench_project))
+        SWEBenchScorer.preflight(self._extras(swe_bench_project, workers=4))
 
         assert not any(cmd[:2] == ["docker", "pull"] for cmd in captured)
         assert len(_FakeTqdm.instances) == 1
         assert _FakeTqdm.instances[0].total == 2
         assert _FakeTqdm.instances[0].updates == [1, 1]
         assert _FakeTqdm.instances[0].closed is True
+        assert _FakeThreadPoolExecutor.instances[0].max_workers == 2
 
     def test_preflight_fails_uv_missing(self, swe_bench_project, monkeypatch):
         monkeypatch.setattr(scoring_mod.shutil, "which", lambda name: None)
@@ -760,7 +873,11 @@ class TestSWEBenchScorerPreflight:
             scoring_mod.shutil, "which", lambda name: f"/usr/bin/{name}"
         )
         _FakeTqdm.reset()
+        self._patch_fake_executor(monkeypatch)
         monkeypatch.setattr(scoring_mod, "tqdm", _FakeTqdm)
+        _FakeThreadPoolExecutor.completion_order = [
+            "docker.io/swebench/test:latest",
+        ]
 
         def fake_run(cmd, **kw):
             cmd_str = " ".join(cmd)
@@ -771,6 +888,7 @@ class TestSWEBenchScorerPreflight:
                         [
                             "docker.io/swebench/cached:latest",
                             "docker.io/swebench/test:latest",
+                            "docker.io/swebench/pending:latest",
                         ]
                     ),
                     stderr="",
@@ -778,8 +896,14 @@ class TestSWEBenchScorerPreflight:
             if cmd[:3] == ["docker", "image", "inspect"]:
                 if cmd[3] == "docker.io/swebench/cached:latest":
                     return MagicMock(returncode=0, stdout="", stderr=b"")
+                if cmd[3] == "docker.io/swebench/pending:latest":
+                    return MagicMock(returncode=1, stdout="", stderr=b"missing")
                 return MagicMock(returncode=1, stdout="", stderr=b"missing")
             if cmd[:2] == ["docker", "pull"]:
+                if cmd[2] == "docker.io/swebench/pending:latest":
+                    pytest.fail(
+                        "pending pull should have been cancelled before starting"
+                    )
                 return MagicMock(
                     returncode=1,
                     stdout="",
@@ -792,8 +916,22 @@ class TestSWEBenchScorerPreflight:
             SetupError,
             match=r"docker\.io/swebench/test:latest.*rate limit exceeded",
         ):
-            SWEBenchScorer.preflight(self._extras(swe_bench_project))
+            SWEBenchScorer.preflight(self._extras(swe_bench_project, workers=2))
         assert len(_FakeTqdm.instances) == 1
-        assert _FakeTqdm.instances[0].total == 2
-        assert _FakeTqdm.instances[0].updates == [1]
+        assert _FakeTqdm.instances[0].total == 3
+        assert _FakeTqdm.instances[0].updates == []
         assert _FakeTqdm.instances[0].closed is True
+        executor = _FakeThreadPoolExecutor.instances[0]
+        assert executor.max_workers == 2
+        assert executor.shutdown_calls == [{"wait": False, "cancel_futures": True}]
+        future_by_image = {future.image: future for future in executor.submitted}
+        assert future_by_image["docker.io/swebench/pending:latest"].cancelled is True
+
+    def test_preflight_fails_invalid_workers(self, swe_bench_project, monkeypatch):
+        monkeypatch.setattr(
+            scoring_mod.shutil, "which", lambda name: f"/usr/bin/{name}"
+        )
+        with pytest.raises(
+            SetupError, match=r"accuracy_config\.extras\.workers must be >= 1"
+        ):
+            SWEBenchScorer.preflight(self._extras(swe_bench_project, workers=0))

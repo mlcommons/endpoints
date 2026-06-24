@@ -14,6 +14,7 @@
 # limitations under the License.
 
 
+import concurrent.futures
 import inspect
 import json
 import logging
@@ -220,12 +221,12 @@ class Scorer(ABC):
 
         # Get ground truths
         order = df["sample_index"].to_numpy()
-        assert (
-            self.dataset.dataframe is not None
-        ), f"Dataset {self.dataset} has no dataframe loaded"
-        assert (
-            self.ground_truth_column in self.dataset.dataframe.columns
-        ), f"Ground truth column {self.ground_truth_column} not found in dataset {self.dataset}"
+        assert self.dataset.dataframe is not None, (
+            f"Dataset {self.dataset} has no dataframe loaded"
+        )
+        assert self.ground_truth_column in self.dataset.dataframe.columns, (
+            f"Ground truth column {self.ground_truth_column} not found in dataset {self.dataset}"
+        )
         ground_truths = self.dataset.dataframe[self.ground_truth_column].to_numpy()[
             order
         ]
@@ -310,12 +311,12 @@ class RougeScorer(Scorer, scorer_id="rouge"):
         empirical = df["output"].tolist()
 
         order = df["sample_index"].to_numpy().astype(int)
-        assert (
-            self.dataset.dataframe is not None
-        ), f"Dataset {self.dataset} has no dataframe loaded"
-        assert (
-            self.ground_truth_column in self.dataset.dataframe.columns
-        ), f"Ground truth column {self.ground_truth_column} not found in dataset {self.dataset}"
+        assert self.dataset.dataframe is not None, (
+            f"Dataset {self.dataset} has no dataframe loaded"
+        )
+        assert self.ground_truth_column in self.dataset.dataframe.columns, (
+            f"Ground truth column {self.ground_truth_column} not found in dataset {self.dataset}"
+        )
 
         ground_truths = list(
             self.dataset.dataframe[self.ground_truth_column].to_numpy()[order]
@@ -500,9 +501,9 @@ class AgenticInferenceInlineScorer(Scorer, scorer_id="agentic_inference_inline")
             raise TypeError(
                 "AgenticInferenceInlineScorer requires an AgenticInferenceDataset"
             )
-        assert (
-            self.dataset.dataframe is not None
-        ), f"Dataset {self.dataset} has no dataframe loaded"
+        assert self.dataset.dataframe is not None, (
+            f"Dataset {self.dataset} has no dataframe loaded"
+        )
 
         expected = self._expected_assistant_turns()
         scorable_expected: dict[tuple[str, int], dict[str, Any]] = {}
@@ -635,9 +636,9 @@ class AgenticInferenceInlineScorer(Scorer, scorer_id="agentic_inference_inline")
             Rows ``conv1/user/turn=1`` followed by ``conv1/assistant/turn=2``
             produce ``expected[("conv1", 1)]`` with ``"_assistant_turn": 2``.
         """
-        assert (
-            self.dataset.dataframe is not None
-        ), f"Dataset {self.dataset} has no dataframe loaded"
+        assert self.dataset.dataframe is not None, (
+            f"Dataset {self.dataset} has no dataframe loaded"
+        )
 
         rows_by_conversation: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for raw_row in self.dataset.dataframe.to_dict("records"):
@@ -885,9 +886,9 @@ class LiveCodeBenchScorer(Scorer, scorer_id="code_bench_scorer"):
     ):
         # Note: LiveCodeBench doesn't use ground_truth_column the same way
         # but we need to pass something to the parent
-        assert (
-            ground_truth_column is None
-        ), "ground_truth_column should be None for LiveCodeBenchScorer"
+        assert ground_truth_column is None, (
+            "ground_truth_column should be None for LiveCodeBenchScorer"
+        )
         super().__init__(
             dataset_name=dataset_name,
             dataset=dataset,
@@ -1135,9 +1136,9 @@ class LiveCodeBenchScorer(Scorer, scorer_id="code_bench_scorer"):
         df = df.apply(self.match_sample_index, axis=1)
 
         # Get question IDs
-        assert (
-            self.dataset.dataframe is not None
-        ), f"Dataset {self.dataset} has no dataframe loaded"
+        assert self.dataset.dataframe is not None, (
+            f"Dataset {self.dataset} has no dataframe loaded"
+        )
 
         def get_question_id(sample_index: int) -> str:
             assert self.dataset.dataframe is not None
@@ -1356,12 +1357,12 @@ class ShopifyCategoryF1Scorer(Scorer, scorer_id="shopify_category_f1"):
         empirical = df["output"].tolist()
 
         order = df["sample_index"].to_numpy().astype(int)
-        assert (
-            self.dataset.dataframe is not None
-        ), f"Dataset {self.dataset} has no dataframe loaded"
-        assert (
-            self.ground_truth_column in self.dataset.dataframe.columns
-        ), f"Ground truth column {self.ground_truth_column} not found in dataset"
+        assert self.dataset.dataframe is not None, (
+            f"Dataset {self.dataset} has no dataframe loaded"
+        )
+        assert self.ground_truth_column in self.dataset.dataframe.columns, (
+            f"Ground truth column {self.ground_truth_column} not found in dataset"
+        )
 
         ground_truths = list(
             self.dataset.dataframe[self.ground_truth_column].to_numpy()[order]
@@ -1644,12 +1645,12 @@ class VBenchScorer(Scorer, scorer_id="vbench"):
 
         video_paths: list[str] = df["output"].tolist()
         order = df["sample_index"].to_numpy().astype(int)
-        assert (
-            self.dataset.dataframe is not None
-        ), f"Dataset {self.dataset} has no dataframe loaded"
-        assert (
-            self.ground_truth_column in self.dataset.dataframe.columns
-        ), f"Prompt column {self.ground_truth_column} not found in dataset"
+        assert self.dataset.dataframe is not None, (
+            f"Dataset {self.dataset} has no dataframe loaded"
+        )
+        assert self.ground_truth_column in self.dataset.dataframe.columns, (
+            f"Prompt column {self.ground_truth_column} not found in dataset"
+        )
         prompts: list[str] = [
             str(p)
             for p in self.dataset.dataframe[self.ground_truth_column].to_numpy()[order]
@@ -1813,6 +1814,8 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
     DEFAULT_SUBSET: ClassVar[str] = "verified"
     DEFAULT_SPLIT: ClassVar[str] = "test"
     DEFAULT_NUM_INSTANCES: ClassVar[int] = 100
+    DEFAULT_WORKERS: ClassVar[int] = 10
+    DEFAULT_MAX_EVAL_WORKERS: ClassVar[int] = 10
     PREPULL_TIMEOUT_S: ClassVar[int] = 10 * 60
 
     def __init__(
@@ -1827,8 +1830,8 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
         subset: str = DEFAULT_SUBSET,
         split: str = DEFAULT_SPLIT,
         num_instances: int = DEFAULT_NUM_INSTANCES,
-        workers: int = 10,
-        max_eval_workers: int = 10,
+        workers: int = DEFAULT_WORKERS,
+        max_eval_workers: int = DEFAULT_MAX_EVAL_WORKERS,
         subprocess_timeout_s: int | None = None,
     ):
         super().__init__(
@@ -1973,37 +1976,56 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
         return images
 
     @classmethod
-    def _prepull_images(cls, images: list[str]) -> None:
+    def _prepull_image(cls, image: str) -> None:
+        inspect_result = subprocess.run(
+            ["docker", "image", "inspect", image],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            timeout=30,
+        )
+        if inspect_result.returncode == 0:
+            return
+
+        pull_result = subprocess.run(
+            ["docker", "pull", image],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            timeout=cls.PREPULL_TIMEOUT_S,
+        )
+        if pull_result.returncode != 0:
+            stderr_text = _decode_subprocess_stderr(pull_result.stderr)
+            raise SetupError(
+                "Failed to pre-pull required SWE-bench Docker image "
+                f"{image}. Authenticate to Docker Hub with `docker login` "
+                "or use a pre-seeded image cache/mirror before retrying."
+                + (f" stderr: {stderr_text}" if stderr_text else "")
+            )
+
+    @classmethod
+    def _prepull_images(cls, images: list[str], *, workers: int) -> None:
         if not images:
             return
 
-        with tqdm(total=len(images), desc="SWE-bench images", unit="image") as bar:
-            for image in images:
-                inspect_result = subprocess.run(
-                    ["docker", "image", "inspect", image],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.PIPE,
-                    timeout=30,
-                )
-                if inspect_result.returncode == 0:
+        futures: list[concurrent.futures.Future[None]] = []
+        executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=min(workers, len(images))
+        )
+        fail_fast = False
+        try:
+            futures = [executor.submit(cls._prepull_image, image) for image in images]
+            with tqdm(total=len(images), desc="SWE-bench images", unit="image") as bar:
+                for future in concurrent.futures.as_completed(futures):
+                    try:
+                        future.result()
+                    except Exception:
+                        fail_fast = True
+                        for pending in futures:
+                            if pending is not future:
+                                pending.cancel()
+                        raise
                     bar.update(1)
-                    continue
-
-                pull_result = subprocess.run(
-                    ["docker", "pull", image],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.PIPE,
-                    timeout=cls.PREPULL_TIMEOUT_S,
-                )
-                if pull_result.returncode != 0:
-                    stderr_text = _decode_subprocess_stderr(pull_result.stderr)
-                    raise SetupError(
-                        "Failed to pre-pull required SWE-bench Docker image "
-                        f"{image}. Authenticate to Docker Hub with `docker login` "
-                        "or use a pre-seeded image cache/mirror before retrying."
-                        + (f" stderr: {stderr_text}" if stderr_text else "")
-                    )
-                bar.update(1)
+        finally:
+            executor.shutdown(wait=not fail_fast, cancel_futures=fail_fast)
 
     @classmethod
     def external_sample_count(cls, extras: dict[str, Any]) -> int | None:
@@ -2024,6 +2046,12 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
             extras,
             "num_instances",
             default=cls.DEFAULT_NUM_INSTANCES,
+        )
+        workers = cls._get_extra_int(
+            extras,
+            "workers",
+            default=cls.DEFAULT_WORKERS,
+            min_value=1,
         )
 
         if shutil.which("uv") is None:
@@ -2097,7 +2125,7 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
             split=split,
             num_instances=num_instances,
         )
-        cls._prepull_images(images)
+        cls._prepull_images(images, workers=workers)
 
     def score_single_sample(self, value: str, ground_truth: str) -> float:
         raise RuntimeError(

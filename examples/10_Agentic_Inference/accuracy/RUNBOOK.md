@@ -42,8 +42,9 @@ uv run inference-endpoint benchmark from-config \
 ```
 
 Scorer preflight now resolves the requested SWE-bench instances and pre-pulls
-the required Docker images before `mini-extra swebench` starts, using a compact
-progress bar. Cached images complete immediately in that bar.
+the required Docker images before `mini-extra swebench` starts, using the
+configured SWE-bench `workers` count and a compact full-count progress bar.
+Cached images still complete immediately in that bar.
 
 ## Common failure modes
 
