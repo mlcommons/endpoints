@@ -326,6 +326,33 @@ Both scores land in `results/edge_agentic_full_run/`: the BFCL gate under
 performance checker in `scores.json`, alongside the performance metrics
 (throughput, TTFT, TPOT, per-turn latency, ISL/OSL).
 
+### Publish for the MLPerf submission checker
+
+The MLPerf Inference submission checker (`tools/submission/submission_checker`
+in `mlcommons/inference`, v5.0+) reads endpoints results directly from the
+artifacts a run already writes — `result_summary.json`, `results.json`, and
+`config.yaml` — so no separate "log" format is needed. `scripts/publish_submission.py`
+copies that trio into the directory layout the checker walks and self-verifies
+the fields it reads (primary-metric QPS, p99 latency, TTFT/TPOT p99, and the
+accuracy score):
+
+```bash
+python scripts/publish_submission.py \
+  --run results/edge_agentic_full_run \
+  --output submission \
+  --submitter <ORG> --system <SYSTEM_NAME> --benchmark qwen3.6-27b \
+  --scaffold
+
+# Then validate with the upstream checker:
+python3 -m inference.tools.submission.submission_checker.main \
+  --input submission --version v6.1 --submitter <ORG>
+```
+
+`--scaffold` also writes `measurements.json` and `systems/<system>.json`
+templates (fill in the `TODO` fields before submitting). Use separate
+`--performance-run` / `--accuracy-run` directories if you ran the two phases
+separately.
+
 ### Reference performance + accuracy (Jetson Thor, Q4_K_M + llama.cpp, reasoning off)
 
 Measured on **NVIDIA Jetson AGX Thor**, `Qwen3.6-27B-Q4_K_M` served single-slot
