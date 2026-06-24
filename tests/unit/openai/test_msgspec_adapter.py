@@ -20,12 +20,37 @@ import json
 import msgspec
 import pandas as pd
 import pytest
-from inference_endpoint.core.types import Query
+from inference_endpoint.core.types import Query, TextModelOutput
 from inference_endpoint.openai.openai_msgspec_adapter import (
     OpenAIMsgspecAdapter,
     _chat_message_from_dict,
 )
 from inference_endpoint.openai.types import ChatMessage
+
+
+def _make_reasoning_response(
+    field_name: str,
+    value: str,
+    extra_message_fields: dict | None = None,
+) -> bytes:
+    message: dict = {"role": "assistant", "content": "answer", field_name: value}
+    if extra_message_fields:
+        message.update(extra_message_fields)
+    return json.dumps(
+        {
+            "id": "chatcmpl-test",
+            "object": "chat.completion",
+            "created": 1234567890,
+            "model": "test-model",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": message,
+                    "finish_reason": "stop",
+                }
+            ],
+        }
+    ).encode()
 
 
 @pytest.mark.unit
@@ -150,8 +175,6 @@ def test_chat_message_content_optional():
 @pytest.mark.unit
 def test_from_endpoint_response_populates_tool_calls_in_text_output():
     """Non-streaming response with tool_calls populates TextModelOutput.tool_calls."""
-    import json
-
     tool_calls = [
         {
             "id": "call_1",
@@ -184,14 +207,40 @@ def test_from_endpoint_response_populates_tool_calls_in_text_output():
 
     result = OpenAIMsgspecAdapter.decode_response(response_bytes, "q1")
 
-    from inference_endpoint.core.types import TextModelOutput
-
     assert isinstance(result.response_output, TextModelOutput)
     assert result.response_output.tool_calls is not None
     assert len(result.response_output.tool_calls) == 1
     assert result.response_output.tool_calls[0]["function"]["name"] == "search"
     # metadata path unchanged
     assert result.metadata.get("tool_calls") == tool_calls
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "field_name",
+    ["reasoning", "reasoning_content"],
+    ids=["vllm", "sglang"],
+)
+def test_from_endpoint_response_reasoning_field(field_name: str):
+    """Non-streaming reasoning is captured regardless of server field name."""
+    result = OpenAIMsgspecAdapter.decode_response(
+        _make_reasoning_response(field_name, "thinking..."), "q1"
+    )
+    assert isinstance(result.response_output, TextModelOutput)
+    assert result.response_output.reasoning == "thinking..."
+    assert result.metadata.get("reasoning_content") == "thinking..."
+
+
+@pytest.mark.unit
+def test_from_endpoint_response_reasoning_both_fields_raises():
+    """Both reasoning fields populated simultaneously triggers an assertion error."""
+    response = _make_reasoning_response(
+        "reasoning_content",
+        "thinking via sglang",
+        extra_message_fields={"reasoning": "thinking via vllm"},
+    )
+    with pytest.raises(AssertionError):
+        OpenAIMsgspecAdapter.decode_response(response, "q1")
 
 
 @pytest.mark.unit

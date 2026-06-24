@@ -131,22 +131,28 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
     latency: dict[str, Any]
     output_sequence_lengths: dict[str, Any]
 
-    def qps(self) -> float | None:
-        if self.duration_ns is None or self.duration_ns <= 0:
-            return None
-        return self.n_samples_completed / (self.duration_ns / 1e9)
+    # Derived throughput, computed once in from_snapshot so the serialized
+    # report (result_summary.json) is self-complete. qps is None without a
+    # duration; tps is also None when no OSL was recorded (non-streaming or
+    # tokenizer unavailable).
+    qps: float | None = None
+    tps: float | None = None
 
-    def tps(self) -> float | None:
-        if self.duration_ns is None or self.duration_ns <= 0:
-            return None
-        if not self.output_sequence_lengths:
-            return None
-        total = self.output_sequence_lengths.get("total", 0)
-        return total / (self.duration_ns / 1e9)
+    # RNG seeds for this run (scheduler/dataloader/warmup, from config). Carried
+    # so result_summary.json is self-validating: a reproducible run is identified
+    # by its seeds. These are config, not a measured metric, so the from_snapshot
+    # caller supplies them rather than reading them from the metrics snapshot.
+    seeds: dict[str, int] | None = None
 
     @classmethod
-    def from_snapshot(cls, snap: dict[str, Any]) -> Report:
+    def from_snapshot(
+        cls, snap: dict[str, Any], *, seeds: dict[str, int] | None = None
+    ) -> Report:
         """Build a Report from a snapshot dict.
+
+        ``seeds`` (optional) carries the run's RNG seeds from config into the
+        report so result_summary.json is self-validating; it is keyword-only
+        because it is config, not part of the metrics snapshot.
 
         Input is the dict form produced by
         ``inference_endpoint.async_utils.services.metrics_aggregator.snapshot
@@ -186,7 +192,19 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
             return _series_to_metric_dict(stat)
 
         version_info = get_version_info()
-        duration_ns = _counter("tracked_duration_ns")
+        raw_duration_ns = _counter("tracked_duration_ns")
+        duration_ns = raw_duration_ns if raw_duration_ns > 0 else None
+        n_completed = _counter("tracked_samples_completed")
+        osl = _series_dict("osl")
+
+        # Derived throughput. qps needs a duration; tps additionally needs OSL.
+        if duration_ns is None:
+            qps = tps = None
+        else:
+            duration_s = duration_ns / 1e9
+            qps = n_completed / duration_s
+            tps = (osl.get("total", 0) / duration_s) if osl else None
+
         # Default missing state to "interrupted" — a malformed / partial
         # snapshot dict is treated as worst-case (run did not reach a
         # clean completion). Drives complete=False and the interrupted
@@ -199,15 +217,18 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
             git_sha=version_info.get("git_sha"),
             test_started_at=0,  # TODO: surface session_started_ns via snapshot
             n_samples_issued=_counter("tracked_samples_issued"),
-            n_samples_completed=_counter("tracked_samples_completed"),
+            n_samples_completed=n_completed,
             n_samples_failed=_counter("tracked_samples_failed"),
-            duration_ns=duration_ns if duration_ns > 0 else None,
+            duration_ns=duration_ns,
             state=state,
             complete=(state == "complete" and n_pending_tasks == 0),
             ttft=_series_dict("ttft_ns"),
             tpot=_series_dict("tpot_ns"),
             latency=_series_dict("sample_latency_ns"),
-            output_sequence_lengths=_series_dict("osl"),
+            output_sequence_lengths=osl,
+            qps=qps,
+            tps=tps,
+            seeds=seeds,
         )
 
     def to_json(self, save_to: os.PathLike | None = None) -> bytes:
@@ -237,6 +258,9 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
         fn(f"Version: {self.version}{newline}")
         if self.git_sha:
             fn(f"Git SHA: {self.git_sha}{newline}")
+        if self.seeds:
+            seed_str = ", ".join(f"{k}={v}" for k, v in self.seeds.items())
+            fn(f"Seeds: {seed_str}{newline}")
         if self.test_started_at > 0:
             approx = monotime_to_datetime(self.test_started_at)
             fn(f"Test started at: {approx.strftime('%Y-%m-%d %H:%M:%S')}{newline}")
@@ -248,12 +272,12 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
         else:
             fn(f"Duration: N/A{newline}")
 
-        if (qps := self.qps()) is not None:
-            fn(f"QPS: {qps:.2f}{newline}")
+        if self.qps is not None:
+            fn(f"QPS: {self.qps:.2f}{newline}")
         else:
             fn(f"QPS: N/A{newline}")
 
-        if (tps := self.tps()) is not None:
+        if (tps := self.tps) is not None:
             fn(f"TPS: {tps:.2f}{newline}")
 
         if summary_only:
