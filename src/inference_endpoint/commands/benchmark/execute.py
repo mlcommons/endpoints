@@ -802,7 +802,16 @@ async def _run_benchmark_async(
 
             if snap_dict is not None:
                 try:
-                    report = Report.from_snapshot(snap_dict)
+                    runtime = ctx.config.settings.runtime
+                    warmup = ctx.config.settings.warmup
+                    report = Report.from_snapshot(
+                        snap_dict,
+                        seeds={
+                            "scheduler_random_seed": runtime.scheduler_random_seed,
+                            "dataloader_random_seed": runtime.dataloader_random_seed,
+                            "warmup_random_seed": warmup.warmup_random_seed,
+                        },
+                    )
                     if not report.complete:
                         logger.warning(
                             "Report is incomplete (state=%s, n_pending_tasks=%d)",
@@ -879,16 +888,18 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
     collector = bench.collector
     report = bench.report
 
-    # Display report if available (from MetricsAggregator pub/sub snapshot)
+    # Display report if available (from MetricsAggregator pub/sub snapshot).
+    # result_summary.json is the self-complete machine-readable report (carries
+    # qps/tps/seeds via Report.to_json); report.txt is the full human-readable
+    # dump (histograms + percentiles); the console log shows just the summary.
     if report is not None:
         report.display(fn=lambda s: logger.info(s), summary_only=True)
         report.to_json(save_to=ctx.report_dir / "result_summary.json")
 
-        # Write human-readable report.txt
         report_txt = ctx.report_dir / "report.txt"
         with report_txt.open("w") as f:
             report.display(fn=lambda s: print(s, file=f))
-        logger.info(f"Report written to {report_txt}")
+        logger.info("Report written to %s", report_txt)
 
     # Write scoring artifacts + copy event log from tmpfs to disk
     _write_scoring_artifacts(ctx, result, bench.tmpfs_dir)
@@ -925,7 +936,7 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
         perf_elapsed = report.duration_ns / 1e9
         total_issued = report.n_samples_issued
         n_errors = report.n_samples_failed
-        qps = report.qps() or 0.0
+        qps = report.qps or 0.0
     else:
         perf = result.perf_results[0] if result.perf_results else None
         if perf:
