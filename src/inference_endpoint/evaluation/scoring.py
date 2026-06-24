@@ -1918,10 +1918,9 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
                 "instances = filter_instances("
                 "instances, filter_spec='', slice_spec=slice_spec, shuffle=False"
                 "); "
-                "seen = set(); images = []; "
-                "for instance in instances: "
-                "    image = get_swebench_docker_image_name(instance); "
-                "    (seen.add(image), images.append(image)) if image not in seen else None; "
+                "images = list(dict.fromkeys("
+                "get_swebench_docker_image_name(instance) for instance in instances"
+                ")); "
                 "print(json.dumps(images))"
             ),
             subset,

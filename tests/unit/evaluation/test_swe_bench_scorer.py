@@ -611,6 +611,7 @@ class TestSWEBenchScorerPreflight:
         derive_cmd = next(
             cmd for cmd in captured if "get_swebench_docker_image_name" in " ".join(cmd)
         )
+        compile(derive_cmd[6], "<swebench-derive-images>", "exec")
         assert derive_cmd[-3:] == ["lite", "test", "2"]
         assert ["docker", "pull", "docker.io/swebench/test:latest"] not in captured
 
