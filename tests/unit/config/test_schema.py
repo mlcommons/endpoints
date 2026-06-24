@@ -31,11 +31,14 @@ from inference_endpoint.config.schema import (
     ModelParams,
     OSLDistribution,
     OSLDistributionType,
+    ProfilerEngine,
+    ProfilingConfig,
     StreamingMode,
     SubmissionReference,
     TestType,
 )
 from inference_endpoint.exceptions import CLIError
+from pydantic import ValidationError
 
 
 class TestOSLDistribution:
@@ -622,3 +625,32 @@ class TestAgenticInferenceTotalSamples:
             load_pattern=lp,
         )
         assert rt.total_samples_to_issue() == 200
+
+
+class TestProfilingConfig:
+    @pytest.mark.unit
+    def test_defaults(self):
+        cfg = ProfilingConfig()
+        assert cfg.engine is None
+        assert cfg.urls is None
+
+    @pytest.mark.unit
+    def test_engine_enum_coercion(self):
+        assert ProfilingConfig(engine="vllm").engine is ProfilerEngine.VLLM
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "ctor",
+        [
+            lambda u: ProfilingConfig(engine="vllm", urls=u),
+            lambda u: ProfilingConfig.model_validate({"engine": "vllm", "urls": u}),
+        ],
+    )
+    def test_url_scheme_rejected_without_scheme(self, ctor):
+        with pytest.raises(ValidationError):
+            ctor(["localhost:8000"])
+
+    @pytest.mark.unit
+    def test_valid_urls_accepted(self):
+        cfg = ProfilingConfig(engine="vllm", urls=["http://h:8001/v1"])
+        assert cfg.urls == ["http://h:8001/v1"]
