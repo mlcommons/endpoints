@@ -1794,6 +1794,10 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
     REQUIRES_EXTRACTOR: ClassVar[bool] = False
     SKIP_ENDPOINT_PHASE: ClassVar[bool] = True
     DEFAULT_SUBPROCESS_TIMEOUT_S: ClassVar[int] = 24 * 60 * 60
+    DEFAULT_SUBSET: ClassVar[str] = "verified"
+    DEFAULT_SPLIT: ClassVar[str] = "test"
+    DEFAULT_NUM_INSTANCES: ClassVar[int] = 100
+    PREPULL_TIMEOUT_S: ClassVar[int] = 10 * 60
 
     def __init__(
         self,
@@ -1804,9 +1808,9 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
         ground_truth_column: str | None = "instance_id",
         swe_bench_project_path: str | os.PathLike | None = None,
         swebench_config_template: str | os.PathLike | None = None,
-        subset: str = "verified",
-        split: str = "test",
-        num_instances: int = 100,
+        subset: str = DEFAULT_SUBSET,
+        split: str = DEFAULT_SPLIT,
+        num_instances: int = DEFAULT_NUM_INSTANCES,
         workers: int = 10,
         max_eval_workers: int = 10,
         subprocess_timeout_s: int | None = None,
@@ -1870,6 +1874,120 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
         )
 
     @classmethod
+    def _get_extra_int(
+        cls, extras: dict[str, Any], key: str, *, default: int, min_value: int = 0
+    ) -> int:
+        value = extras.get(key, default)
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError) as exc:
+            raise SetupError(
+                f"accuracy_config.extras.{key} must be an integer; got {value!r}"
+            ) from exc
+        if parsed < min_value:
+            raise SetupError(
+                f"accuracy_config.extras.{key} must be >= {min_value}; got {parsed}"
+            )
+        return parsed
+
+    @classmethod
+    def _derive_required_images(
+        cls,
+        *,
+        swe_bench_project_path: Path,
+        subset: str,
+        split: str,
+        num_instances: int,
+    ) -> list[str]:
+        derive_cmd = [
+            "uv",
+            "run",
+            "--project",
+            str(swe_bench_project_path),
+            "python",
+            "-c",
+            (
+                "import json, sys; "
+                "from datasets import load_dataset; "
+                "from minisweagent.run.benchmarks.swebench import "
+                "DATASET_MAPPING, filter_instances, get_swebench_docker_image_name; "
+                "subset, split, num_instances = sys.argv[1], sys.argv[2], int(sys.argv[3]); "
+                "dataset_path = DATASET_MAPPING.get(subset, subset); "
+                "instances = list(load_dataset(dataset_path, split=split)); "
+                "slice_spec = f'0:{min(num_instances, len(instances))}'; "
+                "instances = filter_instances("
+                "instances, filter_spec='', slice_spec=slice_spec, shuffle=False"
+                "); "
+                "seen = set(); images = []; "
+                "for instance in instances: "
+                "    image = get_swebench_docker_image_name(instance); "
+                "    (seen.add(image), images.append(image)) if image not in seen else None; "
+                "print(json.dumps(images))"
+            ),
+            subset,
+            split,
+            str(num_instances),
+        ]
+        result = subprocess.run(
+            derive_cmd,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=cls.PREPULL_TIMEOUT_S,
+        )
+        if result.returncode != 0:
+            stderr_text = _decode_subprocess_stderr(result.stderr)
+            raise SetupError(
+                "Failed to derive required SWE-bench Docker images from the accuracy "
+                f"subproject at {swe_bench_project_path}"
+                + (f". stderr: {stderr_text}" if stderr_text else "")
+            )
+        try:
+            images = json.loads(result.stdout or "[]")
+        except json.JSONDecodeError as exc:
+            stdout_text = (result.stdout or "").strip()
+            raise SetupError(
+                "Failed to parse the required SWE-bench Docker image list from the "
+                f"accuracy subproject output: {stdout_text!r}"
+            ) from exc
+        if not isinstance(images, list) or not all(
+            isinstance(image, str) for image in images
+        ):
+            raise SetupError(
+                "Accuracy subproject returned an invalid SWE-bench Docker image list."
+            )
+        return images
+
+    @classmethod
+    def _prepull_images(cls, images: list[str]) -> None:
+        for image in images:
+            inspect_result = subprocess.run(
+                ["docker", "image", "inspect", image],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                timeout=30,
+            )
+            if inspect_result.returncode == 0:
+                logger.info("SWE-bench Docker image already cached: %s", image)
+                continue
+
+            logger.info("Pulling SWE-bench Docker image: %s", image)
+            pull_result = subprocess.run(
+                ["docker", "pull", image],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                timeout=cls.PREPULL_TIMEOUT_S,
+            )
+            if pull_result.returncode != 0:
+                stderr_text = _decode_subprocess_stderr(pull_result.stderr)
+                raise SetupError(
+                    "Failed to pre-pull required SWE-bench Docker image "
+                    f"{image}. Authenticate to Docker Hub with `docker login` "
+                    "or use a pre-seeded image cache/mirror before retrying."
+                    + (f" stderr: {stderr_text}" if stderr_text else "")
+                )
+
+    @classmethod
     def external_sample_count(cls, extras: dict[str, Any]) -> int | None:
         try:
             return int(extras["num_instances"])
@@ -1881,6 +1999,13 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
         """Check uv, mini-extra, swebench, and Docker before the benchmark starts."""
         swe_bench_project_path = cls._resolve_project_path(
             extras.get("swe_bench_project_path")
+        )
+        subset = str(extras.get("subset", cls.DEFAULT_SUBSET))
+        split = str(extras.get("split", cls.DEFAULT_SPLIT))
+        num_instances = cls._get_extra_int(
+            extras,
+            "num_instances",
+            default=cls.DEFAULT_NUM_INSTANCES,
         )
 
         if shutil.which("uv") is None:
@@ -1947,6 +2072,14 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
 
         if docker_result.returncode != 0:
             raise SetupError("Docker daemon is not running. Start Docker and retry.")
+
+        images = cls._derive_required_images(
+            swe_bench_project_path=swe_bench_project_path,
+            subset=subset,
+            split=split,
+            num_instances=num_instances,
+        )
+        cls._prepull_images(images)
 
     def score_single_sample(self, value: str, ground_truth: str) -> float:
         raise RuntimeError(

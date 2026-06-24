@@ -578,17 +578,41 @@ class TestSWEBenchScorer:
 
 
 class TestSWEBenchScorerPreflight:
-    def _extras(self, swe_bench_project: Path) -> dict:
-        return {"swe_bench_project_path": str(swe_bench_project)}
+    def _extras(self, swe_bench_project: Path, **overrides) -> dict:
+        return {"swe_bench_project_path": str(swe_bench_project), **overrides}
 
     def test_preflight_passes(self, swe_bench_project, monkeypatch):
         monkeypatch.setattr(
             scoring_mod.shutil, "which", lambda name: f"/usr/bin/{name}"
         )
-        monkeypatch.setattr(
-            scoring_mod.subprocess, "run", lambda *a, **kw: MagicMock(returncode=0)
+        captured: list[list[str]] = []
+
+        def fake_run(cmd, **kw):
+            captured.append(list(cmd))
+            cmd_str = " ".join(cmd)
+            if "get_swebench_docker_image_name" in cmd_str:
+                return MagicMock(
+                    returncode=0,
+                    stdout=json.dumps(["docker.io/swebench/test:latest"]),
+                    stderr="",
+                )
+            return MagicMock(returncode=0, stdout="", stderr=b"")
+
+        monkeypatch.setattr(scoring_mod.subprocess, "run", fake_run)
+        SWEBenchScorer.preflight(
+            self._extras(
+                swe_bench_project,
+                subset="lite",
+                split="test",
+                num_instances=2,
+            )
         )
-        SWEBenchScorer.preflight(self._extras(swe_bench_project))
+
+        derive_cmd = next(
+            cmd for cmd in captured if "get_swebench_docker_image_name" in " ".join(cmd)
+        )
+        assert derive_cmd[-3:] == ["lite", "test", "2"]
+        assert ["docker", "pull", "docker.io/swebench/test:latest"] not in captured
 
     def test_preflight_fails_uv_missing(self, swe_bench_project, monkeypatch):
         monkeypatch.setattr(scoring_mod.shutil, "which", lambda name: None)
@@ -642,4 +666,34 @@ class TestSWEBenchScorerPreflight:
 
         monkeypatch.setattr(scoring_mod.subprocess, "run", fake_run)
         with pytest.raises(SetupError, match="Docker daemon is not running"):
+            SWEBenchScorer.preflight(self._extras(swe_bench_project))
+
+    def test_preflight_fails_when_pull_fails(self, swe_bench_project, monkeypatch):
+        monkeypatch.setattr(
+            scoring_mod.shutil, "which", lambda name: f"/usr/bin/{name}"
+        )
+
+        def fake_run(cmd, **kw):
+            cmd_str = " ".join(cmd)
+            if "get_swebench_docker_image_name" in cmd_str:
+                return MagicMock(
+                    returncode=0,
+                    stdout=json.dumps(["docker.io/swebench/test:latest"]),
+                    stderr="",
+                )
+            if cmd[:3] == ["docker", "image", "inspect"]:
+                return MagicMock(returncode=1, stdout="", stderr=b"missing")
+            if cmd[:2] == ["docker", "pull"]:
+                return MagicMock(
+                    returncode=1,
+                    stdout="",
+                    stderr=b"rate limit exceeded",
+                )
+            return MagicMock(returncode=0, stdout="", stderr=b"")
+
+        monkeypatch.setattr(scoring_mod.subprocess, "run", fake_run)
+        with pytest.raises(
+            SetupError,
+            match=r"docker\.io/swebench/test:latest.*rate limit exceeded",
+        ):
             SWEBenchScorer.preflight(self._extras(swe_bench_project))

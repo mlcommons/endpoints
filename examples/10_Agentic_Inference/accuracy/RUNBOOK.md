@@ -7,6 +7,7 @@ HuggingFace access, or mini-swe-agent wiring issues.
 ## 0. Preconditions
 
 - Docker daemon running (swebench harness spawns one container per instance).
+- Docker Hub auth or a pre-seeded image cache for uncached SWE-bench images.
 - Network egress to PyPI and HuggingFace Hub.
 - `uv` binary on PATH (`curl -LsSf https://astral.sh/uv/install.sh | sh`).
 - Parent endpoints env already synced (`uv sync --extra dev` from repo root).
@@ -40,9 +41,14 @@ uv run inference-endpoint benchmark from-config \
   --config examples/10_Agentic_Inference/swe_bench_accuracy.yaml
 ```
 
+Scorer preflight now resolves the requested SWE-bench instances and pre-pulls any
+missing Docker images before `mini-extra swebench` starts. Cached images are
+skipped.
+
 ## Common failure modes
 
-| Symptom                                             | Likely cause              | Fix                                                       |
-| --------------------------------------------------- | ------------------------- | --------------------------------------------------------- |
-| `FileNotFoundError: SWE-bench subproject not found` | subproject not synced     | Run `uv sync` in `examples/10_Agentic_Inference/accuracy` |
-| Docker error during `run_evaluation`                | Docker daemon not running | Start Docker and retry                                    |
+| Symptom                                              | Likely cause                          | Fix                                                       |
+| ---------------------------------------------------- | ------------------------------------- | --------------------------------------------------------- |
+| `FileNotFoundError: SWE-bench subproject not found`  | subproject not synced                 | Run `uv sync` in `examples/10_Agentic_Inference/accuracy` |
+| Docker error during `run_evaluation`                 | Docker daemon not running             | Start Docker and retry                                    |
+| `Failed to pre-pull required SWE-bench Docker image` | Docker Hub rate limit or missing auth | Run `docker login` or use a local image cache/mirror      |
