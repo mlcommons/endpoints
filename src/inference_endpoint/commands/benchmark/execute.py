@@ -71,9 +71,11 @@ from inference_endpoint.config.schema import (
     TestType,
 )
 from inference_endpoint.core.types import QueryResult
+from inference_endpoint.dataset_manager.agentic_inference_dataset import (
+    AgenticInferenceDataset,
+)
 from inference_endpoint.dataset_manager.dataset import Dataset
 from inference_endpoint.dataset_manager.factory import DataLoaderFactory
-from inference_endpoint.dataset_manager.multi_turn_dataset import MultiTurnDataset
 from inference_endpoint.endpoint_client.cpu_affinity import AffinityPlan, pin_loadgen
 from inference_endpoint.endpoint_client.http_client import HTTPEndpointClient
 from inference_endpoint.endpoint_client.http_sample_issuer import HttpClientSampleIssuer
@@ -84,8 +86,10 @@ from inference_endpoint.exceptions import (
     InputValidationError,
     SetupError,
 )
+from inference_endpoint.load_generator.agentic_inference_strategy import (
+    AgenticInferenceStrategy,
+)
 from inference_endpoint.load_generator.conversation_manager import ConversationManager
-from inference_endpoint.load_generator.multi_turn_strategy import MultiTurnStrategy
 from inference_endpoint.load_generator.session import (
     BenchmarkSession,
     PhaseConfig,
@@ -254,6 +258,35 @@ def _check_tokenizer_exists(model_name: str) -> bool:
         return False
 
 
+def _resolve_accuracy_components(
+    dataset_name: str, accuracy_config: Any | None
+) -> tuple[type[Scorer], type[Extractor] | None]:
+    """Validate scorer/extractor config and return resolved classes."""
+    if accuracy_config is None or accuracy_config.eval_method is None:
+        raise InputValidationError(
+            f"Dataset '{dataset_name}' requires accuracy_config with eval_method"
+        )
+
+    try:
+        scorer_cls = Scorer.get(accuracy_config.eval_method)
+    except KeyError as exc:
+        raise InputValidationError(str(exc)) from exc
+    extractor_name = accuracy_config.extractor
+    if extractor_name is None:
+        if scorer_cls.REQUIRES_EXTRACTOR:
+            raise InputValidationError(
+                f"Dataset '{dataset_name}' uses scorer "
+                f"'{accuracy_config.eval_method}' which requires an extractor"
+            )
+        extractor_cls: type[Extractor] | None = None
+    else:
+        try:
+            extractor_cls = Extractor.get(extractor_name)
+        except KeyError as exc:
+            raise InputValidationError(str(exc)) from exc
+    return scorer_cls, extractor_cls
+
+
 def _load_datasets(
     config: BenchmarkConfig, report_dir: Path
 ) -> tuple[Dataset, list[Dataset], list[AccuracyConfiguration]]:
@@ -273,25 +306,10 @@ def _load_datasets(
 
     # Pack the evaluation parameters for each accuracy dataset
     for acc_cfg in accuracy_cfgs:
-        if (
-            acc_cfg.accuracy_config is None
-            or acc_cfg.accuracy_config.eval_method is None
-        ):
-            raise InputValidationError(
-                f"Dataset '{acc_cfg.name}' requires accuracy_config with eval_method"
-            )
-
-        scorer_cls = Scorer.get(acc_cfg.accuracy_config.eval_method)
-        extractor_name = acc_cfg.accuracy_config.extractor
-        if extractor_name is None:
-            if scorer_cls.REQUIRES_EXTRACTOR:
-                raise InputValidationError(
-                    f"Dataset '{acc_cfg.name}' uses scorer "
-                    f"'{acc_cfg.accuracy_config.eval_method}' which requires an extractor"
-                )
-            extractor_cls: type[Extractor] | None = None
-        else:
-            extractor_cls = Extractor.get(extractor_name)
+        scorer_cls, extractor_cls = _resolve_accuracy_components(
+            acc_cfg.name, acc_cfg.accuracy_config
+        )
+        assert acc_cfg.accuracy_config is not None
 
         ds = DataLoaderFactory.create_loader(
             acc_cfg, num_repeats=acc_cfg.accuracy_config.num_repeats
@@ -316,12 +334,13 @@ def _load_datasets(
         logger.info(f"Loaded {ds} - {ds.num_samples()} samples")
 
     if not accuracy_cfgs:
-        logger.info("No accuracy datasets provided")
+        logger.info("No separate accuracy datasets provided")
     if len(performance_cfgs) > 1:
         raise InputValidationError("Multiple performance datasets not supported")
 
+    perf_cfg = performance_cfgs[0]
     try:
-        dataloader = DataLoaderFactory.create_loader(performance_cfgs[0])
+        dataloader = DataLoaderFactory.create_loader(perf_cfg)
         dataloader.load(
             api_type=config.endpoint_config.api_type, model_params=config.model_params
         )
@@ -332,6 +351,31 @@ def _load_datasets(
         ) from e
     except Exception as e:
         raise SetupError(f"Failed to load dataset: {e}") from e
+
+    if perf_cfg.accuracy_config is not None:
+        accuracy_config = perf_cfg.accuracy_config
+        if accuracy_config.num_repeats != 1:
+            raise InputValidationError(
+                f"Dataset '{perf_cfg.name}' is a performance dataset; "
+                "accuracy_config.num_repeats must be 1 because scoring runs on "
+                "already-issued performance outputs"
+            )
+        scorer_cls, extractor_cls = _resolve_accuracy_components(
+            perf_cfg.name, accuracy_config
+        )
+
+        eval_configs.append(
+            AccuracyConfiguration(
+                scorer_cls,
+                extractor_cls,
+                "performance",
+                dataloader,
+                report_dir,
+                accuracy_config.ground_truth,
+                accuracy_config.num_repeats,
+                accuracy_config.extras or {},
+            )
+        )
 
     return dataloader, accuracy_datasets, eval_configs
 
@@ -408,7 +452,7 @@ def setup_benchmark(config: BenchmarkConfig, test_mode: TestMode) -> BenchmarkCo
 
 def _build_phases(
     ctx: BenchmarkContext,
-    perf_strategy: MultiTurnStrategy | None = None,
+    perf_strategy: AgenticInferenceStrategy | None = None,
 ) -> list[PhaseConfig]:
     """Build the phase list from BenchmarkContext."""
     phases: list[PhaseConfig] = []
@@ -459,14 +503,17 @@ def _build_phases(
     # Accuracy phases — use eval_cfg.dataset_name as phase name so it matches
     # what Scorer._load_sample_index_map() looks up in sample_idx_map.json
     for eval_cfg in ctx.eval_configs:
+        if eval_cfg.dataset_name == "performance":
+            continue
         acc_ds = eval_cfg.dataset
-        if isinstance(acc_ds, MultiTurnDataset):
+        if isinstance(acc_ds, AgenticInferenceDataset):
             raise InputValidationError(
-                f"Accuracy dataset '{eval_cfg.dataset_name}' is a MultiTurnDataset, "
-                "which is not yet supported for accuracy evaluation."
+                f"Accuracy dataset '{eval_cfg.dataset_name}' is an "
+                "AgenticInferenceDataset, which is not yet supported for "
+                "accuracy evaluation."
             )
         # Accuracy phases run at MAX_THROUGHPUT; inheriting perf_lp (e.g. POISSON)
-        # would silently rate-limit evaluation until a multi-turn accuracy strategy
+        # would silently rate-limit evaluation until an agentic inference accuracy strategy
         # and QPS-budgeting support are added.
         acc_load_pattern: LoadPattern | None = LoadPattern(
             type=LoadPatternType.MAX_THROUGHPUT
@@ -649,10 +696,10 @@ async def _run_benchmark_async(
             launcher.kill_all()
             raise SetupError(f"Failed to connect to endpoint: {e}") from e
 
-        # Build multi-turn strategy if the performance dataset is a MultiTurnDataset.
-        multi_turn_strategy: MultiTurnStrategy | None = None
-        if isinstance(ctx.dataloader, MultiTurnDataset):
-            mt_cfg = None
+        # Build agentic inference strategy if the performance dataset uses it.
+        agentic_inference_strategy: AgenticInferenceStrategy | None = None
+        if isinstance(ctx.dataloader, AgenticInferenceDataset):
+            agentic_cfg = None
             if ctx.config.datasets:
                 perf_ds_cfg = next(
                     (
@@ -663,24 +710,24 @@ async def _run_benchmark_async(
                     None,
                 )
                 if perf_ds_cfg is not None:
-                    mt_cfg = perf_ds_cfg.multi_turn
+                    agentic_cfg = perf_ds_cfg.agentic_inference
             assert ctx.dataloader.conversation_metadata is not None
-            multi_turn_strategy = MultiTurnStrategy(
+            agentic_inference_strategy = AgenticInferenceStrategy(
                 conversation_manager=ConversationManager(),
                 dataset_metadata=ctx.dataloader.conversation_metadata,
-                multi_turn_config=mt_cfg,
+                agentic_inference_config=agentic_cfg,
                 target_concurrency=ctx.config.settings.load_pattern.target_concurrency,
             )
 
         _on_sample_complete: Callable[[QueryResult], None]
-        if multi_turn_strategy is not None:
+        if agentic_inference_strategy is not None:
 
             def _on_sample_complete(result: QueryResult) -> None:
                 try:
-                    multi_turn_strategy.on_sample_complete(result)
+                    agentic_inference_strategy.on_sample_complete(result)
                 except Exception:
                     logger.exception(
-                        "multi_turn_strategy.on_sample_complete failed (result=%s)",
+                        "agentic_inference_strategy.on_sample_complete failed (result=%s)",
                         result.id,
                     )
                 try:
@@ -690,8 +737,8 @@ async def _run_benchmark_async(
                         "collector.on_complete_hook failed (result=%s)", result.id
                     )
 
-            multi_turn_strategy._session_on_sample_complete = _on_sample_complete
-            multi_turn_strategy._session_publisher = publisher
+            agentic_inference_strategy._session_on_sample_complete = _on_sample_complete
+            agentic_inference_strategy._session_publisher = publisher
 
         else:
             _on_sample_complete = collector.on_complete_hook
@@ -705,7 +752,7 @@ async def _run_benchmark_async(
             session_id=session_id,
         )
 
-        phases = _build_phases(ctx, perf_strategy=multi_turn_strategy)
+        phases = _build_phases(ctx, perf_strategy=agentic_inference_strategy)
         report: Report | None = None
 
         # Timer starts when the performance phase begins (after warmup drains),
@@ -781,7 +828,16 @@ async def _run_benchmark_async(
 
             if snap_dict is not None:
                 try:
-                    report = Report.from_snapshot(snap_dict)
+                    runtime = ctx.config.settings.runtime
+                    warmup = ctx.config.settings.warmup
+                    report = Report.from_snapshot(
+                        snap_dict,
+                        seeds={
+                            "scheduler_random_seed": runtime.scheduler_random_seed,
+                            "dataloader_random_seed": runtime.dataloader_random_seed,
+                            "warmup_random_seed": warmup.warmup_random_seed,
+                        },
+                    )
                     if not report.complete:
                         logger.warning(
                             "Report is incomplete (state=%s, n_pending_tasks=%d)",
@@ -858,16 +914,18 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
     collector = bench.collector
     report = bench.report
 
-    # Display report if available (from MetricsAggregator pub/sub snapshot)
+    # Display report if available (from MetricsAggregator pub/sub snapshot).
+    # result_summary.json is the self-complete machine-readable report (carries
+    # qps/tps/seeds via Report.to_json); report.txt is the full human-readable
+    # dump (histograms + percentiles); the console log shows just the summary.
     if report is not None:
         report.display(fn=lambda s: logger.info(s), summary_only=True)
         report.to_json(save_to=ctx.report_dir / "result_summary.json")
 
-        # Write human-readable report.txt
         report_txt = ctx.report_dir / "report.txt"
         with report_txt.open("w") as f:
             report.display(fn=lambda s: print(s, file=f))
-        logger.info(f"Report written to {report_txt}")
+        logger.info("Report written to %s", report_txt)
 
     # Write scoring artifacts + copy event log from tmpfs to disk
     _write_scoring_artifacts(ctx, result, bench.tmpfs_dir)
@@ -891,15 +949,17 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
             ) from e
         score, n_repeats = scorer_instance.score()
         assert eval_cfg.dataset.data is not None
+        num_samples = len(eval_cfg.dataset.data)
+        if eval_cfg.dataset_name == "performance":
+            num_samples = sum(phase.issued_count for phase in result.perf_results)
         accuracy_scores[eval_cfg.dataset_name] = {
             "dataset_name": eval_cfg.dataset_name,
-            "num_samples": len(eval_cfg.dataset.data),
+            "num_samples": num_samples,
             "extractor": (
                 eval_cfg.extractor.__name__ if eval_cfg.extractor is not None else None
             ),
             "ground_truth_column": eval_cfg.ground_truth_column,
             "score": score,
-            "n_repeats": n_repeats,
         }
         logger.info(f"Score for {eval_cfg.dataset_name}: {score} ({n_repeats} repeats)")
 
@@ -908,7 +968,7 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
         perf_elapsed = report.duration_ns / 1e9
         total_issued = report.n_samples_issued
         n_errors = report.n_samples_failed
-        qps = report.qps() or 0.0
+        qps = report.qps or 0.0
     else:
         perf = result.perf_results[0] if result.perf_results else None
         if perf:

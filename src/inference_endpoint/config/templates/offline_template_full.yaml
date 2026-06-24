@@ -26,7 +26,7 @@ datasets:  # Dataset configs
   parser:  # Column remapping: {prompt: <col>, system: <col>}
     prompt: text_input
   accuracy_config: null  # Accuracy evaluation settings
-  multi_turn: null  # Multi-turn conversation configuration
+  agentic_inference: null  # Agentic inference conversation configuration
 - name: accuracy
   type: accuracy  # Dataset purpose: performance or accuracy | options: performance, accuracy
   path: '<DATASET_PATH eg: tests/assets/datasets/ds_samples.jsonl>'  # Dataset file path
@@ -37,11 +37,11 @@ datasets:  # Dataset configs
     prompt: question
     system: system_prompt
   accuracy_config:  # Accuracy evaluation settings
-    eval_method: pass_at_1  # Scorer method | options: pass_at_1, string_match, rouge, code_bench_scorer, shopify_category_f1, vbench, deepseek_r1
+    eval_method: pass_at_1  # Scorer method | options: pass_at_1, string_match, rouge, code_bench_scorer, shopify_category_f1, agentic_inference_inline, vbench, deepseek_r1
     ground_truth: ground_truth  # Ground truth column name
     extractor: boxed_math_extractor  # Answer extractor (abcd_extractor, boxed_math_extractor, identity_extractor, python_code_extractor)
     num_repeats: 1  # Repeat dataset N times for evaluation
-  multi_turn: null  # Multi-turn conversation configuration
+  agentic_inference: null  # Agentic inference conversation configuration
 settings:
   runtime:
     min_duration_ms: 600000  # Min duration (ms, or with suffix: 600s, 10m)

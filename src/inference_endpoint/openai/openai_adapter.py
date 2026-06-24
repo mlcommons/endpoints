@@ -93,7 +93,7 @@ class OpenAIAdapter(HttpRequestAdapter):
     def to_endpoint_request(cls, query: Query) -> CreateChatCompletionRequest:
         """Convert a Query to an OpenAI request.
 
-        Supports both single-turn (prompt/system) and multi-turn (messages array) formats.
+        Supports both single-turn (prompt/system) and agentic inference (messages array) formats.
         """
         if "messages" in query.data and isinstance(query.data["messages"], list):
             messages = query.data["messages"]

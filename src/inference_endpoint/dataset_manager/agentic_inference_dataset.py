@@ -13,9 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Multi-turn conversation dataset for conversational AI benchmarking."""
+"""Agentic inference conversation dataset for conversational AI benchmarking."""
 
-import hashlib
 import logging
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -38,7 +37,7 @@ logger = logging.getLogger(__name__)
 class ConversationSampleEntry:
     """One client-turn entry in ConversationMetadata.samples.
 
-    sample_index is populated after transforms in MultiTurnDataset.load();
+    sample_index is populated after transforms in AgenticInferenceDataset.load();
     None before load() is called.
     """
 
@@ -49,9 +48,9 @@ class ConversationSampleEntry:
 
 @dataclass
 class ConversationMetadata:
-    """Bundle of maps/lists consumed by MultiTurnStrategy.
+    """Bundle of maps/lists consumed by AgenticInferenceStrategy.
 
-    Produced by MultiTurnDataset._build_metadata() from the post-transform dataframe.
+    Produced by AgenticInferenceDataset._build_metadata() from the post-transform dataframe.
     Keys in the *_by_key dicts are (str(conversation_id), int(turn)).
     Populated by load(); None before load() is called.
     """
@@ -63,10 +62,6 @@ class ConversationMetadata:
     pre_built_messages_by_key: dict[tuple[str, int], list[dict]] = field(
         default_factory=dict
     )
-    current_turn_messages_by_key: dict[tuple[str, int], list[dict]] = field(
-        default_factory=dict
-    )
-    system_prompts_by_conv: dict[str, str | None] = field(default_factory=dict)
     delay_seconds_by_key: dict[tuple[str, int], float] = field(default_factory=dict)
 
 
@@ -116,20 +111,17 @@ def _expand_tool_results(row: dict | pd.Series) -> list[dict]:
 def _build_conversation_metadata(
     conv_id: Any,
     group: Any,
-    enable_salt: bool,
 ) -> tuple[
     str,
     dict[tuple[str, int], list[dict]],
-    dict[tuple[str, int], list[dict]],
-    str | None,
     dict[tuple[str, int], float],
     list[ConversationSampleEntry],
     int,
 ]:
     """Build message history for all client turns in a single conversation.
 
-    Returns a tuple of (str_conv_id, pre_built_messages, current_turn_messages,
-    system_prompt, delay_seconds, samples, client_turns_count).
+    Returns a tuple of (str_conv_id, pre_built_messages, delay_seconds, samples,
+    client_turns_count).
     """
     str_conv_id = str(conv_id)
     sorted_group = group.sort_values("turn")
@@ -141,20 +133,8 @@ def _build_conversation_metadata(
         if val and isinstance(val, str):
             system_content = val
             break
-    if enable_salt and system_content:
-        salt_hex = hashlib.blake2b(
-            str_conv_id.encode("utf-8"), digest_size=8
-        ).hexdigest()
-        system_content = f"{system_content}\n\n[cache_salt: {salt_hex}]"
-    elif enable_salt:
-        logger.warning(
-            "multi_turn.enable_salt requested but conversation %s has no "
-            "system prompt; cache salt not applied",
-            conv_id,
-        )
 
     pre_built_messages_by_key: dict[tuple[str, int], list[dict]] = {}
-    current_turn_messages_by_key: dict[tuple[str, int], list[dict]] = {}
     delay_seconds_by_key: dict[tuple[str, int], float] = {}
     samples: list[ConversationSampleEntry] = []
 
@@ -201,7 +181,6 @@ def _build_conversation_metadata(
             pre_built_messages_by_key[(str_conv_id, t_n)] = (
                 list(history) + current_turn_msgs
             )
-            current_turn_messages_by_key[(str_conv_id, t_n)] = current_turn_msgs
             history.extend(current_turn_msgs)
 
             delay_val = row.get("delay_seconds")
@@ -226,16 +205,14 @@ def _build_conversation_metadata(
     return (
         str_conv_id,
         pre_built_messages_by_key,
-        current_turn_messages_by_key,
-        system_content,
         delay_seconds_by_key,
         samples,
         client_turns_count,
     )
 
 
-class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
-    """Dataset for multi-turn conversations.
+class AgenticInferenceDataset(Dataset, dataset_id="agentic_inference_conversations"):
+    """Dataset for agentic inference conversations.
 
     Supports conversational AI benchmarking with turn sequencing and conversation history.
     Validates that conversations have proper structure (alternating user/assistant roles)
@@ -266,7 +243,7 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
     COLUMN_NAMES = ["conversation_id", "turn", "role", "content"]
 
     def __init__(self, dataframe: pd.DataFrame, **kwargs):
-        """Initialize multi-turn dataset.
+        """Initialize agentic inference dataset.
 
         Args:
             dataframe: DataFrame with conversation data.
@@ -283,7 +260,6 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
                 self.dataframe = self.dataframe.loc[~metadata_rows].reset_index(
                     drop=True
                 )
-        self._enable_salt = False
         self._conv_groups = dict(
             list(self.dataframe.groupby("conversation_id", sort=False, dropna=False))
         )
@@ -292,9 +268,6 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
         self._validate_turn_numbering()
         # Populated by load() after transforms; None until then.
         self.conversation_metadata: ConversationMetadata | None = None
-
-    def enable_salt(self) -> None:
-        self._enable_salt = True
 
     def _validate_conversation_grouping(self) -> None:
         """Validate that all rows for each conversation_id appear consecutively in file order.
@@ -510,23 +483,17 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
         samples: list[ConversationSampleEntry] = []
         client_turns_per_conv: dict[str, int] = {}
         pre_built_messages_by_key: dict[tuple[str, int], list[dict]] = {}
-        current_turn_messages_by_key: dict[tuple[str, int], list[dict]] = {}
-        system_prompts_by_conv: dict[str, str | None] = {}
         delay_seconds_by_key: dict[tuple[str, int], float] = {}
 
         for conv_id, group in self._conv_groups.items():
             (
                 str_conv_id,
                 partial_pre_built,
-                partial_current_turn,
-                system_prompt,
                 partial_delay,
                 conv_samples,
                 client_turns_count,
-            ) = _build_conversation_metadata(conv_id, group, self._enable_salt)
+            ) = _build_conversation_metadata(conv_id, group)
             pre_built_messages_by_key.update(partial_pre_built)
-            current_turn_messages_by_key.update(partial_current_turn)
-            system_prompts_by_conv[str_conv_id] = system_prompt
             delay_seconds_by_key.update(partial_delay)
             samples.extend(conv_samples)
             client_turns_per_conv[str_conv_id] = client_turns_count
@@ -537,8 +504,6 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
             max_turns_per_conv=max(g["turn"].max() for g in self._conv_groups.values()),
             client_turns_per_conversation=client_turns_per_conv,
             pre_built_messages_by_key=pre_built_messages_by_key,
-            current_turn_messages_by_key=current_turn_messages_by_key,
-            system_prompts_by_conv=system_prompts_by_conv,
             delay_seconds_by_key=delay_seconds_by_key,
         )
 
@@ -563,9 +528,9 @@ class MultiTurnDataset(Dataset, dataset_id="multi_turn_conversations"):
 
         if adapter is not None and (api_type is None or model_params is None):
             raise NotImplementedError(
-                "MultiTurnDataset.load(adapter=...) is not supported; "
+                "AgenticInferenceDataset.load(adapter=...) is not supported; "
                 "pass api_type=... and model_params=... instead. "
-                "Multi-turn datasets cherry-pick AddStaticColumns defaults from "
+                "Agentic inference datasets cherry-pick AddStaticColumns defaults from "
                 "the api_type's transforms because rows lack a 'prompt' column "
                 "and the full adapter pipeline (ColumnFilter) does not apply."
             )

@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Convert agentic snapshot datasets to the flat-row JSONL format expected by MultiTurnDataset.
+"""Convert agentic snapshot datasets to the flat-row JSONL format expected by AgenticInferenceDataset.
 
 Each snapshot record contains the full conversation history up to a checkpoint:
     {"conversation_id": "sim_000001", "conversation_idx": 0,
@@ -140,7 +140,7 @@ def verify(input_path: Path, output_path: Path) -> bool:
     """Cross-check every client-turn's pre_built_messages against the source snapshot.
 
     For each output client turn, reconstruct the pre_built_messages that
-    MultiTurnDataset would build from the flat rows and compare it against the
+    AgenticInferenceDataset would build from the flat rows and compare it against the
     ground-truth messages built directly from the source snapshot up to the same
     point (accounting for user-collapse and tool-merge).
 
@@ -326,7 +326,7 @@ def convert(input_path: Path, output_path: Path) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Convert agentic snapshot JSONL to MultiTurnDataset flat-row JSONL."
+        description="Convert agentic snapshot JSONL to AgenticInferenceDataset flat-row JSONL."
     )
     parser.add_argument("input", type=Path, help="Input snapshot JSONL file")
     parser.add_argument("output", type=Path, help="Output flat-row JSONL file")
