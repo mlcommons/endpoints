@@ -32,6 +32,7 @@ import numpy as np
 import pandas as pd
 
 from ..core.record import EventRecord, EventType, SampleEventType
+from ..core.types import merge_tool_calls
 from ..dataset_manager.dataset import Dataset
 from ..dataset_manager.predefined.bfcl_v4 import CATEGORY_MAP, SINGLE_TURN_SUBSETS
 from .extractor import Extractor, FunctionCallExtractor
@@ -132,8 +133,14 @@ class BFCLv4Scorer(Scorer, scorer_id="bfcl_v4"):
                     continue
                 data = record.data
                 tool_calls = getattr(data, "tool_calls", None)
-                if tool_calls:
-                    output_text = msgspec.json.encode(list(tool_calls)).decode()
+                # Streaming responses store tool_calls as raw per-delta chunks
+                # (list-of-lists with fragmented `arguments`); merge_tool_calls
+                # reassembles them into complete [{"function": {...}}] objects.
+                # Non-streaming tool_calls are already complete and pass through
+                # unchanged, so this is safe for both paths.
+                merged_tool_calls = merge_tool_calls(tool_calls)
+                if merged_tool_calls:
+                    output_text = msgspec.json.encode(list(merged_tool_calls)).decode()
                 else:
                     output_text = str(data) if data is not None else ""
                 outputs.append(
