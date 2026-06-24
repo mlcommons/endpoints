@@ -593,7 +593,11 @@ class TestSWEBenchScorerPreflight:
             if "get_swebench_docker_image_name" in cmd_str:
                 return MagicMock(
                     returncode=0,
-                    stdout=json.dumps(["docker.io/swebench/test:latest"]),
+                    stdout=(
+                        "👋 This is mini-swe-agent version 2.3.0.\n"
+                        "minisweagent: INFO: Instance slice: 500 -> 2 instances\n"
+                        + json.dumps(["docker.io/swebench/test:latest"])
+                    ),
                     stderr="",
                 )
             return MagicMock(returncode=0, stdout="", stderr=b"")

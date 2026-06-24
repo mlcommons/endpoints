@@ -1783,6 +1783,22 @@ def _decode_subprocess_stderr(stderr: bytes | str | None) -> str:
     return str(stderr).strip()
 
 
+def _extract_json_array_from_mixed_output(stdout: str) -> list[Any] | None:
+    """Return the last valid JSON array found in mixed stdout, or None."""
+    decoder = json.JSONDecoder()
+    matches: list[list[Any]] = []
+    for idx, char in enumerate(stdout):
+        if char != "[":
+            continue
+        try:
+            value, _ = decoder.raw_decode(stdout[idx:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, list):
+            matches.append(value)
+    return matches[-1] if matches else None
+
+
 class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
     """SWE-bench accuracy scorer using the mini-extra CLI (mini-swe-agent package).
 
@@ -1941,14 +1957,13 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
                 f"subproject at {swe_bench_project_path}"
                 + (f". stderr: {stderr_text}" if stderr_text else "")
             )
-        try:
-            images = json.loads(result.stdout or "[]")
-        except json.JSONDecodeError as exc:
+        images = _extract_json_array_from_mixed_output(result.stdout or "")
+        if images is None:
             stdout_text = (result.stdout or "").strip()
             raise SetupError(
                 "Failed to parse the required SWE-bench Docker image list from the "
                 f"accuracy subproject output: {stdout_text!r}"
-            ) from exc
+            )
         if not isinstance(images, list) or not all(
             isinstance(image, str) for image in images
         ):
