@@ -138,10 +138,10 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
     qps: float | None = None
     tps: float | None = None
 
-    # RNG seeds for this run (from RuntimeConfig). Carried so result_summary
-    # .json is self-validating: a reproducible run is identified by its seeds.
-    # These are config, not a measured metric, so the from_snapshot caller
-    # supplies them rather than reading them from the metrics snapshot.
+    # RNG seeds for this run (scheduler/dataloader/warmup, from config). Carried
+    # so result_summary.json is self-validating: a reproducible run is identified
+    # by its seeds. These are config, not a measured metric, so the from_snapshot
+    # caller supplies them rather than reading them from the metrics snapshot.
     seeds: dict[str, int] | None = None
 
     @classmethod

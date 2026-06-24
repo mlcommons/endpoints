@@ -164,6 +164,8 @@ class TestBenchmarkCommandIntegration:
         summary = json.loads((tmp_path / "result_summary.json").read_text())
         assert summary["qps"] > 0
         assert "tps" in summary
+        # report.txt is the human-readable companion — kept alongside the JSON.
+        assert (tmp_path / "report.txt").exists()
 
     @pytest.mark.integration
     def test_mode_logging(self, mock_http_echo_server, ds_dataset_path, caplog):
