@@ -22,6 +22,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import inference_endpoint.commands.benchmark.execute as execute_mod
 import pandas as pd
 import pytest
 from inference_endpoint.commands.benchmark.cli import (
@@ -34,6 +35,7 @@ from inference_endpoint.commands.benchmark.execute import (
     BenchmarkContext,
     ResponseCollector,
     _build_phases,
+    _load_datasets,
     _run_benchmark_async,
     setup_benchmark,
 )
@@ -62,6 +64,7 @@ from inference_endpoint.config.schema import (
 from inference_endpoint.config.utils import cli_error_formatter as _error_formatter
 from inference_endpoint.core.types import QueryResult
 from inference_endpoint.dataset_manager.dataset import Dataset
+from inference_endpoint.dataset_manager.predefined.swe_bench import SWEBench
 from inference_endpoint.endpoint_client.config import HTTPClientConfig
 from inference_endpoint.evaluation.scoring import Scorer
 from inference_endpoint.exceptions import InputValidationError, SetupError
@@ -77,6 +80,29 @@ TEMPLATE_DIR = (
     / "config"
     / "templates"
 )
+
+
+# Test-only scorers registered with leading-underscore IDs so TestScorerMethodSync excludes them.
+
+
+class _SelfContainedScorer(Scorer, scorer_id="_test_skip_endpoint_phase"):
+    SKIP_ENDPOINT_PHASE = True
+
+    def score_single_sample(self, value, ground_truth):
+        return 0.0
+
+    def score(self):
+        return 1.0, 1
+
+
+class _FailingPreflightScorer(Scorer, scorer_id="_test_failing_preflight"):
+    @classmethod
+    def preflight(cls, extras):
+        raise SetupError("mock preflight failure")
+
+    def score_single_sample(self, value, ground_truth):
+        return 0.0
+
 
 # Reusable minimal config kwargs
 _OFFLINE_KWARGS = {
@@ -131,6 +157,55 @@ class TestCLIConfigModels:
                 endpoint_config={"endpoints": ["http://x"]},
                 datasets=[{"path": "test.jsonl"}],
             )
+
+    @pytest.mark.unit
+    def test_concurrency_injected_into_swe_bench_extras(self):
+        """target_concurrency is forwarded as workers into swe_bench_scorer extras."""
+        config = OnlineConfig(
+            endpoint_config={"endpoints": ["http://test:8000"]},
+            model_params={"name": "test-model"},
+            datasets=[
+                {
+                    "name": "swe_bench",
+                    "type": "accuracy",
+                    "accuracy_config": {"eval_method": "swe_bench_scorer"},
+                },
+                {"type": "performance", "path": "tests/assets/datasets/dummy_1k.jsonl"},
+            ],
+            settings={
+                "load_pattern": {"type": "concurrency", "target_concurrency": 32}
+            },
+        )
+        acc_ds = next(d for d in config.datasets if d.type == DatasetType.ACCURACY)
+        assert acc_ds.accuracy_config is not None
+        assert acc_ds.accuracy_config.extras is not None
+        assert acc_ds.accuracy_config.extras.get("workers") == 32
+
+    @pytest.mark.unit
+    def test_explicit_workers_not_overridden_by_concurrency(self):
+        """An explicit workers= in extras is not overwritten by target_concurrency."""
+        config = OnlineConfig(
+            endpoint_config={"endpoints": ["http://test:8000"]},
+            model_params={"name": "test-model"},
+            datasets=[
+                {
+                    "name": "swe_bench",
+                    "type": "accuracy",
+                    "accuracy_config": {
+                        "eval_method": "swe_bench_scorer",
+                        "extras": {"workers": 5},
+                    },
+                },
+                {"type": "performance", "path": "tests/assets/datasets/dummy_1k.jsonl"},
+            ],
+            settings={
+                "load_pattern": {"type": "concurrency", "target_concurrency": 32}
+            },
+        )
+        acc_ds = next(d for d in config.datasets if d.type == DatasetType.ACCURACY)
+        assert acc_ds.accuracy_config is not None
+        assert acc_ds.accuracy_config.extras is not None
+        assert acc_ds.accuracy_config.extras.get("workers") == 5
 
 
 class TestDurationSuffix:
@@ -381,6 +456,91 @@ endpoint_config:
             )
 
 
+class TestAccuracyOnlyDataset:
+    """Test that datasets with ACCURACY_ONLY=True are rejected as perf datasets."""
+
+    @pytest.mark.unit
+    def test_swe_bench_as_perf_raises(self, tmp_path):
+        fake_df = pd.DataFrame(
+            [{"instance_id": "repo__repo-0", "problem_statement": "Fix bug 0"}]
+        )
+        config = OfflineConfig(
+            endpoint_config={"endpoints": ["http://test:8000"]},
+            model_params={"name": "test-model"},
+            datasets=[{"name": "swe_bench"}],
+        )
+        with (
+            patch.object(SWEBench, "generate", return_value=fake_df),
+            pytest.raises(InputValidationError, match="accuracy-only"),
+        ):
+            _load_datasets(config, tmp_path)
+
+    @pytest.mark.unit
+    def test_preflight_error_propagates(self, tmp_path):
+        """A scorer whose preflight() raises SetupError must stop _load_datasets."""
+        dummy_jsonl = tmp_path / "dummy.jsonl"
+        dummy_jsonl.write_text('{"prompt": "hello"}\n')
+        fake_acc_df = pd.DataFrame(
+            [{"instance_id": "repo__repo-0", "prompt": "Fix bug 0"}]
+        )
+        config = OfflineConfig(
+            endpoint_config={"endpoints": ["http://test:8000"]},
+            model_params={"name": "test-model"},
+            datasets=[
+                {"type": "performance", "path": str(dummy_jsonl)},
+                {
+                    "name": "swe_bench",
+                    "type": "accuracy",
+                    "accuracy_config": {"eval_method": "swe_bench_scorer"},
+                },
+            ],
+        )
+        with (
+            patch.object(SWEBench, "generate", return_value=fake_acc_df),
+            patch.object(
+                execute_mod,
+                "_resolve_accuracy_components",
+                return_value=(_FailingPreflightScorer, None),
+            ),
+            pytest.raises(SetupError, match="mock preflight failure"),
+        ):
+            _load_datasets(config, tmp_path)
+
+    @pytest.mark.unit
+    def test_perf_dataset_with_accuracy_config_does_not_crash_load_datasets(
+        self, tmp_path
+    ):
+        """_load_datasets must not crash when perf dataset carries accuracy_config.
+
+        The perf-with-accuracy-config branch appends to eval_configs but not to
+        accuracy_datasets; a zip(strict=True) over both lists would raise ValueError.
+        """
+        dummy_jsonl = tmp_path / "dummy.jsonl"
+        dummy_jsonl.write_text('{"prompt": "hello"}\n')
+        config = OfflineConfig(
+            endpoint_config={"endpoints": ["http://test:8000"]},
+            model_params={"name": "test-model"},
+            datasets=[
+                {
+                    "type": "performance",
+                    "path": str(dummy_jsonl),
+                    "accuracy_config": {"eval_method": "swe_bench_scorer"},
+                },
+            ],
+        )
+        with patch.object(
+            execute_mod,
+            "_resolve_accuracy_components",
+            return_value=(_SelfContainedScorer, None),
+        ):
+            _, accuracy_datasets, eval_configs = _load_datasets(config, tmp_path)
+
+        # The perf dataset appends to eval_configs only, not accuracy_datasets.
+        assert len(accuracy_datasets) == 0
+        assert len(eval_configs) == 1
+        assert eval_configs[0].dataset_name == "performance"
+
+
 class TestYAMLTemplateValidation:
     """Validate all bundled YAML templates parse correctly."""
 
@@ -555,8 +715,6 @@ class TestAggregatorArgs:
     """Tests that metrics aggregator subprocess args are correctly forwarded."""
 
     def _make_ctx(self, config, tmp_path):
-        import random
-
         rt = RuntimeSettings(
             metric_target=Throughput(10.0),
             reported_metrics=[Throughput(10.0)],
@@ -968,6 +1126,27 @@ class TestBuildPhases:
         assert acc.drain_timeout is None
 
     @pytest.mark.unit
+    def test_skip_endpoint_phase_omits_accuracy_phase(
+        self, base_rt_settings, simple_dataset
+    ):
+        config = OfflineConfig(**_OFFLINE_KWARGS)
+        ctx = self._make_ctx(config, base_rt_settings, simple_dataset)
+        ctx.eval_configs = [
+            AccuracyConfiguration(
+                scorer=_SelfContainedScorer,
+                extractor=None,
+                dataset_name="acc",
+                dataset=simple_dataset,
+                report_dir=Path("/tmp"),
+                ground_truth_column=None,
+                num_repeats=1,
+            )
+        ]
+        phases = _build_phases(ctx)
+
+        assert all(p.phase_type != PhaseType.ACCURACY for p in phases)
+
+    @pytest.mark.unit
     def test_warmup_uses_independent_rng_instances(
         self, base_rt_settings, simple_dataset
     ):
@@ -1052,7 +1231,8 @@ class TestScorerMethodSync:
     @pytest.mark.unit
     def test_scorer_enum_matches_registry(self):
         enum_values = {m.value for m in ScorerMethod}
-        registry_keys = set(Scorer.PREDEFINED.keys())
+        # Exclude test-only scorers (ids starting with "_")
+        registry_keys = {k for k in Scorer.PREDEFINED if not k.startswith("_")}
         assert enum_values == registry_keys, (
             f"ScorerMethod enum out of sync with Scorer registry.\n"
             f"  In enum only: {enum_values - registry_keys}\n"

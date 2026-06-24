@@ -32,6 +32,7 @@ from .predefined.shopify_product_catalogue import (
     ShopifyProductCatalogue,
     ShopifyProductCatalogue8k,
 )
+from .predefined.swe_bench import SWEBench
 from .transforms import (
     AddStaticColumns,
     ColumnFilter,
@@ -63,5 +64,6 @@ __all__ = [
     "RandomDataset",
     "ShopifyProductCatalogue",
     "ShopifyProductCatalogue8k",
+    "SWEBench",
     "AgenticInferenceDataset",
 ]
