@@ -34,9 +34,11 @@ from pydantic import (
     ConfigDict,
     Discriminator,
     Field,
+    SerializerFunctionWrapHandler,
     Tag,
     TypeAdapter,
     field_validator,
+    model_serializer,
     model_validator,
 )
 
@@ -465,6 +467,31 @@ class LoadPattern(BaseModel):
         int | None,
         cyclopts.Parameter(alias="--concurrency", help="Concurrent requests"),
     ] = Field(None, gt=0)
+
+    # TODO(vir): remove once the formal tail-cutting mechanism lands.
+    use_legacy_loadgen_qps_metrics: Annotated[
+        bool,
+        cyclopts.Parameter(
+            negative="--no-use-legacy-loadgen-qps-metrics",
+            help=(
+                "Only applies to the poisson load pattern. Report QPS/TPS using "
+                "the legacy MLPerf LoadGen Server 'completed' definition — (completed-1)/T "
+                "and tokens/T, T = first issued request to completion of the "
+                "last-issued request (see mlcommons/inference loadgen/results.cc). "
+                "--no-... uses endpoints-native completed/duration. Ignored for "
+                "non-poisson patterns."
+            ),
+        ),
+    ] = True
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        # use_legacy_loadgen_qps_metrics only applies to poisson; drop it from
+        # the serialized form (and thus YAML templates) for other patterns.
+        data = handler(self)
+        if self.type != LoadPatternType.POISSON:
+            data.pop("use_legacy_loadgen_qps_metrics", None)
+        return data
 
     @model_validator(mode="after")
     def _validate_completeness(self) -> Self:

@@ -130,6 +130,14 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
     tpot: dict[str, Any]
     latency: dict[str, Any]
     output_sequence_lengths: dict[str, Any]
+    # Legacy MLPerf LoadGen Server "completed" window (poisson only): first
+    # issued request -> completion of the last-issued request
+    # (final_query_all_samples_done_time analog; see mlcommons/inference
+    # loadgen/results.cc). Not None iff QPS/TPS were computed over this window;
+    # None means the endpoints-native full-run window was used. Recorded so
+    # result_summary.json is self-describing about which view it holds.
+    # TODO(vir): deprecate once endpoints has a formal tail-cutting mechanism.
+    legacy_loadgen_window_duration_ns: int | None = None
 
     # Derived throughput, computed once in from_snapshot so the serialized
     # report (result_summary.json) is self-complete. qps is None without a
@@ -146,7 +154,11 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
 
     @classmethod
     def from_snapshot(
-        cls, snap: dict[str, Any], *, seeds: dict[str, int] | None = None
+        cls,
+        snap: dict[str, Any],
+        *,
+        seeds: dict[str, int] | None = None,
+        use_legacy_loadgen_qps_metrics: bool = True,
     ) -> Report:
         """Build a Report from a snapshot dict.
 
@@ -169,6 +181,13 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
         honest "incomplete" report on missing fields instead of crashing:
         missing ``state`` defaults to ``"interrupted"`` (worst-case),
         missing counters / series to zero / empty.
+
+        The snapshot always carries BOTH ``tracked_duration_ns`` and
+        ``legacy_loadgen_window_duration_ns``, so it stays config-agnostic and
+        fully reinterpretable either way. Which window the reported QPS/TPS use
+        is decided by the run config (``use_legacy_loadgen_qps_metrics``,
+        recorded in ``config.yaml`` and in this Report's serialized JSON), not
+        by the snapshot.
         """
         counters: dict[str, int | float] = {}
         series: dict[str, dict[str, Any]] = {}
@@ -197,13 +216,41 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
         n_completed = _counter("tracked_samples_completed")
         osl = _series_dict("osl")
 
-        # Derived throughput. qps needs a duration; tps additionally needs OSL.
-        if duration_ns is None:
-            qps = tps = None
+        # Legacy MLPerf LoadGen Server "completed" window (poisson only): first
+        # issued request -> completion of the last-issued request
+        # (final_query_all_samples_done_time analog; see mlcommons/inference
+        # loadgen/results.cc).
+        # TODO(vir): deprecate once endpoints has a formal tail-cutting mechanism.
+        raw_loadgen_window_ns = _counter("legacy_loadgen_window_duration_ns")
+
+        # Derived throughput, computed once so result_summary.json is
+        # self-complete. Legacy LoadGen QPS = (completed-1)/window; otherwise
+        # native completed/duration. The walrus assigns the window
+        # unconditionally (first operand of the `and`), so it stays in scope
+        # for the tps computation and the stored field below — no second
+        # counter read.
+        if (
+            legacy_loadgen_window_duration_ns := (
+                raw_loadgen_window_ns
+                if (use_legacy_loadgen_qps_metrics and raw_loadgen_window_ns > 0)
+                else None
+            )
+        ) is not None and n_completed >= 2:
+            qps = (n_completed - 1) / (legacy_loadgen_window_duration_ns / 1e9)
+        elif duration_ns is not None:
+            qps = n_completed / (duration_ns / 1e9)
         else:
-            duration_s = duration_ns / 1e9
-            qps = n_completed / duration_s
-            tps = (osl.get("total", 0) / duration_s) if osl else None
+            qps = None
+        tps_window_ns = (
+            legacy_loadgen_window_duration_ns
+            if legacy_loadgen_window_duration_ns is not None
+            else duration_ns
+        )
+        tps = (
+            (osl.get("total", 0) / (tps_window_ns / 1e9))
+            if (tps_window_ns and osl)
+            else None
+        )
 
         # Default missing state to "interrupted" — a malformed / partial
         # snapshot dict is treated as worst-case (run did not reach a
@@ -226,6 +273,7 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
             tpot=_series_dict("tpot_ns"),
             latency=_series_dict("sample_latency_ns"),
             output_sequence_lengths=osl,
+            legacy_loadgen_window_duration_ns=legacy_loadgen_window_duration_ns,
             qps=qps,
             tps=tps,
             seeds=seeds,

@@ -70,6 +70,8 @@ class MetricCounterKey(str, Enum):
     # tracked row still exists when the aggregator sees the ERROR.
     TRACKED_SAMPLES_FAILED = "tracked_samples_failed"
     TRACKED_DURATION_NS = "tracked_duration_ns"
+    # Legacy MLPerf LoadGen Server "completed" window (final_query_all_samples_done_time).
+    LEGACY_LOADGEN_WINDOW_DURATION_NS = "legacy_loadgen_window_duration_ns"
     # Total wall-clock duration since session start. Updated on every event as
     # max(current, event_timestamp - session_start). Stored as a counter
     # rather than computed from (now - start) at read time because
@@ -320,6 +322,10 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
                             MetricCounterKey.TRACKED_DURATION_NS.value,
                             table.total_tracked_duration_ns,
                         )
+                        registry.set_counter(
+                            MetricCounterKey.LEGACY_LOADGEN_WINDOW_DURATION_NS.value,
+                            table.total_loadgen_window_ns,
+                        )
                 logger.debug("Session event: %s", ev)
                 continue
 
@@ -391,6 +397,10 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
             registry.set_counter(
                 MetricCounterKey.TRACKED_DURATION_NS.value,
                 table.total_tracked_duration_ns,
+            )
+            registry.set_counter(
+                MetricCounterKey.LEGACY_LOADGEN_WINDOW_DURATION_NS.value,
+                table.total_loadgen_window_ns,
             )
             try:
                 await self._publisher.publish_final(registry, n_pending_tasks=n_pending)
