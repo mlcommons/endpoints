@@ -565,6 +565,40 @@ def _load_final_snapshot_from_disk(path: Path) -> dict[str, Any] | None:
         return None
 
 
+class _PerfPhaseTimeout:
+    """Session-stop timer that bounds the PERFORMANCE phase only.
+
+    ``max_duration_ms`` is a safety cap on the performance phase. The timer is
+    armed when the performance phase starts and cancelled as soon as any later
+    phase starts, so it can never truncate a subsequent accuracy phase: a
+    combined perf+accuracy run must let accuracy finish regardless of how long
+    perf ran.
+    """
+
+    def __init__(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        max_duration_ms: int | None,
+        on_timeout: Callable[[], None],
+    ) -> None:
+        self._loop = loop
+        self._max_duration_ms = max_duration_ms
+        self._on_timeout = on_timeout
+        self._handle: asyncio.TimerHandle | None = None
+
+    def on_phase_start(self, phase_type: PhaseType) -> None:
+        self.cancel()
+        if phase_type == PhaseType.PERFORMANCE and self._max_duration_ms is not None:
+            self._handle = self._loop.call_later(
+                self._max_duration_ms / 1000.0, self._on_timeout
+            )
+
+    def cancel(self) -> None:
+        if self._handle is not None:
+            self._handle.cancel()
+            self._handle = None
+
+
 async def _run_benchmark_async(
     ctx: BenchmarkContext,
     loop: asyncio.AbstractEventLoop,
@@ -763,9 +797,6 @@ async def _run_benchmark_async(
         phases = _build_phases(ctx, perf_strategy=agentic_inference_strategy)
         report: Report | None = None
 
-        # Timer starts when the performance phase begins (after warmup drains),
-        # so max_duration_ms applies only to the perf phase, not warmup.
-        global_timeout_handle = None
         _timeout_done = False
         max_duration_ms = (
             ctx.rt_settings.max_duration_ms if ctx.rt_settings is not None else None
@@ -774,30 +805,26 @@ async def _run_benchmark_async(
         def _on_global_timeout() -> None:
             if not _timeout_done:
                 logger.warning(
-                    "Global experiment timeout reached (%d ms); stopping session.",
+                    "Performance phase max_duration reached (%d ms); stopping session.",
                     max_duration_ms,
                 )
                 session.stop()
 
-        def _on_phase_start(phase: PhaseConfig) -> None:
-            nonlocal global_timeout_handle
-            if (
-                phase.phase_type == PhaseType.PERFORMANCE
-                and max_duration_ms is not None
-            ):
-                global_timeout_handle = loop.call_later(
-                    max_duration_ms / 1000.0, _on_global_timeout
-                )
+        perf_timeout = _PerfPhaseTimeout(loop, max_duration_ms, _on_global_timeout)
 
         loop.add_signal_handler(signal.SIGINT, session.stop)
         try:
-            result = await session.run(phases, on_phase_start=_on_phase_start)
+            result = await session.run(
+                phases,
+                on_phase_start=lambda phase: perf_timeout.on_phase_start(
+                    phase.phase_type
+                ),
+            )
         except Exception as e:
             raise ExecutionError(f"Benchmark execution failed: {e}") from e
         finally:
             _timeout_done = True
-            if global_timeout_handle is not None:
-                global_timeout_handle.cancel()
+            perf_timeout.cancel()
             loop.remove_signal_handler(signal.SIGINT)
             logger.info("Cleaning up...")
             try:

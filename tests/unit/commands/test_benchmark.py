@@ -35,6 +35,7 @@ from inference_endpoint.commands.benchmark.execute import (
     ResponseCollector,
     _build_phases,
     _load_datasets,
+    _PerfPhaseTimeout,
     _run_benchmark_async,
     setup_benchmark,
 )
@@ -1388,3 +1389,90 @@ class TestSetupBenchmarkTokenizer:
             ctx = setup_benchmark(config, TestMode.PERF)
 
         assert ctx.tokenizer_name is None
+
+
+class _FakeTimerHandle:
+    def __init__(self) -> None:
+        self.cancelled = False
+
+    def cancel(self) -> None:
+        self.cancelled = True
+
+
+class _FakeLoop:
+    """Minimal event loop stub recording call_later scheduling."""
+
+    def __init__(self) -> None:
+        self.scheduled: list[tuple[float, object, _FakeTimerHandle]] = []
+
+    def call_later(self, delay, callback):
+        handle = _FakeTimerHandle()
+        self.scheduled.append((delay, callback, handle))
+        return handle
+
+
+class TestPerfPhaseTimeout:
+    """The max_duration_ms cap must bound only the performance phase and never
+    truncate a subsequent accuracy phase (regression: a combined perf+accuracy
+    run was guillotined mid-accuracy because the perf timer was never cancelled).
+    """
+
+    @pytest.mark.unit
+    def test_armed_on_performance_phase(self):
+        loop = _FakeLoop()
+        fired: list[bool] = []
+        timeout = _PerfPhaseTimeout(loop, 4000, lambda: fired.append(True))
+
+        timeout.on_phase_start(PhaseType.PERFORMANCE)
+
+        assert len(loop.scheduled) == 1
+        delay, callback, handle = loop.scheduled[0]
+        assert delay == pytest.approx(4.0)
+        assert handle.cancelled is False
+        callback()
+        assert fired == [True]
+
+    @pytest.mark.unit
+    def test_cancelled_when_accuracy_phase_starts(self):
+        loop = _FakeLoop()
+        timeout = _PerfPhaseTimeout(loop, 4000, lambda: None)
+
+        timeout.on_phase_start(PhaseType.PERFORMANCE)
+        perf_handle = loop.scheduled[0][2]
+        timeout.on_phase_start(PhaseType.ACCURACY)
+
+        assert perf_handle.cancelled is True
+        # No new timer armed for the accuracy phase.
+        assert len(loop.scheduled) == 1
+
+    @pytest.mark.unit
+    def test_not_armed_without_max_duration(self):
+        loop = _FakeLoop()
+        timeout = _PerfPhaseTimeout(loop, None, lambda: None)
+
+        timeout.on_phase_start(PhaseType.PERFORMANCE)
+
+        assert loop.scheduled == []
+
+    @pytest.mark.unit
+    def test_not_armed_for_non_performance_phase(self):
+        loop = _FakeLoop()
+        timeout = _PerfPhaseTimeout(loop, 4000, lambda: None)
+
+        timeout.on_phase_start(PhaseType.WARMUP)
+        timeout.on_phase_start(PhaseType.ACCURACY)
+
+        assert loop.scheduled == []
+
+    @pytest.mark.unit
+    def test_cancel_is_idempotent(self):
+        loop = _FakeLoop()
+        timeout = _PerfPhaseTimeout(loop, 4000, lambda: None)
+
+        timeout.cancel()  # no handle yet — must not raise
+        timeout.on_phase_start(PhaseType.PERFORMANCE)
+        handle = loop.scheduled[0][2]
+        timeout.cancel()
+        timeout.cancel()
+
+        assert handle.cancelled is True
