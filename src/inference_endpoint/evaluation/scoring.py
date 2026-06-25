@@ -122,6 +122,11 @@ class Scorer(ABC):
         """
         return None
 
+    @classmethod
+    def dataset_loader_kwargs(cls, extras: dict[str, Any]) -> dict[str, Any]:
+        """Return dataset-loader kwargs derived from scorer extras."""
+        return {}
+
     @classmethod  # noqa: B027 — intentional no-op default; subclasses override when needed
     def preflight(cls, extras: dict[str, Any]) -> None:
         """Verify external dependencies before the benchmark starts. No-op by default."""
@@ -1841,46 +1846,28 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
             ground_truth_column=ground_truth_column,
         )
         self.report_dir = self.report_dir.resolve()
-        self.swe_bench_project_path = self._resolve_project_path(swe_bench_project_path)
-        self.swebench_config_template = (
-            Path(swebench_config_template)
-            if swebench_config_template is not None
-            else _DEFAULT_SWE_BENCH_TEMPLATE
+        options = self._resolve_options(
+            {
+                "swe_bench_project_path": swe_bench_project_path,
+                "swebench_config_template": swebench_config_template,
+                "subset": subset,
+                "split": split,
+                "num_instances": num_instances,
+                "workers": workers,
+            }
         )
-        SWEBench.hf_dataset_name(subset)
-        self.subset = subset
-        self.split = split
-        self.num_instances = num_instances
-        self.workers = workers
+        self.swe_bench_project_path = options["swe_bench_project_path"]
+        self.swebench_config_template = options["swebench_config_template"]
+        self.subset = options["subset"]
+        self.split = options["split"]
+        self.num_instances = options["num_instances"]
+        self.workers = options["workers"]
         self.max_eval_workers = max_eval_workers
         self.subprocess_timeout_s = (
             subprocess_timeout_s
             if subprocess_timeout_s is not None
             else self.DEFAULT_SUBPROCESS_TIMEOUT_S
         )
-
-        if not self.swebench_config_template.exists():
-            raise FileNotFoundError(
-                f"swebench template not found: {self.swebench_config_template}. "
-                f"Pass swebench_config_template= in accuracy_config.extras."
-            )
-        with self.swebench_config_template.open() as _f:
-            _tmpl = yaml.safe_load(_f) or {}
-        model_cfg = _tmpl.get("model")
-        if not isinstance(model_cfg, dict) or not isinstance(
-            model_cfg.get("model_kwargs"), dict
-        ):
-            raise ValueError(
-                f"swebench template {self.swebench_config_template} must have a "
-                "'model.model_kwargs' dict; check the template structure."
-            )
-        pyproject = self.swe_bench_project_path / "pyproject.toml"
-        if not pyproject.exists():
-            raise FileNotFoundError(
-                f"SWE-bench subproject not found at {self.swe_bench_project_path}. "
-                f"Set ${_SWE_BENCH_PROJECT_PATH_ENV} to the subproject path, "
-                f"then run: cd {self.swe_bench_project_path} && uv sync"
-            )
 
     @staticmethod
     def _resolve_project_path(
@@ -1889,6 +1876,16 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
         """Lookup order: explicit ctor arg → ``$SWE_BENCH_PROJECT_PATH`` env var → in-repo default."""
         return _resolve_subproject_path(
             explicit, _SWE_BENCH_PROJECT_PATH_ENV, Path(_DEFAULT_SWE_BENCH_PROJECT_PATH)
+        )
+
+    @staticmethod
+    def _resolve_template_path(
+        explicit: str | os.PathLike | None,
+    ) -> Path:
+        return (
+            Path(explicit)
+            if explicit is not None
+            else Path(_DEFAULT_SWE_BENCH_TEMPLATE)
         )
 
     @classmethod
@@ -1907,6 +1904,71 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
                 f"accuracy_config.extras.{key} must be >= {min_value}; got {parsed}"
             )
         return parsed
+
+    @classmethod
+    def _resolve_dataset_options(cls, extras: dict[str, Any]) -> dict[str, str]:
+        subset = str(extras.get("subset", cls.DEFAULT_SUBSET))
+        SWEBench.hf_dataset_name(subset)
+        return {
+            "subset": subset,
+            "split": str(extras.get("split", cls.DEFAULT_SPLIT)),
+        }
+
+    @classmethod
+    def _validate_template(cls, template_path: Path) -> None:
+        if not template_path.exists():
+            raise FileNotFoundError(
+                f"swebench template not found: {template_path}. "
+                "Pass swebench_config_template= in accuracy_config.extras."
+            )
+        with template_path.open() as template_file:
+            template = yaml.safe_load(template_file) or {}
+        model_cfg = template.get("model")
+        if not isinstance(model_cfg, dict) or not isinstance(
+            model_cfg.get("model_kwargs"), dict
+        ):
+            raise ValueError(
+                f"swebench template {template_path} must have a "
+                "'model.model_kwargs' dict; check the template structure."
+            )
+
+    @classmethod
+    def _validate_project_path(cls, swe_bench_project_path: Path) -> None:
+        pyproject = swe_bench_project_path / "pyproject.toml"
+        if not pyproject.exists():
+            raise FileNotFoundError(
+                f"SWE-bench subproject not found at {swe_bench_project_path}. "
+                f"Set ${_SWE_BENCH_PROJECT_PATH_ENV} to the subproject path, "
+                f"then run: cd {swe_bench_project_path} && uv sync"
+            )
+
+    @classmethod
+    def _resolve_options(cls, extras: dict[str, Any]) -> dict[str, Any]:
+        options: dict[str, Any] = cls._resolve_dataset_options(extras)
+        options["swe_bench_project_path"] = cls._resolve_project_path(
+            extras.get("swe_bench_project_path")
+        )
+        options["swebench_config_template"] = cls._resolve_template_path(
+            extras.get("swebench_config_template")
+        )
+        options["num_instances"] = cls._get_extra_int(
+            extras,
+            "num_instances",
+            default=cls.DEFAULT_NUM_INSTANCES,
+        )
+        options["workers"] = cls._get_extra_int(
+            extras,
+            "workers",
+            default=cls.DEFAULT_WORKERS,
+            min_value=1,
+        )
+        cls._validate_template(options["swebench_config_template"])
+        cls._validate_project_path(options["swe_bench_project_path"])
+        return options
+
+    @classmethod
+    def dataset_loader_kwargs(cls, extras: dict[str, Any]) -> dict[str, Any]:
+        return cls._resolve_dataset_options(extras)
 
     @classmethod
     def _derive_required_images(
@@ -2036,22 +2098,16 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
     @classmethod
     def preflight(cls, extras: dict[str, Any]) -> None:
         """Check uv, mini-extra, swebench, and Docker before the benchmark starts."""
-        swe_bench_project_path = cls._resolve_project_path(
-            extras.get("swe_bench_project_path")
-        )
-        subset = str(extras.get("subset", cls.DEFAULT_SUBSET))
-        split = str(extras.get("split", cls.DEFAULT_SPLIT))
-        num_instances = cls._get_extra_int(
-            extras,
-            "num_instances",
-            default=cls.DEFAULT_NUM_INSTANCES,
-        )
-        workers = cls._get_extra_int(
-            extras,
-            "workers",
-            default=cls.DEFAULT_WORKERS,
-            min_value=1,
-        )
+        try:
+            options = cls._resolve_options(extras)
+        except (FileNotFoundError, ValueError) as exc:
+            raise SetupError(str(exc)) from exc
+
+        swe_bench_project_path = options["swe_bench_project_path"]
+        subset = options["subset"]
+        split = options["split"]
+        num_instances = options["num_instances"]
+        workers = options["workers"]
 
         if shutil.which("uv") is None:
             raise SetupError(

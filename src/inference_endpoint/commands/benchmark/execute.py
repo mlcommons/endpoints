@@ -65,6 +65,7 @@ from inference_endpoint.config.schema import (
     DatasetType,
     LoadPattern,
     LoadPatternType,
+    ScorerMethod,
     StreamingMode,
     TestMode,
     TestType,
@@ -261,6 +262,22 @@ def _resolve_accuracy_components(
     return scorer_cls, extractor_cls
 
 
+def _validate_accuracy_config_for_scorer(
+    scorer_cls: type[Scorer],
+    dataset_name: str,
+    accuracy_config: Any,
+) -> None:
+    if (
+        scorer_cls.SCORER_ID == ScorerMethod.SWE_BENCH.value
+        and accuracy_config.num_repeats != 1
+    ):
+        raise InputValidationError(
+            f"Dataset '{dataset_name}' uses scorer '{scorer_cls.SCORER_ID}'; "
+            "accuracy_config.num_repeats must be 1 because SWE-bench evaluation "
+            "runs externally once per benchmark."
+        )
+
+
 def _load_datasets(
     config: BenchmarkConfig, report_dir: Path
 ) -> tuple[Dataset, list[Dataset], list[AccuracyConfiguration]]:
@@ -285,12 +302,17 @@ def _load_datasets(
         )
         assert acc_cfg.accuracy_config is not None
 
+        _validate_accuracy_config_for_scorer(
+            scorer_cls, acc_cfg.name, acc_cfg.accuracy_config
+        )
         extras = acc_cfg.accuracy_config.extras or {}
 
         scorer_cls.preflight(extras)
 
         ds = DataLoaderFactory.create_loader(
-            acc_cfg, num_repeats=acc_cfg.accuracy_config.num_repeats
+            acc_cfg,
+            num_repeats=acc_cfg.accuracy_config.num_repeats,
+            **scorer_cls.dataset_loader_kwargs(extras),
         )
         accuracy_datasets.append(ds)
         # TODO add tests and defaults
@@ -347,6 +369,7 @@ def _load_datasets(
         scorer_cls, extractor_cls = _resolve_accuracy_components(
             perf_cfg.name, accuracy_config
         )
+        _validate_accuracy_config_for_scorer(scorer_cls, perf_cfg.name, accuracy_config)
         scorer_cls.preflight(accuracy_config.extras or {})
 
         eval_configs.append(

@@ -106,3 +106,18 @@ class TestSWEBenchGenerate:
         call_kwargs = mock_hf.call_args
         assert "princeton-nlp/SWE-bench_Lite" in call_kwargs[0]
         assert len(df) == 5
+
+    def test_non_default_split_uses_split_specific_cache_path(self, tmp_path: Path):
+        with patch(
+            "inference_endpoint.dataset_manager.predefined.swe_bench.load_from_huggingface",
+            return_value=_make_hf_df(),
+        ) as mock_hf:
+            SWEBench.generate(datasets_dir=tmp_path, subset="lite", split="dev")
+
+        assert mock_hf.call_args.kwargs["split"] == "dev"
+        assert mock_hf.call_args.kwargs["cache_dir"] == (
+            tmp_path / "hf_cache" / "swe_bench_lite_dev"
+        )
+        assert (
+            tmp_path / "swe_bench" / "lite" / "dev" / "swe_bench_lite_dev.parquet"
+        ).exists()

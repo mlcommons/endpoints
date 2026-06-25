@@ -203,6 +203,10 @@ accuracy phase for this dataset; instead, `SWEBenchScorer` shells out to
 `mini-swe-agent` and the `swebench` evaluation harness, and that external flow
 drives requests to the configured endpoint.
 
+Keep `accuracy_config.num_repeats: 1`: the scorer performs one external
+evaluation run per benchmark. Optional `accuracy_config.extras.subset` and
+`split` are used consistently for dataset loading, preflight, and scoring.
+
 The isolated `uv` environment for those tools lives in `accuracy/`. Sync it
 once before running:
 

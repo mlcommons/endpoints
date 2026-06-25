@@ -25,9 +25,11 @@ datasets:
     type: "accuracy"
     accuracy_config:
       eval_method: "swe_bench_scorer"
-      num_repeats: 1
+      num_repeats: 1 # SWE-bench runs one external evaluation pass per benchmark.
       extras:
         num_instances: 200
+        # subset: "lite"
+        # split: "test"
 
 settings:
   load_pattern:

@@ -66,7 +66,7 @@ from inference_endpoint.core.types import QueryResult
 from inference_endpoint.dataset_manager.dataset import Dataset
 from inference_endpoint.dataset_manager.predefined.swe_bench import SWEBench
 from inference_endpoint.endpoint_client.config import HTTPClientConfig
-from inference_endpoint.evaluation.scoring import Scorer
+from inference_endpoint.evaluation.scoring import Scorer, SWEBenchScorer
 from inference_endpoint.exceptions import InputValidationError, SetupError
 from inference_endpoint.load_generator.sample_order import create_sample_order
 from inference_endpoint.load_generator.session import PhaseType
@@ -539,6 +539,82 @@ class TestAccuracyOnlyDataset:
         assert len(accuracy_datasets) == 0
         assert len(eval_configs) == 1
         assert eval_configs[0].dataset_name == "performance"
+
+    @pytest.mark.unit
+    def test_swe_bench_loader_receives_subset_and_split(self, tmp_path):
+        dummy_jsonl = tmp_path / "dummy.jsonl"
+        dummy_jsonl.write_text('{"text_input": "hello"}\n')
+        captured: dict[str, str] = {}
+
+        def fake_generate(
+            *,
+            datasets_dir,
+            subset="verified",
+            split="test",
+            force=False,
+        ):
+            captured["subset"] = subset
+            captured["split"] = split
+            return pd.DataFrame(
+                [{"instance_id": "repo__repo-0", "prompt": "Fix bug 0"}]
+            )
+
+        config = OfflineConfig(
+            endpoint_config={"endpoints": ["http://test:8000"]},
+            model_params={"name": "test-model"},
+            datasets=[
+                {
+                    "type": "performance",
+                    "path": str(dummy_jsonl),
+                    "parser": {"prompt": "text_input"},
+                },
+                {
+                    "name": "swe_bench",
+                    "type": "accuracy",
+                    "accuracy_config": {
+                        "eval_method": "swe_bench_scorer",
+                        "extras": {"subset": "lite", "split": "dev"},
+                    },
+                },
+            ],
+        )
+
+        with (
+            patch.object(SWEBenchScorer, "preflight", return_value=None),
+            patch.object(SWEBench, "generate", side_effect=fake_generate),
+        ):
+            _load_datasets(config, tmp_path)
+
+        assert captured == {"subset": "lite", "split": "dev"}
+
+    @pytest.mark.unit
+    def test_swe_bench_rejects_num_repeats_greater_than_one(self, tmp_path):
+        dummy_jsonl = tmp_path / "dummy.jsonl"
+        dummy_jsonl.write_text('{"text_input": "hello"}\n')
+        config = OfflineConfig(
+            endpoint_config={"endpoints": ["http://test:8000"]},
+            model_params={"name": "test-model"},
+            datasets=[
+                {
+                    "type": "performance",
+                    "path": str(dummy_jsonl),
+                    "parser": {"prompt": "text_input"},
+                },
+                {
+                    "name": "swe_bench",
+                    "type": "accuracy",
+                    "accuracy_config": {
+                        "eval_method": "swe_bench_scorer",
+                        "num_repeats": 2,
+                    },
+                },
+            ],
+        )
+
+        with pytest.raises(
+            InputValidationError, match=r"accuracy_config\.num_repeats must be 1"
+        ):
+            _load_datasets(config, tmp_path)
 
 
 class TestYAMLTemplateValidation:
