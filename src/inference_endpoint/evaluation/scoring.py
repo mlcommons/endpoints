@@ -375,6 +375,8 @@ def _lcb_ws_evaluate(
             ws.close()
         except Exception:  # noqa: BLE001 - ignore close errors
             pass
+
+
 class AgenticInferenceInlineScorer(Scorer, scorer_id="agentic_inference_inline"):
     """Score agentic inference performance replay outputs without issuing another phase."""
 
