@@ -1,0 +1,63 @@
+name: "qwen-agentic-benchmark"
+version: "1.0"
+type: "online"
+
+model_params:
+  name: "Qwen/Qwen3.6-35B-A3B"
+  temperature: 1.0
+  top_k: 20
+  top_p: 0.95
+  repetition_penalty: 1.0
+  presence_penalty: 1.5
+  max_new_tokens: 8192
+  chat_template_kwargs:
+    preserve_thinking: true
+
+datasets:
+  - name: agentic_coding
+    type: performance
+    path: /home/tianmuli/vllm_test/datasets/agentic_combined_v4.jsonl
+    accuracy_config:
+      eval_method: agentic_inference_inline # required benchmark default.
+    agentic_inference:
+      turn_timeout_s: 14400.0
+      num_trajectories_to_issue: 1
+
+  - name: "aime25::gptoss"
+    type: "accuracy"
+    accuracy_config:
+      eval_method: "pass_at_1"
+      ground_truth: "answer"
+      extractor: "boxed_math_extractor"
+      num_repeats: 8
+
+  - name: "gpqa::gptoss"
+    type: "accuracy"
+    accuracy_config:
+      eval_method: "pass_at_1"
+      extractor: "abcd_extractor"
+      ground_truth: "ground_truth"
+      num_repeats: 5
+
+  - name: "livecodebench::gptoss"
+    type: "accuracy"
+    accuracy_config:
+      eval_method: "code_bench_scorer"
+      extractor: "python_code_extractor"
+      num_repeats: 3
+
+settings:
+  runtime:
+    min_duration_ms: 0
+    max_duration_ms: 36000000
+
+  load_pattern:
+    type: agentic_inference
+    target_concurrency: 128 # Submission-specific concurrency.
+
+endpoint_config:
+  endpoints:
+    - "http://localhost:30000"
+  api_type: openai
+
+report_dir: logs/qwen_agentic

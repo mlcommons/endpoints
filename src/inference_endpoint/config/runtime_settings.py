@@ -85,6 +85,12 @@ class RuntimeSettings:
     load_pattern: LoadPattern | None
     """Load pattern configuration"""
 
+    agentic_num_trajectories: int | None = None
+    """For agentic inference: num_trajectories_to_issue from dataset config (None = all)."""
+
+    agentic_num_conversations: int | None = None
+    """For agentic inference: total distinct conversations in the loaded dataset."""
+
     @classmethod
     def from_config(
         cls,
@@ -200,19 +206,37 @@ class RuntimeSettings:
             self.load_pattern is not None
             and self.load_pattern.type == LoadPatternType.AGENTIC_INFERENCE
         ):
-            if self.n_samples_from_dataset < self.min_sample_count:
+            total = self.n_samples_from_dataset
+            if (
+                self.agentic_num_trajectories is not None
+                and self.agentic_num_conversations is not None
+                and self.agentic_num_conversations > 0
+            ):
+                # Scale proportionally: turns_per_trajectory ≈ total_turns / num_conversations
+                total = max(
+                    1,
+                    round(
+                        self.n_samples_from_dataset
+                        * self.agentic_num_trajectories
+                        / self.agentic_num_conversations
+                    ),
+                )
+            if total < self.min_sample_count:
                 logger.warning(
                     "Agentic inference run: min_sample_count=%d exceeds dataset "
                     "client-turn count=%d; using dataset size. Agentic inference cannot "
                     "issue more samples than the dataset provides.",
                     self.min_sample_count,
-                    self.n_samples_from_dataset,
+                    total,
                 )
             logger.debug(
-                "Sample count: %d (agentic inference: issuing all client turns)",
-                self.n_samples_from_dataset,
+                "Sample count: %d (agentic inference: %s)",
+                total,
+                f"{self.agentic_num_trajectories} trajectories × avg turns"
+                if self.agentic_num_trajectories is not None
+                else "issuing all client turns",
             )
-            return self.n_samples_from_dataset
+            return total
 
         # If min_duration is 0, use all dataset samples (new CLI default behavior)
         if self.min_duration_ms == 0:

@@ -93,6 +93,7 @@ def _make_strategy(
     inject_tool_delay: bool = False,
 ) -> AgenticInferenceStrategy:
     agentic_cfg = AgenticInferenceConfig(
+        enable_salt=False,
         turn_timeout_s=10.0,
         inject_tool_delay=inject_tool_delay,
     )
@@ -377,7 +378,7 @@ async def test_turn_ordering_enforced_end_to_end(echo_server):
         {"conversation_id": "c1", "turn": 3, "role": "user", "content": "Second"},
     ]
     ds = _make_dataset(rows)
-    agentic_cfg = AgenticInferenceConfig(turn_timeout_s=10.0)
+    agentic_cfg = AgenticInferenceConfig(enable_salt=False, turn_timeout_s=10.0)
     conv_manager = ConversationManager()
     strategy = AgenticInferenceStrategy(
         conversation_manager=conv_manager,

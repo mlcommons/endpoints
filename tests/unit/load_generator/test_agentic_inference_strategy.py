@@ -158,7 +158,7 @@ def _make_dataset_metadata(conversations: dict[str, list[int]]) -> ConversationM
 async def test_first_user_complete_stops_tracking_but_can_continue_for_accuracy():
     conv_manager = ConversationManager()
     metadata = _make_dataset_metadata({"conv1": [1], "conv2": [1, 2]})
-    cfg = AgenticInferenceConfig(num_trajectories_to_issue=2)
+    cfg = AgenticInferenceConfig(enable_salt=False, num_trajectories_to_issue=2)
     strategy = AgenticInferenceStrategy(
         conv_manager,
         metadata,
@@ -209,6 +209,7 @@ async def test_stop_on_first_user_complete_refills_until_budget_exhausted():
     conv_manager = ConversationManager()
     metadata = _make_dataset_metadata({"conv1": [1], "conv2": [1], "conv3": [1]})
     cfg = AgenticInferenceConfig(
+        enable_salt=False,
         stop_issuing_on_first_user_complete=True,
         num_trajectories_to_issue=3,
     )
@@ -766,7 +767,9 @@ async def test_abort_remaining_turns_includes_pending_delayed_turn():
     conv_manager = ConversationManager()
     conv_manager.get_or_create("c1", expected_client_turns=3)
     metadata = _metadata_with_delay("c1", [1, 2, 3], delay_turn=2, delay=60.0)
-    cfg = AgenticInferenceConfig(turn_timeout_s=5.0, inject_tool_delay=True)
+    cfg = AgenticInferenceConfig(
+        enable_salt=False, turn_timeout_s=5.0, inject_tool_delay=True
+    )
     strategy = AgenticInferenceStrategy(
         conv_manager, metadata, agentic_inference_config=cfg
     )
@@ -814,7 +817,9 @@ async def test_execute_waits_for_delayed_first_turns():
     conv_manager = ConversationManager()
     metadata = _make_dataset_metadata({"c1": [1], "c2": [1]})
     metadata.delay_seconds_by_key = {("c1", 1): 0.02, ("c2", 1): 0.02}
-    cfg = AgenticInferenceConfig(turn_timeout_s=5.0, inject_tool_delay=True)
+    cfg = AgenticInferenceConfig(
+        enable_salt=False, turn_timeout_s=5.0, inject_tool_delay=True
+    )
     strategy = AgenticInferenceStrategy(
         conv_manager,
         metadata,
@@ -851,7 +856,9 @@ async def test_inject_tool_delay_defers_issue_via_call_later():
 
     conv_manager = ConversationManager()
     metadata = _metadata_with_delay("c1", [1, 2], delay_turn=2, delay=0.05)
-    cfg = AgenticInferenceConfig(turn_timeout_s=5.0, inject_tool_delay=True)
+    cfg = AgenticInferenceConfig(
+        enable_salt=False, turn_timeout_s=5.0, inject_tool_delay=True
+    )
     strategy = AgenticInferenceStrategy(
         conv_manager, metadata, agentic_inference_config=cfg
     )
@@ -998,7 +1005,9 @@ async def test_inject_tool_delay_disabled_issues_immediately():
 
     conv_manager = ConversationManager()
     metadata = _metadata_with_delay("c1", [1, 2], delay_turn=2, delay=2.0)
-    cfg = AgenticInferenceConfig(turn_timeout_s=5.0, inject_tool_delay=False)
+    cfg = AgenticInferenceConfig(
+        enable_salt=False, turn_timeout_s=5.0, inject_tool_delay=False
+    )
     strategy = AgenticInferenceStrategy(
         conv_manager, metadata, agentic_inference_config=cfg
     )
@@ -1049,7 +1058,9 @@ async def test_inject_tool_delay_no_dataset_field_back_compat():
 
     conv_manager = ConversationManager()
     metadata = _make_dataset_metadata({"c1": [1, 2]})
-    cfg = AgenticInferenceConfig(turn_timeout_s=5.0, inject_tool_delay=True)
+    cfg = AgenticInferenceConfig(
+        enable_salt=False, turn_timeout_s=5.0, inject_tool_delay=True
+    )
     strategy = AgenticInferenceStrategy(
         conv_manager, metadata, agentic_inference_config=cfg
     )
@@ -1082,7 +1093,9 @@ async def test_inject_tool_delay_cancels_on_timeout():
 
     conv_manager = ConversationManager()
     metadata = _metadata_with_delay("c1", [1, 2, 3], delay_turn=3, delay=1.0)
-    cfg = AgenticInferenceConfig(turn_timeout_s=0.1, inject_tool_delay=True)
+    cfg = AgenticInferenceConfig(
+        enable_salt=False, turn_timeout_s=0.1, inject_tool_delay=True
+    )
     strategy = AgenticInferenceStrategy(
         conv_manager, metadata, agentic_inference_config=cfg
     )

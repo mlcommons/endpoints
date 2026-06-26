@@ -403,7 +403,20 @@ def setup_benchmark(config: BenchmarkConfig, test_mode: TestMode) -> BenchmarkCo
     dataloader, accuracy_datasets, eval_configs = _load_datasets(config, report_dir)
 
     # Setup runtime settings using factory method
-    rt_settings = RuntimeSettings.from_config(config, dataloader.num_samples())
+    agentic_overrides: dict = {}
+    if isinstance(dataloader, AgenticInferenceDataset):
+        perf_cfgs = [d for d in config.datasets if d.type == DatasetType.PERFORMANCE]
+        agentic_cfg = perf_cfgs[0].agentic_inference if perf_cfgs else None
+        assert dataloader.conversation_metadata is not None
+        agentic_overrides = {
+            "agentic_num_conversations": dataloader.conversation_metadata.num_conversations,
+            "agentic_num_trajectories": agentic_cfg.num_trajectories_to_issue
+            if agentic_cfg is not None
+            else None,
+        }
+    rt_settings = RuntimeSettings.from_config(
+        config, dataloader.num_samples(), **agentic_overrides
+    )
 
     # Calculate and display expected sample count
     total_samples = rt_settings.total_samples_to_issue()
@@ -484,6 +497,7 @@ def _build_phases(
 
     # Accuracy phases — use eval_cfg.dataset_name as phase name so it matches
     # what Scorer._load_sample_index_map() looks up in sample_idx_map.json
+    perf_lp = ctx.rt_settings.load_pattern
     for eval_cfg in ctx.eval_configs:
         if eval_cfg.dataset_name == "performance":
             continue
@@ -494,12 +508,17 @@ def _build_phases(
                 "AgenticInferenceDataset, which is not yet supported for "
                 "accuracy evaluation."
             )
-        # Accuracy phases run at MAX_THROUGHPUT; inheriting perf_lp (e.g. POISSON)
-        # would silently rate-limit evaluation until an agentic inference accuracy strategy
-        # and QPS-budgeting support are added.
-        acc_load_pattern: LoadPattern | None = LoadPattern(
-            type=LoadPatternType.MAX_THROUGHPUT
-        )
+        # Accuracy phases inherit the perf load pattern so the KV pool is not
+        # exhausted by simultaneous burst requests. AGENTIC_INFERENCE is
+        # downgraded to CONCURRENCY with the same cap because plain accuracy
+        # datasets are single-turn and cannot use the agentic scheduler.
+        if perf_lp is not None and perf_lp.type == LoadPatternType.AGENTIC_INFERENCE:
+            acc_load_pattern: LoadPattern | None = LoadPattern(
+                type=LoadPatternType.CONCURRENCY,
+                target_concurrency=perf_lp.target_concurrency,
+            )
+        else:
+            acc_load_pattern = perf_lp
         acc_settings = RuntimeSettings(
             metric_target=ctx.rt_settings.metric_target,
             reported_metrics=ctx.rt_settings.reported_metrics,

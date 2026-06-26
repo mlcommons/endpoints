@@ -273,14 +273,14 @@ class AgenticInferenceConfig(BaseModel):
         ),
     )
     enable_salt: bool = Field(
-        False,
+        True,
         description=(
             "Add deterministic salt markers before and after the system prompt "
             "to prevent KV cache reuse across trajectories in agentic inference setting."
         ),
     )
     inject_tool_delay: bool = Field(
-        False,
+        True,
         description=(
             "Pause for a predefined duration between turns. Duration is defined "
             "in dataset."
