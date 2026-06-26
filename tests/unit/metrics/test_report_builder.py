@@ -284,6 +284,12 @@ class TestReportDisplayAndSerialize:
         # Absent seeds -> null, not omitted.
         assert json.loads(Report.from_snapshot(snap).to_json())["seeds"] is None
 
+    def test_to_json_orders_qps_tps_after_git_sha(self):
+        """qps/tps (then seeds) are surfaced right after git_sha, not at the tail."""
+        keys = list(json.loads(_build_report(_make_registry(n_samples=50)).to_json()))
+        assert keys[:4] == ["version", "git_sha", "qps", "tps"]
+        assert keys.index("seeds") < keys.index("ttft")
+
     def test_to_json_save(self, tmp_path: Path):
         registry = _make_registry(n_samples=5)
         report = _build_report(registry)

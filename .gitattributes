@@ -1,2 +1,6 @@
 examples/04_GPTOSS120B_Example/data/perf_eval_ref.parquet filter=lfs diff=lfs merge=lfs -text
 examples/04_GPTOSS120B_Example/data/acc_eval_ref.parquet filter=lfs diff=lfs merge=lfs -text
+
+# Stamp the commit SHA into the package at `git archive` time (sdist / container
+# builds carry no .git). Read back by inference_endpoint.utils.version.get_git_sha.
+src/inference_endpoint/_git_archival.txt export-subst

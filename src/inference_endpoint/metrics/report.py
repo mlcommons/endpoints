@@ -232,7 +232,15 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
         )
 
     def to_json(self, save_to: os.PathLike | None = None) -> bytes:
-        json_bytes = msgspec.json.format(msgspec.json.encode(self), indent=2)
+        # Surface the headline run identity + throughput first (qps/tps/seeds right
+        # after git_sha) instead of trailing the long metric dicts. msgspec serializes
+        # in field-definition order and defaulted fields must come last, so reorder the
+        # serialized mapping rather than the struct.
+        data = msgspec.to_builtins(self)
+        head = ("version", "git_sha", "qps", "tps", "seeds")
+        ordered = {k: data[k] for k in head if k in data}
+        ordered.update({k: v for k, v in data.items() if k not in ordered})
+        json_bytes = msgspec.json.format(msgspec.json.encode(ordered), indent=2)
         if save_to is not None:
             with Path(save_to).open("wb") as f:
                 f.write(json_bytes)
