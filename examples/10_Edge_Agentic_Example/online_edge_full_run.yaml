@@ -34,6 +34,12 @@ timeout: 21600 # 6 h: ~2.5 h perf + ~3 h accuracy, with headroom.
 
 model_params:
   name: "Qwen3.6-27B-Q4_K_M" # set to your served model name.
+  # HF tokenizer for client-side token metrics (ISL / OSL / TPOT). Without it
+  # the served GGUF name above is not a loadable tokenizer, so the metrics
+  # aggregator cannot count output tokens and the OSL / TPOT blocks in
+  # result_summary.json are left empty. Point this at the model's canonical
+  # HF tokenizer (or a local path).
+  tokenizer_name: "Qwen/Qwen3.6-27B"
   # Deterministic decoding so both the inline accuracy check and the BFCL gate
   # are reproducible. Reasoning is disabled server-side
   # (llama-server --reasoning off). max_new_tokens 1024 is generous for BFCL's
