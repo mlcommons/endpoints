@@ -28,6 +28,7 @@ datasets:  # Dataset configs
   accuracy_config: null  # Accuracy evaluation settings
   multi_turn: null  # Multi-turn conversation configuration
   generation_config_override: null  # Per-dataset overrides for the top-level model_params (sparse — only the fields you want to override). Merged on top of BenchmarkConfig.model_params at dataset-load time. Useful for MLPerf-style runs where accuracy and performance use different output budgets in the same fleet, e.g. generation_config_override: {max_new_tokens: 32768, temperature: 0.0}. NOTE: per-dataset `streaming` and `name` are accepted (kwargs-style) but not honored by the single-aggregator metrics path — set those on top-level model_params.
+  agentic_inference: null  # Agentic inference conversation configuration
 - name: accuracy
   type: accuracy  # Dataset purpose: performance or accuracy | options: performance, accuracy
   path: '<DATASET_PATH eg: tests/assets/datasets/ds_samples.jsonl>'  # Dataset file path
@@ -38,12 +39,13 @@ datasets:  # Dataset configs
     prompt: question
     system: system_prompt
   accuracy_config:  # Accuracy evaluation settings
-    eval_method: pass_at_1  # Scorer method | options: pass_at_1, string_match, rouge, code_bench_scorer, shopify_category_f1, vbench
+    eval_method: pass_at_1  # Scorer method | options: pass_at_1, string_match, rouge, code_bench_scorer, shopify_category_f1, agentic_inference_inline, vbench
     ground_truth: ground_truth  # Ground truth column name
     extractor: boxed_math_extractor  # Answer extractor (abcd_extractor, boxed_math_extractor, identity_extractor, python_code_extractor)
     num_repeats: 1  # Repeat dataset N times for evaluation
   multi_turn: null  # Multi-turn conversation configuration
   generation_config_override: null  # Per-dataset overrides for the top-level model_params (sparse — only the fields you want to override). Merged on top of BenchmarkConfig.model_params at dataset-load time. Useful for MLPerf-style runs where accuracy and performance use different output budgets in the same fleet, e.g. generation_config_override: {max_new_tokens: 32768, temperature: 0.0}. NOTE: per-dataset `streaming` and `name` are accepted (kwargs-style) but not honored by the single-aggregator metrics path — set those on top-level model_params.
+  agentic_inference: null  # Agentic inference conversation configuration
 settings:
   runtime:
     min_duration_ms: 600000  # Min duration (ms, or with suffix: 600s, 10m)
@@ -52,7 +54,7 @@ settings:
     scheduler_random_seed: 42  # Scheduler RNG seed
     dataloader_random_seed: 42  # Dataloader RNG seed
   load_pattern:
-    type: concurrency  # Load pattern type | options: max_throughput, poisson, concurrency, multi_turn, burst, step
+    type: concurrency  # Load pattern type | options: max_throughput, poisson, concurrency, agentic_inference, burst, step
     target_qps: null  # Target QPS
     target_concurrency: 32  # Concurrent requests
   client:
@@ -86,9 +88,12 @@ settings:
   warmup:
     enabled: false  # Enable warmup phase before performance run
     n_requests: null  # Warmup request count (None = full dataset once)
-    salt: false  # Prepend a unique random hex salt to each warmup prompt
+    salt: true  # Prepend a unique random hex salt to each warmup prompt
     drain: false
     warmup_random_seed: 42  # RNG seed for warmup scheduling and sample ordering
+  profiling:
+    engine: null  # Profile the named inference engine around the performance phase | options: vllm
+    urls: null  # URL(s) the profiler start/stop triggers are derived from. When None, derived from endpoint_config.endpoints instead. Use when the profiler admin endpoint differs from the inference endpoint.
 endpoint_config:
   endpoints:  # Endpoint URL(s). Must include scheme, e.g. 'http://host:port'.
   - http://localhost:8000

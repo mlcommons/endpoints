@@ -140,7 +140,9 @@ class TestFromSnapshot:
         assert report.n_samples_completed == 0
         assert report.n_samples_failed == 0
         assert report.duration_ns is None
-        assert report.qps() is None
+        # No duration -> from_snapshot leaves throughput unset.
+        assert report.qps is None
+        assert report.tps is None
         # Series with count==0 should produce empty dicts.
         assert report.ttft == {}
         assert report.latency == {}
@@ -154,7 +156,7 @@ class TestFromSnapshot:
         assert report.n_samples_issued == 50
         assert report.n_samples_completed == 50
         assert report.duration_ns == 10_000_000_000
-        assert report.qps() == pytest.approx(5.0)
+        assert report.qps == pytest.approx(5.0)
 
         assert "min" in report.ttft
         assert "percentiles" in report.ttft
@@ -163,8 +165,19 @@ class TestFromSnapshot:
         assert report.latency["min"] > 0
         # No TPOT recordings in the registry → empty dict.
         assert report.tpot == {}
-        # OSL data was written → tps() is computable.
-        assert report.tps() is not None
+        # OSL data was written → tps is computable.
+        assert report.tps is not None
+
+    def test_seeds_keyword_only_passthrough(self):
+        """seeds is config, not a snapshot metric: None unless the caller
+        supplies it, and carried verbatim into the report when it does."""
+        registry = _make_registry(n_samples=5)
+        snap = snapshot_to_dict(
+            registry.build_snapshot(state=SessionState.COMPLETE, n_pending_tasks=0)
+        )
+        assert Report.from_snapshot(snap).seeds is None
+        seeds = {"scheduler_random_seed": 42, "dataloader_random_seed": 7}
+        assert Report.from_snapshot(snap, seeds=seeds).seeds == seeds
 
     def test_failed_uses_tracked_counter(self):
         """``n_samples_failed`` reads from ``tracked_samples_failed``, not
@@ -238,6 +251,39 @@ class TestReportDisplayAndSerialize:
         assert data["n_samples_completed"] == 5
         assert "ttft" in data
 
+    def test_to_json_serializes_qps_and_tps(self):
+        """result_summary.json is self-complete: qps/tps are serialized so
+        consumers don't recompute them from duration + counts."""
+        report = _build_report(_make_registry(n_samples=50))
+        data = json.loads(report.to_json())
+        assert data["qps"] == pytest.approx(5.0)  # 50 completed / 10s
+        assert data["tps"] == pytest.approx(report.tps)
+        assert data["tps"] > 0  # OSL was recorded, so TPS is computable
+
+    def test_to_json_qps_tps_null_without_duration(self):
+        """No duration -> qps/tps serialize as null, not omitted or crashing."""
+        data = json.loads(_build_report(_make_registry(n_samples=0)).to_json())
+        assert data["qps"] is None
+        assert data["tps"] is None
+
+    def test_to_json_serializes_seeds(self):
+        """result_summary.json carries the run's RNG seeds so a run can be
+        validated as reproducible; absent seeds serialize as null."""
+        registry = _make_registry(n_samples=5)
+        snap = snapshot_to_dict(
+            registry.build_snapshot(state=SessionState.COMPLETE, n_pending_tasks=0)
+        )
+        seeds = {"scheduler_random_seed": 42, "dataloader_random_seed": 42}
+        report = Report.from_snapshot(snap, seeds=seeds)
+        assert json.loads(report.to_json())["seeds"] == seeds
+
+        lines: list[str] = []
+        report.display(fn=lines.append, summary_only=True)
+        assert any("Seeds:" in ln for ln in lines)
+
+        # Absent seeds -> null, not omitted.
+        assert json.loads(Report.from_snapshot(snap).to_json())["seeds"] is None
+
     def test_to_json_save(self, tmp_path: Path):
         registry = _make_registry(n_samples=5)
         report = _build_report(registry)
@@ -247,25 +293,6 @@ class TestReportDisplayAndSerialize:
         assert out_path.exists()
         data = json.loads(out_path.read_bytes())
         assert data["n_samples_completed"] == 5
-
-    def test_qps_none_without_duration(self):
-        report = Report(
-            version="test",
-            git_sha=None,
-            test_started_at=0,
-            n_samples_issued=100,
-            n_samples_completed=100,
-            n_samples_failed=0,
-            duration_ns=None,
-            state="complete",
-            complete=True,
-            ttft={},
-            tpot={},
-            latency={},
-            output_sequence_lengths={},
-        )
-        assert report.qps() is None
-        assert report.tps() is None
 
     def test_display_no_started_at(self):
         """test_started_at=0 should not display a timestamp."""

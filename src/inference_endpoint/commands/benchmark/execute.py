@@ -30,13 +30,16 @@ import random
 import shutil
 import signal
 import tempfile
+import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from dataclasses import replace as dataclass_replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 from urllib.parse import urljoin
 
 import msgspec
@@ -44,7 +47,6 @@ import msgspec.json
 from huggingface_hub import model_info
 from pydantic import ValidationError
 from tqdm import tqdm
-from transformers import AutoTokenizer
 from transformers.utils import logging as transformers_logging
 
 from inference_endpoint.async_utils.event_publisher import EventPublisherService
@@ -59,9 +61,6 @@ from inference_endpoint.async_utils.services.metrics_aggregator.snapshot import 
 from inference_endpoint.async_utils.services.metrics_aggregator.subscriber import (
     MetricsSnapshotSubscriber,
 )
-from inference_endpoint.async_utils.services.metrics_aggregator.token_metrics import (
-    _normalize_tool_calls_for_template,
-)
 from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import (
@@ -70,14 +69,17 @@ from inference_endpoint.config.schema import (
     DatasetType,
     LoadPattern,
     LoadPatternType,
+    ProfilerEngine,
     StreamingMode,
     TestMode,
     TestType,
 )
 from inference_endpoint.core.types import QueryResult
+from inference_endpoint.dataset_manager.agentic_inference_dataset import (
+    AgenticInferenceDataset,
+)
 from inference_endpoint.dataset_manager.dataset import Dataset
 from inference_endpoint.dataset_manager.factory import DataLoaderFactory
-from inference_endpoint.dataset_manager.multi_turn_dataset import MultiTurnDataset
 from inference_endpoint.endpoint_client.cpu_affinity import AffinityPlan, pin_loadgen
 from inference_endpoint.endpoint_client.http_client import HTTPEndpointClient
 from inference_endpoint.endpoint_client.http_sample_issuer import HttpClientSampleIssuer
@@ -88,8 +90,10 @@ from inference_endpoint.exceptions import (
     InputValidationError,
     SetupError,
 )
+from inference_endpoint.load_generator.agentic_inference_strategy import (
+    AgenticInferenceStrategy,
+)
 from inference_endpoint.load_generator.conversation_manager import ConversationManager
-from inference_endpoint.load_generator.multi_turn_strategy import MultiTurnStrategy
 from inference_endpoint.load_generator.session import (
     BenchmarkSession,
     PhaseConfig,
@@ -141,6 +145,10 @@ class BenchmarkResult:
     collector: ResponseCollector
     report: Report | None
     tmpfs_dir: Path
+    # Profile trigger payload {engine: str, starts: [...], stops: [...]} when
+    # settings.profiling.engine is set; None otherwise. Rendered into
+    # report.txt and a sibling profiling.json by finalize_benchmark.
+    profiling: dict[str, Any] | None = None
 
 
 @dataclass
@@ -233,6 +241,35 @@ def _check_tokenizer_exists(model_name: str) -> bool:
         return False
 
 
+def _resolve_accuracy_components(
+    dataset_name: str, accuracy_config: Any | None
+) -> tuple[type[Scorer], type[Extractor] | None]:
+    """Validate scorer/extractor config and return resolved classes."""
+    if accuracy_config is None or accuracy_config.eval_method is None:
+        raise InputValidationError(
+            f"Dataset '{dataset_name}' requires accuracy_config with eval_method"
+        )
+
+    try:
+        scorer_cls = Scorer.get(accuracy_config.eval_method)
+    except KeyError as exc:
+        raise InputValidationError(str(exc)) from exc
+    extractor_name = accuracy_config.extractor
+    if extractor_name is None:
+        if scorer_cls.REQUIRES_EXTRACTOR:
+            raise InputValidationError(
+                f"Dataset '{dataset_name}' uses scorer "
+                f"'{accuracy_config.eval_method}' which requires an extractor"
+            )
+        extractor_cls: type[Extractor] | None = None
+    else:
+        try:
+            extractor_cls = Extractor.get(extractor_name)
+        except KeyError as exc:
+            raise InputValidationError(str(exc)) from exc
+    return scorer_cls, extractor_cls
+
+
 def _load_datasets(
     config: BenchmarkConfig, report_dir: Path
 ) -> tuple[Dataset, list[Dataset], list[AccuracyConfiguration]]:
@@ -252,25 +289,10 @@ def _load_datasets(
 
     # Pack the evaluation parameters for each accuracy dataset
     for acc_cfg in accuracy_cfgs:
-        if (
-            acc_cfg.accuracy_config is None
-            or acc_cfg.accuracy_config.eval_method is None
-        ):
-            raise InputValidationError(
-                f"Dataset '{acc_cfg.name}' requires accuracy_config with eval_method"
-            )
-
-        scorer_cls = Scorer.get(acc_cfg.accuracy_config.eval_method)
-        extractor_name = acc_cfg.accuracy_config.extractor
-        if extractor_name is None:
-            if scorer_cls.REQUIRES_EXTRACTOR:
-                raise InputValidationError(
-                    f"Dataset '{acc_cfg.name}' uses scorer "
-                    f"'{acc_cfg.accuracy_config.eval_method}' which requires an extractor"
-                )
-            extractor_cls: type[Extractor] | None = None
-        else:
-            extractor_cls = Extractor.get(extractor_name)
+        scorer_cls, extractor_cls = _resolve_accuracy_components(
+            acc_cfg.name, acc_cfg.accuracy_config
+        )
+        assert acc_cfg.accuracy_config is not None
 
         ds = DataLoaderFactory.create_loader(
             acc_cfg, num_repeats=acc_cfg.accuracy_config.num_repeats
@@ -299,7 +321,7 @@ def _load_datasets(
         logger.info(f"Loaded {ds} - {ds.num_samples()} samples")
 
     if not accuracy_cfgs:
-        logger.info("No accuracy datasets provided")
+        logger.info("No separate accuracy datasets provided")
     if len(performance_cfgs) > 1:
         raise InputValidationError("Multiple performance datasets not supported")
 
@@ -321,76 +343,32 @@ def _load_datasets(
     except Exception as e:
         raise SetupError(f"Failed to load dataset: {e}") from e
 
-    return dataloader, accuracy_datasets, eval_configs
-
-
-def _precompute_isl_for_multi_turn(
-    dataloader: MultiTurnDataset, tokenizer_name: str
-) -> None:
-    """Tokenize pre-built message lists and store token counts in each sample.
-
-    Runs apply_chat_template once per client turn so the hot-path IslTrigger
-    sync path (len(token_ids)) is used instead of on-the-fly text tokenization.
-    Only affects dataset-history turns; live-history turns override 'messages'
-    at runtime so the stored input_tokens are stale (acceptable approximation).
-    """
-    try:
-        tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
-    except Exception:
-        logger.exception(
-            "ISL pre-computation: failed to load tokenizer %s; "
-            "falling back to text-tokenization at runtime",
-            tokenizer_name,
-        )
-        return
-    skipped = 0
-    first_failure_logged = False
-    for sample in dataloader.data or []:
-        messages = sample.get("messages")
-        if not messages:
-            continue
-        try:
-            normalized_messages = []
-            for msg in messages:
-                if msg.get("tool_calls"):
-                    msg = {
-                        **msg,
-                        "tool_calls": _normalize_tool_calls_for_template(
-                            msg["tool_calls"]
-                        ),
-                    }
-                normalized_messages.append(msg)
-            tools = sample.get("tools")
-            raw = tokenizer.apply_chat_template(
-                normalized_messages,
-                tools=tools if tools else None,
-                tokenize=True,
-                add_generation_prompt=True,
+    if perf_cfg.accuracy_config is not None:
+        accuracy_config = perf_cfg.accuracy_config
+        if accuracy_config.num_repeats != 1:
+            raise InputValidationError(
+                f"Dataset '{perf_cfg.name}' is a performance dataset; "
+                "accuracy_config.num_repeats must be 1 because scoring runs on "
+                "already-issued performance outputs"
             )
-            # Some tokenizers (e.g. Qwen3 fast tokenizer) return BatchEncoding
-            # instead of a plain list; extract .input_ids in that case.
-            token_ids: list[int] = raw.input_ids if hasattr(raw, "input_ids") else raw
-            sample["input_tokens"] = token_ids
-        except Exception:
-            if not first_failure_logged:
-                logger.exception(
-                    "ISL pre-computation: apply_chat_template failed (first failure shown)"
-                )
-                first_failure_logged = True
-            skipped += 1
-    if skipped:
-        logger.warning(
-            "ISL pre-computation: %d turn(s) skipped (apply_chat_template failed)",
-            skipped,
+        scorer_cls, extractor_cls = _resolve_accuracy_components(
+            perf_cfg.name, accuracy_config
         )
-    total_with_messages = len([s for s in (dataloader.data or []) if s.get("messages")])
-    if total_with_messages > 0 and skipped == total_with_messages:
-        logger.warning(
-            "ISL precomputation: all %d turn(s) failed apply_chat_template; "
-            "ISL metrics will use text-tokenization fallback. "
-            "Check tokenizer/template compatibility.",
-            total_with_messages,
+
+        eval_configs.append(
+            AccuracyConfiguration(
+                scorer_cls,
+                extractor_cls,
+                "performance",
+                dataloader,
+                report_dir,
+                accuracy_config.ground_truth,
+                accuracy_config.num_repeats,
+                accuracy_config.extras or {},
+            )
         )
+
+    return dataloader, accuracy_datasets, eval_configs
 
 
 def setup_benchmark(config: BenchmarkConfig, test_mode: TestMode) -> BenchmarkContext:
@@ -433,10 +411,6 @@ def setup_benchmark(config: BenchmarkConfig, test_mode: TestMode) -> BenchmarkCo
     # Datasets
     dataloader, accuracy_datasets, eval_configs = _load_datasets(config, report_dir)
 
-    if isinstance(dataloader, MultiTurnDataset) and tokenizer_name is not None:
-        logger.info("Pre-computing ISL token counts for multi-turn dataset…")
-        _precompute_isl_for_multi_turn(dataloader, tokenizer_name)
-
     # Setup runtime settings using factory method
     rt_settings = RuntimeSettings.from_config(config, dataloader.num_samples())
 
@@ -469,7 +443,7 @@ def setup_benchmark(config: BenchmarkConfig, test_mode: TestMode) -> BenchmarkCo
 
 def _build_phases(
     ctx: BenchmarkContext,
-    perf_strategy: MultiTurnStrategy | None = None,
+    perf_strategy: AgenticInferenceStrategy | None = None,
 ) -> list[PhaseConfig]:
     """Build the phase list from BenchmarkContext."""
     phases: list[PhaseConfig] = []
@@ -520,14 +494,17 @@ def _build_phases(
     # Accuracy phases — use eval_cfg.dataset_name as phase name so it matches
     # what Scorer._load_sample_index_map() looks up in sample_idx_map.json
     for eval_cfg in ctx.eval_configs:
+        if eval_cfg.dataset_name == "performance":
+            continue
         acc_ds = eval_cfg.dataset
-        if isinstance(acc_ds, MultiTurnDataset):
+        if isinstance(acc_ds, AgenticInferenceDataset):
             raise InputValidationError(
-                f"Accuracy dataset '{eval_cfg.dataset_name}' is a MultiTurnDataset, "
-                "which is not yet supported for accuracy evaluation."
+                f"Accuracy dataset '{eval_cfg.dataset_name}' is an "
+                "AgenticInferenceDataset, which is not yet supported for "
+                "accuracy evaluation."
             )
         # Accuracy phases run at MAX_THROUGHPUT; inheriting perf_lp (e.g. POISSON)
-        # would silently rate-limit evaluation until a multi-turn accuracy strategy
+        # would silently rate-limit evaluation until an agentic inference accuracy strategy
         # and QPS-budgeting support are added.
         acc_load_pattern: LoadPattern | None = LoadPattern(
             type=LoadPatternType.MAX_THROUGHPUT
@@ -576,6 +553,110 @@ def _load_final_snapshot_from_disk(path: Path) -> dict[str, Any] | None:
     except Exception as e:  # noqa: BLE001 — best-effort.
         logger.warning("Failed to read final snapshot %s: %s", path, e)
         return None
+
+
+# (start_path, stop_path) for each supported inference engine's profiling
+# protocol. Add a row when introducing a new ProfilerEngine variant.
+_PROFILE_PATHS: dict[ProfilerEngine, tuple[str, str]] = {
+    ProfilerEngine.VLLM: ("/start_profile", "/stop_profile"),
+}
+
+
+def _derive_profile_urls(
+    endpoints: list[str], engine: ProfilerEngine, action: str
+) -> list[str]:
+    """One profile URL per endpoint, derived from the engine's HTTP protocol.
+
+    For vLLM: strip a trailing ``/v1`` from each endpoint and append
+    ``/{start,stop}_profile``. ``action`` is ``"start"`` or ``"stop"``.
+    """
+    if not endpoints:
+        raise ValueError(
+            f"profiling.engine={engine.value} but endpoint_config.endpoints "
+            f"is empty; cannot derive {action} URLs"
+        )
+    start_path, stop_path = _PROFILE_PATHS[engine]
+    path = start_path if action == "start" else stop_path
+    urls: list[str] = []
+    for ep in endpoints:
+        base = ep.rstrip("/")
+        if base.endswith("/v1"):
+            base = base[:-3]
+        urls.append(f"{base.rstrip('/')}{path}")
+    return urls
+
+
+def _post_profile(url: str) -> dict[str, Any]:
+    """POST {url} with empty body; never raises. Returns a record dict suitable
+    for report.txt rendering and profiling.json serialization."""
+    record: dict[str, Any] = {
+        "url": url,
+        "sent_at_ns": time.monotonic_ns(),
+        "sent_at_iso": datetime.now().isoformat(timespec="milliseconds"),
+        "status": None,
+        "error": None,
+    }
+    req = urllib_request.Request(url, method="POST", data=b"")
+    try:
+        with urllib_request.urlopen(req, timeout=2) as resp:
+            record["status"] = resp.status
+    except urllib_error.HTTPError as e:
+        record["status"] = e.code
+        record["error"] = f"{e.code} {e.reason}"
+    except Exception as e:  # noqa: BLE001 — profile failures must never abort a run
+        record["error"] = f"{type(e).__name__}: {e}"
+    return record
+
+
+def _render_profile_status(rec: dict[str, Any]) -> str:
+    status = rec.get("status")
+    error = rec.get("error")
+    if status == 200:
+        return "200 OK"
+    if status == 404:
+        return (
+            "404 (profiling not enabled on server — pass "
+            "--profiler-config.profiler=... to server)"
+        )
+    if error:
+        return error
+    if status is not None:
+        return str(status)
+    return "ERROR"
+
+
+def _write_profiling_section(f: TextIO, profiling: dict[str, Any]) -> None:
+    """Append the Profiling section to report.txt (called after report.display)."""
+    starts = profiling.get("starts", [])
+    stops = profiling.get("stops", [])
+    f.write("\n------------------- Profiling -------------------\n")
+    f.write(f"Engine: {profiling.get('engine', 'unknown')}\n")
+    f.write("Start:\n")
+    for rec in starts:
+        f.write(
+            f"  POST {rec['url']} @ {rec['sent_at_iso']} → "
+            f"{_render_profile_status(rec)}\n"
+        )
+    if stops:
+        f.write("Stop:\n")
+        for rec in stops:
+            suffix = (
+                " (from abort handler)" if rec.get("stop_reason") == "abort" else ""
+            )
+            f.write(
+                f"  POST {rec['url']} @ {rec['sent_at_iso']} → "
+                f"{_render_profile_status(rec)}{suffix}\n"
+            )
+    if starts and stops:
+        first_start = min(r["sent_at_ns"] for r in starts)
+        last_stop = max(r["sent_at_ns"] for r in stops)
+        f.write(f"Trigger span: {(last_stop - first_start) / 1e9:.2f} s\n")
+    f.write(
+        "\nNote: actual trace window is bounded by server-side "
+        "--profiler-config.delay_iterations and "
+        "--profiler-config.max_iterations.\n"
+        "Trace artifact path is in server stdout.\n"
+    )
 
 
 async def _run_benchmark_async(
@@ -710,10 +791,10 @@ async def _run_benchmark_async(
             launcher.kill_all()
             raise SetupError(f"Failed to connect to endpoint: {e}") from e
 
-        # Build multi-turn strategy if the performance dataset is a MultiTurnDataset.
-        multi_turn_strategy: MultiTurnStrategy | None = None
-        if isinstance(ctx.dataloader, MultiTurnDataset):
-            mt_cfg = None
+        # Build agentic inference strategy if the performance dataset uses it.
+        agentic_inference_strategy: AgenticInferenceStrategy | None = None
+        if isinstance(ctx.dataloader, AgenticInferenceDataset):
+            agentic_cfg = None
             if ctx.config.datasets:
                 perf_ds_cfg = next(
                     (
@@ -724,24 +805,24 @@ async def _run_benchmark_async(
                     None,
                 )
                 if perf_ds_cfg is not None:
-                    mt_cfg = perf_ds_cfg.multi_turn
+                    agentic_cfg = perf_ds_cfg.agentic_inference
             assert ctx.dataloader.conversation_metadata is not None
-            multi_turn_strategy = MultiTurnStrategy(
+            agentic_inference_strategy = AgenticInferenceStrategy(
                 conversation_manager=ConversationManager(),
                 dataset_metadata=ctx.dataloader.conversation_metadata,
-                multi_turn_config=mt_cfg,
+                agentic_inference_config=agentic_cfg,
                 target_concurrency=ctx.config.settings.load_pattern.target_concurrency,
             )
 
         _on_sample_complete: Callable[[QueryResult], None]
-        if multi_turn_strategy is not None:
+        if agentic_inference_strategy is not None:
 
             def _on_sample_complete(result: QueryResult) -> None:
                 try:
-                    multi_turn_strategy.on_sample_complete(result)
+                    agentic_inference_strategy.on_sample_complete(result)
                 except Exception:
                     logger.exception(
-                        "multi_turn_strategy.on_sample_complete failed (result=%s)",
+                        "agentic_inference_strategy.on_sample_complete failed (result=%s)",
                         result.id,
                     )
                 try:
@@ -751,8 +832,8 @@ async def _run_benchmark_async(
                         "collector.on_complete_hook failed (result=%s)", result.id
                     )
 
-            multi_turn_strategy._session_on_sample_complete = _on_sample_complete
-            multi_turn_strategy._session_publisher = publisher
+            agentic_inference_strategy._session_on_sample_complete = _on_sample_complete
+            agentic_inference_strategy._session_publisher = publisher
 
         else:
             _on_sample_complete = collector.on_complete_hook
@@ -766,7 +847,7 @@ async def _run_benchmark_async(
             session_id=session_id,
         )
 
-        phases = _build_phases(ctx, perf_strategy=multi_turn_strategy)
+        phases = _build_phases(ctx, perf_strategy=agentic_inference_strategy)
         report: Report | None = None
 
         # Timer starts when the performance phase begins (after warmup drains),
@@ -774,6 +855,23 @@ async def _run_benchmark_async(
         global_timeout_handle = None
         _timeout_done = False
         max_duration_ms = ctx.rt_settings.max_duration_ms
+
+        # Profile trigger state. Pre-derive URLs once so a bad config
+        # (engine set but no endpoints) fails before the run.
+        profiling_cfg = config.settings.profiling
+        profile_start_urls: list[str] = []
+        profile_stop_urls: list[str] = []
+        profile_starts: list[dict[str, Any]] = []
+        profile_stops: list[dict[str, Any]] = []
+        if profiling_cfg.engine is not None:
+            profile_endpoints = profiling_cfg.urls or config.endpoint_config.endpoints
+            profile_start_urls = _derive_profile_urls(
+                profile_endpoints, profiling_cfg.engine, "start"
+            )
+            profile_stop_urls = _derive_profile_urls(
+                profile_endpoints, profiling_cfg.engine, "stop"
+            )
+        session_completed_normally = False
 
         def _on_global_timeout() -> None:
             if not _timeout_done:
@@ -785,17 +883,32 @@ async def _run_benchmark_async(
 
         def _on_phase_start(phase: PhaseConfig) -> None:
             nonlocal global_timeout_handle
-            if (
-                phase.phase_type == PhaseType.PERFORMANCE
-                and max_duration_ms is not None
-            ):
+            if phase.phase_type != PhaseType.PERFORMANCE:
+                return
+            if max_duration_ms is not None:
                 global_timeout_handle = loop.call_later(
                     max_duration_ms / 1000.0, _on_global_timeout
                 )
+            # Fire /start_profile sequentially before any perf request is
+            # issued, so the server is armed when traffic begins. Blocks
+            # the loop briefly (sub-100ms per URL); strategy task hasn't
+            # been created yet so nothing is starved.
+            for url in profile_start_urls:
+                rec = _post_profile(url)
+                if rec["status"] == 200:
+                    logger.info("Profile start: %s -> 200 OK", url)
+                else:
+                    logger.warning(
+                        "Profile start: %s -> %s",
+                        url,
+                        rec["error"] or rec["status"],
+                    )
+                profile_starts.append(rec)
 
         loop.add_signal_handler(signal.SIGINT, session.stop)
         try:
             result = await session.run(phases, on_phase_start=_on_phase_start)
+            session_completed_normally = True
         except Exception as e:
             raise ExecutionError(f"Benchmark execution failed: {e}") from e
         finally:
@@ -803,6 +916,25 @@ async def _run_benchmark_async(
             if global_timeout_handle is not None:
                 global_timeout_handle.cancel()
             loop.remove_signal_handler(signal.SIGINT)
+            # Fire /stop_profile for URLs whose /start_profile succeeded.
+            # Unifies the clean phase-end path and the abort path —
+            # both reach this block, both fire stops.
+            if profile_starts:
+                stop_reason = "phase_end" if session_completed_normally else "abort"
+                for i, start_rec in enumerate(profile_starts):
+                    if start_rec["status"] != 200 or i >= len(profile_stop_urls):
+                        continue
+                    rec = _post_profile(profile_stop_urls[i])
+                    rec["stop_reason"] = stop_reason
+                    if rec["status"] == 200:
+                        logger.info("Profile stop: %s -> 200 OK", profile_stop_urls[i])
+                    else:
+                        logger.warning(
+                            "Profile stop: %s -> %s",
+                            profile_stop_urls[i],
+                            rec["error"] or rec["status"],
+                        )
+                    profile_stops.append(rec)
             logger.info("Cleaning up...")
             try:
                 if http_client:
@@ -842,7 +974,16 @@ async def _run_benchmark_async(
 
             if snap_dict is not None:
                 try:
-                    report = Report.from_snapshot(snap_dict)
+                    runtime = ctx.config.settings.runtime
+                    warmup = ctx.config.settings.warmup
+                    report = Report.from_snapshot(
+                        snap_dict,
+                        seeds={
+                            "scheduler_random_seed": runtime.scheduler_random_seed,
+                            "dataloader_random_seed": runtime.dataloader_random_seed,
+                            "warmup_random_seed": warmup.warmup_random_seed,
+                        },
+                    )
                     if not report.complete:
                         logger.warning(
                             "Report is incomplete (state=%s, n_pending_tasks=%d)",
@@ -855,11 +996,20 @@ async def _run_benchmark_async(
             metrics_subscriber.close()
             pbar.close()
 
+    profiling_payload: dict[str, Any] | None = None
+    if profiling_cfg.engine is not None:
+        profiling_payload = {
+            "engine": profiling_cfg.engine.value,
+            "starts": profile_starts,
+            "stops": profile_stops,
+        }
+
     return BenchmarkResult(
         session=result,
         collector=collector,
         report=report,
         tmpfs_dir=tmpfs_dir,
+        profiling=profiling_payload,
     )
 
 
@@ -919,16 +1069,27 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
     collector = bench.collector
     report = bench.report
 
-    # Display report if available (from MetricsAggregator pub/sub snapshot)
+    # Display report if available (from MetricsAggregator pub/sub snapshot).
+    # result_summary.json is the self-complete machine-readable report (carries
+    # qps/tps/seeds via Report.to_json); report.txt is the full human-readable
+    # dump (histograms + percentiles); the console log shows just the summary.
     if report is not None:
         report.display(fn=lambda s: logger.info(s), summary_only=True)
         report.to_json(save_to=ctx.report_dir / "result_summary.json")
 
-        # Write human-readable report.txt
         report_txt = ctx.report_dir / "report.txt"
         with report_txt.open("w") as f:
             report.display(fn=lambda s: print(s, file=f))
-        logger.info(f"Report written to {report_txt}")
+            if bench.profiling is not None:
+                _write_profiling_section(f, bench.profiling)
+        logger.info("Report written to %s", report_txt)
+
+    # Sibling profiling.json — kept separate so Report stays a pure
+    # snapshot-derived struct.
+    if bench.profiling is not None:
+        (ctx.report_dir / "profiling.json").write_text(
+            json.dumps(bench.profiling, indent=2)
+        )
 
     # Write scoring artifacts + copy event log from tmpfs to disk
     _write_scoring_artifacts(ctx, result, bench.tmpfs_dir)
@@ -946,15 +1107,17 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
         )
         score, n_repeats = scorer_instance.score()
         assert eval_cfg.dataset.data is not None
+        num_samples = len(eval_cfg.dataset.data)
+        if eval_cfg.dataset_name == "performance":
+            num_samples = sum(phase.issued_count for phase in result.perf_results)
         accuracy_scores[eval_cfg.dataset_name] = {
             "dataset_name": eval_cfg.dataset_name,
-            "num_samples": len(eval_cfg.dataset.data),
+            "num_samples": num_samples,
             "extractor": (
                 eval_cfg.extractor.__name__ if eval_cfg.extractor is not None else None
             ),
             "ground_truth_column": eval_cfg.ground_truth_column,
             "score": score,
-            "n_repeats": n_repeats,
         }
         logger.info(f"Score for {eval_cfg.dataset_name}: {score} ({n_repeats} repeats)")
 
@@ -963,7 +1126,7 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
         perf_elapsed = report.duration_ns / 1e9
         total_issued = report.n_samples_issued
         n_errors = report.n_samples_failed
-        qps = report.qps() or 0.0
+        qps = report.qps or 0.0
     else:
         perf = result.perf_results[0] if result.perf_results else None
         if perf:

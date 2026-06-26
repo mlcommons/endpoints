@@ -77,7 +77,9 @@ class LoadPatternType(str, Enum):
     MAX_THROUGHPUT = "max_throughput"  # Offline: all queries at t=0
     POISSON = "poisson"  # Online: fixed QPS with Poisson distribution
     CONCURRENCY = "concurrency"  # Online: fixed concurrent requests
-    MULTI_TURN = "multi_turn"  # Multi-turn conversations with turn sequencing
+    AGENTIC_INFERENCE = (
+        "agentic_inference"  # Agentic inference conversations with turn sequencing
+    )
     BURST = "burst"  # Burst pattern (TODO)
     STEP = "step"  # Step pattern (TODO)
 
@@ -114,6 +116,7 @@ class ScorerMethod(str, Enum):
     ROUGE = "rouge"
     CODE_BENCH = "code_bench_scorer"
     SHOPIFY_CATEGORY_F1 = "shopify_category_f1"
+    AGENTIC_INFERENCE_INLINE = "agentic_inference_inline"
     VBENCH = "vbench"
 
 
@@ -262,30 +265,35 @@ class SubmissionReference(BaseModel):
         return get_ruleset(self.ruleset)
 
 
-class MultiTurnConfig(BaseModel):
-    """Multi-turn conversation configuration.
+class AgenticInferenceConfig(BaseModel):
+    """Agentic inference conversation configuration.
 
     Configuration for benchmarking conversational AI workloads with turn sequencing.
-    Enables testing multi-turn conversations where each turn depends on previous responses.
-    Presence of this block in the dataset config enables multi-turn mode.
+    Enables testing agentic inference conversations where each turn depends on previous responses.
+    Presence of this block in the dataset config enables agentic inference mode.
 
     Attributes:
         turn_timeout_s: Deadline between issuing a turn and receiving its
             response. A timeout aborts that turn and all remaining client
             turns of the same conversation because subsequent turns depend
             on the timed-out response.
-        use_dataset_history: If True, use pre-built message history from dataset.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    turn_timeout_s: float = Field(default=300.0, gt=0)
-    use_dataset_history: bool = True
+    turn_timeout_s: float = Field(
+        default=86400.0,
+        gt=0,
+        description=(
+            "Per-turn timeout in seconds. A timeout aborts that turn and all "
+            "remaining turns in the same conversation."
+        ),
+    )
     enable_salt: bool = Field(
         False,
         description=(
-            "Enable salt addition after system prompt to prevent KV cache reuse "
-            "across trajectories in multi-turn setting."
+            "Add deterministic salt markers before and after the system prompt "
+            "to prevent KV cache reuse across trajectories in agentic inference setting."
         ),
     )
     inject_tool_delay: bool = Field(
@@ -293,6 +301,24 @@ class MultiTurnConfig(BaseModel):
         description=(
             "Pause for a predefined duration between turns. Duration is defined "
             "in dataset."
+        ),
+    )
+    num_trajectories_to_issue: int | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Number of conversation trajectories to start. Defaults to one pass "
+            "over the dataset; values above the dataset size repeat trajectories "
+            "with unique logical conversation ids."
+        ),
+    )
+    stop_issuing_on_first_user_complete: bool = Field(
+        False,
+        description=(
+            "When performance tracking stops because the first concurrency slot "
+            "has no next trajectory left to assign, also stop issuing future "
+            "turns. If false, replay continues outside the performance window "
+            "for accuracy/log coverage."
         ),
     )
 
@@ -327,8 +353,8 @@ class Dataset(BaseModel):
     accuracy_config: AccuracyConfig | None = Field(
         None, description="Accuracy evaluation settings"
     )
-    multi_turn: MultiTurnConfig | None = Field(
-        None, description="Multi-turn conversation configuration"
+    agentic_inference: AgenticInferenceConfig | None = Field(
+        None, description="Agentic inference conversation configuration"
     )
     # TODO(post-mortem): generation config is per-phase (perf vs. accuracy),
     # not per-dataset — phases are derived from datasets and the override is
@@ -535,11 +561,11 @@ class LoadPattern(BaseModel):
             raise ValueError(
                 "Concurrency requires --concurrency (e.g., --concurrency 10)"
             )
-        if self.type == LoadPatternType.MULTI_TURN and (
+        if self.type == LoadPatternType.AGENTIC_INFERENCE and (
             not self.target_concurrency or self.target_concurrency <= 0
         ):
             raise ValueError(
-                "Multi-turn requires --concurrency (e.g., --concurrency 96)"
+                "Agentic inference requires --concurrency (e.g., --concurrency 96)"
             )
         return self
 
@@ -570,7 +596,7 @@ class WarmupConfig(BaseModel):
             help="Prepend a unique random hex salt to each warmup prompt",
         ),
     ] = Field(
-        False, description="Prepend a unique random hex salt to each warmup prompt"
+        True, description="Prepend a unique random hex salt to each warmup prompt"
     )
     drain: Annotated[
         bool,
@@ -666,6 +692,72 @@ class DrainConfig(BaseModel):
     )
 
 
+class ProfilerEngine(str, Enum):
+    """Inference engine whose profiling protocol the client should drive.
+
+    Selects the HTTP path layout used to derive start/stop URLs from
+    ``endpoint_config.endpoints``. Each value corresponds to one server-side
+    profiling protocol; add a new variant + ``_PROFILE_PATHS`` row to support
+    another engine.
+    """
+
+    VLLM = "vllm"
+
+
+@cyclopts.Parameter(name="*")
+class ProfilingConfig(BaseModel):
+    """Client-side trigger for the server's profiler.
+
+    When ``engine`` is set, fires POST ``<start_path>`` at performance-phase
+    begin and POST ``<stop_path>`` at performance-phase end. URLs are derived
+    using the engine-specific protocol from ``urls`` when set, otherwise
+    from ``endpoint_config.endpoints``.
+    Server must be launched with profiling enabled (e.g. vLLM's
+    ``--profiler-config.profiler=cuda|torch``); the schedule
+    (``delay_iterations``, ``max_iterations``) is set there, not here.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    engine: Annotated[
+        ProfilerEngine | None,
+        cyclopts.Parameter(
+            alias="--profile",
+            help="Profile the named inference engine around the performance phase",
+        ),
+    ] = Field(
+        None,
+        description="Profile the named inference engine around the performance phase",
+    )
+    urls: Annotated[
+        list[str] | None,
+        cyclopts.Parameter(
+            alias="--profile-urls",
+            help="Override URL(s) for profiler triggers; "
+            "defaults to endpoint_config.endpoints",
+            negative="",
+        ),
+    ] = Field(
+        None,
+        description="URL(s) the profiler start/stop triggers are derived from. "
+        "When None, derived from endpoint_config.endpoints instead. Use when "
+        "the profiler admin endpoint differs from the inference endpoint.",
+    )
+
+    @field_validator("urls", mode="after")
+    @classmethod
+    def _validate_url_scheme(cls, v: list[str] | None) -> list[str] | None:
+        if v is None:
+            return v
+        for url in v:
+            if not url.startswith(("http://", "https://")):
+                raise ValueError(
+                    f"Profiling endpoint URL must include scheme "
+                    f"(http:// or https://), got: {url!r}"
+                )
+        return v
+
+
 @cyclopts.Parameter(name="*")
 class Settings(BaseModel):
     """Test settings."""
@@ -680,6 +772,7 @@ class Settings(BaseModel):
         description="Per-phase in-flight response drain timeout configuration",
     )
     warmup: WarmupConfig = Field(default_factory=WarmupConfig)
+    profiling: ProfilingConfig = Field(default_factory=ProfilingConfig)
 
 
 class OfflineSettings(Settings):
@@ -868,35 +961,52 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
             if lp.type not in (
                 LoadPatternType.POISSON,
                 LoadPatternType.CONCURRENCY,
-                LoadPatternType.MULTI_TURN,
+                LoadPatternType.AGENTIC_INFERENCE,
             ):
                 raise ValueError(
-                    "Online mode requires --load-pattern (poisson, concurrency, or multi_turn)"
+                    "Online mode requires --load-pattern (poisson, concurrency, or agentic_inference)"
                 )
 
-        # Cross-validate load_pattern.type=multi_turn ↔ performance dataset.multi_turn config
-        has_multi_turn_perf_dataset = any(
-            d.multi_turn is not None
+        # Cross-validate load_pattern.type=agentic_inference against the
+        # performance dataset agentic_inference config.
+        has_agentic_inference_perf_dataset = any(
+            d.agentic_inference is not None
             for d in (self.datasets or [])
             if d.type == DatasetType.PERFORMANCE
         )
-        has_multi_turn_non_perf_dataset = any(
-            d.multi_turn is not None
+        has_agentic_inference_non_perf_dataset = any(
+            d.agentic_inference is not None
             for d in (self.datasets or [])
             if d.type != DatasetType.PERFORMANCE
         )
-        if has_multi_turn_non_perf_dataset:
+        if has_agentic_inference_non_perf_dataset:
             raise ValueError(
-                "multi_turn config is only supported on performance datasets; "
-                "accuracy datasets with multi_turn are not supported"
+                "agentic_inference config is only supported on performance datasets; "
+                "accuracy datasets with agentic_inference are not supported"
             )
-        if lp.type == LoadPatternType.MULTI_TURN and not has_multi_turn_perf_dataset:
+        if (
+            lp.type == LoadPatternType.AGENTIC_INFERENCE
+            and not has_agentic_inference_perf_dataset
+        ):
             raise ValueError(
-                "load_pattern.type=multi_turn requires the performance dataset to have multi_turn config"
+                "load_pattern.type=agentic_inference requires the performance "
+                "dataset to have agentic_inference config"
             )
-        if has_multi_turn_perf_dataset and lp.type != LoadPatternType.MULTI_TURN:
+        if (
+            lp.type == LoadPatternType.AGENTIC_INFERENCE
+            and self.settings.runtime.n_samples_to_issue is not None
+        ):
             raise ValueError(
-                f"Performance dataset with multi_turn config requires load_pattern.type=multi_turn, "
+                "runtime.n_samples_to_issue is not supported for agentic inference runs; "
+                "use datasets[].agentic_inference.num_trajectories_to_issue instead"
+            )
+        if (
+            has_agentic_inference_perf_dataset
+            and lp.type != LoadPatternType.AGENTIC_INFERENCE
+        ):
+            raise ValueError(
+                "Performance dataset with agentic_inference config requires "
+                "load_pattern.type=agentic_inference, "
                 f"got '{lp.type}'"
             )
 

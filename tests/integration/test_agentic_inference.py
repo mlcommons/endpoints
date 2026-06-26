@@ -13,19 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Integration tests for multi-turn benchmarking end-to-end.
+"""Integration tests for agentic inference benchmarking end-to-end.
 
-Validates that MultiTurnDataset + MultiTurnStrategy + BenchmarkSession work
+Validates that AgenticInferenceDataset + AgenticInferenceStrategy + BenchmarkSession work
 correctly together against a real HTTP echo server.
 
 Tests cover:
-  1. Dataset-history mode (use_dataset_history=True): pre-built messages are
-     issued as-is; each turn is issued sequentially per conversation.
-  2. Live-history mode (use_dataset_history=False): messages are built at
-     runtime from ConversationManager.message_history; the injected messages
-     grow with each turn.
-  3. Multiple concurrent conversations complete successfully.
-  4. Turn ordering: turn N+1 is never issued before turn N completes.
+  1. Pre-built messages are issued as-is; each turn is issued sequentially per
+     conversation.
+  2. Multiple concurrent conversations complete successfully.
+  3. Turn ordering: turn N+1 is never issued before turn N completes.
 """
 
 import asyncio
@@ -38,19 +35,22 @@ import pytest
 from inference_endpoint import metrics
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import (
+    AgenticInferenceConfig,
     LoadPattern,
     LoadPatternType,
-    MultiTurnConfig,
 )
 from inference_endpoint.core.record import EventRecord, SampleEventType
 from inference_endpoint.core.types import QueryResult
-from inference_endpoint.dataset_manager.multi_turn_dataset import MultiTurnDataset
+from inference_endpoint.dataset_manager.agentic_inference_dataset import (
+    AgenticInferenceDataset,
+)
 from inference_endpoint.endpoint_client.config import HTTPClientConfig
 from inference_endpoint.endpoint_client.http_client import HTTPEndpointClient
 from inference_endpoint.endpoint_client.http_sample_issuer import HttpClientSampleIssuer
-from inference_endpoint.exceptions import InputValidationError
+from inference_endpoint.load_generator.agentic_inference_strategy import (
+    AgenticInferenceStrategy,
+)
 from inference_endpoint.load_generator.conversation_manager import ConversationManager
-from inference_endpoint.load_generator.multi_turn_strategy import MultiTurnStrategy
 from inference_endpoint.load_generator.session import (
     BenchmarkSession,
     EventPublisher,
@@ -79,38 +79,36 @@ class _RecordingPublisher:
         pass
 
 
-def _make_dataset(rows: list[dict]) -> MultiTurnDataset:
-    """Build a loaded MultiTurnDataset from a list of row dicts."""
+def _make_dataset(rows: list[dict]) -> AgenticInferenceDataset:
+    """Build a loaded AgenticInferenceDataset from a list of row dicts."""
     df = pd.DataFrame(rows)
-    ds = MultiTurnDataset(dataframe=df)
+    ds = AgenticInferenceDataset(dataframe=df)
     ds.load()
     return ds
 
 
 def _make_strategy(
-    ds: MultiTurnDataset,
-    use_dataset_history: bool = True,
+    ds: AgenticInferenceDataset,
     target_concurrency: int | None = None,
     inject_tool_delay: bool = False,
-) -> MultiTurnStrategy:
-    mt_cfg = MultiTurnConfig(
+) -> AgenticInferenceStrategy:
+    agentic_cfg = AgenticInferenceConfig(
         turn_timeout_s=10.0,
-        use_dataset_history=use_dataset_history,
         inject_tool_delay=inject_tool_delay,
     )
     assert ds.conversation_metadata is not None
-    return MultiTurnStrategy(
+    return AgenticInferenceStrategy(
         conversation_manager=ConversationManager(),
         dataset_metadata=ds.conversation_metadata,
-        multi_turn_config=mt_cfg,
+        agentic_inference_config=agentic_cfg,
         target_concurrency=target_concurrency,
     )
 
 
 async def _run_session(
     server_url: str,
-    ds: MultiTurnDataset,
-    strategy: MultiTurnStrategy,
+    ds: AgenticInferenceDataset,
+    strategy: AgenticInferenceStrategy,
     responses_out: dict,
     event_records_out: list[EventRecord] | None = None,
 ) -> int:
@@ -299,7 +297,7 @@ async def test_dataset_history_messages_present(echo_server):
             },
         ]
         ds = _make_dataset(rows)
-        strategy = _make_strategy(ds, use_dataset_history=True)
+        strategy = _make_strategy(ds)
         responses: dict = {}
 
         count = await _run_session(server.url, ds, strategy, responses)
@@ -321,8 +319,8 @@ async def test_dataset_history_messages_present(echo_server):
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_live_history_messages_grow_each_turn(echo_server):
-    """Live-history mode: messages array grows with each completed turn."""
+async def test_pre_built_messages_grow_each_turn(echo_server):
+    """Pre-built messages array grows with each dataset turn."""
     received_payloads: list[dict] = []
 
     class CapturingEchoServer(EchoServer):
@@ -348,7 +346,7 @@ async def test_live_history_messages_grow_each_turn(echo_server):
             {"conversation_id": "c1", "turn": 3, "role": "user", "content": "Turn two"},
         ]
         ds = _make_dataset(rows)
-        strategy = _make_strategy(ds, use_dataset_history=False)
+        strategy = _make_strategy(ds)
         responses: dict = {}
 
         count = await _run_session(server.url, ds, strategy, responses)
@@ -379,12 +377,12 @@ async def test_turn_ordering_enforced_end_to_end(echo_server):
         {"conversation_id": "c1", "turn": 3, "role": "user", "content": "Second"},
     ]
     ds = _make_dataset(rows)
-    mt_cfg = MultiTurnConfig(turn_timeout_s=10.0, use_dataset_history=True)
+    agentic_cfg = AgenticInferenceConfig(turn_timeout_s=10.0)
     conv_manager = ConversationManager()
-    strategy = MultiTurnStrategy(
+    strategy = AgenticInferenceStrategy(
         conversation_manager=conv_manager,
         dataset_metadata=ds.conversation_metadata,
-        multi_turn_config=mt_cfg,
+        agentic_inference_config=agentic_cfg,
     )
 
     # Wrap on_sample_complete to record completion timestamps
@@ -631,7 +629,9 @@ async def test_concurrent_conversations_stress(echo_server):
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_multi_turn_active_conversations_respects_target_concurrency(echo_server):
+async def test_agentic_inference_active_conversations_respects_target_concurrency(
+    echo_server,
+):
     num_convs = 20
     rows = []
     for i in range(num_convs):
@@ -678,7 +678,7 @@ async def test_multi_turn_active_conversations_respects_target_concurrency(echo_
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_multi_turn_pipeline_exception_propagates(echo_server):
+async def test_agentic_inference_pipeline_exception_propagates(echo_server):
     rows = [
         {"conversation_id": "err_c1", "turn": 1, "role": "user", "content": "Q1"},
         {"conversation_id": "err_c1", "turn": 2, "role": "assistant", "content": "A1"},
@@ -742,11 +742,7 @@ async def test_multi_turn_pipeline_exception_propagates(echo_server):
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_tools_field_forwarded_to_endpoint(echo_server):
-    """The 'tools' array from the dataset reaches the endpoint in every request payload.
-
-    TODO: Add a tool-call-aware server that returns dynamic tool_call_ids to
-    validate live-history mode with real tool_call_id round-tripping.
-    """
+    """The 'tools' array from the dataset reaches the endpoint in every request payload."""
     received_payloads: list[dict] = []
 
     class CapturingEchoServer(EchoServer):
@@ -808,7 +804,7 @@ async def test_tools_field_forwarded_to_endpoint(echo_server):
             },
         ]
         ds = _make_dataset(rows)
-        strategy = _make_strategy(ds, use_dataset_history=True)
+        strategy = _make_strategy(ds)
         responses: dict = {}
 
         count = await _run_session(server.url, ds, strategy, responses)
@@ -821,45 +817,6 @@ async def test_tools_field_forwarded_to_endpoint(echo_server):
             assert payload["tools"][0]["function"]["name"] == "search"
     finally:
         server.stop()
-
-
-@pytest.mark.integration
-def test_live_history_rejects_tool_turns():
-    """MultiTurnStrategy raises InputValidationError at __init__ when use_dataset_history=False
-    and the dataset contains tool-role turns.
-    """
-    tool_calls = [
-        {
-            "id": "call_1",
-            "type": "function",
-            "function": {"name": "search", "arguments": '{"q": "hello"}'},
-        }
-    ]
-    tool_results = [{"tool_call_id": "call_1", "content": "result"}]
-    rows = [
-        {"conversation_id": "c1", "turn": 1, "role": "user", "content": "Search"},
-        {
-            "conversation_id": "c1",
-            "turn": 2,
-            "role": "assistant",
-            "content": None,
-            "tool_calls": tool_calls,
-        },
-        {
-            "conversation_id": "c1",
-            "turn": 3,
-            "role": "tool",
-            "tool_results": tool_results,
-        },
-    ]
-    ds = _make_dataset(rows)
-    mt_cfg = MultiTurnConfig(turn_timeout_s=10.0, use_dataset_history=False)
-    with pytest.raises(InputValidationError, match="use_dataset_history=True"):
-        MultiTurnStrategy(
-            conversation_manager=ConversationManager(),
-            dataset_metadata=ds.conversation_metadata,
-            multi_turn_config=mt_cfg,
-        )
 
 
 def _tool_use_rows_with_delays(

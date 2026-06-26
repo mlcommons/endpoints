@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "Multi-Turn Conversation Dataset Schema",
-  "description": "JSON schema describing the structure and requirements for multi-turn conversation datasets in the MLPerf Inference Endpoint Benchmarking System",
+  "title": "Agentic Inference Dataset Schema",
+  "description": "JSON schema describing the structure and requirements for agentic inference conversation datasets in the MLPerf Inference Endpoint Benchmarking System",
   "version": "1.0.0",
 
   "definitions": {
@@ -386,7 +386,7 @@
   ],
 
   "documentation": {
-    "overview": "Multi-turn conversation datasets enable benchmarking of realistic conversational AI workloads where each turn depends on previous responses. The system maintains conversation history and enforces turn sequencing.",
+    "overview": "Agentic inference conversation datasets enable benchmarking of realistic conversational AI workloads where each turn depends on previous responses. The system maintains conversation history and enforces turn sequencing.",
 
     "requiredFields": [
       {
@@ -431,7 +431,7 @@
       {
         "field": "delay_seconds",
         "type": "number",
-        "description": "Optional. Inter-turn wall-clock delay (seconds) the client should sleep before issuing this row. Typically set only on 'tool' or 'user' rows. Honored at run time only when MultiTurnConfig.inject_tool_delay=True; otherwise ignored. Missing or zero means no sleep."
+        "description": "Optional. Inter-turn wall-clock delay (seconds) the client should sleep before issuing this row. Typically set only on 'tool' or 'user' rows. Honored at run time only when AgenticInferenceConfig.inject_tool_delay=True; otherwise ignored. Missing or zero means no sleep."
       },
       {
         "field": "model",
