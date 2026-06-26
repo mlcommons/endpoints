@@ -84,12 +84,15 @@ Alternatively, `llama-server` can fetch it directly with
 If you already have an OpenAI-compatible server running, skip this section.
 
 This example was validated on an **NVIDIA Jetson AGX Thor** (aarch64, Blackwell GPU,
-JetPack 7 / CUDA 13) using a **natively-built llama.cpp `llama-server`**.
+JetPack 7 / CUDA 13) using a **natively-built llama.cpp `llama-server`** at commit
+**`cfff1fc`** — the reference results below were produced on this commit.
 
 **Build llama.cpp with CUDA on Thor (one time):**
 
 ```bash
 git clone https://github.com/ggml-org/llama.cpp && cd llama.cpp
+# Pin to the validated reference commit (matches the Reference results below).
+git checkout cfff1fc
 # CUDA toolkit ships with JetPack at /usr/local/cuda (CUDA 13 on R38)
 cmake -B build -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=110   # Thor = sm_110 (cc 11.0)
 cmake --build build --config Release -j --target llama-server
