@@ -1,6 +1,6 @@
 [build-system]
-requires = ["uv_build==0.7.6"]
-build-backend = "uv_build"
+requires = ["hatchling==1.27.0", "hatch-vcs==0.4.0"]
+build-backend = "hatchling.build"
 
 [tool.uv]
 environments = [
@@ -10,13 +10,27 @@ environments = [
     "sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]
 
-[tool.uv.build-backend]
-module-root = "src"
-source-exclude = ["inference_endpoint/evaluation/livecodebench/_server.py"]
+# Version is derived from git (nearest tag + commits-since + short SHA) by hatch-vcs
+# and written to src/inference_endpoint/_version.py at build time; editable installs
+# compute it live. git-archive/sdist builds (no .git — e.g. the container, built via
+# `git archive`) recover it from the export-subst'd .git_archival.txt. No manual
+# version bumps, and the commit SHA is embedded in the version string itself.
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.build.hooks.vcs]
+version-file = "src/inference_endpoint/_version.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/inference_endpoint"]
+exclude = ["src/inference_endpoint/evaluation/livecodebench/_server.py"]
+
+[tool.hatch.build.targets.sdist]
+include = ["/src", "/README.md", "/LICENSE.md", "/.git_archival.txt"]
 
 [project]
 name = "inference-endpoint"
-version = "0.1.0"
+dynamic = ["version"]
 description = "High-performance LLM endpoint benchmarking system with 50k QPS capability"
 readme = "README.md"
 license = {text = "Apache-2.0"}

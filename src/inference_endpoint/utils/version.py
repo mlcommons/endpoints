@@ -15,50 +15,24 @@
 
 """Version and git information utilities."""
 
-import subprocess
 from functools import lru_cache
-from pathlib import Path
 
 from .. import __version__
-
-# Substituted with the full commit SHA by `git archive` export-subst (see
-# .gitattributes); left as the literal "$Format:%H$" placeholder in a working tree.
-_GIT_ARCHIVAL = Path(__file__).resolve().parent.parent / "_git_archival.txt"
 
 
 @lru_cache(maxsize=1)
 def get_git_sha() -> str | None:
-    """Get the SHA of the *endpoints package's* git commit (short, 7 chars).
+    """Short commit SHA of the build, parsed from the VCS-derived ``__version__``.
 
-    Resolution order:
-      1. ``_git_archival.txt``, substituted by ``git archive`` export-subst at build
-         time — sdist / git-archive builds (e.g. the container image) carry no
-         ``.git``, so this is the only source there.
-      2. ``git rev-parse`` anchored to this package's own directory, so a dev/editable
-         checkout reports the endpoints repo's HEAD — not the caller's cwd, which may
-         be an unrelated git repo.
-
-    Returns the short SHA, or None if neither source is available.
+    hatch-vcs encodes the commit as the PEP 440 local segment ``+g<sha>`` (e.g.
+    ``0.6.dev3+g6eac351`` or ``...+g6eac351.d20260626`` when dirty). A clean tagged
+    release has no local segment and returns None — ``__version__`` itself is the
+    canonical, self-identifying version, so this is just a convenience accessor.
     """
-    try:
-        baked = _GIT_ARCHIVAL.read_text().strip().removeprefix("node:").strip()
-    except OSError:
-        baked = ""
-    if len(baked) == 40 and all(c in "0123456789abcdef" for c in baked.lower()):
-        return baked[:7]
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--short=7", "HEAD"],
-            cwd=_GIT_ARCHIVAL.parent,
-            capture_output=True,
-            text=True,
-            timeout=1.0,
-            check=False,
-        )
-        if result.returncode == 0:
-            return result.stdout.strip()
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
+    local = __version__.partition("+")[2]
+    for part in local.split("."):
+        if part.startswith("g") and len(part) > 1:
+            return part[1:]
     return None
 
 
@@ -67,7 +41,7 @@ def get_version_info() -> dict[str, str | None]:
     """Get version and git information.
 
     Returns:
-        Dictionary with 'version' and 'git_sha' keys.
+        Dictionary with 'version' (VCS-derived, SHA-embedded) and 'git_sha' keys.
     """
     return {
         "version": __version__,

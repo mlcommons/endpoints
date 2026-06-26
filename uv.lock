@@ -791,7 +791,6 @@ wheels = [
 
 [[package]]
 name = "inference-endpoint"
-version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "colorama", marker = "(platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'darwin') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
@@ -867,7 +866,6 @@ requires-dist = [
     { name = "hdrhistogram", specifier = "==0.10.3" },
     { name = "httptools", specifier = "==0.7.1" },
     { name = "hypothesis", marker = "extra == 'test'", specifier = "==6.151.10" },
-    { name = "inference-endpoint", extras = ["sql"], marker = "extra == 'test'" },
     { name = "jinja2", specifier = "==3.1.6" },
     { name = "line-profiler", marker = "extra == 'dev'", specifier = "==5.0.2" },
     { name = "line-profiler", marker = "extra == 'test'", specifier = "==5.0.2" },
@@ -903,13 +901,14 @@ requires-dist = [
     { name = "sphinx-autodoc-typehints", marker = "extra == 'dev'", specifier = "==3.9.11" },
     { name = "sphinx-rtd-theme", marker = "extra == 'dev'", specifier = "==3.1.0" },
     { name = "sqlalchemy", marker = "extra == 'sql'", specifier = "==2.0.48" },
+    { name = "sqlalchemy", marker = "extra == 'test'", specifier = "==2.0.48" },
     { name = "transformers", specifier = "==5.5.0" },
     { name = "typing-extensions", specifier = "==4.15.0" },
     { name = "urllib3", specifier = "==2.7.0" },
     { name = "uvloop", specifier = "==0.22.1" },
     { name = "websocket-client", specifier = "==1.9.0" },
 ]
-provides-extras = ["sql", "dev", "test", "performance"]
+provides-extras = ["dev", "performance", "sql", "test"]
 
 [[package]]
 name = "iniconfig"

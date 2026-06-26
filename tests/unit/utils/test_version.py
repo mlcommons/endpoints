@@ -13,44 +13,42 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for git_sha resolution (must track the endpoints package, not the cwd)."""
+"""Tests for version/git_sha derivation from the VCS-derived __version__."""
 
 import pytest
 
 from inference_endpoint.utils import version
 
 
-@pytest.mark.unit
-def test_git_sha_from_archival_substitution(tmp_path, monkeypatch):
-    """A substituted _git_archival.txt (git archive export-subst) -> short 7-char SHA."""
-    archival = tmp_path / "_git_archival.txt"
-    archival.write_text("node: " + "a" * 40 + "\n")
-    monkeypatch.setattr(version, "_GIT_ARCHIVAL", archival)
+def _clear_caches():
     version.get_git_sha.cache_clear()
-    assert version.get_git_sha() == "a" * 7
-    version.get_git_sha.cache_clear()
+    version.get_version_info.cache_clear()
 
 
 @pytest.mark.unit
-def test_git_sha_placeholder_never_leaks(tmp_path, monkeypatch):
-    """An unsubstituted "$Format:%H$" placeholder must never be returned verbatim:
-    fall through to git (or None), but never emit the literal placeholder."""
-    archival = tmp_path / "_git_archival.txt"
-    archival.write_text("node: $Format:%H$\n")
-    monkeypatch.setattr(version, "_GIT_ARCHIVAL", archival)
-    version.get_git_sha.cache_clear()
-    sha = version.get_git_sha()
-    version.get_git_sha.cache_clear()
-    assert sha is None or "$" not in sha
+@pytest.mark.parametrize(
+    ("ver", "expected_sha"),
+    [
+        ("0.6.dev3+g6eac351", "6eac351"),  # dev build after a tag
+        ("0.5.post2+g1234abc.d20260626", "1234abc"),  # dirty working tree (date suffix)
+        ("0.5", None),  # clean tagged release -> no local segment, no SHA
+        ("0.0.0+unknown", None),  # fresh checkout, not yet built
+    ],
+)
+def test_git_sha_parsed_from_version(monkeypatch, ver, expected_sha):
+    """get_git_sha extracts the +g<sha> local segment from the VCS version."""
+    monkeypatch.setattr(version, "__version__", ver)
+    _clear_caches()
+    assert version.get_git_sha() == expected_sha
+    _clear_caches()
 
 
 @pytest.mark.unit
-def test_git_sha_anchored_to_package_not_cwd(tmp_path, monkeypatch):
-    """With the real archival placeholder and the process cwd pointed at an unrelated
-    non-git dir, get_git_sha must resolve via the package's own repo (dev checkout ->
-    the endpoints HEAD) or None — it must not pick up the caller's cwd repo."""
-    monkeypatch.chdir(tmp_path)
-    version.get_git_sha.cache_clear()
-    sha = version.get_git_sha()
-    version.get_git_sha.cache_clear()
-    assert sha is None or (len(sha) == 7 and "$" not in sha)
+def test_version_info_carries_version_and_git_sha(monkeypatch):
+    """get_version_info surfaces the SHA-embedded version plus the parsed git_sha."""
+    monkeypatch.setattr(version, "__version__", "0.6.dev3+g6eac351")
+    _clear_caches()
+    info = version.get_version_info()
+    assert info["version"] == "0.6.dev3+g6eac351"
+    assert info["git_sha"] == "6eac351"
+    _clear_caches()

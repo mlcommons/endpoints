@@ -29,7 +29,12 @@ del _os
 # Core imports - public API types
 from .core.types import Query, QueryId, QueryResult  # noqa: E402
 
-__version__ = "0.1.0"
+try:
+    # Written by hatch-vcs at build time (git tag + commits-since + short SHA);
+    # gitignored. Absent only in a fresh checkout before the first build.
+    from ._version import __version__
+except ImportError:
+    __version__ = "0.0.0+unknown"
 __author__ = "MLPerf Inference Endpoint Team"
 __description__ = "High-performance LLM endpoint benchmarking system"
 
