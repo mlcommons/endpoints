@@ -967,12 +967,24 @@ async def _run_benchmark_async(
                 try:
                     runtime = ctx.config.settings.runtime
                     warmup = ctx.config.settings.warmup
+                    lp = ctx.config.settings.load_pattern
+                    bench_mode = ctx.benchmark_mode
                     report = Report.from_snapshot(
                         snap_dict,
                         seeds={
                             "scheduler_random_seed": runtime.scheduler_random_seed,
                             "dataloader_random_seed": runtime.dataloader_random_seed,
                             "warmup_random_seed": warmup.warmup_random_seed,
+                        },
+                        loadgen={
+                            "benchmark_mode": getattr(bench_mode, "value", bench_mode),
+                            "load_pattern": getattr(lp.type, "value", lp.type),
+                            "target_qps": lp.target_qps,
+                            "target_concurrency": lp.target_concurrency,
+                            "n_samples_to_issue": runtime.n_samples_to_issue,
+                            "min_duration_ms": runtime.min_duration_ms,
+                            "max_duration_ms": runtime.max_duration_ms,
+                            "num_workers": ctx.config.settings.client.num_workers,
                         },
                     )
                     if not report.complete:

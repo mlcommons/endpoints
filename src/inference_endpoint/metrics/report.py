@@ -144,15 +144,25 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
     # caller supplies them rather than reading them from the metrics snapshot.
     seeds: dict[str, int] | None = None
 
+    # Load-generation settings for this run (from config): how the load was driven
+    # — pattern, target rate/concurrency, sample count, duration bounds, workers.
+    # Config, not a measured metric, so the from_snapshot caller supplies it.
+    loadgen: dict[str, Any] | None = None
+
     @classmethod
     def from_snapshot(
-        cls, snap: dict[str, Any], *, seeds: dict[str, int] | None = None
+        cls,
+        snap: dict[str, Any],
+        *,
+        seeds: dict[str, int] | None = None,
+        loadgen: dict[str, Any] | None = None,
     ) -> Report:
         """Build a Report from a snapshot dict.
 
-        ``seeds`` (optional) carries the run's RNG seeds from config into the
-        report so result_summary.json is self-validating; it is keyword-only
-        because it is config, not part of the metrics snapshot.
+        ``seeds`` and ``loadgen`` (optional, keyword-only) carry config — the run's
+        RNG seeds and load-generation settings — into the report so
+        result_summary.json is self-describing; they are not part of the metrics
+        snapshot.
 
         Input is the dict form produced by
         ``inference_endpoint.async_utils.services.metrics_aggregator.snapshot
@@ -229,18 +239,11 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
             qps=qps,
             tps=tps,
             seeds=seeds,
+            loadgen=loadgen,
         )
 
     def to_json(self, save_to: os.PathLike | None = None) -> bytes:
-        # Surface the headline run identity + throughput first (qps/tps/seeds right
-        # after git_sha) instead of trailing the long metric dicts. msgspec serializes
-        # in field-definition order and defaulted fields must come last, so reorder the
-        # serialized mapping rather than the struct.
-        data = msgspec.to_builtins(self)
-        head = ("version", "git_sha", "qps", "tps", "seeds")
-        ordered = {k: data[k] for k in head if k in data}
-        ordered.update({k: v for k, v in data.items() if k not in ordered})
-        json_bytes = msgspec.json.format(msgspec.json.encode(ordered), indent=2)
+        json_bytes = msgspec.json.format(msgspec.json.encode(self), indent=2)
         if save_to is not None:
             with Path(save_to).open("wb") as f:
                 f.write(json_bytes)
@@ -269,6 +272,11 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
         if self.seeds:
             seed_str = ", ".join(f"{k}={v}" for k, v in self.seeds.items())
             fn(f"Seeds: {seed_str}{newline}")
+        if self.loadgen:
+            lg_str = ", ".join(
+                f"{k}={v}" for k, v in self.loadgen.items() if v is not None
+            )
+            fn(f"Load settings: {lg_str}{newline}")
         if self.test_started_at > 0:
             approx = monotime_to_datetime(self.test_started_at)
             fn(f"Test started at: {approx.strftime('%Y-%m-%d %H:%M:%S')}{newline}")

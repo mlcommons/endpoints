@@ -179,6 +179,16 @@ class TestFromSnapshot:
         seeds = {"scheduler_random_seed": 42, "dataloader_random_seed": 7}
         assert Report.from_snapshot(snap, seeds=seeds).seeds == seeds
 
+    def test_loadgen_keyword_only_passthrough(self):
+        """loadgen settings are config: None unless supplied, carried verbatim."""
+        registry = _make_registry(n_samples=5)
+        snap = snapshot_to_dict(
+            registry.build_snapshot(state=SessionState.COMPLETE, n_pending_tasks=0)
+        )
+        assert Report.from_snapshot(snap).loadgen is None
+        loadgen = {"load_pattern": "poisson", "target_qps": 14.75, "num_workers": 8}
+        assert Report.from_snapshot(snap, loadgen=loadgen).loadgen == loadgen
+
     def test_failed_uses_tracked_counter(self):
         """``n_samples_failed`` reads from ``tracked_samples_failed``, not
         ``total_samples_failed``. The two diverge when an ERROR fires for
@@ -284,11 +294,22 @@ class TestReportDisplayAndSerialize:
         # Absent seeds -> null, not omitted.
         assert json.loads(Report.from_snapshot(snap).to_json())["seeds"] is None
 
-    def test_to_json_orders_qps_tps_after_git_sha(self):
-        """qps/tps (then seeds) are surfaced right after git_sha, not at the tail."""
-        keys = list(json.loads(_build_report(_make_registry(n_samples=50)).to_json()))
-        assert keys[:4] == ["version", "git_sha", "qps", "tps"]
-        assert keys.index("seeds") < keys.index("ttft")
+    def test_to_json_and_display_carry_loadgen(self):
+        """Load-generation settings appear in result_summary.json and report.txt."""
+        registry = _make_registry(n_samples=5)
+        snap = snapshot_to_dict(
+            registry.build_snapshot(state=SessionState.COMPLETE, n_pending_tasks=0)
+        )
+        loadgen = {"load_pattern": "poisson", "target_qps": 14.75, "num_workers": 8}
+        report = Report.from_snapshot(snap, loadgen=loadgen)
+        assert json.loads(report.to_json())["loadgen"] == loadgen
+
+        lines: list[str] = []
+        report.display(fn=lines.append, summary_only=True)
+        assert any("Load settings:" in ln and "poisson" in ln for ln in lines)
+
+        # Absent loadgen -> null, not omitted.
+        assert json.loads(Report.from_snapshot(snap).to_json())["loadgen"] is None
 
     def test_to_json_save(self, tmp_path: Path):
         registry = _make_registry(n_samples=5)
