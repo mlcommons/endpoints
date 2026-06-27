@@ -138,21 +138,23 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
     qps: float | None = None
     tps: float | None = None
 
-    # RNG seeds for this run (scheduler/dataloader/warmup, from config). Carried
-    # so result_summary.json is self-validating: a reproducible run is identified
-    # by its seeds. These are config, not a measured metric, so the from_snapshot
-    # caller supplies them rather than reading them from the metrics snapshot.
-    seeds: dict[str, int] | None = None
+    # Run configuration (load_pattern, runtime incl. RNG seeds, client, warmup),
+    # from config. Carried so result_summary.json is self-describing and a
+    # reproducible run is identified by its settings. Config, not a measured
+    # metric, so the from_snapshot caller supplies it (a config model_dump) rather
+    # than reading it from the metrics snapshot.
+    run_config: dict[str, Any] | None = None
 
     @classmethod
     def from_snapshot(
-        cls, snap: dict[str, Any], *, seeds: dict[str, int] | None = None
+        cls, snap: dict[str, Any], *, run_config: dict[str, Any] | None = None
     ) -> Report:
         """Build a Report from a snapshot dict.
 
-        ``seeds`` (optional) carries the run's RNG seeds from config into the
-        report so result_summary.json is self-validating; it is keyword-only
-        because it is config, not part of the metrics snapshot.
+        ``run_config`` (optional, keyword-only) carries the run's configuration
+        (a config ``model_dump``: load_pattern, runtime incl. seeds, client,
+        warmup) into the report so result_summary.json is self-describing; it is
+        config, not part of the metrics snapshot.
 
         Input is the dict form produced by
         ``inference_endpoint.async_utils.services.metrics_aggregator.snapshot
@@ -228,7 +230,7 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
             output_sequence_lengths=osl,
             qps=qps,
             tps=tps,
-            seeds=seeds,
+            run_config=run_config,
         )
 
     def to_json(self, save_to: os.PathLike | None = None) -> bytes:
@@ -258,9 +260,14 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
         fn(f"Version: {self.version}{newline}")
         if self.git_sha:
             fn(f"Git SHA: {self.git_sha}{newline}")
-        if self.seeds:
-            seed_str = ", ".join(f"{k}={v}" for k, v in self.seeds.items())
-            fn(f"Seeds: {seed_str}{newline}")
+        if self.run_config:
+            fn(f"Run config:{newline}")
+            for section, params in self.run_config.items():
+                if isinstance(params, dict):
+                    inner = ", ".join(f"{k}={v}" for k, v in params.items())
+                    fn(f"  {section}: {inner}{newline}")
+                else:
+                    fn(f"  {section}: {params}{newline}")
         if self.test_started_at > 0:
             approx = monotime_to_datetime(self.test_started_at)
             fn(f"Test started at: {approx.strftime('%Y-%m-%d %H:%M:%S')}{newline}")

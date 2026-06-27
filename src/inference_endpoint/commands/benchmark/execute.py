@@ -965,16 +965,16 @@ async def _run_benchmark_async(
 
             if snap_dict is not None:
                 try:
-                    runtime = ctx.config.settings.runtime
-                    warmup = ctx.config.settings.warmup
-                    report = Report.from_snapshot(
-                        snap_dict,
-                        seeds={
-                            "scheduler_random_seed": runtime.scheduler_random_seed,
-                            "dataloader_random_seed": runtime.dataloader_random_seed,
-                            "warmup_random_seed": warmup.warmup_random_seed,
-                        },
+                    # Snapshot the run's load/runtime config straight from the
+                    # Pydantic settings (single source of truth) — captures RNG
+                    # seeds, load pattern, sample count, durations, workers, etc.
+                    # without hand-listing fields. endpoint_config (api_key/URLs)
+                    # is a sibling of settings, so it is not included.
+                    run_config = ctx.config.settings.model_dump(
+                        mode="json",
+                        include={"runtime", "load_pattern", "client", "warmup"},
                     )
+                    report = Report.from_snapshot(snap_dict, run_config=run_config)
                     if not report.complete:
                         logger.warning(
                             "Report is incomplete (state=%s, n_pending_tasks=%d)",
