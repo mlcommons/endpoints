@@ -934,10 +934,13 @@ async def _run_benchmark_async(
         def _on_global_timeout() -> None:
             if not _timeout_done:
                 logger.warning(
-                    "Performance phase max_duration reached (%d ms); stopping session.",
+                    "Performance phase max_duration reached (%d ms); "
+                    "ending performance phase.",
                     max_duration_ms,
                 )
-                session.stop()
+                # Stop only the perf phase, not the whole session, so a combined
+                # perf+accuracy run still runs accuracy after the perf cap.
+                session.stop_current_phase()
 
         perf_timeout = _PerfPhaseTimeout(loop, max_duration_ms, _on_global_timeout)
 

@@ -64,22 +64,26 @@ datasets:
       # One pass over the 20 conversations (no trajectory repeats).
       num_trajectories_to_issue: 20
 
-  - name: bfcl_v4::function_calling # do not change.
-    type: "accuracy" # do not change.
-    params:
-      categories: ["non_live", "live", "hallucination"] # do not change.
+  # BFCL v4 single-turn accuracy gate. This whole block is the fixed MLPerf
+  # reference configuration (category mix, sampling, scorer); leave it as-is —
+  # the only fields you tune for your setup are model_params and endpoint_config
+  # above. Changing anything here changes what the gate measures.
+  - name: bfcl_v4::function_calling
+    type: "accuracy"
+    generate_params:
+      categories: ["non_live", "live", "hallucination"]
       category_sample_pct:
-        non_live: 62 # do not change.
-        live: 10 # do not change.
-        hallucination: 10 # do not change.
+        non_live: 62
+        live: 10
+        hallucination: 10
       # Subsets with total size <= 25 are always taken in full so their scores
       # are not reduced to one or two noisy samples.
-      subset_floor: 25 # do not change.
+      subset_floor: 25
     accuracy_config:
-      eval_method: "bfcl_v4" # do not change.
-      ground_truth: "ground_truth" # do not change.
-      extractor: "function_call_extractor" # do not change.
-      num_repeats: 1 # do not change.
+      eval_method: "bfcl_v4"
+      ground_truth: "ground_truth"
+      extractor: "function_call_extractor"
+      num_repeats: 1
 
 settings:
   runtime:
@@ -87,7 +91,7 @@ settings:
     # Safety cap (4 h) so the performance phase stays bounded even if decode is
     # slower than expected; one pass should finish in ~2.5 h on an edge box.
     max_duration_ms: 14400000
-    dataloader_random_seed: 42 # BFCL accuracy sampling — do not change.
+    dataloader_random_seed: 42 # BFCL accuracy sampling seed; compliance requires 42.
   load_pattern:
     # Drives the performance phase; the accuracy phase self-overrides to
     # max_throughput.

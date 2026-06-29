@@ -83,7 +83,9 @@ class DataLoaderFactory:
                 preset_transforms = getattr(ds_cls.PRESETS, preset)()
 
             # Pass dataset-specific params from config to generate()
-            dataset_params = dict(config.params) if config.params else {}
+            dataset_params = (
+                dict(config.generate_params) if config.generate_params else {}
+            )
             dataset_params.update(kwargs)
             force_regen = dataset_params.pop("force", False)
 

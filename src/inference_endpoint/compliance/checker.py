@@ -227,6 +227,10 @@ def check_perf_validity(scores: dict[str, Any]) -> list[Check]:
     missing = turns.get("missing")
     issued = turns.get("issued")
     observed = turns.get("observed")
+    # "expected" is the count of scorable turns, which can be fewer than the
+    # turns actually issued (e.g. a dataset with 1007 issued but 1006 scorable).
+    # Validate against expected so a complete run isn't failed for that gap.
+    expected = turns.get("expected")
     return [
         Check(
             "no_dropped_turns",
@@ -235,8 +239,8 @@ def check_perf_validity(scores: dict[str, Any]) -> list[Check]:
         ),
         Check(
             "all_turns_observed",
-            issued is not None and observed == issued,
-            f"observed={observed} == issued={issued}",
+            expected is not None and observed == expected,
+            f"observed={observed} == expected={expected} (issued={issued})",
         ),
     ]
 

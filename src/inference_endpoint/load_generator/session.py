@@ -346,6 +346,7 @@ class BenchmarkSession:
 
         # Mutable state
         self._stop_requested = False
+        self._current_phase_stopped = False
         self._done = False
         self._current_phase_issuer: PhaseIssuer | None = None
         self._current_phase_type: PhaseType | None = None
@@ -363,6 +364,20 @@ class BenchmarkSession:
         """
         self._stop_requested = True
         self._drain_event.set()
+        if self._strategy_task and not self._strategy_task.done():
+            self._strategy_task.cancel()
+
+    def stop_current_phase(self) -> None:
+        """End the in-progress phase without aborting the session.
+
+        Sets a per-phase stop flag the strategy's stop-check observes (so a
+        polling strategy stops issuing) and cancels the current strategy task
+        (so a strategy blocked awaiting a slow response is interrupted). Unlike
+        ``stop``, this does NOT set the session-wide ``_stop_requested`` flag —
+        a combined run whose performance phase hits its ``max_duration`` cap
+        still proceeds to the accuracy phase.
+        """
+        self._current_phase_stopped = True
         if self._strategy_task and not self._strategy_task.done():
             self._strategy_task.cancel()
 
@@ -411,6 +426,9 @@ class BenchmarkSession:
         """Run a single phase. Returns PhaseResult or None for warmup."""
         logger.info("Starting phase: %s (%s)", phase.name, phase.phase_type.value)
         phase_start = time.monotonic_ns()
+        # Per-phase stop flag is scoped to this phase; clear any cap left set by
+        # a previous phase so it can't short-circuit this one.
+        self._current_phase_stopped = False
 
         # Create per-phase state
         if phase.strategy is not None:
@@ -638,7 +656,7 @@ class BenchmarkSession:
         )
 
         def check() -> bool:
-            if self._stop_requested:
+            if self._stop_requested or self._current_phase_stopped:
                 return True
             if (
                 stop_on_sample_count

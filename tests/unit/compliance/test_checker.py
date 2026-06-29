@@ -151,9 +151,11 @@ def test_accuracy_gate_fails_on_too_few_samples():
 
 
 @pytest.mark.unit
-def test_perf_validity_passes_with_no_dropped_turns():
+def test_perf_validity_passes_when_observed_matches_expected():
+    # issued (1007) > expected (1006): a complete run observes every *scorable*
+    # turn but fewer than issued. Validating against expected must still pass.
     checks = check_perf_validity(
-        {"turns": {"issued": 1007, "observed": 1007, "missing": 0}}
+        {"turns": {"issued": 1007, "expected": 1006, "observed": 1006, "missing": 0}}
     )
     assert all(c.passed for c in checks)
 
@@ -161,7 +163,14 @@ def test_perf_validity_passes_with_no_dropped_turns():
 @pytest.mark.unit
 def test_perf_validity_fails_with_dropped_turns():
     checks = check_perf_validity(
-        {"turns": {"issued": 1007, "observed": 969, "missing": 38}}
+        {
+            "turns": {
+                "issued": 1007,
+                "expected": 1006,
+                "observed": 969,
+                "missing": 38,
+            }
+        }
     )
     assert not all(c.passed for c in checks)
 
@@ -184,7 +193,16 @@ def test_check_submission_accuracy_dir(tmp_path):
 def test_check_submission_perf_dir(tmp_path):
     (tmp_path / "config.yaml").write_text(yaml.safe_dump(_passing_config()))
     (tmp_path / "scores.json").write_text(
-        json.dumps({"turns": {"issued": 1007, "observed": 1007, "missing": 0}})
+        json.dumps(
+            {
+                "turns": {
+                    "issued": 1007,
+                    "expected": 1006,
+                    "observed": 1006,
+                    "missing": 0,
+                }
+            }
+        )
     )
     report = check_submission(tmp_path)
     assert report.passed

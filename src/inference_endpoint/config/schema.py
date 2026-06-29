@@ -335,7 +335,7 @@ class Dataset(BaseModel):
     parser: dict[str, str] | None = Field(
         None, description="Column remapping: {prompt: <col>, system: <col>}"
     )
-    params: dict[str, Any] | None = Field(
+    generate_params: dict[str, Any] | None = Field(
         None, description="Dataset-specific parameters passed to the generate() method"
     )
     accuracy_config: AccuracyConfig | None = Field(

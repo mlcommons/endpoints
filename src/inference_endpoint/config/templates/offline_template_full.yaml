@@ -26,7 +26,7 @@ datasets:  # Dataset configs
   eval_method: null
   parser:  # Column remapping: {prompt: <col>, system: <col>}
     prompt: text_input
-  params: null  # Dataset-specific parameters passed to the generate() method
+  generate_params: null  # Dataset-specific parameters passed to the generate() method
   accuracy_config: null  # Accuracy evaluation settings
   agentic_inference: null  # Agentic inference conversation configuration
 - name: accuracy
@@ -38,7 +38,7 @@ datasets:  # Dataset configs
   parser:  # Column remapping: {prompt: <col>, system: <col>}
     prompt: question
     system: system_prompt
-  params: null  # Dataset-specific parameters passed to the generate() method
+  generate_params: null  # Dataset-specific parameters passed to the generate() method
   accuracy_config:  # Accuracy evaluation settings
     eval_method: pass_at_1  # Scorer method | options: pass_at_1, string_match, rouge, code_bench_scorer, shopify_category_f1, agentic_inference_inline, vbench, bfcl_v4
     ground_truth: ground_truth  # Ground truth column name

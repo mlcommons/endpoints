@@ -377,10 +377,8 @@ class Dataset:
         if self.transforms is not None:
             transforms.extend(self.transforms)
 
-        # If adapter is specified, use it to get transforms, otherwise fallback to use APIType to
-        # get transforms. When the dataset already provides a ColumnFilter (e.g. via a preset),
-        # skip the adapter's ColumnFilter to avoid schema conflicts (the adapter's filter
-        # expects "prompt" but function-calling datasets use "messages"+"tools" instead).
+        # Collect the adapter's (or API type's) default transforms to append
+        # after any dataset-provided ones.
         if adapter is not None and model_params is not None:
             adapter_transforms = adapter.dataset_transforms(model_params)
         elif api_type is not None and model_params is not None:
@@ -388,6 +386,15 @@ class Dataset:
         else:
             adapter_transforms = []
 
+        # A ColumnFilter projects the frame down to the columns the API path
+        # expects. The adapter's default filter assumes a single "prompt"
+        # column, which is wrong for datasets whose schema is "messages"+"tools"
+        # (e.g. the BFCL function-calling presets): running it would drop the
+        # columns those datasets need. When the dataset already supplies its own
+        # ColumnFilter (the authoritative projection for its schema), we drop
+        # ONLY the adapter's ColumnFilter and still apply every other adapter
+        # transform (Harmonize, tokenization, etc.), so behavior is unchanged
+        # apart from which columns survive the projection.
         has_user_column_filter = any(isinstance(t, ColumnFilter) for t in transforms)
         for t in adapter_transforms:
             if has_user_column_filter and isinstance(t, ColumnFilter):

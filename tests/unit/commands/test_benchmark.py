@@ -312,6 +312,9 @@ datasets:
 """
         config_file = tmp_path / "cfg.yaml"
         config_file.write_text(yaml_content)
+        # The override is only meaningful if the config doesn't already set 42.
+        pre_override = BenchmarkConfig.from_yaml_file(config_file)
+        assert pre_override.model_params.seed != 42
         from_config(config=config_file, seed=42)
         called_config, _ = mock_run.call_args[0]
         assert called_config.model_params.seed == 42
