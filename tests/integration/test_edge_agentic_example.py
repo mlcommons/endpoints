@@ -72,7 +72,7 @@ from inference_endpoint.load_generator.session import (
 from inference_endpoint.testing.echo_server import EchoServer
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-EXAMPLE_DIR = REPO_ROOT / "examples" / "10_Edge_Agentic_Example"
+EXAMPLE_DIR = REPO_ROOT / "examples" / "11_Edge_Agentic_Example"
 FULL_RUN_CONFIG = "online_edge_full_run.yaml"
 PERF_DATASET = EXAMPLE_DIR / "agentic_coding_2.5h.jsonl"
 

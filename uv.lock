@@ -1331,6 +1331,7 @@ dependencies = [
 [package.optional-dependencies]
 bfcl = [
     { name = "bfcl-eval", marker = "(platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'darwin') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
+    { name = "httpx", marker = "(platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'darwin') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
     { name = "soundfile", marker = "(platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'darwin') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
 ]
 dev = [
@@ -1382,6 +1383,7 @@ requires-dist = [
     { name = "filelock", marker = "extra == 'dev'", specifier = ">=3.20.3" },
     { name = "hdrhistogram", specifier = "==0.10.3" },
     { name = "httptools", specifier = "==0.7.1" },
+    { name = "httpx", marker = "extra == 'bfcl'", specifier = "==0.28.1" },
     { name = "hypothesis", marker = "extra == 'test'", specifier = "==6.151.10" },
     { name = "inference-endpoint", extras = ["sql"], marker = "extra == 'test'" },
     { name = "jinja2", specifier = "==3.1.6" },

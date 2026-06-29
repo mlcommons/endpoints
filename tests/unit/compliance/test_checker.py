@@ -40,7 +40,9 @@ def _passing_config() -> dict:
     }
 
 
-def _accuracy_results(overall: float, normalized: float, total: int) -> dict:
+def _accuracy_results(
+    overall: float | str, normalized: float | str, total: int | str
+) -> dict:
     return {
         "accuracy_scores": {
             "bfcl_v4::function_calling": {
@@ -98,6 +100,47 @@ def test_accuracy_gate_fails_below_threshold():
     checks = check_accuracy(_accuracy_results(80.0, 85.4, 995), GOLDEN, FACTORS, 995)
     overall = next(c for c in checks if c.name == "accuracy:overall_accuracy")
     assert not overall.passed
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "overall, normalized, total, expect_pass",
+    [
+        # Production contract: BFCLv4Scorer serializes metrics as ":.2f" strings
+        # and total_samples as an int. The gate must coerce before comparing.
+        ("86.23", "87.96", 995, True),
+        ("83.65", "85.33", 995, True),  # just above 0.97x reference
+        ("83.64", "87.96", 995, False),  # just below 0.97x86.23=83.6431
+        ("80.00", "85.40", 995, False),
+    ],
+)
+def test_accuracy_gate_string_contract(overall, normalized, total, expect_pass):
+    # String-valued scores must not raise (str >= float / ":.2f" on str) — the
+    # gate coerces them — and must produce the correct pass/fail.
+    checks = check_accuracy(
+        _accuracy_results(overall, normalized, total), GOLDEN, FACTORS, 995
+    )
+    assert all(c.passed for c in checks) is expect_pass
+
+
+@pytest.mark.unit
+def test_accuracy_gate_handles_string_total_samples():
+    checks = check_accuracy(
+        _accuracy_results("86.23", "87.96", "995"), GOLDEN, FACTORS, 995
+    )
+    samples = next(c for c in checks if c.name == "min_sample_count")
+    assert samples.passed
+
+
+@pytest.mark.unit
+def test_check_submission_accuracy_dir_string_scores(tmp_path):
+    # End-to-end with the real (string) scorer contract, not fabricated floats.
+    (tmp_path / "config.yaml").write_text(yaml.safe_dump(_passing_config()))
+    (tmp_path / "results.json").write_text(
+        json.dumps(_accuracy_results("86.23", "87.96", 995))
+    )
+    report = check_submission(tmp_path)
+    assert report.passed
 
 
 @pytest.mark.unit

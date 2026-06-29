@@ -73,7 +73,9 @@ class TestR2DownloadSuccess:
     def test_success_via_constant_uri(self, tmp_path, monkeypatch):
         dst = _dst(tmp_path)
         payload = b"PARQUET-BYTES"
-        monkeypatch.setattr(BFCLv4, "R2_DATASET_URI", "https://host/x.uri")
+        monkeypatch.setattr(
+            BFCLv4, "R2_DATASET_URI", "https://inference.mlcommons-storage.org/x.uri"
+        )
         monkeypatch.delenv(BFCLv4.R2_DATASET_URI_ENV, raising=False)
         monkeypatch.setattr(
             BFCLv4, "SINGLE_TURN_SHA256", hashlib.sha256(payload).hexdigest()
@@ -93,8 +95,14 @@ class TestR2DownloadSuccess:
         """BFCL_V4_DATASET_URI takes precedence over the class constant."""
         dst = _dst(tmp_path)
         payload = b"ENV-WINS"
-        monkeypatch.setattr(BFCLv4, "R2_DATASET_URI", "https://host/constant.uri")
-        monkeypatch.setenv(BFCLv4.R2_DATASET_URI_ENV, "https://host/env.uri")
+        monkeypatch.setattr(
+            BFCLv4,
+            "R2_DATASET_URI",
+            "https://inference.mlcommons-storage.org/constant.uri",
+        )
+        monkeypatch.setenv(
+            BFCLv4.R2_DATASET_URI_ENV, "https://inference.mlcommons-storage.org/env.uri"
+        )
         monkeypatch.setattr(
             BFCLv4, "SINGLE_TURN_SHA256", hashlib.sha256(payload).hexdigest()
         )
@@ -107,14 +115,16 @@ class TestR2DownloadSuccess:
             assert BFCLv4._download_full_parquet_from_r2(dst) is True
         # The env URI, not the constant, is the last positional arg passed to bash.
         passed_cmd = run.call_args.args[0]
-        assert passed_cmd[-1] == "https://host/env.uri"
+        assert passed_cmd[-1] == "https://inference.mlcommons-storage.org/env.uri"
 
     def test_relocates_file_from_subdir(self, tmp_path, monkeypatch):
         """Downloader nests the file in a subdir; loader relocates to dst_path."""
         dst = _dst(tmp_path)
         payload = b"NESTED"
         nested = dst.parent / "edge-agentic" / dst.name
-        monkeypatch.setattr(BFCLv4, "R2_DATASET_URI", "https://host/x.uri")
+        monkeypatch.setattr(
+            BFCLv4, "R2_DATASET_URI", "https://inference.mlcommons-storage.org/x.uri"
+        )
         monkeypatch.delenv(BFCLv4.R2_DATASET_URI_ENV, raising=False)
         monkeypatch.setattr(
             BFCLv4, "SINGLE_TURN_SHA256", hashlib.sha256(payload).hexdigest()
@@ -134,7 +144,9 @@ class TestR2DownloadSuccess:
 class TestR2DownloadFailures:
     def test_sha256_mismatch_raises(self, tmp_path, monkeypatch):
         dst = _dst(tmp_path)
-        monkeypatch.setattr(BFCLv4, "R2_DATASET_URI", "https://host/x.uri")
+        monkeypatch.setattr(
+            BFCLv4, "R2_DATASET_URI", "https://inference.mlcommons-storage.org/x.uri"
+        )
         monkeypatch.delenv(BFCLv4.R2_DATASET_URI_ENV, raising=False)
         # Real (unmocked) SHA pin; downloaded bytes won't match it.
         with (
@@ -149,7 +161,9 @@ class TestR2DownloadFailures:
 
     def test_missing_file_after_download_raises(self, tmp_path, monkeypatch):
         dst = _dst(tmp_path)
-        monkeypatch.setattr(BFCLv4, "R2_DATASET_URI", "https://host/x.uri")
+        monkeypatch.setattr(
+            BFCLv4, "R2_DATASET_URI", "https://inference.mlcommons-storage.org/x.uri"
+        )
         monkeypatch.delenv(BFCLv4.R2_DATASET_URI_ENV, raising=False)
 
         def _run_noop(cmd, **kwargs):
@@ -164,7 +178,9 @@ class TestR2DownloadFailures:
 
     def test_downloader_nonzero_exit_raises(self, tmp_path, monkeypatch):
         dst = _dst(tmp_path)
-        monkeypatch.setattr(BFCLv4, "R2_DATASET_URI", "https://host/x.uri")
+        monkeypatch.setattr(
+            BFCLv4, "R2_DATASET_URI", "https://inference.mlcommons-storage.org/x.uri"
+        )
         monkeypatch.delenv(BFCLv4.R2_DATASET_URI_ENV, raising=False)
 
         def _run_fail(cmd, **kwargs):
@@ -176,6 +192,28 @@ class TestR2DownloadFailures:
             pytest.raises(RuntimeError, match="R2 downloader failed"),
         ):
             BFCLv4._download_full_parquet_from_r2(dst)
+
+    @pytest.mark.parametrize(
+        "uri",
+        [
+            "https://evil.example.com/x.uri",  # wrong host
+            "http://inference.mlcommons-storage.org/x.uri",  # not https
+            "file:///etc/passwd",  # non-http scheme
+        ],
+    )
+    def test_untrusted_uri_rejected_before_network(self, tmp_path, monkeypatch, uri):
+        """A mis-set URI is refused before any script fetch / subprocess runs."""
+        dst = _dst(tmp_path)
+        monkeypatch.setattr(BFCLv4, "R2_DATASET_URI", uri)
+        monkeypatch.delenv(BFCLv4.R2_DATASET_URI_ENV, raising=False)
+        with (
+            patch(f"{_MODULE}.requests.get") as get,
+            patch(f"{_MODULE}.subprocess.run") as run,
+            pytest.raises(ValueError, match="untrusted URI"),
+        ):
+            BFCLv4._download_full_parquet_from_r2(dst)
+        get.assert_not_called()
+        run.assert_not_called()
 
 
 class TestVerifySha256:

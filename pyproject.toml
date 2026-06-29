@@ -146,6 +146,10 @@ bfcl = [
     # bfcl-eval's qwen model handler transitively imports qwen_agent → soundfile;
     # soundfile is not used by our scorer but must be present for the import to succeed.
     "soundfile==0.13.1",
+    # Used directly by the multi-turn runner (bfcl_v4_multi_turn_runner.py).
+    # Present transitively via openai, but declared explicitly so the import
+    # does not depend on another package keeping it.
+    "httpx==0.28.1",
 ]
 
 [project.scripts]

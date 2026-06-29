@@ -155,6 +155,13 @@ def main() -> None:
             "After %.1f%% sampling: %d total entries", args.sample_pct, len(entries)
         )
 
+    if not entries:
+        logger.warning(
+            "No entries to evaluate for subsets %s (after sampling); nothing to run.",
+            subsets,
+        )
+        return
+
     # Run conversations
     logger.info(
         "Starting evaluation against %s (model=%s, temperature=%s, seed=%s)",

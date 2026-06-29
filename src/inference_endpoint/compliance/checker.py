@@ -100,6 +100,21 @@ def _get(d: dict[str, Any], *path: str, default: Any = None) -> Any:
     return cur
 
 
+def _to_float(value: Any) -> float | None:
+    """Coerce a score value to float, or None if absent/non-numeric.
+
+    ``BFCLv4Scorer.score()`` serializes accuracy metrics as formatted strings
+    (e.g. ``"86.23"``) and stores them verbatim in ``results.json``, so the gate
+    must coerce before any numeric comparison or ``:.2f`` formatting.
+    """
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def check_config_lock(config: dict[str, Any]) -> list[Check]:
     """Validate deterministic + single-stream settings from the resolved config."""
     checks: list[Check] = []
@@ -162,9 +177,11 @@ def check_accuracy(
     for golden_key, result_key in _ACCURACY_METRIC_KEYS.items():
         if golden_key not in golden or golden_key not in factors:
             continue
-        measured = score.get(result_key)
+        measured = _to_float(score.get(result_key))
         if measured is None:
-            checks.append(Check(f"accuracy:{result_key}", False, "metric missing"))
+            checks.append(
+                Check(f"accuracy:{result_key}", False, "metric missing or non-numeric")
+            )
             continue
         factor = factors[golden_key][0]
         threshold = golden[golden_key] * factor
@@ -177,12 +194,13 @@ def check_accuracy(
         )
 
     if min_samples is not None:
-        total = score.get("total_samples")
+        raw_total = score.get("total_samples")
+        total = _to_float(raw_total)
         checks.append(
             Check(
                 "min_sample_count",
                 total is not None and total >= min_samples,
-                f"total_samples={total} >= {min_samples}",
+                f"total_samples={raw_total} >= {min_samples}",
             )
         )
 

@@ -28,6 +28,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..dataset_manager.predefined.bfcl_v4 import _convert_bfcl_functions_to_tools
 from ..dataset_manager.predefined.bfcl_v4.multi_turn import BFCLv4MultiTurnEntry
 
 logger = logging.getLogger(__name__)
@@ -118,17 +119,14 @@ class BFCLExecutionBridge:
         entry = state.entry
         turn_idx = state.current_turn
 
-        # Handle holdout functions (miss_func category)
+        # Handle holdout functions (miss_func category). Augment only the
+        # per-conversation tool list on `state`; never mutate the shared
+        # dataset `entry`, or re-runs (retry/re-score) would append the same
+        # holdout functions again and corrupt the execution context.
         if str(turn_idx) in entry.holdout_function:
             added_funcs = entry.holdout_function[str(turn_idx)]
-            from ..dataset_manager.predefined.bfcl_v4 import (
-                _convert_bfcl_functions_to_tools,
-            )
-
             added_tools = _convert_bfcl_functions_to_tools(added_funcs)
             state.tools = state.tools + added_tools
-            # Also update the raw_functions for execution context
-            entry.raw_functions.extend(added_funcs)
 
         turn_messages = entry.get_turn_messages(turn_idx)
 

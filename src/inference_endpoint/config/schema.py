@@ -274,13 +274,6 @@ class AgenticInferenceConfig(BaseModel):
             "remaining turns in the same conversation."
         ),
     )
-    use_dataset_history: bool = Field(
-        True,
-        description=(
-            "Use dataset-provided message history for each turn instead of "
-            "reconstructing history from prior generated responses."
-        ),
-    )
     enable_salt: bool = Field(
         False,
         description=(

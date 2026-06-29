@@ -51,7 +51,7 @@ model_params:
 datasets:
   - name: agentic_coding
     type: performance
-    path: examples/10_Edge_Agentic_Example/agentic_coding_2.5h.jsonl
+    path: examples/11_Edge_Agentic_Example/agentic_coding_2.5h.jsonl
     accuracy_config:
       # Inline "online checker": score the replayed performance outputs against
       # the recorded tool calls (multiset IoU of executables). The dataset is

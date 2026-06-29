@@ -7,7 +7,7 @@ To reproduce the reference accuracy number (~3 h on an edge device), edit
 to match your server, then run:
 
 ```bash
-cd examples/10_Edge_Agentic_Example/
+cd examples/11_Edge_Agentic_Example/
 inference-endpoint benchmark from-config \
   --config online_edge_full_run.yaml \
   --accuracy-only
@@ -170,8 +170,8 @@ The single example config, `online_edge_full_run.yaml`, has the sampling rates
 pre-configured; `--accuracy-only` runs just its accuracy phase.
 
 ```bash
-# Run from the examples/10_Edge_Agentic_Example/ directory
-cd examples/10_Edge_Agentic_Example/
+# Run from the examples/11_Edge_Agentic_Example/ directory
+cd examples/11_Edge_Agentic_Example/
 
 inference-endpoint benchmark from-config \
   --config online_edge_full_run.yaml \
@@ -275,9 +275,9 @@ dataset); the dataset is both the performance workload and its own ground truth.
 The **accuracy phase** is the BFCL v4 single-turn gate from Step 2.
 
 ```bash
-# Run from the examples/10_Edge_Agentic_Example/ directory, against the same
+# Run from the examples/11_Edge_Agentic_Example/ directory, against the same
 # server used in Step 0 (start it first).
-cd examples/10_Edge_Agentic_Example/
+cd examples/11_Edge_Agentic_Example/
 
 inference-endpoint benchmark from-config \
   --config online_edge_full_run.yaml

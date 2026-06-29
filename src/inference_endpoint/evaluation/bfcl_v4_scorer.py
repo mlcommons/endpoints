@@ -275,7 +275,13 @@ class BFCLv4Scorer(Scorer, scorer_id="bfcl_v4"):
         # Deserialize func_descriptions once outside the loop
         func_descriptions: list[list[dict] | None] | None = None
         if func_descriptions_raw is not None:
-            func_descriptions = [json.loads(fd) for fd in func_descriptions_raw]
+            # A NaN/None cell (partial dataset or parquet round-trip) is not a
+            # JSON string; treat it as "no description" rather than aborting the
+            # whole scoring pass on json.loads(nan).
+            func_descriptions = [
+                json.loads(fd) if isinstance(fd, str) else None
+                for fd in func_descriptions_raw
+            ]
 
         scores_by_subset: dict[str, list[float]] = defaultdict(list)
         all_scores: list[float] = []
@@ -299,6 +305,19 @@ class BFCLv4Scorer(Scorer, scorer_id="bfcl_v4"):
 
             scores_by_subset[subset].append(s)
             all_scores.append(s)
+
+        if not all_scores:
+            # No samples matched (e.g. empty/filtered events log). np.mean([])
+            # would make overall_accuracy the literal string "nan"; emit an
+            # explicit zero result instead so results.json is well-formed.
+            return {
+                "overall_accuracy": "0.00",
+                "normalized_single_turn_score": "0.00",
+                "category_scores": {},
+                "subset_scores": {},
+                "unscored_subsets": {},
+                "total_samples": 0,
+            }, 1
 
         subset_results = {
             name: float(np.mean(scores)) for name, scores in scores_by_subset.items()

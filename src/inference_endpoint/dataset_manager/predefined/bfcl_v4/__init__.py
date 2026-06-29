@@ -26,6 +26,7 @@ import subprocess
 from logging import getLogger
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import pandas as pd
 import requests
@@ -169,6 +170,11 @@ class BFCLv4(
     R2_DATASET_URI_ENV = "BFCL_V4_DATASET_URI"
     # Pinned mlcommons/r2-downloader commit (same convention as open_orca).
     R2_DOWNLOADER_COMMIT = "27da4421877f2831eeb615b43ee5098c4b70be7e"
+    # The resolved dataset URI is handed to a downloaded shell script, so the
+    # host is restricted to MLCommons R2 storage. This stops a mis-set
+    # BFCL_V4_DATASET_URI env var from pointing the downloader at an
+    # attacker-controlled location.
+    R2_ALLOWED_HOST = "mlcommons-storage.org"
 
     @classmethod
     def generate(
@@ -258,7 +264,28 @@ class BFCLv4(
         if not dst_path.parent.exists():
             dst_path.parent.mkdir(parents=True)
 
-        if dst_path.exists() and not force:
+        cache_ok = dst_path.exists() and not force
+        uri_configured = bool(
+            os.environ.get(cls.R2_DATASET_URI_ENV) or cls.R2_DATASET_URI
+        )
+        if cache_ok and uri_configured:
+            # A hosted dataset is configured: only trust the cache if its bytes
+            # match the pinned SHA-256. Otherwise drop it and fall through to a
+            # verified R2 download, so a stale or locally-built parquet can't
+            # silently win and make the run score different data.
+            try:
+                cls._verify_sha256(dst_path, cls.SINGLE_TURN_SHA256)
+            except ValueError as exc:
+                logger.warning(
+                    "Cached %s failed SHA-256 verification (%s); re-downloading "
+                    "from MLCommons R2.",
+                    dst_path.name,
+                    exc,
+                )
+                dst_path.unlink()
+                cache_ok = False
+
+        if cache_ok:
             logger.info(f"Loading cached dataset from {dst_path}")
             df = pd.read_parquet(dst_path)
             df = cls._deserialize_complex_columns(df)
@@ -390,8 +417,23 @@ class BFCLv4(
         if not uri:
             return False
 
+        # The uri is passed to a downloaded shell script; restrict it to https
+        # on MLCommons R2 storage before invoking anything.
+        parsed = urlparse(uri)
+        host = parsed.hostname or ""
+        if parsed.scheme != "https" or not (
+            host == cls.R2_ALLOWED_HOST or host.endswith("." + cls.R2_ALLOWED_HOST)
+        ):
+            raise ValueError(
+                f"Refusing to download dataset from untrusted URI '{uri}': "
+                f"expected https on {cls.R2_ALLOWED_HOST}"
+            )
+
         download_dir = dst_path.parent
         download_dir.mkdir(parents=True, exist_ok=True)
+        # Start from a clean target so a stale parquet can't shadow the fresh
+        # download (the relocate below only fires when dst_path is absent).
+        dst_path.unlink(missing_ok=True)
         downloader_url = (
             "https://raw.githubusercontent.com/mlcommons/r2-downloader/"
             f"{cls.R2_DOWNLOADER_COMMIT}/mlc-r2-downloader.sh"
