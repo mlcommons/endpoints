@@ -224,33 +224,31 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
         raw_loadgen_window_ns = _counter("legacy_loadgen_window_duration_ns")
 
         # Derived throughput, computed once so result_summary.json is
-        # self-complete. Legacy LoadGen QPS = (completed-1)/window; otherwise
-        # native completed/duration. The walrus assigns the window
-        # unconditionally (first operand of the `and`), so it stays in scope
-        # for the tps computation and the stored field below — no second
-        # counter read.
-        if (
-            legacy_loadgen_window_duration_ns := (
-                raw_loadgen_window_ns
-                if (use_legacy_loadgen_qps_metrics and raw_loadgen_window_ns > 0)
-                else None
-            )
-        ) is not None and n_completed >= 2:
-            qps = (n_completed - 1) / (legacy_loadgen_window_duration_ns / 1e9)
+        # self-complete. The legacy LoadGen window drives the headline QPS/TPS
+        # only when it is enabled, available, AND there are >=2 completions
+        # (QPS = (completed-1)/window is undefined below 2). If any of those
+        # fail, BOTH QPS and TPS fall back to the native window so they always
+        # share one window, and legacy_loadgen_window_duration_ns stays None so
+        # the serialized report honestly records which view it holds.
+        use_legacy_window = (
+            use_legacy_loadgen_qps_metrics
+            and raw_loadgen_window_ns > 0
+            and n_completed >= 2
+        )
+        legacy_loadgen_window_duration_ns = (
+            raw_loadgen_window_ns if use_legacy_window else None
+        )
+        if use_legacy_window:
+            window_s = raw_loadgen_window_ns / 1e9
+            qps = (n_completed - 1) / window_s
+            tps = (osl.get("total", 0) / window_s) if osl else None
         elif duration_ns is not None:
-            qps = n_completed / (duration_ns / 1e9)
+            duration_s = duration_ns / 1e9
+            qps = n_completed / duration_s
+            tps = (osl.get("total", 0) / duration_s) if osl else None
         else:
             qps = None
-        tps_window_ns = (
-            legacy_loadgen_window_duration_ns
-            if legacy_loadgen_window_duration_ns is not None
-            else duration_ns
-        )
-        tps = (
-            (osl.get("total", 0) / (tps_window_ns / 1e9))
-            if (tps_window_ns and osl)
-            else None
-        )
+            tps = None
 
         # Default missing state to "interrupted" — a malformed / partial
         # snapshot dict is treated as worst-case (run did not reach a

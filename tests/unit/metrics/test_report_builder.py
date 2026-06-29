@@ -558,8 +558,13 @@ class TestLoadgenQpsMetrics:
         registry = _make_registry(n_samples=1)
         _set_loadgen_window(registry, duration_ns=1_000_000_000)
         report = _build_report(registry)
-        # Native QPS = 1 / 10 s (tracked_duration set to 10s by _make_registry).
+        # Both QPS and TPS fall back to the native window (10s) — they must
+        # share one window, and the legacy field must be None so the serialized
+        # report does not mislabel which view it holds.
         assert report.qps == pytest.approx(0.1)
+        total = report.output_sequence_lengths["total"]
+        assert report.tps == pytest.approx(total / 10.0)
+        assert report.legacy_loadgen_window_duration_ns is None
 
 
 @pytest.mark.unit

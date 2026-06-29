@@ -65,13 +65,19 @@ def _make_sigterm_handler(
     async def _signal_finalize() -> None:
         try:
             # Mirror the ENDED-driven path: refresh tracked_duration_ns
-            # from the table BEFORE publish_final, otherwise an
-            # interrupted run whose STOP_PERFORMANCE_TRACKING never
-            # fired would report duration_ns=0 and QPS=N/A in the final
-            # report even after processing many tracked samples.
+            # and the legacy LoadGen window from the table BEFORE
+            # publish_final, otherwise an interrupted run whose
+            # STOP_PERFORMANCE_TRACKING never fired would report
+            # duration_ns=0 (QPS=N/A) and a zero legacy window (silent
+            # native fallback) in the final report even after processing
+            # many tracked samples.
             registry.set_counter(
                 MetricCounterKey.TRACKED_DURATION_NS.value,
                 table.total_tracked_duration_ns,
+            )
+            registry.set_counter(
+                MetricCounterKey.LEGACY_LOADGEN_WINDOW_DURATION_NS.value,
+                table.total_loadgen_window_ns,
             )
             await publisher.publish_final(
                 registry,
