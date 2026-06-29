@@ -16,7 +16,7 @@
 
 """Out-of-process runner for the MLCommons DeepSeek-R1 accuracy evaluator.
 
-Invoked by ``inference_endpoint.evaluation.scoring.DeepSeekR1Scorer`` via
+Invoked by ``inference_endpoint.evaluation.scoring.LegacyMLPerfDeepSeekR1Scorer`` via
 ``uv run --project``. Reads a parquet of per-sample model outputs, runs the
 fetched MLCommons ``eval_accuracy.process_dataframe`` per subset (so one
 subset's failure - e.g. a missing LiveCodeBench dataset - does not sink the
@@ -32,7 +32,8 @@ others), and writes an aggregate metrics JSON:
     }
 
 The evaluator source + its prm800k / LiveCodeBench submodules are fetched by
-``setup_eval.sh`` into ``./mlperf_eval/``. See RUNBOOK.md.
+``setup_eval.sh`` into ``./mlperf_eval/``. See
+examples/07_DeepSeekR1_Example/README.md.
 """
 
 from __future__ import annotations
@@ -106,7 +107,7 @@ def main() -> None:
     # basis for tokens_per_sample. Count with the DeepSeek tokenizer so the
     # number matches MLPerf token accounting.
     logger.info("Loading tokenizer: %s", args.tokenizer)
-    tok = AutoTokenizer.from_pretrained(args.tokenizer, trust_remote_code=True)
+    tok = AutoTokenizer.from_pretrained(args.tokenizer, trust_remote_code=False)
     df["tok_model_output_len"] = [
         len(tok.encode(o, add_special_tokens=False))
         for o in df["model_output"].astype(str)

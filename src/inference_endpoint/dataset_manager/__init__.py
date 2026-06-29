@@ -24,8 +24,8 @@ from .dataset import Dataset, EmptyDataset
 from .factory import DataLoaderFactory
 from .predefined.aime25 import AIME25
 from .predefined.cnndailymail import CNNDailyMail
-from .predefined.deepseek_r1 import DeepSeekR1
 from .predefined.gpqa import GPQA
+from .predefined.legacy_mlperf_deepseek_r1 import LegacyMLPerfDeepSeekR1
 from .predefined.livecodebench import LiveCodeBench
 from .predefined.open_orca import OpenOrca
 from .predefined.random import RandomDataset
@@ -57,7 +57,7 @@ __all__ = [
     "MakeAdapterCompatible",
     "apply_transforms",
     "AIME25",
-    "DeepSeekR1",
+    "LegacyMLPerfDeepSeekR1",
     "GPQA",
     "OpenOrca",
     "LiveCodeBench",

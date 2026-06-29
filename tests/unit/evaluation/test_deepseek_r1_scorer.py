@@ -24,19 +24,19 @@ import pytest
 from inference_endpoint.core.record import EventRecord, EventType, SampleEventType
 from inference_endpoint.core.types import TextModelOutput
 from inference_endpoint.evaluation import scoring as scoring_mod
-from inference_endpoint.evaluation.scoring import DeepSeekR1Scorer, Scorer
+from inference_endpoint.evaluation.scoring import LegacyMLPerfDeepSeekR1Scorer, Scorer
 
 
 @pytest.mark.unit
-class TestDeepSeekR1ScorerRegistration:
+class TestLegacyMLPerfDeepSeekR1ScorerRegistration:
     def test_scorer_registered(self):
-        assert "deepseek_r1" in Scorer.available_scorers()
-        assert Scorer.get("deepseek_r1") is DeepSeekR1Scorer
+        assert "legacy_mlperf_deepseek_r1" in Scorer.available_scorers()
+        assert Scorer.get("legacy_mlperf_deepseek_r1") is LegacyMLPerfDeepSeekR1Scorer
 
 
 @pytest.mark.unit
-class TestDeepSeekR1Scorer:
-    """DeepSeekR1Scorer unit tests with the eval subprocess monkey-patched."""
+class TestLegacyMLPerfDeepSeekR1Scorer:
+    """LegacyMLPerfDeepSeekR1Scorer unit tests with the eval subprocess monkey-patched."""
 
     # Three samples across three subsets.
     OUTPUTS = [
@@ -127,7 +127,7 @@ class TestDeepSeekR1Scorer:
     def test_score_returns_exact_match(
         self, dataset, staged, project, patch_subprocess
     ):
-        scorer = DeepSeekR1Scorer(
+        scorer = LegacyMLPerfDeepSeekR1Scorer(
             dataset_name="dsr1_acc",
             dataset=dataset,
             report_dir=staged,
@@ -151,7 +151,7 @@ class TestDeepSeekR1Scorer:
     ):
         """The parquet handed to the subprocess has the evaluator's columns,
         with model_output (from events) joined to the correct dataset row."""
-        scorer = DeepSeekR1Scorer(
+        scorer = LegacyMLPerfDeepSeekR1Scorer(
             dataset_name="dsr1_acc",
             dataset=dataset,
             report_dir=staged,
@@ -175,7 +175,7 @@ class TestDeepSeekR1Scorer:
         empty_project = tmp_path / "empty"
         empty_project.mkdir()
         with pytest.raises(FileNotFoundError, match="deepseek_eval_runner.py"):
-            DeepSeekR1Scorer(
+            LegacyMLPerfDeepSeekR1Scorer(
                 dataset_name="dsr1_acc",
                 dataset=dataset,
                 report_dir=staged,
@@ -193,7 +193,7 @@ class TestDeepSeekR1Scorer:
             return MagicMock(returncode=0, stdout="ok\n")
 
         monkeypatch.setattr(scoring_mod.subprocess, "run", fake_run)
-        scorer = DeepSeekR1Scorer(
+        scorer = LegacyMLPerfDeepSeekR1Scorer(
             dataset_name="dsr1_acc",
             dataset=dataset,
             report_dir=staged,
@@ -206,7 +206,7 @@ class TestDeepSeekR1Scorer:
 
 
 @pytest.mark.unit
-class TestDeepSeekR1ScorerContainer:
+class TestLegacyMLPerfDeepSeekR1ScorerContainer:
     """Container path: text subsets graded by the subprocess, livecodebench graded
     via the lcb-service WebSocket, merged into one 5-subset number."""
 
@@ -307,7 +307,7 @@ class TestDeepSeekR1ScorerContainer:
         return calls
 
     def _scorer(self, dataset, staged, project):
-        return DeepSeekR1Scorer(
+        return LegacyMLPerfDeepSeekR1Scorer(
             dataset_name="dsr1_acc",
             dataset=dataset,
             report_dir=staged,
@@ -355,7 +355,7 @@ class TestDeepSeekR1ScorerContainer:
             scoring_mod, "_lcb_ws_evaluate", lambda url, codes, timeout: None
         )
         scorer = self._scorer(dataset, staged, project)
-        score, n_repeats = scorer.score()
+        scorer.score()
 
         # No in-process LCB re-grade: subprocess still ran exactly once.
         assert patch_subprocess["n"] == 1

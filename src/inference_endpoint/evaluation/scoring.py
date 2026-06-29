@@ -125,7 +125,7 @@ class Scorer(ABC):
         self.sample_index_map = self._load_sample_index_map()
 
         # Whether the most recent score() covered every issued sample. Scorers
-        # that can return a partial headline number (e.g. DeepSeekR1Scorer when
+        # that can return a partial headline number (e.g. LegacyMLPerfDeepSeekR1Scorer when
         # the lcb-service container is unreachable) set this False so callers
         # can distinguish a partial result from a complete one. Default True.
         self.complete: bool = True
@@ -332,7 +332,7 @@ def _lcb_ws_evaluate(
     Sends ``{codes_dict, timeout_sec}`` and consumes progress frames until a
     terminal ``completed`` (returns ``result`` = ``{total_samples, results}``)
     or ``error``. Returns None on any failure so callers can fall back. Kept as
-    a module function so both LiveCodeBenchScorer and DeepSeekR1Scorer (which
+    a module function so both LiveCodeBenchScorer and LegacyMLPerfDeepSeekR1Scorer (which
     grades its livecodebench subset out-of-band) share one client.
     """
     if websocket is None:
@@ -950,111 +950,6 @@ class LiveCodeBenchScorer(Scorer, scorer_id="code_bench_scorer"):
             "This method should not be called. Use the score() method instead, which invokes lcb_runner."
         )
 
-    def _evaluate_via_websocket(self, codes_dict: dict[str, list[str]]) -> dict | None:
-        """Attempt to evaluate via WebSocket service (synchronous).
-
-        Configured for long-running connections (minutes to hours) with:
-        - Extended timeouts for send/receive operations
-        - Automatic ping/pong for connection keep-alive
-        - Proper error handling for network interruptions
-
-        Returns:
-            dict with evaluation results, or None if connection failed
-        """
-        if websocket is None:
-            print(
-                "Warning: websocket-client package not installed, falling back to subprocess"
-            )
-            print("Install with: pip install websocket-client")
-            return None
-
-        try:
-            # Create WebSocket connection with settings for long-running operations
-            # Timeout is set high for long evaluations (hours), but recv() will return
-            # as soon as data is available (not blocking for the full timeout)
-            ws = websocket.create_connection(
-                self.lcb_websocket_url,
-                timeout=7200,  # 2 hours connection timeout
-                ping_interval=30,  # Send ping every 30 seconds to keep connection alive
-                ping_timeout=10,  # Wait 10 seconds for pong response
-            )
-
-            # Setup progress tracking
-            total_samples = sum(len(codes) for codes in codes_dict.values())
-            pbar = None
-
-            try:
-                # Send evaluation request
-                request = {
-                    "codes_dict": codes_dict,
-                    "timeout_sec": self.timeout,
-                }
-                ws.send(msgspec.json.encode(request).decode("utf-8"))
-
-                print(f"Connected to WebSocket service: {self.lcb_websocket_url}")
-                print(
-                    f"Evaluating {len(codes_dict)} questions ({total_samples} samples)..."
-                )
-                pbar = tqdm(
-                    total=total_samples,
-                    desc="LCB Evaluation",
-                    unit="sample",
-                )
-
-                # Process responses
-                while True:
-                    try:
-                        message = ws.recv()
-                        if not message:
-                            # Connection closed cleanly
-                            break
-
-                        data = msgspec.json.decode(message)
-                        status = data.get("status")
-
-                        if status == "started":
-                            # Initial message, progress bar already initialized
-                            pass
-
-                        elif status == "progress":
-                            completed = data.get("completed_samples", 0)
-                            # Update progress bar to current position
-                            pbar.n = completed
-                            pbar.refresh()
-
-                        elif status == "completed":
-                            pbar.n = total_samples
-                            pbar.refresh()
-                            return data.get("result")
-
-                        elif status == "error":
-                            error_msg = data.get("error", "Unknown error")
-                            print(f"WebSocket evaluation error: {error_msg}")
-                            return None
-
-                    except websocket.WebSocketTimeoutException:
-                        # This shouldn't happen with ping/pong, but handle gracefully
-                        print("WebSocket timeout - connection lost")
-                        return None
-
-                # If we exit the loop without returning, something went wrong
-                return None
-
-            finally:
-                # Ensure progress bar is always closed
-                if pbar:
-                    pbar.close()
-
-                # Close WebSocket connection
-                try:
-                    ws.close()
-                except Exception:
-                    pass  # Ignore errors on close
-
-        except (ConnectionRefusedError, OSError, Exception) as e:
-            print(f"WebSocket connection failed: {e}, falling back to subprocess")
-            return None
-
     def _evaluate_via_subprocess(self, df: pd.DataFrame) -> float | None:
         """Evaluate via subprocess (fallback method).
 
@@ -1197,8 +1092,10 @@ class LiveCodeBenchScorer(Scorer, scorer_id="code_bench_scorer"):
             for _, row in df.iterrows():
                 codes_dict[row["question_id"]].append(row["extracted_code"])
 
-            # Attempt WebSocket evaluation (synchronous)
-            result = self._evaluate_via_websocket(codes_dict)
+            # Attempt WebSocket evaluation (synchronous) via the shared client.
+            result = _lcb_ws_evaluate(
+                self.lcb_websocket_url, dict(codes_dict), self.timeout
+            )
 
             if result is not None:
                 # Successfully evaluated via WebSocket
@@ -1725,12 +1622,7 @@ class VBenchScorer(Scorer, scorer_id="vbench"):
         return mean_score, n_repeats
 
 
-_DEFAULT_DEEPSEEK_EVAL_PROJECT_PATH = Path(__file__).resolve().parent / "deepseek_r1"
-
-_DEEPSEEK_EVAL_PROJECT_PATH_ENV = "DEEPSEEK_EVAL_PROJECT_PATH"
-
-
-class DeepSeekR1Scorer(Scorer, scorer_id="deepseek_r1"):
+class LegacyMLPerfDeepSeekR1Scorer(Scorer, scorer_id="legacy_mlperf_deepseek_r1"):
     """MLPerf DeepSeek-R1 combined-subset accuracy scorer.
 
     The MLPerf DeepSeek-R1 accuracy dataset is an ensemble of five subsets
@@ -1743,7 +1635,8 @@ class DeepSeekR1Scorer(Scorer, scorer_id="deepseek_r1"):
     ``prm800k`` math grader and ``LiveCodeBench`` code executor submodules)
     that are incompatible with the parent benchmark env, so - exactly like
     ``VBenchScorer`` - it runs out-of-process via ``uv run --project`` against
-    the isolated subproject at ``src/inference_endpoint/evaluation/deepseek_r1/``
+    the isolated subproject at
+    ``src/inference_endpoint/evaluation/legacy_mlperf_deepseek_r1/``
     (a uv subproject, excluded from the parent wheel). The parent process never
     imports the evaluator.
 
@@ -1820,7 +1713,7 @@ class DeepSeekR1Scorer(Scorer, scorer_id="deepseek_r1"):
             raise FileNotFoundError(
                 f"deepseek_eval_runner.py not found at {runner}. "
                 f"Run `uv sync` and `bash setup_eval.sh` in the accuracy "
-                f"subproject, or set ${_DEEPSEEK_EVAL_PROJECT_PATH_ENV} to the "
+                f"subproject, or set $DEEPSEEK_EVAL_PROJECT_PATH to the "
                 f"synced subproject path."
             )
 
@@ -1834,10 +1727,10 @@ class DeepSeekR1Scorer(Scorer, scorer_id="deepseek_r1"):
         """
         if explicit is not None:
             return Path(explicit)
-        from_env = os.environ.get(_DEEPSEEK_EVAL_PROJECT_PATH_ENV)
+        from_env = os.environ.get("DEEPSEEK_EVAL_PROJECT_PATH")
         if from_env:
             return Path(from_env)
-        return Path(_DEFAULT_DEEPSEEK_EVAL_PROJECT_PATH)
+        return Path(__file__).resolve().parent / "legacy_mlperf_deepseek_r1"
 
     def score_single_sample(self, value: str, ground_truth: str) -> float:
         raise RuntimeError(
@@ -1911,7 +1804,10 @@ class DeepSeekR1Scorer(Scorer, scorer_id="deepseek_r1"):
         Returns ``(passed, total)`` or None if the service is unreachable (so
         score() can fall back to the in-process path).
         """
-        assert self.lcb_websocket_url is not None
+        if self.lcb_websocket_url is None:
+            raise ValueError(
+                "lcb_websocket_url must be configured to score LCB via container"
+            )
         codes_dict: dict[str, list[str]] = defaultdict(list)
         for _, row in lcb_df.iterrows():
             code = PythonCodeExtractor.extract(
@@ -1950,7 +1846,7 @@ class DeepSeekR1Scorer(Scorer, scorer_id="deepseek_r1"):
         # but still count toward the denominator, so keep them in.
         if df.empty:
             logger.warning(
-                "DeepSeekR1Scorer: no outputs to score; returning None score."
+                "LegacyMLPerfDeepSeekR1Scorer: no outputs to score; returning None score."
             )
             self.complete = False
             return None, n_repeats
@@ -1959,12 +1855,14 @@ class DeepSeekR1Scorer(Scorer, scorer_id="deepseek_r1"):
         order = df["sample_index"].to_numpy().astype(int)
 
         ref = self.dataset.dataframe
-        assert ref is not None, f"Dataset {self.dataset} has no dataframe loaded"
+        if ref is None:
+            raise RuntimeError(f"Dataset {self.dataset} has no dataframe loaded")
         for col in (self.ground_truth_column, self.subset_column, self.question_column):
-            assert col in ref.columns, (
-                f"Column {col!r} not found in dataset {self.dataset}; "
-                f"available: {list(ref.columns)}"
-            )
+            if col not in ref.columns:
+                raise ValueError(
+                    f"Column {col!r} not found in dataset {self.dataset}; "
+                    f"available: {list(ref.columns)}"
+                )
 
         eval_df = pd.DataFrame(
             {
@@ -1991,7 +1889,7 @@ class DeepSeekR1Scorer(Scorer, scorer_id="deepseek_r1"):
             exact_match = results.get("exact_match")
             if exact_match is None:
                 logger.warning(
-                    "DeepSeekR1Scorer: subprocess produced no exact_match; "
+                    "LegacyMLPerfDeepSeekR1Scorer: subprocess produced no exact_match; "
                     "returning None score. See %s",
                     out_json,
                 )
@@ -2037,7 +1935,7 @@ class DeepSeekR1Scorer(Scorer, scorer_id="deepseek_r1"):
             # needs a ~21 GB dataset load. Score LCB separately with
             # score_livecodebench.sh and fold it in.
             logger.warning(
-                "DeepSeekR1Scorer: lcb-service unreachable at %s; livecodebench "
+                "LegacyMLPerfDeepSeekR1Scorer: lcb-service unreachable at %s; livecodebench "
                 "left unscored (reporting %d text samples only, run marked "
                 "incomplete). Score LCB separately via score_livecodebench.sh.",
                 self.lcb_websocket_url,
@@ -2068,7 +1966,7 @@ class DeepSeekR1Scorer(Scorer, scorer_id="deepseek_r1"):
         )
         if combined is not None and lcb_ok and total_n != expected_n:
             logger.warning(
-                "DeepSeekR1Scorer: scored %d of %d samples (LCB count diverged "
+                "LegacyMLPerfDeepSeekR1Scorer: scored %d of %d samples (LCB count diverged "
                 "from the issued rows); marking the result incomplete.",
                 total_n,
                 expected_n,
@@ -2082,7 +1980,7 @@ class DeepSeekR1Scorer(Scorer, scorer_id="deepseek_r1"):
         results["complete"] = complete
         out_json.write_bytes(msgspec.json.encode(results))
         logger.info(
-            "DeepSeekR1Scorer: combined exact_match=%s (text %d/%d + LCB %d/%d, complete=%s)",
+            "LegacyMLPerfDeepSeekR1Scorer: combined exact_match=%s (text %d/%d + LCB %d/%d, complete=%s)",
             f"{combined:.4f}" if combined is not None else "None",
             text_correct,
             text_n,

@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for the predefined DeepSeek-R1 dataset (local source)."""
+"""Unit tests for the predefined DeepSeek-R1 dataset (prepared parquet source)."""
 
 from pathlib import Path
 
@@ -21,113 +21,154 @@ import numpy as np
 import pandas as pd
 import pytest
 from inference_endpoint.dataset_manager.dataset import Dataset
-from inference_endpoint.dataset_manager.predefined.deepseek_r1 import (
+from inference_endpoint.dataset_manager.predefined import (
+    legacy_mlperf_deepseek_r1 as dsr1_mod,
+)
+from inference_endpoint.dataset_manager.predefined.legacy_mlperf_deepseek_r1 import (
     SOURCE_ENV,
-    DeepSeekR1,
+    LegacyMLPerfDeepSeekR1,
 )
 
 pytestmark = pytest.mark.unit
 
 
-def _raw_source_df() -> pd.DataFrame:
-    """A minimal MLPerf-shaped source frame (pre-prepare columns)."""
+def _prepared_df() -> pd.DataFrame:
+    """A prepared DeepSeek-R1 frame: output columns already present.
+
+    ``tok_output`` is an extra source column that must be dropped from output.
+    """
     return pd.DataFrame(
         {
-            "tok_input": [np.array([1, 2, 3]), np.array([4, 5]), np.array([6])],
+            "input_tokens": [[1, 2, 3], [4, 5], [6]],
             "ground_truth": ["42", "lcb_q7", "C"],
             "dataset": ["math500", "livecodebench", "gpqa"],
             "question": ["q-math", "q-code", "q-gpqa"],
-            # An extra source column that must be dropped from the output.
             "tok_output": [[9], [9, 9], [9, 9, 9]],
         }
     )
 
 
 @pytest.fixture
-def pkl_source(tmp_path: Path) -> Path:
+def prepared_parquet(tmp_path: Path) -> Path:
+    path = tmp_path / "deepseek_r1_eval.parquet"
+    _prepared_df().to_parquet(path, index=False)
+    return path
+
+
+@pytest.fixture
+def raw_pkl(tmp_path: Path) -> Path:
+    """A raw MLPerf-shaped ``.pkl`` (pre-tokenization columns)."""
     path = tmp_path / "deepseek_r1.pkl"
-    _raw_source_df().to_pickle(path)
+    pd.DataFrame(
+        {
+            "tok_input": [np.array([1, 2, 3]), np.array([4, 5])],
+            "ground_truth": ["42", "C"],
+            "dataset": ["math500", "gpqa"],
+            "question": ["q-math", "q-gpqa"],
+        }
+    ).to_pickle(path)
     return path
 
 
 def test_registered_in_predefined():
-    assert Dataset.PREDEFINED["deepseek_r1"] is DeepSeekR1
-    assert DeepSeekR1.DATASET_ID == "deepseek_r1"
+    assert Dataset.PREDEFINED["legacy_mlperf_deepseek_r1"] is LegacyMLPerfDeepSeekR1
+    assert LegacyMLPerfDeepSeekR1.DATASET_ID == "legacy_mlperf_deepseek_r1"
 
 
-def test_generate_transforms_and_caches(tmp_path: Path, pkl_source: Path):
+def test_generate_prepared_parquet_caches(tmp_path: Path, prepared_parquet: Path):
     cache = tmp_path / "cache"
-    df = DeepSeekR1.generate(datasets_dir=cache, source=pkl_source)
+    df = LegacyMLPerfDeepSeekR1.generate(datasets_dir=cache, source=prepared_parquet)
 
+    # Only the output columns survive; the extra source column is dropped.
     assert list(df.columns) == ["input_tokens", "ground_truth", "dataset", "question"]
-    # tok_input -> input_tokens, as plain Python lists (msgspec-friendly).
-    assert df["input_tokens"].tolist() == [[1, 2, 3], [4, 5], [6]]
-    assert all(isinstance(v, list) for v in df["input_tokens"])
     assert df["ground_truth"].tolist() == ["42", "lcb_q7", "C"]
     assert df["dataset"].tolist() == ["math500", "livecodebench", "gpqa"]
 
-    # The cache parquet is written under <datasets_dir>/deepseek_r1/.
-    cached = cache / "deepseek_r1" / "deepseek_r1_eval.parquet"
+    # The cache parquet is written under <datasets_dir>/legacy_mlperf_deepseek_r1/.
+    cached = cache / "legacy_mlperf_deepseek_r1" / "deepseek_r1_eval.parquet"
     assert cached.exists()
 
 
-def test_generate_loads_from_cache_without_source(tmp_path: Path, pkl_source: Path):
+def test_generate_loads_from_cache_without_source(
+    tmp_path: Path, prepared_parquet: Path
+):
     cache = tmp_path / "cache"
-    DeepSeekR1.generate(datasets_dir=cache, source=pkl_source)
+    LegacyMLPerfDeepSeekR1.generate(datasets_dir=cache, source=prepared_parquet)
     # Second call needs no source: it reads the cached parquet.
-    df = DeepSeekR1.generate(datasets_dir=cache)
+    df = LegacyMLPerfDeepSeekR1.generate(datasets_dir=cache)
     assert len(df) == 3
     assert "input_tokens" in df.columns
 
 
-def test_force_rebuilds_cache(tmp_path: Path, pkl_source: Path):
+def test_force_rebuilds_cache(tmp_path: Path, prepared_parquet: Path, monkeypatch):
     cache = tmp_path / "cache"
-    DeepSeekR1.generate(datasets_dir=cache, source=pkl_source)
-    # force=True must rebuild from source, so a missing source now raises.
+    LegacyMLPerfDeepSeekR1.generate(datasets_dir=cache, source=prepared_parquet)
+    # force=True must rebuild from source: with no source/env and the bundled
+    # parquet absent, it re-resolves and raises rather than reusing the cache.
+    monkeypatch.delenv(SOURCE_ENV, raising=False)
+    monkeypatch.setattr(dsr1_mod, "_BUNDLED_PARQUET", tmp_path / "absent.parquet")
     with pytest.raises(FileNotFoundError):
-        DeepSeekR1.generate(datasets_dir=cache, force=True)
+        LegacyMLPerfDeepSeekR1.generate(datasets_dir=cache, force=True)
 
 
-def test_generate_uses_env_var(tmp_path: Path, pkl_source: Path, monkeypatch):
-    monkeypatch.setenv(SOURCE_ENV, str(pkl_source))
-    df = DeepSeekR1.generate(datasets_dir=tmp_path / "cache")
+def test_generate_uses_env_var(tmp_path: Path, prepared_parquet: Path, monkeypatch):
+    monkeypatch.setenv(SOURCE_ENV, str(prepared_parquet))
+    df = LegacyMLPerfDeepSeekR1.generate(datasets_dir=tmp_path / "cache")
     assert len(df) == 3
 
 
-def test_prepared_parquet_passthrough(tmp_path: Path):
-    prepared = tmp_path / "prepared.parquet"
+def test_raw_pkl_source_not_supported(tmp_path: Path, raw_pkl: Path):
+    # A raw .pkl is rejected on suffix before any read.
+    with pytest.raises(NotImplementedError, match="raw MLPerf source"):
+        LegacyMLPerfDeepSeekR1.generate(datasets_dir=tmp_path / "cache", source=raw_pkl)
+
+
+def test_prepared_pkl_rejected_by_suffix(tmp_path: Path):
+    # Even a prepared .pkl is rejected: only .parquet is supported.
+    p = tmp_path / "prepared.pkl"
+    _prepared_df().to_pickle(p)
+    with pytest.raises(NotImplementedError, match="prepared .parquet"):
+        LegacyMLPerfDeepSeekR1.generate(datasets_dir=tmp_path / "cache", source=p)
+
+
+def test_parquet_without_input_tokens_not_supported(tmp_path: Path):
+    # A parquet of raw (un-tokenized) columns has no input_tokens -> unsupported.
+    bad = tmp_path / "raw.parquet"
     pd.DataFrame(
         {
-            "input_tokens": [[1, 2], [3]],
-            "ground_truth": ["a", "b"],
-            "dataset": ["math500", "aime"],
-            "question": ["q1", "q2"],
-            "extra": [0, 1],
+            "tok_input": [[1, 2]],
+            "ground_truth": ["a"],
+            "dataset": ["math500"],
+            "question": ["q"],
         }
-    ).to_parquet(prepared, index=False)
+    ).to_parquet(bad, index=False)
+    with pytest.raises(NotImplementedError, match="input_tokens"):
+        LegacyMLPerfDeepSeekR1.generate(datasets_dir=tmp_path / "cache", source=bad)
 
-    df = DeepSeekR1.generate(datasets_dir=tmp_path / "cache", source=prepared)
-    assert list(df.columns) == ["input_tokens", "ground_truth", "dataset", "question"]
-    assert len(df) == 2
+
+def test_defaults_to_bundled_parquet_when_unset(
+    tmp_path: Path, prepared_parquet: Path, monkeypatch
+):
+    # No source, no env -> falls back to the bundled example parquet.
+    monkeypatch.delenv(SOURCE_ENV, raising=False)
+    monkeypatch.setattr(dsr1_mod, "_BUNDLED_PARQUET", prepared_parquet)
+    df = LegacyMLPerfDeepSeekR1.generate(datasets_dir=tmp_path / "cache")
+    assert len(df) == 3
+    assert "input_tokens" in df.columns
 
 
 def test_missing_source_raises(tmp_path: Path, monkeypatch):
+    # No source, no env, and the bundled parquet absent (wheel install) -> raise.
     monkeypatch.delenv(SOURCE_ENV, raising=False)
+    monkeypatch.setattr(dsr1_mod, "_BUNDLED_PARQUET", tmp_path / "absent.parquet")
     with pytest.raises(FileNotFoundError, match=SOURCE_ENV):
-        DeepSeekR1.generate(datasets_dir=tmp_path / "cache")
-
-
-def test_source_missing_columns_raises(tmp_path: Path):
-    bad = tmp_path / "bad.parquet"
-    pd.DataFrame({"foo": [1], "bar": [2]}).to_parquet(bad, index=False)
-    with pytest.raises(ValueError, match="missing expected columns"):
-        DeepSeekR1.generate(datasets_dir=tmp_path / "cache", source=bad)
+        LegacyMLPerfDeepSeekR1.generate(datasets_dir=tmp_path / "cache")
 
 
 def test_resolved_source_not_found_raises(tmp_path: Path):
-    missing = tmp_path / "nope.pkl"
+    missing = tmp_path / "nope.parquet"
     with pytest.raises(FileNotFoundError, match="source not found"):
-        DeepSeekR1.generate(datasets_dir=tmp_path / "cache", source=missing)
+        LegacyMLPerfDeepSeekR1.generate(datasets_dir=tmp_path / "cache", source=missing)
 
 
 def test_prepared_parquet_missing_output_column_raises(tmp_path: Path):
@@ -137,7 +178,7 @@ def test_prepared_parquet_missing_output_column_raises(tmp_path: Path):
         {"input_tokens": [[1]], "ground_truth": ["a"], "dataset": ["math500"]}
     ).to_parquet(bad, index=False)
     with pytest.raises(ValueError, match="missing columns"):
-        DeepSeekR1.generate(datasets_dir=tmp_path / "cache", source=bad)
+        LegacyMLPerfDeepSeekR1.generate(datasets_dir=tmp_path / "cache", source=bad)
 
 
 def test_stratified_subset(tmp_path: Path):
@@ -152,7 +193,7 @@ def test_stratified_subset(tmp_path: Path):
         }
     ).to_parquet(src, index=False)
 
-    df = DeepSeekR1.generate(
+    df = LegacyMLPerfDeepSeekR1.generate(
         datasets_dir=tmp_path / "cache", source=src, max_samples=10
     )
     assert 8 <= len(df) <= 12
@@ -160,29 +201,37 @@ def test_stratified_subset(tmp_path: Path):
     assert set(df["dataset"]) == {"math500", "gpqa"}
 
 
-def test_get_dataloader_threads_source(tmp_path: Path, pkl_source: Path):
-    """create_loader -> get_dataloader -> generate(**kwargs) threads `source`."""
-    ds = DeepSeekR1.get_dataloader(datasets_dir=tmp_path / "cache", source=pkl_source)
+def test_get_dataloader_loads_msgspec_safe_tokens(
+    tmp_path: Path, prepared_parquet: Path
+):
+    """create_loader -> get_dataloader -> generate threads `source`, and
+    Dataset.load() normalizes input_tokens to plain Python ints (msgspec-safe)."""
+    ds = LegacyMLPerfDeepSeekR1.get_dataloader(
+        datasets_dir=tmp_path / "cache", source=prepared_parquet
+    )
     ds.load()
     assert ds.num_samples() == 3
+    row = ds.load_sample(0)
+    assert isinstance(row["input_tokens"], list)
+    assert all(isinstance(t, int) for t in row["input_tokens"])
 
 
 def test_factory_resolves_deepseek_r1_via_env(
-    tmp_path: Path, pkl_source: Path, monkeypatch
+    tmp_path: Path, prepared_parquet: Path, monkeypatch
 ):
-    """The user-facing contract: `--dataset deepseek_r1` (name -> PREDEFINED)
+    """The user-facing contract: `--dataset legacy_mlperf_deepseek_r1` (name -> PREDEFINED)
     resolves through the factory and loads from the local env source."""
     from inference_endpoint.config.schema import Dataset as DatasetConfig
     from inference_endpoint.dataset_manager.factory import DataLoaderFactory
 
-    monkeypatch.setenv(SOURCE_ENV, str(pkl_source))
+    monkeypatch.setenv(SOURCE_ENV, str(prepared_parquet))
     monkeypatch.chdir(tmp_path)  # default dataset_cache/ lands here
 
-    cfg = DatasetConfig(name="deepseek_r1", type="accuracy")
+    cfg = DatasetConfig(name="legacy_mlperf_deepseek_r1", type="accuracy")
     ds = DataLoaderFactory.create_loader(cfg, num_repeats=1)
     ds.load()
 
-    assert isinstance(ds, DeepSeekR1)
+    assert isinstance(ds, LegacyMLPerfDeepSeekR1)
     assert ds.num_samples() == 3
     row = ds.load_sample(0)
     assert set(row) >= {"input_tokens", "ground_truth", "dataset", "question"}

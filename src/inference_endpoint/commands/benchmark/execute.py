@@ -26,7 +26,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import random
 import shutil
 import signal
@@ -105,31 +104,6 @@ from inference_endpoint.metrics.report import Report
 transformers_logging.set_verbosity_error()
 
 logger = logging.getLogger(__name__)
-
-_SERVICE_READY_TIMEOUT_ENV = "INFERENCE_ENDPOINT_SERVICE_READY_TIMEOUT_S"
-_SERVICE_READY_TIMEOUT_DEFAULT = 30.0
-
-
-def _service_ready_timeout() -> float:
-    """Service-startup readiness timeout, overridable via env.
-
-    Service imports off a shared/Lustre FS can exceed the default under heavy
-    login-node I/O contention. A non-numeric override is ignored with a warning
-    rather than crashing setup.
-    """
-    raw = os.environ.get(_SERVICE_READY_TIMEOUT_ENV)
-    if raw is None:
-        return _SERVICE_READY_TIMEOUT_DEFAULT
-    try:
-        return float(raw)
-    except ValueError:
-        logger.warning(
-            "Ignoring non-numeric %s=%r; using default %.0fs",
-            _SERVICE_READY_TIMEOUT_ENV,
-            raw,
-            _SERVICE_READY_TIMEOUT_DEFAULT,
-        )
-        return _SERVICE_READY_TIMEOUT_DEFAULT
 
 
 def _default_report_path() -> Path:
@@ -780,7 +754,7 @@ async def _run_benchmark_async(
                     args=event_logger_args,
                 ),
             ],
-            timeout=_service_ready_timeout(),
+            timeout=config.settings.service_ready_timeout_s,
         )
 
         # Create endpoint client on the shared loop
@@ -1142,7 +1116,7 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
             "ground_truth_column": eval_cfg.ground_truth_column,
             "score": score,
             # False when the scorer produced only a partial headline (e.g.
-            # DeepSeekR1Scorer when the lcb-service container was unreachable),
+            # LegacyMLPerfDeepSeekR1Scorer when the lcb-service container was unreachable),
             # so a partial number is never mistaken for a complete one.
             "complete": scorer_instance.complete,
         }

@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
-# setup_eval.sh - fetch the MLCommons DeepSeek-R1 evaluator into ./mlperf_eval/.
+# setup_eval.sh - lay out the MLCommons DeepSeek-R1 evaluator under ./mlperf_eval/.
 #
-# Downloads language/deepseek-r1/eval_accuracy.py from mlcommons/inference and
+# eval_accuracy.py is vendored (committed) at mlperf_eval/eval_accuracy.py - it
+# is a single file and avoids a network fetch at setup time. This script only
 # clones its two submodules (prm800k, LiveCodeBench) at pinned commits, laid
-# out exactly as eval_accuracy.py expects:
+# out exactly as eval_accuracy.py expects (it resolves submodules relative to
+# its own __file__):
 #
 #   mlperf_eval/
-#     eval_accuracy.py
+#     eval_accuracy.py          # vendored from mlcommons/inference @ e59ce58
 #     submodules/prm800k/
 #     submodules/LiveCodeBench/
 #
-# These are third-party sources, fetched at setup time rather than vendored
-# into this repo. Run once on the accuracy host after `uv sync`.
+# Run once on the accuracy host after `uv sync`.
 
 set -euo pipefail
 
@@ -20,6 +21,8 @@ EVAL_DIR="${SCRIPT_DIR}/mlperf_eval"
 SUBMODULES_DIR="${EVAL_DIR}/submodules"
 
 # Pinned upstream commits (resolved 2026-06-01). Bump deliberately.
+# eval_accuracy.py is vendored from mlcommons/inference @ MLC_INFERENCE_COMMIT;
+# re-vendor it (and bump this commit) when updating the evaluator.
 MLC_INFERENCE_REPO="https://github.com/mlcommons/inference"
 MLC_INFERENCE_COMMIT="e59ce582f544edcc1b3f69a6c6f3ebc66eecb3d7"
 PRM800K_REPO="https://github.com/openai/prm800k"
@@ -27,12 +30,13 @@ PRM800K_COMMIT="7ecc794703b2877f63226f2477a49b34f9b25163"
 LCB_REPO="https://github.com/LiveCodeBench/LiveCodeBench"
 LCB_COMMIT="28fef95ea8c9f7a547c8329f2cd3d32b92c1fa24"
 
-EVAL_ACCURACY_URL="https://raw.githubusercontent.com/mlcommons/inference/${MLC_INFERENCE_COMMIT}/language/deepseek-r1/eval_accuracy.py"
-
 mkdir -p "${SUBMODULES_DIR}"
 
-echo "==> Fetching eval_accuracy.py @ ${MLC_INFERENCE_COMMIT}"
-curl -fsSL "${EVAL_ACCURACY_URL}" -o "${EVAL_DIR}/eval_accuracy.py"
+if [ ! -f "${EVAL_DIR}/eval_accuracy.py" ]; then
+    echo "ERROR: vendored eval_accuracy.py missing at ${EVAL_DIR}." >&2
+    echo "It is committed in the repo; check out the full tree." >&2
+    exit 1
+fi
 
 clone_pinned() {
     local repo="$1" commit="$2" dest="$3"

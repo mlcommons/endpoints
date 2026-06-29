@@ -23,45 +23,49 @@ from ...dataset import Dataset
 
 logger = getLogger(__name__)
 
-#: Env var pointing at the local MLPerf DeepSeek-R1 source dataset.
-SOURCE_ENV = "DEEPSEEK_R1_DATASET_PKL"
+#: Env var pointing at the local prepared DeepSeek-R1 ``.parquet``.
+SOURCE_ENV = "LEGACY_MLPERF_DEEPSEEK_R1_DATASET"
 
-#: Columns required in a raw MLPerf source (pre-prepared parquets carry the
-#: output columns directly and skip this check).
-_REQUIRED_SOURCE_COLUMNS = ("tok_input", "ground_truth", "dataset", "question")
+#: Prepared parquet bundled in the repo (git-LFS). Used as the default source
+#: when neither an explicit ``source=`` nor ``$LEGACY_MLPERF_DEEPSEEK_R1_DATASET``
+#: is set. Present only in a source checkout - it is not packaged in the wheel
+#: (it lives under ``examples/``), so the lookup is guarded by ``.exists()``.
+_BUNDLED_PARQUET = (
+    Path(__file__).resolve().parents[5]
+    / "examples/07_DeepSeekR1_Example/data/deepseek_r1_eval.parquet"
+)
 
-#: Columns the benchmark + DeepSeekR1Scorer consume.
-_OUTPUT_COLUMNS = ["input_tokens", "ground_truth", "dataset", "question"]
 
-
-class DeepSeekR1(Dataset, dataset_id="deepseek_r1"):
+class LegacyMLPerfDeepSeekR1(Dataset, dataset_id="legacy_mlperf_deepseek_r1"):
     """MLPerf DeepSeek-R1 combined-subset dataset (local source).
 
     The official MLCommons DeepSeek-R1 accuracy set ships as a pandas pickle
     bundling five subsets (``math500``/``aime``/``gpqa``/``mmlu_pro``/
-    ``livecodebench``) with a pre-tokenized MLPerf prompt. This loader converts
-    that local source into the benchmark's columns and caches the result as a
-    parquet under ``<datasets_dir>/deepseek_r1/``:
+    ``livecodebench``) with a pre-tokenized MLPerf prompt. This loader consumes
+    a prepared ``.parquet`` of that source (already carrying the benchmark's
+    columns) and caches it under ``<datasets_dir>/legacy_mlperf_deepseek_r1/``:
 
       - ``input_tokens`` : pre-tokenized MLPerf prompt (source ``tok_input``);
         named so the ``openai_completions`` adapter's ``Harmonize()`` is a no-op
         and the server chat template is bypassed - the model sees the exact
         MLPerf prompt.
       - ``ground_truth`` : expected answer (LCB rows carry the LiveCodeBench id).
-      - ``dataset``      : subset id, used by ``DeepSeekR1Scorer`` to route
+      - ``dataset``      : subset id, used by ``LegacyMLPerfDeepSeekR1Scorer`` to route
         per-subset grading.
       - ``question``     : human-readable question text.
 
     One loader serves both phases: the perf phase issues ``input_tokens`` and the
-    accuracy phase hands the rows to ``DeepSeekR1Scorer`` (which grades by
+    accuracy phase hands the rows to ``LegacyMLPerfDeepSeekR1Scorer`` (which grades by
     ``dataset``/``ground_truth``).
 
-    The source is not bundled (it is the official MLCommons dataset). Point
-    ``$DEEPSEEK_R1_DATASET_PKL`` at your local ``.pkl`` (or an already-prepared
-    ``.parquet``), or pass ``source=`` to :meth:`generate`.
+    The source is not bundled (it is the official MLCommons dataset). Prepare a
+    ``.parquet`` carrying the output columns (see
+    ``examples/07_DeepSeekR1_Example/README.md``) and point
+    ``$LEGACY_MLPERF_DEEPSEEK_R1_DATASET`` at it, or pass ``source=`` to :meth:`generate`.
+    Building from the raw MLPerf source is not supported.
     """
 
-    COLUMN_NAMES = _OUTPUT_COLUMNS
+    COLUMN_NAMES = ["input_tokens", "ground_truth", "dataset", "question"]
 
     @classmethod
     def generate(
@@ -76,9 +80,10 @@ class DeepSeekR1(Dataset, dataset_id="deepseek_r1"):
 
         Args:
             datasets_dir: Root cache dir; the parquet is written under
-                ``<datasets_dir>/deepseek_r1/deepseek_r1_eval.parquet``.
-            source: Local MLPerf ``.pkl`` (or prepared ``.parquet``). Falls back
-                to ``$DEEPSEEK_R1_DATASET_PKL`` when omitted.
+                ``<datasets_dir>/legacy_mlperf_deepseek_r1/deepseek_r1_eval.parquet``.
+            source: Prepared DeepSeek-R1 ``.parquet`` (already carrying
+                ``input_tokens``). Falls back to ``$LEGACY_MLPERF_DEEPSEEK_R1_DATASET``
+                when omitted.
             max_samples: If set, return a stratified subset of this many rows
                 (proportional per ``dataset`` subset) for a quick estimate.
             seed: Random seed for the stratified subset.
@@ -101,61 +106,55 @@ class DeepSeekR1(Dataset, dataset_id="deepseek_r1"):
             logger.info("Stratified subset: %d of %d rows", len(df), full_n)
         return df
 
-    @staticmethod
-    def _build_from_source(source: str | os.PathLike | None) -> pd.DataFrame:
+    @classmethod
+    def _build_from_source(cls, source: str | os.PathLike | None) -> pd.DataFrame:
         resolved = source or os.environ.get(SOURCE_ENV)
+        if not resolved and _BUNDLED_PARQUET.exists():
+            resolved = _BUNDLED_PARQUET
         if not resolved:
             raise FileNotFoundError(
                 "DeepSeek-R1 source dataset not found. Set "
-                f"${SOURCE_ENV} to the local MLPerf DeepSeek-R1 .pkl (or pass "
-                "source=...). The official dataset is not bundled with the repo."
+                f"${SOURCE_ENV} to a prepared DeepSeek-R1 .parquet (or pass "
+                "source=...). A prepared copy ships at "
+                "examples/07_DeepSeekR1_Example/data/deepseek_r1_eval.parquet "
+                "and is used automatically from a source checkout."
             )
         path = Path(resolved)
         if not path.exists():
             raise FileNotFoundError(f"DeepSeek-R1 source not found at {path}")
 
-        # read_pickle executes arbitrary code on load, so it is only safe on
-        # trusted input: `path` is an operator-supplied local file (via
-        # $DEEPSEEK_R1_DATASET_PKL or an explicit source=), namely the official
-        # MLCommons DeepSeek-R1 dataset, which ships as a pandas .pkl. It is
-        # never a network/remote source. A prepared .parquet (already carrying
-        # input_tokens) is also accepted and passed through.
-        raw = (
-            pd.read_pickle(path)
-            if path.suffix in (".pkl", ".pickle")
-            else pd.read_parquet(path)
-        )
+        # Only a prepared .parquet (already carrying the output columns,
+        # including the pre-tokenized input_tokens) is supported. Converting a
+        # raw MLPerf source is intentionally out of scope: prepare the parquet
+        # offline (see examples/07_DeepSeekR1_Example/README.md).
+        if path.suffix != ".parquet":
+            raise NotImplementedError(
+                f"DeepSeek-R1 source {path} is not a prepared .parquet. "
+                "Building from a raw MLPerf source is not supported; pass a "
+                "prepared .parquet carrying an 'input_tokens' column."
+            )
 
-        if "input_tokens" in raw.columns:
-            missing = [c for c in _OUTPUT_COLUMNS if c not in raw.columns]
-            if missing:
-                raise ValueError(
-                    f"Prepared DeepSeek-R1 source {path} missing columns "
-                    f"{missing}; found {list(raw.columns)}"
-                )
-            return raw[_OUTPUT_COLUMNS].reset_index(drop=True)
-
-        missing = [c for c in _REQUIRED_SOURCE_COLUMNS if c not in raw.columns]
+        raw = pd.read_parquet(path)
+        if "input_tokens" not in raw.columns:
+            raise NotImplementedError(
+                f"DeepSeek-R1 parquet {path} has no 'input_tokens' column. "
+                "Building from a raw (un-tokenized) MLPerf source is not "
+                "supported; pass a prepared .parquet."
+            )
+        missing = [c for c in cls.COLUMN_NAMES if c not in raw.columns]
         if missing:
             raise ValueError(
-                f"DeepSeek-R1 source {path} missing expected columns {missing}; "
-                f"found {list(raw.columns)}"
+                f"Prepared DeepSeek-R1 source {path} missing columns "
+                f"{missing}; found {list(raw.columns)}"
             )
-        return pd.DataFrame(
-            {
-                "input_tokens": raw["tok_input"].map(
-                    lambda t: t.tolist() if hasattr(t, "tolist") else list(t)
-                ),
-                "ground_truth": raw["ground_truth"].astype(str),
-                "dataset": raw["dataset"].astype(str),
-                "question": raw["question"].astype(str),
-            }
-        )
+        return raw[cls.COLUMN_NAMES].reset_index(drop=True)
 
     @staticmethod
     def _stratified_subset(
         df: pd.DataFrame, max_samples: int, seed: int
     ) -> pd.DataFrame:
+        if df.empty:
+            return df
         frac = max_samples / len(df)
         parts = [
             group.sample(
