@@ -82,6 +82,7 @@ def _make_aggregator(
         sig_figs=3,
         n_histogram_buckets=10,
         streaming=streaming,
+        drain_timeout_s=None,
     )
     return agg, registry, publisher
 
