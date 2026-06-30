@@ -345,7 +345,7 @@ def _lcb_ws_evaluate(
         ws = websocket.create_connection(
             url, timeout=7200, ping_interval=30, ping_timeout=10
         )
-    except (ConnectionRefusedError, OSError, Exception) as e:  # noqa: BLE001
+    except (OSError, websocket.WebSocketException) as e:
         logger.warning("lcb-service WebSocket connect failed (%s): %s", url, e)
         return None
     total = sum(len(c) for c in codes_dict.values())
@@ -1921,6 +1921,10 @@ class LegacyMLPerfDeepSeekR1Scorer(Scorer, scorer_id="legacy_mlperf_deepseek_r1"
             if em is None:  # subset failed to grade (status != "ok")
                 text_complete = False
                 continue
+            # `em` is a per-subset mean of strictly-binary (0/100) per-sample
+            # scores, so round(em/100*n) recovers the exact integer correct
+            # count. If a future MLCommons subset emits fractional/partial
+            # credit, sum raw per-sample counts from the runner instead.
             text_correct += round(em / 100.0 * n)
             text_n += n
 
@@ -1932,12 +1936,13 @@ class LegacyMLPerfDeepSeekR1Scorer(Scorer, scorer_id="legacy_mlperf_deepseek_r1"
         if lcb_scored is None:
             # Container unreachable: leave livecodebench UNSCORED. Do NOT re-run
             # the in-process executor - it can't sandbox runaway model code and
-            # needs a ~21 GB dataset load. Score LCB separately with
-            # score_livecodebench.sh and fold it in.
+            # needs a ~21 GB dataset load. Launch the lcb-service container (see
+            # src/inference_endpoint/evaluation/livecodebench/README.md) and re-run.
             logger.warning(
                 "LegacyMLPerfDeepSeekR1Scorer: lcb-service unreachable at %s; livecodebench "
                 "left unscored (reporting %d text samples only, run marked "
-                "incomplete). Score LCB separately via score_livecodebench.sh.",
+                "incomplete). Launch the lcb-service container (see "
+                "evaluation/livecodebench/README.md) and re-run to score LCB.",
                 self.lcb_websocket_url,
                 text_n,
             )

@@ -366,6 +366,51 @@ class TestLegacyMLPerfDeepSeekR1ScorerContainer:
         assert res["complete"] is False
         assert res["per_dataset"]["livecodebench"]["status"] == "unscored"
 
+    def test_lcb_count_divergence_marks_incomplete(
+        self, dataset, staged, project, patch_subprocess, monkeypatch
+    ):
+        """Container reports more LCB samples than were issued -> total_n
+        (text 1 + lcb 2) != expected_n (2): a number is still produced but the
+        run is flagged incomplete (the headline-validity guard)."""
+        monkeypatch.setattr(
+            scoring_mod,
+            "_lcb_ws_evaluate",
+            lambda url, codes, timeout: {
+                "total_samples": 2,
+                "results": {"lcb-q0": [True, True]},
+            },
+        )
+        scorer = self._scorer(dataset, staged, project)
+        score, _ = scorer.score()
+        assert score is not None
+        assert scorer.complete is False
+        assert self._results(staged)["complete"] is False
+
+    def test_subprocess_nonzero_exit_raises(
+        self, dataset, staged, project, monkeypatch
+    ):
+        """A non-zero eval-subprocess exit surfaces as RuntimeError, not a
+        silent partial score."""
+        monkeypatch.setattr(
+            scoring_mod.subprocess,
+            "run",
+            lambda cmd, **kw: MagicMock(returncode=1, stdout="boom\ntraceback\n"),
+        )
+        scorer = self._scorer(dataset, staged, project)
+        with pytest.raises(RuntimeError, match="exited with code 1"):
+            scorer.score()
+
+    def test_subprocess_timeout_raises(self, dataset, staged, project, monkeypatch):
+        """A timed-out eval subprocess surfaces as RuntimeError."""
+
+        def _timeout(cmd, **kw):
+            raise scoring_mod.subprocess.TimeoutExpired(cmd, 1, output="partial\n")
+
+        monkeypatch.setattr(scoring_mod.subprocess, "run", _timeout)
+        scorer = self._scorer(dataset, staged, project)
+        with pytest.raises(RuntimeError, match="timed out after"):
+            scorer.score()
+
     def test_failed_text_subset_marks_incomplete(
         self, dataset, staged, project, monkeypatch
     ):

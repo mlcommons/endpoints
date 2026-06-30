@@ -16,9 +16,9 @@ ENV PYTHONUNBUFFERED=1 \
     UV_PROJECT_ENVIRONMENT=/opt/venv
 
 # Install system dependencies
-# git + curl + ca-certificates are required by the deepseek_r1 evaluator's setup_eval.sh
-# (git-clones prm800k / LiveCodeBench and curls the MLCommons eval_accuracy.py) in the
-# provisioning RUN below; without them that step fails and mlperf_eval/ is never baked.
+# git + curl + ca-certificates support the legacy_mlperf_deepseek_r1 evaluator's setup_eval.sh
+# (it git-clones prm800k / LiveCodeBench at pinned commits) in the provisioning RUN below;
+# without them that step fails and mlperf_eval/ is never baked. (eval_accuracy.py is vendored.)
 RUN apt-get update && \
     apt-get install -y --no-install-recommends build-essential procps git curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
@@ -52,12 +52,13 @@ RUN uv sync --frozen --extra dev --extra test
 
 # Provision the isolated DeepSeek-R1 accuracy evaluator so the image is self-contained for
 # `inference-endpoint benchmark --mode acc|both` with NO host checkout and NO runtime network.
-# DeepSeekR1Scorer shells out via `uv run --project src/inference_endpoint/evaluation/deepseek_r1`;
+# LegacyMLPerfDeepSeekR1Scorer shells out via `uv run --project src/inference_endpoint/evaluation/legacy_mlperf_deepseek_r1`;
 # that subproject pins heavy/conflicting deps (transformers, prm800k, LiveCodeBench code
 # executor) that must stay OUT of /opt/venv. So override UV_PROJECT_ENVIRONMENT to build the
-# subproject's OWN .venv, then setup_eval.sh fetches eval_accuracy.py + prm800k + LiveCodeBench
-# into mlperf_eval/. (At run time the launcher must likewise point UV_PROJECT_ENVIRONMENT +
-# DEEPSEEK_EVAL_PROJECT_PATH at this subproject, since the image ENV defaults to /opt/venv.)
-RUN cd src/inference_endpoint/evaluation/deepseek_r1 && \
+# subproject's OWN .venv, then setup_eval.sh clones prm800k + LiveCodeBench into mlperf_eval/
+# (eval_accuracy.py is vendored). (At run time the launcher must likewise point
+# UV_PROJECT_ENVIRONMENT + DEEPSEEK_EVAL_PROJECT_PATH at this subproject, since the image ENV
+# defaults to /opt/venv.)
+RUN cd src/inference_endpoint/evaluation/legacy_mlperf_deepseek_r1 && \
     UV_PROJECT_ENVIRONMENT="$(pwd)/.venv" uv sync && \
     UV_PROJECT_ENVIRONMENT="$(pwd)/.venv" bash setup_eval.sh

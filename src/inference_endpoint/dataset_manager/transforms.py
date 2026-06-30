@@ -189,6 +189,9 @@ class Harmonize(RowProcessor):
 
     @property
     def harmonizer(self) -> Harmonizer:
+        # Lazily built so construction doesn't fail offline when inputs are
+        # already pre-tokenized. Relies on serial access (RowProcessor drives
+        # this via single-threaded df.apply); not safe for concurrent first build.
         if self._harmonizer is None:
             self._harmonizer = Harmonizer(
                 tokenizer_name=self._tokenizer_name,

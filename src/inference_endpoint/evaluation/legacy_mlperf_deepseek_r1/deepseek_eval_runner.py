@@ -165,9 +165,12 @@ def main() -> None:
         overall_exact_match = None
         evaluated_samples = 0
 
+    # mean() is NaN on an empty/all-NaN frame (e.g. a standalone run on an
+    # all-failed set); NaN serializes as invalid JSON the scorer can't decode.
+    tps_mean = df["tok_model_output_len"].mean() if len(df) else 0.0
     results = {
         "exact_match": overall_exact_match,
-        "tokens_per_sample": float(df["tok_model_output_len"].mean()),
+        "tokens_per_sample": 0.0 if pd.isna(tps_mean) else float(tps_mean),
         "num_samples": int(len(df)),
         "evaluated_samples": evaluated_samples,
         "complete": complete,
