@@ -26,21 +26,24 @@ from inference_endpoint.metrics.results_plots import (
 
 
 def _accuracy_results() -> dict:
-    # BFCL serializes scores as strings; the extractor must coerce them.
+    # Current contract: scalar score + a numeric breakdown block. A couple of
+    # values are left as strings to exercise the extractor's defensive coercion
+    # (older artifacts serialized percentages as strings).
     return {
         "accuracy_scores": {
             "bfcl_v4::function_calling": {
-                "score": {
-                    "overall_accuracy": "86.23",
-                    "normalized_single_turn_score": "87.96",
+                "score": 0.8623,
+                "breakdown": {
+                    "overall_accuracy": 86.23,
+                    "normalized_single_turn_score": 87.96,
                     "category_scores": {
-                        "non_live": "82.59",
-                        "live": "84.12",
+                        "non_live": 82.59,
+                        "live": 84.12,
                         "hallucination": "97.16",
                     },
-                    "subset_scores": {"simple_python": "92.74", "simple_java": "46.77"},
+                    "subset_scores": {"simple_python": 92.74, "simple_java": "46.77"},
                     "total_samples": 995,
-                }
+                },
             }
         }
     }

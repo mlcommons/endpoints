@@ -16,7 +16,6 @@
 import json
 
 import pytest
-import yaml
 from inference_endpoint.compliance import (
     check_accuracy,
     check_config_lock,
@@ -40,17 +39,49 @@ def _passing_config() -> dict:
     }
 
 
+# A full, schema-valid config the checker can round-trip through
+# BenchmarkConfig.from_yaml_file(); its values satisfy config-lock.
+_VALID_CONFIG_YAML = """
+name: "compliance-test"
+type: "offline"
+model_params:
+  name: "qwen3.6-27b"
+  temperature: 0.0
+  seed: 42
+datasets:
+  - name: "bfcl_v4::function_calling"
+    type: "accuracy"
+    path: "bfcl.jsonl"
+settings:
+  runtime:
+    dataloader_random_seed: 42
+  load_pattern:
+    type: "max_throughput"
+  client:
+    num_workers: 1
+    max_connections: 1
+endpoint_config:
+  endpoints:
+    - "http://localhost:8000"
+"""
+
+
+def _write_valid_config(tmp_path) -> None:
+    (tmp_path / "config.yaml").write_text(_VALID_CONFIG_YAML)
+
+
 def _accuracy_results(
     overall: float | str, normalized: float | str, total: int | str
 ) -> dict:
     return {
         "accuracy_scores": {
             "bfcl_v4::function_calling": {
-                "score": {
+                "score": 0.8623,
+                "breakdown": {
                     "overall_accuracy": overall,
                     "normalized_single_turn_score": normalized,
                     "total_samples": total,
-                }
+                },
             }
         }
     }
@@ -106,8 +137,8 @@ def test_accuracy_gate_fails_below_threshold():
 @pytest.mark.parametrize(
     "overall, normalized, total, expect_pass",
     [
-        # Production contract: BFCLv4Scorer serializes metrics as ":.2f" strings
-        # and total_samples as an int. The gate must coerce before comparing.
+        # Breakdown metrics are numeric, but older artifacts stored them as
+        # ":.2f" strings; the gate must still coerce before comparing.
         ("86.23", "87.96", 995, True),
         ("83.65", "85.33", 995, True),  # just above 0.97x reference
         ("83.64", "87.96", 995, False),  # just below 0.97x86.23=83.6431
@@ -134,8 +165,8 @@ def test_accuracy_gate_handles_string_total_samples():
 
 @pytest.mark.unit
 def test_check_submission_accuracy_dir_string_scores(tmp_path):
-    # End-to-end with the real (string) scorer contract, not fabricated floats.
-    (tmp_path / "config.yaml").write_text(yaml.safe_dump(_passing_config()))
+    # End-to-end with string-valued breakdown metrics (defensive coercion path).
+    _write_valid_config(tmp_path)
     (tmp_path / "results.json").write_text(
         json.dumps(_accuracy_results("86.23", "87.96", 995))
     )
@@ -177,7 +208,7 @@ def test_perf_validity_fails_with_dropped_turns():
 
 @pytest.mark.unit
 def test_check_submission_accuracy_dir(tmp_path):
-    (tmp_path / "config.yaml").write_text(yaml.safe_dump(_passing_config()))
+    _write_valid_config(tmp_path)
     (tmp_path / "results.json").write_text(
         json.dumps(_accuracy_results(86.23, 87.96, 995))
     )
@@ -191,7 +222,7 @@ def test_check_submission_accuracy_dir(tmp_path):
 
 @pytest.mark.unit
 def test_check_submission_perf_dir(tmp_path):
-    (tmp_path / "config.yaml").write_text(yaml.safe_dump(_passing_config()))
+    _write_valid_config(tmp_path)
     (tmp_path / "scores.json").write_text(
         json.dumps(
             {
@@ -218,7 +249,7 @@ def test_check_submission_uses_ruleset_thresholds(tmp_path):
     threshold = golden["bfcl_overall_accuracy"] * factors["bfcl_overall_accuracy"][0]
     assert threshold == pytest.approx(83.6431)
 
-    (tmp_path / "config.yaml").write_text(yaml.safe_dump(_passing_config()))
+    _write_valid_config(tmp_path)
     (tmp_path / "results.json").write_text(
         json.dumps(_accuracy_results(83.0, 87.0, 995))
     )

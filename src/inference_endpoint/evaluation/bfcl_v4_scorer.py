@@ -105,6 +105,8 @@ class BFCLv4Scorer(Scorer, scorer_id="bfcl_v4"):
                 "bfcl-eval is required for BFCL v4 scoring. "
                 "Install with: pip install inference-endpoint[bfcl]"
             )
+        # Populated by score(); exposed via score_breakdown().
+        self._breakdown: dict[str, Any] | None = None
 
     def get_outputs(self) -> pd.DataFrame:
         """Read COMPLETE events, preferring structured tool_calls for scoring.
@@ -231,19 +233,13 @@ class BFCLv4Scorer(Scorer, scorer_id="bfcl_v4"):
         )
         return 1.0 if result["valid"] else 0.0
 
-    def score(  # type: ignore[override]
-        self,
-    ) -> tuple[dict[str, Any] | float | None, int]:
-        """Score all samples and return per-category results.
+    def score(self) -> tuple[float | None, int]:
+        """Score all samples; return the scalar overall accuracy and n_repeats.
 
-        Widens the base ``Scorer.score`` return: the first element is a
-        per-subset results dict rather than a single float. The accuracy
-        consumer in ``commands/benchmark/execute.py`` stores it verbatim, so
-        the richer payload is preserved end-to-end.
-
-        Returns:
-            (results_dict, n_repeats) where results_dict contains per-subset
-            accuracy, category aggregates, and a weighted overall score.
+        Conforms to the base ``Scorer.score`` scalar contract: the first element
+        is the overall accuracy as a fraction in ``[0, 1]``. The per-subset and
+        per-category breakdown (with percentages and sample counts) is cached and
+        exposed separately via :meth:`score_breakdown`.
         """
         df = self.get_outputs()
 
@@ -307,17 +303,17 @@ class BFCLv4Scorer(Scorer, scorer_id="bfcl_v4"):
             all_scores.append(s)
 
         if not all_scores:
-            # No samples matched (e.g. empty/filtered events log). np.mean([])
-            # would make overall_accuracy the literal string "nan"; emit an
-            # explicit zero result instead so results.json is well-formed.
-            return {
-                "overall_accuracy": "0.00",
-                "normalized_single_turn_score": "0.00",
+            # No samples matched (e.g. empty/filtered events log). Emit an
+            # explicit zero breakdown so results.json is well-formed.
+            self._breakdown = {
+                "overall_accuracy": 0.0,
+                "normalized_single_turn_score": 0.0,
                 "category_scores": {},
                 "subset_scores": {},
                 "unscored_subsets": {},
                 "total_samples": 0,
-            }, 1
+            }
+            return 0.0, 1
 
         subset_results = {
             name: float(np.mean(scores)) for name, scores in scores_by_subset.items()
@@ -362,20 +358,29 @@ class BFCLv4Scorer(Scorer, scorer_id="bfcl_v4"):
         )
 
         unscored_subsets = {
-            s: f"{subset_results[s] * 100:.2f}"
+            s: round(subset_results[s] * 100, 2)
             for s in _UNSCORED_SUBSETS
             if s in subset_results
         }
 
-        results = {
-            "overall_accuracy": f"{float(np.mean(all_scores)) * 100:.2f}",
-            "normalized_single_turn_score": f"{normalized_score * 100:.2f}",
+        overall = float(np.mean(all_scores))
+        self._breakdown = {
+            "overall_accuracy": round(overall * 100, 2),
+            "normalized_single_turn_score": round(normalized_score * 100, 2),
             "category_scores": {
-                k: f"{v * 100:.2f}" for k, v in category_results.items()
+                k: round(v * 100, 2) for k, v in category_results.items()
             },
-            "subset_scores": {k: f"{v * 100:.2f}" for k, v in subset_results.items()},
+            "subset_scores": {k: round(v * 100, 2) for k, v in subset_results.items()},
             "unscored_subsets": unscored_subsets,
             "total_samples": len(all_scores),
         }
 
-        return results, n_repeats
+        return overall, n_repeats
+
+    def score_breakdown(self) -> dict[str, Any] | None:
+        """Per-subset / per-category accuracy breakdown cached by :meth:`score`.
+
+        Percentages are floats in ``[0, 100]``; ``total_samples`` is the scored
+        sample count. Returns ``None`` if :meth:`score` has not run yet.
+        """
+        return self._breakdown

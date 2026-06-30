@@ -164,14 +164,17 @@ def _verify_accuracy(run_dir: Path) -> list[str]:
         )
         return findings
     for name, entry in scores.items():
-        score = entry.get("score") if isinstance(entry, dict) else entry
-        findings.append(f"  accuracy_scores[{name}].score = {score}")
-        if isinstance(score, dict):
-            findings.append(
-                "  NOTE: score is a dict (per-category breakdown); the upstream "
-                "endpoints accuracy gate may expect a scalar -- confirm with the "
-                "checker version you target."
-            )
+        if isinstance(entry, dict):
+            score = entry.get("score")
+            findings.append(f"  accuracy_scores[{name}].score = {score}")
+            breakdown = entry.get("breakdown")
+            if isinstance(breakdown, dict):
+                findings.append(
+                    f"  accuracy_scores[{name}].breakdown.overall_accuracy = "
+                    f"{breakdown.get('overall_accuracy')}"
+                )
+        else:
+            findings.append(f"  accuracy_scores[{name}] = {entry}")
     return findings
 
 

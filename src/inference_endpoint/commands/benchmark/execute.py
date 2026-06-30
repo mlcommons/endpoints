@@ -1174,7 +1174,7 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
         num_samples = len(eval_cfg.dataset.data)
         if eval_cfg.dataset_name == "performance":
             num_samples = sum(phase.issued_count for phase in result.perf_results)
-        accuracy_scores[eval_cfg.dataset_name] = {
+        entry: dict[str, Any] = {
             "dataset_name": eval_cfg.dataset_name,
             "num_samples": num_samples,
             "extractor": (
@@ -1183,6 +1183,10 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
             "ground_truth_column": eval_cfg.ground_truth_column,
             "score": score,
         }
+        breakdown = scorer_instance.score_breakdown()
+        if breakdown is not None:
+            entry["breakdown"] = breakdown
+        accuracy_scores[eval_cfg.dataset_name] = entry
         logger.info(f"Score for {eval_cfg.dataset_name}: {score} ({n_repeats} repeats)")
 
     # Report metrics: prefer Report from MetricsSnapshot, fall back to SessionResult

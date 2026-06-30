@@ -52,7 +52,7 @@ except ImportError:
     matplotlib = None  # type: ignore[assignment]
     plt = None  # type: ignore[assignment]
 
-# Accuracy: ruleset golden-metric name -> key in the scorer's score block.
+# Accuracy: ruleset golden-metric name -> key in the scorer's breakdown block.
 _ACCURACY_METRIC_KEYS = {
     "bfcl_overall_accuracy": "overall_accuracy",
     "bfcl_normalized_accuracy": "normalized_single_turn_score",
@@ -95,7 +95,7 @@ class RunArtifacts:
 
 
 def _to_float(value: Any) -> float | None:
-    """BFCL scores are serialized as strings (e.g. "86.23"); coerce defensively."""
+    """Coerce a metric to float (older artifacts stored strings like "86.23")."""
     if value is None:
         return None
     try:
@@ -109,9 +109,12 @@ def _find_accuracy_score(results: dict[str, Any]) -> dict[str, Any] | None:
     if not isinstance(accuracy_scores, dict):
         return None
     for entry in accuracy_scores.values():
-        score = entry.get("score") if isinstance(entry, dict) else None
-        if isinstance(score, dict) and "overall_accuracy" in score:
-            return score
+        if not isinstance(entry, dict):
+            continue
+        # Prefer the structured breakdown; fall back to score-as-dict (older runs).
+        for block in (entry.get("breakdown"), entry.get("score")):
+            if isinstance(block, dict) and "overall_accuracy" in block:
+                return block
     return None
 
 

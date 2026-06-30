@@ -37,12 +37,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import yaml
+from pydantic import ValidationError
 
 from ..config.ruleset_base import BenchmarkSuiteRuleset
 from ..config.ruleset_registry import get_ruleset
+from ..config.schema import BenchmarkConfig
 
-# BFCL accuracy: ruleset golden-metric name -> key in the scorer's score block.
+# BFCL accuracy: ruleset golden-metric name -> key in the scorer's breakdown block.
 _ACCURACY_METRIC_KEYS = {
     "bfcl_overall_accuracy": "overall_accuracy",
     "bfcl_normalized_accuracy": "normalized_single_turn_score",
@@ -101,11 +102,10 @@ def _get(d: dict[str, Any], *path: str, default: Any = None) -> Any:
 
 
 def _to_float(value: Any) -> float | None:
-    """Coerce a score value to float, or None if absent/non-numeric.
+    """Coerce a metric value to float, or None if absent/non-numeric.
 
-    ``BFCLv4Scorer.score()`` serializes accuracy metrics as formatted strings
-    (e.g. ``"86.23"``) and stores them verbatim in ``results.json``, so the gate
-    must coerce before any numeric comparison or ``:.2f`` formatting.
+    Breakdown metrics are numeric, but older artifacts stored them as formatted
+    strings (e.g. ``"86.23"``); coerce defensively before any comparison.
     """
     if value is None:
         return None
@@ -208,13 +208,21 @@ def check_accuracy(
 
 
 def _find_accuracy_score(results: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the BFCL per-subset breakdown from a run's ``accuracy_scores``.
+
+    Each entry carries a scalar ``score`` plus an optional ``breakdown`` dict
+    (per-subset/category accuracy + ``total_samples``); the gate reads the
+    breakdown. ``score``-as-dict is also accepted for older artifacts.
+    """
     accuracy_scores = results.get("accuracy_scores")
     if not isinstance(accuracy_scores, dict):
         return None
     for entry in accuracy_scores.values():
-        score = entry.get("score") if isinstance(entry, dict) else None
-        if isinstance(score, dict) and "overall_accuracy" in score:
-            return score
+        if not isinstance(entry, dict):
+            continue
+        for block in (entry.get("breakdown"), entry.get("score")):
+            if isinstance(block, dict) and "overall_accuracy" in block:
+                return block
     return None
 
 
@@ -265,11 +273,18 @@ def check_submission(
     min_samples = per_model.min_sample_count_valid
 
     config_path = report_dir / "config.yaml"
-    if config_path.exists():
-        config = yaml.safe_load(config_path.read_text()) or {}
-        report.checks.extend(check_config_lock(config))
-    else:
+    if not config_path.exists():
         report.add("config_present", False, f"missing {config_path}")
+    else:
+        # Load through the schema (env-var resolution + validation + discriminated
+        # union) rather than a raw yaml.safe_load, so config-lock checks run on the
+        # same normalized shape the benchmark actually used.
+        try:
+            config = BenchmarkConfig.from_yaml_file(config_path).model_dump()
+        except (ValidationError, OSError, ValueError) as e:
+            report.add("config_valid", False, f"{config_path} failed to load: {e}")
+        else:
+            report.checks.extend(check_config_lock(config))
 
     results_path = report_dir / "results.json"
     scores_path = report_dir / "scores.json"
