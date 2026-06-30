@@ -28,6 +28,7 @@ from urllib import error as urllib_error
 import pandas as pd
 import pytest
 from inference_endpoint.commands.benchmark.cli import (
+    benchmark_app,
     from_config,
     offline,
     online,
@@ -276,6 +277,49 @@ class TestCommandHandlers:
         assert called_config.datasets[0].path == expected_path
         assert called_config.datasets[0].type == expected_dtype
         assert called_mode == mode
+
+    @pytest.mark.unit
+    def test_use_legacy_loadgen_qps_metrics_default_and_disable(self):
+        """LoadPattern flag defaults True; --no-use-legacy-loadgen-qps-metrics
+        sets False (poisson only).
+        """
+        base = [
+            "online",
+            "--endpoints",
+            "http://h:80",
+            "--model",
+            "m",
+            "--dataset",
+            "d.jsonl",
+            "--load-pattern",
+            "poisson",
+            "--target-qps",
+            "100",
+        ]
+        _, bound, _ = benchmark_app.parse_args(base, exit_on_error=False)
+        lp = bound.arguments["config"].settings.load_pattern
+        assert lp.use_legacy_loadgen_qps_metrics is True
+
+        _, bound, _ = benchmark_app.parse_args(
+            [*base, "--no-use-legacy-loadgen-qps-metrics"], exit_on_error=False
+        )
+        lp = bound.arguments["config"].settings.load_pattern
+        assert lp.use_legacy_loadgen_qps_metrics is False
+
+    @pytest.mark.unit
+    def test_loadgen_flag_serialized_only_for_poisson(self):
+        """``use_legacy_loadgen_qps_metrics`` is dropped from the serialized
+        form for non-poisson patterns (so it does not pollute their YAML
+        templates), and present for poisson.
+        """
+        poisson = LoadPattern(type=LoadPatternType.POISSON, target_qps=100)
+        assert "use_legacy_loadgen_qps_metrics" in poisson.model_dump()
+
+        for lp in (
+            LoadPattern(type=LoadPatternType.MAX_THROUGHPUT),
+            LoadPattern(type=LoadPatternType.CONCURRENCY, target_concurrency=10),
+        ):
+            assert "use_legacy_loadgen_qps_metrics" not in lp.model_dump()
 
     @pytest.mark.unit
     @patch("inference_endpoint.commands.benchmark.cli.run_benchmark")

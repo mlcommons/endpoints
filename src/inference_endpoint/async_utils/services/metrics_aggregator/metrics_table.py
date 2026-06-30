@@ -451,6 +451,13 @@ class MetricsTable:
         self.session_started_ns: int | None = None
         self.tracked_blocks: list[TrackedBlock] = []
 
+        # LoadGen window anchors: start at the FIRST issued tracked request
+        # (LoadGen t=0), end at the completion of the last-issued request that
+        # completed. See total_loadgen_window_ns.
+        self._loadgen_max_issued_ns: int = -1
+        self._loadgen_window_end_ns: int | None = None
+        self._loadgen_window_start_ns: int | None = None
+
     # --- Trigger registration ---
 
     def add_trigger(self, field_name: str, trigger: EmitTrigger) -> None:
@@ -501,6 +508,16 @@ class MetricsTable:
         """Total samples completed across all tracking blocks."""
         return sum(b.completed_samples for b in self.tracked_blocks)
 
+    @property
+    def total_loadgen_window_ns(self) -> int:
+        """Window from the first issued tracked request (LoadGen t=0) to the
+        completion of the last-issued request that completed — the legacy MLPerf
+        LoadGen ``final_query_all_samples_done_time`` analog. Returns 0 (=>
+        the legacy metric falls back to native) when no tracked request completed."""
+        if self._loadgen_window_end_ns is None or self._loadgen_window_start_ns is None:
+            return 0
+        return max(0, self._loadgen_window_end_ns - self._loadgen_window_start_ns)
+
     # --- Field updates ---
 
     def set_field(
@@ -526,6 +543,8 @@ class MetricsTable:
                 return
             row = self._create_row(sample_uuid)
             row.tracked_block_idx = len(self.tracked_blocks) - 1
+            if self._loadgen_window_start_ns is None:
+                self._loadgen_window_start_ns = value
         else:
             row = self._in_flight.get(sample_uuid)
             if row is None:
@@ -608,3 +627,8 @@ class MetricsTable:
             if complete_ns > block.last_complete_ns:
                 block.last_complete_ns = complete_ns
             block.completed_samples += 1
+        # End the legacy LoadGen window at the completion of the last-issued
+        # (largest issued_ns) request that completed.
+        if row.issued_ns is not None and row.issued_ns > self._loadgen_max_issued_ns:
+            self._loadgen_max_issued_ns = row.issued_ns
+            self._loadgen_window_end_ns = complete_ns

@@ -726,6 +726,50 @@ class TestEdgeCases:
 
 
 # ---------------------------------------------------------------------------
+# LoadGen window aggregation (end-to-end through the event router)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestLoadgenWindowAggregation:
+    @pytest.mark.asyncio
+    async def test_loadgen_window_duration_emitted(self, tmp_path):
+        """The aggregator emits ``legacy_loadgen_window_duration_ns`` = first
+        issue to the completion of the last-issued request.
+
+        Sequence: STARTED, START_PERFORMANCE_TRACKING, ISSUED(s1, t=100),
+        COMPLETE(s1, t=500), ISSUED(s2, t=200, last-issued), COMPLETE(s2,
+        t=600), STOP_PERFORMANCE_TRACKING. Window = 600 - 100 = 500.
+        """
+        loop = asyncio.get_event_loop()
+        with ManagedZMQContext.scoped(socket_dir=str(tmp_path)) as ctx:
+            agg, registry, _ = make_aggregator(ctx, loop, "agg_loadgen_window")
+            try:
+                await agg.process(
+                    [
+                        session_event(SessionEventType.STARTED, ts=0),
+                        session_event(
+                            SessionEventType.START_PERFORMANCE_TRACKING, ts=10
+                        ),
+                        sample_event(SampleEventType.ISSUED, "s1", ts=100),
+                        sample_event(SampleEventType.COMPLETE, "s1", ts=500),
+                        sample_event(SampleEventType.ISSUED, "s2", ts=200),
+                        sample_event(SampleEventType.COMPLETE, "s2", ts=600),
+                        session_event(
+                            SessionEventType.STOP_PERFORMANCE_TRACKING, ts=700
+                        ),
+                    ]
+                )
+                counters = snapshot_counters(registry)
+                assert (
+                    counters[MetricCounterKey.LEGACY_LOADGEN_WINDOW_DURATION_NS.value]
+                    == 600 - 100
+                )
+            finally:
+                agg.close()
+
+
+# ---------------------------------------------------------------------------
 # Counter accounting (issued / completed)
 # ---------------------------------------------------------------------------
 

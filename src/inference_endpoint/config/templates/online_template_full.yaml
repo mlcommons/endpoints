@@ -53,6 +53,7 @@ settings:
     type: poisson  # Load pattern type | options: max_throughput, poisson, concurrency, agentic_inference, burst, step
     target_qps: 10.0  # Target QPS
     target_concurrency: null  # Concurrent requests
+    use_legacy_loadgen_qps_metrics: true  # Only applies to the poisson load pattern. Report QPS/TPS using the legacy MLPerf LoadGen Server 'completed' definition — (completed-1)/T and tokens/T, T = first issued request to completion of the last-issued request (see mlcommons/inference loadgen/results.cc). --no-... uses endpoints-native completed/duration. Ignored for non-poisson patterns.
   client:
     num_workers: -1  # Worker processes (-1=auto)
     log_level: INFO  # Worker log level

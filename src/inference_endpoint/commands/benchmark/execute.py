@@ -967,6 +967,7 @@ async def _run_benchmark_async(
                 try:
                     runtime = ctx.config.settings.runtime
                     warmup = ctx.config.settings.warmup
+                    load_pattern = ctx.config.settings.load_pattern
                     report = Report.from_snapshot(
                         snap_dict,
                         seeds={
@@ -974,12 +975,24 @@ async def _run_benchmark_async(
                             "dataloader_random_seed": runtime.dataloader_random_seed,
                             "warmup_random_seed": warmup.warmup_random_seed,
                         },
+                        use_legacy_loadgen_qps_metrics=(
+                            load_pattern.type == LoadPatternType.POISSON
+                            and load_pattern.use_legacy_loadgen_qps_metrics
+                        ),
                     )
                     if not report.complete:
                         logger.warning(
                             "Report is incomplete (state=%s, n_pending_tasks=%d)",
                             report.state,
                             snap_dict.get("n_pending_tasks", 0),
+                        )
+                    if report.legacy_loadgen_window_duration_ns is not None:
+                        logger.warning(
+                            "Reporting QPS/TPS with the legacy MLPerf LoadGen Server "
+                            "'completed' definition (deprecated; to be removed once a "
+                            "formal tail-cutting mechanism lands). Pass "
+                            "--no-use-legacy-loadgen-qps-metrics for endpoints-native "
+                            "metrics."
                         )
                 except Exception as e:  # noqa: BLE001 — best-effort report build.
                     logger.warning(f"Failed to build report from snapshot: {e}")
