@@ -99,3 +99,4 @@ report_dir: null  # Report output directory
 timeout: null  # Global timeout in seconds
 verbose: false  # Enable verbose logging
 enable_cpu_affinity: true  # NUMA-aware CPU pinning
+system_info: null
