@@ -99,8 +99,8 @@ class SequentialSampleOrder(SampleOrder):
     that matches reference implementations (e.g. evalscope).
     """
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(self, n_samples_in_dataset: int):
+        super().__init__(n_samples_in_dataset=n_samples_in_dataset)
         self._curr_idx = 0
 
     def next_sample_index(self) -> int:

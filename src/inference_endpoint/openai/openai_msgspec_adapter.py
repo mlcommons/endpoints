@@ -72,12 +72,9 @@ class OpenAIMsgspecAdapter(HttpRequestAdapter):
 
     @classmethod
     def dataset_transforms(cls, model_params: ModelParams) -> list[Transform]:
-        temp = model_params.temperature
-        if temp is not None and float(temp) == int(temp):
-            temp = int(temp)
         metadata: dict[str, Any] = {
             "model": model_params.name,
-            "temperature": temp,
+            "temperature": model_params.temperature,
             "seed": model_params.seed,
             "top_p": model_params.top_p,
             "top_k": model_params.top_k,
@@ -97,7 +94,6 @@ class OpenAIMsgspecAdapter(HttpRequestAdapter):
         # See: https://platform.openai.com/docs/api-reference/chat/create for more details on
         # what the fields mean.
         allowed = [
-            "prompt",
             "system",
             "messages",
             "tools",
@@ -110,7 +106,7 @@ class OpenAIMsgspecAdapter(HttpRequestAdapter):
             "chat_template",
         ]
         return [
-            ColumnFilter(required_columns=[], optional_columns=allowed),
+            ColumnFilter(required_columns=["prompt"], optional_columns=allowed),
             AddStaticColumns(metadata),
         ]
 
