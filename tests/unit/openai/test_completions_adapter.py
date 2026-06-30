@@ -81,7 +81,7 @@ class TestOpenAITextCompletionsAdapterDatasetTransforms:
         assert payload["skip_special_tokens"] is False
 
     @pytest.mark.unit
-    def test_skip_special_tokens_defaults_true_in_request(self):
+    def test_generation_controls_use_defaults_in_request(self):
         params = ModelParams(name="m")
         data = pd.DataFrame({"input_tokens": [[10, 20]]})
         for transform in OpenAITextCompletionsAdapter.dataset_transforms(params):
@@ -92,7 +92,7 @@ class TestOpenAITextCompletionsAdapterDatasetTransforms:
                 Query(data=data.to_dict(orient="records")[0])
             )
         )
-        assert "min_tokens" not in payload
+        assert payload["min_tokens"] == 1
         assert payload["skip_special_tokens"] is True
 
 

@@ -202,8 +202,8 @@ class ModelParams(BaseModel):
     max_new_tokens: Annotated[
         int, cyclopts.Parameter(alias="--max-output-tokens", help="Max output tokens")
     ] = 1024
-    min_new_tokens: int | None = Field(
-        None,
+    min_new_tokens: int = Field(
+        1,
         ge=0,
         description="Minimum output tokens for OpenAI text-completions servers",
     )
@@ -230,10 +230,7 @@ class ModelParams(BaseModel):
 
     @model_validator(mode="after")
     def _validate_generation_lengths(self) -> Self:
-        if (
-            self.min_new_tokens is not None
-            and self.min_new_tokens > self.max_new_tokens
-        ):
+        if self.min_new_tokens > self.max_new_tokens:
             raise ValueError(
                 "min_new_tokens must be less than or equal to max_new_tokens"
             )
@@ -901,8 +898,10 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
         if not self.model_params.name:
             raise ValueError("Required: --model-params.name [--model]")
 
+        # TODO(vir): Move API-type-specific validation out of this generic
+        # cross-model validator and into the selected adapter. Requires a larger refactor.
         non_default_completion_controls = {
-            "model_params.min_new_tokens": self.model_params.min_new_tokens is not None,
+            "model_params.min_new_tokens": self.model_params.min_new_tokens != 1,
             "model_params.skip_special_tokens": not self.model_params.skip_special_tokens,
         }
         configured_controls = [

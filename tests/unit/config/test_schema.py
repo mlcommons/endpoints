@@ -105,6 +105,10 @@ class TestModelParams:
             ModelParams(name="test", min_new_tokens=2, max_new_tokens=1)
 
     @pytest.mark.unit
+    def test_min_new_tokens_defaults_one(self):
+        assert ModelParams(name="test").min_new_tokens == 1
+
+    @pytest.mark.unit
     def test_skip_special_tokens_defaults_true(self):
         assert ModelParams(name="test").skip_special_tokens is True
 
@@ -515,7 +519,7 @@ class TestClientAPITypePropagation:
                 "endpoint_config.api_type=openai_completions",
             ),
             (
-                {"min_new_tokens": 1, "skip_special_tokens": False},
+                {"min_new_tokens": 0, "skip_special_tokens": False},
                 "model_params.min_new_tokens and model_params.skip_special_tokens require "
                 "endpoint_config.api_type=openai_completions",
             ),
@@ -535,6 +539,7 @@ class TestClientAPITypePropagation:
         self, api_type
     ):
         config = BenchmarkConfig(**self._common(api_type))
+        assert config.model_params.min_new_tokens == 1
         assert config.model_params.skip_special_tokens is True
 
 
@@ -561,7 +566,7 @@ class TestAgenticInferenceValidation:
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
-        "controls", [{"min_new_tokens": 1}, {"skip_special_tokens": False}]
+        "controls", [{"min_new_tokens": 0}, {"skip_special_tokens": False}]
     )
     def test_agentic_inference_rejects_text_completion_generation_controls(
         self, controls
