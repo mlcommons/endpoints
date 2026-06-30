@@ -36,6 +36,22 @@ _BUNDLED_PARQUET = (
 )
 
 
+def _is_lfs_pointer(path: Path) -> bool:
+    """True if ``path`` is an unresolved git-LFS pointer stub, not real content.
+
+    A clone without git-LFS leaves a tiny text stub in place of the parquet;
+    detecting it lets the loader give an actionable error instead of letting
+    ``pd.read_parquet`` fail cryptically.
+    """
+    try:
+        if path.stat().st_size > 1024:  # real parquet is MBs; pointers are ~130 B
+            return False
+        with path.open("rb") as f:
+            return f.read(64).startswith(b"version https://git-lfs.github.com/spec")
+    except OSError:
+        return False
+
+
 class LegacyMLPerfDeepSeekR1(Dataset, dataset_id="legacy_mlperf_deepseek_r1"):
     """MLPerf DeepSeek-R1 combined-subset dataset (local source).
 
@@ -58,11 +74,12 @@ class LegacyMLPerfDeepSeekR1(Dataset, dataset_id="legacy_mlperf_deepseek_r1"):
     accuracy phase hands the rows to ``LegacyMLPerfDeepSeekR1Scorer`` (which grades by
     ``dataset``/``ground_truth``).
 
-    The source is not bundled (it is the official MLCommons dataset). Prepare a
-    ``.parquet`` carrying the output columns (see
-    ``examples/07_DeepSeekR1_Example/README.md``) and point
-    ``$LEGACY_MLPERF_DEEPSEEK_R1_DATASET`` at it, or pass ``source=`` to :meth:`generate`.
-    Building from the raw MLPerf source is not supported.
+    A prepared ``.parquet`` ships in the repo (git-LFS, under
+    ``examples/07_DeepSeekR1_Example/data/``) and is the default source. To use a
+    different or updated prepared ``.parquet`` (e.g. a new MLPerf revision or a
+    variant), point ``$LEGACY_MLPERF_DEEPSEEK_R1_DATASET`` at it or pass
+    ``source=`` to :meth:`generate`. Building from the raw MLPerf source is not
+    supported.
     """
 
     COLUMN_NAMES = ["input_tokens", "ground_truth", "dataset", "question"]
@@ -96,7 +113,7 @@ class LegacyMLPerfDeepSeekR1(Dataset, dataset_id="legacy_mlperf_deepseek_r1"):
             logger.info("DeepSeek-R1 dataset cached at %s; loading.", dst_path)
             df = pd.read_parquet(dst_path)
         else:
-            df = cls._build_from_source(source)
+            df = cls._load_prepared_parquet(source)
             df.to_parquet(dst_path, index=False)
             logger.info("Wrote %d DeepSeek-R1 rows to %s", len(df), dst_path)
 
@@ -107,7 +124,7 @@ class LegacyMLPerfDeepSeekR1(Dataset, dataset_id="legacy_mlperf_deepseek_r1"):
         return df
 
     @classmethod
-    def _build_from_source(cls, source: str | os.PathLike | None) -> pd.DataFrame:
+    def _load_prepared_parquet(cls, source: str | os.PathLike | None) -> pd.DataFrame:
         resolved = source or os.environ.get(SOURCE_ENV)
         if not resolved and _BUNDLED_PARQUET.exists():
             resolved = _BUNDLED_PARQUET
@@ -122,6 +139,15 @@ class LegacyMLPerfDeepSeekR1(Dataset, dataset_id="legacy_mlperf_deepseek_r1"):
         path = Path(resolved)
         if not path.exists():
             raise FileNotFoundError(f"DeepSeek-R1 source not found at {path}")
+
+        # A git-LFS pointer (clone without LFS) "exists" but is a tiny text stub,
+        # not a parquet; surface that clearly instead of a cryptic read failure.
+        if _is_lfs_pointer(path):
+            raise FileNotFoundError(
+                f"DeepSeek-R1 parquet {path} is an unresolved git-LFS pointer "
+                "(cloned without LFS?). Run `git lfs pull`, or set "
+                f"${SOURCE_ENV} to a real prepared .parquet."
+            )
 
         # Only a prepared .parquet (already carrying the output columns,
         # including the pre-tokenized input_tokens) is supported. Converting a

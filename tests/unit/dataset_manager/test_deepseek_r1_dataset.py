@@ -171,6 +171,18 @@ def test_resolved_source_not_found_raises(tmp_path: Path):
         LegacyMLPerfDeepSeekR1.generate(datasets_dir=tmp_path / "cache", source=missing)
 
 
+def test_lfs_pointer_source_raises_actionable(tmp_path: Path):
+    # A git-LFS pointer stub (clone without LFS) must give an actionable error,
+    # not a cryptic pd.read_parquet failure.
+    ptr = tmp_path / "deepseek_r1_eval.parquet"
+    ptr.write_text(
+        "version https://git-lfs.github.com/spec/v1\n"
+        "oid sha256:abc123\nsize 4700000\n"
+    )
+    with pytest.raises(FileNotFoundError, match="git-LFS pointer"):
+        LegacyMLPerfDeepSeekR1.generate(datasets_dir=tmp_path / "cache", source=ptr)
+
+
 def test_prepared_parquet_missing_output_column_raises(tmp_path: Path):
     # input_tokens present but a required output column (question) absent.
     bad = tmp_path / "partial.parquet"
