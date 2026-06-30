@@ -202,6 +202,17 @@ class ModelParams(BaseModel):
     max_new_tokens: Annotated[
         int, cyclopts.Parameter(alias="--max-output-tokens", help="Max output tokens")
     ] = 1024
+    min_tokens: int | None = Field(
+        None,
+        ge=0,
+        description="Minimum output tokens for OpenAI text-completions servers",
+    )
+    skip_special_tokens: bool | None = Field(
+        None,
+        description=(
+            "Whether OpenAI text-completions servers omit special tokens from decoded output"
+        ),
+    )
     osl_distribution: OSLDistribution | None = Field(
         None, description="Output sequence length distribution"
     )
@@ -216,6 +227,12 @@ class ModelParams(BaseModel):
             help="HF repo ID or local path for the tokenizer. Overrides model name for client-side token metrics (ISL/OSL/TPOT).",
         ),
     ] = None
+
+    @model_validator(mode="after")
+    def _validate_generation_lengths(self) -> Self:
+        if self.min_tokens is not None and self.min_tokens > self.max_new_tokens:
+            raise ValueError("min_tokens must be less than or equal to max_new_tokens")
+        return self
 
 
 class SubmissionReference(BaseModel):
@@ -878,6 +895,19 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
 
         if not self.model_params.name:
             raise ValueError("Required: --model-params.name [--model]")
+
+        completion_controls = (
+            self.model_params.min_tokens,
+            self.model_params.skip_special_tokens,
+        )
+        if (
+            any(value is not None for value in completion_controls)
+            and self.endpoint_config.api_type != APIType.OPENAI_COMPLETIONS
+        ):
+            raise ValueError(
+                "model_params.min_tokens and skip_special_tokens require "
+                "endpoint_config.api_type=openai_completions"
+            )
 
         # --- Validate (cross-model checks only; sub-models self-validate) ---
         if self.type == TestType.SUBMISSION and not self.benchmark_mode:

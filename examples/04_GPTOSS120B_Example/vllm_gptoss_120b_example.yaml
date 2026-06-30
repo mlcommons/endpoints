@@ -7,6 +7,8 @@ model_params:
   name: "openai/gpt-oss-120b"
   temperature: 1.0
   max_new_tokens: 32768
+  min_tokens: 1
+  skip_special_tokens: false
   top_k: -1
   top_p: 1.0
   streaming: "on"
@@ -51,7 +53,6 @@ settings:
 
   client:
     num_workers: 8
-    record_worker_events: false
 
 endpoint_config:
   endpoints:

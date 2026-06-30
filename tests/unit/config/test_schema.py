@@ -96,6 +96,13 @@ class TestModelParams:
         assert params.tokenizer_name == "Qwen/Qwen3.6-35B-A3B"
         assert params.name == "qwen/qwen3.6-35b-a3b"
 
+    @pytest.mark.unit
+    def test_min_tokens_cannot_exceed_max_new_tokens(self):
+        with pytest.raises(
+            ValidationError, match="min_tokens must be less than or equal"
+        ):
+            ModelParams(name="test", min_tokens=2, max_new_tokens=1)
+
 
 class TestAPIType:
     @pytest.mark.unit
@@ -477,10 +484,23 @@ class TestClientAPITypePropagation:
             OpenAITextCompletionsAdapter,
         )
 
-        config = BenchmarkConfig(**self._common(APIType.OPENAI_COMPLETIONS))
+        values = self._common(APIType.OPENAI_COMPLETIONS)
+        values["model_params"].update(
+            min_tokens=1,
+            skip_special_tokens=False,
+        )
+        config = BenchmarkConfig(**values)
         assert config.settings.client.api_type is APIType.OPENAI_COMPLETIONS
         assert config.settings.client.adapter is OpenAITextCompletionsAdapter
         assert config.settings.client.accumulator is OpenAISSEAccumulator
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("api_type", [APIType.OPENAI, APIType.SGLANG])
+    def test_completion_generation_controls_reject_other_api_types(self, api_type):
+        values = self._common(api_type)
+        values["model_params"].update(min_tokens=1)
+        with pytest.raises(ValidationError, match="require.*openai_completions"):
+            BenchmarkConfig(**values)
 
 
 class TestAgenticInferenceValidation:
