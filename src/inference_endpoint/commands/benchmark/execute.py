@@ -176,7 +176,6 @@ class BenchmarkContext:
     dataloader: Dataset | None
     rt_settings: RuntimeSettings | None
     total_samples: int
-    accuracy_only: bool = False
     accuracy_datasets: list[Dataset] = field(default_factory=list)
     eval_configs: list[AccuracyConfiguration] = field(default_factory=list)
     affinity_plan: AffinityPlan | None = None
@@ -184,6 +183,11 @@ class BenchmarkContext:
     @property
     def collect_responses(self) -> bool:
         return self.test_mode in (TestMode.ACC, TestMode.BOTH)
+
+    @property
+    def accuracy_only(self) -> bool:
+        """TestMode.ACC is the single source of truth for accuracy-only runs."""
+        return self.test_mode == TestMode.ACC
 
     @property
     def benchmark_mode(self) -> TestType | None:
@@ -273,21 +277,22 @@ def _resolve_accuracy_components(
 def _load_datasets(
     config: BenchmarkConfig,
     report_dir: Path,
-    accuracy_only: bool = False,
+    test_mode: TestMode,
 ) -> tuple[Dataset | None, list[Dataset], list[AccuracyConfiguration]]:
     """Load performance and accuracy datasets. Returns (perf_loader, acc_datasets, eval_configs)."""
+    accuracy_only = test_mode == TestMode.ACC
     accuracy_cfgs = [ds for ds in config.datasets if ds.type == DatasetType.ACCURACY]
     performance_cfgs = [
         ds for ds in config.datasets if ds.type == DatasetType.PERFORMANCE
     ]
 
-    if not accuracy_only and not performance_cfgs:
+    if accuracy_only:
+        if not accuracy_cfgs:
+            raise InputValidationError(
+                "--accuracy-only requires at least one accuracy dataset"
+            )
+    elif not performance_cfgs:
         raise InputValidationError("At least one performance dataset required")
-
-    if accuracy_only and not accuracy_cfgs:
-        raise InputValidationError(
-            "--accuracy-only requires at least one accuracy dataset"
-        )
 
     accuracy_datasets: list[Dataset] = []
     eval_configs: list[AccuracyConfiguration] = []
@@ -377,7 +382,6 @@ def _load_datasets(
 def setup_benchmark(
     config: BenchmarkConfig,
     test_mode: TestMode,
-    accuracy_only: bool = False,
 ) -> BenchmarkContext:
     """Load tokenizer, dataset, create scheduler, setup report dir."""
     # CPU affinity
@@ -417,7 +421,7 @@ def setup_benchmark(
 
     # Datasets
     dataloader, accuracy_datasets, eval_configs = _load_datasets(
-        config, report_dir, accuracy_only=accuracy_only
+        config, report_dir, test_mode
     )
 
     rt_settings: RuntimeSettings | None = None
@@ -448,7 +452,6 @@ def setup_benchmark(
         dataloader=dataloader,
         rt_settings=rt_settings,
         total_samples=total_samples,
-        accuracy_only=accuracy_only,
         accuracy_datasets=accuracy_datasets,
         eval_configs=eval_configs,
         affinity_plan=affinity_plan,
@@ -1260,15 +1263,20 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
 def run_benchmark(
     config: BenchmarkConfig,
     test_mode: TestMode,
-    accuracy_only: bool = False,
 ) -> None:
-    """Orchestrate setup → execute → finalize."""
+    """Orchestrate setup → execute → finalize.
+
+    ``test_mode`` is the single source of truth for what runs: ``ACC`` is an
+    accuracy-only run (no performance phase), ``PERF`` performance-only, and
+    ``BOTH`` runs performance then accuracy. The CLI ``--accuracy-only`` flag is
+    a convenience alias that resolves to ``TestMode.ACC``.
+    """
     logger.debug(
         "BenchmarkConfig (%s):\n%s",
         type(config).__name__,
         config.model_dump_json(indent=2, exclude_none=True),
     )
-    ctx = setup_benchmark(config, test_mode, accuracy_only=accuracy_only)
+    ctx = setup_benchmark(config, test_mode)
     bench: BenchmarkResult | None = None
     try:
         bench = run_benchmark_async(ctx)
