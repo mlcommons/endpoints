@@ -91,6 +91,12 @@ settings:
   profiling:
     engine: null  # Profile the named inference engine around the performance phase | options: vllm
     urls: null  # URL(s) the profiler start/stop triggers are derived from. When None, derived from endpoint_config.endpoints instead. Use when the profiler admin endpoint differs from the inference endpoint.
+  power:
+    source: null  # Power telemetry source name; None disables monitoring. Built-ins: nvidia_smi, prometheus, command. Register custom sources with @power_source('name').
+    interval_s: 1.0  # Sampling interval in seconds
+    options: {}  # Source-specific settings (each source documents its keys). e.g. nvidia_smi: {gpu_indices}; prometheus: {url, query}; command: {argv}. command argv must print one JSONL sample per line: {"ts": <epoch_s>, "value": <float>, "label": "<series>"}.
+    value_kind: power_w  # Sample semantics: instantaneous watts or a cumulative joule counter | options: power_w, energy_j
+    env: {}  # Extra environment for the sidecar process
 endpoint_config:
   endpoints:  # Endpoint URL(s). Must include scheme, e.g. 'http://host:port'.
   - http://localhost:8000

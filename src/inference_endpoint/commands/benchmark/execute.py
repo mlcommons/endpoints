@@ -100,6 +100,13 @@ from inference_endpoint.load_generator.session import (
     SessionResult,
 )
 from inference_endpoint.metrics.report import Report
+from inference_endpoint.power import (
+    PowerCollector,
+    build_power_report,
+    write_power_section,
+)
+from inference_endpoint.power.window import disabled_report
+from inference_endpoint.utils import monotime_to_datetime
 
 transformers_logging.set_verbosity_error()
 
@@ -148,6 +155,9 @@ class BenchmarkResult:
     # settings.profiling.engine is set; None otherwise. Rendered into
     # report.txt and a sibling profiling.json by finalize_benchmark.
     profiling: dict[str, Any] | None = None
+    # Power-telemetry sidecar when settings.power.source is set; None otherwise.
+    # finalize_benchmark windows its trace and writes a sibling power.json.
+    power: PowerCollector | None = None
 
 
 @dataclass
@@ -896,6 +906,15 @@ async def _run_benchmark_async(
                     )
                 profile_starts.append(rec)
 
+        # Power telemetry sidecar (best-effort; never fails the run). Started
+        # before session.run so it is warm; finalize_benchmark windows its
+        # trace to the performance phase.
+        power_cfg = config.settings.power
+        power_collector: PowerCollector | None = None
+        if power_cfg.source is not None:
+            power_collector = PowerCollector(power_cfg, ctx.report_dir / "power")
+            power_collector.start()
+
         loop.add_signal_handler(signal.SIGINT, session.stop)
         try:
             result = await session.run(phases, on_phase_start=_on_phase_start)
@@ -926,6 +945,9 @@ async def _run_benchmark_async(
                             rec["error"] or rec["status"],
                         )
                     profile_stops.append(rec)
+            # Stop the power sidecar (best-effort; bounded SIGTERM->SIGKILL).
+            if power_collector is not None:
+                power_collector.stop()
             logger.info("Cleaning up...")
             try:
                 if http_client:
@@ -1014,6 +1036,7 @@ async def _run_benchmark_async(
         report=report,
         tmpfs_dir=tmpfs_dir,
         profiling=profiling_payload,
+        power=power_collector,
     )
 
 
@@ -1066,12 +1089,59 @@ def _salvage_tmpfs(report_dir: Path, tmpfs_dir: Path) -> None:
         logger.debug(f"Copied {src_events} -> {dst_events}")
 
 
+def _build_power_payload(
+    ctx: BenchmarkContext, bench: BenchmarkResult
+) -> dict[str, Any] | None:
+    """Window the power trace to the performance phase and build the JSON payload.
+
+    Best-effort: any failure yields a ``status:"failed"`` payload, never an
+    exception that would abort finalization.
+    """
+    pc = bench.power
+    if pc is None:
+        return None
+    try:
+        if pc.resolved is None:
+            return disabled_report(pc.error or "power collector failed to start")
+        perf = bench.session.perf_results
+        if not perf:
+            return disabled_report("no performance phase to window power against")
+        # Phase windows are monotonic_ns; convert to wall-clock epoch (the clock
+        # power samples are stamped in) via the shared monotonic->wall anchor.
+        start_epoch = monotime_to_datetime(perf[0].start_time_ns).timestamp()
+        end_epoch = monotime_to_datetime(perf[-1].end_time_ns).timestamp()
+        output_tokens: int | None = None
+        if bench.report is not None:
+            osl = bench.report.output_sequence_lengths or {}
+            total = osl.get("total")
+            output_tokens = int(total) if total else None
+        return build_power_report(
+            resolved=pc.resolved,
+            trace_path=pc.trace_path,
+            window_start_epoch_s=start_epoch,
+            window_end_epoch_s=end_epoch,
+            output_tokens=output_tokens,
+            token_window_basis="performance_phase_tracked",
+            # Report tokens are scoped to the (single) tracked perf phase, so
+            # they share the energy window. Multiple perf phases would span gaps.
+            consistent_with_window=len(perf) == 1,
+            collector_status=pc.status,
+            collector_error=pc.error,
+            interval_s=pc.cfg.interval_s,
+        )
+    except Exception as e:  # noqa: BLE001 — power must never break finalization.
+        logger.warning("power: failed to build report: %s", e)
+        return disabled_report(f"power report build failed: {e}")
+
+
 def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
     """Score accuracy, aggregate results, write JSON."""
     config = ctx.config
     result = bench.session
     collector = bench.collector
     report = bench.report
+
+    power_payload = _build_power_payload(ctx, bench)
 
     # Display report if available (from MetricsAggregator pub/sub snapshot).
     # result_summary.json is the self-complete machine-readable report (carries
@@ -1086,6 +1156,8 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
             report.display(fn=lambda s: print(s, file=f))
             if bench.profiling is not None:
                 _write_profiling_section(f, bench.profiling)
+            if power_payload is not None:
+                write_power_section(f, power_payload)
         logger.info("Report written to %s", report_txt)
 
     # Sibling profiling.json — kept separate so Report stays a pure
@@ -1094,6 +1166,10 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
         (ctx.report_dir / "profiling.json").write_text(
             json.dumps(bench.profiling, indent=2)
         )
+
+    # Sibling power.json — same rationale: Report stays snapshot-pure.
+    if power_payload is not None:
+        (ctx.report_dir / "power.json").write_text(json.dumps(power_payload, indent=2))
 
     # Write scoring artifacts + copy event log from tmpfs to disk
     _write_scoring_artifacts(ctx, result, bench.tmpfs_dir)

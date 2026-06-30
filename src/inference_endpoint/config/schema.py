@@ -703,6 +703,70 @@ class ProfilingConfig(BaseModel):
 
 
 @cyclopts.Parameter(name="*")
+class PowerConfig(BaseModel):
+    """Vendor-agnostic power/energy monitoring.
+
+    When ``source`` is set, a sidecar process streams power samples to a trace
+    file during the performance phase; at finalization the trace is sliced to
+    the measurement window, integrated into energy, and written to a sibling
+    ``power.json``. A broken collector never fails or skews the benchmark.
+
+    The sidecar runs *where the command runs* — i.e. the load-generator host.
+    For remote GPUs either point ``prometheus`` at a server-side DCGM exporter
+    or supply an ssh-wrapped ``command``; clocks are assumed NTP-synced.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    # Vendor-neutral core. Source-specific settings live in `options`, owned and
+    # validated by the registered source builder (see power/sources.py) — the
+    # schema knows nothing about GPUs, Prometheus, etc.
+    source: Annotated[
+        str | None,
+        cyclopts.Parameter(
+            alias="--power",
+            help="Power source: nvidia_smi | prometheus | command | <custom plugin>",
+        ),
+    ] = Field(
+        None,
+        description="Power telemetry source name; None disables monitoring. "
+        "Built-ins: nvidia_smi, prometheus, command. Register custom sources "
+        "with @power_source('name').",
+    )
+    interval_s: Annotated[
+        float,
+        cyclopts.Parameter(alias="--power-interval"),
+    ] = Field(1.0, gt=0, description="Sampling interval in seconds")
+    options: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Source-specific settings (each source documents its keys). "
+        "e.g. nvidia_smi: {gpu_indices}; prometheus: {url, query}; "
+        "command: {argv}. command argv must print one JSONL sample per line: "
+        '{"ts": <epoch_s>, "value": <float>, "label": "<series>"}.',
+    )
+
+    # --- Advanced (hidden from CLI; rarely needed, sane defaults) ------------
+    value_kind: Annotated[
+        Literal["power_w", "energy_j"], cyclopts.Parameter(show=False)
+    ] = Field(
+        "power_w",
+        description="Sample semantics: instantaneous watts or a cumulative joule counter",
+    )
+    env: Annotated[dict[str, str], cyclopts.Parameter(show=False)] = Field(
+        default_factory=dict, description="Extra environment for the sidecar process"
+    )
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        # When disabled (source=None), collapse to an empty mapping so a
+        # turned-off feature leaves no footprint in the serialized config.
+        data = handler(self)
+        if self.source is None:
+            return {}
+        return data
+
+
+@cyclopts.Parameter(name="*")
 class Settings(BaseModel):
     """Test settings."""
 
@@ -717,6 +781,7 @@ class Settings(BaseModel):
     )
     warmup: WarmupConfig = Field(default_factory=WarmupConfig)
     profiling: ProfilingConfig = Field(default_factory=ProfilingConfig)
+    power: PowerConfig = Field(default_factory=PowerConfig)
 
 
 class OfflineSettings(Settings):
