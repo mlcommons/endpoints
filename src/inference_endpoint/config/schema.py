@@ -908,6 +908,13 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
                 "model_params.min_tokens and skip_special_tokens require "
                 "endpoint_config.api_type=openai_completions"
             )
+        if any(value is not None for value in completion_controls) and any(
+            dataset.agentic_inference is not None for dataset in self.datasets
+        ):
+            raise ValueError(
+                "OpenAI text-completion generation controls are not supported "
+                "for agentic inference datasets"
+            )
 
         # --- Validate (cross-model checks only; sub-models self-validate) ---
         if self.type == TestType.SUBMISSION and not self.benchmark_mode:

@@ -525,6 +525,16 @@ class TestAgenticInferenceValidation:
         assert config.settings.load_pattern.target_concurrency == 16
 
     @pytest.mark.unit
+    def test_agentic_inference_rejects_text_completion_generation_controls(self):
+        values = self._make_online_agentic_inference()
+        values["model_params"].update(min_tokens=1)
+        values["endpoint_config"]["api_type"] = APIType.OPENAI_COMPLETIONS
+        with pytest.raises(
+            ValidationError, match="not supported for agentic inference"
+        ):
+            BenchmarkConfig(**values)
+
+    @pytest.mark.unit
     def test_agentic_inference_rejects_removed_stop_on_first_empty_slot_as_extra(self):
         # Legacy agentic inference knobs should remain rejected by extra="forbid".
         with pytest.raises(ValueError, match="stop_on_first_empty_slot"):
