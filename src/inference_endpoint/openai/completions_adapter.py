@@ -56,7 +56,7 @@ class OpenAITextCompletionsAdapter(HttpRequestAdapter):
             "model": model_params.name,
             "stream": (model_params.streaming == StreamingMode.ON),
             "max_tokens": model_params.max_new_tokens,
-            "min_tokens": model_params.min_tokens,
+            "min_tokens": model_params.min_new_tokens,
             "skip_special_tokens": model_params.skip_special_tokens,
             "temperature": model_params.temperature,
             "top_p": model_params.top_p,

@@ -98,11 +98,15 @@ class TestModelParams:
         assert params.name == "qwen/qwen3.6-35b-a3b"
 
     @pytest.mark.unit
-    def test_min_tokens_cannot_exceed_max_new_tokens(self):
+    def test_min_new_tokens_cannot_exceed_max_new_tokens(self):
         with pytest.raises(
-            ValidationError, match="min_tokens must be less than or equal"
+            ValidationError, match="min_new_tokens must be less than or equal"
         ):
-            ModelParams(name="test", min_tokens=2, max_new_tokens=1)
+            ModelParams(name="test", min_new_tokens=2, max_new_tokens=1)
+
+    @pytest.mark.unit
+    def test_skip_special_tokens_defaults_true(self):
+        assert ModelParams(name="test").skip_special_tokens is True
 
 
 class TestAPIType:
@@ -487,7 +491,7 @@ class TestClientAPITypePropagation:
 
         values = self._common(APIType.OPENAI_COMPLETIONS)
         values["model_params"].update(
-            min_tokens=1,
+            min_new_tokens=1,
             skip_special_tokens=False,
         )
         config = BenchmarkConfig(**values)
@@ -501,8 +505,8 @@ class TestClientAPITypePropagation:
         ("controls", "message"),
         [
             (
-                {"min_tokens": 0},
-                "model_params.min_tokens requires "
+                {"min_new_tokens": 0},
+                "model_params.min_new_tokens requires "
                 "endpoint_config.api_type=openai_completions",
             ),
             (
@@ -511,8 +515,8 @@ class TestClientAPITypePropagation:
                 "endpoint_config.api_type=openai_completions",
             ),
             (
-                {"min_tokens": 1, "skip_special_tokens": False},
-                "model_params.min_tokens and model_params.skip_special_tokens require "
+                {"min_new_tokens": 1, "skip_special_tokens": False},
+                "model_params.min_new_tokens and model_params.skip_special_tokens require "
                 "endpoint_config.api_type=openai_completions",
             ),
         ],
@@ -524,6 +528,14 @@ class TestClientAPITypePropagation:
         values["model_params"].update(controls)
         with pytest.raises(ValidationError, match=re.escape(message)):
             BenchmarkConfig(**values)
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("api_type", [APIType.OPENAI, APIType.SGLANG])
+    def test_default_completion_generation_controls_allow_other_api_types(
+        self, api_type
+    ):
+        config = BenchmarkConfig(**self._common(api_type))
+        assert config.model_params.skip_special_tokens is True
 
 
 class TestAgenticInferenceValidation:
@@ -548,9 +560,14 @@ class TestAgenticInferenceValidation:
         assert config.settings.load_pattern.target_concurrency == 16
 
     @pytest.mark.unit
-    def test_agentic_inference_rejects_text_completion_generation_controls(self):
+    @pytest.mark.parametrize(
+        "controls", [{"min_new_tokens": 1}, {"skip_special_tokens": False}]
+    )
+    def test_agentic_inference_rejects_text_completion_generation_controls(
+        self, controls
+    ):
         values = self._make_online_agentic_inference()
-        values["model_params"].update(min_tokens=1)
+        values["model_params"].update(controls)
         values["endpoint_config"]["api_type"] = APIType.OPENAI_COMPLETIONS
         with pytest.raises(
             ValidationError, match="not supported for agentic inference"

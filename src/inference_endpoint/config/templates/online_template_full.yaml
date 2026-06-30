@@ -13,8 +13,8 @@ model_params:
   frequency_penalty: null  # Frequency penalty
   chat_template_kwargs: null  # Per-request chat-template kwargs forwarded to compatible servers.
   max_new_tokens: 1024  # Max output tokens
-  min_tokens: null  # Minimum output tokens for OpenAI text-completions servers
-  skip_special_tokens: null  # Whether OpenAI text-completions servers omit special tokens from decoded output
+  min_new_tokens: null  # Minimum output tokens for OpenAI text-completions servers
+  skip_special_tokens: true  # Whether OpenAI text-completions servers omit special tokens from decoded output
   osl_distribution: null  # Output sequence length distribution
   streaming: 'on'  # Streaming mode: auto/on/off | options: auto, on, off
   tokenizer_name: null  # HF repo ID or local path for the tokenizer. Overrides model name for client-side token metrics (ISL/OSL/TPOT).

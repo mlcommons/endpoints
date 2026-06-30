@@ -202,13 +202,13 @@ class ModelParams(BaseModel):
     max_new_tokens: Annotated[
         int, cyclopts.Parameter(alias="--max-output-tokens", help="Max output tokens")
     ] = 1024
-    min_tokens: int | None = Field(
+    min_new_tokens: int | None = Field(
         None,
         ge=0,
         description="Minimum output tokens for OpenAI text-completions servers",
     )
-    skip_special_tokens: bool | None = Field(
-        None,
+    skip_special_tokens: bool = Field(
+        True,
         description=(
             "Whether OpenAI text-completions servers omit special tokens from decoded output"
         ),
@@ -230,8 +230,13 @@ class ModelParams(BaseModel):
 
     @model_validator(mode="after")
     def _validate_generation_lengths(self) -> Self:
-        if self.min_tokens is not None and self.min_tokens > self.max_new_tokens:
-            raise ValueError("min_tokens must be less than or equal to max_new_tokens")
+        if (
+            self.min_new_tokens is not None
+            and self.min_new_tokens > self.max_new_tokens
+        ):
+            raise ValueError(
+                "min_new_tokens must be less than or equal to max_new_tokens"
+            )
         return self
 
 
@@ -896,12 +901,14 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
         if not self.model_params.name:
             raise ValueError("Required: --model-params.name [--model]")
 
-        completion_controls = {
-            "model_params.min_tokens": self.model_params.min_tokens,
-            "model_params.skip_special_tokens": self.model_params.skip_special_tokens,
+        non_default_completion_controls = {
+            "model_params.min_new_tokens": self.model_params.min_new_tokens is not None,
+            "model_params.skip_special_tokens": not self.model_params.skip_special_tokens,
         }
         configured_controls = [
-            name for name, value in completion_controls.items() if value is not None
+            name
+            for name, is_non_default in non_default_completion_controls.items()
+            if is_non_default
         ]
         if (
             configured_controls

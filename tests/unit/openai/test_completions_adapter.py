@@ -67,7 +67,7 @@ class TestOpenAITextCompletionsAdapterDatasetTransforms:
 
     @pytest.mark.unit
     def test_generation_controls_flow_from_model_params_to_request(self):
-        params = ModelParams(name="m", min_tokens=1, skip_special_tokens=False)
+        params = ModelParams(name="m", min_new_tokens=0, skip_special_tokens=False)
         data = pd.DataFrame({"input_tokens": [[10, 20]]})
         for transform in OpenAITextCompletionsAdapter.dataset_transforms(params):
             data = transform(data)
@@ -77,8 +77,23 @@ class TestOpenAITextCompletionsAdapterDatasetTransforms:
                 Query(data=data.to_dict(orient="records")[0])
             )
         )
-        assert payload["min_tokens"] == 1
+        assert payload["min_tokens"] == 0
         assert payload["skip_special_tokens"] is False
+
+    @pytest.mark.unit
+    def test_skip_special_tokens_defaults_true_in_request(self):
+        params = ModelParams(name="m")
+        data = pd.DataFrame({"input_tokens": [[10, 20]]})
+        for transform in OpenAITextCompletionsAdapter.dataset_transforms(params):
+            data = transform(data)
+
+        payload = json.loads(
+            OpenAITextCompletionsAdapter.encode_query(
+                Query(data=data.to_dict(orient="records")[0])
+            )
+        )
+        assert "min_tokens" not in payload
+        assert payload["skip_special_tokens"] is True
 
 
 class TestOpenAITextCompletionsAdapterEncodeQuery:
