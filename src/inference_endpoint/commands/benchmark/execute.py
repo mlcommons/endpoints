@@ -730,6 +730,10 @@ async def _run_benchmark_async(
                 str(config.settings.drain.metrics_tokenizer_workers),
             ]
         )
+        # Control live metrics publishing via config parameter
+        # publish_interval_s = 0 disables live tick task in publisher.start()
+        publish_interval_s = 0.25 if ctx.rt_settings.enable_live_metrics else 0.0
+        aggregator_args.extend(["--publish-interval", str(publish_interval_s)])
 
         # EventLoggerService writes events.jsonl to tmpfs (high-frequency writes)
         event_logger_args: list[str] = [
