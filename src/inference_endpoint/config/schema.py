@@ -896,19 +896,22 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
         if not self.model_params.name:
             raise ValueError("Required: --model-params.name [--model]")
 
-        completion_controls = (
-            self.model_params.min_tokens,
-            self.model_params.skip_special_tokens,
-        )
+        completion_controls = {
+            "model_params.min_tokens": self.model_params.min_tokens,
+            "model_params.skip_special_tokens": self.model_params.skip_special_tokens,
+        }
+        configured_controls = [
+            name for name, value in completion_controls.items() if value is not None
+        ]
         if (
-            any(value is not None for value in completion_controls)
+            configured_controls
             and self.endpoint_config.api_type != APIType.OPENAI_COMPLETIONS
         ):
-            raise ValueError(
-                "model_params.min_tokens and skip_special_tokens require "
-                "endpoint_config.api_type=openai_completions"
-            )
-        if any(value is not None for value in completion_controls) and any(
+            controls = " and ".join(configured_controls)
+            verb = "requires" if len(configured_controls) == 1 else "require"
+            required_api_type = "endpoint_config.api_type=openai_completions"
+            raise ValueError(f"{controls} {verb} {required_api_type}")
+        if configured_controls and any(
             dataset.agentic_inference is not None for dataset in self.datasets
         ):
             raise ValueError(

@@ -16,6 +16,7 @@
 """Tests for configuration schema models and validation."""
 
 import random
+import re
 
 import pytest
 from inference_endpoint import metrics
@@ -496,10 +497,32 @@ class TestClientAPITypePropagation:
 
     @pytest.mark.unit
     @pytest.mark.parametrize("api_type", [APIType.OPENAI, APIType.SGLANG])
-    def test_completion_generation_controls_reject_other_api_types(self, api_type):
+    @pytest.mark.parametrize(
+        ("controls", "message"),
+        [
+            (
+                {"min_tokens": 0},
+                "model_params.min_tokens requires "
+                "endpoint_config.api_type=openai_completions",
+            ),
+            (
+                {"skip_special_tokens": False},
+                "model_params.skip_special_tokens requires "
+                "endpoint_config.api_type=openai_completions",
+            ),
+            (
+                {"min_tokens": 1, "skip_special_tokens": False},
+                "model_params.min_tokens and model_params.skip_special_tokens require "
+                "endpoint_config.api_type=openai_completions",
+            ),
+        ],
+    )
+    def test_completion_generation_controls_reject_other_api_types(
+        self, api_type, controls, message
+    ):
         values = self._common(api_type)
-        values["model_params"].update(min_tokens=1)
-        with pytest.raises(ValidationError, match="require.*openai_completions"):
+        values["model_params"].update(controls)
+        with pytest.raises(ValidationError, match=re.escape(message)):
             BenchmarkConfig(**values)
 
 
