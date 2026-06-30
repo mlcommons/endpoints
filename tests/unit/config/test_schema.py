@@ -16,6 +16,7 @@
 """Tests for configuration schema models and validation."""
 
 import random
+import re
 
 import pytest
 from inference_endpoint import metrics
@@ -95,6 +96,21 @@ class TestModelParams:
         )
         assert params.tokenizer_name == "Qwen/Qwen3.6-35B-A3B"
         assert params.name == "qwen/qwen3.6-35b-a3b"
+
+    @pytest.mark.unit
+    def test_min_new_tokens_cannot_exceed_max_new_tokens(self):
+        with pytest.raises(
+            ValidationError, match="min_new_tokens must be less than or equal"
+        ):
+            ModelParams(name="test", min_new_tokens=2, max_new_tokens=1)
+
+    @pytest.mark.unit
+    def test_min_new_tokens_defaults_one(self):
+        assert ModelParams(name="test").min_new_tokens == 1
+
+    @pytest.mark.unit
+    def test_skip_special_tokens_defaults_true(self):
+        assert ModelParams(name="test").skip_special_tokens is True
 
 
 class TestAPIType:
@@ -477,10 +493,54 @@ class TestClientAPITypePropagation:
             OpenAITextCompletionsAdapter,
         )
 
-        config = BenchmarkConfig(**self._common(APIType.OPENAI_COMPLETIONS))
+        values = self._common(APIType.OPENAI_COMPLETIONS)
+        values["model_params"].update(
+            min_new_tokens=1,
+            skip_special_tokens=False,
+        )
+        config = BenchmarkConfig(**values)
         assert config.settings.client.api_type is APIType.OPENAI_COMPLETIONS
         assert config.settings.client.adapter is OpenAITextCompletionsAdapter
         assert config.settings.client.accumulator is OpenAISSEAccumulator
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("api_type", [APIType.OPENAI, APIType.SGLANG])
+    @pytest.mark.parametrize(
+        ("controls", "message"),
+        [
+            (
+                {"min_new_tokens": 0},
+                "model_params.min_new_tokens requires "
+                "endpoint_config.api_type=openai_completions",
+            ),
+            (
+                {"skip_special_tokens": False},
+                "model_params.skip_special_tokens requires "
+                "endpoint_config.api_type=openai_completions",
+            ),
+            (
+                {"min_new_tokens": 0, "skip_special_tokens": False},
+                "model_params.min_new_tokens and model_params.skip_special_tokens require "
+                "endpoint_config.api_type=openai_completions",
+            ),
+        ],
+    )
+    def test_completion_generation_controls_reject_other_api_types(
+        self, api_type, controls, message
+    ):
+        values = self._common(api_type)
+        values["model_params"].update(controls)
+        with pytest.raises(ValidationError, match=re.escape(message)):
+            BenchmarkConfig(**values)
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("api_type", [APIType.OPENAI, APIType.SGLANG])
+    def test_default_completion_generation_controls_allow_other_api_types(
+        self, api_type
+    ):
+        config = BenchmarkConfig(**self._common(api_type))
+        assert config.model_params.min_new_tokens == 1
+        assert config.model_params.skip_special_tokens is True
 
 
 class TestAgenticInferenceValidation:
@@ -503,6 +563,21 @@ class TestAgenticInferenceValidation:
         config = BenchmarkConfig(**self._make_online_agentic_inference(concurrency=16))
         assert config.settings.load_pattern.type == LoadPatternType.AGENTIC_INFERENCE
         assert config.settings.load_pattern.target_concurrency == 16
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "controls", [{"min_new_tokens": 0}, {"skip_special_tokens": False}]
+    )
+    def test_agentic_inference_rejects_text_completion_generation_controls(
+        self, controls
+    ):
+        values = self._make_online_agentic_inference()
+        values["model_params"].update(controls)
+        values["endpoint_config"]["api_type"] = APIType.OPENAI_COMPLETIONS
+        with pytest.raises(
+            ValidationError, match="not supported for agentic inference"
+        ):
+            BenchmarkConfig(**values)
 
     @pytest.mark.unit
     def test_agentic_inference_rejects_removed_stop_on_first_empty_slot_as_extra(self):

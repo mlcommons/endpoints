@@ -202,6 +202,17 @@ class ModelParams(BaseModel):
     max_new_tokens: Annotated[
         int, cyclopts.Parameter(alias="--max-output-tokens", help="Max output tokens")
     ] = 1024
+    min_new_tokens: int = Field(
+        1,
+        ge=0,
+        description="Minimum output tokens for OpenAI text-completions servers",
+    )
+    skip_special_tokens: bool = Field(
+        True,
+        description=(
+            "Whether OpenAI text-completions servers omit special tokens from decoded output"
+        ),
+    )
     osl_distribution: OSLDistribution | None = Field(
         None, description="Output sequence length distribution"
     )
@@ -216,6 +227,14 @@ class ModelParams(BaseModel):
             help="HF repo ID or local path for the tokenizer. Overrides model name for client-side token metrics (ISL/OSL/TPOT).",
         ),
     ] = None
+
+    @model_validator(mode="after")
+    def _validate_generation_lengths(self) -> Self:
+        if self.min_new_tokens > self.max_new_tokens:
+            raise ValueError(
+                "min_new_tokens must be less than or equal to max_new_tokens"
+            )
+        return self
 
 
 class SubmissionReference(BaseModel):
@@ -881,6 +900,33 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
 
         if not self.model_params.name:
             raise ValueError("Required: --model-params.name [--model]")
+
+        # TODO(vir): Move API-type-specific validation out of this generic
+        # cross-model validator and into the selected adapter. Requires a larger refactor.
+        non_default_completion_controls = {
+            "model_params.min_new_tokens": self.model_params.min_new_tokens != 1,
+            "model_params.skip_special_tokens": not self.model_params.skip_special_tokens,
+        }
+        configured_controls = [
+            name
+            for name, is_non_default in non_default_completion_controls.items()
+            if is_non_default
+        ]
+        if (
+            configured_controls
+            and self.endpoint_config.api_type != APIType.OPENAI_COMPLETIONS
+        ):
+            controls = " and ".join(configured_controls)
+            verb = "requires" if len(configured_controls) == 1 else "require"
+            required_api_type = "endpoint_config.api_type=openai_completions"
+            raise ValueError(f"{controls} {verb} {required_api_type}")
+        if configured_controls and any(
+            dataset.agentic_inference is not None for dataset in self.datasets
+        ):
+            raise ValueError(
+                "OpenAI text-completion generation controls are not supported "
+                "for agentic inference datasets"
+            )
 
         # --- Validate (cross-model checks only; sub-models self-validate) ---
         if self.type == TestType.SUBMISSION and not self.benchmark_mode:
