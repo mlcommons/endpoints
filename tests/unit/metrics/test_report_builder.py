@@ -107,11 +107,19 @@ def _make_registry(n_samples: int = 50) -> MetricsRegistry:
     return registry
 
 
+def _set_loadgen_window(registry: MetricsRegistry, *, duration_ns: int) -> None:
+    """Populate the legacy LoadGen window counter a loadgen-view Report reads."""
+    registry.set_counter(
+        MetricCounterKey.LEGACY_LOADGEN_WINDOW_DURATION_NS.value, duration_ns
+    )
+
+
 def _build_report(
     registry: MetricsRegistry,
     *,
     state: SessionState = SessionState.COMPLETE,
     n_pending_tasks: int = 0,
+    use_legacy_loadgen_qps_metrics: bool = True,
 ) -> Report:
     """Build a Report from a snapshot dict (matches the consumer contract).
 
@@ -122,7 +130,10 @@ def _build_report(
     does (loaded JSON file → Report).
     """
     snap = registry.build_snapshot(state=state, n_pending_tasks=n_pending_tasks)
-    return Report.from_snapshot(snapshot_to_dict(snap))
+    return Report.from_snapshot(
+        snapshot_to_dict(snap),
+        use_legacy_loadgen_qps_metrics=use_legacy_loadgen_qps_metrics,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -151,7 +162,9 @@ class TestFromSnapshot:
 
     def test_with_metrics(self):
         registry = _make_registry(n_samples=50)
-        report = _build_report(registry)
+        # Native view (completed / tracked_duration) so QPS/TPS are computable
+        # from tracked_duration_ns alone (no loadgen window counter set here).
+        report = _build_report(registry, use_legacy_loadgen_qps_metrics=False)
 
         assert report.n_samples_issued == 50
         assert report.n_samples_completed == 50
@@ -489,6 +502,69 @@ class TestFromSnapshotDict:
         assert "TTFT" in output
         # Scrubbed values surface as a sentinel rather than crashing.
         assert "N/A" in output
+
+
+# ---------------------------------------------------------------------------
+# use_legacy_loadgen_qps_metrics: legacy MLPerf LoadGen "completed" (default) vs
+# endpoints' native throughput, with native fallback when the window is
+# unavailable.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestLoadgenQpsMetrics:
+    def test_default_uses_loadgen_window(self):
+        """Default: QPS = (completed-1)/W, TPS = tokens/W, where W is the
+        legacy LoadGen window.
+        """
+        registry = _make_registry(n_samples=50)
+        _set_loadgen_window(registry, duration_ns=8_000_000_000)
+        report = _build_report(registry)
+        assert report.legacy_loadgen_window_duration_ns == 8_000_000_000
+        # (50 - 1) / 8 s
+        assert report.qps == pytest.approx(49 / 8.0)
+        total = report.output_sequence_lengths["total"]
+        assert report.tps == pytest.approx(total / 8.0)
+
+    def test_disabled_uses_native(self):
+        """--no-use-legacy-loadgen-qps-metrics → native completed/duration and
+        tokens/duration, ignoring the legacy LoadGen window.
+        """
+        registry = _make_registry(n_samples=50)
+        _set_loadgen_window(registry, duration_ns=8_000_000_000)
+        report = _build_report(registry, use_legacy_loadgen_qps_metrics=False)
+        # Native view selected → window not recorded on the report.
+        assert report.legacy_loadgen_window_duration_ns is None
+        # Native: 50 / 10 s.
+        assert report.qps == pytest.approx(5.0)
+        total = report.output_sequence_lengths["total"]
+        assert report.tps == pytest.approx(total / 10.0)
+
+    def test_falls_back_to_native_when_window_unavailable(self):
+        """loadgen with absent/zero window → native fallback (not None), so the
+        default never silently drops the headline.
+        """
+        registry = _make_registry(n_samples=50)  # no window counter set
+        report = _build_report(registry)
+        assert report.legacy_loadgen_window_duration_ns is None
+        assert report.qps == pytest.approx(5.0)
+        total = report.output_sequence_lengths["total"]
+        assert report.tps == pytest.approx(total / 10.0)
+
+    def test_loadgen_qps_falls_back_when_completed_lt_2(self):
+        """Fewer than 2 completions → native QPS (the (completed-1)/W form is
+        undefined for a single sample).
+        """
+        registry = _make_registry(n_samples=1)
+        _set_loadgen_window(registry, duration_ns=1_000_000_000)
+        report = _build_report(registry)
+        # Both QPS and TPS fall back to the native window (10s) — they must
+        # share one window, and the legacy field must be None so the serialized
+        # report does not mislabel which view it holds.
+        assert report.qps == pytest.approx(0.1)
+        total = report.output_sequence_lengths["total"]
+        assert report.tps == pytest.approx(total / 10.0)
+        assert report.legacy_loadgen_window_duration_ns is None
 
 
 @pytest.mark.unit

@@ -26,6 +26,7 @@ import functools
 from importlib import import_module
 from pathlib import Path
 from typing import Annotated, Any, Literal
+from urllib.parse import urlparse
 
 import cyclopts
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -44,6 +45,21 @@ from .cpu_affinity import (
     get_current_numa_node,
 )
 from .utils import get_ephemeral_port_limit, get_ephemeral_port_range
+
+
+def _endpoint_destination(url: str) -> tuple[str | None, int]:
+    """Resolve an endpoint URL to its ``(host, port)`` destination identity.
+
+    Used to count distinct destinations for the ephemeral-port budget. A
+    bare ``host:port`` (no scheme) is parsed as http so the host/port land
+    in the right fields instead of collapsing to ``(None, None)``; a missing
+    port resolves to the scheme default (443 for https, else 80) so that
+    http and https to the same host count as distinct destinations.
+    """
+    parsed = urlparse(url if "://" in url else f"http://{url}")
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    return (parsed.hostname, port)
+
 
 ADAPTER_MAP = {
     APIType.OPENAI: "inference_endpoint.openai.openai_msgspec_adapter.OpenAIMsgspecAdapter",
@@ -253,13 +269,28 @@ class HTTPClientConfig(WithUpdatesMixin, BaseModel):
             system_maximum_ports = high - low + 1
             available_ports = get_ephemeral_port_limit()
 
+            # The ephemeral-port limit is per (source IP, destination) pair: the
+            # TCP 4-tuple (src_ip, src_port, dst_ip, dst_port) only needs to be
+            # unique, so the kernel reuses local ports across distinct
+            # destinations. Each distinct endpoint therefore has its own
+            # ~`available_ports` budget. Workers are round-robined across
+            # endpoints, so scale the cap by the distinct-endpoint count;
+            # otherwise concurrency is needlessly throttled to a single
+            # endpoint's budget when several endpoints are configured.
+            distinct_endpoints = len(
+                {_endpoint_destination(u) for u in self.endpoint_urls}
+            )
+            port_budget = available_ports * max(1, distinct_endpoints)
+
             if self.max_connections == -1:
-                object.__setattr__(self, "max_connections", available_ports)
+                object.__setattr__(self, "max_connections", port_budget)
             elif self.max_connections > 0:
-                if self.max_connections > available_ports:
+                if self.max_connections > port_budget:
                     raise RuntimeError(
-                        f"--max-connections ({self.max_connections}) exceeds ephemeral port limit ({available_ports}). "
-                        f"Either reduce --max-connections or increase system port limit."
+                        f"--max-connections ({self.max_connections}) exceeds the ephemeral "
+                        f"port budget ({port_budget} = {available_ports} ports x "
+                        f"{max(1, distinct_endpoints)} distinct endpoint(s)). Reduce "
+                        f"--max-connections, add endpoints, or raise the system port range."
                     )
 
             if self.min_required_connections == -1:
