@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Import all audit-test modules to fire their register() calls."""
+"""AuditTest implementations.
 
-from . import output_caching_test  # noqa: F401
+Each module defines one AuditTest; the package ``__init__`` wires them into the
+``AUDIT_TESTS`` registry by importing the concrete class.
+"""

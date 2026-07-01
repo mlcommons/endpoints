@@ -58,6 +58,11 @@ They are built on three LoadGen-specific pieces:
 | TEST09 | Mean output token length within ±10% of reference   | gpt-oss-120b                                 |
 | TEST08 | DLRM-v3 streaming accuracy                          | DLRM-v3 — **out of scope** (not LLM)         |
 
+**Category** is this design's own grouping (not an MLPerf term): _orchestrator_ tests
+drive extra benchmark phases and compare them (TEST01, TEST04 — what this module runs);
+_analyzer_ tests post-process a single run's logs (TEST06/07/09). It determines whether a
+test reuses the `setup/run/finalize` engine (orchestrator) or only reads artifacts (analyzer).
+
 **TEST04 (mechanism).** `audit.config` sets `performance_issue_same=1` /
 `performance_issue_same_index=3` so LoadGen issues the **same sample repeatedly** for the
 **same number of queries** as the standard run, then the verification compares throughput.
@@ -149,6 +154,7 @@ before the audit.
                                       ▼
                          ┌─────────────────────────┐
                          │  run_benchmark(cfg,mode) │
+                         │  → returns report_dir    │
                          └────────────┬────────────┘
                                       ▼
                   ┌──────────────────────────────────────┐
@@ -163,19 +169,18 @@ before the audit.
                                     │ no                    └─────────────────────────┘
                                     ▼
                           ╱──────────────────╲   no   ┌────────────────────────┐
-                         ╱  config.audit set?  ╲─────►│ return None → exit 0   │
+                         ╱  config.audit set?  ╲─────►│ exit 0 (no audit)      │
                          ╲────────┬────────────╱       └────────────────────────┘
-                                  │ yes
+                                  │ yes  (cli._run dispatches)
                                   ▼
-                   ┌──────────────────────────────────┐
-                   │   run_audit(cfg, report_dir)      │
-                   │   test = get_audit_test(test_id)  │
-                   └────────────────┬─────────────────┘
+                   ┌────────────────────────────────────────┐
+                   │ run_audit(cfg, report_dir / "audit")    │
+                   │ test = get_audit_test(test_id)          │
+                   └────────────────┬───────────────────────┘
                                     ▼
             ╱────────────────────────────────────────-╲   no   ┌───────────────────────┐
-           ╱ load_pattern ∈ {max_throughput,            ╲─────►│ raise SetupError      │
-           ╲  concurrency}  AND  ≥1 performance dataset?  ╱      │     → exit 3          │
-            ╲────────────────────┬───────────────────-──╱       └───────────────────────┘
+           ╱           ≥1 performance dataset?          ╲─────►│ raise SetupError      │
+           ╲────────────────────┬───────────────────-──╱       │     → exit 3          │
                                  │ yes                                    ▲
                                  ▼                                        │
             ┌──────────────────────────────────────────┐                 │
@@ -187,53 +192,62 @@ before the audit.
         ╔═══════════ for each spec (back-to-back) ═════════════╗         │
         ║                    ▼                                  ║         │
         ║   ┌──────────────────────────────────────────┐       ║         │
-        ║   │ setup_benchmark(phase_cfg, audit=None)    │       ║         │
+        ║   │ phase_cfg = perf-only (accuracy datasets  │       ║         │
+        ║   │   dropped; audit=None; report_dir=<label>)│       ║         │
+        ║   │ ctx = setup_benchmark(phase_cfg, run_spec)│       ║         │
         ║   └──────────────┬───────────────────────────┘       ║         │
         ║                  ▼                                    ║         │
-        ║          ╱──────────────╲ yes  ╱─────────────────╲    ║         │
-        ║         ╱  first phase?   ╲───►╱ every spec's      ╲──╫──no─────┘
-        ║         ╲────────┬────────╱    ╲ sample_index in    ╱ ║ (out of range)
-        ║                  │ no           ╲ range [0,N)?     ╱  ║
-        ║                  │               ╲──────┬────────-╱   ║
-        ║                  │◄─────────────────────┘ yes         ║
-        ║                  ▼                                    ║
-        ║   ┌──────────────────────────────────────────┐       ║
-        ║   │ run_benchmark_async(ctx) → finalize       │       ║
-        ║   └──────────────┬───────────────────────────┘       ║
-        ║                  ▼                                    ║
+        ║          ╱──────────────╲ yes  ╱──────────────────────╲║         │
+        ║         ╱  first phase?   ╲───►╱ test.validate(cfg, N): ╲╫─raises─┘
+        ║         ╲────────┬────────╱    ╲  ref count ≤ N AND each ╱║(SetupError
+        ║                  │ no           ╲ fixed index ∈ [0,N)?  ╱ ║ → exit 3)
+        ║                  │               ╲──────┬─────────────-╱  ║
+        ║                  │◄─────────────────────┘ ok             ║
+        ║                  ▼                                       ║
+        ║   ┌──────────────────────────────────────────┐          ║
+        ║   │ run_benchmark_async(ctx) → finalize       │          ║
+        ║   └──────────────┬───────────────────────────┘          ║
+        ║                  ▼                                       ║
         ║       ╱───────────────────────╲ no   ┌─────────────────────────┐
         ║      ╱ report not None AND       ╲───►│ raise ExecutionError    │
         ║      ╲   report.complete?         ╱   │   → exit 4              │
         ║       ╲──────────┬──────────────╱     │ (no verdict on partial) │
         ║                  │ yes                 └─────────────────────────┘
-        ║                  ▼                                    ║
-        ║   ┌──────────────────────────────────────────┐       ║
-        ║   │ append AuditRunArtifacts(label, report,        │       ║
-        ║   │   n_requested = spec.n_samples)           │       ║
-        ║   └──────────────────────────────────────────┘       ║
-        ╚══════════════════╪═══════════════════════════════════╝
+        ║                  ▼                                       ║
+        ║   ┌──────────────────────────────────────────┐          ║
+        ║   │ append AuditRunArtifacts(label, report,   │          ║
+        ║   │   n_requested = spec.n_samples)           │          ║
+        ║   └──────────────────────────────────────────┘          ║
+        ╚══════════════════╪═══════════════════════════════════════╝
                            ▼ (all phases done)
             ┌──────────────────────────────────────────┐
             │ result = test.verify([ref, audit])        │
             │  • completion guard:                      │
             │      completed ≥ requested × (1 − thr)    │
             │  • caching rule:                          │
-            │      audit_qps < ref_qps × (1 + thr)      │
+            │      audit_qps ≤ ref_qps × (1 + thr)      │
             └──────────────┬───────────────────────────┘
                            ▼
             ┌──────────────────────────────────────────┐
             │ write_result → <report_dir>/audit/ [atomic]│
-            │   verify_OUTPUT_CACHING_TEST.txt           │
-            │   audit_result.json                        │
+            │   audit_result.json        (durable first) │
+            │   verify_OUTPUT_CACHING_TEST.txt  (marker) │
             └──────────────┬───────────────────────────┘
                            ▼
             ┌──────────────────────────────────────────┐
-            │ return AuditResult → cli.py               │
+            │ return AuditResult → cli._run             │
             │   exit 0 (PASS)  /  exit 1 (FAIL)         │
             └──────────────────────────────────────────┘
 ```
 
-Post-run-only tests (TEST06/07/09) take the same path with a single-element `plan_runs`, so
+The first-phase gate calls `AuditTest.validate(cfg, N)` once `N` (the loaded dataset size)
+is known: each audit owns its own preconditions there, so the generic loop never encodes a
+single test's rules. For the output-caching test that means the distinct-sample reference
+count must fit the dataset (else `WithoutReplacementSampleOrder` would wrap and re-issue,
+making the baseline cacheable) and every fixed `sample_index` must be in range. A failure
+raises `SetupError` (exit 3) before any phase issues load.
+
+Analyzer tests (TEST06/07/09) take the same path with a single-element `plan_runs`, so
 phase 2 simply doesn't exist and `verify` reads the one run's artifacts.
 
 In a `type: submission` config (see §5) this whole `run_audit` block runs **after** the
@@ -288,6 +302,11 @@ class OutputCachingTestConfig(BaseModel):
 AuditConfig = OutputCachingTestConfig
 ```
 
+`audit:` holds a **single** `AuditConfig`, and the union is discriminated on `test`, so two
+`OutputCachingTest` blocks can't coexist. To repeat the audit over several prompts, widen
+`sample_index` to a list inside the one config and have `plan_runs` emit one audit phase per
+index — not duplicate the block.
+
 On `BenchmarkConfig`: `audit: AuditConfig | None = None`. With a single member the alias is
 just `OutputCachingTestConfig`; the `test: Literal[...]` discriminator field is already in place, so
 adding the second test only assembles the `Annotated[... , Field(discriminator="test")]`
@@ -313,38 +332,32 @@ so it does not require equal counts.
 ### Generic orchestrator
 
 `run_benchmark` first executes the main benchmark (performance, plus accuracy scoring when
-the config carries accuracy datasets) exactly as today. Then, when `config.audit is not
-None`, it runs `run_audit(config)` (in `commands/audit.py`) as an **additive
-post-step** under the same `report_dir`. If the main run is interrupted (`KeyboardInterrupt`
-/ Ctrl-C), `run_benchmark` salvages partial results and re-raises **without** starting the
-audit — an interrupted run must not silently roll into the (long) compliance phases. The two stages are independent, self-contained
-operations sequenced at the top level — not per-phase config surgery — so one
-`type: submission` YAML can produce the full set: perf [+ accuracy] + the audit's reference
-and test04 phases + result (§5). The audit runs its **own** reference phase at
-`samples`; it does not reuse the (typically larger, full-dataset) submission perf run. The
-generic loop never names a specific test:
+the config carries accuracy datasets) exactly as today and returns its `report_dir`. Then,
+when `config.audit is not None`, `cli._run` runs `run_audit(config, report_dir / "audit")`
+(in `commands/audit.py`) as an **additive post-step**. If the main run is interrupted
+(`KeyboardInterrupt` / Ctrl-C), `run_benchmark` salvages partial results and re-raises
+**without** starting the audit — an interrupted run must not silently roll into the (long)
+compliance phases. The two stages are independent, self-contained operations sequenced at
+the top level — not per-phase config surgery — so one `type: submission` YAML can produce
+the full set: perf [+ accuracy] + the audit's reference and output_caching phases + result
+(§5). The audit runs its **own** reference phase at `samples`; it does not reuse the
+(typically larger, full-dataset) submission perf run. The generic loop never names a
+specific test:
 
 1. `test = get_audit_test(config.audit.test)`
 2. `specs = test.plan_runs(config.audit)`
-3. **Validate before any run executes.** The load pattern is checked against an
-   **allow-list** — `max_throughput` (MLPerf Offline), `concurrency`, and `poisson` (both
-   MLPerf Server) are accepted; everything else (`agentic_inference`, `burst`, `step`) is
-   rejected up front. The audit compares achieved QPS (`report.qps` =
-   completed-samples / duration), which is exactly MLPerf's per-scenario throughput score
-   ("Samples per second" for Offline, "Completed samples per second" for Server); both
-   phases reuse the same settings, so a paced arrival rate matches by construction.
-   `agentic_inference`'s conversation-turn semantics make the fixed-index audit phase
-   meaningless, and `burst`/`step` are unimplemented. This is the diagram's "first phase?"
-   pre-flight gate: the first phase's `setup_benchmark` loads the dataset (it spawns no
-   workers — just reads data), and its row count `N` drives two checks reused across every
-   spec, before any phase runs: (a) every **distinct** fixed `sample_index` must fall in
-   `[0, N)`, and (b) a without-replacement (reference) phase must not request more than `N`
-   samples — otherwise the sample order cycles and repeats rows, making the baseline
-   cacheable. Either failure raises `SetupError` (exit 3) after that single load, so a bad
-   config never wastes a full reference run.
+3. **Validate before any run executes.** The first phase's `setup_benchmark` loads the
+   dataset; its row count `N` is then handed to `test.validate(config.audit, N)`, which owns
+   every test-specific precondition (the orchestrator stays test-agnostic — it imposes no
+   load-pattern restriction of its own). For the output-caching test that means the
+   distinct-sample reference count must fit `N` (else the order wraps and re-issues samples,
+   making the baseline cacheable) and every fixed `sample_index` must be in `[0, N)`. This
+   reuses the first load — no separate probe — and surfaces a bad config as `SetupError`
+   before any phase issues load.
 4. Execute each spec back-to-back via the existing `setup_benchmark` /
    `run_benchmark_async` path (no duplicated report-dir or `config.yaml` logic). Each phase
-   config has `audit=None` to prevent re-entry into `run_audit`. If any phase raises
+   config is performance-only (accuracy datasets dropped so no phase re-issues or re-scores
+   them) and has `audit=None` to prevent re-entry into `run_audit`. If any phase raises
    (`SetupError` / `ExecutionError`), `run_audit` aborts **without verifying** — a crashed
    phase must never produce a result. A phase that returns but whose `Report.complete` is
    `False` (metrics drain timed out, or the run was interrupted → partial stats) is likewise
@@ -494,16 +507,41 @@ Both scenarios ship as committed configs (see also
 > Only `output_caching_test` (TEST04) exists today. This section sketches how the
 > abstraction accommodates future tests; the examples below are illustrative, not shipped.
 
+---
+
+## 7. Extending to other audit tests
+
 Adding a test whose run behavior is already expressible touches **four things**: a new file
 under `compliance/audit_test/`, one `AuditTestId` enum value, a per-test config model added to
 the `AuditConfig` discriminated union (`Annotated[OutputCachingTestConfig | TestNNConfig, Field(discriminator="test")]`),
-and one import line in `compliance/audit_test/__init__.py`. The orchestrator, load generator,
-result writer, and CLI are untouched.
+and one entry in the `AUDIT_TESTS` map in `compliance/__init__.py`. The orchestrator, load
+generator, result writer, and CLI are untouched.
 
-- **Multi-phase (e.g. TEST01, same-model check):** `plan_runs` returns two specs — a
-  `performance` and an `accuracy` run — and `verify` compares their outputs.
-- **Post-run only (e.g. TEST09, output-length check):** `plan_runs` returns a single normal
-  run; `verify` reads `events.jsonl` and checks mean OSL within `[ref × 0.9, ref × 1.1]`.
+**Orchestrator example (TEST01 — same-model check):**
+
+```python
+# compliance/audit_test/test01.py
+class Test01Audit:
+    test_id = AuditTestId.TEST01
+
+    def plan_runs(self, cfg: AuditConfig) -> list[AuditRunSpec]:
+        return [
+            AuditRunSpec("performance", cfg.samples, SampleOrderSpec.without_replacement()),
+            AuditRunSpec("accuracy",    cfg.samples, SampleOrderSpec.without_replacement()),
+        ]
+
+    def validate(self, cfg: AuditConfig, dataset_size: int) -> None:
+        ...  # bounds-check this test's phases against the dataset
+
+    def verify(self, runs: list[AuditRunArtifacts], cfg: AuditConfig) -> AuditResult:
+        perf, acc = runs
+        return AuditResult("TEST01", perf.model_outputs_match(acc), {...})
+
+# wire into compliance/__init__.py:  AUDIT_TESTS[Test01Audit.test_id] = Test01Audit()
+```
+
+**Analyzer example (TEST09 — output-length check):** `plan_runs` returns a single normal
+run; `verify` reads `events.jsonl` and checks mean OSL within `[ref × 0.9, ref × 1.1]`.
 
 **What costs more than one file (honest limits):**
 
@@ -512,3 +550,32 @@ result writer, and CLI are untouched.
    generic seam, not leakage.
 2. TEST06/09 need raw output token IDs (see §2) → one isolated, audit-capture data-path
    addition shared by all token-level tests. TEST04 and TEST01 need none of it.
+
+---
+
+## 8. Success criteria (goal-driven; verify before done)
+
+1. **Integration** — `benchmark from-config` with an `audit:` block runs both phases
+   back-to-back and writes `verify_OUTPUT_CACHING_TEST.txt` + `audit_result.json`; PASS against a
+   no-caching `mock_http_echo_server`, FAIL against a caching mock.
+2. **Completion guard** — a phase that completes far fewer than its _requested_ count fails
+   the result (`completed < requested × (1 − threshold)` → FAIL), independent of the other
+   phase's count.
+3. **Unit** — `SingleSampleOrder` always yields the configured index (bounds-checked);
+   `verify_output_caching` PASS within threshold, FAIL above, PASS at the exact boundary (`<=`),
+   slower-passes, custom threshold, and the completion guard trips; `AuditRunStats.from_report`
+   raises on a `None`-duration or non-positive `qps`; `OutputCachingAudit.plan_runs` emits a
+   reference spec at `samples` and an audit spec at `audit_samples` (which may differ).
+4. **Unit (orchestrator)** — assert the reference phase issues `samples` and the audit phase
+   issues `audit_samples` (defaulting to `samples` when omitted), validation fires before any
+   run, the typed result propagates (PASS/FAIL distinguishable), and a phase config never
+   carries `audit` (no re-entry).
+5. **Validation** — `AuditTest.validate` rejects an out-of-range `sample_index` and a
+   reference count exceeding the loaded dataset, both before any phase runs.
+6. **Robustness** — `AuditRunStats.from_report` raises a clean `ValueError` on a report with no
+   duration (`qps is None`) or non-positive throughput (`qps <= 0`); a phase whose
+   `Report.complete` is `False` (metrics drain timeout / interrupt) aborts the audit with
+   `ExecutionError` rather than certifying a result on partial data.
+7. **No leakage** — `grep -r test04 src/inference_endpoint/{load_generator,config/runtime_settings.py}`
+   returns nothing.
+8. `pre-commit run --all-files` clean (ruff / mypy / license headers).

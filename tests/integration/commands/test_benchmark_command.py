@@ -263,14 +263,18 @@ class TestBenchmarkCommandIntegration:
         # All audit artifacts live under <report_dir>/audit/.
         assert (tmp_path / "audit" / "reference").is_dir()
         assert (tmp_path / "audit" / "output_caching").is_dir()
-        # Orchestrator returned a result and wrote it to disk.
+        # Orchestrator returned a verdict and wrote both result files.
         assert result is not None
-        assert (tmp_path / "audit" / "audit_result.json").exists()
         # No caching on the echo server → the audit must PASS (a regression that
         # always FAILs, or mis-plumbs the threshold, would otherwise slip by).
         assert result.passed is True
+        assert result.test_id == AuditTestId.OUTPUT_CACHING_TEST.value
+        result_path = tmp_path / "audit" / "audit_result.json"
+        assert result_path.exists()
         verify_txt = (tmp_path / "audit" / "verify_OUTPUT_CACHING_TEST.txt").read_text()
         assert "Performance check pass: True" in verify_txt
+        result_json = json.loads(result_path.read_text())
+        assert result_json["passed"] is True
 
 
 TEMPLATE_DIR = (

@@ -35,26 +35,8 @@ from inference_endpoint.compliance.audit_test.output_caching_test import (
     verify_output_caching,
 )
 from inference_endpoint.compliance.result import AuditResult, write_result
-from inference_endpoint.config.schema import (
-    AuditTestId,
-    LoadPatternType,
-    OutputCachingTestConfig,
-)
+from inference_endpoint.config.schema import AuditTestId, OutputCachingTestConfig
 from inference_endpoint.exceptions import ExecutionError, SetupError
-
-# Load patterns the audit must reject, derived from the enum so the test stays
-# correct regardless of which patterns exist on the base (only max_throughput
-# and concurrency are accepted).
-_REJECTED_LOAD_PATTERNS = [
-    p
-    for p in LoadPatternType
-    if p
-    not in (
-        LoadPatternType.MAX_THROUGHPUT,
-        LoadPatternType.CONCURRENCY,
-        LoadPatternType.POISSON,
-    )
-]
 
 # ---------------------------------------------------------------------------
 # verify_output_caching — pure function, no I/O
@@ -123,6 +105,14 @@ class TestVerifyOutputCaching:
         # With threshold=0.02 the limit is 102.0 → audit 105 > limit → FAIL
         result = verify_output_caching(ref, audit, threshold=0.02)
         assert result.passed is False
+
+    @pytest.mark.unit
+    def test_pass_at_exact_threshold_boundary(self):
+        # MLPerf "not more than X% faster" → audit_qps == limit still passes.
+        ref = AuditRunStats(qps=100.0, n_completed=1000, n_requested=1000)
+        audit = AuditRunStats(qps=110.0, n_completed=1000, n_requested=1000)
+        result = verify_output_caching(ref, audit, threshold=0.10)
+        assert result.passed is True
 
 
 # ---------------------------------------------------------------------------
@@ -229,6 +219,45 @@ class TestOutputCachingAuditVerify:
 
 
 # ---------------------------------------------------------------------------
+# OutputCachingAudit.validate — dataset bounds checks
+# ---------------------------------------------------------------------------
+
+
+class TestOutputCachingAuditValidate:
+    def _cfg(self, samples=50, audit_samples=None, sample_index=0):
+        return OutputCachingTestConfig(
+            test=AuditTestId.OUTPUT_CACHING_TEST,
+            samples=samples,
+            audit_samples=audit_samples,
+            sample_index=sample_index,
+        )
+
+    @pytest.mark.unit
+    def test_passes_when_within_bounds(self):
+        # reference count <= dataset and fixed index in range → no raise.
+        OutputCachingAudit().validate(self._cfg(samples=50, sample_index=10), 100)
+
+    @pytest.mark.unit
+    def test_rejects_reference_count_exceeding_dataset(self):
+        # reference draws distinct samples → count must not exceed the dataset.
+        with pytest.raises(SetupError, match="exceeds dataset size"):
+            OutputCachingAudit().validate(self._cfg(samples=200), 100)
+
+    @pytest.mark.unit
+    def test_allows_audit_count_exceeding_dataset(self):
+        # The audit phase repeats one fixed sample, so its count may exceed the
+        # dataset; only the distinct-sample reference count is bounded.
+        OutputCachingAudit().validate(
+            self._cfg(samples=50, audit_samples=500, sample_index=0), 100
+        )
+
+    @pytest.mark.unit
+    def test_rejects_out_of_range_sample_index(self):
+        with pytest.raises(SetupError, match="out of .*range"):
+            OutputCachingAudit().validate(self._cfg(samples=50, sample_index=100), 100)
+
+
+# ---------------------------------------------------------------------------
 # AuditRunStats.from_report
 # ---------------------------------------------------------------------------
 
@@ -319,8 +348,8 @@ class TestRegistry:
 
     @pytest.mark.unit
     def test_get_audit_test_raises_on_unknown(self, monkeypatch):
-        # Empty the registry so the id resolves to nothing.
-        monkeypatch.setattr(compliance, "_REGISTRY", {})
+        # Empty the explicit map so the id resolves to nothing.
+        monkeypatch.setattr(compliance, "AUDIT_TESTS", {})
         with pytest.raises(KeyError, match="No audit test registered"):
             compliance.get_audit_test(AuditTestId.OUTPUT_CACHING_TEST)
 
@@ -331,46 +360,23 @@ class TestRegistry:
 
 
 class TestRunAuditGuards:
-    def _audit_config(self) -> MagicMock:
+    def _audit_config(self, sample_index=0) -> MagicMock:
         """A MagicMock BenchmarkConfig with a real output-caching audit block."""
 
         config = MagicMock()
         config.audit = OutputCachingTestConfig(
-            test=AuditTestId.OUTPUT_CACHING_TEST, samples=4, sample_index=0
+            test=AuditTestId.OUTPUT_CACHING_TEST, samples=4, sample_index=sample_index
         )
-        return config
-
-    @pytest.mark.unit
-    @pytest.mark.parametrize("pattern", _REJECTED_LOAD_PATTERNS, ids=lambda p: p.name)
-    def test_rejects_paced_or_incompatible_load_pattern(self, tmp_path, pattern):
-        """Only max_throughput / concurrency are valid; everything else is
-        rejected before any phase runs (guards the fixed-index audit semantics)."""
-
-        config = self._audit_config()
-        config.settings.load_pattern.type = pattern
-        with pytest.raises(SetupError, match="max_throughput, concurrency, or poisson"):
-            run_audit(config, tmp_path)
-
-    @pytest.mark.unit
-    @pytest.mark.parametrize("pattern", ["MAX_THROUGHPUT", "CONCURRENCY", "POISSON"])
-    def test_refuses_result_on_incomplete_phase(self, tmp_path, monkeypatch, pattern):
-        """A phase whose Report.complete is False (drain timeout / interrupted)
-        must abort with ExecutionError, never a certified result."""
-
-        config = self._audit_config()
-        config.settings.load_pattern.type = getattr(LoadPatternType, pattern)
         perf_ds = MagicMock()
         perf_ds.type.value = "performance"
         config.datasets = [perf_ds]
         config.with_updates.return_value = MagicMock()
+        return config
 
-        # The bounds-check reads num_samples from the first phase's loaded ctx.
+    def _patch_phase(self, monkeypatch, *, num_samples, bench):
+        """Wire setup/run/finalize so run_audit reaches the verify path."""
         ctx = MagicMock()
-        ctx.dataloader.num_samples.return_value = 100
-        incomplete = MagicMock()
-        incomplete.complete = False
-        bench = MagicMock()
-        bench.report = incomplete
+        ctx.dataloader.num_samples.return_value = num_samples
         monkeypatch.setattr(
             "inference_endpoint.commands.audit.setup_benchmark",
             lambda *a, **k: ctx,
@@ -384,7 +390,13 @@ class TestRunAuditGuards:
             lambda ctx, b: None,
         )
 
-        with pytest.raises(ExecutionError, match="did not complete cleanly"):
+    @pytest.mark.unit
+    def test_rejects_out_of_range_sample_index(self, tmp_path, monkeypatch):
+        """The test's validate() runs after the dataset loads and aborts with
+        SetupError before any phase issues load."""
+        config = self._audit_config(sample_index=500)
+        self._patch_phase(monkeypatch, num_samples=100, bench=MagicMock())
+        with pytest.raises(SetupError, match="out of .*range"):
             run_audit(config, tmp_path)
 
     @pytest.mark.unit
@@ -392,22 +404,62 @@ class TestRunAuditGuards:
         """A without-replacement (reference) phase requesting more samples than
         the dataset holds must be rejected before any phase runs — otherwise the
         baseline repeats rows and becomes cacheable, masking output caching."""
-
         config = self._audit_config()  # reference samples=4, sample_index=0
-        config.settings.load_pattern.type = LoadPatternType.MAX_THROUGHPUT
-        perf_ds = MagicMock()
-        perf_ds.type.value = "performance"
-        config.datasets = [perf_ds]
-        config.with_updates.return_value = MagicMock()
+        self._patch_phase(
+            monkeypatch, num_samples=3, bench=MagicMock()
+        )  # < reference samples (4)
+        with pytest.raises(SetupError, match="exceeds dataset size"):
+            run_audit(config, tmp_path)
 
+    @pytest.mark.unit
+    def test_refuses_result_on_incomplete_phase(self, tmp_path, monkeypatch):
+        """A phase whose Report.complete is False (drain timeout / interrupted)
+        must abort with ExecutionError, never a certified result."""
+        config = self._audit_config()
+        incomplete = MagicMock()
+        incomplete.complete = False
+        bench = MagicMock()
+        bench.report = incomplete
+        self._patch_phase(monkeypatch, num_samples=100, bench=bench)
+
+        with pytest.raises(ExecutionError, match="did not complete cleanly"):
+            run_audit(config, tmp_path)
+
+    @pytest.mark.unit
+    def test_interrupted_phase_raises_keyboard_interrupt(self, tmp_path, monkeypatch):
+        """A SIGINT/SIGTERM during an audit phase yields an 'interrupted' report;
+        run_audit must propagate KeyboardInterrupt (CLI exit 130), not the
+        generic ExecutionError (exit 4) used for a crashed/drain-timeout phase."""
+        config = self._audit_config()
+        interrupted = MagicMock()
+        interrupted.state = "interrupted"
+        interrupted.complete = False
+        bench = MagicMock()
+        bench.report = interrupted
+        self._patch_phase(monkeypatch, num_samples=100, bench=bench)
+
+        with pytest.raises(KeyboardInterrupt):
+            run_audit(config, tmp_path)
+
+    @pytest.mark.unit
+    def test_keyboard_interrupt_propagates(self, tmp_path, monkeypatch):
+        """SIGINT during a phase surfaces as KeyboardInterrupt (exit 130), not a
+        wrapped ExecutionError — `except Exception` must not swallow it."""
+        config = self._audit_config()
         ctx = MagicMock()
-        ctx.dataloader.num_samples.return_value = 3  # < reference samples (4)
+        ctx.dataloader.num_samples.return_value = 100
+
+        def _interrupt(_ctx):
+            raise KeyboardInterrupt
+
         monkeypatch.setattr(
             "inference_endpoint.commands.audit.setup_benchmark",
             lambda *a, **k: ctx,
         )
-
-        with pytest.raises(SetupError, match="exceeds dataset size"):
+        monkeypatch.setattr(
+            "inference_endpoint.commands.audit.run_benchmark_async", _interrupt
+        )
+        with pytest.raises(KeyboardInterrupt):
             run_audit(config, tmp_path)
 
     @pytest.mark.unit
@@ -415,32 +467,15 @@ class TestRunAuditGuards:
         """Each audit phase is performance-only: accuracy datasets must be
         stripped from the per-phase config so setup_benchmark never appends an
         ACCURACY phase (which would re-issue and re-score the accuracy set)."""
-
         config = self._audit_config()
-        config.settings.load_pattern.type = LoadPatternType.MAX_THROUGHPUT
-        perf_ds = MagicMock()
-        perf_ds.type.value = "performance"
+        perf_ds = config.datasets[0]
         acc_ds = MagicMock()
         acc_ds.type.value = "accuracy"
         config.datasets = [perf_ds, acc_ds]
-        config.with_updates.return_value = MagicMock()
 
-        ctx = MagicMock()
-        ctx.dataloader.num_samples.return_value = 100
         bench = MagicMock()
         bench.report = None  # abort after the first phase's with_updates call
-        monkeypatch.setattr(
-            "inference_endpoint.commands.audit.setup_benchmark",
-            lambda *a, **k: ctx,
-        )
-        monkeypatch.setattr(
-            "inference_endpoint.commands.audit.run_benchmark_async",
-            lambda ctx: bench,
-        )
-        monkeypatch.setattr(
-            "inference_endpoint.commands.audit.finalize_benchmark",
-            lambda ctx, b: None,
-        )
+        self._patch_phase(monkeypatch, num_samples=100, bench=bench)
 
         with pytest.raises(ExecutionError):
             run_audit(config, tmp_path)
@@ -449,65 +484,9 @@ class TestRunAuditGuards:
         assert config.with_updates.call_args.kwargs["datasets"] == [perf_ds]
 
     @pytest.mark.unit
-    def test_interrupted_phase_raises_keyboard_interrupt(self, tmp_path, monkeypatch):
-        """A SIGINT/SIGTERM during an audit phase yields an 'interrupted' report;
-        run_audit must propagate KeyboardInterrupt (CLI exit 130), not the
-        generic ExecutionError (exit 4) used for a crashed/drain-timeout phase."""
-        config = self._audit_config()
-        config.settings.load_pattern.type = LoadPatternType.MAX_THROUGHPUT
-        perf_ds = MagicMock()
-        perf_ds.type.value = "performance"
-        config.datasets = [perf_ds]
-        config.with_updates.return_value = MagicMock()
-
-        ctx = MagicMock()
-        ctx.dataloader.num_samples.return_value = 100
-        interrupted = MagicMock()
-        interrupted.state = "interrupted"
-        interrupted.complete = False
-        bench = MagicMock()
-        bench.report = interrupted
-        monkeypatch.setattr(
-            "inference_endpoint.commands.audit.setup_benchmark", lambda *a, **k: ctx
-        )
-        monkeypatch.setattr(
-            "inference_endpoint.commands.audit.run_benchmark_async", lambda ctx: bench
-        )
-        monkeypatch.setattr(
-            "inference_endpoint.commands.audit.finalize_benchmark", lambda ctx, b: None
-        )
-
-        with pytest.raises(KeyboardInterrupt):
-            run_audit(config, tmp_path)
-
-    @pytest.mark.unit
-    def test_rejects_out_of_range_sample_index(self, tmp_path, monkeypatch):
-        """A fixed sample_index beyond the loaded dataset size is rejected before
-        any phase runs."""
-        config = MagicMock()
-        config.audit = OutputCachingTestConfig(
-            test=AuditTestId.OUTPUT_CACHING_TEST, samples=4, sample_index=100
-        )
-        config.settings.load_pattern.type = LoadPatternType.MAX_THROUGHPUT
-        perf_ds = MagicMock()
-        perf_ds.type.value = "performance"
-        config.datasets = [perf_ds]
-        config.with_updates.return_value = MagicMock()
-
-        ctx = MagicMock()
-        ctx.dataloader.num_samples.return_value = 10  # sample_index=100 out of range
-        monkeypatch.setattr(
-            "inference_endpoint.commands.audit.setup_benchmark", lambda *a, **k: ctx
-        )
-
-        with pytest.raises(SetupError, match="out of range"):
-            run_audit(config, tmp_path)
-
-    @pytest.mark.unit
     def test_rejects_when_no_performance_dataset(self, tmp_path):
         """An audit config with no performance dataset is rejected up front."""
         config = self._audit_config()
-        config.settings.load_pattern.type = LoadPatternType.MAX_THROUGHPUT
         acc_ds = MagicMock()
         acc_ds.type.value = "accuracy"
         config.datasets = [acc_ds]

@@ -22,7 +22,7 @@ MLPerf Inference TEST04 compliance test.
 
 Pass criterion (MLCommons-faithful):
   Each phase completed ≥ requested * (1 - threshold)
-  AND audit_qps < ref_qps * (1 + threshold)  [caching inflates audit QPS → FAIL]
+  AND audit_qps <= ref_qps * (1 + threshold)  [caching inflates audit QPS → FAIL]
 """
 
 from __future__ import annotations
@@ -31,7 +31,8 @@ from typing import TYPE_CHECKING, ClassVar
 
 from ...config.runtime_settings import SampleOrderSpec
 from ...config.schema import AuditTestId
-from .. import AuditRunArtifacts, AuditRunSpec, AuditRunStats, register
+from ...exceptions import SetupError
+from .. import AuditRunArtifacts, AuditRunSpec, AuditRunStats
 from ..result import AuditResult
 
 if TYPE_CHECKING:
@@ -62,6 +63,31 @@ class OutputCachingAudit:
             ),
         ]
 
+    def validate(self, cfg: AuditConfig, dataset_size: int) -> None:
+        """Bounds-check the planned phases against the loaded dataset size.
+
+        The reference phase draws distinct samples without replacement; if its
+        count exceeds the dataset, the order wraps and re-issues samples, making
+        the baseline partially cacheable and able to mask (or invert) a caching
+        speedup. The audit phase pins one fixed index, which must exist — but its
+        count may exceed the dataset, since it repeats that single sample.
+        """
+        for spec in self.plan_runs(cfg):
+            idx = spec.sample_order.fixed_index
+            if idx is None:
+                if spec.n_samples is not None and spec.n_samples > dataset_size:
+                    raise SetupError(
+                        f"Audit phase '{spec.label}': n_samples={spec.n_samples} "
+                        f"exceeds dataset size {dataset_size}; a distinct-sample "
+                        "phase would wrap and re-issue samples"
+                    )
+            elif not (0 <= idx < dataset_size):
+                raise SetupError(
+                    f"Audit phase '{spec.label}': sample_index={idx} is out of "
+                    f"range [0, {dataset_size}) for dataset with {dataset_size} "
+                    "samples"
+                )
+
     def verify(self, runs: list[AuditRunArtifacts], cfg: AuditConfig) -> AuditResult:
         if len(runs) != 2:
             raise ValueError(
@@ -84,7 +110,7 @@ def verify_output_caching(
 
     Pass iff:
       1. Each phase completed ≥ (1 - threshold) of its requested queries.
-      2. audit_qps < ref_qps * (1 + threshold)
+      2. audit_qps <= ref_qps * (1 + threshold)
     """
     min_completion = 1.0 - threshold
     ref_ok = ref.n_completed >= ref.n_requested * min_completion
@@ -98,10 +124,11 @@ def verify_output_caching(
             f"(threshold {threshold:.0%})"
         )
     else:
+        # "not more than X% faster" → equality at the boundary still passes.
         limit = ref.qps * (1.0 + threshold)
-        passed = audit.qps < limit
+        passed = audit.qps <= limit
         reason = (
-            f"audit_qps={audit.qps:.4f} {'<' if passed else '>='} "
+            f"audit_qps={audit.qps:.4f} {'<=' if passed else '>'} "
             f"ref_qps * (1 + {threshold:.0%}) = {limit:.4f}"
         )
 
@@ -119,6 +146,3 @@ def verify_output_caching(
             "reason": reason,
         },
     )
-
-
-register(OutputCachingAudit())

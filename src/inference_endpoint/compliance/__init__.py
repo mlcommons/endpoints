@@ -91,21 +91,32 @@ class AuditTest(Protocol):
         self, runs: list[AuditRunArtifacts], cfg: AuditConfig
     ) -> AuditResult: ...
 
+    def validate(self, cfg: AuditConfig, dataset_size: int) -> None:
+        """Raise SetupError if cfg is invalid for a dataset of dataset_size.
 
-_REGISTRY: dict[str, AuditTest] = {}
-
-
-def register(test: AuditTest) -> None:
-    # Key on the enum .value (e.g. "output_caching_test"); str() on a (str, Enum)
-    # member yields "AuditTestId.OUTPUT_CACHING_TEST", not the value.
-    _REGISTRY[test.test_id.value] = test
+        Owns every precondition that is specific to this audit (e.g. which
+        sample counts/indices its phases can use) so the generic orchestrator
+        stays test-agnostic.
+        """
+        ...
 
 
 def get_audit_test(test_id: AuditTestId) -> AuditTest:
-    key = test_id.value
-    if key not in _REGISTRY:
-        raise KeyError(f"No audit test registered for '{key}'")
-    return _REGISTRY[key]
+    try:
+        return AUDIT_TESTS[test_id]
+    except KeyError:
+        raise KeyError(f"No audit test registered for '{test_id.value}'") from None
+
+
+# Implementations are imported at module end — after the protocol and dataclasses
+# above are defined — because each audit module imports those names from this
+# package; importing at the top would be circular. This is module-scope wiring,
+# not a lazy in-function import.
+from .audit_test.output_caching_test import OutputCachingAudit  # noqa: E402
+
+AUDIT_TESTS: dict[AuditTestId, AuditTest] = {
+    OutputCachingAudit.test_id: OutputCachingAudit(),
+}
 
 
 __all__ = [
@@ -114,12 +125,6 @@ __all__ = [
     "AuditRunArtifacts",
     "AuditRunSpec",
     "AuditRunStats",
+    "AUDIT_TESTS",
     "get_audit_test",
-    "register",
 ]
-
-# Import audit-test implementations so their register(...) calls populate
-# _REGISTRY on package import. Kept at the bottom — after the names above are
-# defined — because each test module imports AuditRunSpec/register from here;
-# a top-of-file import would be circular.
-from . import audit_test  # noqa: E402, F401
