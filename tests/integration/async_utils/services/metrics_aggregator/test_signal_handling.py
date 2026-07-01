@@ -50,28 +50,32 @@ def _spawn_aggregator(
     SIGINT to just this group (not the test runner's group) emulates a
     user Ctrl-C in the foreground process group of the subprocess and
     not the test runner.
+
+    Readiness is gated on the ``<output_dir>/.ready`` marker the aggregator
+    touches once its signal handlers are registered.
     """
+    cmd = [
+        sys.executable,
+        "-m",
+        "inference_endpoint.async_utils.services.metrics_aggregator",
+        "--socket-dir",
+        str(socket_dir),
+        "--socket-name",
+        socket_name,
+        "--metrics-socket",
+        metrics_socket,
+        "--metrics-output-dir",
+        str(output_dir),
+        # Required by the entrypoint, but inert here: no tokenizer is
+        # configured (so no live tokenization) and the run is signalled
+        # rather than ENDED, so the drain budget is never reached.
+        "--drain-timeout",
+        "5",
+        "--tokenizer-workers",
+        "0",
+    ]
     return subprocess.Popen(
-        [
-            sys.executable,
-            "-m",
-            "inference_endpoint.async_utils.services.metrics_aggregator",
-            "--socket-dir",
-            str(socket_dir),
-            "--socket-name",
-            socket_name,
-            "--metrics-socket",
-            metrics_socket,
-            "--metrics-output-dir",
-            str(output_dir),
-            # Required by the entrypoint, but inert here: no tokenizer is
-            # configured (so no live tokenization) and the run is signalled
-            # rather than ENDED, so the drain budget is never reached.
-            "--drain-timeout",
-            "5",
-            "--tokenizer-workers",
-            "0",
-        ],
+        cmd,
         # New process group so we can signal it without disturbing the
         # test runner.
         preexec_fn=os.setsid,
@@ -110,6 +114,7 @@ class TestAggregatorSignalHandling:
         # Use a unique socket name per test to avoid collisions if a
         # previous test run left an IPC file behind.
         suffix = uuid.uuid4().hex[:8]
+        ready_file = output_dir / ".ready"
         proc = _spawn_aggregator(
             socket_dir,
             output_dir,
@@ -117,14 +122,19 @@ class TestAggregatorSignalHandling:
             metrics_socket=f"metrics_{suffix}",
         )
         try:
-            # Give the subprocess time to: parse args, set up ZMQ, bind
-            # sockets, register signal handlers, enter the await loop.
-            # The signal-handler registration is what we're testing, so
-            # we MUST wait for it before sending the signal.
-            time.sleep(2.0)
+            # Poll for the ready sentinel instead of sleeping a fixed amount:
+            # on network-mounted filesystems (e.g. Lustre) Python import can
+            # take several seconds, so a fixed sleep races with signal-handler
+            # registration. The aggregator touches <output_dir>/.ready only after
+            # loop.add_signal_handler returns, so this is an exact gate.
+            ready = _wait_for_file(ready_file, timeout=30.0)
+            assert ready, (
+                f"aggregator did not become ready within 30 s — "
+                f"stderr: {(proc.stderr.read() if proc.stderr else b'').decode()[-2000:]}"
+            )
             assert (
                 proc.poll() is None
-            ), f"aggregator died early: stderr={(proc.stderr.read() if proc.stderr else b"").decode()}"
+            ), f"aggregator died early: stderr={(proc.stderr.read() if proc.stderr else b'').decode()}"
 
             # SIGTERM the process group → triggers _signal_finalize.
             os.killpg(proc.pid, signal.SIGTERM)
@@ -163,6 +173,7 @@ class TestAggregatorSignalHandling:
         output_dir = tmp_path / "output"
         output_dir.mkdir()  # parent owns dir setup (see sibling test)
         suffix = uuid.uuid4().hex[:8]
+        ready_file = output_dir / ".ready"
         proc = _spawn_aggregator(
             socket_dir,
             output_dir,
@@ -170,7 +181,8 @@ class TestAggregatorSignalHandling:
             metrics_socket=f"metrics_{suffix}",
         )
         try:
-            time.sleep(2.0)
+            ready = _wait_for_file(ready_file, timeout=30.0)
+            assert ready, "aggregator did not become ready within 30 s"
             assert proc.poll() is None, "aggregator died before signal-handler test"
 
             os.killpg(proc.pid, signal.SIGINT)
