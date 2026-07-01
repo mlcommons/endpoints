@@ -59,11 +59,6 @@ They are built on three LoadGen-specific pieces:
 | TEST09 | Mean output token length within ±10% of reference   | gpt-oss-120b                                 |
 | TEST08 | DLRM-v3 streaming accuracy                          | DLRM-v3 — **out of scope** (not LLM)         |
 
-**Category** is this design's own grouping (not an MLPerf term): _orchestrator_ tests
-drive extra benchmark phases and compare them (TEST01, TEST04 — what this module runs);
-_analyzer_ tests post-process a single run's logs (TEST06/07/09). It determines whether a
-test reuses the `setup/run/finalize` engine (orchestrator) or only reads artifacts (analyzer).
-
 **TEST04 (mechanism).** `audit.config` sets `performance_issue_same=1` /
 `performance_issue_same_index=3` so LoadGen issues the **same sample repeatedly** for the
 **same number of queries** as the standard run, then the verification compares throughput.

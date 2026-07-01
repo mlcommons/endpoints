@@ -801,11 +801,7 @@ class Settings(BaseModel):
     ] = Field(
         default=30.0,
         ge=0,
-        description=(
-            "Seconds to wait for the metrics-aggregator and event-logger "
-            "subprocesses to report ready. Increase when service imports run "
-            "off a shared/Lustre FS under heavy login-node I/O contention."
-        ),
+        description="Seconds to wait for metrics-aggregator/event-logger services to become ready.",
     )
 
 
