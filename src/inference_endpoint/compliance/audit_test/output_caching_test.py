@@ -22,7 +22,7 @@ MLPerf Inference TEST04 compliance test.
 
 Pass criterion (MLCommons-faithful):
   Each phase completed ≥ requested * (1 - threshold)
-  AND audit_qps <= ref_qps * (1 + threshold)  [caching inflates audit QPS → FAIL]
+  AND audit_qps < ref_qps * (1 + threshold)  [caching inflates audit QPS → FAIL]
 """
 
 from __future__ import annotations
@@ -110,7 +110,7 @@ def verify_output_caching(
 
     Pass iff:
       1. Each phase completed ≥ (1 - threshold) of its requested queries.
-      2. audit_qps <= ref_qps * (1 + threshold)
+      2. audit_qps < ref_qps * (1 + threshold)
     """
     min_completion = 1.0 - threshold
     ref_ok = ref.n_completed >= ref.n_requested * min_completion
@@ -124,11 +124,12 @@ def verify_output_caching(
             f"(threshold {threshold:.0%})"
         )
     else:
-        # "not more than X% faster" → equality at the boundary still passes.
+        # Matches upstream compliance/TEST04/verify_performance.py's strict `<`:
+        # a run exactly on the boundary is not "faster" enough to pass.
         limit = ref.qps * (1.0 + threshold)
-        passed = audit.qps <= limit
+        passed = audit.qps < limit
         reason = (
-            f"audit_qps={audit.qps:.4f} {'<=' if passed else '>'} "
+            f"audit_qps={audit.qps:.4f} {'<' if passed else '>='} "
             f"ref_qps * (1 + {threshold:.0%}) = {limit:.4f}"
         )
 

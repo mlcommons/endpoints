@@ -94,12 +94,17 @@ class TestVerifyOutputCaching:
         assert result.passed is False
 
     @pytest.mark.unit
-    def test_pass_at_exact_threshold_boundary(self):
-        # MLPerf "not more than X% faster" → audit_qps == limit still passes.
-        ref = AuditRunStats(qps=100.0, n_completed=1000, n_requested=1000)
-        audit = AuditRunStats(qps=110.0, n_completed=1000, n_requested=1000)
-        result = verify_output_caching(ref, audit, threshold=0.10)
-        assert result.passed is True
+    def test_fail_when_audit_qps_exactly_at_limit(self):
+        # audit_qps sits exactly on the limit ref_qps * (1 + threshold).
+        # Matches upstream compliance/TEST04/verify_performance.py's strict
+        # `<` comparison, so a run exactly on the boundary FAILs. Compute the
+        # limit the same way the code does to avoid float-rounding ambiguity.
+        ref_qps, threshold = 100.0, 0.10
+        limit = ref_qps * (1.0 + threshold)
+        ref = AuditRunStats(qps=ref_qps, n_completed=1000, n_requested=1000)
+        audit = AuditRunStats(qps=limit, n_completed=1000, n_requested=1000)
+        result = verify_output_caching(ref, audit, threshold=threshold)
+        assert result.passed is False
 
 
 # ---------------------------------------------------------------------------

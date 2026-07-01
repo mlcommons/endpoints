@@ -225,7 +225,7 @@ before the audit.
             │  • completion guard:                      │
             │      completed ≥ requested × (1 − thr)    │
             │  • caching rule:                          │
-            │      audit_qps ≤ ref_qps × (1 + thr)      │
+            │      audit_qps < ref_qps × (1 + thr)      │
             └──────────────┬───────────────────────────┘
                            ▼
             ┌──────────────────────────────────────────┐
@@ -562,8 +562,9 @@ run; `verify` reads `events.jsonl` and checks mean OSL within `[ref × 0.9, ref 
    the result (`completed < requested × (1 − threshold)` → FAIL), independent of the other
    phase's count.
 3. **Unit** — `SingleSampleOrder` always yields the configured index (bounds-checked);
-   `verify_output_caching` PASS within threshold, FAIL above, PASS at the exact boundary (`<=`),
-   slower-passes, custom threshold, and the completion guard trips; `AuditRunStats.from_report`
+   `verify_output_caching` PASS within threshold, FAIL above, FAIL at the exact boundary (`<`,
+   matching upstream `verify_performance.py`), slower-passes, custom threshold, and the
+   completion guard trips; `AuditRunStats.from_report`
    raises on a `None`-duration or non-positive `qps`; `OutputCachingAudit.plan_runs` emits a
    reference spec at `samples` and an audit spec at `audit_samples` (which may differ).
 4. **Unit (orchestrator)** — assert the reference phase issues `samples` and the audit phase
