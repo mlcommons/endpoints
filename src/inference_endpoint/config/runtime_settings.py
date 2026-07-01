@@ -28,7 +28,7 @@ from __future__ import annotations
 import logging
 import math
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from .. import metrics
@@ -39,6 +39,25 @@ logger = logging.getLogger(__name__)
 if TYPE_CHECKING:
     from .ruleset_base import BenchmarkSuiteRuleset
     from .schema import BenchmarkConfig, LoadPattern
+
+
+@dataclass(frozen=True, slots=True)
+class SampleOrderSpec:
+    """Generic sample-ordering selector consumed by create_sample_order.
+
+    fixed_index is None  -> without-replacement (the normal default).
+    fixed_index set      -> always issue that one fixed dataset index.
+    """
+
+    fixed_index: int | None = None
+
+    @classmethod
+    def without_replacement(cls) -> SampleOrderSpec:
+        return cls(fixed_index=None)
+
+    @classmethod
+    def single(cls, index: int) -> SampleOrderSpec:
+        return cls(fixed_index=index)
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,6 +103,9 @@ class RuntimeSettings:
 
     load_pattern: LoadPattern | None
     """Load pattern configuration"""
+
+    sample_order: SampleOrderSpec = field(default_factory=SampleOrderSpec, kw_only=True)
+    """Sample-ordering strategy (default: without-replacement)."""
 
     @classmethod
     def from_config(
@@ -162,6 +184,7 @@ class RuntimeSettings:
             "rng_sched": random.Random(runtime_cfg.scheduler_random_seed),
             "rng_sample_index": random.Random(runtime_cfg.dataloader_random_seed),
             "load_pattern": load_pattern_cfg,
+            "sample_order": SampleOrderSpec(),
         }
 
         # Apply overrides

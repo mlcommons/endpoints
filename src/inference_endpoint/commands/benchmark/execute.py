@@ -61,6 +61,7 @@ from inference_endpoint.async_utils.services.metrics_aggregator.subscriber impor
     MetricsSnapshotSubscriber,
 )
 from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
+from inference_endpoint.compliance import AuditRunSpec
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import (
     APIType,
@@ -362,7 +363,11 @@ def _load_datasets(
     return dataloader, accuracy_datasets, eval_configs
 
 
-def setup_benchmark(config: BenchmarkConfig, test_mode: TestMode) -> BenchmarkContext:
+def setup_benchmark(
+    config: BenchmarkConfig,
+    test_mode: TestMode,
+    run_spec: AuditRunSpec | None = None,
+) -> BenchmarkContext:
     """Load tokenizer, dataset, create scheduler, setup report dir."""
     # CPU affinity
     affinity_plan = (
@@ -404,6 +409,12 @@ def setup_benchmark(config: BenchmarkConfig, test_mode: TestMode) -> BenchmarkCo
 
     # Setup runtime settings using factory method
     rt_settings = RuntimeSettings.from_config(config, dataloader.num_samples())
+    if run_spec is not None:
+        rt_settings = dataclass_replace(
+            rt_settings,
+            n_samples_to_issue=run_spec.n_samples,
+            sample_order=run_spec.sample_order,
+        )
 
     # Calculate and display expected sample count
     total_samples = rt_settings.total_samples_to_issue()
@@ -1198,8 +1209,15 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
         logger.error(f"Save failed: {e}")
 
 
-def run_benchmark(config: BenchmarkConfig, test_mode: TestMode) -> None:
-    """Orchestrate setup → execute → finalize."""
+def run_benchmark(config: BenchmarkConfig, test_mode: TestMode) -> Path:
+    """Orchestrate setup → execute → finalize for the main run.
+
+    Returns the run's ``report_dir`` so the caller can locate artifacts (and, for
+    a config with an ``audit:`` block, point ``run_audit`` at ``<report_dir>/audit``).
+    The compliance audit is dispatched by the caller (``cli._run``), not here, so
+    this module does not depend on ``commands.audit``.
+    """
+
     logger.debug(
         "BenchmarkConfig (%s):\n%s",
         type(config).__name__,
@@ -1211,10 +1229,15 @@ def run_benchmark(config: BenchmarkConfig, test_mode: TestMode) -> None:
         bench = run_benchmark_async(ctx)
         finalize_benchmark(ctx, bench)
     except KeyboardInterrupt:
-        logger.warning("Benchmark interrupted by user")
+        # Salvage partial results (finally), then propagate: an interrupted
+        # run must not silently roll into the long compliance audit phases.
+        logger.warning("Benchmark interrupted by user; skipping audit")
+        raise
     finally:
         if bench:
             if bench.tmpfs_dir.exists():
                 _salvage_tmpfs(ctx.report_dir, bench.tmpfs_dir)
                 shutil.rmtree(bench.tmpfs_dir, ignore_errors=True)
             logger.info(f"Partial results saved to {ctx.report_dir}")
+
+    return ctx.report_dir

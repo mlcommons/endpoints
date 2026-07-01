@@ -102,8 +102,35 @@ class WithReplacementSampleOrder(SampleOrder):
         return self.rng.randint(0, self.n_samples_in_dataset - 1)
 
 
+class SingleSampleOrder(SampleOrder):
+    """Always yield one fixed dataset index (issue the same sample every call).
+
+    The index is fixed at construction and bounds-checked against the dataset
+    size; the rng is unused.
+    """
+
+    def __init__(self, sample_index: int, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if not 0 <= sample_index < self.n_samples_in_dataset:
+            raise ValueError(
+                f"sample_index must be in [0, {self.n_samples_in_dataset}), "
+                f"got {sample_index}"
+            )
+        self.sample_index = sample_index
+
+    def next_sample_index(self) -> int:
+        return self.sample_index
+
+
 def create_sample_order(settings: RuntimeSettings) -> SampleOrder:
-    """Create a SampleOrder from RuntimeSettings."""
+    """Create a SampleOrder from RuntimeSettings, switching on sample_order spec."""
+    spec = settings.sample_order
+    if spec.fixed_index is not None:
+        return SingleSampleOrder(
+            sample_index=spec.fixed_index,
+            n_samples_in_dataset=settings.n_samples_from_dataset,
+            rng=settings.rng_sample_index,
+        )
     return WithoutReplacementSampleOrder(
         n_samples_in_dataset=settings.n_samples_from_dataset,
         rng=settings.rng_sample_index,
