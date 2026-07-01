@@ -19,14 +19,17 @@
 #
 # Requires: pip install -e ".[bfcl]"  (the BFCL accuracy dataset pulls bfcl-eval)
 #
-# Run (start the edge server first; see README.md):
+# Run from the repo root (start the edge server first; see README.md). The
+# performance dataset path below is repo-root-relative, so the combined run must
+# be launched from the repo root:
 #   inference-endpoint benchmark from-config \
-#     --config online_edge_full_run.yaml
+#     --config examples/11_Edge_Agentic_Example/online_edge_full_run.yaml
 #
 # To run only the accuracy phase (skip performance) from this same config, add
-# --accuracy-only:
+# --accuracy-only (the BFCL accuracy dataset self-downloads, so this variant is
+# cwd-independent):
 #   inference-endpoint benchmark from-config \
-#     --config online_edge_full_run.yaml --accuracy-only
+#     --config examples/11_Edge_Agentic_Example/online_edge_full_run.yaml --accuracy-only
 name: "edge-agentic-full-run"
 version: "1.0"
 type: "online"

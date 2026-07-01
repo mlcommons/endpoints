@@ -275,12 +275,13 @@ dataset); the dataset is both the performance workload and its own ground truth.
 The **accuracy phase** is the BFCL v4 single-turn gate from Step 2.
 
 ```bash
-# Run from the examples/11_Edge_Agentic_Example/ directory, against the same
-# server used in Step 0 (start it first).
-cd examples/11_Edge_Agentic_Example/
-
+# Run from the repo root (cd back if you followed Step 2), against the same
+# server used in Step 0 (start it first). Unlike the accuracy-only runs above
+# — whose BFCL dataset self-downloads — the combined run loads the performance
+# dataset via the config's repo-root-relative path, so it must be launched from
+# the repo root. Results land in ./results/edge_agentic_full_run/.
 inference-endpoint benchmark from-config \
-  --config online_edge_full_run.yaml
+  --config examples/11_Edge_Agentic_Example/online_edge_full_run.yaml
 ```
 
 Before running, open `online_edge_full_run.yaml` and set `model_params.name` to
@@ -308,11 +309,12 @@ multi-slot endpoint.
 ### Verify the combined results
 
 ```bash
-# Performance inline-checker score
+# Performance inline-checker score (a run is valid when no turns are missing)
 python3 -c "
 import json, pathlib
 s = json.loads(pathlib.Path('results/edge_agentic_full_run/scores.json').read_text())
-print('Inline accuracy score:', s['score'], '| valid:', s['valid'])
+missing = s['turns']['missing']
+print('Inline accuracy score:', s['score'], '| valid run:', missing == 0, '| missing turns:', missing)
 "
 
 # BFCL v4 single-turn accuracy (the gated metric)
