@@ -1045,10 +1045,10 @@ class TestBuildPhases:
         assert acc.runtime_settings.load_pattern.target_concurrency == 7
 
     @pytest.mark.unit
-    def test_accuracy_phase_max_throughput_when_perf_poisson(
+    def test_accuracy_phase_inherits_perf_poisson(
         self, base_rt_settings, simple_dataset
     ):
-        """POISSON perf must not rate-limit accuracy: it stays MAX_THROUGHPUT."""
+        """POISSON perf: accuracy mirrors the same POISSON config (target_qps)."""
         rt = dataclasses.replace(
             base_rt_settings,
             load_pattern=LoadPattern(type=LoadPatternType.POISSON, target_qps=10.0),
@@ -1060,7 +1060,8 @@ class TestBuildPhases:
 
         acc = next(p for p in phases if p.phase_type == PhaseType.ACCURACY)
         assert acc.runtime_settings.load_pattern is not None
-        assert acc.runtime_settings.load_pattern.type == LoadPatternType.MAX_THROUGHPUT
+        assert acc.runtime_settings.load_pattern.type == LoadPatternType.POISSON
+        assert acc.runtime_settings.load_pattern.target_qps == 10.0
 
     @pytest.mark.unit
     def test_accuracy_phase_max_throughput_when_perf_offline(
@@ -1069,6 +1070,42 @@ class TestBuildPhases:
         """Offline (MAX_THROUGHPUT) perf leaves accuracy at MAX_THROUGHPUT."""
         config = OfflineConfig(**_OFFLINE_KWARGS)
         ctx = self._make_ctx(config, base_rt_settings, simple_dataset)
+        ctx.eval_configs = [self._make_eval_config(simple_dataset)]
+        phases = _build_phases(ctx)
+
+        acc = next(p for p in phases if p.phase_type == PhaseType.ACCURACY)
+        assert acc.runtime_settings.load_pattern is not None
+        assert acc.runtime_settings.load_pattern.type == LoadPatternType.MAX_THROUGHPUT
+
+    @pytest.mark.unit
+    def test_accuracy_phase_max_throughput_when_perf_agentic(
+        self, base_rt_settings, simple_dataset
+    ):
+        """AGENTIC_INFERENCE can't drive a non-agentic accuracy dataset, so the
+        accuracy phase falls back to MAX_THROUGHPUT instead of crashing."""
+        rt = dataclasses.replace(
+            base_rt_settings,
+            load_pattern=LoadPattern(
+                type=LoadPatternType.AGENTIC_INFERENCE, target_concurrency=8
+            ),
+        )
+        config = OfflineConfig(**_OFFLINE_KWARGS)
+        ctx = self._make_ctx(config, rt, simple_dataset)
+        ctx.eval_configs = [self._make_eval_config(simple_dataset)]
+        phases = _build_phases(ctx)
+
+        acc = next(p for p in phases if p.phase_type == PhaseType.ACCURACY)
+        assert acc.runtime_settings.load_pattern is not None
+        assert acc.runtime_settings.load_pattern.type == LoadPatternType.MAX_THROUGHPUT
+
+    @pytest.mark.unit
+    def test_accuracy_phase_max_throughput_when_perf_none(
+        self, base_rt_settings, simple_dataset
+    ):
+        """A missing perf load pattern falls back to MAX_THROUGHPUT for accuracy."""
+        rt = dataclasses.replace(base_rt_settings, load_pattern=None)
+        config = OfflineConfig(**_OFFLINE_KWARGS)
+        ctx = self._make_ctx(config, rt, simple_dataset)
         ctx.eval_configs = [self._make_eval_config(simple_dataset)]
         phases = _build_phases(ctx)
 
@@ -1100,6 +1137,35 @@ class TestBuildPhases:
         assert any(
             "load mode" in m and "concurrency" in m and "4" in m for m in msgs
         ), msgs
+
+    @pytest.mark.unit
+    def test_accuracy_issuer_logs_poisson_when_perf_poisson(
+        self, base_rt_settings, simple_dataset, caplog
+    ):
+        """POISSON perf logs the inherited poisson mode with its target_qps and
+        must NOT emit a target_concurrency suffix (the concurrency-only branch)."""
+        rt = dataclasses.replace(
+            base_rt_settings,
+            load_pattern=LoadPattern(type=LoadPatternType.POISSON, target_qps=10.0),
+        )
+        config = OfflineConfig(**_OFFLINE_KWARGS)
+        ctx = self._make_ctx(config, rt, simple_dataset)
+        ctx.eval_configs = [self._make_eval_config(simple_dataset)]
+
+        with caplog.at_level(
+            logging.INFO, logger="inference_endpoint.commands.benchmark.execute"
+        ):
+            _build_phases(ctx)
+
+        msgs = [r.getMessage() for r in caplog.records]
+        load_mode_msgs = [m for m in msgs if "load mode" in m]
+        assert load_mode_msgs, msgs
+        assert any(
+            "poisson" in m and "target_qps=10.0" in m for m in load_mode_msgs
+        ), load_mode_msgs
+        assert all(
+            "target_concurrency" not in m for m in load_mode_msgs
+        ), load_mode_msgs
 
     @pytest.mark.unit
     def test_warmup_uses_independent_rng_instances(

@@ -482,6 +482,16 @@ def _build_phases(
         )
     )
 
+    # Accuracy mirrors the perf load pattern so evaluation exercises the
+    # endpoint the same way it was benchmarked. AGENTIC_INFERENCE can't drive
+    # the (non-agentic) accuracy datasets — create_load_strategy rejects it —
+    # so it (and a missing perf pattern) falls back to MAX_THROUGHPUT.
+    perf_lp = ctx.rt_settings.load_pattern
+    if perf_lp is None or perf_lp.type == LoadPatternType.AGENTIC_INFERENCE:
+        acc_load_pattern = LoadPattern(type=LoadPatternType.MAX_THROUGHPUT)
+    else:
+        acc_load_pattern = perf_lp
+
     # Accuracy phases — use eval_cfg.dataset_name as phase name so it matches
     # what Scorer._load_sample_index_map() looks up in sample_idx_map.json
     for eval_cfg in ctx.eval_configs:
@@ -494,29 +504,19 @@ def _build_phases(
                 "AgenticInferenceDataset, which is not yet supported for "
                 "accuracy evaluation."
             )
-        # When the perf phase runs CONCURRENCY (online), the accuracy phase
-        # mirrors that fixed concurrency so evaluation exercises the endpoint
-        # the same way. Every other pattern keeps MAX_THROUGHPUT — inheriting
-        # POISSON would silently rate-limit evaluation to the perf QPS, which
-        # has no QPS-budgeting support for accuracy yet.
-        perf_lp = ctx.rt_settings.load_pattern
-        acc_load_pattern: LoadPattern | None
-        if perf_lp is not None and perf_lp.type == LoadPatternType.CONCURRENCY:
-            acc_load_pattern = LoadPattern(
-                type=LoadPatternType.CONCURRENCY,
-                target_concurrency=perf_lp.target_concurrency,
+        if acc_load_pattern.type == LoadPatternType.CONCURRENCY:
+            load_mode_detail = (
+                f" (target_concurrency={acc_load_pattern.target_concurrency})"
             )
+        elif acc_load_pattern.type == LoadPatternType.POISSON:
+            load_mode_detail = f" (target_qps={acc_load_pattern.target_qps})"
         else:
-            acc_load_pattern = LoadPattern(type=LoadPatternType.MAX_THROUGHPUT)
+            load_mode_detail = ""
         logger.info(
             "Accuracy issuer '%s' load mode: %s%s",
             eval_cfg.dataset_name,
             acc_load_pattern.type.value,
-            (
-                f" (target_concurrency={acc_load_pattern.target_concurrency})"
-                if acc_load_pattern.type == LoadPatternType.CONCURRENCY
-                else ""
-            ),
+            load_mode_detail,
         )
         acc_settings = RuntimeSettings(
             metric_target=ctx.rt_settings.metric_target,
