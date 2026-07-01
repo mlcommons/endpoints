@@ -149,7 +149,8 @@ class ChatCompletionResponseMessage(
     content: str | None = None
     refusal: str | None = None
     tool_calls: list[dict[str, Any]] | None = None
-    reasoning_content: str | None = None
+    reasoning_content: str | None = None  # SGLang / DeepSeek field name
+    reasoning: str | None = None  # vLLM field name
 
 
 class ChatCompletionChoice(
@@ -217,6 +218,8 @@ class TextCompletionRequest(
     prompt: str | list[int]
     temperature: float | None = None
     max_tokens: int | None = None
+    min_tokens: int | None = None
+    skip_special_tokens: bool | None = None
     stream: bool | None = None
     top_p: float | None = None
     top_k: int | None = None

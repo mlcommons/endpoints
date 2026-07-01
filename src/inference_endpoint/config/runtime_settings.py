@@ -195,21 +195,21 @@ class RuntimeSettings:
             )
             return self.n_samples_to_issue
 
-        # Multi-turn must issue exactly all client turns — QPS-based formulas are meaningless.
+        # Agentic inference must issue exactly all client turns — QPS-based formulas are meaningless.
         if (
             self.load_pattern is not None
-            and self.load_pattern.type == LoadPatternType.MULTI_TURN
+            and self.load_pattern.type == LoadPatternType.AGENTIC_INFERENCE
         ):
             if self.n_samples_from_dataset < self.min_sample_count:
                 logger.warning(
-                    "Multi-turn run: min_sample_count=%d exceeds dataset "
-                    "client-turn count=%d; using dataset size. Multi-turn cannot "
+                    "Agentic inference run: min_sample_count=%d exceeds dataset "
+                    "client-turn count=%d; using dataset size. Agentic inference cannot "
                     "issue more samples than the dataset provides.",
                     self.min_sample_count,
                     self.n_samples_from_dataset,
                 )
             logger.debug(
-                "Sample count: %d (multi-turn: issuing all client turns)",
+                "Sample count: %d (agentic inference: issuing all client turns)",
                 self.n_samples_from_dataset,
             )
             return self.n_samples_from_dataset

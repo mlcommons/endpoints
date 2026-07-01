@@ -64,6 +64,13 @@ def _spawn_aggregator(
             metrics_socket,
             "--metrics-output-dir",
             str(output_dir),
+            # Required by the entrypoint, but inert here: no tokenizer is
+            # configured (so no live tokenization) and the run is signalled
+            # rather than ENDED, so the drain budget is never reached.
+            "--drain-timeout",
+            "5",
+            "--tokenizer-workers",
+            "0",
         ],
         # New process group so we can signal it without disturbing the
         # test runner.

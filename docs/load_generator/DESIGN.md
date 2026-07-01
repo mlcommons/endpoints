@@ -1057,7 +1057,7 @@ phases = [
 result = await session.run(phases)
 
 for pr in result.perf_results:
-    print(f"{pr.name}: {pr.report.qps():.0f} QPS")
+    print(f"{pr.name}: {pr.report.qps or 0:.0f} QPS")
 ```
 
 ---

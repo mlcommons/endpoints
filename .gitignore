@@ -186,6 +186,11 @@ data/
 results/
 outputs/
 
+# Bundled example datasets are intentionally committed (git-LFS); the broad
+# `data/` rule above would otherwise exclude them.
+!examples/07_DeepSeekR1_Example/data/
+!examples/07_DeepSeekR1_Example/data/deepseek_r1_eval.parquet
+
 # Example vLLM virtualenv
 examples/03_BenchmarkComparison/vllm_venv/
 

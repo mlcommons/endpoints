@@ -16,8 +16,11 @@ ENV PYTHONUNBUFFERED=1 \
     UV_PROJECT_ENVIRONMENT=/opt/venv
 
 # Install system dependencies
+# git + curl + ca-certificates support the legacy_mlperf_deepseek_r1 evaluator's setup_eval.sh
+# (it git-clones prm800k / LiveCodeBench at pinned commits) in the provisioning RUN below;
+# without them that step fails and mlperf_eval/ is never baked. (eval_accuracy.py is vendored.)
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends build-essential procps \
+    apt-get install -y --no-install-recommends build-essential procps git curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 RUN mkdir /mnt/inference-endpoint
@@ -45,3 +48,32 @@ RUN uv sync --frozen --no-install-project --extra dev --extra test
 # Copy source and install project
 COPY --chown=${USER_ID}:${GROUP_ID} src/ ./src/
 RUN uv sync --frozen --extra dev --extra test
+
+
+# Provision the isolated DeepSeek-R1 accuracy evaluator. Gated by PROVISION_DSR1
+# (default 1): with it on, the image is self-contained for
+# `inference-endpoint benchmark --mode acc|both` with NO host checkout and NO
+# runtime network. Build with `--build-arg PROVISION_DSR1=0` to skip it (dev
+# images that never run DSR1 accuracy) and avoid the subproject's heavy venv +
+# submodule clones.
+#
+# LegacyMLPerfDeepSeekR1Scorer shells out via `uv run --project src/inference_endpoint/evaluation/legacy_mlperf_deepseek_r1`;
+# that subproject pins heavy/conflicting deps (transformers, prm800k, LiveCodeBench code
+# executor) that must stay OUT of /opt/venv. So override UV_PROJECT_ENVIRONMENT to build the
+# subproject's OWN .venv, then setup_eval.sh clones prm800k + LiveCodeBench into mlperf_eval/
+# (eval_accuracy.py is vendored). (At run time the launcher must likewise point
+# UV_PROJECT_ENVIRONMENT + DEEPSEEK_EVAL_PROJECT_PATH at this subproject, since the image ENV
+# defaults to /opt/venv.)
+#
+# NOTE: a single on/off build-arg is fine for one knob. If DSR1 provisioning
+# grows more customization (variant deps, extra subprojects, conditional
+# submodules), prefer splitting it into a layered `scripts/Dockerfile.dsr1`
+# (FROM this dev image) instead of accreting more ARGs/conditionals here.
+ARG PROVISION_DSR1=1
+RUN if [ "${PROVISION_DSR1}" = "1" ]; then \
+        cd src/inference_endpoint/evaluation/legacy_mlperf_deepseek_r1 && \
+        UV_PROJECT_ENVIRONMENT="$(pwd)/.venv" uv sync && \
+        UV_PROJECT_ENVIRONMENT="$(pwd)/.venv" bash setup_eval.sh ; \
+    else \
+        echo "PROVISION_DSR1=${PROVISION_DSR1}: skipping DeepSeek-R1 evaluator provisioning" ; \
+    fi

@@ -16,6 +16,7 @@
 """Tests for configuration schema models and validation."""
 
 import random
+import re
 
 import pytest
 from inference_endpoint import metrics
@@ -31,11 +32,14 @@ from inference_endpoint.config.schema import (
     ModelParams,
     OSLDistribution,
     OSLDistributionType,
+    ProfilerEngine,
+    ProfilingConfig,
     StreamingMode,
     SubmissionReference,
     TestType,
 )
 from inference_endpoint.exceptions import CLIError
+from pydantic import ValidationError
 
 
 class TestOSLDistribution:
@@ -92,6 +96,21 @@ class TestModelParams:
         )
         assert params.tokenizer_name == "Qwen/Qwen3.6-35B-A3B"
         assert params.name == "qwen/qwen3.6-35b-a3b"
+
+    @pytest.mark.unit
+    def test_min_new_tokens_cannot_exceed_max_new_tokens(self):
+        with pytest.raises(
+            ValidationError, match="min_new_tokens must be less than or equal"
+        ):
+            ModelParams(name="test", min_new_tokens=2, max_new_tokens=1)
+
+    @pytest.mark.unit
+    def test_min_new_tokens_defaults_one(self):
+        assert ModelParams(name="test").min_new_tokens == 1
+
+    @pytest.mark.unit
+    def test_skip_special_tokens_defaults_true(self):
+        assert ModelParams(name="test").skip_special_tokens is True
 
 
 class TestAPIType:
@@ -474,43 +493,115 @@ class TestClientAPITypePropagation:
             OpenAITextCompletionsAdapter,
         )
 
-        config = BenchmarkConfig(**self._common(APIType.OPENAI_COMPLETIONS))
+        values = self._common(APIType.OPENAI_COMPLETIONS)
+        values["model_params"].update(
+            min_new_tokens=1,
+            skip_special_tokens=False,
+        )
+        config = BenchmarkConfig(**values)
         assert config.settings.client.api_type is APIType.OPENAI_COMPLETIONS
         assert config.settings.client.adapter is OpenAITextCompletionsAdapter
         assert config.settings.client.accumulator is OpenAISSEAccumulator
 
+    @pytest.mark.unit
+    @pytest.mark.parametrize("api_type", [APIType.OPENAI, APIType.SGLANG])
+    @pytest.mark.parametrize(
+        ("controls", "message"),
+        [
+            (
+                {"min_new_tokens": 0},
+                "model_params.min_new_tokens requires "
+                "endpoint_config.api_type=openai_completions",
+            ),
+            (
+                {"skip_special_tokens": False},
+                "model_params.skip_special_tokens requires "
+                "endpoint_config.api_type=openai_completions",
+            ),
+            (
+                {"min_new_tokens": 0, "skip_special_tokens": False},
+                "model_params.min_new_tokens and model_params.skip_special_tokens require "
+                "endpoint_config.api_type=openai_completions",
+            ),
+        ],
+    )
+    def test_completion_generation_controls_reject_other_api_types(
+        self, api_type, controls, message
+    ):
+        values = self._common(api_type)
+        values["model_params"].update(controls)
+        with pytest.raises(ValidationError, match=re.escape(message)):
+            BenchmarkConfig(**values)
 
-class TestMultiTurnValidation:
-    """Tests for multi-turn config validation and cross-validation."""
+    @pytest.mark.unit
+    @pytest.mark.parametrize("api_type", [APIType.OPENAI, APIType.SGLANG])
+    def test_default_completion_generation_controls_allow_other_api_types(
+        self, api_type
+    ):
+        config = BenchmarkConfig(**self._common(api_type))
+        assert config.model_params.min_new_tokens == 1
+        assert config.model_params.skip_special_tokens is True
 
-    def _make_online_multi_turn(self, concurrency: int | None = 4, **ds_kwargs):
-        lp: dict = {"type": "multi_turn"}
+
+class TestAgenticInferenceValidation:
+    """Tests for agentic inference config validation and cross-validation."""
+
+    def _make_online_agentic_inference(self, concurrency: int | None = 4, **ds_kwargs):
+        lp: dict = {"type": "agentic_inference"}
         if concurrency is not None:
             lp["target_concurrency"] = concurrency
         return {
             "type": TestType.ONLINE,
             "model_params": {"name": "M"},
             "endpoint_config": {"endpoints": ["http://x"]},
-            "datasets": [{"path": "D", "multi_turn": {}, **ds_kwargs}],
+            "datasets": [{"path": "D", "agentic_inference": {}, **ds_kwargs}],
             "settings": {"load_pattern": lp},
         }
 
     @pytest.mark.unit
-    def test_multi_turn_valid_config(self):
-        config = BenchmarkConfig(**self._make_online_multi_turn(concurrency=16))
-        assert config.settings.load_pattern.type == LoadPatternType.MULTI_TURN
+    def test_agentic_inference_valid_config(self):
+        config = BenchmarkConfig(**self._make_online_agentic_inference(concurrency=16))
+        assert config.settings.load_pattern.type == LoadPatternType.AGENTIC_INFERENCE
         assert config.settings.load_pattern.target_concurrency == 16
 
     @pytest.mark.unit
-    def test_multi_turn_requires_target_concurrency(self):
-        with pytest.raises(ValueError, match="Multi-turn requires --concurrency"):
-            BenchmarkConfig(**self._make_online_multi_turn(concurrency=None))
+    @pytest.mark.parametrize(
+        "controls", [{"min_new_tokens": 0}, {"skip_special_tokens": False}]
+    )
+    def test_agentic_inference_rejects_text_completion_generation_controls(
+        self, controls
+    ):
+        values = self._make_online_agentic_inference()
+        values["model_params"].update(controls)
+        values["endpoint_config"]["api_type"] = APIType.OPENAI_COMPLETIONS
+        with pytest.raises(
+            ValidationError, match="not supported for agentic inference"
+        ):
+            BenchmarkConfig(**values)
 
     @pytest.mark.unit
-    def test_multi_turn_without_multi_turn_dataset_rejected(self):
+    def test_agentic_inference_rejects_removed_stop_on_first_empty_slot_as_extra(self):
+        # Legacy agentic inference knobs should remain rejected by extra="forbid".
+        with pytest.raises(ValueError, match="stop_on_first_empty_slot"):
+            BenchmarkConfig(
+                **self._make_online_agentic_inference(
+                    concurrency=16,
+                    agentic_inference={"stop_on_first_empty_slot": True},
+                )
+            )
+
+    @pytest.mark.unit
+    def test_agentic_inference_requires_target_concurrency(self):
+        with pytest.raises(
+            ValueError, match="Agentic inference requires --concurrency"
+        ):
+            BenchmarkConfig(**self._make_online_agentic_inference(concurrency=None))
+
+    @pytest.mark.unit
+    def test_agentic_inference_without_agentic_inference_dataset_rejected(self):
         with pytest.raises(
             ValueError,
-            match="requires the performance dataset to have multi_turn config",
+            match="requires the performance dataset to have agentic_inference config",
         ):
             BenchmarkConfig(
                 type=TestType.ONLINE,
@@ -518,34 +609,58 @@ class TestMultiTurnValidation:
                 endpoint_config={"endpoints": ["http://x"]},
                 datasets=[{"path": "D"}],
                 settings={
-                    "load_pattern": {"type": "multi_turn", "target_concurrency": 4}
+                    "load_pattern": {
+                        "type": "agentic_inference",
+                        "target_concurrency": 4,
+                    }
                 },
             )
 
     @pytest.mark.unit
-    def test_multi_turn_dataset_without_multi_turn_load_pattern_rejected(self):
-        with pytest.raises(ValueError, match="requires load_pattern.type=multi_turn"):
+    def test_agentic_inference_dataset_without_agentic_inference_load_pattern_rejected(
+        self,
+    ):
+        with pytest.raises(
+            ValueError, match="requires load_pattern.type=agentic_inference"
+        ):
             BenchmarkConfig(
                 type=TestType.ONLINE,
                 model_params={"name": "M"},
                 endpoint_config={"endpoints": ["http://x"]},
-                datasets=[{"path": "D", "multi_turn": {}}],
+                datasets=[{"path": "D", "agentic_inference": {}}],
                 settings={"load_pattern": {"type": "poisson", "target_qps": 10}},
             )
 
+    @pytest.mark.unit
+    def test_agentic_inference_rejects_runtime_num_samples_override(self):
+        with pytest.raises(ValueError, match="num_trajectories_to_issue"):
+            BenchmarkConfig(
+                type=TestType.ONLINE,
+                model_params={"name": "M"},
+                endpoint_config={"endpoints": ["http://x"]},
+                datasets=[{"path": "D", "agentic_inference": {}}],
+                settings={
+                    "load_pattern": {
+                        "type": "agentic_inference",
+                        "target_concurrency": 4,
+                    },
+                    "runtime": {"n_samples_to_issue": 200},
+                },
+            )
 
-class TestMultiTurnTotalSamples:
-    """Tests for total_samples_to_issue() with multi_turn load pattern."""
+
+class TestAgenticInferenceTotalSamples:
+    """Tests for total_samples_to_issue() with agentic_inference load pattern."""
 
     @pytest.mark.unit
-    def test_multi_turn_uses_dataset_size_ignoring_duration(self):
+    def test_agentic_inference_uses_dataset_size_ignoring_duration(self):
         config = BenchmarkConfig(
             type=TestType.ONLINE,
             model_params={"name": "M"},
             endpoint_config={"endpoints": ["http://x"]},
-            datasets=[{"path": "D", "multi_turn": {}}],
+            datasets=[{"path": "D", "agentic_inference": {}}],
             settings={
-                "load_pattern": {"type": "multi_turn", "target_concurrency": 4},
+                "load_pattern": {"type": "agentic_inference", "target_concurrency": 4},
                 "runtime": {"min_duration_ms": 600000},
             },
         )
@@ -553,8 +668,8 @@ class TestMultiTurnTotalSamples:
         assert rt.total_samples_to_issue() == 4316
 
     @pytest.mark.unit
-    def test_multi_turn_clamps_to_dataset_size(self):
-        lp = LoadPattern(type=LoadPatternType.MULTI_TURN, target_concurrency=4)
+    def test_agentic_inference_clamps_to_dataset_size(self):
+        lp = LoadPattern(type=LoadPatternType.AGENTIC_INFERENCE, target_concurrency=4)
         rt = RuntimeSettings(
             metric_target=metrics.Throughput(10.0),
             reported_metrics=[metrics.Throughput(10.0)],
@@ -570,8 +685,8 @@ class TestMultiTurnTotalSamples:
         assert rt.total_samples_to_issue() == 5
 
     @pytest.mark.unit
-    def test_multi_turn_explicit_n_samples_takes_precedence(self):
-        lp = LoadPattern(type=LoadPatternType.MULTI_TURN, target_concurrency=4)
+    def test_agentic_inference_explicit_n_samples_takes_precedence(self):
+        lp = LoadPattern(type=LoadPatternType.AGENTIC_INFERENCE, target_concurrency=4)
         rt = RuntimeSettings(
             metric_target=metrics.Throughput(10.0),
             reported_metrics=[metrics.Throughput(10.0)],
@@ -585,3 +700,32 @@ class TestMultiTurnTotalSamples:
             load_pattern=lp,
         )
         assert rt.total_samples_to_issue() == 200
+
+
+class TestProfilingConfig:
+    @pytest.mark.unit
+    def test_defaults(self):
+        cfg = ProfilingConfig()
+        assert cfg.engine is None
+        assert cfg.urls is None
+
+    @pytest.mark.unit
+    def test_engine_enum_coercion(self):
+        assert ProfilingConfig(engine="vllm").engine is ProfilerEngine.VLLM
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "ctor",
+        [
+            lambda u: ProfilingConfig(engine="vllm", urls=u),
+            lambda u: ProfilingConfig.model_validate({"engine": "vllm", "urls": u}),
+        ],
+    )
+    def test_url_scheme_rejected_without_scheme(self, ctor):
+        with pytest.raises(ValidationError):
+            ctor(["localhost:8000"])
+
+    @pytest.mark.unit
+    def test_valid_urls_accepted(self):
+        cfg = ProfilingConfig(engine="vllm", urls=["http://h:8001/v1"])
+        assert cfg.urls == ["http://h:8001/v1"]

@@ -34,9 +34,11 @@ from pydantic import (
     ConfigDict,
     Discriminator,
     Field,
+    SerializerFunctionWrapHandler,
     Tag,
     TypeAdapter,
     field_validator,
+    model_serializer,
     model_validator,
 )
 
@@ -60,7 +62,9 @@ class LoadPatternType(str, Enum):
     MAX_THROUGHPUT = "max_throughput"  # Offline: all queries at t=0
     POISSON = "poisson"  # Online: fixed QPS with Poisson distribution
     CONCURRENCY = "concurrency"  # Online: fixed concurrent requests
-    MULTI_TURN = "multi_turn"  # Multi-turn conversations with turn sequencing
+    AGENTIC_INFERENCE = (
+        "agentic_inference"  # Agentic inference conversations with turn sequencing
+    )
     BURST = "burst"  # Burst pattern (TODO)
     STEP = "step"  # Step pattern (TODO)
 
@@ -97,7 +101,9 @@ class ScorerMethod(str, Enum):
     ROUGE = "rouge"
     CODE_BENCH = "code_bench_scorer"
     SHOPIFY_CATEGORY_F1 = "shopify_category_f1"
+    AGENTIC_INFERENCE_INLINE = "agentic_inference_inline"
     VBENCH = "vbench"
+    LEGACY_MLPERF_DEEPSEEK_R1 = "legacy_mlperf_deepseek_r1"
 
 
 class TestMode(str, Enum):
@@ -197,6 +203,17 @@ class ModelParams(BaseModel):
     max_new_tokens: Annotated[
         int, cyclopts.Parameter(alias="--max-output-tokens", help="Max output tokens")
     ] = 1024
+    min_new_tokens: int = Field(
+        1,
+        ge=0,
+        description="Minimum output tokens for OpenAI text-completions servers",
+    )
+    skip_special_tokens: bool = Field(
+        True,
+        description=(
+            "Whether OpenAI text-completions servers omit special tokens from decoded output"
+        ),
+    )
     osl_distribution: OSLDistribution | None = Field(
         None, description="Output sequence length distribution"
     )
@@ -211,6 +228,14 @@ class ModelParams(BaseModel):
             help="HF repo ID or local path for the tokenizer. Overrides model name for client-side token metrics (ISL/OSL/TPOT).",
         ),
     ] = None
+
+    @model_validator(mode="after")
+    def _validate_generation_lengths(self) -> Self:
+        if self.min_new_tokens > self.max_new_tokens:
+            raise ValueError(
+                "min_new_tokens must be less than or equal to max_new_tokens"
+            )
+        return self
 
 
 class SubmissionReference(BaseModel):
@@ -245,30 +270,35 @@ class SubmissionReference(BaseModel):
         return get_ruleset(self.ruleset)
 
 
-class MultiTurnConfig(BaseModel):
-    """Multi-turn conversation configuration.
+class AgenticInferenceConfig(BaseModel):
+    """Agentic inference conversation configuration.
 
     Configuration for benchmarking conversational AI workloads with turn sequencing.
-    Enables testing multi-turn conversations where each turn depends on previous responses.
-    Presence of this block in the dataset config enables multi-turn mode.
+    Enables testing agentic inference conversations where each turn depends on previous responses.
+    Presence of this block in the dataset config enables agentic inference mode.
 
     Attributes:
         turn_timeout_s: Deadline between issuing a turn and receiving its
             response. A timeout aborts that turn and all remaining client
             turns of the same conversation because subsequent turns depend
             on the timed-out response.
-        use_dataset_history: If True, use pre-built message history from dataset.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    turn_timeout_s: float = Field(default=300.0, gt=0)
-    use_dataset_history: bool = True
+    turn_timeout_s: float = Field(
+        default=86400.0,
+        gt=0,
+        description=(
+            "Per-turn timeout in seconds. A timeout aborts that turn and all "
+            "remaining turns in the same conversation."
+        ),
+    )
     enable_salt: bool = Field(
         False,
         description=(
-            "Enable salt addition after system prompt to prevent KV cache reuse "
-            "across trajectories in multi-turn setting."
+            "Add deterministic salt markers before and after the system prompt "
+            "to prevent KV cache reuse across trajectories in agentic inference setting."
         ),
     )
     inject_tool_delay: bool = Field(
@@ -276,6 +306,24 @@ class MultiTurnConfig(BaseModel):
         description=(
             "Pause for a predefined duration between turns. Duration is defined "
             "in dataset."
+        ),
+    )
+    num_trajectories_to_issue: int | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Number of conversation trajectories to start. Defaults to one pass "
+            "over the dataset; values above the dataset size repeat trajectories "
+            "with unique logical conversation ids."
+        ),
+    )
+    stop_issuing_on_first_user_complete: bool = Field(
+        False,
+        description=(
+            "When performance tracking stops because the first concurrency slot "
+            "has no next trajectory left to assign, also stop issuing future "
+            "turns. If false, replay continues outside the performance window "
+            "for accuracy/log coverage."
         ),
     )
 
@@ -310,8 +358,8 @@ class Dataset(BaseModel):
     accuracy_config: AccuracyConfig | None = Field(
         None, description="Accuracy evaluation settings"
     )
-    multi_turn: MultiTurnConfig | None = Field(
-        None, description="Multi-turn conversation configuration"
+    agentic_inference: AgenticInferenceConfig | None = Field(
+        None, description="Agentic inference conversation configuration"
     )
 
     @model_validator(mode="after")
@@ -440,6 +488,31 @@ class LoadPattern(BaseModel):
         cyclopts.Parameter(alias="--concurrency", help="Concurrent requests"),
     ] = Field(None, gt=0)
 
+    # TODO(vir): remove once the formal tail-cutting mechanism lands.
+    use_legacy_loadgen_qps_metrics: Annotated[
+        bool,
+        cyclopts.Parameter(
+            negative="--no-use-legacy-loadgen-qps-metrics",
+            help=(
+                "Only applies to the poisson load pattern. Report QPS/TPS using "
+                "the legacy MLPerf LoadGen Server 'completed' definition — (completed-1)/T "
+                "and tokens/T, T = first issued request to completion of the "
+                "last-issued request (see mlcommons/inference loadgen/results.cc). "
+                "--no-... uses endpoints-native completed/duration. Ignored for "
+                "non-poisson patterns."
+            ),
+        ),
+    ] = True
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        # use_legacy_loadgen_qps_metrics only applies to poisson; drop it from
+        # the serialized form (and thus YAML templates) for other patterns.
+        data = handler(self)
+        if self.type != LoadPatternType.POISSON:
+            data.pop("use_legacy_loadgen_qps_metrics", None)
+        return data
+
     @model_validator(mode="after")
     def _validate_completeness(self) -> Self:
         if self.type == LoadPatternType.POISSON and (
@@ -452,11 +525,11 @@ class LoadPattern(BaseModel):
             raise ValueError(
                 "Concurrency requires --concurrency (e.g., --concurrency 10)"
             )
-        if self.type == LoadPatternType.MULTI_TURN and (
+        if self.type == LoadPatternType.AGENTIC_INFERENCE and (
             not self.target_concurrency or self.target_concurrency <= 0
         ):
             raise ValueError(
-                "Multi-turn requires --concurrency (e.g., --concurrency 96)"
+                "Agentic inference requires --concurrency (e.g., --concurrency 96)"
             )
         return self
 
@@ -487,7 +560,7 @@ class WarmupConfig(BaseModel):
             help="Prepend a unique random hex salt to each warmup prompt",
         ),
     ] = Field(
-        False, description="Prepend a unique random hex salt to each warmup prompt"
+        True, description="Prepend a unique random hex salt to each warmup prompt"
     )
     drain: Annotated[
         bool,
@@ -552,18 +625,18 @@ class DrainConfig(BaseModel):
             alias="--metrics-drain-timeout",
             help=(
                 "Wall-clock budget (seconds) for the metrics aggregator to finish "
-                "in-flight async tokenize tasks after the run ends before cancelling "
-                "them. Set to 0 to wait indefinitely. Increase for large datasets or "
-                "long-context workloads where ISL/OSL/TPOT tokenization lags behind "
-                "request throughput."
+                "tokenizing buffered samples after the run ends. Set to 0 to wait "
+                "indefinitely. Increase for very large datasets where the end-of-run "
+                "tokenize batch is big."
             ),
         ),
     ] = Field(
-        60.0,
+        0.0,
         ge=0,
         description=(
-            "Wall-clock budget (seconds) for the metrics aggregator to drain "
-            "in-flight tokenize tasks after ENDED (default: 60.0; 0 = unlimited)."
+            "Wall-clock budget (seconds) to finish tokenizing buffered samples "
+            "after ENDED (default: 0 = unlimited). An incomplete drain is "
+            "surfaced via n_pending_tasks > 0, never silently dropped."
         ),
     )
     metrics_tokenizer_workers: Annotated[
@@ -571,16 +644,85 @@ class DrainConfig(BaseModel):
         cyclopts.Parameter(
             alias="--metrics-tokenizer-workers",
             help=(
-                "Number of tokenizer worker threads in the metrics aggregator. "
-                "Increase if ISL/OSL/TPOT tokenization can't keep up with request "
-                "throughput (symptoms: large drain timeout warning at run end)."
+                "In-process tokenizer threads for live (mid-run) ISL/OSL/TPOT in "
+                "the metrics aggregator. 0 defers all tokenization to the "
+                "end-of-run drain, which always uses the auto-sized sharded pool."
             ),
         ),
     ] = Field(
         2,
-        ge=1,
-        description="Number of tokenizer worker threads in the metrics aggregator (default: 2).",
+        ge=0,
+        description=(
+            "In-process tokenizer threads for live (mid-run) ISL/OSL/TPOT "
+            "(default: 2; 0 = defer everything to the end-of-run drain)."
+        ),
     )
+
+
+class ProfilerEngine(str, Enum):
+    """Inference engine whose profiling protocol the client should drive.
+
+    Selects the HTTP path layout used to derive start/stop URLs from
+    ``endpoint_config.endpoints``. Each value corresponds to one server-side
+    profiling protocol; add a new variant + ``_PROFILE_PATHS`` row to support
+    another engine.
+    """
+
+    VLLM = "vllm"
+
+
+@cyclopts.Parameter(name="*")
+class ProfilingConfig(BaseModel):
+    """Client-side trigger for the server's profiler.
+
+    When ``engine`` is set, fires POST ``<start_path>`` at performance-phase
+    begin and POST ``<stop_path>`` at performance-phase end. URLs are derived
+    using the engine-specific protocol from ``urls`` when set, otherwise
+    from ``endpoint_config.endpoints``.
+    Server must be launched with profiling enabled (e.g. vLLM's
+    ``--profiler-config.profiler=cuda|torch``); the schedule
+    (``delay_iterations``, ``max_iterations``) is set there, not here.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    engine: Annotated[
+        ProfilerEngine | None,
+        cyclopts.Parameter(
+            alias="--profile",
+            help="Profile the named inference engine around the performance phase",
+        ),
+    ] = Field(
+        None,
+        description="Profile the named inference engine around the performance phase",
+    )
+    urls: Annotated[
+        list[str] | None,
+        cyclopts.Parameter(
+            alias="--profile-urls",
+            help="Override URL(s) for profiler triggers; "
+            "defaults to endpoint_config.endpoints",
+            negative="",
+        ),
+    ] = Field(
+        None,
+        description="URL(s) the profiler start/stop triggers are derived from. "
+        "When None, derived from endpoint_config.endpoints instead. Use when "
+        "the profiler admin endpoint differs from the inference endpoint.",
+    )
+
+    @field_validator("urls", mode="after")
+    @classmethod
+    def _validate_url_scheme(cls, v: list[str] | None) -> list[str] | None:
+        if v is None:
+            return v
+        for url in v:
+            if not url.startswith(("http://", "https://")):
+                raise ValueError(
+                    f"Profiling endpoint URL must include scheme "
+                    f"(http:// or https://), got: {url!r}"
+                )
+        return v
 
 
 @cyclopts.Parameter(name="*")
@@ -597,6 +739,22 @@ class Settings(BaseModel):
         description="Per-phase in-flight response drain timeout configuration",
     )
     warmup: WarmupConfig = Field(default_factory=WarmupConfig)
+    profiling: ProfilingConfig = Field(default_factory=ProfilingConfig)
+    service_ready_timeout_s: Annotated[
+        float,
+        cyclopts.Parameter(
+            alias="--service-ready-timeout",
+            help="Seconds to wait for metrics/event-logger services to start",
+        ),
+    ] = Field(
+        default=30.0,
+        ge=0,
+        description=(
+            "Seconds to wait for the metrics-aggregator and event-logger "
+            "subprocesses to report ready. Increase when service imports run "
+            "off a shared/Lustre FS under heavy login-node I/O contention."
+        ),
+    )
 
 
 class OfflineSettings(Settings):
@@ -759,6 +917,33 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
         if not self.model_params.name:
             raise ValueError("Required: --model-params.name [--model]")
 
+        # TODO(vir): Move API-type-specific validation out of this generic
+        # cross-model validator and into the selected adapter. Requires a larger refactor.
+        non_default_completion_controls = {
+            "model_params.min_new_tokens": self.model_params.min_new_tokens != 1,
+            "model_params.skip_special_tokens": not self.model_params.skip_special_tokens,
+        }
+        configured_controls = [
+            name
+            for name, is_non_default in non_default_completion_controls.items()
+            if is_non_default
+        ]
+        if (
+            configured_controls
+            and self.endpoint_config.api_type != APIType.OPENAI_COMPLETIONS
+        ):
+            controls = " and ".join(configured_controls)
+            verb = "requires" if len(configured_controls) == 1 else "require"
+            required_api_type = "endpoint_config.api_type=openai_completions"
+            raise ValueError(f"{controls} {verb} {required_api_type}")
+        if configured_controls and any(
+            dataset.agentic_inference is not None for dataset in self.datasets
+        ):
+            raise ValueError(
+                "OpenAI text-completion generation controls are not supported "
+                "for agentic inference datasets"
+            )
+
         # --- Validate (cross-model checks only; sub-models self-validate) ---
         if self.type == TestType.SUBMISSION and not self.benchmark_mode:
             raise ValueError(
@@ -785,35 +970,52 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
             if lp.type not in (
                 LoadPatternType.POISSON,
                 LoadPatternType.CONCURRENCY,
-                LoadPatternType.MULTI_TURN,
+                LoadPatternType.AGENTIC_INFERENCE,
             ):
                 raise ValueError(
-                    "Online mode requires --load-pattern (poisson, concurrency, or multi_turn)"
+                    "Online mode requires --load-pattern (poisson, concurrency, or agentic_inference)"
                 )
 
-        # Cross-validate load_pattern.type=multi_turn ↔ performance dataset.multi_turn config
-        has_multi_turn_perf_dataset = any(
-            d.multi_turn is not None
+        # Cross-validate load_pattern.type=agentic_inference against the
+        # performance dataset agentic_inference config.
+        has_agentic_inference_perf_dataset = any(
+            d.agentic_inference is not None
             for d in (self.datasets or [])
             if d.type == DatasetType.PERFORMANCE
         )
-        has_multi_turn_non_perf_dataset = any(
-            d.multi_turn is not None
+        has_agentic_inference_non_perf_dataset = any(
+            d.agentic_inference is not None
             for d in (self.datasets or [])
             if d.type != DatasetType.PERFORMANCE
         )
-        if has_multi_turn_non_perf_dataset:
+        if has_agentic_inference_non_perf_dataset:
             raise ValueError(
-                "multi_turn config is only supported on performance datasets; "
-                "accuracy datasets with multi_turn are not supported"
+                "agentic_inference config is only supported on performance datasets; "
+                "accuracy datasets with agentic_inference are not supported"
             )
-        if lp.type == LoadPatternType.MULTI_TURN and not has_multi_turn_perf_dataset:
+        if (
+            lp.type == LoadPatternType.AGENTIC_INFERENCE
+            and not has_agentic_inference_perf_dataset
+        ):
             raise ValueError(
-                "load_pattern.type=multi_turn requires the performance dataset to have multi_turn config"
+                "load_pattern.type=agentic_inference requires the performance "
+                "dataset to have agentic_inference config"
             )
-        if has_multi_turn_perf_dataset and lp.type != LoadPatternType.MULTI_TURN:
+        if (
+            lp.type == LoadPatternType.AGENTIC_INFERENCE
+            and self.settings.runtime.n_samples_to_issue is not None
+        ):
             raise ValueError(
-                f"Performance dataset with multi_turn config requires load_pattern.type=multi_turn, "
+                "runtime.n_samples_to_issue is not supported for agentic inference runs; "
+                "use datasets[].agentic_inference.num_trajectories_to_issue instead"
+            )
+        if (
+            has_agentic_inference_perf_dataset
+            and lp.type != LoadPatternType.AGENTIC_INFERENCE
+        ):
+            raise ValueError(
+                "Performance dataset with agentic_inference config requires "
+                "load_pattern.type=agentic_inference, "
                 f"got '{lp.type}'"
             )
 

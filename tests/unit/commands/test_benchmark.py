@@ -16,15 +16,19 @@
 """Tests for benchmark CLI models, config building, and command handlers."""
 
 import asyncio
+import io
+import json
 import random
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+from urllib import error as urllib_error
 
 import pandas as pd
 import pytest
 from inference_endpoint.commands.benchmark.cli import (
+    benchmark_app,
     from_config,
     offline,
     online,
@@ -34,7 +38,11 @@ from inference_endpoint.commands.benchmark.execute import (
     BenchmarkContext,
     ResponseCollector,
     _build_phases,
+    _derive_profile_urls,
+    _post_profile,
+    _render_profile_status,
     _run_benchmark_async,
+    _write_profiling_section,
     setup_benchmark,
 )
 from inference_endpoint.config.runtime_settings import RuntimeSettings
@@ -46,6 +54,7 @@ from inference_endpoint.config.schema import (
     LoadPatternType,
     OfflineSettings,
     OnlineSettings,
+    ProfilerEngine,
     RuntimeConfig,
     ScorerMethod,
     StreamingMode,
@@ -270,6 +279,49 @@ class TestCommandHandlers:
         assert called_mode == mode
 
     @pytest.mark.unit
+    def test_use_legacy_loadgen_qps_metrics_default_and_disable(self):
+        """LoadPattern flag defaults True; --no-use-legacy-loadgen-qps-metrics
+        sets False (poisson only).
+        """
+        base = [
+            "online",
+            "--endpoints",
+            "http://h:80",
+            "--model",
+            "m",
+            "--dataset",
+            "d.jsonl",
+            "--load-pattern",
+            "poisson",
+            "--target-qps",
+            "100",
+        ]
+        _, bound, _ = benchmark_app.parse_args(base, exit_on_error=False)
+        lp = bound.arguments["config"].settings.load_pattern
+        assert lp.use_legacy_loadgen_qps_metrics is True
+
+        _, bound, _ = benchmark_app.parse_args(
+            [*base, "--no-use-legacy-loadgen-qps-metrics"], exit_on_error=False
+        )
+        lp = bound.arguments["config"].settings.load_pattern
+        assert lp.use_legacy_loadgen_qps_metrics is False
+
+    @pytest.mark.unit
+    def test_loadgen_flag_serialized_only_for_poisson(self):
+        """``use_legacy_loadgen_qps_metrics`` is dropped from the serialized
+        form for non-poisson patterns (so it does not pollute their YAML
+        templates), and present for poisson.
+        """
+        poisson = LoadPattern(type=LoadPatternType.POISSON, target_qps=100)
+        assert "use_legacy_loadgen_qps_metrics" in poisson.model_dump()
+
+        for lp in (
+            LoadPattern(type=LoadPatternType.MAX_THROUGHPUT),
+            LoadPattern(type=LoadPatternType.CONCURRENCY, target_concurrency=10),
+        ):
+            assert "use_legacy_loadgen_qps_metrics" not in lp.model_dump()
+
+    @pytest.mark.unit
     @patch("inference_endpoint.commands.benchmark.cli.run_benchmark")
     def test_from_config_handler(self, mock_run, tmp_path):
         yaml_content = """
@@ -412,7 +464,7 @@ class TestWarmupConfig:
         cfg = WarmupConfig()
         assert cfg.enabled is False
         assert cfg.n_requests is None
-        assert cfg.salt is False
+        assert cfg.salt is True
         assert cfg.drain is False
 
     @pytest.mark.unit
@@ -489,8 +541,7 @@ class TestDrainConfig:
         assert cfg.warmup_timeout_s == 240.0
         assert cfg.performance_timeout_s == 240.0
         assert cfg.accuracy_timeout_s is None
-        assert cfg.metrics_drain_timeout_s == 60.0
-        assert cfg.metrics_tokenizer_workers == 2
+        assert cfg.metrics_drain_timeout_s == 0.0
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
@@ -513,11 +564,6 @@ class TestDrainConfig:
             DrainConfig(metrics_drain_timeout_s=-1.0)
 
     @pytest.mark.unit
-    def test_metrics_tokenizer_workers_must_be_at_least_one(self):
-        with pytest.raises(ValidationError):
-            DrainConfig(metrics_tokenizer_workers=0)
-
-    @pytest.mark.unit
     def test_extra_fields_rejected(self):
         with pytest.raises(ValidationError):
             DrainConfig(unknown_field=1)
@@ -538,7 +584,6 @@ settings:
     performance_timeout_s: 30.0
     accuracy_timeout_s: null
     metrics_drain_timeout_s: 300.0
-    metrics_tokenizer_workers: 8
 """
         config_file = tmp_path / "drain.yaml"
         config_file.write_text(yaml_content)
@@ -548,7 +593,6 @@ settings:
         assert drain.performance_timeout_s == 30.0
         assert drain.accuracy_timeout_s is None
         assert drain.metrics_drain_timeout_s == 300.0
-        assert drain.metrics_tokenizer_workers == 8
 
 
 class TestAggregatorArgs:
@@ -641,17 +685,13 @@ class TestAggregatorArgs:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("workers, expected_flag", [(4, "4"), (8, "8"), (2, "2")])
-    async def test_tokenizer_workers_forwarded_to_aggregator_args(
-        self, tmp_path, workers, expected_flag
-    ):
-        config = OfflineConfig(
-            **_OFFLINE_KWARGS,
-            settings=OfflineSettings(
-                drain=DrainConfig(metrics_tokenizer_workers=workers)
-            ),
-        )
+    async def test_tokenizer_and_workers_forwarded_from_schema(self, tmp_path):
+        """The benchmark forwards --tokenizer and --tokenizer-workers; the
+        workers value comes from the schema default
+        (drain.metrics_tokenizer_workers), the single source of truth."""
+        config = OfflineConfig(**_OFFLINE_KWARGS, settings=OfflineSettings())
         ctx = self._make_ctx(config, tmp_path)
+        ctx.tokenizer_name = "gpt2"
 
         captured: list = []
 
@@ -689,9 +729,11 @@ class TestAggregatorArgs:
 
         aggregator_cfg = next(c for c in captured if "metrics_aggregator" in c.module)
         args = aggregator_cfg.args
-        assert "--tokenizer-workers" in args
+        idx = args.index("--tokenizer")
+        assert args[idx + 1] == "gpt2"
         idx = args.index("--tokenizer-workers")
-        assert args[idx + 1] == expected_flag
+        expected = str(config.settings.drain.metrics_tokenizer_workers)
+        assert args[idx + 1] == expected
 
 
 class TestBuildPhases:
@@ -836,6 +878,17 @@ class TestBuildPhases:
         phases = _build_phases(ctx)
 
         assert phases[0].runtime_settings.n_samples_to_issue is None
+
+    @pytest.mark.unit
+    def test_warmup_defaults_uses_salt(self, base_rt_settings, simple_dataset):
+        config = OfflineConfig(
+            **_OFFLINE_KWARGS,
+            settings=OfflineSettings(warmup=WarmupConfig(enabled=True)),
+        )
+        ctx = self._make_ctx(config, base_rt_settings, simple_dataset)
+        phases = _build_phases(ctx)
+
+        assert phases[0].dataset._salt_rng is not None
 
     @pytest.mark.unit
     def test_warmup_without_salt_uses_raw_dataloader(
@@ -1277,3 +1330,108 @@ class TestSetupBenchmarkTokenizer:
             ctx = setup_benchmark(config, TestMode.PERF)
 
         assert ctx.tokenizer_name is None
+
+
+class TestProfilingHelpers:
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "endpoint,expected",
+        [
+            ("http://h:8000/v1", "http://h:8000/start_profile"),
+            ("http://h:8000/v1/", "http://h:8000/start_profile"),
+            ("http://h:8000", "http://h:8000/start_profile"),
+        ],
+    )
+    def test_derive_strips_v1(self, endpoint, expected):
+        out = _derive_profile_urls([endpoint], ProfilerEngine.VLLM, "start")
+        assert out == [expected]
+
+    @pytest.mark.unit
+    def test_derive_stop_path_and_fanout(self):
+        out = _derive_profile_urls(
+            ["http://a/v1", "http://b/v1"], ProfilerEngine.VLLM, "stop"
+        )
+        assert out == ["http://a/stop_profile", "http://b/stop_profile"]
+
+    @pytest.mark.unit
+    def test_derive_empty_endpoints_raises(self):
+        with pytest.raises(ValueError):
+            _derive_profile_urls([], ProfilerEngine.VLLM, "start")
+
+    @pytest.mark.unit
+    def test_post_profile_200(self):
+        resp = MagicMock()
+        resp.__enter__.return_value.status = 200
+        with patch(
+            "inference_endpoint.commands.benchmark.execute.urllib_request.urlopen",
+            return_value=resp,
+        ):
+            rec = _post_profile("http://h/start_profile")
+        assert rec["status"] == 200
+        assert rec["error"] is None
+        assert "sent_at_ns" in rec
+        assert "sent_at_iso" in rec
+
+    @pytest.mark.unit
+    def test_post_profile_http_error(self):
+        err = urllib_error.HTTPError("http://h", 404, "Not Found", {}, None)
+        with patch(
+            "inference_endpoint.commands.benchmark.execute.urllib_request.urlopen",
+            side_effect=err,
+        ):
+            rec = _post_profile("http://h/start_profile")
+        assert rec["status"] == 404
+        assert "404" in rec["error"]
+
+    @pytest.mark.unit
+    def test_post_profile_connection_failure_never_raises(self):
+        with patch(
+            "inference_endpoint.commands.benchmark.execute.urllib_request.urlopen",
+            side_effect=OSError("refused"),
+        ):
+            rec = _post_profile("http://h/start_profile")
+        assert rec["status"] is None
+        assert "OSError" in rec["error"]
+
+    @pytest.mark.unit
+    def test_render_status_200(self):
+        assert _render_profile_status({"status": 200, "error": None}) == "200 OK"
+
+    @pytest.mark.unit
+    def test_render_status_404_hint(self):
+        out = _render_profile_status({"status": 404, "error": "404 Not Found"})
+        assert "profiling not enabled" in out
+
+    @pytest.mark.unit
+    def test_write_section_and_json_roundtrip(self):
+        payload = {
+            "engine": "vllm",
+            "starts": [
+                {
+                    "url": "http://h/start_profile",
+                    "status": 200,
+                    "error": None,
+                    "sent_at_ns": 1,
+                    "sent_at_iso": "2026-01-01T00:00:00.000",
+                }
+            ],
+            "stops": [
+                {
+                    "url": "http://h/stop_profile",
+                    "status": 200,
+                    "error": None,
+                    "stop_reason": "phase_end",
+                    "sent_at_ns": 2,
+                    "sent_at_iso": "2026-01-01T00:00:01.000",
+                }
+            ],
+        }
+        buf = io.StringIO()
+        _write_profiling_section(buf, payload)
+        text = buf.getvalue()
+        assert "Profiling" in text
+        assert "http://h/start_profile" in text
+        assert "http://h/stop_profile" in text
+        assert "Trigger span" in text
+        # Mirrors what finalize_benchmark dumps to profiling.json
+        assert json.loads(json.dumps(payload))["engine"] == "vllm"
