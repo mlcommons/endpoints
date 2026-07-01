@@ -24,6 +24,7 @@ import cyclopts
 import yaml
 from pydantic import ValidationError  # noqa: F401 (used in from_config)
 
+from inference_endpoint.commands.audit import run_audit
 from inference_endpoint.commands.benchmark.execute import run_benchmark
 from inference_endpoint.config.schema import (
     BenchmarkConfig,
@@ -32,7 +33,11 @@ from inference_endpoint.config.schema import (
     TestMode,
     TestType,
 )
-from inference_endpoint.exceptions import DatasetValidationError, InputValidationError
+from inference_endpoint.exceptions import (
+    CLIError,
+    DatasetValidationError,
+    InputValidationError,
+)
 
 benchmark_app = cyclopts.App(name="benchmark", help="Run benchmarks.")
 
@@ -51,7 +56,21 @@ def _run(config: BenchmarkConfig, dataset: list[str], mode: TestMode) -> None:
             raise DatasetValidationError(f"Invalid --dataset: {msgs}") from e
         except ValueError as e:
             raise DatasetValidationError(f"Invalid --dataset: {e}") from e
-    run_benchmark(config, mode)
+    report_dir = run_benchmark(config, mode)
+    # If an interrupt aborted the main run, run_benchmark re-raises and we never
+    # reach the audit (propagates to main.py → exit 130).
+    if config.audit is not None:
+        # All audit artifacts (phase subdirs + verify_<TEST>.txt +
+        # audit_result.json) nest under <report_dir>/audit/ so they don't
+        # intermingle with the main run's top-level output.
+        result = run_audit(config, report_dir / "audit")
+        # Raise on FAIL rather than sys.exit so the single exit-code mapping in
+        # main.run() stays authoritative (CLIError → 1); PASS returns → 0.
+        if not result.passed:
+            raise CLIError(
+                f"Compliance audit {result.test_id} FAILED: "
+                f"{result.details.get('reason', '')}"
+            )
 
 
 @benchmark_app.command

@@ -1435,3 +1435,28 @@ class TestProfilingHelpers:
         assert "Trigger span" in text
         # Mirrors what finalize_benchmark dumps to profiling.json
         assert json.loads(json.dumps(payload))["engine"] == "vllm"
+
+
+class TestRunBenchmarkInterrupt:
+    @pytest.mark.unit
+    def test_keyboard_interrupt_skips_audit(self, monkeypatch):
+        """A Ctrl-C during the main run must propagate out of cli._run and NOT
+        start the audit: an interrupted run cannot certify a compliance result.
+        (The audit is dispatched by cli._run, not run_benchmark.)"""
+        from inference_endpoint.commands.benchmark import cli
+        from inference_endpoint.config.schema import TestMode
+
+        config = MagicMock()
+        config.datasets = [object()]  # non-empty → _run skips CLI dataset injection
+        config.audit = MagicMock()  # audit IS configured
+
+        def _interrupt(cfg, mode):
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(cli, "run_benchmark", _interrupt)
+        audit_spy = MagicMock()
+        monkeypatch.setattr(cli, "run_audit", audit_spy)
+
+        with pytest.raises(KeyboardInterrupt):
+            cli._run(config, [], TestMode.PERF)
+        audit_spy.assert_not_called()
