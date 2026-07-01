@@ -49,16 +49,13 @@ class TestAutoNumWorkersNonLinux:
 class TestEndpointBudgetScaling:
     """max_connections budget scales with the number of distinct endpoints.
 
-    The ephemeral-port limit is per (source IP, destination) pair, so each
-    distinct endpoint contributes its own ~available_ports budget. num_workers
+    Ephemeral-port capacity is per (source IP, destination) pair, so each
+    distinct endpoint contributes its configured port-range budget. num_workers
     is pinned (>=1) so config resolution skips the NUMA auto-probe.
     """
 
     def test_auto_budget_scales_with_distinct_endpoints(self):
-        with (
-            patch.object(cfg, "get_ephemeral_port_range", return_value=(32768, 60999)),
-            patch.object(cfg, "get_ephemeral_port_limit", return_value=10000),
-        ):
+        with patch.object(cfg, "get_ephemeral_port_range", return_value=(1, 10000)):
             c = cfg.HTTPClientConfig(
                 endpoint_urls=[
                     "http://10.0.0.1:8000",
@@ -70,22 +67,31 @@ class TestEndpointBudgetScaling:
         assert c.max_connections == 30000  # 10000 ports x 3 distinct endpoints
 
     def test_single_endpoint_budget_unchanged(self):
-        with (
-            patch.object(cfg, "get_ephemeral_port_range", return_value=(32768, 60999)),
-            patch.object(cfg, "get_ephemeral_port_limit", return_value=10000),
-        ):
+        with patch.object(cfg, "get_ephemeral_port_range", return_value=(1, 10000)):
             c = cfg.HTTPClientConfig(
                 endpoint_urls=["http://10.0.0.1:8000"], num_workers=10
             )
         assert c.max_connections == 10000  # single endpoint -> unchanged
 
+    def test_live_socket_usage_does_not_reject_overall_connection_limit(self):
+        with (
+            patch.object(cfg, "get_ephemeral_port_range", return_value=(1, 10000)),
+            patch.object(
+                cfg, "get_ephemeral_port_limit", return_value=0, create=True
+            ) as live_port_limit,
+        ):
+            c = cfg.HTTPClientConfig(
+                endpoint_urls=["http://10.0.0.1:8000"],
+                num_workers=10,
+                max_connections=10,
+            )
+        assert c.max_connections == 10
+        live_port_limit.assert_not_called()
+
     def test_duplicate_endpoints_do_not_inflate_budget(self):
         # Same (host, port) repeated (even with different paths) is one
         # destination -> one budget, since the 4-tuple ignores path.
-        with (
-            patch.object(cfg, "get_ephemeral_port_range", return_value=(32768, 60999)),
-            patch.object(cfg, "get_ephemeral_port_limit", return_value=10000),
-        ):
+        with patch.object(cfg, "get_ephemeral_port_range", return_value=(1, 10000)):
             c = cfg.HTTPClientConfig(
                 endpoint_urls=[
                     "http://10.0.0.1:8000/v1/a",
@@ -98,10 +104,7 @@ class TestEndpointBudgetScaling:
 
     def test_explicit_max_connections_within_scaled_budget_ok(self):
         # 25000 exceeds one endpoint's budget (10000) but fits 3 (30000).
-        with (
-            patch.object(cfg, "get_ephemeral_port_range", return_value=(32768, 60999)),
-            patch.object(cfg, "get_ephemeral_port_limit", return_value=10000),
-        ):
+        with patch.object(cfg, "get_ephemeral_port_range", return_value=(1, 10000)):
             c = cfg.HTTPClientConfig(
                 endpoint_urls=[
                     "http://10.0.0.1:8000",
@@ -114,10 +117,7 @@ class TestEndpointBudgetScaling:
         assert c.max_connections == 25000
 
     def test_explicit_max_connections_exceeding_scaled_budget_raises(self):
-        with (
-            patch.object(cfg, "get_ephemeral_port_range", return_value=(32768, 60999)),
-            patch.object(cfg, "get_ephemeral_port_limit", return_value=10000),
-        ):
+        with patch.object(cfg, "get_ephemeral_port_range", return_value=(1, 10000)):
             with pytest.raises(RuntimeError, match="exceeds the ephemeral"):
                 cfg.HTTPClientConfig(
                     endpoint_urls=["http://10.0.0.1:8000", "http://10.0.0.2:8000"],
@@ -156,10 +156,7 @@ class TestEndpointDestination:
         assert len(keys) == 2
 
     def test_schemeless_budget_scales_with_distinct_hosts(self):
-        with (
-            patch.object(cfg, "get_ephemeral_port_range", return_value=(32768, 60999)),
-            patch.object(cfg, "get_ephemeral_port_limit", return_value=10000),
-        ):
+        with patch.object(cfg, "get_ephemeral_port_range", return_value=(1, 10000)):
             c = cfg.HTTPClientConfig(
                 endpoint_urls=["10.0.0.1:8000", "10.0.0.2:8000"],
                 num_workers=10,

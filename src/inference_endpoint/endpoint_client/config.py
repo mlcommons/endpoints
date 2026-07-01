@@ -44,7 +44,7 @@ from .cpu_affinity import (
     get_cpus_in_numa_node,
     get_current_numa_node,
 )
-from .utils import get_ephemeral_port_limit, get_ephemeral_port_range
+from .utils import get_ephemeral_port_range
 
 
 def _endpoint_destination(url: str) -> tuple[str | None, int]:
@@ -267,20 +267,17 @@ class HTTPClientConfig(WithUpdatesMixin, BaseModel):
         if self.endpoint_urls:
             low, high = get_ephemeral_port_range()
             system_maximum_ports = high - low + 1
-            available_ports = get_ephemeral_port_limit()
 
-            # The ephemeral-port limit is per (source IP, destination) pair: the
+            # Ephemeral-port capacity is per (source IP, destination) pair: the
             # TCP 4-tuple (src_ip, src_port, dst_ip, dst_port) only needs to be
             # unique, so the kernel reuses local ports across distinct
             # destinations. Each distinct endpoint therefore has its own
-            # ~`available_ports` budget. Workers are round-robined across
-            # endpoints, so scale the cap by the distinct-endpoint count;
-            # otherwise concurrency is needlessly throttled to a single
-            # endpoint's budget when several endpoints are configured.
+            # configured port-range budget. Do not subtract live, process-global
+            # socket occupancy: it includes unrelated destinations and is racy.
             distinct_endpoints = len(
                 {_endpoint_destination(u) for u in self.endpoint_urls}
             )
-            port_budget = available_ports * max(1, distinct_endpoints)
+            port_budget = system_maximum_ports * max(1, distinct_endpoints)
 
             if self.max_connections == -1:
                 object.__setattr__(self, "max_connections", port_budget)
@@ -288,7 +285,7 @@ class HTTPClientConfig(WithUpdatesMixin, BaseModel):
                 if self.max_connections > port_budget:
                     raise RuntimeError(
                         f"--max-connections ({self.max_connections}) exceeds the ephemeral "
-                        f"port budget ({port_budget} = {available_ports} ports x "
+                        f"port budget ({port_budget} = {system_maximum_ports} ports x "
                         f"{max(1, distinct_endpoints)} distinct endpoint(s)). Reduce "
                         f"--max-connections, add endpoints, or raise the system port range."
                     )
