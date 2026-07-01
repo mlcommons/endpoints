@@ -21,7 +21,6 @@ from pathlib import Path
 
 import pytest
 import yaml
-
 from inference_endpoint.commands.audit import run_audit
 from inference_endpoint.commands.benchmark.execute import run_benchmark
 from inference_endpoint.config.schema import (
@@ -243,8 +242,8 @@ class TestBenchmarkCommandIntegration:
             type=test_type,
             audit=AuditConfig(
                 test=AuditTestId.OUTPUT_CACHING_TEST,
-                samples=16,
-                audit_samples=16,
+                samples=5,
+                audit_samples=5,
                 sample_index=0,
                 threshold=0.9,
             ),

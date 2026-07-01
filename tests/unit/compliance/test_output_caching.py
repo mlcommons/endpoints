@@ -23,7 +23,6 @@ from unittest.mock import MagicMock
 
 import pydantic
 import pytest
-
 from inference_endpoint import compliance
 from inference_endpoint.commands.audit import run_audit
 from inference_endpoint.compliance import (
@@ -315,13 +314,11 @@ class TestWriteResult:
 class TestRegistry:
     @pytest.mark.unit
     def test_get_audit_test_returns_output_caching(self):
-
         test = get_audit_test(AuditTestId.OUTPUT_CACHING_TEST)
         assert test.test_id == AuditTestId.OUTPUT_CACHING_TEST
 
     @pytest.mark.unit
     def test_get_audit_test_raises_on_unknown(self, monkeypatch):
-
         # Empty the registry so the id resolves to nothing.
         monkeypatch.setattr(compliance, "_REGISTRY", {})
         with pytest.raises(KeyError, match="No audit test registered"):
