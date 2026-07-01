@@ -16,9 +16,11 @@
 """Tests for BatchTokenizer and TokenBatchQueue."""
 
 import asyncio
+import multiprocessing
 import time
 from concurrent.futures import Future, ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
+from multiprocessing.connection import wait as wait_for_process
 from unittest.mock import patch
 
 import pytest
@@ -707,16 +709,45 @@ def test_terminate_procs_kills_running_workers():
     to ``None``, so the worker handles must be snapshotted BEFORE shutdown — a
     blocked worker is only killed if terminate() actually runs.
     """
-    ex = ProcessPoolExecutor(max_workers=1)
-    ex.submit(time.sleep, 30)  # occupy the worker so it won't exit on its own
-    deadline = time.monotonic() + 5
-    while not getattr(ex, "_processes", None) and time.monotonic() < deadline:
-        time.sleep(0.01)
-    procs = list((getattr(ex, "_processes", None) or {}).values())
-    assert procs, "worker did not spawn"
+    ex = ProcessPoolExecutor(
+        max_workers=1, mp_context=multiprocessing.get_context("spawn")
+    )
+    procs = []
+    manager_thread = None
+    try:
+        ex.submit(time.sleep, 0).result(timeout=30)
+        future = ex.submit(time.sleep, 30)
+        manager_thread = getattr(ex, "_executor_manager_thread", None)
+        deadline = time.monotonic() + 5
+        while (
+            not future.running() and not future.done() and time.monotonic() < deadline
+        ):
+            time.sleep(0.01)
+        if future.done():
+            future.result()
+        assert future.running(), "worker task did not start"
+        procs = list((getattr(ex, "_processes", None) or {}).values())
+        assert procs, "worker did not spawn"
+        assert not wait_for_process(
+            [p.sentinel for p in procs], timeout=0
+        ), "worker exited before termination"
 
-    _terminate_procs([ex])
+        _terminate_procs([ex])
 
-    for p in procs:
-        p.join(5)
-        assert not p.is_alive(), "worker was not terminated"
+        for p in procs:
+            # The executor manager may reap the child concurrently; sentinel
+            # readiness observes exit without racing its return-code update.
+            assert wait_for_process(
+                [p.sentinel], timeout=5
+            ), "worker was not terminated"
+    finally:
+        cleanup_procs = procs or list((getattr(ex, "_processes", None) or {}).values())
+        for p in cleanup_procs:
+            if not wait_for_process([p.sentinel], timeout=0):
+                try:
+                    p.kill()
+                except (OSError, ValueError):
+                    pass
+        ex.shutdown(wait=False, cancel_futures=True)
+        if manager_thread is not None:
+            manager_thread.join(5)
