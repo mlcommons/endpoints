@@ -84,6 +84,11 @@ class OutputCachingAudit:
         the baseline partially cacheable and able to mask (or invert) a caching
         speedup. The audit phase pins one fixed index, which must exist — but its
         count may exceed the dataset, since it repeats that single sample.
+
+        ``dataset_size`` is the performance dataset **as loaded** (i.e. after its
+        own ``samples:`` truncation), not the underlying file's row count — a
+        ``sample_index`` bound-checked here may still be out of range against
+        the raw file if the dataset's ``samples:`` is smaller than the file.
         """
         if load_pattern not in _VALID_LOAD_PATTERNS:
             valid = ", ".join(p.value for p in _VALID_LOAD_PATTERNS)

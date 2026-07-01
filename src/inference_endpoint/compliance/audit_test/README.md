@@ -51,6 +51,10 @@ audit:
 | `sample_index`  | no       | `0`              | Dataset row repeated in the audit phase; must be in range.    |
 | `threshold`     | no       | `0.10`           | Caching tolerance, `0 < threshold < 1`.                       |
 
+`sample_index` is bound-checked against the performance dataset **as loaded** — i.e. after
+its own `samples:` truncation, not the underlying file's row count. A dataset with
+`samples: 144` over a 248-row file only accepts `sample_index` in `[0, 144)`.
+
 ## Supported load patterns
 
 The audit compares achieved QPS, so it only accepts load patterns where that QPS reflects
