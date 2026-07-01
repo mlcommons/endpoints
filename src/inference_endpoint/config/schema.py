@@ -103,6 +103,7 @@ class ScorerMethod(str, Enum):
     SHOPIFY_CATEGORY_F1 = "shopify_category_f1"
     AGENTIC_INFERENCE_INLINE = "agentic_inference_inline"
     VBENCH = "vbench"
+    LEGACY_MLPERF_DEEPSEEK_R1 = "legacy_mlperf_deepseek_r1"
 
 
 class TestMode(str, Enum):
@@ -739,6 +740,21 @@ class Settings(BaseModel):
     )
     warmup: WarmupConfig = Field(default_factory=WarmupConfig)
     profiling: ProfilingConfig = Field(default_factory=ProfilingConfig)
+    service_ready_timeout_s: Annotated[
+        float,
+        cyclopts.Parameter(
+            alias="--service-ready-timeout",
+            help="Seconds to wait for metrics/event-logger services to start",
+        ),
+    ] = Field(
+        default=30.0,
+        ge=0,
+        description=(
+            "Seconds to wait for the metrics-aggregator and event-logger "
+            "subprocesses to report ready. Increase when service imports run "
+            "off a shared/Lustre FS under heavy login-node I/O contention."
+        ),
+    )
 
 
 class OfflineSettings(Settings):
