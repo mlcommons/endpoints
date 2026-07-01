@@ -482,6 +482,16 @@ def _build_phases(
         )
     )
 
+    # Accuracy mirrors the perf load pattern so evaluation exercises the
+    # endpoint the same way it was benchmarked. AGENTIC_INFERENCE can't drive
+    # the (non-agentic) accuracy datasets — create_load_strategy rejects it —
+    # so it (and a missing perf pattern) falls back to MAX_THROUGHPUT.
+    perf_lp = ctx.rt_settings.load_pattern
+    if perf_lp is None or perf_lp.type == LoadPatternType.AGENTIC_INFERENCE:
+        acc_load_pattern = LoadPattern(type=LoadPatternType.MAX_THROUGHPUT)
+    else:
+        acc_load_pattern = perf_lp
+
     # Accuracy phases — use eval_cfg.dataset_name as phase name so it matches
     # what Scorer._load_sample_index_map() looks up in sample_idx_map.json
     for eval_cfg in ctx.eval_configs:
@@ -494,11 +504,19 @@ def _build_phases(
                 "AgenticInferenceDataset, which is not yet supported for "
                 "accuracy evaluation."
             )
-        # Accuracy phases run at MAX_THROUGHPUT; inheriting perf_lp (e.g. POISSON)
-        # would silently rate-limit evaluation until an agentic inference accuracy strategy
-        # and QPS-budgeting support are added.
-        acc_load_pattern: LoadPattern | None = LoadPattern(
-            type=LoadPatternType.MAX_THROUGHPUT
+        if acc_load_pattern.type == LoadPatternType.CONCURRENCY:
+            load_mode_detail = (
+                f" (target_concurrency={acc_load_pattern.target_concurrency})"
+            )
+        elif acc_load_pattern.type == LoadPatternType.POISSON:
+            load_mode_detail = f" (target_qps={acc_load_pattern.target_qps})"
+        else:
+            load_mode_detail = ""
+        logger.info(
+            "Accuracy issuer '%s' load mode: %s%s",
+            eval_cfg.dataset_name,
+            acc_load_pattern.type.value,
+            load_mode_detail,
         )
         acc_settings = RuntimeSettings(
             metric_target=ctx.rt_settings.metric_target,
