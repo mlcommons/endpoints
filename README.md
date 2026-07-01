@@ -1,7 +1,10 @@
 # MLPerf Inference Endpoint Benchmarking System
 
+[![Tests](https://github.com/mlcommons/endpoints/actions/workflows/test.yml/badge.svg)](https://github.com/mlcommons/endpoints/actions/workflows/test.yml)
+[![codecov](https://codecov.io/gh/mlcommons/endpoints/branch/main/graph/badge.svg)](https://codecov.io/gh/mlcommons/endpoints)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
+[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 [![Pre-commit](https://img.shields.io/badge/pre--commit-enabled-brightgreen.svg)](https://pre-commit.com/)
 
 A high-performance benchmarking tool for LLM inference endpoints, targeting 50k+ QPS. Part of [MLCommons](https://mlcommons.org/).
