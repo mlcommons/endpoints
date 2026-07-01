@@ -61,8 +61,16 @@ def main() -> int:
     args = parser.parse_args()
 
     any_written = False
+    multiple = len(args.report_dir) > 1
     for report_dir in args.report_dir:
-        written = generate_plots(report_dir, args.out_dir, args.ruleset, args.model)
+        # Plot filenames are fixed (accuracy.png, perf_turns.png, ...). With a
+        # single shared --out-dir and multiple report dirs they would clobber
+        # each other, so give each report its own subdirectory. When --out-dir
+        # is unset, generate_plots defaults to REPORT_DIR/plots (already unique).
+        out_dir = args.out_dir
+        if out_dir is not None and multiple:
+            out_dir = out_dir / report_dir.name
+        written = generate_plots(report_dir, out_dir, args.ruleset, args.model)
         if written:
             any_written = True
             print(f"{report_dir}: wrote {len(written)} plot(s)")

@@ -164,7 +164,7 @@ class BFCLExecutionBridge:
         entry = state.entry
 
         # Add assistant message to history
-        assistant_msg: dict[str, Any] = {"role": "assistant"}
+        assistant_msg: dict[str, Any] = {"role": "assistant", "content": content or ""}
         if tool_calls:
             assistant_msg["tool_calls"] = [
                 {
@@ -185,9 +185,6 @@ class BFCLExecutionBridge:
                     strict=False,
                 )
             ]
-            assistant_msg["content"] = content or ""
-        else:
-            assistant_msg["content"] = content or ""
 
         state.messages.append(assistant_msg)
 

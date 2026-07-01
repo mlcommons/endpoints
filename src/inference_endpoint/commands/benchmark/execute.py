@@ -384,6 +384,23 @@ def setup_benchmark(
     test_mode: TestMode,
 ) -> BenchmarkContext:
     """Load tokenizer, dataset, create scheduler, setup report dir."""
+    # Accuracy-only runs force single-stream (1 worker / 1 connection) for
+    # deterministic sample ordering. Bake it into the config here — before CPU
+    # affinity, report_dir/config.yaml persistence, and RuntimeSettings — so the
+    # written config.yaml matches what actually runs. The compliance gate reads
+    # config.yaml and asserts single_stream; without this it would fail a valid
+    # accuracy-only run whose source config declared multiple workers.
+    if test_mode == TestMode.ACC:
+        config = config.with_updates(
+            settings=config.settings.model_copy(
+                update={
+                    "client": config.settings.client.with_updates(
+                        num_workers=1, max_connections=1
+                    )
+                }
+            )
+        )
+
     # CPU affinity
     affinity_plan = (
         pin_loadgen(config.settings.client.num_workers)
@@ -839,10 +856,12 @@ async def _run_benchmark_async(
                 "cpu_affinity": ctx.affinity_plan,
             }
             if ctx.accuracy_only:
-                client_overrides["num_workers"] = 1
-                client_overrides["max_connections"] = 1
+                # Single-stream (num_workers=1, max_connections=1) is baked into
+                # config in setup_benchmark so it is persisted to config.yaml;
+                # no runtime override needed here.
                 logger.info(
-                    "Accuracy-only: using 1 worker, 1 connection for deterministic ordering"
+                    "Accuracy-only: single-stream (1 worker, 1 connection) for "
+                    "deterministic ordering"
                 )
             http_config = config.settings.client.with_updates(**client_overrides)
             http_client = await HTTPEndpointClient.create(http_config, loop)

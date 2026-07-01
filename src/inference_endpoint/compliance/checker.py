@@ -134,8 +134,18 @@ def check_config_lock(config: dict[str, Any]) -> list[Check]:
     dl_seed = _get(config, "settings", "runtime", "dataloader_random_seed")
     seeds = {"model_params.seed": model_seed, "dataloader_random_seed": dl_seed}
     set_seeds = {k: v for k, v in seeds.items() if v is not None}
-    seeds_ok = bool(set_seeds) and all(v == 42 for v in set_seeds.values())
-    checks.append(Check("seed==42", seeds_ok, str(seeds)))
+    if not set_seeds:
+        # No seed anywhere: report the specific failure rather than an all-None
+        # dict that reads like "seed != 42".
+        seeds_ok = False
+        detail = "no seed set (expected seed==42)"
+    else:
+        offending = {k: v for k, v in set_seeds.items() if v != 42}
+        seeds_ok = not offending
+        detail = f"seeds={set_seeds}" + (
+            f" (expected 42; offending: {offending})" if offending else ""
+        )
+    checks.append(Check("seed==42", seeds_ok, detail))
 
     workers = _get(config, "settings", "client", "num_workers")
     conns = _get(config, "settings", "client", "max_connections")

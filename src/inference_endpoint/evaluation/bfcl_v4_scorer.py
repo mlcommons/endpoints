@@ -174,10 +174,8 @@ class BFCLv4Scorer(Scorer, scorer_id="bfcl_v4"):
         incorrectly count as "made a tool call." In practice this is rare
         since hallucination prompts elicit refusal text, not JSON.
         """
-        has_native_tool_calls = (
-            FunctionCallExtractor._try_parse_tool_calls_json(raw_output) is not None
-        )
-        return 1.0 if not has_native_tool_calls else 0.0
+        made_tool_call = FunctionCallExtractor.has_native_tool_calls(raw_output)
+        return 1.0 if not made_tool_call else 0.0
 
     def _score_ast(
         self,
@@ -243,8 +241,20 @@ class BFCLv4Scorer(Scorer, scorer_id="bfcl_v4"):
         """
         df = self.get_outputs()
 
-        valid_uuids = self.sample_index_map.keys()
-        df = df[df["sample_uuid"].isin(valid_uuids)]
+        # get_outputs() may return an empty, column-less frame (no COMPLETE
+        # events at all), so guard before indexing "sample_uuid".
+        if not df.empty:
+            valid_uuids = self.sample_index_map.keys()
+            df = df[df["sample_uuid"].isin(valid_uuids)]
+
+        if df.empty:
+            # No scorable samples: either the events log had no COMPLETE records
+            # or none map to a known sample_uuid. Emit the zero breakdown so
+            # results.json is well-formed; the sample_index lookup below would
+            # otherwise KeyError on the empty frame.
+            self._breakdown = self._zero_breakdown()
+            return 0.0, 1
+
         df = df.apply(self.match_sample_index, axis=1)
 
         if self.extractor is not None:
@@ -301,19 +311,6 @@ class BFCLv4Scorer(Scorer, scorer_id="bfcl_v4"):
 
             scores_by_subset[subset].append(s)
             all_scores.append(s)
-
-        if not all_scores:
-            # No samples matched (e.g. empty/filtered events log). Emit an
-            # explicit zero breakdown so results.json is well-formed.
-            self._breakdown = {
-                "overall_accuracy": 0.0,
-                "normalized_single_turn_score": 0.0,
-                "category_scores": {},
-                "subset_scores": {},
-                "unscored_subsets": {},
-                "total_samples": 0,
-            }
-            return 0.0, 1
 
         subset_results = {
             name: float(np.mean(scores)) for name, scores in scores_by_subset.items()
@@ -376,6 +373,18 @@ class BFCLv4Scorer(Scorer, scorer_id="bfcl_v4"):
         }
 
         return overall, n_repeats
+
+    @staticmethod
+    def _zero_breakdown() -> dict[str, Any]:
+        """Well-formed all-zero breakdown for a run with no scorable samples."""
+        return {
+            "overall_accuracy": 0.0,
+            "normalized_single_turn_score": 0.0,
+            "category_scores": {},
+            "subset_scores": {},
+            "unscored_subsets": {},
+            "total_samples": 0,
+        }
 
     def score_breakdown(self) -> dict[str, Any] | None:
         """Per-subset / per-category accuracy breakdown cached by :meth:`score`.

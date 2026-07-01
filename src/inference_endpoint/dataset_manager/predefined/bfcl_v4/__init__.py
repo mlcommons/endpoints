@@ -202,7 +202,9 @@ class BFCLv4(
                 Defaults to all single-turn subsets.
             sample_pct: Percentage (0-100) of samples to use from each subset. Applied
                 uniformly to every subset. Acts as the fallback rate for subsets whose
-                category is absent from `category_sample_pct`.
+                category is absent from `category_sample_pct`. If None (the default),
+                no percentage sampling is applied and every subset is kept in full
+                (equivalent to 100%); it does NOT mean 0%.
             category_sample_pct: Per-category sampling rates, e.g.
                 {"non_live": 20, "live": 10, "hallucination": 5}. A subset is sampled at
                 its category's rate; categories not listed fall back to `sample_pct`
@@ -257,6 +259,13 @@ class BFCLv4(
             )
 
         if not subsets:
+            logger.warning(
+                "BFCLv4.generate: no single-turn subsets to load after filtering "
+                "(requested subsets=%s, multi_turn_requested=%s) — returning an "
+                "empty DataFrame. Downstream scoring will produce a zero breakdown.",
+                subsets,
+                multi_turn_subsets_requested,
+            )
             return pd.DataFrame(columns=cls.COLUMN_NAMES)
 
         # Load or generate the full dataset (cached as parquet)

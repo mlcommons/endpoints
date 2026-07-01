@@ -410,6 +410,16 @@ class FunctionCallExtractor(Extractor, extractor_id="function_call_extractor"):
         return default
 
     @classmethod
+    def has_native_tool_calls(cls, text: str) -> bool:
+        """Whether ``text`` parses as serialized OpenAI ``tool_calls`` JSON.
+
+        Stable public entry point for consumers (e.g. hallucination scoring)
+        that only need to know whether the model emitted a structured tool call,
+        without reaching into the extractor's private parsing helpers.
+        """
+        return cls._try_parse_tool_calls_json(text) is not None
+
+    @classmethod
     def _try_parse_tool_calls_json(cls, text: str) -> str | None:
         """Parse serialized OpenAI tool_calls format.
 

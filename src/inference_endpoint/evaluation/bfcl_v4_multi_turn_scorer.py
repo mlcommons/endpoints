@@ -167,7 +167,12 @@ class BFCLv4MultiTurnScorer:
                 acc = subset_correct.get(subset, 0) / total * 100
                 subset_scores[subset] = f"{acc:.2f}"
 
-        # Category aggregate: unweighted mean of subset scores (matching evalscope)
+        # Category aggregate: unweighted mean of per-subset accuracies. This
+        # matches evalscope's multi-turn reporting, which averages the four
+        # multi_turn_* subsets equally regardless of their sample counts. The
+        # trade-off is deliberate: a small subset counts as much as a large one,
+        # so it is NOT a sample-weighted mean. Keep it unweighted to stay
+        # comparable with published evalscope multi-turn numbers.
         valid_subset_accs = [float(v) for v in subset_scores.values()]
         overall = (
             sum(valid_subset_accs) / len(valid_subset_accs)
