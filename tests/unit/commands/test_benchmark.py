@@ -39,6 +39,8 @@ from inference_endpoint.commands.benchmark.execute import (
     ResponseCollector,
     _build_phases,
     _derive_profile_urls,
+    _load_datasets,
+    _PerfPhaseTimeout,
     _post_profile,
     _render_profile_status,
     _run_benchmark_async,
@@ -339,6 +341,25 @@ datasets:
         called_config, called_mode = mock_run.call_args[0]
         assert called_config.timeout == 42.0
         assert called_mode == TestMode.BOTH
+
+    @pytest.mark.unit
+    @patch("inference_endpoint.commands.benchmark.cli.run_benchmark")
+    def test_from_config_report_dir_override(self, mock_run, tmp_path):
+        yaml_content = """
+type: "offline"
+model_params:
+  name: "test-model"
+endpoint_config:
+  endpoints: ["http://test:8000"]
+datasets:
+  - path: "test.jsonl"
+"""
+        config_file = tmp_path / "cfg.yaml"
+        config_file.write_text(yaml_content)
+        override_dir = tmp_path / "reports"
+        from_config(config=config_file, report_dir=override_dir)
+        called_config, _ = mock_run.call_args[0]
+        assert called_config.report_dir == override_dir
 
     @pytest.mark.unit
     def test_from_config_bad_yaml(self, tmp_path):
@@ -734,6 +755,79 @@ class TestAggregatorArgs:
         idx = args.index("--tokenizer-workers")
         expected = str(config.settings.drain.metrics_tokenizer_workers)
         assert args[idx + 1] == expected
+
+
+class TestAccuracyOnlyDatasetLoading:
+    """`--accuracy-only` must skip the performance dataset even when the config
+    carries one, so a single combined config can run accuracy on its own."""
+
+    def _config_with_perf_and_acc(self):
+        return OfflineConfig(
+            **_OFFLINE_KWARGS
+            | {
+                "datasets": [
+                    {"path": "perf.jsonl", "type": "performance"},
+                    {
+                        "path": "acc.jsonl",
+                        "type": "accuracy",
+                        "accuracy_config": {
+                            "eval_method": "pass_at_1",
+                            "ground_truth": "gt",
+                        },
+                    },
+                ]
+            }
+        )
+
+    @pytest.mark.unit
+    def test_accuracy_only_skips_performance_dataset(self, tmp_path):
+        config = self._config_with_perf_and_acc()
+        with (
+            patch(
+                "inference_endpoint.commands.benchmark.execute."
+                "DataLoaderFactory.create_loader",
+                return_value=MagicMock(),
+            ) as mock_create,
+            patch(
+                "inference_endpoint.commands.benchmark.execute."
+                "_resolve_accuracy_components",
+                return_value=(Scorer.get("pass_at_1"), None),
+            ),
+        ):
+            dataloader, acc_datasets, eval_configs = _load_datasets(
+                config, tmp_path, TestMode.ACC
+            )
+
+        assert dataloader is None
+        assert len(acc_datasets) == 1
+        # Only the accuracy dataset is loaded; the perf dataset is never touched.
+        assert mock_create.call_count == 1
+        # No inline "performance" eval is registered in accuracy-only mode.
+        assert all(ec.dataset_name != "performance" for ec in eval_configs)
+
+    @pytest.mark.unit
+    def test_default_run_loads_performance_dataset(self, tmp_path):
+        config = self._config_with_perf_and_acc()
+        with (
+            patch(
+                "inference_endpoint.commands.benchmark.execute."
+                "DataLoaderFactory.create_loader",
+                return_value=MagicMock(),
+            ) as mock_create,
+            patch(
+                "inference_endpoint.commands.benchmark.execute."
+                "_resolve_accuracy_components",
+                return_value=(Scorer.get("pass_at_1"), None),
+            ),
+        ):
+            dataloader, acc_datasets, _ = _load_datasets(
+                config, tmp_path, TestMode.BOTH
+            )
+
+        assert dataloader is not None
+        assert len(acc_datasets) == 1
+        # Both the perf and accuracy datasets are loaded.
+        assert mock_create.call_count == 2
 
 
 class TestBuildPhases:
@@ -1330,6 +1424,93 @@ class TestSetupBenchmarkTokenizer:
             ctx = setup_benchmark(config, TestMode.PERF)
 
         assert ctx.tokenizer_name is None
+
+
+class _FakeTimerHandle:
+    def __init__(self) -> None:
+        self.cancelled = False
+
+    def cancel(self) -> None:
+        self.cancelled = True
+
+
+class _FakeLoop:
+    """Minimal event loop stub recording call_later scheduling."""
+
+    def __init__(self) -> None:
+        self.scheduled: list[tuple[float, object, _FakeTimerHandle]] = []
+
+    def call_later(self, delay, callback):
+        handle = _FakeTimerHandle()
+        self.scheduled.append((delay, callback, handle))
+        return handle
+
+
+class TestPerfPhaseTimeout:
+    """The max_duration_ms cap must bound only the performance phase and never
+    truncate a subsequent accuracy phase (regression: a combined perf+accuracy
+    run was guillotined mid-accuracy because the perf timer was never cancelled).
+    """
+
+    @pytest.mark.unit
+    def test_armed_on_performance_phase(self):
+        loop = _FakeLoop()
+        fired: list[bool] = []
+        timeout = _PerfPhaseTimeout(loop, 4000, lambda: fired.append(True))
+
+        timeout.on_phase_start(PhaseType.PERFORMANCE)
+
+        assert len(loop.scheduled) == 1
+        delay, callback, handle = loop.scheduled[0]
+        assert delay == pytest.approx(4.0)
+        assert handle.cancelled is False
+        callback()
+        assert fired == [True]
+
+    @pytest.mark.unit
+    def test_cancelled_when_accuracy_phase_starts(self):
+        loop = _FakeLoop()
+        timeout = _PerfPhaseTimeout(loop, 4000, lambda: None)
+
+        timeout.on_phase_start(PhaseType.PERFORMANCE)
+        perf_handle = loop.scheduled[0][2]
+        timeout.on_phase_start(PhaseType.ACCURACY)
+
+        assert perf_handle.cancelled is True
+        # No new timer armed for the accuracy phase.
+        assert len(loop.scheduled) == 1
+
+    @pytest.mark.unit
+    def test_not_armed_without_max_duration(self):
+        loop = _FakeLoop()
+        timeout = _PerfPhaseTimeout(loop, None, lambda: None)
+
+        timeout.on_phase_start(PhaseType.PERFORMANCE)
+
+        assert loop.scheduled == []
+
+    @pytest.mark.unit
+    def test_not_armed_for_non_performance_phase(self):
+        loop = _FakeLoop()
+        timeout = _PerfPhaseTimeout(loop, 4000, lambda: None)
+
+        timeout.on_phase_start(PhaseType.WARMUP)
+        timeout.on_phase_start(PhaseType.ACCURACY)
+
+        assert loop.scheduled == []
+
+    @pytest.mark.unit
+    def test_cancel_is_idempotent(self):
+        loop = _FakeLoop()
+        timeout = _PerfPhaseTimeout(loop, 4000, lambda: None)
+
+        timeout.cancel()  # no handle yet — must not raise
+        timeout.on_phase_start(PhaseType.PERFORMANCE)
+        handle = loop.scheduled[0][2]
+        timeout.cancel()
+        timeout.cancel()
+
+        assert handle.cancelled is True
 
 
 class TestProfilingHelpers:

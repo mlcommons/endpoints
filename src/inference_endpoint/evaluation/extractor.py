@@ -14,10 +14,12 @@
 # limitations under the License.
 
 
+import ast
 import inspect
+import json
 import re
 from abc import ABC, abstractmethod
-from typing import ClassVar
+from typing import Any, ClassVar
 
 
 class Extractor(ABC):
@@ -301,3 +303,290 @@ class PythonCodeExtractor(Extractor, extractor_id="python_code_extractor"):
             return code
 
         return default
+
+
+class FunctionCallExtractor(Extractor, extractor_id="function_call_extractor"):
+    """Extract function call(s) from model output for BFCL evaluation.
+
+    Extraction priority (highest to lowest fidelity):
+    1. Native tool_calls JSON (serialized by the adapter when the endpoint returns
+       structured tool_calls -- this is the most reliable path)
+    2. JSON array of {"name": "...", "arguments": {...}} objects
+    3. Text-based function calls (LAST RESORT -- regex heuristic, may produce
+       false positives from explanatory text or fail on nested parentheses)
+
+    The extractor normalizes all formats into a JSON string representation
+    suitable for comparison by the bfcl-eval scoring library.
+
+    Examples:
+        >>> # Native tool_calls (serialized by adapter) -- preferred path
+        >>> text = '[{"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{\\"city\\":\\"London\\"}"}}]'
+        >>> FunctionCallExtractor.extract(text)
+        '[{"name": "get_weather", "arguments": {"city": "London"}}]'
+
+        >>> # Text-based function call (last resort fallback)
+        >>> text = "get_weather(city='London')"
+        >>> FunctionCallExtractor.extract(text)
+        '[{"name": "get_weather", "arguments": {"city": "London"}}]'
+    """
+
+    _SKIP_NAMES = frozenset(
+        {
+            "print",
+            "return",
+            "if",
+            "for",
+            "while",
+            "def",
+            "class",
+            "import",
+            "from",
+            "with",
+            "assert",
+            "raise",
+            "try",
+            "except",
+            "len",
+            "str",
+            "int",
+            "float",
+            "list",
+            "dict",
+            "set",
+            "tuple",
+            "type",
+            "isinstance",
+            "range",
+            "enumerate",
+            "zip",
+            "map",
+            "filter",
+            "Note",
+            "Example",
+            "Here",
+            "This",
+            "The",
+            "For",
+        }
+    )
+
+    _FUNC_START_PATTERN = re.compile(r"\b([A-Za-z_]\w*)\s*\(")
+
+    @classmethod
+    def extract(cls, text: str, default: str | None = None) -> str | None:
+        """Extract function calls from model output text.
+
+        Args:
+            text: Raw model output (either serialized tool_calls JSON or text)
+            default: Default value if extraction fails
+
+        Returns:
+            JSON string of normalized function calls, or default on failure
+        """
+        if not text or not isinstance(text, str):
+            return default
+
+        text = text.strip()
+        if not text:
+            return default
+
+        # Priority 1: Native tool_calls JSON (from adapter serialization)
+        result = cls._try_parse_tool_calls_json(text)
+        if result is not None:
+            return result
+
+        # Priority 2: JSON array of function call objects
+        result = cls._try_parse_function_array(text)
+        if result is not None:
+            return result
+
+        # Priority 3 (last resort): Text-based function calls.
+        # This path is inherently heuristic and may not handle all edge cases
+        # (e.g., deeply nested parentheses, function-like text in explanations).
+        result = cls._try_parse_text_function_calls(text)
+        if result is not None:
+            return result
+
+        return default
+
+    @classmethod
+    def has_native_tool_calls(cls, text: str) -> bool:
+        """Whether ``text`` parses as serialized OpenAI ``tool_calls`` JSON.
+
+        Stable public entry point for consumers (e.g. hallucination scoring)
+        that only need to know whether the model emitted a structured tool call,
+        without reaching into the extractor's private parsing helpers.
+        """
+        return cls._try_parse_tool_calls_json(text) is not None
+
+    @classmethod
+    def _try_parse_tool_calls_json(cls, text: str) -> str | None:
+        """Parse serialized OpenAI tool_calls format.
+
+        Expected format: [{"id":"...","type":"function","function":{"name":"...","arguments":"..."}}]
+        """
+        try:
+            data = json.loads(text)
+            if not isinstance(data, list):
+                return None
+
+            calls: list[dict[str, Any]] = []
+            for item in data:
+                if not isinstance(item, dict):
+                    return None
+                func_data = item.get("function")
+                if func_data is None:
+                    return None
+
+                name = func_data.get("name", "")
+                arguments = func_data.get("arguments", "{}")
+
+                if isinstance(arguments, str):
+                    try:
+                        arguments = json.loads(arguments)
+                    except (json.JSONDecodeError, ValueError):
+                        pass
+
+                calls.append({"name": name, "arguments": arguments})
+
+            if calls:
+                return json.dumps(calls)
+        except (json.JSONDecodeError, ValueError, TypeError):
+            pass
+        return None
+
+    @classmethod
+    def _try_parse_function_array(cls, text: str) -> str | None:
+        """Parse a JSON array of function call dicts: [{"name": "...", "arguments": {...}}]"""
+        try:
+            data = json.loads(text)
+            if not isinstance(data, list):
+                return None
+
+            calls: list[dict[str, Any]] = []
+            for item in data:
+                if not isinstance(item, dict):
+                    return None
+                if "name" not in item:
+                    return None
+                calls.append(
+                    {
+                        "name": item["name"],
+                        "arguments": item.get("arguments", {}),
+                    }
+                )
+
+            if calls:
+                return json.dumps(calls)
+        except (json.JSONDecodeError, ValueError, TypeError):
+            pass
+        return None
+
+    @classmethod
+    def _find_balanced_parens(cls, text: str, start: int) -> int | None:
+        """Find the closing paren matching the opening paren at `start`.
+
+        Returns the index of the matching ')' or None if unbalanced.
+        Handles nested parentheses, strings (single/double quotes), and brackets.
+        """
+        depth = 0
+        i = start
+        in_single_quote = False
+        in_double_quote = False
+        length = len(text)
+
+        while i < length:
+            ch = text[i]
+            if ch == "\\" and (in_single_quote or in_double_quote):
+                i += 2
+                continue
+            if ch == "'" and not in_double_quote:
+                in_single_quote = not in_single_quote
+            elif ch == '"' and not in_single_quote:
+                in_double_quote = not in_double_quote
+            elif not in_single_quote and not in_double_quote:
+                if ch == "(":
+                    depth += 1
+                elif ch == ")":
+                    depth -= 1
+                    if depth == 0:
+                        return i
+            i += 1
+        return None
+
+    @classmethod
+    def _try_parse_text_function_calls(cls, text: str) -> str | None:
+        """Parse text-based function calls like func_name(arg1='val1', arg2=42).
+
+        Uses balanced parenthesis matching to handle nested calls.
+        Applies heuristics to reject likely false positives from natural language.
+        Tracks consumed ranges to avoid extracting inner calls that are actually
+        arguments of an outer call.
+        """
+        calls: list[dict[str, Any]] = []
+        consumed_ranges: list[tuple[int, int]] = []
+
+        for match in cls._FUNC_START_PATTERN.finditer(text):
+            match_start = match.start()
+
+            if any(s <= match_start < e for s, e in consumed_ranges):
+                continue
+
+            func_name = match.group(1)
+            if func_name in cls._SKIP_NAMES:
+                continue
+
+            paren_open = match.end() - 1
+            paren_close = cls._find_balanced_parens(text, paren_open)
+            if paren_close is None:
+                continue
+
+            consumed_ranges.append((paren_open, paren_close + 1))
+
+            args_str = text[paren_open + 1 : paren_close].strip()
+
+            if args_str and cls._looks_like_signature(args_str):
+                continue
+
+            arguments = cls._parse_arguments_string(args_str)
+            calls.append({"name": func_name, "arguments": arguments})
+
+        if calls:
+            return json.dumps(calls)
+        return None
+
+    @classmethod
+    def _looks_like_signature(cls, args_str: str) -> bool:
+        """Return True if args look like a type signature rather than real arguments.
+
+        Bare identifiers without '=' or literal values (e.g., 'city', 'x, y')
+        suggest a declaration or documentation reference, not an actual invocation.
+        """
+        parts = [p.strip() for p in args_str.split(",")]
+        return all(re.fullmatch(r"[A-Za-z_]\w*(?:\s*:\s*\w+)?", p) for p in parts if p)
+
+    @classmethod
+    def _parse_arguments_string(cls, args_str: str) -> dict[str, Any]:
+        """Parse a function arguments string into a dict.
+
+        Handles: key='value', key=123, key=True, key=None, key=[1,2,3]
+        Falls back to returning the raw string if parsing fails.
+        """
+        if not args_str:
+            return {}
+
+        arguments: dict[str, Any] = {}
+        try:
+            fake_dict = f"dict({args_str})"
+            tree = ast.parse(fake_dict, mode="eval")
+            if isinstance(tree.body, ast.Call):
+                for kw in tree.body.keywords:
+                    if kw.arg is not None:
+                        try:
+                            arguments[kw.arg] = ast.literal_eval(kw.value)
+                        except (ValueError, SyntaxError):
+                            arguments[kw.arg] = ast.unparse(kw.value)
+        except (SyntaxError, ValueError):
+            arguments = {"_raw": args_str}
+
+        return arguments

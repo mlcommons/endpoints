@@ -216,6 +216,47 @@ def test_from_endpoint_response_populates_tool_calls_in_text_output():
 
 
 @pytest.mark.unit
+def test_seed_forwarded_in_metadata():
+    """seed from ModelParams is propagated into the request metadata dict."""
+    from inference_endpoint.config.schema import ModelParams
+    from inference_endpoint.dataset_manager.transforms import AddStaticColumns
+
+    model_params = ModelParams(name="test-model", seed=42)
+    transforms = OpenAIMsgspecAdapter.dataset_transforms(model_params)
+    injector = next(t for t in transforms if isinstance(t, AddStaticColumns))
+    assert injector.data.get("seed") == 42
+
+
+@pytest.mark.unit
+def test_seed_none_when_not_set():
+    """seed key is present but None in metadata when ModelParams.seed is not configured."""
+    from inference_endpoint.config.schema import ModelParams
+    from inference_endpoint.dataset_manager.transforms import AddStaticColumns
+
+    model_params = ModelParams(name="test-model")
+    transforms = OpenAIMsgspecAdapter.dataset_transforms(model_params)
+    injector = next(t for t in transforms if isinstance(t, AddStaticColumns))
+    assert injector.data.get("seed") is None
+
+
+@pytest.mark.unit
+def test_seed_in_request_payload():
+    """seed passes through to_endpoint_request when present in query data."""
+    query = Query(
+        id="q-seed",
+        data={
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "seed": 99,
+        },
+    )
+    request = OpenAIMsgspecAdapter.to_endpoint_request(query)
+    encoded = msgspec.json.encode(request)
+    payload = json.loads(encoded)
+    assert payload.get("seed") == 99
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "field_name",
     ["reasoning", "reasoning_content"],

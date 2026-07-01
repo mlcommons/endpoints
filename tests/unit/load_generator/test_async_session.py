@@ -389,6 +389,43 @@ class TestBenchmarkSession:
         assert result.perf_results[0].issued_count < 100_000
 
     @pytest.mark.asyncio
+    async def test_stop_current_phase_advances_to_accuracy(self):
+        """A perf-phase timeout must end only that phase, not skip accuracy.
+
+        Mirrors _PerfPhaseTimeout firing mid-perf: stop_current_phase cancels
+        the perf strategy without setting the session-wide stop flag, so the
+        following accuracy phase still runs to completion.
+        """
+        loop = asyncio.get_running_loop()
+        issuer = FakeIssuer()
+        issuer._loop = loop
+        publisher = FakePublisher()
+
+        session = BenchmarkSession(issuer, publisher, loop)
+        loop.call_later(0.05, session.stop_current_phase)
+
+        phases = [
+            PhaseConfig(
+                "perf",
+                _make_settings(n_samples=100_000, max_duration_ms=10_000),
+                FakeDataset(100),
+                PhaseType.PERFORMANCE,
+            ),
+            PhaseConfig(
+                "acc", _make_settings(n_samples=3), FakeDataset(3), PhaseType.ACCURACY
+            ),
+        ]
+        result = await asyncio.wait_for(session.run(phases), timeout=10.0)
+
+        # Perf was cut short by the phase-scoped stop...
+        assert result.perf_results[0].issued_count < 100_000
+        # ...but the accuracy phase still ran to completion.
+        assert len(result.accuracy_results) == 1
+        assert result.accuracy_results[0].issued_count == 3
+        # The session-wide stop flag was never set.
+        assert session._stop_requested is False
+
+    @pytest.mark.asyncio
     async def test_on_sample_complete_callback(self):
         loop = asyncio.get_running_loop()
         issuer = FakeIssuer()
