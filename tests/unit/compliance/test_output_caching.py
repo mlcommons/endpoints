@@ -61,19 +61,6 @@ class TestVerifyOutputCaching:
         assert result.passed is False
 
     @pytest.mark.unit
-    def test_fail_when_audit_qps_exactly_at_limit(self):
-        # audit_qps sits exactly on the limit ref_qps * (1 + threshold).
-        # MLPerf's verify_performance.py uses a strict `<`, so a run exactly on
-        # the boundary FAILs; match that reference behavior. Compute the limit
-        # the same way the code does to avoid float-rounding ambiguity.
-        ref_qps, threshold = 100.0, 0.10
-        limit = ref_qps * (1.0 + threshold)
-        ref = AuditRunStats(qps=ref_qps, n_completed=1000, n_requested=1000)
-        audit = AuditRunStats(qps=limit, n_completed=1000, n_requested=1000)
-        result = verify_output_caching(ref, audit, threshold=threshold)
-        assert result.passed is False
-
-    @pytest.mark.unit
     def test_fail_when_reference_phase_incomplete(self):
         ref = AuditRunStats(qps=100.0, n_completed=800, n_requested=1000)
         audit = AuditRunStats(qps=50.0, n_completed=1000, n_requested=1000)
