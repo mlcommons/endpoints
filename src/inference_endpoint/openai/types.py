@@ -218,6 +218,8 @@ class TextCompletionRequest(
     prompt: str | list[int]
     temperature: float | None = None
     max_tokens: int | None = None
+    min_tokens: int | None = None
+    skip_special_tokens: bool | None = None
     stream: bool | None = None
     top_p: float | None = None
     top_k: int | None = None
