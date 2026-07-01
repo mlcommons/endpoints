@@ -99,6 +99,7 @@ Dataset Manager --> Load Generator --> Endpoint Client --> External Endpoint
 | **TensorRT-LLM**         | `src/inference_endpoint/trtllm/`                                                                                   | Adapter for TensorRT-LLM endpoints. `TRTLLMAdapter` sends requests; `TRTLLMSSEAccumulator` handles SSE streaming responses.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | **DeepSeek-R1 (MLPerf)** | `src/inference_endpoint/evaluation/scoring.py` (`LegacyMLPerfDeepSeekR1Scorer`), `examples/07_DeepSeekR1_Example/` | MLPerf DeepSeek-R1 accuracy. TensorRT-LLM is OpenAI-compatible, so it is served via `api_type: openai` / `openai_completions` (no dedicated trtllm adapter). The combined multi-subset eval (`math500`/`aime`/`gpqa`/`mmlu_pro`/`livecodebench`) is the official MLCommons `eval_accuracy.py`, run out-of-process via `uv run --project` against the isolated subproject at `src/inference_endpoint/evaluation/legacy_mlperf_deepseek_r1/` (a uv subproject excluded from the parent wheel; mirrors the VBench pattern). The example feeds the exact MLPerf prompt via pre-tokenized `input_tokens` to `/v1/completions`.                                                                                                                       |
 | **VideoGen**             | `src/inference_endpoint/videogen/`                                                                                 | Adapter for video-generation endpoints (e.g. trtllm-serve `POST /v1/videos/generations`, used by MLPerf WAN2.2-T2V-A14B). Defaults to `response_format=video_path` (server saves video to shared storage and returns path) to avoid large byte payloads. Accuracy mode also runs on `video_path`: the adapter mirrors the path into `response_output` so the event log carries it to `VBenchScorer` (see `evaluation/scoring.py`), which scores videos via VBench from a sibling `uv` subproject at `examples/09_Wan22_VideoGen_Example/accuracy/` (vbench's `transformers==4.33.2` + `numpy<2` pins are incompatible with the parent env, so it runs out-of-process via `uv run --project`). Dataset is ingested via the generic JSONL loader. |
+| **Compliance**         | `src/inference_endpoint/compliance/`, `commands/audit.py`         | MLPerf compliance audits. `AuditTest` protocol + `AuditRunSpec`/`AuditRunStats`/`AuditRunArtifacts` + test registry (`compliance/__init__.py`); `OutputCachingAudit` (`compliance/audit_test/output_caching_test.py`) implements the **output-caching** audit (MLPerf **TEST04**) caching detection — a reference phase over distinct samples vs an audit phase repeating one fixed sample (`SingleSampleOrder`), failing if audit QPS exceeds reference QPS by more than `threshold`. `commands/audit.py:run_audit` orchestrates the phases back-to-back, refuses to certify an incomplete phase, and writes `verify_OUTPUT_CACHING_TEST.txt` + `audit_result.json` atomically (under `<report_dir>/audit/`) via `compliance/result.py`. Enabled by the YAML `audit:` block (`AuditConfig`/`OutputCachingTestConfig`, `AuditTestId.OUTPUT_CACHING_TEST` in `schema.py`); the CLI (`cli._run`) dispatches to it after the main run. Performance-only; load patterns whose score is a throughput rate (`max_throughput` → MLPerf Offline, `concurrency`/`poisson` → MLPerf Server). |
 
 ### Hot-Path Architecture
 
@@ -155,6 +156,16 @@ Validation is layered:
 - `poisson`: Fixed QPS with Poisson arrival distribution
 - `concurrency`: Fixed concurrent requests
 
+### Compliance Audits
+
+Orthogonal to the main run: a YAML-only `audit:` block (`show=False`, no CLI flag) on `BenchmarkConfig` selects an `AuditTest`. `cli._run` runs the main benchmark via `run_benchmark`, then — if `audit:` is set — calls `commands/audit.py:run_audit`, which:
+
+1. Validates the load pattern (`max_throughput`/`concurrency`/`poisson` — the throughput-rate scenarios) and the configured `sample_index` bounds (reusing the first phase's loaded dataset — no extra load).
+2. Runs each `AuditRunSpec` phase (from `AuditTest.plan_runs`) back-to-back under its own `<report_dir>/<label>/` subdir via `setup_benchmark`/`run_benchmark_async`. A phase whose `Report.complete` is `False` (drain timeout / interrupt) aborts with `ExecutionError` — no verdict on partial data.
+3. Calls `AuditTest.verify(...)` and atomically writes `verify_<TEST>.txt` + `audit_result.json`.
+
+`run_audit` returns an `AuditResult`; `cli.py` maps `passed` to the process exit code (0 PASS / 1 FAIL; setup/IO errors → non-zero via the standard error path). The output-caching audit (MLPerf TEST04) is the only registered audit today (`AuditTestId.OUTPUT_CACHING_TEST`); add new audits by implementing the `AuditTest` protocol and calling `register(...)` in `compliance/audit_test/`.
+
 ## Code Organization
 
 ```
@@ -165,11 +176,18 @@ src/inference_endpoint/
 │   ├── benchmark/
 │   │   ├── __init__.py
 │   │   ├── cli.py             # benchmark_app: offline, online, from-config subcommands
-│   │   └── execute.py         # Phased execution: setup/run_threaded/finalize + BenchmarkContext
+│   │   └── execute.py         # Phased execution: setup/run_threaded/finalize + BenchmarkContext; run_benchmark runs the main benchmark (cli._run dispatches run_audit when audit: is set)
+│   ├── audit.py               # run_audit() — compliance audit orchestrator (phases → verify → result)
 │   ├── probe.py               # ProbeConfig + execute_probe()
 │   ├── info.py                # execute_info()
 │   ├── validate.py            # execute_validate()
 │   └── init.py                # execute_init()
+├── compliance/                # MLPerf compliance audits
+│   ├── __init__.py            # AuditTest protocol + AuditRunSpec/AuditRunStats/AuditRunArtifacts + test registry
+│   ├── result.py              # AuditResult + atomic write_result (verify_<TEST>.txt + audit_result.json)
+│   └── audit_test/             # registered audit tests (register(...) on import)
+│       ├── output_caching_test.py  # OutputCachingAudit (MLPerf TEST04): caching detection (reference vs fixed-sample QPS)
+│       └── README.md           # TEST04 output-caching audit usage (WAN 2.2 example)
 ├── core/
 │   ├── types.py               # APIType, Query, QueryResult, StreamChunk, QueryStatus (msgspec Structs)
 │   └── record.py              # EventRecord — transport record used by event logger and ZMQ transport
@@ -178,7 +196,7 @@ src/inference_endpoint/
 │   ├── strategy.py            # TimedIssueStrategy, BurstStrategy, ConcurrencyStrategy, LoadStrategy
 │   ├── agentic_inference_strategy.py # AgenticInferenceStrategy
 │   ├── conversation_manager.py # ConversationManager, ConversationState
-│   ├── sample_order.py        # SampleOrder, WithoutReplacementSampleOrder, WithReplacementSampleOrder
+│   ├── sample_order.py        # SampleOrder, WithoutReplacement/WithReplacement/SingleSampleOrder, create_sample_order
 │   └── delay.py               # poisson_delay_fn, make_delay_fn
 ├── endpoint_client/
 │   ├── http_client.py         # HTTPEndpointClient - main client interface
@@ -219,7 +237,7 @@ src/inference_endpoint/
 │   └── metric.py              # Metric types (Throughput, etc.)
 ├── config/
 │   ├── schema.py              # Single source of truth: Pydantic models + cyclopts annotations
-│   ├── runtime_settings.py    # RuntimeSettings dataclass
+│   ├── runtime_settings.py    # RuntimeSettings + SampleOrderSpec dataclasses
 │   ├── ruleset_base.py        # BenchmarkSuiteRuleset base
 │   ├── ruleset_registry.py    # Ruleset registry
 │   ├── user_config.py         # UserConfig dataclass for ruleset user overrides
