@@ -1,0 +1,47 @@
+# Online benchmark with vendor-agnostic power monitoring.
+# See docs/POWER_MONITORING.md. Power telemetry is collected during the
+# performance phase and written to <report_dir>/power.json + a section in
+# report.txt. A broken collector never fails the benchmark.
+name: "online-power-example"
+version: "1.0"
+type: "online"
+
+model_params:
+  name: "meta-llama/Llama-3.1-8B-Instruct"
+  temperature: 0.0
+  max_new_tokens: 128
+
+datasets:
+  - name: cnn_dailymail::llama3_8b
+    type: "performance"
+    samples: 2000
+    parser:
+      input: prompt
+
+settings:
+  runtime:
+    min_duration_ms: 300000
+    max_duration_ms: 1800000
+
+  load_pattern:
+    type: "concurrency"
+    target_concurrency: 64
+
+  client:
+    num_workers: 4
+
+  # --- Power monitoring -----------------------------------------------------
+  # Built-in nvidia-smi sidecar on the load-generator host. For a remote GPU
+  # node, switch to the `prometheus` source (DCGM exporter) or an ssh-wrapped
+  # `command` source — see docs/POWER_MONITORING.md.
+  power:
+    source: nvidia_smi
+    interval_s: 1.0
+    # options: { gpu_indices: [0, 1, 2, 3] }   # default: all visible GPUs
+
+endpoint_config:
+  endpoints:
+    - "http://localhost:8000"
+  api_key: null
+
+report_dir: logs/power_example
