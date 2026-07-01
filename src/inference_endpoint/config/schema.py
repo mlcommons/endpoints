@@ -56,6 +56,23 @@ class SystemDefaults(BaseModel):
     DEFAULT_METRIC: ClassVar[metrics.Metric] = metrics.Throughput(0.0)
 
 
+def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    """Recursively merge ``override`` into ``base`` and return the result.
+
+    For overlapping keys whose values are both dicts, recurse; otherwise the
+    override value wins. Mutates a *copy* — callers can safely pass model_dump()
+    output. Used by ``Dataset.effective_generation_config`` so a sparse nested
+    override (e.g. ``{osl_distribution: {max: 512}}``) preserves siblings.
+    """
+    out = dict(base)
+    for k, v in override.items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = _deep_merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
 class LoadPatternType(str, Enum):
     """Load pattern types."""
 
@@ -361,6 +378,38 @@ class Dataset(BaseModel):
     agentic_inference: AgenticInferenceConfig | None = Field(
         None, description="Agentic inference conversation configuration"
     )
+    # TODO(post-mortem): generation config is per-phase (perf vs. accuracy),
+    # not per-dataset — phases are derived from datasets and the override is
+    # keyed to dataset identity. This lives on Dataset as a short-term WAR
+    # so MLPerf-style accuracy + perf can share one fleet. The proper fix is
+    # a first-class GenerationConfig carried on PhaseConfig, decoupled from
+    # the dataset entry. Field/method names use "generation_config" to keep
+    # the eventual migration mechanical.
+    #
+    # Caveats on per-dataset overrides today:
+    #   - `name` flows into the request `model` field but the tokenizer and
+    #     aggregator are launched from the global `model_params.name`, so a
+    #     per-dataset rename mismatches ISL/OSL accounting.
+    #   - `streaming` flows into the request but the single MetricsAggregator
+    #     is launched with the global `model_params.streaming` flag, so a
+    #     per-dataset streaming flip will not produce TTFT/TPOT for that
+    #     phase. Keep streaming on `model_params` (per-run) for now.
+    #   - Nested dicts (`osl_distribution`, `chat_template_kwargs`) are
+    #     deep-merged so sparse overrides preserve sibling defaults.
+    generation_config_override: dict[str, Any] | None = Field(
+        None,
+        description=(
+            "Per-dataset overrides for the top-level model_params (sparse — "
+            "only the fields you want to override). Merged on top of "
+            "BenchmarkConfig.model_params at dataset-load time. Useful for "
+            "MLPerf-style runs where accuracy and performance use different "
+            "output budgets in the same fleet, e.g. "
+            "generation_config_override: {max_new_tokens: 32768, "
+            "temperature: 0.0}. NOTE: per-dataset `streaming` and `name` are "
+            "accepted (kwargs-style) but not honored by the single-aggregator "
+            "metrics path — set those on top-level model_params."
+        ),
+    )
 
     @model_validator(mode="after")
     def _auto_derive_name(self) -> Self:
@@ -368,6 +417,40 @@ class Dataset(BaseModel):
         if not self.name and self.path:
             object.__setattr__(self, "name", Path(self.path).stem)
         return self
+
+    @model_validator(mode="after")
+    def _validate_generation_config_override(self) -> Self:
+        """Fail fast on unknown keys; values are validated at merge time
+        (see ``effective_generation_config``) because cross-field validation
+        needs the base ``ModelParams`` from ``BenchmarkConfig``.
+        """
+        if self.generation_config_override:
+            valid = set(ModelParams.model_fields)
+            bad = sorted(set(self.generation_config_override) - valid)
+            if bad:
+                raise ValueError(
+                    f"Dataset '{self.name}': unknown keys in "
+                    f"generation_config_override: {bad}. "
+                    f"Valid keys: {sorted(valid)}"
+                )
+        return self
+
+    def effective_generation_config(self, base: ModelParams) -> ModelParams:
+        """Return base merged with this dataset's generation-config overrides.
+
+        Nested dicts are deep-merged so a sparse nested override preserves
+        sibling defaults (e.g. ``{osl_distribution: {max: 512}}`` keeps the
+        base ``type/mean/std/min``). The merged dict is re-validated through
+        ``ModelParams.model_validate`` so type-invalid scalar overrides (e.g.
+        ``temperature: 'hot'``) are rejected. Note that this only catches
+        scalar invalidity — a sparse nested override whose merged result
+        passes default-validation will not raise (callers that need stricter
+        nested validation should set ``base`` to an explicit instance).
+        """
+        if not self.generation_config_override:
+            return base
+        merged = _deep_merge(base.model_dump(), self.generation_config_override)
+        return ModelParams.model_validate(merged)
 
 
 class AccuracyConfig(BaseModel):
