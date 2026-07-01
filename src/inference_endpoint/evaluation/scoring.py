@@ -324,6 +324,18 @@ class RougeScorer(Scorer, scorer_id="rouge"):
         return result, 1
 
 
+def _uv_subproject_env(project_path: os.PathLike | str) -> dict[str, str]:
+    """Env for ``uv run --project <project_path>`` pinned to the subproject's OWN
+    ``.venv``.
+
+    Without this, an inherited ``UV_PROJECT_ENVIRONMENT`` (the dev image sets it
+    to ``/opt/venv``) redirects ``uv`` to the parent environment instead of the
+    isolated subproject venv - defeating the whole out-of-process isolation.
+    Mirrors how ``setup_eval.sh`` provisioned it (``UV_PROJECT_ENVIRONMENT=$(pwd)/.venv``).
+    """
+    return {**os.environ, "UV_PROJECT_ENVIRONMENT": str(Path(project_path) / ".venv")}
+
+
 def _lcb_ws_evaluate(
     url: str, codes_dict: dict[str, list[str]], timeout_sec: int
 ) -> dict | None:
@@ -1513,6 +1525,7 @@ class VBenchScorer(Scorer, scorer_id="vbench"):
                 stderr=subprocess.STDOUT,
                 text=True,
                 timeout=self.subprocess_timeout_s,
+                env=_uv_subproject_env(self.vbench_project_path),
             )
         except subprocess.TimeoutExpired as e:
             partial = (
@@ -1693,8 +1706,9 @@ class LegacyMLPerfDeepSeekR1Scorer(Scorer, scorer_id="legacy_mlperf_deepseek_r1"
         # executor can't sandbox. When a port is set, the livecodebench subset
         # is graded out-of-band against the lcb-service WebSocket container
         # (ws://localhost:<port>/evaluate); the rest go through the subprocess.
-        # If the socket is unreachable, score() falls back to grading all
-        # subsets in the subprocess (prior behavior).
+        # If the socket is unreachable, livecodebench is left UNSCORED and the
+        # run is marked incomplete (it is never graded in-process). With no port
+        # configured, grading LCB in-process requires an explicit ALLOW_LCB_LOCAL=1.
         self.lcb_subset = lcb_subset
         self.lcb_timeout = lcb_timeout
         self.lcb_websocket_url = (
@@ -1774,6 +1788,7 @@ class LegacyMLPerfDeepSeekR1Scorer(Scorer, scorer_id="legacy_mlperf_deepseek_r1"
                 stderr=subprocess.STDOUT,
                 text=True,
                 timeout=self.subprocess_timeout_s,
+                env=_uv_subproject_env(self.project_path),
             )
         except subprocess.TimeoutExpired as e:
             partial = (
@@ -1883,7 +1898,17 @@ class LegacyMLPerfDeepSeekR1Scorer(Scorer, scorer_id="legacy_mlperf_deepseek_r1"
         use_container = self.lcb_websocket_url is not None and n_lcb > 0
 
         if not use_container:
-            # No container (or no LCB rows): grade every subset in-process.
+            # Refuse to grade untrusted livecodebench code in-process without the
+            # sandboxed container, unless explicitly opted in. (n_lcb == 0 is
+            # safe: no LCB rows means no untrusted code to execute.)
+            if n_lcb > 0 and os.environ.get("ALLOW_LCB_LOCAL") != "1":
+                raise RuntimeError(
+                    "livecodebench rows present but no lcb-service container is "
+                    "configured (set lcb_websocket_port). Refusing to execute "
+                    "untrusted model-generated code in-process; configure the "
+                    "container, or set ALLOW_LCB_LOCAL=1 to override."
+                )
+            # No LCB rows (or explicit opt-in): grade every subset in-process.
             self._run_eval_subprocess(input_parquet, out_json)
             results = msgspec.json.decode(out_json.read_bytes())
             exact_match = results.get("exact_match")

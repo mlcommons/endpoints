@@ -189,4 +189,8 @@ class LegacyMLPerfDeepSeekR1(Dataset, dataset_id="legacy_mlperf_deepseek_r1"):
             )
             for _, group in df.groupby("dataset")
         ]
-        return pd.concat(parts).sample(frac=1, random_state=seed).reset_index(drop=True)
+        # The per-subset >=1 floor + rounding can push the pool over max_samples
+        # (e.g. many subsets, small max_samples); shuffle and trim so the result
+        # stays stratified but never returns more than requested.
+        pool = pd.concat(parts).sample(frac=1, random_state=seed)
+        return pool.head(max_samples).reset_index(drop=True)

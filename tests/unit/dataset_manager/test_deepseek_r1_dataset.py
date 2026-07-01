@@ -208,9 +208,28 @@ def test_stratified_subset(tmp_path: Path):
     df = LegacyMLPerfDeepSeekR1.generate(
         datasets_dir=tmp_path / "cache", source=src, max_samples=10
     )
-    assert 8 <= len(df) <= 12
+    assert len(df) == 10  # never overshoots the requested size
     # Both subsets represented (proportional sampling, not all-from-one).
     assert set(df["dataset"]) == {"math500", "gpqa"}
+
+
+def test_stratified_subset_never_overshoots(tmp_path: Path):
+    # Many subsets + small max_samples: the per-subset >=1 floor summed to 5
+    # (one per subset) and overshot a request of 3. Must be capped at max_samples.
+    src = tmp_path / "many.parquet"
+    pd.DataFrame(
+        {
+            "input_tokens": [[1]] * 50,
+            "ground_truth": ["g"] * 50,
+            "dataset": ["a"] * 10 + ["b"] * 10 + ["c"] * 10 + ["d"] * 10 + ["e"] * 10,
+            "question": ["q"] * 50,
+        }
+    ).to_parquet(src, index=False)
+
+    df = LegacyMLPerfDeepSeekR1.generate(
+        datasets_dir=tmp_path / "cache", source=src, max_samples=3
+    )
+    assert len(df) == 3
 
 
 def test_get_dataloader_loads_msgspec_safe_tokens(

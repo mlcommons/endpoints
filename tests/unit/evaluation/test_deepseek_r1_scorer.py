@@ -146,6 +146,22 @@ class TestLegacyMLPerfDeepSeekR1Scorer:
         assert Path(cmd[3]) == project
         assert Path(cmd[5]) == project / "deepseek_eval_runner.py"
 
+    def test_subprocess_pins_subproject_venv(
+        self, dataset, staged, project, patch_subprocess
+    ):
+        """The eval subprocess pins UV_PROJECT_ENVIRONMENT to the subproject's own
+        .venv, so an inherited value (e.g. /opt/venv in the dev image) can't
+        redirect uv to the parent environment."""
+        scorer = LegacyMLPerfDeepSeekR1Scorer(
+            dataset_name="dsr1_acc",
+            dataset=dataset,
+            report_dir=staged,
+            deepseek_eval_project_path=project,
+        )
+        scorer.score()
+        env = patch_subprocess["kwargs"]["env"]
+        assert env["UV_PROJECT_ENVIRONMENT"] == str(project / ".venv")
+
     def test_eval_dataframe_columns_and_mapping(
         self, dataset, staged, project, patch_subprocess
     ):
@@ -410,6 +426,39 @@ class TestLegacyMLPerfDeepSeekR1ScorerContainer:
         scorer = self._scorer(dataset, staged, project)
         with pytest.raises(RuntimeError, match="timed out after"):
             scorer.score()
+
+    def test_no_container_with_lcb_rows_refuses(
+        self, dataset, staged, project, patch_subprocess, monkeypatch
+    ):
+        """With livecodebench rows but no container, refuse to run untrusted code
+        in-process unless ALLOW_LCB_LOCAL is set."""
+        monkeypatch.delenv("ALLOW_LCB_LOCAL", raising=False)
+        scorer = LegacyMLPerfDeepSeekR1Scorer(
+            dataset_name="dsr1_acc",
+            dataset=dataset,
+            report_dir=staged,
+            deepseek_eval_project_path=project,
+            lcb_websocket_port=None,
+        )
+        with pytest.raises(RuntimeError, match="ALLOW_LCB_LOCAL"):
+            scorer.score()
+
+    def test_allow_lcb_local_opt_in_grades_in_process(
+        self, dataset, staged, project, patch_subprocess, monkeypatch
+    ):
+        """ALLOW_LCB_LOCAL=1 opts into in-process LCB grading (no container)."""
+        monkeypatch.setenv("ALLOW_LCB_LOCAL", "1")
+        scorer = LegacyMLPerfDeepSeekR1Scorer(
+            dataset_name="dsr1_acc",
+            dataset=dataset,
+            report_dir=staged,
+            deepseek_eval_project_path=project,
+            lcb_websocket_port=None,
+        )
+        score, _ = scorer.score()
+        assert score is not None
+        # Graded all subsets in-process: no subset marked --external-subsets.
+        assert patch_subprocess["external"][0] == []
 
     def test_failed_text_subset_marks_incomplete(
         self, dataset, staged, project, monkeypatch
