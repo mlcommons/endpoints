@@ -26,6 +26,7 @@ loop never special-cases a test.
 class AuditTest(Protocol):
     test_id: ClassVar[AuditTestId]                          # AuditTestId.OUTPUT_CACHING_TEST
     def plan_runs(self, cfg: AuditConfig) -> list[AuditRunSpec]: ...
+    def validate(self, cfg: AuditConfig, dataset_size: int, load_pattern: LoadPatternType) -> None: ...
     def verify(self, runs: list[AuditRunArtifacts], cfg: AuditConfig) -> AuditResult: ...
 ```
 
@@ -88,7 +89,7 @@ _intent_ over this repo's own artifacts.
 This repo names MLPerf **TEST04** the **output-caching test**: id `output_caching_test`
 (`AuditTestId.OUTPUT_CACHING_TEST`), config class `OutputCachingTestConfig`, audit
 `OutputCachingAudit`, and artifacts (under `<report_dir>/audit/`)
-`verify_OUTPUT_CACHING_TEST.txt` + `audit_result.json`. Where this doc writes
+`audit_result.json` + `verify_OUTPUT_CACHING_TEST.txt`. Where this doc writes
 "TEST04" it means the upstream MLPerf test the output-caching audit re-implements.
 
 ---
@@ -138,7 +139,7 @@ benchmark from-config
             │
             │ 3. verify(runs, cfg) ; 4. write_result (atomic)
             ▼
-   <report_dir>/audit/ : verify_OUTPUT_CACHING_TEST.txt  +  audit_result.json
+   <report_dir>/audit/ : audit_result.json  +  verify_OUTPUT_CACHING_TEST.txt
 ```
 
 ### Program flow (output-caching audit / MLPerf TEST04, two phases)
@@ -240,11 +241,12 @@ before the audit.
             └──────────────────────────────────────────┘
 ```
 
-The first-phase gate calls `AuditTest.validate(cfg, N)` once `N` (the loaded dataset size)
-is known: each audit owns its own preconditions there, so the generic loop never encodes a
-single test's rules. For the output-caching test that means the distinct-sample reference
-count must fit the dataset (else `WithoutReplacementSampleOrder` would wrap and re-issue,
-making the baseline cacheable) and every fixed `sample_index` must be in range. A failure
+The first-phase gate calls `AuditTest.validate(cfg, N, load_pattern)` once `N` (the loaded
+dataset size) is known: each audit owns its own preconditions there, so the generic loop
+never encodes a single test's rules. For the output-caching test that means only
+`max_throughput`/`concurrency` are accepted, the distinct-sample reference count must fit
+the dataset (else `WithoutReplacementSampleOrder` would wrap and re-issue, making the
+baseline cacheable), and every fixed `sample_index` must be in range. A failure
 raises `SetupError` (exit 3) before any phase issues load.
 
 Analyzer tests (TEST06/07/09) take the same path with a single-element `plan_runs`, so
@@ -411,11 +413,11 @@ re-check-from-disk adapter — the audit runs only via `benchmark from-config`.
 
 ```
 src/inference_endpoint/compliance/
-├── __init__.py        # AuditTest protocol, AuditRunSpec/Stats/Artifacts, get_audit_test(); imports audit_test to register
-├── result.py          # AuditResult + atomic write → verify_<TEST>.txt + audit_result.json
+├── __init__.py        # AuditTest protocol, AuditRunSpec/Stats/Artifacts, AUDIT_TESTS map, get_audit_test()
+├── result.py          # AuditResult + atomic write → audit_result.json + verify_<TEST>.txt
 └── audit_test/
-    ├── __init__.py     # imports test modules so their register(...) calls fire
-    ├── output_caching_test.py  # OutputCachingAudit: plan_runs (reference + audit specs) + verify_output_caching core
+    ├── __init__.py     # package marker for the AuditTest implementations
+    ├── output_caching_test.py  # OutputCachingAudit: plan_runs (reference + audit specs) + validate + verify_output_caching core
     └── README.md       # usage: config block, load patterns, output, pass criteria
 ```
 
@@ -560,7 +562,7 @@ run; `verify` reads `events.jsonl` and checks mean OSL within `[ref × 0.9, ref 
 ## 8. Success criteria (goal-driven; verify before done)
 
 1. **Integration** — `benchmark from-config` with an `audit:` block runs both phases
-   back-to-back and writes `verify_OUTPUT_CACHING_TEST.txt` + `audit_result.json`; PASS against a
+   back-to-back and writes `audit_result.json` + `verify_OUTPUT_CACHING_TEST.txt`; PASS against a
    no-caching `mock_http_echo_server`, FAIL against a caching mock.
 2. **Completion guard** — a phase that completes far fewer than its _requested_ count fails
    the result (`completed < requested × (1 − threshold)` → FAIL), independent of the other

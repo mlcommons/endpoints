@@ -160,7 +160,7 @@ Validation is layered:
 
 Orthogonal to the main run: a YAML-only `audit:` block (`show=False`, no CLI flag) on `BenchmarkConfig` selects an `AuditTest`. `cli._run` runs the main benchmark, then — if `audit:` is set — calls `commands/audit.py:run_audit`, which:
 
-1. Builds a performance-only per-phase config (drops accuracy datasets so no phase re-issues or re-scores them) and, after the first phase's dataset loads, calls `AuditTest.validate(cfg, dataset_size)` to bounds-check the test's sample counts/indices before any phase issues load (reuses the loaded dataset — no extra load).
+1. Builds a performance-only per-phase config (drops accuracy datasets so no phase re-issues or re-scores them) and, after the first phase's dataset loads, calls `AuditTest.validate(cfg, dataset_size, load_pattern)` to bounds-check the test's sample counts/indices and load pattern before any phase issues load (reuses the loaded dataset — no extra load).
 2. Runs each `AuditRunSpec` phase (from `AuditTest.plan_runs`) back-to-back under its own `<report_dir>/<label>/` subdir via `setup_benchmark`/`run_benchmark_async`. A phase whose `Report.complete` is `False` (drain timeout / interrupt) aborts with `ExecutionError` — no verdict on partial data.
 3. Calls `AuditTest.verify(...)` and atomically writes `audit_result.json` (durable record) then `verify_<TEST>.txt` (validator marker).
 
@@ -184,8 +184,8 @@ src/inference_endpoint/
 │   └── init.py                # execute_init()
 ├── compliance/                # MLPerf compliance audits
 │   ├── __init__.py            # AuditTest protocol + AuditRunSpec/AuditRunStats/AuditRunArtifacts + test registry
-│   ├── result.py              # AuditResult + atomic write_result (verify_<TEST>.txt + audit_result.json)
-│   └── audit_test/             # registered audit tests (register(...) on import)
+│   ├── result.py              # AuditResult + atomic write_result (audit_result.json + verify_<TEST>.txt)
+│   └── audit_test/             # audit tests, added to the AUDIT_TESTS map in compliance/__init__.py
 │       ├── output_caching_test.py  # OutputCachingAudit (MLPerf TEST04): caching detection (reference vs fixed-sample QPS)
 │       └── README.md           # TEST04 output-caching audit usage (WAN 2.2 example)
 ├── core/

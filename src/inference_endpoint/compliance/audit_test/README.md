@@ -53,16 +53,17 @@ audit:
 
 ## Supported load patterns
 
-The audit compares achieved QPS, so it accepts only the load patterns whose score is a
-throughput rate:
+The audit compares achieved QPS, so it only accepts load patterns where that QPS reflects
+the SUT's own serving capacity, not an external arrival schedule:
 
-| Load pattern     | MLPerf scenario                       |
-| ---------------- | ------------------------------------- |
-| `max_throughput` | Offline (`Samples per second`)        |
-| `concurrency`    | Server (`Completed samples per sec.`) |
-| `poisson`        | Server (`Completed samples per sec.`) |
+| Load pattern     | MLPerf scenario                |
+| ---------------- | ------------------------------ |
+| `max_throughput` | Offline (`Samples per second`) |
+| `concurrency`    | Single-Stream                  |
 
-`agentic_inference`, `burst`, and `step` are rejected before any phase runs.
+`poisson`, `agentic_inference`, `burst`, and `step` are rejected before any phase runs — a
+rate-paced pattern like `poisson` can pin achieved QPS below SUT capacity regardless of
+caching, which would mask the exact signal this audit exists to detect.
 
 ## Pass criteria
 
@@ -92,8 +93,8 @@ main run's output:
 <report_dir>/audit/
 ├── reference/                    # reference-phase report dir
 ├── output_caching/               # audit-phase report dir
-├── verify_OUTPUT_CACHING_TEST.txt  # "Performance check pass: True|False"
-└── audit_result.json             # full result + comparison details
+├── audit_result.json             # full result + comparison details (written first)
+└── verify_OUTPUT_CACHING_TEST.txt  # "Performance check pass: True|False"
 ```
 
 `audit_result.json`:
