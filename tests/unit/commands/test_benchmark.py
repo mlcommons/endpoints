@@ -38,8 +38,8 @@ from inference_endpoint.commands.benchmark.execute import (
     BenchmarkContext,
     ResponseCollector,
     _build_phases,
-    _load_datasets,
     _derive_profile_urls,
+    _load_datasets,
     _post_profile,
     _render_profile_status,
     _run_benchmark_async,
@@ -1477,6 +1477,8 @@ class TestLoadDatasetsGenerationConfigOverrideCompletions(_OverrideTestBase):
 
     api_type = "openai_completions"
     max_tokens_key = "max_tokens"
+
+
 class TestProfilingHelpers:
     @pytest.mark.unit
     @pytest.mark.parametrize(
