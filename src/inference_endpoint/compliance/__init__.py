@@ -29,7 +29,7 @@ from .result import AuditResult
 
 if TYPE_CHECKING:
     from ..config.runtime_settings import SampleOrderSpec
-    from ..config.schema import AuditConfig, AuditTestId
+    from ..config.schema import AuditConfig, AuditTestId, LoadPatternType
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,12 +91,14 @@ class AuditTest(Protocol):
         self, runs: list[AuditRunArtifacts], cfg: AuditConfig
     ) -> AuditResult: ...
 
-    def validate(self, cfg: AuditConfig, dataset_size: int) -> None:
-        """Raise SetupError if cfg is invalid for a dataset of dataset_size.
+    def validate(
+        self, cfg: AuditConfig, dataset_size: int, load_pattern: LoadPatternType
+    ) -> None:
+        """Raise SetupError if cfg is invalid for a dataset_size / load_pattern.
 
         Owns every precondition that is specific to this audit (e.g. which
-        sample counts/indices its phases can use) so the generic orchestrator
-        stays test-agnostic.
+        sample counts/indices its phases can use, which load patterns produce
+        a meaningful comparison) so the generic orchestrator stays test-agnostic.
         """
         ...
 

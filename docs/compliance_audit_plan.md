@@ -347,13 +347,17 @@ specific test:
 1. `test = get_audit_test(config.audit.test)`
 2. `specs = test.plan_runs(config.audit)`
 3. **Validate before any run executes.** The first phase's `setup_benchmark` loads the
-   dataset; its row count `N` is then handed to `test.validate(config.audit, N)`, which owns
-   every test-specific precondition (the orchestrator stays test-agnostic — it imposes no
-   load-pattern restriction of its own). For the output-caching test that means the
-   distinct-sample reference count must fit `N` (else the order wraps and re-issues samples,
-   making the baseline cacheable) and every fixed `sample_index` must be in `[0, N)`. This
-   reuses the first load — no separate probe — and surfaces a bad config as `SetupError`
-   before any phase issues load.
+   dataset; its row count `N` and the configured load pattern are then handed to
+   `test.validate(config.audit, N, load_pattern)`, which owns every test-specific
+   precondition (the orchestrator itself imposes no load-pattern restriction — each
+   `AuditTest` decides which patterns produce a meaningful comparison for its own metric).
+   For the output-caching test that means: only `max_throughput`/`concurrency` are accepted
+   (a rate-paced pattern like `poisson` can pin achieved QPS below SUT capacity regardless of
+   caching, masking the exact signal this audit exists to detect); the distinct-sample
+   reference count must fit `N` (else the order wraps and re-issues samples, making the
+   baseline cacheable); and every fixed `sample_index` must be in `[0, N)`. This reuses the
+   first load — no separate probe — and surfaces a bad config as `SetupError` before any
+   phase issues load.
 4. Execute each spec back-to-back via the existing `setup_benchmark` /
    `run_benchmark_async` path (no duplicated report-dir or `config.yaml` logic). Each phase
    config is performance-only (accuracy datasets dropped so no phase re-issues or re-scores
@@ -530,8 +534,8 @@ class Test01Audit:
             AuditRunSpec("accuracy",    cfg.samples, SampleOrderSpec.without_replacement()),
         ]
 
-    def validate(self, cfg: AuditConfig, dataset_size: int) -> None:
-        ...  # bounds-check this test's phases against the dataset
+    def validate(self, cfg: AuditConfig, dataset_size: int, load_pattern: LoadPatternType) -> None:
+        ...  # bounds-check this test's phases against the dataset / load pattern
 
     def verify(self, runs: list[AuditRunArtifacts], cfg: AuditConfig) -> AuditResult:
         perf, acc = runs
@@ -571,8 +575,9 @@ run; `verify` reads `events.jsonl` and checks mean OSL within `[ref × 0.9, ref 
    issues `audit_samples` (defaulting to `samples` when omitted), validation fires before any
    run, the typed result propagates (PASS/FAIL distinguishable), and a phase config never
    carries `audit` (no re-entry).
-5. **Validation** — `AuditTest.validate` rejects an out-of-range `sample_index` and a
-   reference count exceeding the loaded dataset, both before any phase runs.
+5. **Validation** — `AuditTest.validate` rejects an out-of-range `sample_index`, a
+   reference count exceeding the loaded dataset, and a rate-paced load pattern
+   (`poisson`/`agentic_inference`/`burst`/`step`), all before any phase runs.
 6. **Robustness** — `AuditRunStats.from_report` raises a clean `ValueError` on a report with no
    duration (`qps is None`) or non-positive throughput (`qps <= 0`); a phase whose
    `Report.complete` is `False` (metrics drain timeout / interrupt) aborts the audit with

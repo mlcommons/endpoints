@@ -99,7 +99,9 @@ def run_audit(config: BenchmarkConfig, base_report_dir: Path) -> AuditResult:
             ctx = setup_benchmark(phase_config, TestMode.PERF, run_spec=spec)
             if dataset_size is None:
                 dataset_size = ctx.dataloader.num_samples()
-                test.validate(audit_cfg, dataset_size)
+                test.validate(
+                    audit_cfg, dataset_size, config.settings.load_pattern.type
+                )
             bench = run_benchmark_async(ctx)
             finalize_benchmark(ctx, bench)
         except (SetupError, ExecutionError):

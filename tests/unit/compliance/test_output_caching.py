@@ -35,7 +35,11 @@ from inference_endpoint.compliance.audit_test.output_caching_test import (
     verify_output_caching,
 )
 from inference_endpoint.compliance.result import AuditResult, write_result
-from inference_endpoint.config.schema import AuditTestId, OutputCachingTestConfig
+from inference_endpoint.config.schema import (
+    AuditTestId,
+    LoadPatternType,
+    OutputCachingTestConfig,
+)
 from inference_endpoint.exceptions import ExecutionError, SetupError
 
 # ---------------------------------------------------------------------------
@@ -211,7 +215,7 @@ class TestOutputCachingAuditVerify:
 
 
 # ---------------------------------------------------------------------------
-# OutputCachingAudit.validate — dataset bounds checks
+# OutputCachingAudit.validate — dataset bounds + load-pattern checks
 # ---------------------------------------------------------------------------
 
 
@@ -225,28 +229,57 @@ class TestOutputCachingAuditValidate:
         )
 
     @pytest.mark.unit
-    def test_passes_when_within_bounds(self):
+    @pytest.mark.parametrize(
+        "pattern", [LoadPatternType.MAX_THROUGHPUT, LoadPatternType.CONCURRENCY]
+    )
+    def test_passes_when_within_bounds(self, pattern):
         # reference count <= dataset and fixed index in range → no raise.
-        OutputCachingAudit().validate(self._cfg(samples=50, sample_index=10), 100)
+        OutputCachingAudit().validate(
+            self._cfg(samples=50, sample_index=10), 100, pattern
+        )
 
     @pytest.mark.unit
     def test_rejects_reference_count_exceeding_dataset(self):
         # reference draws distinct samples → count must not exceed the dataset.
         with pytest.raises(SetupError, match="exceeds dataset size"):
-            OutputCachingAudit().validate(self._cfg(samples=200), 100)
+            OutputCachingAudit().validate(
+                self._cfg(samples=200), 100, LoadPatternType.MAX_THROUGHPUT
+            )
 
     @pytest.mark.unit
     def test_allows_audit_count_exceeding_dataset(self):
         # The audit phase repeats one fixed sample, so its count may exceed the
         # dataset; only the distinct-sample reference count is bounded.
         OutputCachingAudit().validate(
-            self._cfg(samples=50, audit_samples=500, sample_index=0), 100
+            self._cfg(samples=50, audit_samples=500, sample_index=0),
+            100,
+            LoadPatternType.MAX_THROUGHPUT,
         )
 
     @pytest.mark.unit
     def test_rejects_out_of_range_sample_index(self):
         with pytest.raises(SetupError, match="out of .*range"):
-            OutputCachingAudit().validate(self._cfg(samples=50, sample_index=100), 100)
+            OutputCachingAudit().validate(
+                self._cfg(samples=50, sample_index=100),
+                100,
+                LoadPatternType.MAX_THROUGHPUT,
+            )
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "pattern",
+        [
+            LoadPatternType.POISSON,
+            LoadPatternType.AGENTIC_INFERENCE,
+            LoadPatternType.BURST,
+            LoadPatternType.STEP,
+        ],
+    )
+    def test_rejects_rate_paced_or_incompatible_load_pattern(self, pattern):
+        # A rate-paced (or turn-sequenced) pattern can pin achieved QPS below
+        # SUT capacity, masking a caching-induced speedup — reject up front.
+        with pytest.raises(SetupError, match="load pattern"):
+            OutputCachingAudit().validate(self._cfg(), 100, pattern)
 
 
 # ---------------------------------------------------------------------------
@@ -359,6 +392,7 @@ class TestRunAuditGuards:
         config.audit = OutputCachingTestConfig(
             test=AuditTestId.OUTPUT_CACHING_TEST, samples=4, sample_index=sample_index
         )
+        config.settings.load_pattern.type = LoadPatternType.MAX_THROUGHPUT
         perf_ds = MagicMock()
         perf_ds.type.value = "performance"
         config.datasets = [perf_ds]
@@ -389,6 +423,17 @@ class TestRunAuditGuards:
         config = self._audit_config(sample_index=500)
         self._patch_phase(monkeypatch, num_samples=100, bench=MagicMock())
         with pytest.raises(SetupError, match="out of .*range"):
+            run_audit(config, tmp_path)
+
+    @pytest.mark.unit
+    def test_rejects_rate_paced_load_pattern(self, tmp_path, monkeypatch):
+        """A poisson (rate-paced) load pattern is rejected via test.validate()
+        before any phase issues load — it can pin achieved QPS below SUT
+        capacity, masking a caching-induced speedup."""
+        config = self._audit_config()
+        config.settings.load_pattern.type = LoadPatternType.POISSON
+        self._patch_phase(monkeypatch, num_samples=100, bench=MagicMock())
+        with pytest.raises(SetupError, match="load pattern"):
             run_audit(config, tmp_path)
 
     @pytest.mark.unit

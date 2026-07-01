@@ -30,13 +30,24 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, ClassVar
 
 from ...config.runtime_settings import SampleOrderSpec
-from ...config.schema import AuditTestId
+from ...config.schema import AuditTestId, LoadPatternType
 from ...exceptions import SetupError
 from .. import AuditRunArtifacts, AuditRunSpec, AuditRunStats
 from ..result import AuditResult
 
 if TYPE_CHECKING:
     from ...config.schema import AuditConfig, OutputCachingTestConfig
+
+# Only load patterns where achieved QPS is bounded by the SUT's own serving
+# capacity, not by the load generator's arrival schedule. max_throughput
+# (Offline) issues everything at once; concurrency keeps a fixed number of
+# requests in flight, so QPS = concurrency / latency directly reflects SUT
+# speed. A rate-paced pattern (poisson) pins the arrival rate independently
+# of the SUT: if that rate is at or below what the SUT can already sustain,
+# a caching-induced speedup never surfaces as higher completed QPS — both
+# phases just complete at the pinned rate, masking the exact signal this
+# audit exists to detect.
+_VALID_LOAD_PATTERNS = (LoadPatternType.MAX_THROUGHPUT, LoadPatternType.CONCURRENCY)
 
 
 class OutputCachingAudit:
@@ -63,8 +74,10 @@ class OutputCachingAudit:
             ),
         ]
 
-    def validate(self, cfg: AuditConfig, dataset_size: int) -> None:
-        """Bounds-check the planned phases against the loaded dataset size.
+    def validate(
+        self, cfg: AuditConfig, dataset_size: int, load_pattern: LoadPatternType
+    ) -> None:
+        """Bounds-check the planned phases and load pattern.
 
         The reference phase draws distinct samples without replacement; if its
         count exceeds the dataset, the order wraps and re-issues samples, making
@@ -72,6 +85,13 @@ class OutputCachingAudit:
         speedup. The audit phase pins one fixed index, which must exist — but its
         count may exceed the dataset, since it repeats that single sample.
         """
+        if load_pattern not in _VALID_LOAD_PATTERNS:
+            valid = ", ".join(p.value for p in _VALID_LOAD_PATTERNS)
+            raise SetupError(
+                f"Output-caching audit requires a load pattern where achieved "
+                f"QPS reflects SUT capacity ({valid}); got {load_pattern.value!r}, "
+                "which would mask a caching-induced speedup"
+            )
         for spec in self.plan_runs(cfg):
             idx = spec.sample_order.fixed_index
             if idx is None:
