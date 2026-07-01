@@ -34,6 +34,9 @@ from inference_endpoint.async_utils.services.metrics_aggregator.metrics_table im
 from inference_endpoint.async_utils.services.metrics_aggregator.registry import (
     MetricsRegistry,
 )
+from inference_endpoint.async_utils.services.metrics_aggregator.token_metrics import (
+    TokenBatchQueue,
+)
 from inference_endpoint.core.record import (
     EventRecord,
     SampleEventType,
@@ -294,13 +297,13 @@ class TestOslTriggerToolCalls:
         )
         from inference_endpoint.core.types import TextModelOutput
 
-        from .conftest import MockTokenizePool, snapshot_series_count
+        from .conftest import MockBatchTokenizer, snapshot_series_count
 
         registry = MetricsRegistry()
         registry.register_series("osl", hdr_low=1, hdr_high=100_000)
         loop = asyncio.get_running_loop()
-        pool = MockTokenizePool(delay=0)
-        trigger = OslTrigger(registry, pool, loop)
+        queue = TokenBatchQueue(MockBatchTokenizer(), loop)
+        trigger = OslTrigger(registry, queue)
 
         tool_calls = (
             {
@@ -317,9 +320,8 @@ class TestOslTriggerToolCalls:
             data=tmo,
         )
         row = SampleRow(sample_uuid="s1")
-        task = trigger.fire(ev, row, {})
-        assert task is not None
-        await task
+        trigger.fire(ev, row, {})
+        await queue.drain_all()
 
         assert snapshot_series_count(registry, "osl") == 1
 
@@ -331,13 +333,13 @@ class TestOslTriggerToolCalls:
         )
         from inference_endpoint.core.types import TextModelOutput
 
-        from .conftest import MockTokenizePool, snapshot_series_count
+        from .conftest import MockBatchTokenizer, snapshot_series_count
 
         registry = MetricsRegistry()
         registry.register_series("osl", hdr_low=1, hdr_high=100_000)
         loop = asyncio.get_running_loop()
-        pool = MockTokenizePool(delay=0)
-        trigger = OslTrigger(registry, pool, loop)
+        queue = TokenBatchQueue(MockBatchTokenizer(), loop)
+        trigger = OslTrigger(registry, queue)
 
         tmo = TextModelOutput(output="hello world")
         ev = EventRecord(
@@ -347,9 +349,8 @@ class TestOslTriggerToolCalls:
             data=tmo,
         )
         row = SampleRow(sample_uuid="s1")
-        task = trigger.fire(ev, row, {})
-        assert task is not None
-        await task
+        trigger.fire(ev, row, {})
+        await queue.drain_all()
 
         assert snapshot_series_count(registry, "osl") == 1
 
@@ -368,15 +369,15 @@ class TestTpotTriggerToolCalls:
         )
         from inference_endpoint.core.types import TextModelOutput
 
-        from .conftest import MockTokenizePool, snapshot_series_count
+        from .conftest import MockBatchTokenizer, snapshot_series_count
 
         registry = MetricsRegistry()
         registry.register_series(
             "tpot_ns", hdr_low=1, hdr_high=100_000_000_000, dtype=float
         )
         loop = asyncio.get_running_loop()
-        pool = MockTokenizePool(delay=0)
-        trigger = TpotTrigger(registry, pool, loop)
+        queue = TokenBatchQueue(MockBatchTokenizer(), loop)
+        trigger = TpotTrigger(registry, queue)
 
         tool_calls = (
             {
@@ -395,9 +396,8 @@ class TestTpotTriggerToolCalls:
         row = SampleRow(sample_uuid="s1")
         # RECV_FIRST_NS was set at t=1000
         pre_change = {SampleField.RECV_FIRST_NS: 1000}
-        task = trigger.fire(ev, row, pre_change)
-        assert task is not None
-        await task
+        trigger.fire(ev, row, pre_change)
+        await queue.drain_all()
 
         assert snapshot_series_count(registry, "tpot_ns") == 1
 
@@ -409,15 +409,15 @@ class TestTpotTriggerToolCalls:
         )
         from inference_endpoint.core.types import TextModelOutput
 
-        from .conftest import MockTokenizePool, snapshot_series_total
+        from .conftest import MockBatchTokenizer, snapshot_series_total
 
         registry = MetricsRegistry()
         registry.register_series(
             "tpot_ns", hdr_low=1, hdr_high=100_000_000_000, dtype=float
         )
         loop = asyncio.get_running_loop()
-        pool = MockTokenizePool(delay=0)
-        trigger = TpotTrigger(registry, pool, loop)
+        queue = TokenBatchQueue(MockBatchTokenizer(), loop)
+        trigger = TpotTrigger(registry, queue)
 
         tool_call_chunks = (
             (
@@ -442,9 +442,8 @@ class TestTpotTriggerToolCalls:
         )
         row = SampleRow(sample_uuid="s1")
         pre_change = {SampleField.RECV_FIRST_NS: 1000}
-        task = trigger.fire(ev, row, pre_change)
-        assert task is not None
-        await task
+        trigger.fire(ev, row, pre_change)
+        await queue.drain_all()
 
         assert snapshot_series_total(registry, "tpot_ns") == pytest.approx(2000.0)
 
