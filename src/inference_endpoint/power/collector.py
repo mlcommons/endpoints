@@ -135,7 +135,10 @@ class PowerCollector:
     @staticmethod
     def _signal_group(proc: subprocess.Popen[bytes], sig: int) -> None:
         try:
-            os.killpg(os.getpgid(proc.pid), sig)
+            if hasattr(os, "killpg") and hasattr(os, "getpgid"):
+                os.killpg(os.getpgid(proc.pid), sig)
+            else:  # Windows: no process groups
+                proc.send_signal(sig)
         except (ProcessLookupError, PermissionError):
             proc.send_signal(sig)
 

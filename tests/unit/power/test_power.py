@@ -182,6 +182,31 @@ def test_energy_counter_kind_uses_delta(tmp_path):
     assert rep["totals"]["energy_j"] == pytest.approx(4000.0)
 
 
+def test_energy_counter_kind_detects_midrun_reset(tmp_path):
+    # A counter reset mid-window (100 -> 150 -> 20 -> 110) has a positive
+    # last-minus-first delta (10) but is unusable; must return None, not 10.
+    f = tmp_path / "c.log"
+    f.write_text(
+        '{"ts": 1000.0, "value": 100.0, "label": "node"}\n'
+        '{"ts": 1005.0, "value": 150.0, "label": "node"}\n'
+        '{"ts": 1010.0, "value": 20.0, "label": "node"}\n'
+        '{"ts": 1015.0, "value": 110.0, "label": "node"}\n'
+    )
+    rep = build_power_report(
+        resolved=_jsonl_source(value_kind="energy_j"),
+        trace_path=f,
+        window_start_epoch_s=1000.0,
+        window_end_epoch_s=1015.0,
+        output_tokens=None,
+        token_window_basis="performance_phase_tracked",
+        consistent_with_window=True,
+        collector_status="ok",
+        collector_error=None,
+        interval_s=5.0,
+    )
+    assert rep["totals"]["energy_j"] is None
+
+
 def test_epot_suppressed_when_inconsistent(tmp_path):
     f = tmp_path / "p.log"
     f.write_text(

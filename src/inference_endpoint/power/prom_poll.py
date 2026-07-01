@@ -35,13 +35,13 @@ import urllib.parse
 import urllib.request
 
 
-def _series_label(metric: dict[str, str]) -> str:
+def _series_label(metric: dict[str, str] | None) -> str:
     """Stable label from a Prometheus metric's labels (gpu/instance preferred)."""
+    if not metric:
+        return "default"
     for key in ("gpu", "device", "instance", "__name__"):
         if key in metric:
             return str(metric[key])
-    if not metric:
-        return "default"
     return ",".join(f"{k}={v}" for k, v in sorted(metric.items()))
 
 

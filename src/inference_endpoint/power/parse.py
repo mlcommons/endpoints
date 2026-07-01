@@ -77,6 +77,9 @@ def _parse_jsonl(path: Path, src: ResolvedSource) -> ParseResult:
                 continue
             try:
                 obj = json.loads(line)
+                if not isinstance(obj, dict):
+                    dropped += 1
+                    continue
                 ts = _parse_ts(str(obj[src.ts_field]))
                 value = float(obj[src.value_field])
                 label = (
@@ -108,9 +111,12 @@ def _parse_csv(path: Path, src: ResolvedSource) -> ParseResult:
                 except (ValueError, KeyError, TypeError):
                     dropped += 1
         else:
-            ts_i = int(src.ts_field)
-            val_i = int(src.value_field)
-            lbl_i = int(src.label_field) if src.label_field else None
+            try:
+                ts_i = int(src.ts_field)
+                val_i = int(src.value_field)
+                lbl_i = int(src.label_field) if src.label_field else None
+            except (ValueError, TypeError):
+                return ParseResult(samples=[], dropped=0)
             for row in csv.reader(f):
                 try:
                     ts = _parse_ts(row[ts_i])

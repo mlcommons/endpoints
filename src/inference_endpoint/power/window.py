@@ -54,8 +54,15 @@ def _energy_j(samples: list[PowerSample], value_kind: str) -> float | None:
     if len(samples) < 2:
         return None
     if value_kind == "energy_j":
-        delta = samples[-1].value - samples[0].value
-        return delta if delta >= 0 else None  # counter reset → unusable
+        # Sum non-negative adjacent deltas; a mid-run counter reset (negative
+        # delta) makes the whole total unusable, even if last-first is positive.
+        total = 0.0
+        for a, b in zip(samples, samples[1:], strict=False):
+            delta = b.value - a.value
+            if delta < 0:
+                return None  # counter reset → unusable
+            total += delta
+        return total
     total = 0.0
     for a, b in zip(samples, samples[1:], strict=False):
         dt = b.ts_epoch_s - a.ts_epoch_s
