@@ -12,7 +12,13 @@ environments = [
 
 [tool.uv.build-backend]
 module-root = "src"
-source-exclude = ["inference_endpoint/evaluation/livecodebench/_server.py"]
+source-exclude = [
+    "inference_endpoint/evaluation/livecodebench/_server.py",
+    # Isolated uv subproject (own pyproject.toml/uv.lock; pinned transformers /
+    # numpy<2 / prm800k that conflict with the parent env). Invoked only via
+    # `uv run --project`, never imported - keep it out of the parent wheel.
+    "inference_endpoint/evaluation/legacy_mlperf_deepseek_r1/**",
+]
 
 [project]
 name = "inference-endpoint"
@@ -139,6 +145,8 @@ exclude = [
     "tests/assets/datasets/*",
     "src/inference_endpoint/openai/openai_types_gen.py",
     "src/inference_endpoint/openai/openapi.yaml",
+    # Vendored third-party MLCommons evaluator - keep verbatim.
+    "src/inference_endpoint/evaluation/legacy_mlperf_deepseek_r1/mlperf_eval/",
     "datasets/*",
     "datasets/",
 ]
@@ -227,6 +235,7 @@ ignore_missing_imports = true
 exclude = [
     "openai_types_gen\\.py$",
     "metrics/reporter\\.py$",
+    "legacy_mlperf_deepseek_r1/mlperf_eval/",
 ]
 
 [[tool.mypy.overrides]]

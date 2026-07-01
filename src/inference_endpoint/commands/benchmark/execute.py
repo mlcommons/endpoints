@@ -763,7 +763,7 @@ async def _run_benchmark_async(
                     args=event_logger_args,
                 ),
             ],
-            timeout=30.0,
+            timeout=config.settings.service_ready_timeout_s,
         )
 
         # Create endpoint client on the shared loop
@@ -1110,14 +1110,20 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
     # Accuracy scoring
     accuracy_scores: dict[str, Any] = {}
     for eval_cfg in ctx.eval_configs:
-        scorer_instance = eval_cfg.scorer(
-            eval_cfg.dataset_name,
-            eval_cfg.dataset,
-            eval_cfg.report_dir,
-            extractor=eval_cfg.extractor,
-            ground_truth_column=eval_cfg.ground_truth_column,
-            **eval_cfg.extras,
-        )
+        try:
+            scorer_instance = eval_cfg.scorer(
+                eval_cfg.dataset_name,
+                eval_cfg.dataset,
+                eval_cfg.report_dir,
+                extractor=eval_cfg.extractor,
+                ground_truth_column=eval_cfg.ground_truth_column,
+                **eval_cfg.extras,
+            )
+        except TypeError as e:
+            raise InputValidationError(
+                f"Dataset '{eval_cfg.dataset_name}': invalid accuracy_config.extras "
+                f"for scorer '{eval_cfg.scorer.__name__}': {e}"
+            ) from e
         score, n_repeats = scorer_instance.score()
         assert eval_cfg.dataset.data is not None
         num_samples = len(eval_cfg.dataset.data)
@@ -1131,8 +1137,15 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
             ),
             "ground_truth_column": eval_cfg.ground_truth_column,
             "score": score,
+            # False when the scorer produced only a partial headline (e.g.
+            # LegacyMLPerfDeepSeekR1Scorer when the lcb-service container was unreachable),
+            # so a partial number is never mistaken for a complete one.
+            "complete": scorer_instance.complete,
         }
-        logger.info(f"Score for {eval_cfg.dataset_name}: {score} ({n_repeats} repeats)")
+        logger.info(
+            f"Score for {eval_cfg.dataset_name}: {score} "
+            f"({n_repeats} repeats, complete={scorer_instance.complete})"
+        )
 
     # Report metrics: prefer Report from MetricsSnapshot, fall back to SessionResult
     if report is not None and report.duration_ns is not None:
