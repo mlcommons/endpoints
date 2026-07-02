@@ -36,17 +36,17 @@ Exits 0 if everything imports, 1 otherwise.
 import sys
 from pathlib import Path
 
+import bfcl_eval
+from inference_endpoint.evaluation import bfcl_v4_execution, bfcl_v4_scorer
+from inference_endpoint.evaluation.scoring import Scorer
+
 
 def main() -> int:
-    import bfcl_eval
-
     print(f"bfcl-eval {getattr(bfcl_eval, '__version__', '<unknown>')} imported")
 
     # The scorer guards `bfcl_eval` behind try/except → None on ImportError.
     # With the extra installed these must resolve to the real objects, otherwise
     # scoring silently degrades.
-    from inference_endpoint.evaluation import bfcl_v4_scorer
-
     if bfcl_v4_scorer.Language is None or bfcl_v4_scorer.ast_checker is None:
         print(
             "ERROR: bfcl_v4_scorer.Language/ast_checker are None — bfcl-eval "
@@ -58,8 +58,6 @@ def main() -> int:
     # The execution bridge imports a different bfcl-eval submodule (also guarded
     # behind try/except → None), so check it resolved too — catches a partial
     # bfcl-eval breakage that leaves the ast_checker path working.
-    from inference_endpoint.evaluation import bfcl_v4_execution
-
     if bfcl_v4_execution.execute_multi_turn_func_call is None:
         print(
             "ERROR: bfcl_v4_execution bfcl-eval imports are None — the "
@@ -77,9 +75,7 @@ def main() -> int:
         )
         return 1
 
-    # The scorer/dataset are registered via their import side effects.
-    from inference_endpoint.evaluation.scoring import Scorer
-
+    # The scorer/dataset are registered via `scoring` import side effects.
     Scorer.get("bfcl_v4")
 
     print("bfcl import smoke OK")
