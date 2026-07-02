@@ -15,8 +15,10 @@
 
 import pytest
 from inference_endpoint import metrics
+from inference_endpoint.config.ruleset_registry import get_ruleset, list_rulesets
 from inference_endpoint.config.rulesets.mlcommons import models
 from inference_endpoint.config.rulesets.mlcommons.rules import (
+    ALL_ROUNDS,
     CURRENT,
     OptimizationPriority,
 )
@@ -111,3 +113,37 @@ def test_apply_user_config_min_sample_count_override():
         )
         == 2 * 10 * 60
     )
+
+
+@pytest.mark.unit
+def test_current_round_is_v6_1():
+    assert CURRENT.version == "v6.1"
+
+
+@pytest.mark.unit
+def test_v6_1_official_seeds():
+    """Seeds are the schedule/sample_index values from loadgen/mlperf.conf."""
+    v6_1 = get_ruleset("mlperf-inference-v6.1")
+    assert v6_1.scheduler_rng_seed == 3936089224930324775
+    assert v6_1.sample_index_rng_seed == 14276810075590677512
+
+
+@pytest.mark.unit
+def test_all_rounds_registered_by_version():
+    names = list_rulesets()
+    for ruleset in ALL_ROUNDS:
+        assert f"mlperf-inference-{ruleset.version}" in names
+    # Both the prior and current round remain resolvable.
+    assert "mlperf-inference-v5.1" in names
+    assert "mlperf-inference-v6.1" in names
+    assert get_ruleset("mlcommons-current") is CURRENT
+
+
+@pytest.mark.unit
+def test_v6_1_latency_targets_match_v5_1():
+    """Only the round seeds rotate; per-model targets are identical."""
+    v5_1 = get_ruleset("mlperf-inference-v5.1")
+    v6_1 = get_ruleset("mlperf-inference-v6.1")
+    assert v6_1.benchmark_rulesets == v5_1.benchmark_rulesets
+    assert v6_1.scheduler_rng_seed != v5_1.scheduler_rng_seed
+    assert v6_1.sample_index_rng_seed != v5_1.sample_index_rng_seed

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from .rulesets.mlcommons.rules import ALL_ROUNDS as mlcommons_rounds
 from .rulesets.mlcommons.rules import CURRENT as mlcommons_current
 
 if TYPE_CHECKING:
@@ -79,9 +80,10 @@ def list_rulesets() -> list[str]:
 # Auto-register MLCommons rulesets
 def _auto_register_mlcommons():
     """Auto-register MLCommons rulesets."""
-    # Register with version-specific name
-    register_ruleset(f"mlperf-inference-{mlcommons_current.version}", mlcommons_current)
-    # Also register as "mlcommons-current" for convenience
+    # Register every known round under its version-specific name
+    for ruleset in mlcommons_rounds:
+        register_ruleset(f"mlperf-inference-{ruleset.version}", ruleset)
+    # Also register the current round as "mlcommons-current" for convenience
     register_ruleset("mlcommons-current", mlcommons_current)
 
 

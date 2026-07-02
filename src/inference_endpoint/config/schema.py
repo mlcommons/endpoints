@@ -22,6 +22,7 @@ on Annotated fields to declare shorthand aliases alongside dotted paths.
 
 from __future__ import annotations
 
+import logging
 from collections import Counter
 from enum import Enum
 from pathlib import Path
@@ -49,6 +50,8 @@ from ..exceptions import CLIError
 from ..utils import WithUpdatesMixin
 from .ruleset_base import BenchmarkSuiteRuleset
 from .utils import parse_dataset_string, resolve_env_vars
+
+logger = logging.getLogger(__name__)
 
 
 class SystemDefaults(BaseModel):
@@ -1019,7 +1022,52 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
                 f"got '{lp.type}'"
             )
 
+        # Pin RNG seeds from the submission ruleset. Done last so the values
+        # are baked into the config before any consumer reads them — the config
+        # dump to the report dir, RuntimeSettings.from_config, and the report
+        # seeds block all see the pinned values.
+        self._apply_ruleset_seed_overrides()
+
         return self
+
+    def _apply_ruleset_seed_overrides(self) -> None:
+        """Override runtime RNG seeds from the selected submission ruleset.
+
+        MLPerf rounds pin the RNG seeds; this mirrors LoadGen locking the core
+        seeds from ``user.conf`` (a submitter cannot substitute their own).
+        Lenient by design: if ``submission_ref`` is unset or names a ruleset
+        that is not registered, the config is left unchanged, so non-submission
+        and placeholder configs are unaffected.
+        """
+        if self.submission_ref is None:
+            return
+        try:
+            ruleset = self.submission_ref.get_ruleset_instance()
+        except KeyError:
+            logger.warning(
+                "submission_ref.ruleset %r is not registered; skipping ruleset "
+                "seed overrides.",
+                self.submission_ref.ruleset,
+            )
+            return
+
+        updates: dict[str, int] = {}
+        if ruleset.scheduler_rng_seed is not None:
+            updates["scheduler_random_seed"] = ruleset.scheduler_rng_seed
+        if ruleset.sample_index_rng_seed is not None:
+            updates["dataloader_random_seed"] = ruleset.sample_index_rng_seed
+        if not updates:
+            return
+
+        new_runtime = self.settings.runtime.model_copy(update=updates)
+        object.__setattr__(
+            self,
+            "settings",
+            self.settings.model_copy(update={"runtime": new_runtime}),
+        )
+        logger.info(
+            "Pinned RNG seeds from ruleset %r: %s", self.submission_ref.ruleset, updates
+        )
 
     @model_validator(mode="after")
     def _propagate_client_api_type(self) -> Self:

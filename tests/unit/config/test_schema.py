@@ -729,3 +729,71 @@ class TestProfilingConfig:
     def test_valid_urls_accepted(self):
         cfg = ProfilingConfig(engine="vllm", urls=["http://h:8001/v1"])
         assert cfg.urls == ["http://h:8001/v1"]
+
+
+# Official v6.1 seeds from loadgen/mlperf.conf (schedule / sample_index).
+_V6_1_SCHED_SEED = 3936089224930324775
+_V6_1_SAMPLE_SEED = 14276810075590677512
+
+
+class TestRulesetSeedOverride:
+    """A submission ruleset pins the runtime RNG seeds at config construction,
+    before the config is dumped to the report dir."""
+
+    def _submission(self, ruleset: str, runtime: dict | None = None) -> BenchmarkConfig:
+        settings = {"runtime": runtime} if runtime is not None else {}
+        return BenchmarkConfig(
+            type=TestType.SUBMISSION,
+            benchmark_mode=TestType.OFFLINE,
+            endpoint_config={"endpoints": ["http://localhost:8000"]},
+            submission_ref=SubmissionReference(model="llama-2-70b", ruleset=ruleset),
+            datasets=[{"path": "perf.jsonl"}],
+            settings=settings,
+        )
+
+    @pytest.mark.unit
+    def test_registered_ruleset_pins_seeds(self):
+        cfg = self._submission("mlperf-inference-v6.1")
+        assert cfg.settings.runtime.scheduler_random_seed == _V6_1_SCHED_SEED
+        assert cfg.settings.runtime.dataloader_random_seed == _V6_1_SAMPLE_SEED
+
+    @pytest.mark.unit
+    def test_override_precedes_config_dump(self, tmp_path):
+        """The dumped config.yaml carries the pinned seeds, so the report dir's
+        config is representative of what actually ran."""
+        cfg = self._submission("mlperf-inference-v6.1")
+        out = tmp_path / "config.yaml"
+        cfg.to_yaml_file(out)
+        reloaded = BenchmarkConfig.from_yaml_file(out)
+        assert reloaded.settings.runtime.scheduler_random_seed == _V6_1_SCHED_SEED
+        assert reloaded.settings.runtime.dataloader_random_seed == _V6_1_SAMPLE_SEED
+
+    @pytest.mark.unit
+    def test_ruleset_seed_wins_over_user_value(self):
+        """Compliance rounds lock the seeds — a user-supplied seed is overridden
+        (mirrors LoadGen locking core seeds from user.conf)."""
+        cfg = self._submission(
+            "mlperf-inference-v6.1",
+            runtime={"scheduler_random_seed": 7, "dataloader_random_seed": 9},
+        )
+        assert cfg.settings.runtime.scheduler_random_seed == _V6_1_SCHED_SEED
+        assert cfg.settings.runtime.dataloader_random_seed == _V6_1_SAMPLE_SEED
+
+    @pytest.mark.unit
+    def test_unregistered_ruleset_is_lenient(self):
+        """An unknown ruleset leaves the config unchanged rather than failing,
+        so placeholder/non-submission configs are unaffected."""
+        cfg = self._submission("does-not-exist")
+        assert cfg.settings.runtime.scheduler_random_seed == 42
+        assert cfg.settings.runtime.dataloader_random_seed == 42
+
+    @pytest.mark.unit
+    def test_no_submission_ref_keeps_defaults(self):
+        cfg = BenchmarkConfig(
+            type=TestType.OFFLINE,
+            model_params={"name": "test"},
+            endpoint_config={"endpoints": ["http://localhost:8000"]},
+            datasets=[{"path": "test.jsonl"}],
+        )
+        assert cfg.settings.runtime.scheduler_random_seed == 42
+        assert cfg.settings.runtime.dataloader_random_seed == 42

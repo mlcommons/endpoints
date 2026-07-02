@@ -269,4 +269,21 @@ _v5_1 = RoundRuleset(
 )
 
 
-CURRENT = _v5_1
+# v6.1 per-model latency targets are unchanged from v5.1 (they match the
+# current mlperf.conf); only the round RNG seeds rotate. Seeds are the
+# schedule_rng_seed / sample_index_rng_seed values from loadgen/mlperf.conf
+# (mlcommons/inference). qsl_rng_seed is intentionally not modeled — see
+# docs/RANDOM_SEEDS.md (it selects load order of the first-N working set,
+# which the sample-index shuffle already covers).
+_v6_1 = RoundRuleset(
+    version="v6.1",
+    scheduler_rng_seed=3936089224930324775,
+    sample_index_rng_seed=14276810075590677512,
+    benchmark_rulesets=_v5_1.benchmark_rulesets,
+)
+
+
+# All known rounds, registered by version in the ruleset registry.
+ALL_ROUNDS = [_v5_1, _v6_1]
+
+CURRENT = _v6_1
