@@ -2,7 +2,7 @@
 
 ## Quick start
 
-To reproduce the reference accuracy number (~3 h on an edge device), edit
+To reproduce the reference accuracy number, edit
 `model_params.name` and `endpoint_config.endpoints` in `online_edge_full_run.yaml`
 to match your server, then run:
 
@@ -57,7 +57,7 @@ CLI that comes with it.
 | Git                                 | To clone the repo                                                                                     |
 | A running model server              | Any OpenAI-compatible endpoint. Validated with `Qwen3.6-27B-Q4_K_M` via llama.cpp (see below)         |
 | ~24 GB memory (GPU/VRAM or unified) | The Q4 GGUF is ~16.8 GB on disk; the rest is KV cache at `--ctx-size 32768`. 16 GB is **not** enough. |
-| ~3 hours wall-clock                 | Single-turn (3 categories), ~995 samples                                                              |
+| Time budget                         | Single-turn (3 categories), ~995 samples; several hours on a single-stream edge box                   |
 
 ### Obtaining the model
 
@@ -186,7 +186,7 @@ Before running, open `online_edge_full_run.yaml` and set `model_params.name` to
 match the model name your server reports (e.g. `Qwen3.6-27B-Q4_K_M`). The
 `endpoint_config.endpoints` list defaults to `http://localhost:8080`.
 
-**Sampling rates** (validated at ~995 samples, ~3 h single-turn on an edge device):
+**Sampling rates** (validated at ~995 samples):
 
 | Category      | Sample rate               | Notes        |
 | ------------- | ------------------------- | ------------ |
@@ -288,19 +288,18 @@ Before running, open `online_edge_full_run.yaml` and set `model_params.name` to
 your served model name. The config is single-stream (`target_concurrency: 1`,
 matching `llama-server -np 1`), deterministic (`temperature 0`, `seed 42`),
 reasoning **off**, runs **performance first, then accuracy**, and writes both
-scores into one report directory (`results/edge_agentic_full_run/`). Total
-wall-clock ~5.5 h on a single-stream edge box (~2.5 h perf + ~3 h accuracy).
+scores into one report directory (`results/edge_agentic_full_run/`).
 
-| Phase       | Dataset                     | Conversations | Generated turns | Peak ISL       | One single-stream pass (Thor, reasoning off) |
-| ----------- | --------------------------- | ------------- | --------------- | -------------- | -------------------------------------------- |
-| performance | `agentic_coding_2.5h.jsonl` | 20            | 1007            | ~23.5K (< 32K) | **~2 h 37 m**, IoU 0.6335                    |
-| accuracy    | BFCL v4 single-turn (~995)  | —             | —               | < 32K          | **~3 h**, overall 86.23%                     |
+| Phase       | Dataset                     | Conversations | Generated turns | Peak ISL       | Score             |
+| ----------- | --------------------------- | ------------- | --------------- | -------------- | ----------------- |
+| performance | `agentic_coding_2.5h.jsonl` | 20            | 1007            | ~23.5K (< 32K) | inline IoU 0.6335 |
+| accuracy    | BFCL v4 single-turn (~995)  | —             | —               | < 32K          | overall 86.23%    |
 
 The performance dataset is built so that **no conversation overflows the 32K
 served context** — every turn completes and the run is _valid_ (0 dropped
-turns). With serving optimizations (e.g. MTP speculative decoding) the perf phase
-drops toward ~1.5 h. Only raise `target_concurrency` when pointing at a
-multi-slot endpoint.
+turns). Serving optimizations (e.g. MTP speculative decoding) are expected to make
+the performance phase substantially faster. Only raise `target_concurrency` when
+pointing at a multi-slot endpoint.
 
 > **Keep reasoning off.** On this tool-calling workload, enabling server-side
 > reasoning gives no inline-accuracy benefit and costs ~60% more wall-clock (see
@@ -358,42 +357,19 @@ templates (fill in the `TODO` fields before submitting). Use separate
 `--performance-run` / `--accuracy-run` directories if you ran the two phases
 separately.
 
-### Reference performance + accuracy (Jetson Thor, Q4_K_M + llama.cpp, reasoning off)
+### Reasoning ON vs OFF (Jetson Thor, Q4_K_M + llama.cpp)
 
 Measured on **NVIDIA Jetson AGX Thor**, `Qwen3.6-27B-Q4_K_M` served single-slot
-(`-np 1`, `--reasoning off`, `--ctx-size 32768`, `--flash-attn on`, `-ngl 99`),
-driven single-stream over `agentic_coding_2.5h.jsonl` (1007 generated turns).
-One pass: **2 h 37 m**, 1007/1007 turns, 0 dropped/failed, inline IoU **0.6335**,
-aggregate ~11.8 tok/s.
-
-| Metric                         | p50    | p90    | p99    | max    |
-| ------------------------------ | ------ | ------ | ------ | ------ |
-| **ISL** (input tokens / turn)  | 9,834  | 18,181 | 22,314 | 23,456 |
-| **OSL** (output tokens / turn) | 68     | 203    | 849    | 1,245  |
-| **TTFT**                       | 2.15 s | 4.27 s | 8.47 s | 22.3 s |
-| **TPOT** (per output token)    | ~91 ms | ~95 ms | ~97 ms | ~98 ms |
-| **End-to-end latency / turn**  | 5.9 s  | 16.5 s | 65 s   | 96.9 s |
-
-ISL grows monotonically within a conversation (the deep coding turns reach
-~22–23K, still under 32K); TTFT scales with it, and the latency tail comes from
-the high-ISL + high-OSL turns late in a trajectory.
-
-**Reasoning ON vs OFF** (identical datasets, same Thor class) — reasoning ON
-gives no accuracy benefit for ~60% more wall-clock:
+(`-np 1`, `--ctx-size 32768`, `--flash-attn on`, `-ngl 99`), driven single-stream
+over `agentic_coding_2.5h.jsonl` (1007 generated turns, all completed):
 
 | Dataset              | reasoning OFF                | reasoning ON         |
 | -------------------- | ---------------------------- | -------------------- |
 | `_2.5h` (1007 turns) | IoU **0.6335**, **2 h 37 m** | IoU 0.6374, 4 h 13 m |
 
-> ⚠️ **Reference baseline — not the final optimized numbers.** These figures
-> characterize an _unoptimized_ edge serving path: stock `llama.cpp` with a
-> `Q4_K_M` GGUF, a single slot, and no speculative decoding / multi-token
-> prediction. They give a **reproducible baseline** and validate the workload and
-> methodology — they are **not** the performance target. Optimized backends
-> (TensorRT-based serving, NVFP4, MTP) are expected to be substantially faster
-> and will be reported separately. Absolute latency/throughput are
-> hardware-specific (measured on Jetson Thor); only accuracy is
-> hardware-independent.
+Reasoning ON gives no meaningful accuracy change (IoU 0.6335 vs 0.6374, within
+run-to-run noise) while costing ~60% more wall-clock. Based on this finding,
+**this workload runs with `--reasoning off`** as the reference configuration.
 
 ---
 
@@ -435,13 +411,13 @@ Validated with `Qwen3.6-27B-Q4_K_M`, `temperature=0`, `seed=42`, server launched
 `--reasoning off --ctx-size 32768 -np 1` on llama.cpp `cfff1fc`. The single-turn
 benchmark was run **twice, with a freshly restarted server each pass**.
 
-| Device                  | Pass | Overall    | Normalized | non_live | live  | hallucination | Runtime |
-| ----------------------- | ---- | ---------- | ---------- | -------- | ----- | ------------- | ------- |
-| Jetson Thor (reference) | run1 | **86.23%** | **87.96%** | 82.59    | 84.12 | 97.16         | 3.09 h  |
-| Jetson Thor (reference) | run2 | **86.23%** | **87.96%** | 82.59    | 84.12 | 97.16         | 3.12 h  |
+| Device                  | Pass | Overall    | Normalized | non_live | live  | hallucination |
+| ----------------------- | ---- | ---------- | ---------- | -------- | ----- | ------------- |
+| Jetson Thor (reference) | run1 | **86.23%** | **87.96%** | 82.59    | 84.12 | 97.16         |
+| Jetson Thor (reference) | run2 | **86.23%** | **87.96%** | 82.59    | 84.12 | 97.16         |
 
 - **Run-to-run:** accuracy is **identical** across passes (deterministic
-  decoding at `temperature 0` + fixed seeds); wall-clock varied < 1%.
+  decoding at `temperature 0` + fixed seeds).
 
 ### Accuracy gate
 
