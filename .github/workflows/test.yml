@@ -2,9 +2,9 @@ name: Tests
 
 on:
   pull_request:
-    branches: [main, master]
+    branches: [main, master, "release/**"]
   push:
-    branches: [main, master]
+    branches: [main, master, "release/**"]
 
 jobs:
   test:
@@ -30,6 +30,14 @@ jobs:
           path: |
             coverage.xml
             htmlcov/
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac # v5.5.5
+        with:
+          files: ./coverage.xml
+          fail_ci_if_error: false
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
   build:
     runs-on: ubuntu-latest

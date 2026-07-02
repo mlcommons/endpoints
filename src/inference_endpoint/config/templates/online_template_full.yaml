@@ -14,6 +14,8 @@ model_params:
   frequency_penalty: null  # Frequency penalty
   chat_template_kwargs: null  # Per-request chat-template kwargs forwarded to compatible servers.
   max_new_tokens: 1024  # Max output tokens
+  min_new_tokens: 1  # Minimum output tokens for OpenAI text-completions servers
+  skip_special_tokens: true  # Whether OpenAI text-completions servers omit special tokens from decoded output
   osl_distribution: null  # Output sequence length distribution
   streaming: 'on'  # Streaming mode: auto/on/off | options: auto, on, off
   tokenizer_name: null  # HF repo ID or local path for the tokenizer. Overrides model name for client-side token metrics (ISL/OSL/TPOT).
@@ -40,7 +42,7 @@ datasets:  # Dataset configs
     system: system_prompt
   generate_params: null  # Dataset-specific parameters passed to the generate() method
   accuracy_config:  # Accuracy evaluation settings
-    eval_method: pass_at_1  # Scorer method | options: pass_at_1, string_match, rouge, code_bench_scorer, shopify_category_f1, agentic_inference_inline, vbench, bfcl_v4
+    eval_method: pass_at_1  # Scorer method | options: pass_at_1, string_match, rouge, code_bench_scorer, shopify_category_f1, agentic_inference_inline, vbench, bfcl_v4, legacy_mlperf_deepseek_r1
     ground_truth: ground_truth  # Ground truth column name
     extractor: boxed_math_extractor  # Answer extractor (abcd_extractor, boxed_math_extractor, identity_extractor, python_code_extractor)
     num_repeats: 1  # Repeat dataset N times for evaluation
@@ -56,6 +58,7 @@ settings:
     type: poisson  # Load pattern type | options: max_throughput, poisson, concurrency, agentic_inference, burst, step
     target_qps: 10.0  # Target QPS
     target_concurrency: null  # Concurrent requests
+    use_legacy_loadgen_qps_metrics: true  # Only applies to the poisson load pattern. Report QPS/TPS using the legacy MLPerf LoadGen Server 'completed' definition — (completed-1)/T and tokens/T, T = first issued request to completion of the last-issued request (see mlcommons/inference loadgen/results.cc). --no-... uses endpoints-native completed/duration. Ignored for non-poisson patterns.
   client:
     num_workers: -1  # Worker processes (-1=auto)
     log_level: INFO  # Worker log level
@@ -82,8 +85,8 @@ settings:
     warmup_timeout_s: 240.0  # Warmup drain timeout in seconds (None = wait indefinitely)
     performance_timeout_s: 240.0  # Performance drain timeout in seconds (None = wait indefinitely)
     accuracy_timeout_s: null  # Accuracy drain timeout in seconds (None = wait indefinitely)
-    metrics_drain_timeout_s: 60.0  # Wall-clock budget (seconds) for the metrics aggregator to drain in-flight tokenize tasks after ENDED (default: 60.0; 0 = unlimited).
-    metrics_tokenizer_workers: 2  # Number of tokenizer worker threads in the metrics aggregator (default: 2).
+    metrics_drain_timeout_s: 0.0  # Wall-clock budget (seconds) to finish tokenizing buffered samples after ENDED (default: 0 = unlimited). An incomplete drain is surfaced via n_pending_tasks > 0, never silently dropped.
+    metrics_tokenizer_workers: 2  # In-process tokenizer threads for live (mid-run) ISL/OSL/TPOT (default: 2; 0 = defer everything to the end-of-run drain).
   warmup:
     enabled: false  # Enable warmup phase before performance run
     n_requests: null  # Warmup request count (None = full dataset once)
@@ -93,6 +96,7 @@ settings:
   profiling:
     engine: null  # Profile the named inference engine around the performance phase | options: vllm
     urls: null  # URL(s) the profiler start/stop triggers are derived from. When None, derived from endpoint_config.endpoints instead. Use when the profiler admin endpoint differs from the inference endpoint.
+  service_ready_timeout_s: 30.0  # Seconds to wait for the metrics-aggregator and event-logger subprocesses to report ready. Increase when service imports run off a shared/Lustre FS under heavy login-node I/O contention.
 endpoint_config:
   endpoints:  # Endpoint URL(s). Must include scheme, e.g. 'http://host:port'.
   - http://localhost:8000

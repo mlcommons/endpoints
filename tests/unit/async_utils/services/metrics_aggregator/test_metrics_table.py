@@ -34,6 +34,9 @@ from inference_endpoint.async_utils.services.metrics_aggregator.metrics_table im
 from inference_endpoint.async_utils.services.metrics_aggregator.registry import (
     MetricsRegistry,
 )
+from inference_endpoint.async_utils.services.metrics_aggregator.token_metrics import (
+    TokenBatchQueue,
+)
 from inference_endpoint.core.record import (
     EventRecord,
     SampleEventType,
@@ -294,13 +297,13 @@ class TestOslTriggerToolCalls:
         )
         from inference_endpoint.core.types import TextModelOutput
 
-        from .conftest import MockTokenizePool, snapshot_series_count
+        from .conftest import MockBatchTokenizer, snapshot_series_count
 
         registry = MetricsRegistry()
         registry.register_series("osl", hdr_low=1, hdr_high=100_000)
         loop = asyncio.get_running_loop()
-        pool = MockTokenizePool(delay=0)
-        trigger = OslTrigger(registry, pool, loop)
+        queue = TokenBatchQueue(MockBatchTokenizer(), loop)
+        trigger = OslTrigger(registry, queue)
 
         tool_calls = (
             {
@@ -317,9 +320,8 @@ class TestOslTriggerToolCalls:
             data=tmo,
         )
         row = SampleRow(sample_uuid="s1")
-        task = trigger.fire(ev, row, {})
-        assert task is not None
-        await task
+        trigger.fire(ev, row, {})
+        await queue.drain_all()
 
         assert snapshot_series_count(registry, "osl") == 1
 
@@ -331,13 +333,13 @@ class TestOslTriggerToolCalls:
         )
         from inference_endpoint.core.types import TextModelOutput
 
-        from .conftest import MockTokenizePool, snapshot_series_count
+        from .conftest import MockBatchTokenizer, snapshot_series_count
 
         registry = MetricsRegistry()
         registry.register_series("osl", hdr_low=1, hdr_high=100_000)
         loop = asyncio.get_running_loop()
-        pool = MockTokenizePool(delay=0)
-        trigger = OslTrigger(registry, pool, loop)
+        queue = TokenBatchQueue(MockBatchTokenizer(), loop)
+        trigger = OslTrigger(registry, queue)
 
         tmo = TextModelOutput(output="hello world")
         ev = EventRecord(
@@ -347,9 +349,8 @@ class TestOslTriggerToolCalls:
             data=tmo,
         )
         row = SampleRow(sample_uuid="s1")
-        task = trigger.fire(ev, row, {})
-        assert task is not None
-        await task
+        trigger.fire(ev, row, {})
+        await queue.drain_all()
 
         assert snapshot_series_count(registry, "osl") == 1
 
@@ -368,15 +369,15 @@ class TestTpotTriggerToolCalls:
         )
         from inference_endpoint.core.types import TextModelOutput
 
-        from .conftest import MockTokenizePool, snapshot_series_count
+        from .conftest import MockBatchTokenizer, snapshot_series_count
 
         registry = MetricsRegistry()
         registry.register_series(
             "tpot_ns", hdr_low=1, hdr_high=100_000_000_000, dtype=float
         )
         loop = asyncio.get_running_loop()
-        pool = MockTokenizePool(delay=0)
-        trigger = TpotTrigger(registry, pool, loop)
+        queue = TokenBatchQueue(MockBatchTokenizer(), loop)
+        trigger = TpotTrigger(registry, queue)
 
         tool_calls = (
             {
@@ -395,9 +396,8 @@ class TestTpotTriggerToolCalls:
         row = SampleRow(sample_uuid="s1")
         # RECV_FIRST_NS was set at t=1000
         pre_change = {SampleField.RECV_FIRST_NS: 1000}
-        task = trigger.fire(ev, row, pre_change)
-        assert task is not None
-        await task
+        trigger.fire(ev, row, pre_change)
+        await queue.drain_all()
 
         assert snapshot_series_count(registry, "tpot_ns") == 1
 
@@ -409,15 +409,15 @@ class TestTpotTriggerToolCalls:
         )
         from inference_endpoint.core.types import TextModelOutput
 
-        from .conftest import MockTokenizePool, snapshot_series_total
+        from .conftest import MockBatchTokenizer, snapshot_series_total
 
         registry = MetricsRegistry()
         registry.register_series(
             "tpot_ns", hdr_low=1, hdr_high=100_000_000_000, dtype=float
         )
         loop = asyncio.get_running_loop()
-        pool = MockTokenizePool(delay=0)
-        trigger = TpotTrigger(registry, pool, loop)
+        queue = TokenBatchQueue(MockBatchTokenizer(), loop)
+        trigger = TpotTrigger(registry, queue)
 
         tool_call_chunks = (
             (
@@ -442,8 +442,79 @@ class TestTpotTriggerToolCalls:
         )
         row = SampleRow(sample_uuid="s1")
         pre_change = {SampleField.RECV_FIRST_NS: 1000}
-        task = trigger.fire(ev, row, pre_change)
-        assert task is not None
-        await task
+        trigger.fire(ev, row, pre_change)
+        await queue.drain_all()
 
         assert snapshot_series_total(registry, "tpot_ns") == pytest.approx(2000.0)
+
+
+def _start_tracking(table: MetricsTable, start_ns: int = 0) -> None:
+    """Open a real tracking block at ``start_ns`` (STARTED + START)."""
+    table.handle_session_event(
+        EventRecord(event_type=SessionEventType.STARTED, timestamp_ns=start_ns)
+    )
+    table.handle_session_event(
+        EventRecord(
+            event_type=SessionEventType.START_PERFORMANCE_TRACKING,
+            timestamp_ns=start_ns,
+        )
+    )
+
+
+def _issue(table: MetricsTable, uuid: str, ts: int) -> None:
+    table.set_field(
+        uuid,
+        "issued_ns",
+        ts,
+        EventRecord(
+            event_type=SampleEventType.ISSUED, timestamp_ns=ts, sample_uuid=uuid
+        ),
+    )
+
+
+def _complete(table: MetricsTable, uuid: str, ts: int) -> None:
+    table.set_field(
+        uuid,
+        "complete_ns",
+        ts,
+        EventRecord(
+            event_type=SampleEventType.COMPLETE, timestamp_ns=ts, sample_uuid=uuid
+        ),
+    )
+
+
+@pytest.mark.unit
+class TestLoadgenWindow:
+    """``MetricsTable.total_loadgen_window_ns`` — the legacy MLPerf LoadGen Server
+    ``final_query_all_samples_done_time`` analog: from the first issued
+    tracked request to the completion of the last-issued request that
+    completed.
+    """
+
+    def test_first_issue_to_last_issued_completion(self):
+        """s1 issued early (t=100) completes late (t=1000); s2 issued late
+        (t=200) completes early (t=300). s2 has the largest issued_ns, so the
+        window ends at s2's completion (300) and starts at the first issue
+        (100): window = 300 - 100.
+        """
+        table = _new_table()
+        _start_tracking(table, start_ns=50)
+        _issue(table, "s1", 100)
+        _issue(table, "s2", 200)
+        _complete(table, "s2", 300)
+        _complete(table, "s1", 1000)
+
+        # Start at first issue (100), not block start (50); end at the
+        # last-issued (s2) completion (300).
+        assert table.total_loadgen_window_ns == 300 - 100
+
+    def test_no_completions_yields_zero(self):
+        """If no tracked request ever COMPLETEs, the window end is never set →
+        total_loadgen_window_ns == 0.
+        """
+        table = _new_table()
+        _start_tracking(table, start_ns=0)
+        _issue(table, "s1", 100)
+        # s1 is issued but never completes.
+
+        assert table.total_loadgen_window_ns == 0

@@ -28,6 +28,7 @@ from urllib import error as urllib_error
 import pandas as pd
 import pytest
 from inference_endpoint.commands.benchmark.cli import (
+    benchmark_app,
     from_config,
     offline,
     online,
@@ -280,6 +281,49 @@ class TestCommandHandlers:
         assert called_mode == mode
 
     @pytest.mark.unit
+    def test_use_legacy_loadgen_qps_metrics_default_and_disable(self):
+        """LoadPattern flag defaults True; --no-use-legacy-loadgen-qps-metrics
+        sets False (poisson only).
+        """
+        base = [
+            "online",
+            "--endpoints",
+            "http://h:80",
+            "--model",
+            "m",
+            "--dataset",
+            "d.jsonl",
+            "--load-pattern",
+            "poisson",
+            "--target-qps",
+            "100",
+        ]
+        _, bound, _ = benchmark_app.parse_args(base, exit_on_error=False)
+        lp = bound.arguments["config"].settings.load_pattern
+        assert lp.use_legacy_loadgen_qps_metrics is True
+
+        _, bound, _ = benchmark_app.parse_args(
+            [*base, "--no-use-legacy-loadgen-qps-metrics"], exit_on_error=False
+        )
+        lp = bound.arguments["config"].settings.load_pattern
+        assert lp.use_legacy_loadgen_qps_metrics is False
+
+    @pytest.mark.unit
+    def test_loadgen_flag_serialized_only_for_poisson(self):
+        """``use_legacy_loadgen_qps_metrics`` is dropped from the serialized
+        form for non-poisson patterns (so it does not pollute their YAML
+        templates), and present for poisson.
+        """
+        poisson = LoadPattern(type=LoadPatternType.POISSON, target_qps=100)
+        assert "use_legacy_loadgen_qps_metrics" in poisson.model_dump()
+
+        for lp in (
+            LoadPattern(type=LoadPatternType.MAX_THROUGHPUT),
+            LoadPattern(type=LoadPatternType.CONCURRENCY, target_concurrency=10),
+        ):
+            assert "use_legacy_loadgen_qps_metrics" not in lp.model_dump()
+
+    @pytest.mark.unit
     @patch("inference_endpoint.commands.benchmark.cli.run_benchmark")
     def test_from_config_handler(self, mock_run, tmp_path):
         yaml_content = """
@@ -518,8 +562,7 @@ class TestDrainConfig:
         assert cfg.warmup_timeout_s == 240.0
         assert cfg.performance_timeout_s == 240.0
         assert cfg.accuracy_timeout_s is None
-        assert cfg.metrics_drain_timeout_s == 60.0
-        assert cfg.metrics_tokenizer_workers == 2
+        assert cfg.metrics_drain_timeout_s == 0.0
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
@@ -542,11 +585,6 @@ class TestDrainConfig:
             DrainConfig(metrics_drain_timeout_s=-1.0)
 
     @pytest.mark.unit
-    def test_metrics_tokenizer_workers_must_be_at_least_one(self):
-        with pytest.raises(ValidationError):
-            DrainConfig(metrics_tokenizer_workers=0)
-
-    @pytest.mark.unit
     def test_extra_fields_rejected(self):
         with pytest.raises(ValidationError):
             DrainConfig(unknown_field=1)
@@ -567,7 +605,6 @@ settings:
     performance_timeout_s: 30.0
     accuracy_timeout_s: null
     metrics_drain_timeout_s: 300.0
-    metrics_tokenizer_workers: 8
 """
         config_file = tmp_path / "drain.yaml"
         config_file.write_text(yaml_content)
@@ -577,7 +614,6 @@ settings:
         assert drain.performance_timeout_s == 30.0
         assert drain.accuracy_timeout_s is None
         assert drain.metrics_drain_timeout_s == 300.0
-        assert drain.metrics_tokenizer_workers == 8
 
 
 class TestAggregatorArgs:
@@ -670,17 +706,13 @@ class TestAggregatorArgs:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("workers, expected_flag", [(4, "4"), (8, "8"), (2, "2")])
-    async def test_tokenizer_workers_forwarded_to_aggregator_args(
-        self, tmp_path, workers, expected_flag
-    ):
-        config = OfflineConfig(
-            **_OFFLINE_KWARGS,
-            settings=OfflineSettings(
-                drain=DrainConfig(metrics_tokenizer_workers=workers)
-            ),
-        )
+    async def test_tokenizer_and_workers_forwarded_from_schema(self, tmp_path):
+        """The benchmark forwards --tokenizer and --tokenizer-workers; the
+        workers value comes from the schema default
+        (drain.metrics_tokenizer_workers), the single source of truth."""
+        config = OfflineConfig(**_OFFLINE_KWARGS, settings=OfflineSettings())
         ctx = self._make_ctx(config, tmp_path)
+        ctx.tokenizer_name = "gpt2"
 
         captured: list = []
 
@@ -718,9 +750,11 @@ class TestAggregatorArgs:
 
         aggregator_cfg = next(c for c in captured if "metrics_aggregator" in c.module)
         args = aggregator_cfg.args
-        assert "--tokenizer-workers" in args
+        idx = args.index("--tokenizer")
+        assert args[idx + 1] == "gpt2"
         idx = args.index("--tokenizer-workers")
-        assert args[idx + 1] == expected_flag
+        expected = str(config.settings.drain.metrics_tokenizer_workers)
+        assert args[idx + 1] == expected
 
 
 class TestAccuracyOnlyDatasetLoading:

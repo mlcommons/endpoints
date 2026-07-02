@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import gc
 import weakref
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -50,7 +51,7 @@ async def test_sigterm_handler_holds_strong_reference_to_finalize_task():
     registry = MagicMock()
     table = MagicMock()
     table.total_tracked_duration_ns = 0
-    table.in_flight_tasks_count = 0
+    token_queue = SimpleNamespace(pending=0)
 
     # publish_final blocks on an event so we can observe the task
     # mid-execution and exercise the strong-ref contract.
@@ -69,6 +70,7 @@ async def test_sigterm_handler_holds_strong_reference_to_finalize_task():
         registry=registry,
         publisher=publisher,
         table=table,
+        token_queue=token_queue,
         shutdown_event=shutdown_event,
     )
 
@@ -113,16 +115,18 @@ async def test_sigterm_handler_holds_strong_reference_to_finalize_task():
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_sigterm_handler_refreshes_tracked_duration():
-    """Handler must mirror the ENDED path: refresh tracked_duration_ns
-    from the table BEFORE publish_final, so an interrupted run whose
-    STOP_PERFORMANCE_TRACKING never fired still reports a sensible QPS.
+    """Handler must mirror the ENDED path: refresh tracked_duration_ns AND
+    the legacy LoadGen window from the table BEFORE publish_final, so an
+    interrupted run whose STOP_PERFORMANCE_TRACKING never fired still reports
+    a sensible QPS and does not silently fall back from legacy to native.
     """
     loop = asyncio.get_event_loop()
 
     registry = MagicMock()
     table = MagicMock()
     table.total_tracked_duration_ns = 12345
-    table.in_flight_tasks_count = 3
+    table.total_loadgen_window_ns = 67890
+    token_queue = SimpleNamespace(pending=3)
 
     publisher = MagicMock()
     publisher.publish_final = AsyncMock()
@@ -134,16 +138,18 @@ async def test_sigterm_handler_refreshes_tracked_duration():
         registry=registry,
         publisher=publisher,
         table=table,
+        token_queue=token_queue,
         shutdown_event=shutdown_event,
     )
     on_sigterm()
     await shutdown_event.wait()
     await asyncio.sleep(0)
 
-    registry.set_counter.assert_called_once()
-    name, value = registry.set_counter.call_args.args
-    assert "tracked_duration" in name
-    assert value == 12345
+    refreshed = dict(c.args for c in registry.set_counter.call_args_list)
+    tracked = next(v for n, v in refreshed.items() if "tracked_duration" in n)
+    window = next(v for n, v in refreshed.items() if "loadgen_window" in n)
+    assert tracked == 12345
+    assert window == 67890
     publisher.publish_final.assert_awaited_once()
     assert publisher.publish_final.await_args.kwargs == {
         "n_pending_tasks": 3,
