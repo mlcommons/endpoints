@@ -1426,6 +1426,119 @@ class TestSetupBenchmarkTokenizer:
         assert ctx.tokenizer_name is None
 
 
+class TestSetupBenchmarkAccuracySingleStream:
+    """`setup_benchmark` forces single-stream for accuracy-only runs and bakes it
+    into the persisted config so the compliance single_stream gate passes."""
+
+    @pytest.fixture()
+    def _base_patches(self):
+        with (
+            patch(
+                "inference_endpoint.commands.benchmark.execute.pin_loadgen",
+                return_value=None,
+            ),
+            patch(
+                "inference_endpoint.config.schema.BenchmarkConfig.to_yaml_file",
+                return_value=None,
+            ),
+        ):
+            yield
+
+    @pytest.fixture()
+    def _simple_dataset(self):
+        ds = Dataset(pd.DataFrame({"prompt": ["q0"]}))
+        ds.load()
+        return ds
+
+    @pytest.fixture()
+    def _rt_settings(self):
+        return RuntimeSettings(
+            metric_target=Throughput(10.0),
+            reported_metrics=[Throughput(10.0)],
+            min_duration_ms=0,
+            max_duration_ms=None,
+            n_samples_from_dataset=1,
+            n_samples_to_issue=None,
+            min_sample_count=1,
+            rng_sched=random.Random(0),
+            rng_sample_index=random.Random(0),
+            load_pattern=LoadPattern(type=LoadPatternType.MAX_THROUGHPUT),
+        )
+
+    @pytest.mark.unit
+    def test_accuracy_only_normalizes_client_and_target_concurrency(
+        self, tmp_path, _base_patches, _simple_dataset, _rt_settings
+    ):
+        config = OnlineConfig(
+            endpoint_config={"endpoints": ["http://x"]},
+            model_params={"name": "test-model"},
+            settings=OnlineSettings(
+                load_pattern=LoadPattern(
+                    type=LoadPatternType.CONCURRENCY, target_concurrency=10
+                ),
+                client=HTTPClientConfig(
+                    num_workers=4, warmup_connections=0, max_connections=8
+                ),
+            ),
+            report_dir=str(tmp_path),
+        )
+        with (
+            patch(
+                "inference_endpoint.commands.benchmark.execute._check_tokenizer_exists",
+                return_value=True,
+            ),
+            patch(
+                "inference_endpoint.commands.benchmark.execute._load_datasets",
+                return_value=(_simple_dataset, [], []),
+            ),
+            patch(
+                "inference_endpoint.commands.benchmark.execute.RuntimeSettings.from_config",
+                return_value=_rt_settings,
+            ),
+        ):
+            ctx = setup_benchmark(config, TestMode.ACC)
+
+        assert ctx.config.settings.client.num_workers == 1
+        assert ctx.config.settings.client.max_connections == 1
+        assert ctx.config.settings.load_pattern.target_concurrency == 1
+
+    @pytest.mark.unit
+    def test_perf_run_leaves_target_concurrency_untouched(
+        self, tmp_path, _base_patches, _simple_dataset, _rt_settings
+    ):
+        config = OnlineConfig(
+            endpoint_config={"endpoints": ["http://x"]},
+            model_params={"name": "test-model"},
+            settings=OnlineSettings(
+                load_pattern=LoadPattern(
+                    type=LoadPatternType.CONCURRENCY, target_concurrency=10
+                ),
+                client=HTTPClientConfig(
+                    num_workers=4, warmup_connections=0, max_connections=8
+                ),
+            ),
+            report_dir=str(tmp_path),
+        )
+        with (
+            patch(
+                "inference_endpoint.commands.benchmark.execute._check_tokenizer_exists",
+                return_value=True,
+            ),
+            patch(
+                "inference_endpoint.commands.benchmark.execute._load_datasets",
+                return_value=(_simple_dataset, [], []),
+            ),
+            patch(
+                "inference_endpoint.commands.benchmark.execute.RuntimeSettings.from_config",
+                return_value=_rt_settings,
+            ),
+        ):
+            ctx = setup_benchmark(config, TestMode.PERF)
+
+        assert ctx.config.settings.client.num_workers == 4
+        assert ctx.config.settings.load_pattern.target_concurrency == 10
+
+
 class _FakeTimerHandle:
     def __init__(self) -> None:
         self.cancelled = False

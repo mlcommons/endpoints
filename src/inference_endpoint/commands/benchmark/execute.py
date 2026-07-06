@@ -391,14 +391,25 @@ def setup_benchmark(
     # config.yaml and asserts single_stream; without this it would fail a valid
     # accuracy-only run whose source config declared multiple workers.
     if test_mode == TestMode.ACC:
-        config = config.with_updates(
-            settings=config.settings.model_copy(
-                update={
-                    "client": config.settings.client.with_updates(
-                        num_workers=1, max_connections=1
-                    )
-                }
+        settings_update: dict[str, Any] = {
+            "client": config.settings.client.with_updates(
+                num_workers=1, max_connections=1
             )
+        }
+        # The compliance single_stream gate also reads
+        # load_pattern.target_concurrency when it is set. Normalize it to 1 so a
+        # combined config that declares concurrency > 1 does not fail single_stream
+        # on an accuracy-only run whose client is already forced to one connection.
+        load_pattern = config.settings.load_pattern
+        if (
+            load_pattern.target_concurrency is not None
+            and load_pattern.target_concurrency != 1
+        ):
+            settings_update["load_pattern"] = load_pattern.model_copy(
+                update={"target_concurrency": 1}
+            )
+        config = config.with_updates(
+            settings=config.settings.model_copy(update=settings_update)
         )
 
     # CPU affinity

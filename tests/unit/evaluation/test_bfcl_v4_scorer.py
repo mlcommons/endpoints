@@ -278,6 +278,16 @@ class TestFunctionCallExtractorPublicApi:
             FunctionCallExtractor.has_native_tool_calls("just prose, no calls") is False
         )
 
+    def test_extract_tolerates_non_dict_function_value(self):
+        # A malformed tool_calls array whose "function" is not an object must
+        # fall through to None instead of raising AttributeError (str/list have
+        # no .get), which would otherwise abort scoring for the whole run.
+        assert FunctionCallExtractor.extract('[{"function": "foo"}]') is None
+        assert FunctionCallExtractor.extract('[{"function": ["x"]}]') is None
+        assert FunctionCallExtractor.has_native_tool_calls('[{"function": "foo"}]') is (
+            False
+        )
+
 
 class TestBFCLv4ScorerScoreAst:
     """_score_ast branch behavior (empty-expected shortcut + ast_checker path)."""

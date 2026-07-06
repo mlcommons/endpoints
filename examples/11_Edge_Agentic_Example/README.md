@@ -243,7 +243,7 @@ python3 -c "
 import json, pathlib
 r = json.loads(pathlib.Path('results/edge_agentic_full_run/results.json').read_text())
 print('Overall ST accuracy:',
-      r['accuracy_scores']['bfcl_v4::function_calling']['score']['overall_accuracy'], '%')
+      r['accuracy_scores']['bfcl_v4::function_calling']['breakdown']['overall_accuracy'], '%')
 "
 
 # Multi-turn overall accuracy (only if you ran the optional Step 3)
@@ -259,6 +259,12 @@ print('Overall MT accuracy:',
 > `accuracy_scores['bfcl_v4::function_calling']`). There is no separate
 > `accuracy_scores.json`. A human-readable summary is also written to
 > `results/edge_agentic_full_run/report.txt`.
+>
+> Result shape differs between the two pipelines: the **single-turn** entry
+> stores `score` as a scalar fraction (0–1) with the per-subset dict under a
+> separate `breakdown` key (hence `['breakdown']['overall_accuracy']` above),
+> whereas the **multi-turn** CLI writes `score` as a dict (hence
+> `['score']['overall_accuracy']` in the multi-turn snippet).
 
 ---
 
@@ -321,7 +327,7 @@ python3 -c "
 import json, pathlib
 r = json.loads(pathlib.Path('results/edge_agentic_full_run/results.json').read_text())
 print('Overall ST accuracy:',
-      r['accuracy_scores']['bfcl_v4::function_calling']['score']['overall_accuracy'], '%')
+      r['accuracy_scores']['bfcl_v4::function_calling']['breakdown']['overall_accuracy'], '%')
 "
 ```
 
@@ -375,17 +381,20 @@ run-to-run noise) while costing ~60% more wall-clock. Based on this finding,
 
 ## Reproducible runs with `--seed`
 
-Pass `--seed <N>` to fix the RNG used for sampling. The same seed + same model +
-a deterministic server produce identical outputs across runs.
+Fix the RNG used for sampling so the same seed + same model + a deterministic
+server produce identical outputs across runs. How the seed is supplied depends
+on the entrypoint: the `offline`/`online` CLI modes and the multi-turn CLI take
+`--seed <N>`, but `from-config` does **not** — it reads `model_params.seed` from
+the YAML (`online_edge_full_run.yaml` already sets `model_params.seed: 42`).
 
 ```bash
-# Single-turn with seed
+# Single-turn (from-config): seed comes from the YAML (model_params.seed: 42),
+# not a CLI flag — `from-config` does not accept --seed.
 inference-endpoint benchmark from-config \
   --config online_edge_full_run.yaml \
-  --accuracy-only \
-  --seed 42
+  --accuracy-only
 
-# Multi-turn with seed
+# Multi-turn CLI: accepts --seed directly
 python -m inference_endpoint.evaluation.bfcl_v4_multi_turn_cli \
   --endpoint http://localhost:8080 \
   --model Qwen3.6-27B-Q4_K_M \

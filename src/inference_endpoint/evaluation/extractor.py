@@ -435,7 +435,7 @@ class FunctionCallExtractor(Extractor, extractor_id="function_call_extractor"):
                 if not isinstance(item, dict):
                     return None
                 func_data = item.get("function")
-                if func_data is None:
+                if not isinstance(func_data, dict):
                     return None
 
                 name = func_data.get("name", "")
