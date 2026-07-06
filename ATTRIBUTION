@@ -6,7 +6,6 @@ This project is created and maintained by MLCommons, contributed by the communit
 
 This section lists third-party assets and their attributions.
 
-<!-- TODO: Populate third-party asset attributions here -->
 <!-- Format:
 ### Asset Name
 - Source: [URL or reference]
@@ -14,5 +13,16 @@ This section lists third-party assets and their attributions.
 - Copyright: [Copyright holder]
 - Description: [Brief description of use]
 -->
+
+### SWE-bench
+
+- Source: https://github.com/SWE-bench/SWE-bench (https://huggingface.co/datasets/SWE-bench/SWE-bench)
+- License: MIT
+- Copyright: Copyright (c) 2023 Princeton Natural Language Processing
+- Description: The edge-agentic performance dataset
+  (`examples/11_Edge_Agentic_Example/agentic_coding_2.5h.jsonl`) replays
+  multi-turn agentic-coding trajectories derived from SWE-bench task instances
+  (instance IDs such as `django__django-16899`). Cite: Jimenez et al.,
+  "SWE-bench: Can Language Models Resolve Real-world Github Issues?", ICLR 2024.
 
 For a complete list of dependencies and their licenses, see the requirements files in the `requirements/` directory.

@@ -299,11 +299,21 @@ def main() -> int:
 
     print(f"Assembling endpoints submission ({args.version}) under: {args.output}\n")
 
+    # Track runs that produced no parseable artifacts so a wrong/empty path
+    # fails loudly instead of exiting 0 with an incomplete submission tree.
+    empty_runs: list[str] = []
+
     if perf_run is not None:
         perf_dst = results_root / _PERF_SUBDIR
         copied = _copy_artifacts(perf_run, perf_dst)
         print(f"[performance] {perf_run}  ->  {perf_dst}")
         print(f"             copied: {', '.join(copied) or '(none!)'}")
+        if not copied:
+            print(
+                f"             ERROR: no parseable artifacts "
+                f"({', '.join(_RUN_ARTIFACTS)}) found under {perf_run}"
+            )
+            empty_runs.append(f"--performance-run {perf_run}")
         for line in _verify_performance(perf_run):
             print(line)
         print()
@@ -313,6 +323,12 @@ def main() -> int:
         copied = _copy_artifacts(acc_run, acc_dst)
         print(f"[accuracy]    {acc_run}  ->  {acc_dst}")
         print(f"             copied: {', '.join(copied) or '(none!)'}")
+        if not copied:
+            print(
+                f"             ERROR: no parseable artifacts "
+                f"({', '.join(_RUN_ARTIFACTS)}) found under {acc_run}"
+            )
+            empty_runs.append(f"--accuracy-run {acc_run}")
         for line in _verify_accuracy(acc_run):
             print(line)
         print()
@@ -338,6 +354,15 @@ def main() -> int:
             f"{'written (fill TODOs)' if wrote_s else 'left as-is (exists)'} -> {system_json}"
         )
         print()
+
+    if empty_runs:
+        print(
+            "FAILED: no parseable artifacts were copied for: "
+            f"{', '.join(empty_runs)}. The submission tree is incomplete "
+            "(check the run path(s) and that the run emitted "
+            f"{', '.join(_RUN_ARTIFACTS)})."
+        )
+        return 1
 
     print("Done. Validate with the upstream checker:")
     print(

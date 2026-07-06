@@ -62,3 +62,54 @@ class TestPercentile:
     def test_non_dict_metric_returns_none(self):
         ps = _load_publish_submission()
         assert ps._percentile(None, "99.0") is None
+
+
+class TestMainExitCode:
+    def _run(self, argv):
+        ps = _load_publish_submission()
+        old = sys.argv
+        sys.argv = ["publish_submission.py", *argv]
+        try:
+            return ps.main()
+        finally:
+            sys.argv = old
+
+    def test_empty_run_dir_returns_nonzero(self, tmp_path):
+        """A run dir with none of the parseable artifacts must fail, not exit 0."""
+        run = tmp_path / "empty_run"
+        run.mkdir()
+        rc = self._run(
+            [
+                "--run",
+                str(run),
+                "--output",
+                str(tmp_path / "submission"),
+                "--submitter",
+                "NVIDIA",
+                "--system",
+                "AGX_Thor",
+                "--benchmark",
+                "qwen3.6-27b",
+            ]
+        )
+        assert rc == 1
+
+    def test_run_with_artifact_returns_zero(self, tmp_path):
+        run = tmp_path / "good_run"
+        run.mkdir()
+        (run / "results.json").write_text("{}", encoding="utf-8")
+        rc = self._run(
+            [
+                "--run",
+                str(run),
+                "--output",
+                str(tmp_path / "submission"),
+                "--submitter",
+                "NVIDIA",
+                "--system",
+                "AGX_Thor",
+                "--benchmark",
+                "qwen3.6-27b",
+            ]
+        )
+        assert rc == 0
