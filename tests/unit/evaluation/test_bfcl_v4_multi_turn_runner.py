@@ -146,11 +146,25 @@ def test_send_request_includes_tools_only_when_present():
 
 
 @pytest.mark.unit
-def test_parse_response_malformed_returns_none_triple():
-    """A response missing choices/message yields (None, None, None), not a crash."""
+@pytest.mark.parametrize(
+    "body",
+    [
+        {},  # no choices
+        {"choices": []},  # empty choices
+        {"error": "upstream unavailable"},  # proxy/error payload
+        {"choices": [{}]},  # choice without a message
+    ],
+)
+def test_parse_response_malformed_raises(body):
+    """A structurally malformed body raises MalformedResponseError so run_entry
+    can force-terminate rather than score it as a normal completion."""
+    from inference_endpoint.evaluation.bfcl_v4_multi_turn_runner import (
+        MalformedResponseError,
+    )
+
     runner = _make_runner()
-    assert runner._parse_response({}) == (None, None, None)
-    assert runner._parse_response({"choices": []}) == (None, None, None)
+    with pytest.raises(MalformedResponseError):
+        runner._parse_response(body)
 
 
 @pytest.mark.unit
@@ -196,6 +210,25 @@ def test_run_entry_force_terminates_on_failed_request():
     )
     runner, bridge = _runner_with_mock_bridge(state)
     with patch.object(runner, "_send_request", return_value=None):
+        result = runner.run_entry(MagicMock())
+    assert state.force_terminated is True and state.completed is True
+    assert result["total_requests"] == 1
+    bridge.process_response.assert_not_called()
+
+
+@pytest.mark.unit
+def test_run_entry_force_terminates_on_malformed_body():
+    """A 200 with a malformed body force-terminates like a transport error,
+    without scoring the entry via the bridge."""
+    state = SimpleNamespace(
+        completed=False,
+        force_terminated=False,
+        model_results_per_turn=[],
+        current_turn_results=[],
+    )
+    runner, bridge = _runner_with_mock_bridge(state)
+    # A JSON body lacking choices — _parse_response raises MalformedResponseError.
+    with patch.object(runner, "_send_request", return_value={"error": "bad gateway"}):
         result = runner.run_entry(MagicMock())
     assert state.force_terminated is True and state.completed is True
     assert result["total_requests"] == 1

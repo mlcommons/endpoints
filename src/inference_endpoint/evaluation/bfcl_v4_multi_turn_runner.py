@@ -39,6 +39,15 @@ logger = logging.getLogger(__name__)
 DEFAULT_TIMEOUT_S = 300.0
 
 
+class MalformedResponseError(Exception):
+    """A 200 response whose body lacks the expected ``choices[0].message`` shape.
+
+    Raised so the runner can force-terminate the entry (same failure class as a
+    transport error / HTTP 500) instead of scoring a proxy error page or
+    ``{"error": ...}`` payload as a normal, tool-call-free completion.
+    """
+
+
 class BFCLMultiTurnRunner:
     """Runs BFCL multi-turn conversations against an OpenAI-compatible endpoint.
 
@@ -106,14 +115,19 @@ class BFCLMultiTurnRunner:
             total_requests += 1
 
             if response_data is None:
-                # Request failed — mark as force terminated
-                state.force_terminated = True
-                state.completed = True
-                state.model_results_per_turn.append(state.current_turn_results)
+                # Transport error / HTTP 500 — force-terminate the entry.
+                self._force_terminate(state)
                 break
 
             # Parse model response
-            tool_calls, tool_call_ids, content = self._parse_response(response_data)
+            try:
+                tool_calls, tool_call_ids, content = self._parse_response(response_data)
+            except MalformedResponseError:
+                # A structurally malformed 200 body is the same failure class as
+                # a transport error: force-terminate so a flaky gateway can't be
+                # silently scored as a degraded-but-normal completion.
+                self._force_terminate(state)
+                break
 
             # Process through execution bridge
             action = self._bridge.process_response(
@@ -179,6 +193,13 @@ class BFCLMultiTurnRunner:
     def __exit__(self, *args):
         self.close()
 
+    @staticmethod
+    def _force_terminate(state: Any) -> None:
+        """Mark an entry force-terminated (transport error or malformed body)."""
+        state.force_terminated = True
+        state.completed = True
+        state.model_results_per_turn.append(state.current_turn_results)
+
     def _send_request(
         self, messages: list[dict], tools: list[dict]
     ) -> dict[str, Any] | None:
@@ -230,9 +251,9 @@ class BFCLMultiTurnRunner:
         try:
             choice = response_data["choices"][0]
             message = choice["message"]
-        except (KeyError, IndexError) as exc:
+        except (KeyError, IndexError, TypeError) as exc:
             logger.warning("Malformed response: %s", exc)
-            return None, None, None
+            raise MalformedResponseError(str(exc)) from exc
 
         content = message.get("content")
         raw_tool_calls = message.get("tool_calls")

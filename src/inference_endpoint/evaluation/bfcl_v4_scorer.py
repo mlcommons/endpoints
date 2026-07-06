@@ -47,6 +47,13 @@ except ImportError:
 
 _HALLUCINATION_SUBSETS = set(CATEGORY_MAP["hallucination"])
 
+# Relevance subsets present a genuinely relevant function, so a correct response
+# DOES emit a tool call — the mirror image of the hallucination (irrelevance)
+# subsets. bfcl-eval ships no possible_answer for live_relevance, so routing it
+# through the AST path would default ground_truth to "[]" and award credit for
+# NOT calling (inverted). Score it on tool-call presence instead.
+_RELEVANCE_SUBSETS = {"live_relevance"}
+
 _SUBSET_LANGUAGE_NAMES = {
     "simple_java": "JAVA",
     "simple_javascript": "JAVASCRIPT",
@@ -177,6 +184,16 @@ class BFCLv4Scorer(Scorer, scorer_id="bfcl_v4"):
         made_tool_call = FunctionCallExtractor.has_native_tool_calls(raw_output)
         return 1.0 if not made_tool_call else 0.0
 
+    def _score_relevance(self, raw_output: str) -> float:
+        """Score a relevance sample: correct when the model DOES call a tool.
+
+        The mirror image of :meth:`_score_hallucination` — live_relevance
+        presents a relevant function, so producing a structured tool call is the
+        correct behavior.
+        """
+        made_tool_call = FunctionCallExtractor.has_native_tool_calls(raw_output)
+        return 1.0 if made_tool_call else 0.0
+
     def _score_ast(
         self,
         value: str,
@@ -300,6 +317,8 @@ class BFCLv4Scorer(Scorer, scorer_id="bfcl_v4"):
 
             if subset in _HALLUCINATION_SUBSETS:
                 s = self._score_hallucination(raw_outputs[i])
+            elif subset in _RELEVANCE_SUBSETS:
+                s = self._score_relevance(raw_outputs[i])
             else:
                 func_desc = func_descriptions[i] if func_descriptions else None
                 s = self._score_ast(

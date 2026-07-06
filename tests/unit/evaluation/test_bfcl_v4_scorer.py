@@ -258,6 +258,44 @@ class TestBFCLv4ScorerHallucination:
         assert scorer._score_hallucination(raw) == 0.0
 
 
+class TestBFCLv4ScorerRelevance:
+    """_score_relevance is the mirror of hallucination: a live_relevance sample
+    is correct when the model DOES call a tool (not when it refuses)."""
+
+    def test_structured_tool_call_scores_one(self, tmp_path):
+        scorer = _make_scorer(tmp_path, sample_index_map={})
+        raw = json.dumps(
+            [
+                {
+                    "id": "1",
+                    "type": "function",
+                    "function": {"name": "f", "arguments": "{}"},
+                }
+            ]
+        )
+        assert scorer._score_relevance(raw) == 1.0
+
+    def test_plain_text_scores_zero(self, tmp_path):
+        scorer = _make_scorer(tmp_path, sample_index_map={})
+        assert scorer._score_relevance("I don't think a tool is needed here.") == 0.0
+
+    def test_relevance_is_inverse_of_hallucination(self, tmp_path):
+        scorer = _make_scorer(tmp_path, sample_index_map={})
+        raw = json.dumps(
+            [
+                {
+                    "id": "1",
+                    "type": "function",
+                    "function": {"name": "f", "arguments": "{}"},
+                }
+            ]
+        )
+        # Same input, opposite verdicts — confirms live_relevance is not routed
+        # through the hallucination (or the empty-ground-truth AST) path.
+        assert scorer._score_relevance(raw) == 1.0
+        assert scorer._score_hallucination(raw) == 0.0
+
+
 class TestFunctionCallExtractorPublicApi:
     """has_native_tool_calls is the stable entry point for hallucination scoring."""
 

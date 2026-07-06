@@ -109,3 +109,117 @@ def test_process_response_no_tool_calls_advances_turn():
     action = bridge.process_response(state, tool_calls=None, content="all done")
     assert action.action_type == "complete"
     assert state.completed is True
+
+
+@pytest.mark.unit
+def test_process_response_drops_undeclared_tool_name():
+    """A tool call to a name the entry never declared must not reach bfcl-eval's
+    executor (guards against injection like __import__('os').system)."""
+    executed = []
+    bridge = _make_bridge()
+    state = _state()
+    state.entry.num_turns = 1
+    state.tools = [{"type": "function", "function": {"name": "f"}}]
+    with (
+        patch.object(ex, "convert_to_function_call", lambda calls: list(calls)),
+        patch.object(ex, "is_empty_execute_response", lambda d: len(d) == 0),
+        patch.object(
+            ex,
+            "execute_multi_turn_func_call",
+            lambda **k: (executed.append(k), (["r"], None))[1],
+        ),
+    ):
+        action = bridge.process_response(
+            state,
+            tool_calls=[{"name": "__import__('os').system", "arguments": {}}],
+            tool_call_ids=["c0"],
+        )
+
+    assert executed == []  # malicious name filtered before execution
+    assert action.action_type in ("complete", "next_turn")
+
+
+@pytest.mark.unit
+def test_process_response_allows_declared_tool_name():
+    executed = []
+    bridge = _make_bridge()
+    state = _state()
+    state.tools = [{"type": "function", "function": {"name": "f"}}]
+    with (
+        patch.object(
+            ex, "convert_to_function_call", lambda calls: ["f()"] if calls else []
+        ),
+        patch.object(ex, "is_empty_execute_response", lambda d: len(d) == 0),
+        patch.object(
+            ex,
+            "execute_multi_turn_func_call",
+            lambda **k: (executed.append(k), (["r"], None))[1],
+        ),
+    ):
+        action = bridge.process_response(
+            state, tool_calls=[{"name": "f", "arguments": {}}], tool_call_ids=["c0"]
+        )
+
+    assert len(executed) == 1  # declared name executed normally
+    assert action.action_type == "continue"
+
+
+@pytest.mark.unit
+def test_evict_bfcl_instances_deletes_matching_cached_globals():
+    entry = SimpleNamespace(
+        entry_id="multi_turn_base_5",
+        involved_classes=["GorillaFileSystem", "MathAPI"],
+    )
+    key1 = "mlcommons_endpoints_eval_multi_turn_base_5_GorillaFileSystem_instance"
+    key2 = "mlcommons_endpoints_eval_multi_turn_base_5_MathAPI_instance"
+    other = "mlcommons_endpoints_eval_other_entry_MathAPI_instance"
+    fake_mod = SimpleNamespace()
+    for k in (key1, key2, other):
+        setattr(fake_mod, k, object())
+
+    with patch.object(ex, "multi_turn_utils", fake_mod):
+        ex.BFCLExecutionBridge._evict_bfcl_instances(entry)
+
+    assert not hasattr(fake_mod, key1)
+    assert not hasattr(fake_mod, key2)
+    assert hasattr(fake_mod, other)  # a different entry's instance is untouched
+
+
+@pytest.mark.unit
+def test_evict_bfcl_instances_matches_sanitized_key():
+    # bfcl-eval sanitizes the cache key via re.sub(r"[-./:]", "_", ...); eviction
+    # must apply the same transform to actually hit the cached instance.
+    entry = SimpleNamespace(entry_id="multi.turn:0", involved_classes=["A"])
+    sanitized = "mlcommons_endpoints_eval_multi_turn_0_A_instance"
+    fake_mod = SimpleNamespace()
+    setattr(fake_mod, sanitized, object())
+
+    with patch.object(ex, "multi_turn_utils", fake_mod):
+        ex.BFCLExecutionBridge._evict_bfcl_instances(entry)
+
+    assert not hasattr(fake_mod, sanitized)
+
+
+@pytest.mark.unit
+def test_evict_bfcl_instances_noop_without_bfcl():
+    entry = SimpleNamespace(entry_id="x", involved_classes=["A"])
+    with patch.object(ex, "multi_turn_utils", None):
+        ex.BFCLExecutionBridge._evict_bfcl_instances(entry)  # must not raise
+
+
+@pytest.mark.unit
+def test_cleanup_pops_state_and_evicts_instances():
+    bridge = _make_bridge()
+    entry = SimpleNamespace(entry_id="multi_turn_base_0", involved_classes=["A"])
+    state = _state()
+    state.entry = entry
+    bridge._states["multi_turn_base_0"] = state
+    key = "mlcommons_endpoints_eval_multi_turn_base_0_A_instance"
+    fake_mod = SimpleNamespace()
+    setattr(fake_mod, key, object())
+
+    with patch.object(ex, "multi_turn_utils", fake_mod):
+        bridge.cleanup("multi_turn_base_0")
+
+    assert "multi_turn_base_0" not in bridge._states
+    assert not hasattr(fake_mod, key)

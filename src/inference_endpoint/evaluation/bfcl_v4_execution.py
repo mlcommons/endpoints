@@ -25,6 +25,7 @@ classes, and accumulation of results for final scoring.
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -34,12 +35,14 @@ from ..dataset_manager.predefined.bfcl_v4.multi_turn import BFCLv4MultiTurnEntry
 logger = logging.getLogger(__name__)
 
 try:
+    from bfcl_eval.eval_checker.multi_turn_eval import multi_turn_utils
     from bfcl_eval.eval_checker.multi_turn_eval.multi_turn_utils import (
         execute_multi_turn_func_call,
         is_empty_execute_response,
     )
     from bfcl_eval.model_handler.utils import convert_to_function_call
 except ImportError:
+    multi_turn_utils = None
     execute_multi_turn_func_call = None
     is_empty_execute_response = None
     convert_to_function_call = None
@@ -140,6 +143,21 @@ class BFCLExecutionBridge:
 
         return list(state.messages), list(state.tools)
 
+    @staticmethod
+    def _allowed_tool_names(state: ConversationExecState) -> set[str]:
+        """Function names this conversation declared to the model (OpenAI shape).
+
+        Includes any holdout functions already merged into ``state.tools``.
+        """
+        names: set[str] = set()
+        for tool in state.tools:
+            if not isinstance(tool, dict):
+                continue
+            func = tool.get("function")
+            if isinstance(func, dict) and isinstance(func.get("name"), str):
+                names.add(func["name"])
+        return names
+
     def process_response(
         self,
         state: ConversationExecState,
@@ -202,13 +220,31 @@ class BFCLExecutionBridge:
         # and decode into executable format. Both steps are inside one try-except
         # so that invalid JSON in arguments (common for small/quantized models)
         # is handled the same way as an unrecognised function name.
+        # Names decoded here reach bfcl-eval's eval()-based executor, guarded
+        # upstream only by a small denylist that a payload like
+        # __import__('os').system trivially bypasses. Restrict execution to the
+        # functions this entry actually declared: a call to any other name is
+        # either a hallucination or an injection attempt from an untrusted
+        # endpoint, so drop it before it can be executed.
+        allowed_names = self._allowed_tool_names(state)
         try:
             model_responses_bfcl = []
             for tc in tool_calls:
+                name = tc["name"]
+                if allowed_names and name not in allowed_names:
+                    logger.warning(
+                        "Dropping tool call to undeclared function %r for %s turn "
+                        "%d (not in the entry's tool list); refusing to execute an "
+                        "untrusted name.",
+                        name,
+                        entry.entry_id,
+                        state.current_turn,
+                    )
+                    continue
                 args = tc["arguments"]
                 if isinstance(args, str):
                     args = json.loads(args)
-                model_responses_bfcl.append({tc["name"]: args})
+                model_responses_bfcl.append({name: args})
             decoded_calls = convert_to_function_call(model_responses_bfcl)
         except Exception as exc:
             logger.warning(
@@ -314,8 +350,30 @@ class BFCLExecutionBridge:
         }
 
     def cleanup(self, entry_id: str) -> None:
-        """Remove state for a completed conversation."""
-        self._states.pop(entry_id, None)
+        """Remove state for a completed conversation.
+
+        Also evicts bfcl-eval's cached simulated-class instances. bfcl-eval
+        caches one instance per (model, entry, class) in the ``multi_turn_utils``
+        module globals under ``f"{model}_{entry}_{class}_instance"`` (sanitized
+        via ``re.sub(r"[-./:]", "_", ...)``) and never frees them. Without
+        eviction, re-running the same ``entry_id`` in-process resumes from the
+        previous run's mutated state instead of ``initial_config``, and a full
+        run leaks thousands of instances for the life of the process.
+        """
+        state = self._states.pop(entry_id, None)
+        if state is not None:
+            self._evict_bfcl_instances(state.entry)
+
+    @staticmethod
+    def _evict_bfcl_instances(entry: BFCLv4MultiTurnEntry) -> None:
+        """Delete bfcl-eval's cached simulated-class instances for ``entry``."""
+        if multi_turn_utils is None:
+            return
+        cache = vars(multi_turn_utils)
+        for class_name in entry.involved_classes:
+            key = f"{_MODEL_NAME_FOR_EXECUTION}_{entry.entry_id}_{class_name}_instance"
+            key = re.sub(r"[-./:]", "_", key)
+            cache.pop(key, None)
 
 
 @dataclass
