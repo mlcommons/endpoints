@@ -20,6 +20,9 @@ import re
 
 import pytest
 from inference_endpoint import metrics
+from inference_endpoint.config import ruleset_registry
+from inference_endpoint.config.ruleset_registry import register_ruleset
+from inference_endpoint.config.rulesets.mlcommons.rules import RoundRuleset
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import (
     APIType,
@@ -795,5 +798,50 @@ class TestRulesetSeedOverride:
             endpoint_config={"endpoints": ["http://localhost:8000"]},
             datasets=[{"path": "test.jsonl"}],
         )
+        assert cfg.settings.runtime.scheduler_random_seed == 42
+        assert cfg.settings.runtime.dataloader_random_seed == 42
+
+    @pytest.fixture
+    def register_temp_ruleset(self):
+        """Register a throwaway RoundRuleset for the test, then unregister it."""
+        registered: list[str] = []
+
+        def _register(name, *, scheduler_rng_seed, sample_index_rng_seed):
+            register_ruleset(
+                name,
+                RoundRuleset(
+                    version=name,
+                    scheduler_rng_seed=scheduler_rng_seed,
+                    sample_index_rng_seed=sample_index_rng_seed,
+                    benchmark_rulesets={},
+                ),
+            )
+            registered.append(name)
+            return name
+
+        yield _register
+        for name in registered:
+            ruleset_registry._RULESET_REGISTRY.pop(name, None)
+
+    @pytest.mark.unit
+    def test_partial_none_seed_pins_only_set_seed(self, register_temp_ruleset):
+        """``ruleset_base`` documents ``None`` as a valid unseeded value. A
+        ruleset with one seed ``None`` pins only the seed that is set and leaves
+        the other at its runtime default (exercises one ``is not None`` branch)."""
+        name = register_temp_ruleset(
+            "test-partial-seed", scheduler_rng_seed=None, sample_index_rng_seed=999
+        )
+        cfg = self._submission(name)
+        assert cfg.settings.runtime.scheduler_random_seed == 42  # left unchanged
+        assert cfg.settings.runtime.dataloader_random_seed == 999
+
+    @pytest.mark.unit
+    def test_all_none_seed_leaves_config_unchanged(self, register_temp_ruleset):
+        """A fully unseeded ruleset (both seeds ``None``) exercises the
+        ``if not updates`` early-exit — runtime seeds keep their defaults."""
+        name = register_temp_ruleset(
+            "test-no-seed", scheduler_rng_seed=None, sample_index_rng_seed=None
+        )
+        cfg = self._submission(name)
         assert cfg.settings.runtime.scheduler_random_seed == 42
         assert cfg.settings.runtime.dataloader_random_seed == 42

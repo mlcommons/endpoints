@@ -44,7 +44,13 @@ def register_ruleset(name: str, ruleset: BenchmarkSuiteRuleset) -> None:
     Args:
         name: Unique name/version identifier (e.g., "mlperf-inference-v5.1")
         ruleset: The ruleset instance to register
+
+    Raises:
+        ValueError: If a ruleset is already registered under ``name`` (guards
+            against two rounds silently sharing a version string).
     """
+    if name in _RULESET_REGISTRY:
+        raise ValueError(f"Ruleset {name!r} is already registered")
     _RULESET_REGISTRY[name] = ruleset
 
 

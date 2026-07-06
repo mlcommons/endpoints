@@ -15,7 +15,11 @@
 
 import pytest
 from inference_endpoint import metrics
-from inference_endpoint.config.ruleset_registry import get_ruleset, list_rulesets
+from inference_endpoint.config.ruleset_registry import (
+    get_ruleset,
+    list_rulesets,
+    register_ruleset,
+)
 from inference_endpoint.config.rulesets.mlcommons import models
 from inference_endpoint.config.rulesets.mlcommons.rules import (
     ALL_ROUNDS,
@@ -140,10 +144,33 @@ def test_all_rounds_registered_by_version():
 
 
 @pytest.mark.unit
+def test_round_versions_are_unique():
+    """Each registered round must own a distinct version string, else the
+    registry would silently overwrite one round's entry with another's."""
+    assert len(ALL_ROUNDS) == len({r.version for r in ALL_ROUNDS})
+
+
+@pytest.mark.unit
+def test_register_ruleset_rejects_duplicate():
+    """Re-registering an existing name raises rather than clobbering it."""
+    with pytest.raises(ValueError):
+        register_ruleset("mlperf-inference-v6.1", CURRENT)
+
+
+@pytest.mark.unit
 def test_v6_1_latency_targets_match_v5_1():
     """Only the round seeds rotate; per-model targets are identical."""
     v5_1 = get_ruleset("mlperf-inference-v5.1")
     v6_1 = get_ruleset("mlperf-inference-v6.1")
     assert v6_1.benchmark_rulesets == v5_1.benchmark_rulesets
+    # v6.1 holds an independent copy, not a shared reference to v5.1's dict.
+    assert v6_1.benchmark_rulesets is not v5_1.benchmark_rulesets
+    # Anchor on a concrete target so the equality above verifies real structure.
+    assert (
+        v6_1.benchmark_rulesets[models.Llama3_1_405b][
+            OptimizationPriority.THROUGHPUT
+        ].max_tpot_latency_ms
+        == 175
+    )
     assert v6_1.scheduler_rng_seed != v5_1.scheduler_rng_seed
     assert v6_1.sample_index_rng_seed != v5_1.sample_index_rng_seed

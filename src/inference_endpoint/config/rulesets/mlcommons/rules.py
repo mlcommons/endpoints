@@ -279,7 +279,9 @@ _v6_1 = RoundRuleset(
     version="v6.1",
     scheduler_rng_seed=3936089224930324775,
     sample_index_rng_seed=14276810075590677512,
-    benchmark_rulesets=_v5_1.benchmark_rulesets,
+    benchmark_rulesets={
+        model: rules.copy() for model, rules in _v5_1.benchmark_rulesets.items()
+    },
 )
 
 

@@ -1065,7 +1065,7 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
             "settings",
             self.settings.model_copy(update={"runtime": new_runtime}),
         )
-        logger.info(
+        logger.debug(
             "Pinned RNG seeds from ruleset %r: %s", self.submission_ref.ruleset, updates
         )
 
