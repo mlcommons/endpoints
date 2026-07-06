@@ -164,12 +164,12 @@ class TestBenchmarkConfig:
             benchmark_mode=TestType.OFFLINE,
             endpoint_config={"endpoints": ["http://localhost:8000"]},
             submission_ref=SubmissionReference(
-                model="llama-2-70b", ruleset="mlperf-inference-v6.0"
+                model="llama-2-70b", ruleset="mlperf-inference-v6.1"
             ),
             datasets=[{"path": "perf.jsonl"}],
         )
         assert config.model_params.name == "llama-2-70b"
-        assert config.submission_ref.ruleset == "mlperf-inference-v6.0"
+        assert config.submission_ref.ruleset == "mlperf-inference-v6.1"
 
     @pytest.mark.unit
     def test_multiple_accuracy_datasets(self):
@@ -295,7 +295,7 @@ class TestBenchmarkConfigMethods:
             model_params={"name": "M"},
             endpoint_config={"endpoints": ["http://x"]},
             datasets=[{"path": "D"}],
-            submission_ref={"model": "M", "ruleset": "R"},
+            submission_ref={"model": "M", "ruleset": "mlperf-inference-v6.1"},
         )
         assert config.get_benchmark_mode() == TestType.OFFLINE
 
@@ -734,9 +734,9 @@ class TestProfilingConfig:
         assert cfg.urls == ["http://h:8001/v1"]
 
 
-# Official v6.1 seeds from loadgen/mlperf.conf (schedule / sample_index).
-_V6_1_SCHED_SEED = 3936089224930324775
-_V6_1_SAMPLE_SEED = 14276810075590677512
+# Official v6.1 seeds from loadgen/mlperf.conf L41-43 (schedule / sample_index).
+_V6_1_SCHED_SEED = 16159082839903944936
+_V6_1_SAMPLE_SEED = 2747215439041700203
 
 
 class TestRulesetSeedOverride:
@@ -783,10 +783,23 @@ class TestRulesetSeedOverride:
         assert cfg.settings.runtime.dataloader_random_seed == _V6_1_SAMPLE_SEED
 
     @pytest.mark.unit
-    def test_unregistered_ruleset_is_lenient(self):
-        """An unknown ruleset leaves the config unchanged rather than failing,
-        so placeholder/non-submission configs are unaffected."""
-        cfg = self._submission("does-not-exist")
+    def test_unregistered_ruleset_submission_raises(self):
+        """A submission naming an unregistered ruleset must fail loudly rather
+        than silently falling back to default seeds."""
+        with pytest.raises(ValidationError):
+            self._submission("does-not-exist")
+
+    @pytest.mark.unit
+    def test_unregistered_ruleset_non_submission_is_lenient(self):
+        """Non-submission configs are unaffected: an unknown ruleset leaves the
+        runtime seeds at their defaults rather than erroring."""
+        cfg = BenchmarkConfig(
+            type=TestType.OFFLINE,
+            model_params={"name": "test"},
+            endpoint_config={"endpoints": ["http://localhost:8000"]},
+            datasets=[{"path": "test.jsonl"}],
+            submission_ref=SubmissionReference(model="test", ruleset="does-not-exist"),
+        )
         assert cfg.settings.runtime.scheduler_random_seed == 42
         assert cfg.settings.runtime.dataloader_random_seed == 42
 
@@ -834,6 +847,17 @@ class TestRulesetSeedOverride:
         cfg = self._submission(name)
         assert cfg.settings.runtime.scheduler_random_seed == 42  # left unchanged
         assert cfg.settings.runtime.dataloader_random_seed == 999
+
+    @pytest.mark.unit
+    def test_partial_none_seed_scheduler_only(self, register_temp_ruleset):
+        """Mirror of the scheduler-None case: scheduler set, sample_index None
+        (exercises the ``sample_index_rng_seed is not None`` False branch)."""
+        name = register_temp_ruleset(
+            "test-partial-sched", scheduler_rng_seed=777, sample_index_rng_seed=None
+        )
+        cfg = self._submission(name)
+        assert cfg.settings.runtime.scheduler_random_seed == 777
+        assert cfg.settings.runtime.dataloader_random_seed == 42  # left unchanged
 
     @pytest.mark.unit
     def test_all_none_seed_leaves_config_unchanged(self, register_temp_ruleset):

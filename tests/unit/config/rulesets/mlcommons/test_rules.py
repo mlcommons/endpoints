@@ -128,8 +128,8 @@ def test_current_round_is_v6_1():
 def test_v6_1_official_seeds():
     """Seeds are the schedule/sample_index values from loadgen/mlperf.conf."""
     v6_1 = get_ruleset("mlperf-inference-v6.1")
-    assert v6_1.scheduler_rng_seed == 3936089224930324775
-    assert v6_1.sample_index_rng_seed == 14276810075590677512
+    assert v6_1.scheduler_rng_seed == 16159082839903944936
+    assert v6_1.sample_index_rng_seed == 2747215439041700203
 
 
 @pytest.mark.unit

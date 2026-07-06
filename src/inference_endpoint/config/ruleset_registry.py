@@ -85,12 +85,17 @@ def list_rulesets() -> list[str]:
 
 # Auto-register MLCommons rulesets
 def _auto_register_mlcommons():
-    """Auto-register MLCommons rulesets."""
+    """Auto-register MLCommons rulesets (idempotent).
+
+    Uses ``setdefault`` so re-running (e.g. a module re-import) is a no-op
+    rather than tripping ``register_ruleset``'s duplicate guard. Uniqueness of
+    round versions is enforced separately by ``test_round_versions_are_unique``.
+    """
     # Register every known round under its version-specific name
     for ruleset in mlcommons_rounds:
-        register_ruleset(f"mlperf-inference-{ruleset.version}", ruleset)
+        _RULESET_REGISTRY.setdefault(f"mlperf-inference-{ruleset.version}", ruleset)
     # Also register the current round as "mlcommons-current" for convenience
-    register_ruleset("mlcommons-current", mlcommons_current)
+    _RULESET_REGISTRY.setdefault("mlcommons-current", mlcommons_current)
 
 
 # Auto-register on import

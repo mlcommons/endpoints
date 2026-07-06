@@ -19,6 +19,7 @@ These values are derived directly from the MLPerf Inference Policies document:
 https://github.com/mlcommons/inference_policies/blob/master/inference_rules.adoc
 """
 
+import copy
 import random
 from dataclasses import dataclass, field
 from enum import Enum
@@ -271,16 +272,20 @@ _v5_1 = RoundRuleset(
 
 # v6.1 per-model latency targets are unchanged from v5.1 (they match the
 # current mlperf.conf); only the round RNG seeds rotate. Seeds are the
-# schedule_rng_seed / sample_index_rng_seed values from loadgen/mlperf.conf
-# (mlcommons/inference). qsl_rng_seed is intentionally not modeled — see
-# docs/RANDOM_SEEDS.md (it selects load order of the first-N working set,
-# which the sample-index shuffle already covers).
+# schedule_rng_seed / sample_index_rng_seed values from loadgen/mlperf.conf,
+# pinned to a specific upstream commit for traceability:
+# https://github.com/mlcommons/inference/blob/10f823448fd38bb739e52690efe8191c3a55412b/loadgen/mlperf.conf#L41
+# qsl_rng_seed is intentionally not modeled: it only selects the load order of
+# the first-N working set, which the sample-index shuffle already covers.
 _v6_1 = RoundRuleset(
     version="v6.1",
-    scheduler_rng_seed=3936089224930324775,
-    sample_index_rng_seed=14276810075590677512,
+    scheduler_rng_seed=16159082839903944936,
+    sample_index_rng_seed=2747215439041700203,
     benchmark_rulesets={
-        model: rules.copy() for model, rules in _v5_1.benchmark_rulesets.items()
+        # Keep the model-singleton keys; deep-copy only the per-model rules so
+        # v6.1's mutable leaves (e.g. reported_metrics) can't leak into v5.1.
+        model: copy.deepcopy(rules)
+        for model, rules in _v5_1.benchmark_rulesets.items()
     },
 )
 

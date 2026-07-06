@@ -1035,15 +1035,22 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
 
         MLPerf rounds pin the RNG seeds; this mirrors LoadGen locking the core
         seeds from ``user.conf`` (a submitter cannot substitute their own).
-        Lenient by design: if ``submission_ref`` is unset or names a ruleset
-        that is not registered, the config is left unchanged, so non-submission
-        and placeholder configs are unaffected.
+        If ``submission_ref`` is unset, the config is left unchanged. If it
+        names an unregistered ruleset, a ``type=SUBMISSION`` config errors (a
+        submission cannot silently fall back to default seeds), while any other
+        type is left unchanged so non-submission/placeholder configs still work.
         """
         if self.submission_ref is None:
             return
         try:
             ruleset = self.submission_ref.get_ruleset_instance()
-        except KeyError:
+        except KeyError as e:
+            if self.type == TestType.SUBMISSION:
+                raise ValueError(
+                    f"submission_ref.ruleset {self.submission_ref.ruleset!r} is not "
+                    "registered; a submission must pin official RNG seeds and cannot "
+                    "fall back to defaults."
+                ) from e
             logger.warning(
                 "submission_ref.ruleset %r is not registered; skipping ruleset "
                 "seed overrides.",
@@ -1059,6 +1066,13 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
         if not updates:
             return
 
+        # model_copy(update=) writes straight into __dict__ without validating
+        # that the keys are real fields; guard so a future RuntimeConfig rename
+        # fails loudly instead of silently attaching a junk attribute.
+        runtime_fields = type(self.settings.runtime).model_fields
+        unknown = updates.keys() - runtime_fields.keys()
+        if unknown:
+            raise ValueError(f"seed override targets unknown runtime fields: {unknown}")
         new_runtime = self.settings.runtime.model_copy(update=updates)
         object.__setattr__(
             self,
