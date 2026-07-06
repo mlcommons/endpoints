@@ -111,11 +111,25 @@ def _copy_artifacts(src_dir: Path, dst_dir: Path) -> list[str]:
 
 
 def _percentile(metric: dict[str, Any], key: str) -> Any:
-    """Read a float-formatted percentile (``"99.0"``) tolerating ``"99"``."""
+    """Read a percentile value tolerating int/float key spellings (``"99"`` vs ``"99.0"``).
+
+    Matches on numeric value, so a request for ``"99.5"`` never falls back to the
+    ``"99"`` bucket.
+    """
     perc = metric.get("percentiles", {}) if isinstance(metric, dict) else {}
     if key in perc:
         return perc[key]
-    return perc.get(key.split(".")[0])
+    try:
+        want = float(key)
+    except (TypeError, ValueError):
+        return None
+    for k, v in perc.items():
+        try:
+            if float(k) == want:
+                return v
+        except (TypeError, ValueError):
+            continue
+    return None
 
 
 def _verify_performance(run_dir: Path) -> list[str]:
