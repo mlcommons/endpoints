@@ -26,20 +26,9 @@ multi_turn_long_context.
 from logging import getLogger
 from typing import Any
 
-from . import _convert_bfcl_functions_to_tools
+from . import MULTI_TURN_SUBSETS, _convert_bfcl_functions_to_tools
 
 logger = getLogger(__name__)
-
-MULTI_TURN_SUBSETS = [
-    "multi_turn_base",
-    "multi_turn_miss_func",
-    "multi_turn_miss_param",
-    "multi_turn_long_context",
-]
-
-MULTI_TURN_CATEGORY_MAP = {
-    "multi_turn": MULTI_TURN_SUBSETS,
-}
 
 DEFAULT_USER_PROMPT_FOR_ADDITIONAL_FUNCTION_FC = (
     "I have updated the available functions. "
@@ -71,7 +60,6 @@ class BFCLv4MultiTurnEntry:
         "involved_classes",
         "ground_truth",
         "holdout_function",
-        "excluded_function",
     )
 
     def __init__(
@@ -85,7 +73,6 @@ class BFCLv4MultiTurnEntry:
         involved_classes: list[str],
         ground_truth: list[Any],
         holdout_function: dict[str, list[dict[str, Any]]] | None = None,
-        excluded_function: list[str] | None = None,
     ):
         self.entry_id = entry_id
         self.subset = subset
@@ -96,7 +83,6 @@ class BFCLv4MultiTurnEntry:
         self.involved_classes = involved_classes
         self.ground_truth = ground_truth
         self.holdout_function = holdout_function or {}
-        self.excluded_function = excluded_function or []
 
     @property
     def num_turns(self) -> int:
@@ -116,17 +102,6 @@ class BFCLv4MultiTurnEntry:
                 }
             ]
         return self.turns[turn_idx]
-
-    def get_tools_for_turn(self, turn_idx: int) -> list[dict[str, Any]]:
-        """Get the tools available at a specific turn.
-
-        For miss_func, holdout functions are added at their designated turn.
-        """
-        if str(turn_idx) in self.holdout_function:
-            added_funcs = self.holdout_function[str(turn_idx)]
-            added_tools = _convert_bfcl_functions_to_tools(added_funcs)
-            return self.tools + added_tools
-        return self.tools
 
 
 def load_multi_turn_entries(
@@ -181,7 +156,6 @@ def load_multi_turn_entries(
                 involved_classes=raw.get("involved_classes", []),
                 ground_truth=ground_truth,
                 holdout_function=raw.get("missed_function"),
-                excluded_function=raw.get("excluded_function"),
             )
             entries.append(entry)
 

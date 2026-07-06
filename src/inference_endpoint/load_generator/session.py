@@ -376,8 +376,14 @@ class BenchmarkSession:
         ``stop``, this does NOT set the session-wide ``_stop_requested`` flag —
         a combined run whose performance phase hits its ``max_duration`` cap
         still proceeds to the accuracy phase.
+
+        Also sets the drain event: if the cap fires while the phase is already
+        inside its ``_drain_inflight`` wait (strategy task finished), cancelling
+        the task is a no-op, so an unbounded (``performance_timeout_s: null``)
+        drain would otherwise hang forever on a stuck in-flight response.
         """
         self._current_phase_stopped = True
+        self._drain_event.set()
         if self._strategy_task and not self._strategy_task.done():
             self._strategy_task.cancel()
 
@@ -503,13 +509,18 @@ class BenchmarkSession:
         complete and an offline burst over few connections legitimately exceeds
         any fixed bound. A dropped transport still unblocks the wait via the
         ``_receive_responses`` close path."""
-        if phase_issuer.inflight <= 0 or self._stop_requested:
+        if (
+            phase_issuer.inflight <= 0
+            or self._stop_requested
+            or self._current_phase_stopped
+        ):
             return
         logger.info("Draining %d in-flight responses...", phase_issuer.inflight)
         self._drain_event.clear()
-        # Re-check after clear: a completion may have set the event between the
-        # initial inflight check and clear(), which would otherwise be lost.
-        if phase_issuer.inflight <= 0:
+        # Re-check after clear: a completion (or a per-phase cap firing) may have
+        # set the event between the initial inflight check and clear(), which
+        # would otherwise be lost, hanging an unbounded drain forever.
+        if phase_issuer.inflight <= 0 or self._current_phase_stopped:
             return
         if timeout is None:
             await self._drain_event.wait()

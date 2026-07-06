@@ -17,11 +17,13 @@ import json
 
 import pytest
 from inference_endpoint.metrics.results_plots import (
+    Distribution,
     extract_accuracy,
     extract_distribution,
     extract_turn_scores,
     generate_plots,
     load_run,
+    plot_distribution,
 )
 
 
@@ -145,6 +147,33 @@ def test_load_run_assembles_artifacts(tmp_path):
     assert run.inline_score == pytest.approx(0.613)
     # Only populated distributions are kept (tpot/osl were empty).
     assert set(run.distributions) == {"ttft", "latency"}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "buckets, counts",
+    [
+        ([(0.0, 1.0), (1.0, 2.0), (2.0, 3.0)], [10, 5]),  # more buckets than counts
+        ([(0.0, 1.0)], [10, 5, 1]),  # more counts than buckets
+    ],
+)
+def test_plot_distribution_tolerates_bucket_count_mismatch(tmp_path, buckets, counts):
+    # buckets and counts are extracted independently; a length mismatch must be
+    # sliced to a common length rather than raising inside matplotlib's bar().
+    pytest.importorskip("matplotlib")
+    dist = Distribution(
+        name="ttft",
+        unit="s",
+        minimum=0.0,
+        maximum=3.0,
+        median=1.0,
+        avg=1.0,
+        percentiles={50.0: 1.0},
+        hist_buckets=buckets,
+        hist_counts=counts,
+    )
+    out = plot_distribution(dist, tmp_path / "dist.png")
+    assert out is not None and out.exists()
 
 
 @pytest.mark.unit

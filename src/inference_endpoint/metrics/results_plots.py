@@ -351,11 +351,15 @@ def plot_distribution(dist: Distribution, out_path: Path) -> Path | None:
     axes[0].set_ylabel(dist.unit)
 
     if dist.hist_buckets and dist.hist_counts:
-        centers = [(lo + hi) / 2 for lo, hi in dist.hist_buckets]
-        widths = [(hi - lo) for lo, hi in dist.hist_buckets]
+        # buckets and counts are extracted independently; a length mismatch would
+        # make matplotlib's bar() raise. Slice both to the common length.
+        n = min(len(dist.hist_buckets), len(dist.hist_counts))
+        buckets = dist.hist_buckets[:n]
+        centers = [(lo + hi) / 2 for lo, hi in buckets]
+        widths = [(hi - lo) for lo, hi in buckets]
         axes[1].bar(
             centers,
-            dist.hist_counts[: len(centers)],
+            dist.hist_counts[:n],
             width=widths,
             color="#8172b3",
             align="center",

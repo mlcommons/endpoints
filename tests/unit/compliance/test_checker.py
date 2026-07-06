@@ -134,6 +134,23 @@ def test_accuracy_gate_fails_below_threshold():
 
 
 @pytest.mark.unit
+def test_accuracy_gate_fails_when_no_metric_applies():
+    # A score is present but the golden/factor tables carry no key that
+    # intersects _ACCURACY_METRIC_KEYS: the loop appends zero accuracy checks,
+    # so without the explicit guard the gate would silently PASS. It must FAIL.
+    checks = check_accuracy(_accuracy_results(86.23, 87.96, 995), {}, {}, None)
+    applicable = next(c for c in checks if c.name == "accuracy_metric_applicable")
+    assert not applicable.passed
+    assert not any(c.name.startswith("accuracy:") for c in checks)
+
+
+@pytest.mark.unit
+def test_accuracy_gate_no_metric_applicable_check_absent_when_metrics_apply():
+    checks = check_accuracy(_accuracy_results(86.23, 87.96, 995), GOLDEN, FACTORS, 995)
+    assert not any(c.name == "accuracy_metric_applicable" for c in checks)
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "overall, normalized, total, expect_pass",
     [

@@ -85,8 +85,7 @@ class OpenAIMsgspecAdapter(HttpRequestAdapter):
         }
         if model_params.streaming == StreamingMode.ON:
             metadata["stream"] = True
-        if model_params.max_new_tokens is not None:
-            metadata["max_completion_tokens"] = model_params.max_new_tokens
+        metadata["max_completion_tokens"] = model_params.max_new_tokens
 
         # These fields are used in .to_endpoint_request() but don't exist in ModelParams,
         # so they currently cannot be configured unless they are specified in the dataset file

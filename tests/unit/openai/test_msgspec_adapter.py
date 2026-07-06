@@ -240,6 +240,19 @@ def test_seed_none_when_not_set():
 
 
 @pytest.mark.unit
+def test_max_completion_tokens_always_emitted():
+    """max_new_tokens always has a value (default 1024), so the metadata always
+    carries max_completion_tokens — matching OpenAIAdapter (no conditional guard)."""
+    from inference_endpoint.config.schema import ModelParams
+    from inference_endpoint.dataset_manager.transforms import AddStaticColumns
+
+    mp = ModelParams(name="test-model", max_new_tokens=256)
+    transforms = OpenAIMsgspecAdapter.dataset_transforms(mp)
+    injector = next(t for t in transforms if isinstance(t, AddStaticColumns))
+    assert injector.data["max_completion_tokens"] == 256
+
+
+@pytest.mark.unit
 def test_seed_in_request_payload():
     """seed passes through to_endpoint_request when present in query data."""
     query = Query(

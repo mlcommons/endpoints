@@ -426,6 +426,27 @@ class TestBenchmarkSession:
         assert session._stop_requested is False
 
     @pytest.mark.asyncio
+    async def test_stop_current_phase_unblocks_unbounded_drain(self):
+        """The per-phase cap must break an in-progress unbounded drain wait.
+
+        If the cap fires while the phase is already inside ``_drain_inflight``
+        (strategy task finished, so cancelling it is a no-op) with a stuck
+        in-flight response and ``timeout=None``, the drain would hang forever
+        unless ``stop_current_phase`` also sets the drain event.
+        """
+        loop = asyncio.get_running_loop()
+        session = BenchmarkSession(FakeIssuer(), FakePublisher(), loop)
+
+        class _StuckIssuer:
+            inflight = 3  # never drains
+
+        loop.call_later(0.02, session.stop_current_phase)
+        await asyncio.wait_for(
+            session._drain_inflight(_StuckIssuer(), timeout=None), timeout=2.0
+        )
+        assert session._current_phase_stopped is True
+
+    @pytest.mark.asyncio
     async def test_on_sample_complete_callback(self):
         loop = asyncio.get_running_loop()
         issuer = FakeIssuer()

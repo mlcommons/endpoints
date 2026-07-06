@@ -184,9 +184,11 @@ def check_accuracy(
     if score is None:
         return [Check("accuracy_results_present", False, "no accuracy score found")]
 
+    applicable_metrics = 0
     for golden_key, result_key in _ACCURACY_METRIC_KEYS.items():
         if golden_key not in golden or golden_key not in factors:
             continue
+        applicable_metrics += 1
         measured = _to_float(score.get(result_key))
         if measured is None:
             checks.append(
@@ -200,6 +202,18 @@ def check_accuracy(
                 f"accuracy:{result_key}",
                 measured >= threshold,
                 f"{measured:.2f} >= {threshold:.2f} (={factor} x {golden[golden_key]})",
+            )
+        )
+
+    # An accuracy score was found but none of its metrics intersect the model's
+    # golden/factor tables: the gate would otherwise silently PASS on zero
+    # accuracy checks. Fail explicitly so a misconfigured golden table is visible.
+    if applicable_metrics == 0:
+        checks.append(
+            Check(
+                "accuracy_metric_applicable",
+                False,
+                "no accuracy metric matched the model's golden/factor tables",
             )
         )
 

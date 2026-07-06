@@ -32,12 +32,11 @@ import httpx
 from ..dataset_manager.predefined.bfcl_v4.multi_turn import (
     BFCLv4MultiTurnEntry,
 )
-from .bfcl_v4_execution import BFCLExecutionBridge
+from .bfcl_v4_execution import DEFAULT_MAX_STEPS_PER_TURN, BFCLExecutionBridge
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT_S = 300.0
-DEFAULT_MAX_STEPS_PER_TURN = 25
 
 
 class BFCLMultiTurnRunner:
