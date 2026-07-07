@@ -41,7 +41,8 @@ def test_get_git_sha():
     sha = get_git_sha()
     if sha is not None:
         assert isinstance(sha, str)
-        assert len(sha) == 7  # Short SHA should be 7 chars
+        # --short=7 is a minimum width; git lengthens it on prefix collision.
+        assert 7 <= len(sha) <= 40
         assert sha.isalnum()  # Should only contain alphanumeric chars
 
 
@@ -56,7 +57,7 @@ def test_get_version_info():
     # git_sha can be None if not in a git repo
     if info["git_sha"] is not None:
         assert isinstance(info["git_sha"], str)
-        assert len(info["git_sha"]) == 7
+        assert 7 <= len(info["git_sha"]) <= 40
 
 
 @pytest.mark.unit
@@ -79,7 +80,10 @@ def test_git_sha_is_endpoints_repo_not_cwd(tmp_path, monkeypatch):
         pytest.skip("git not available")
 
     # The endpoints repo SHA, resolved independently of the process CWD.
-    expected = _git("rev-parse", "--short=7", "HEAD", cwd=_REPO_ROOT)
+    try:
+        expected = _git("rev-parse", "--short=7", "HEAD", cwd=_REPO_ROOT)
+    except subprocess.CalledProcessError:
+        pytest.skip("Source tree is not a git repository")
 
     # A distinct, unrelated git repo the CLI is pretend-launched from.
     other = tmp_path / "other_repo"
@@ -142,3 +146,32 @@ def test_git_sha_returns_none_on_untrusted_or_missing_repo(fake, monkeypatch):
         assert get_git_sha() is None
     finally:
         get_git_sha.cache_clear()
+
+
+@pytest.mark.unit
+def test_git_sha_returned_when_toplevel_matches(monkeypatch):
+    """Happy path without a real git repo: toplevel == _REPO_ROOT -> return sha.
+
+    Covers the success branch deterministically so it holds in a no-git
+    environment (installed wheel / clean container).
+    """
+
+    def fake_run(*args, **kwargs):
+        return subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=f"{_REPO_ROOT}\nabc1234\n"
+        )
+
+    monkeypatch.setattr(version_mod.subprocess, "run", fake_run)
+    get_git_sha.cache_clear()
+    try:
+        assert get_git_sha() == "abc1234"
+    finally:
+        get_git_sha.cache_clear()
+
+
+@pytest.mark.unit
+def test_resolve_repo_root_falls_back_on_shallow_tree(monkeypatch):
+    """A too-shallow module path yields the filesystem root, not IndexError."""
+    monkeypatch.setattr(version_mod, "__file__", "/inference_endpoint/utils/version.py")
+    root = version_mod._resolve_repo_root()
+    assert root == Path("/inference_endpoint/utils/version.py").resolve().parents[-1]
