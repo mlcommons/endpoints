@@ -103,6 +103,7 @@ class ScorerMethod(str, Enum):
     SHOPIFY_CATEGORY_F1 = "shopify_category_f1"
     AGENTIC_INFERENCE_INLINE = "agentic_inference_inline"
     VBENCH = "vbench"
+    BFCL_V4 = "bfcl_v4"
     LEGACY_MLPERF_DEEPSEEK_R1 = "legacy_mlperf_deepseek_r1"
 
 
@@ -191,6 +192,12 @@ class ModelParams(BaseModel):
         cyclopts.Parameter(alias="--model", help="Model name", required=True),
     ] = ""
     temperature: float | None = Field(None, description="Sampling temperature")
+    seed: Annotated[
+        int | None,
+        cyclopts.Parameter(
+            alias="--seed", help="Random seed for reproducible sampling"
+        ),
+    ] = Field(None, description="Random seed for reproducible sampling")
     top_k: int | None = Field(None, description="Top-K sampling")
     top_p: float | None = Field(None, description="Top-P (nucleus) sampling")
     repetition_penalty: float | None = Field(None, description="Repetition penalty")
@@ -354,6 +361,9 @@ class Dataset(BaseModel):
     )
     parser: dict[str, str] | None = Field(
         None, description="Column remapping: {prompt: <col>, system: <col>}"
+    )
+    generate_params: dict[str, Any] | None = Field(
+        None, description="Dataset-specific parameters passed to the generate() method"
     )
     accuracy_config: AccuracyConfig | None = Field(
         None, description="Accuracy evaluation settings"

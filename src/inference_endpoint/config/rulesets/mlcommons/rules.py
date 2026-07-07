@@ -108,6 +108,9 @@ class OptimizationPriority(Enum):
     LOW_LATENCY_INTERACTIVE = (
         "Strict latency constraint for Interactive sessions, TPOT > TTFT > throughput"
     )
+    EDGE_SINGLE_STREAM = (
+        "Single-stream edge serving (one in-flight request, -np 1), reasoning off"
+    )
 
 
 @dataclass(frozen=True)
@@ -270,3 +273,36 @@ _v5_1 = RoundRuleset(
 
 
 CURRENT = _v5_1
+
+
+# --- Edge-Agentic (BFCL v4) ruleset ---
+#
+# Two-phase benchmark against a single served edge model (Qwen3.6-27B Q4_K_M,
+# single slot, reasoning off, ctx 32768, seed 42):
+#   * Accuracy gate — BFCL v4 single-turn (~995 samples); the pass/fail bound
+#     lives on the model (golden_accuracy + accuracy_target_settings).
+#   * Performance — agentic-coding replay with the inline online checker; reported
+#     via aggregate throughput. TTFT/TPOT are reported in the run report but are
+#     NOT gated here: this is the unoptimized reference baseline (stock llama.cpp
+#     Q4_K_M, no speculative decoding), so absolute latency is informational, not a
+#     target. A future round can add max_ttft/max_tpot caps once an optimized
+#     target exists. The "0 dropped turns" validity rule is enforced by the
+#     compliance checker, not encoded here.
+_edge_v0_1 = RoundRuleset(
+    version="edge-v0.1",
+    scheduler_rng_seed=42,
+    sample_index_rng_seed=42,
+    benchmark_rulesets={
+        models.Qwen3_6_27B: {
+            OptimizationPriority.EDGE_SINGLE_STREAM: PerModelRuleset(
+                min_duration_ms_valid=0,
+                max_duration_ms_valid=4 * 60 * 60 * 1000,  # 4 h safety cap
+                min_sample_count_valid=995,  # BFCL v4 single-turn accuracy gate
+                metric=metrics.Throughput,
+                reported_metrics=[metrics.Throughput],
+            )
+        },
+    },
+)
+
+EDGE_CURRENT = _edge_v0_1

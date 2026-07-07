@@ -29,6 +29,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from .rulesets.mlcommons.rules import CURRENT as mlcommons_current
+from .rulesets.mlcommons.rules import EDGE_CURRENT as mlcommons_edge_current
 
 if TYPE_CHECKING:
     from .ruleset_base import BenchmarkSuiteRuleset
@@ -83,6 +84,11 @@ def _auto_register_mlcommons():
     register_ruleset(f"mlperf-inference-{mlcommons_current.version}", mlcommons_current)
     # Also register as "mlcommons-current" for convenience
     register_ruleset("mlcommons-current", mlcommons_current)
+    # Edge-Agentic (BFCL v4) ruleset
+    register_ruleset(
+        f"mlperf-{mlcommons_edge_current.version}", mlcommons_edge_current
+    )  # -> "mlperf-edge-v0.1"
+    register_ruleset("mlperf-edge-current", mlcommons_edge_current)
 
 
 # Auto-register on import
