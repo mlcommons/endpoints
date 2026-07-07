@@ -382,7 +382,7 @@ datasets:
   - path: "test.jsonl"
 submission_ref:
   model: "test-model"
-  ruleset: "test"
+  ruleset: "mlperf-inference-v6.1"
 """
         config_file = tmp_path / "sub.yaml"
         config_file.write_text(yaml_content)
