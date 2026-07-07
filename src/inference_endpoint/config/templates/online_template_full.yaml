@@ -24,7 +24,7 @@ datasets:  # Dataset configs
   type: performance  # Dataset purpose: performance or accuracy | options: performance, accuracy
   path: '<DATASET_PATH eg: tests/assets/datasets/dummy_1k.jsonl>'  # Dataset file path
   format: null  # Dataset format (auto-detected)
-  samples: null  # Number of samples to use
+  samples: null
   eval_method: null
   parser:  # Column remapping: {prompt: <col>, system: <col>}
     prompt: text_input
@@ -35,7 +35,7 @@ datasets:  # Dataset configs
   type: accuracy  # Dataset purpose: performance or accuracy | options: performance, accuracy
   path: '<DATASET_PATH eg: tests/assets/datasets/ds_samples.jsonl>'  # Dataset file path
   format: null  # Dataset format (auto-detected)
-  samples: null  # Number of samples to use
+  samples: null
   eval_method: exact_match  # Accuracy evaluation method | options: exact_match, contains, judge
   parser:  # Column remapping: {prompt: <col>, system: <col>}
     prompt: question
@@ -96,7 +96,7 @@ settings:
   profiling:
     engine: null  # Profile the named inference engine around the performance phase | options: vllm
     urls: null  # URL(s) the profiler start/stop triggers are derived from. When None, derived from endpoint_config.endpoints instead. Use when the profiler admin endpoint differs from the inference endpoint.
-  service_ready_timeout_s: 30.0  # Seconds to wait for the metrics-aggregator and event-logger subprocesses to report ready. Increase when service imports run off a shared/Lustre FS under heavy login-node I/O contention.
+  service_ready_timeout_s: 30.0  # Seconds to wait for metrics-aggregator/event-logger services to become ready.
 endpoint_config:
   endpoints:  # Endpoint URL(s). Must include scheme, e.g. 'http://host:port'.
   - http://localhost:8000
@@ -106,3 +106,4 @@ report_dir: null  # Report output directory
 timeout: null  # Global timeout in seconds
 verbose: false  # Enable verbose logging
 enable_cpu_affinity: true  # NUMA-aware CPU pinning
+audit: null  # Compliance audit config (YAML only). When set, runs the audit after the main benchmark.

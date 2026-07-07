@@ -61,6 +61,7 @@ from inference_endpoint.async_utils.services.metrics_aggregator.subscriber impor
     MetricsSnapshotSubscriber,
 )
 from inference_endpoint.async_utils.transport.zmq.context import ManagedZMQContext
+from inference_endpoint.compliance import AuditRunSpec
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import (
     APIType,
@@ -111,6 +112,17 @@ def _default_report_path() -> Path:
     return Path(
         f"{tempfile.gettempdir()}/reports_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     )
+
+
+def resolve_report_dir(config: BenchmarkConfig) -> Path:
+    """Resolve the run's report directory, defaulting to a timestamped path.
+
+    Exposed so callers that need the report dir before invoking
+    ``setup_benchmark`` (e.g. to share one directory tree across multiple
+    runs against the same config) resolve it identically rather than
+    duplicating the default-path logic.
+    """
+    return Path(config.report_dir) if config.report_dir else _default_report_path()
 
 
 class ResponseCollector:
@@ -382,8 +394,13 @@ def _load_datasets(
 def setup_benchmark(
     config: BenchmarkConfig,
     test_mode: TestMode,
+    audit_run_spec: AuditRunSpec | None = None,
 ) -> BenchmarkContext:
-    """Load tokenizer, dataset, create scheduler, setup report dir."""
+    """Load tokenizer, dataset, create scheduler, setup report dir.
+
+    ``audit_run_spec``, when set, overrides the issue count and sample order
+    for a compliance-audit phase (see ``commands/audit.py:run_audit``).
+    """
     # Accuracy-only runs force single-stream (1 worker / 1 connection) for
     # deterministic sample ordering. Bake it into the config here — before CPU
     # affinity, report_dir/config.yaml persistence, and RuntimeSettings — so the
@@ -420,9 +437,7 @@ def setup_benchmark(
     )
 
     # Report directory
-    report_dir = (
-        Path(config.report_dir) if config.report_dir else _default_report_path()
-    )
+    report_dir = resolve_report_dir(config)
     report_dir.mkdir(parents=True, exist_ok=True)
     config.to_yaml_file(report_dir / "config.yaml")
 
@@ -456,6 +471,12 @@ def setup_benchmark(
     total_samples = 0
     if dataloader is not None:
         rt_settings = RuntimeSettings.from_config(config, dataloader.num_samples())
+        if audit_run_spec is not None:
+            rt_settings = dataclass_replace(
+                rt_settings,
+                n_samples_to_issue=audit_run_spec.n_samples,
+                sample_order=audit_run_spec.sample_order,
+            )
         total_samples = rt_settings.total_samples_to_issue()
 
     if accuracy_datasets:
@@ -759,349 +780,365 @@ async def _run_benchmark_async(
     collector = ResponseCollector(collect_responses=ctx.collect_responses, pbar=pbar)
 
     # ZMQ context for event publishing + service launcher
-    with ManagedZMQContext.scoped(io_threads=2) as zmq_ctx:
-        # Event publisher
-        publisher = EventPublisherService(zmq_ctx)
-        pub_socket_name = publisher.socket_name
+    tmpfs_dir: Path | None = None
+    try:
+        with ManagedZMQContext.scoped(io_threads=2) as zmq_ctx:
+            # Event publisher
+            publisher = EventPublisherService(zmq_ctx)
+            pub_socket_name = publisher.socket_name
 
-        # Tmpfs for high-frequency writes (event log).
-        shm = Path("/dev/shm")
-        use_shm = shm.exists()
-        tmpfs_base = shm if use_shm else Path(tempfile.gettempdir())
-        tmpfs_dir = tmpfs_base / f"benchmark_{session_id}"
-        tmpfs_dir.mkdir(parents=True, exist_ok=True)
+            # Tmpfs for high-frequency writes (event log).
+            shm = Path("/dev/shm")
+            use_shm = shm.exists()
+            tmpfs_base = shm if use_shm else Path(tempfile.gettempdir())
+            tmpfs_dir = tmpfs_base / f"benchmark_{session_id}"
+            tmpfs_dir.mkdir(parents=True, exist_ok=True)
 
-        event_log_dir = tmpfs_dir / "events"
-        event_log_dir.mkdir(parents=True, exist_ok=True)
+            event_log_dir = tmpfs_dir / "events"
+            event_log_dir.mkdir(parents=True, exist_ok=True)
 
-        # Metrics-snapshot output (disk fallback for the final snapshot).
-        # Lives under the report dir so it's preserved with the rest of
-        # the run artifacts.
-        metrics_output_dir = ctx.report_dir / "metrics"
-        metrics_output_dir.mkdir(parents=True, exist_ok=True)
+            # Metrics-snapshot output (disk fallback for the final snapshot).
+            # Lives under the report dir so it's preserved with the rest of
+            # the run artifacts.
+            metrics_output_dir = ctx.report_dir / "metrics"
+            metrics_output_dir.mkdir(parents=True, exist_ok=True)
 
-        metrics_socket_name = f"metrics_pub_{uuid.uuid4().hex[:8]}"
+            metrics_socket_name = f"metrics_pub_{uuid.uuid4().hex[:8]}"
 
-        # Connect the metrics-snapshot subscriber BEFORE launching the
-        # aggregator subprocess that binds the matching PUB socket. ZMQ
-        # tolerates connect-before-bind on IPC (the connect resolves once
-        # the binder appears), and starting the SUB reader early gives
-        # the subscription handshake time to complete during the
-        # ~1-2 second subprocess-launch window. This eliminates the
-        # slow-joiner risk of dropping early live ticks (or the worst
-        # case: missing COMPLETE if the SUB handshake never warms up).
-        if zmq_ctx.socket_dir is None:
-            raise RuntimeError("ZMQ socket_dir must be set after publisher bind")
-        metrics_subscriber = MetricsSnapshotSubscriber(
-            metrics_socket_name, zmq_ctx, loop
-        )
-        metrics_subscriber.start()
+            # Connect the metrics-snapshot subscriber BEFORE launching the
+            # aggregator subprocess that binds the matching PUB socket. ZMQ
+            # tolerates connect-before-bind on IPC (the connect resolves once
+            # the binder appears), and starting the SUB reader early gives
+            # the subscription handshake time to complete during the
+            # ~1-2 second subprocess-launch window. This eliminates the
+            # slow-joiner risk of dropping early live ticks (or the worst
+            # case: missing COMPLETE if the SUB handshake never warms up).
+            if zmq_ctx.socket_dir is None:
+                raise RuntimeError("ZMQ socket_dir must be set after publisher bind")
+            metrics_subscriber = MetricsSnapshotSubscriber(
+                metrics_socket_name, zmq_ctx, loop
+            )
+            metrics_subscriber.start()
 
-        # Launch service subprocesses
-        launcher = ServiceLauncher(zmq_ctx)
-        aggregator_args: list[str] = [
-            "--socket-dir",
-            zmq_ctx.socket_dir,
-            "--socket-name",
-            pub_socket_name,
-            "--metrics-socket",
-            metrics_socket_name,
-            "--metrics-output-dir",
-            str(metrics_output_dir),
-        ]
-        if ctx.enable_streaming:
-            aggregator_args.append("--streaming")
-        if ctx.tokenizer_name is not None:
-            aggregator_args.extend(["--tokenizer", ctx.tokenizer_name])
-        aggregator_args.extend(
-            ["--drain-timeout", str(config.settings.drain.metrics_drain_timeout_s)]
-        )
-        aggregator_args.extend(
-            [
-                "--tokenizer-workers",
-                str(config.settings.drain.metrics_tokenizer_workers),
+            # Launch service subprocesses
+            launcher = ServiceLauncher(zmq_ctx)
+            aggregator_args: list[str] = [
+                "--socket-dir",
+                zmq_ctx.socket_dir,
+                "--socket-name",
+                pub_socket_name,
+                "--metrics-socket",
+                metrics_socket_name,
+                "--metrics-output-dir",
+                str(metrics_output_dir),
             ]
-        )
+            if ctx.enable_streaming:
+                aggregator_args.append("--streaming")
+            if ctx.tokenizer_name is not None:
+                aggregator_args.extend(["--tokenizer", ctx.tokenizer_name])
+            aggregator_args.extend(
+                ["--drain-timeout", str(config.settings.drain.metrics_drain_timeout_s)]
+            )
+            aggregator_args.extend(
+                [
+                    "--tokenizer-workers",
+                    str(config.settings.drain.metrics_tokenizer_workers),
+                ]
+            )
 
-        # EventLoggerService writes events.jsonl to tmpfs (high-frequency writes)
-        event_logger_args: list[str] = [
-            "--log-dir",
-            str(event_log_dir),
-            "--socket-dir",
-            zmq_ctx.socket_dir,
-            "--socket-name",
-            pub_socket_name,
-            "--writers",
-            "jsonl",
-        ]
+            # EventLoggerService writes events.jsonl to tmpfs (high-frequency writes)
+            event_logger_args: list[str] = [
+                "--log-dir",
+                str(event_log_dir),
+                "--socket-dir",
+                zmq_ctx.socket_dir,
+                "--socket-name",
+                pub_socket_name,
+                "--writers",
+                "jsonl",
+            ]
 
-        await launcher.launch(
-            [
-                ServiceConfig(
-                    module="inference_endpoint.async_utils.services.metrics_aggregator",
-                    args=aggregator_args,
-                ),
-                ServiceConfig(
-                    module="inference_endpoint.async_utils.services.event_logger",
-                    args=event_logger_args,
-                ),
-            ],
-            timeout=config.settings.service_ready_timeout_s,
-        )
-
-        # Create endpoint client on the shared loop
-        endpoints = config.endpoint_config.endpoints
-        logger.info(f"Connecting: {endpoints}")
-        http_client: HTTPEndpointClient | None = None
-        try:
-            api_type: APIType = config.endpoint_config.api_type
-            # client.api_type is propagated from endpoint_config.api_type by
-            # BenchmarkConfig._propagate_client_api_type — no override needed here.
-            client_overrides: dict = {
-                "endpoint_urls": [
-                    urljoin(e.rstrip("/") + "/", api_type.default_route())
-                    for e in endpoints
-                ],
-                "api_key": config.endpoint_config.api_key,
-                "event_logs_dir": ctx.report_dir,
-                "cpu_affinity": ctx.affinity_plan,
-            }
-            if ctx.accuracy_only:
-                # Single-stream (num_workers=1, max_connections=1) is baked into
-                # config in setup_benchmark so it is persisted to config.yaml;
-                # no runtime override needed here.
-                logger.info(
-                    "Accuracy-only: single-stream (1 worker, 1 connection) for "
-                    "deterministic ordering"
-                )
-            http_config = config.settings.client.with_updates(**client_overrides)
-            http_client = await HTTPEndpointClient.create(http_config, loop)
-            issuer = HttpClientSampleIssuer(http_client)
-        except Exception as e:
-            pbar.close()
-            publisher.close()
-            launcher.kill_all()
-            raise SetupError(f"Failed to connect to endpoint: {e}") from e
-
-        # Build agentic inference strategy if the performance dataset uses it.
-        agentic_inference_strategy: AgenticInferenceStrategy | None = None
-        if isinstance(ctx.dataloader, AgenticInferenceDataset):
-            agentic_cfg = None
-            if ctx.config.datasets:
-                perf_ds_cfg = next(
-                    (
-                        d
-                        for d in ctx.config.datasets
-                        if d.type == DatasetType.PERFORMANCE
+            await launcher.launch(
+                [
+                    ServiceConfig(
+                        module="inference_endpoint.async_utils.services.metrics_aggregator",
+                        args=aggregator_args,
                     ),
-                    None,
-                )
-                if perf_ds_cfg is not None:
-                    agentic_cfg = perf_ds_cfg.agentic_inference
-            assert ctx.dataloader.conversation_metadata is not None
-            agentic_inference_strategy = AgenticInferenceStrategy(
-                conversation_manager=ConversationManager(),
-                dataset_metadata=ctx.dataloader.conversation_metadata,
-                agentic_inference_config=agentic_cfg,
-                target_concurrency=ctx.config.settings.load_pattern.target_concurrency,
+                    ServiceConfig(
+                        module="inference_endpoint.async_utils.services.event_logger",
+                        args=event_logger_args,
+                    ),
+                ],
+                timeout=config.settings.service_ready_timeout_s,
             )
 
-        _on_sample_complete: Callable[[QueryResult], None]
-        if agentic_inference_strategy is not None:
-
-            def _on_sample_complete(result: QueryResult) -> None:
-                try:
-                    agentic_inference_strategy.on_sample_complete(result)
-                except Exception:
-                    logger.exception(
-                        "agentic_inference_strategy.on_sample_complete failed (result=%s)",
-                        result.id,
+            # Create endpoint client on the shared loop
+            endpoints = config.endpoint_config.endpoints
+            logger.info(f"Connecting: {endpoints}")
+            http_client: HTTPEndpointClient | None = None
+            try:
+                api_type: APIType = config.endpoint_config.api_type
+                # client.api_type is propagated from endpoint_config.api_type by
+                # BenchmarkConfig._propagate_client_api_type — no override needed here.
+                client_overrides: dict = {
+                    "endpoint_urls": [
+                        urljoin(e.rstrip("/") + "/", api_type.default_route())
+                        for e in endpoints
+                    ],
+                    "api_key": config.endpoint_config.api_key,
+                    "event_logs_dir": ctx.report_dir,
+                    "cpu_affinity": ctx.affinity_plan,
+                }
+                if ctx.accuracy_only:
+                    # Single-stream (num_workers=1, max_connections=1) is baked into
+                    # config in setup_benchmark so it is persisted to config.yaml;
+                    # no runtime override needed here.
+                    logger.info(
+                        "Accuracy-only: single-stream (1 worker, 1 connection) for "
+                        "deterministic ordering"
                     )
-                try:
-                    collector.on_complete_hook(result)
-                except Exception:
-                    logger.exception(
-                        "collector.on_complete_hook failed (result=%s)", result.id
+                http_config = config.settings.client.with_updates(**client_overrides)
+                http_client = await HTTPEndpointClient.create(http_config, loop)
+                issuer = HttpClientSampleIssuer(http_client)
+            except Exception as e:
+                pbar.close()
+                publisher.close()
+                launcher.kill_all()
+                raise SetupError(f"Failed to connect to endpoint: {e}") from e
+
+            # Build agentic inference strategy if the performance dataset uses it.
+            agentic_inference_strategy: AgenticInferenceStrategy | None = None
+            if isinstance(ctx.dataloader, AgenticInferenceDataset):
+                agentic_cfg = None
+                if ctx.config.datasets:
+                    perf_ds_cfg = next(
+                        (
+                            d
+                            for d in ctx.config.datasets
+                            if d.type == DatasetType.PERFORMANCE
+                        ),
+                        None,
                     )
-
-            agentic_inference_strategy._session_on_sample_complete = _on_sample_complete
-            agentic_inference_strategy._session_publisher = publisher
-
-        else:
-            _on_sample_complete = collector.on_complete_hook
-
-        # Create session
-        session = BenchmarkSession(
-            issuer=issuer,
-            event_publisher=publisher,
-            loop=loop,
-            on_sample_complete=_on_sample_complete,
-            session_id=session_id,
-        )
-
-        phases = _build_phases(ctx, perf_strategy=agentic_inference_strategy)
-        report: Report | None = None
-
-        _timeout_done = False
-        max_duration_ms = (
-            ctx.rt_settings.max_duration_ms if ctx.rt_settings is not None else None
-        )
-
-        # Profile trigger state. Pre-derive URLs once so a bad config
-        # (engine set but no endpoints) fails before the run.
-        profiling_cfg = config.settings.profiling
-        profile_start_urls: list[str] = []
-        profile_stop_urls: list[str] = []
-        profile_starts: list[dict[str, Any]] = []
-        profile_stops: list[dict[str, Any]] = []
-        if profiling_cfg.engine is not None:
-            profile_endpoints = profiling_cfg.urls or config.endpoint_config.endpoints
-            profile_start_urls = _derive_profile_urls(
-                profile_endpoints, profiling_cfg.engine, "start"
-            )
-            profile_stop_urls = _derive_profile_urls(
-                profile_endpoints, profiling_cfg.engine, "stop"
-            )
-        session_completed_normally = False
-
-        def _on_global_timeout() -> None:
-            if not _timeout_done:
-                logger.warning(
-                    "Performance phase max_duration reached (%d ms); "
-                    "ending performance phase.",
-                    max_duration_ms,
+                    if perf_ds_cfg is not None:
+                        agentic_cfg = perf_ds_cfg.agentic_inference
+                assert ctx.dataloader.conversation_metadata is not None
+                agentic_inference_strategy = AgenticInferenceStrategy(
+                    conversation_manager=ConversationManager(),
+                    dataset_metadata=ctx.dataloader.conversation_metadata,
+                    agentic_inference_config=agentic_cfg,
+                    target_concurrency=ctx.config.settings.load_pattern.target_concurrency,
                 )
-                # Stop only the perf phase, not the whole session, so a combined
-                # perf+accuracy run still runs accuracy after the perf cap.
-                session.stop_current_phase()
 
-        perf_timeout = _PerfPhaseTimeout(loop, max_duration_ms, _on_global_timeout)
+            _on_sample_complete: Callable[[QueryResult], None]
+            if agentic_inference_strategy is not None:
 
-        def _on_phase_start(phase: PhaseConfig) -> None:
-            # _PerfPhaseTimeout arms the perf cap on PERFORMANCE and cancels it
-            # when any later phase starts, so a combined perf+accuracy run can
-            # never have its accuracy phase truncated by the perf cap.
-            perf_timeout.on_phase_start(phase.phase_type)
-            if phase.phase_type != PhaseType.PERFORMANCE:
-                return
-            # Fire /start_profile sequentially before any perf request is
-            # issued, so the server is armed when traffic begins. Blocks
-            # the loop briefly (sub-100ms per URL); strategy task hasn't
-            # been created yet so nothing is starved.
-            for url in profile_start_urls:
-                rec = _post_profile(url)
-                if rec["status"] == 200:
-                    logger.info("Profile start: %s -> 200 OK", url)
-                else:
+                def _on_sample_complete(result: QueryResult) -> None:
+                    try:
+                        agentic_inference_strategy.on_sample_complete(result)
+                    except Exception:
+                        logger.exception(
+                            "agentic_inference_strategy.on_sample_complete failed (result=%s)",
+                            result.id,
+                        )
+                    try:
+                        collector.on_complete_hook(result)
+                    except Exception:
+                        logger.exception(
+                            "collector.on_complete_hook failed (result=%s)", result.id
+                        )
+
+                agentic_inference_strategy._session_on_sample_complete = (
+                    _on_sample_complete
+                )
+                agentic_inference_strategy._session_publisher = publisher
+
+            else:
+                _on_sample_complete = collector.on_complete_hook
+
+            # Create session
+            session = BenchmarkSession(
+                issuer=issuer,
+                event_publisher=publisher,
+                loop=loop,
+                on_sample_complete=_on_sample_complete,
+                session_id=session_id,
+            )
+
+            phases = _build_phases(ctx, perf_strategy=agentic_inference_strategy)
+            report: Report | None = None
+
+            _timeout_done = False
+            max_duration_ms = (
+                ctx.rt_settings.max_duration_ms if ctx.rt_settings is not None else None
+            )
+
+            # Profile trigger state. Pre-derive URLs once so a bad config
+            # (engine set but no endpoints) fails before the run.
+            profiling_cfg = config.settings.profiling
+            profile_start_urls: list[str] = []
+            profile_stop_urls: list[str] = []
+            profile_starts: list[dict[str, Any]] = []
+            profile_stops: list[dict[str, Any]] = []
+            if profiling_cfg.engine is not None:
+                profile_endpoints = (
+                    profiling_cfg.urls or config.endpoint_config.endpoints
+                )
+                profile_start_urls = _derive_profile_urls(
+                    profile_endpoints, profiling_cfg.engine, "start"
+                )
+                profile_stop_urls = _derive_profile_urls(
+                    profile_endpoints, profiling_cfg.engine, "stop"
+                )
+            session_completed_normally = False
+
+            def _on_global_timeout() -> None:
+                if not _timeout_done:
                     logger.warning(
-                        "Profile start: %s -> %s",
-                        url,
-                        rec["error"] or rec["status"],
+                        "Performance phase max_duration reached (%d ms); "
+                        "ending performance phase.",
+                        max_duration_ms,
                     )
-                profile_starts.append(rec)
+                    # Stop only the perf phase, not the whole session, so a combined
+                    # perf+accuracy run still runs accuracy after the perf cap.
+                    session.stop_current_phase()
 
-        loop.add_signal_handler(signal.SIGINT, session.stop)
-        try:
-            result = await session.run(phases, on_phase_start=_on_phase_start)
-            session_completed_normally = True
-        except Exception as e:
-            raise ExecutionError(f"Benchmark execution failed: {e}") from e
-        finally:
-            _timeout_done = True
-            perf_timeout.cancel()
-            loop.remove_signal_handler(signal.SIGINT)
-            # Fire /stop_profile for URLs whose /start_profile succeeded.
-            # Unifies the clean phase-end path and the abort path —
-            # both reach this block, both fire stops.
-            if profile_starts:
-                stop_reason = "phase_end" if session_completed_normally else "abort"
-                for i, start_rec in enumerate(profile_starts):
-                    if start_rec["status"] != 200 or i >= len(profile_stop_urls):
-                        continue
-                    rec = _post_profile(profile_stop_urls[i])
-                    rec["stop_reason"] = stop_reason
+            perf_timeout = _PerfPhaseTimeout(loop, max_duration_ms, _on_global_timeout)
+
+            def _on_phase_start(phase: PhaseConfig) -> None:
+                # _PerfPhaseTimeout arms the perf cap on PERFORMANCE and cancels it
+                # when any later phase starts, so a combined perf+accuracy run can
+                # never have its accuracy phase truncated by the perf cap.
+                perf_timeout.on_phase_start(phase.phase_type)
+                if phase.phase_type != PhaseType.PERFORMANCE:
+                    return
+                # Fire /start_profile sequentially before any perf request is
+                # issued, so the server is armed when traffic begins. Blocks
+                # the loop briefly (sub-100ms per URL); strategy task hasn't
+                # been created yet so nothing is starved.
+                for url in profile_start_urls:
+                    rec = _post_profile(url)
                     if rec["status"] == 200:
-                        logger.info("Profile stop: %s -> 200 OK", profile_stop_urls[i])
+                        logger.info("Profile start: %s -> 200 OK", url)
                     else:
                         logger.warning(
-                            "Profile stop: %s -> %s",
-                            profile_stop_urls[i],
+                            "Profile start: %s -> %s",
+                            url,
                             rec["error"] or rec["status"],
                         )
-                    profile_stops.append(rec)
-            logger.info("Cleaning up...")
+                    profile_starts.append(rec)
+
+            loop.add_signal_handler(signal.SIGINT, session.stop)
             try:
-                if http_client:
-                    await http_client.shutdown_async()
+                result = await session.run(phases, on_phase_start=_on_phase_start)
+                session_completed_normally = True
             except Exception as e:
-                logger.warning(f"Client cleanup error: {e}")
-            logger.info(
-                "Closing publisher (buffer=%d, pending=%d)...",
-                publisher.buffered_count,
-                publisher.pending_count,
-            )
-            publisher.close()
-            logger.info("Waiting for services to finish processing...")
-            await asyncio.to_thread(launcher.wait_for_exit, None)
-
-            # Source the snapshot dict for Report:
-            # 1. Preferred: the JSON file the aggregator atomically wrote
-            #    in publish_final (ENDED-driven or signal-handler-driven).
-            # 2. Fallback: convert the last live snapshot from pub/sub to
-            #    its dict form. Only reached when the aggregator was killed
-            #    by an uncatchable signal (SIGKILL / OOM) before its
-            #    handler could write. Report will be marked incomplete
-            #    because state will be LIVE / DRAINING, not "complete".
-            snap_dict: dict[str, Any] | None = _load_final_snapshot_from_disk(
-                metrics_output_dir / "final_snapshot.json"
-            )
-            if snap_dict is not None:
-                logger.info("Built report from final_snapshot.json")
-            elif metrics_subscriber.latest is not None:
-                snap_dict = snapshot_to_dict(metrics_subscriber.latest)
-                logger.warning(
-                    "No final_snapshot.json on disk; falling back to last "
-                    "pub/sub snapshot (state may or may not be terminal)"
-                )
-            else:
-                logger.error("No metrics snapshot available; cannot build report")
-
-            if snap_dict is not None:
+                raise ExecutionError(f"Benchmark execution failed: {e}") from e
+            finally:
+                _timeout_done = True
+                perf_timeout.cancel()
+                loop.remove_signal_handler(signal.SIGINT)
+                # Fire /stop_profile for URLs whose /start_profile succeeded.
+                # Unifies the clean phase-end path and the abort path —
+                # both reach this block, both fire stops.
+                if profile_starts:
+                    stop_reason = "phase_end" if session_completed_normally else "abort"
+                    for i, start_rec in enumerate(profile_starts):
+                        if start_rec["status"] != 200 or i >= len(profile_stop_urls):
+                            continue
+                        rec = _post_profile(profile_stop_urls[i])
+                        rec["stop_reason"] = stop_reason
+                        if rec["status"] == 200:
+                            logger.info(
+                                "Profile stop: %s -> 200 OK", profile_stop_urls[i]
+                            )
+                        else:
+                            logger.warning(
+                                "Profile stop: %s -> %s",
+                                profile_stop_urls[i],
+                                rec["error"] or rec["status"],
+                            )
+                        profile_stops.append(rec)
+                logger.info("Cleaning up...")
                 try:
-                    runtime = ctx.config.settings.runtime
-                    warmup = ctx.config.settings.warmup
-                    load_pattern = ctx.config.settings.load_pattern
-                    report = Report.from_snapshot(
-                        snap_dict,
-                        seeds={
-                            "scheduler_random_seed": runtime.scheduler_random_seed,
-                            "dataloader_random_seed": runtime.dataloader_random_seed,
-                            "warmup_random_seed": warmup.warmup_random_seed,
-                        },
-                        use_legacy_loadgen_qps_metrics=(
-                            load_pattern.type == LoadPatternType.POISSON
-                            and load_pattern.use_legacy_loadgen_qps_metrics
-                        ),
-                    )
-                    if not report.complete:
-                        logger.warning(
-                            "Report is incomplete (state=%s, n_pending_tasks=%d)",
-                            report.state,
-                            snap_dict.get("n_pending_tasks", 0),
-                        )
-                    if report.legacy_loadgen_window_duration_ns is not None:
-                        logger.warning(
-                            "Reporting QPS/TPS with the legacy MLPerf LoadGen Server "
-                            "'completed' definition (deprecated; to be removed once a "
-                            "formal tail-cutting mechanism lands). Pass "
-                            "--no-use-legacy-loadgen-qps-metrics for endpoints-native "
-                            "metrics."
-                        )
-                except Exception as e:  # noqa: BLE001 — best-effort report build.
-                    logger.warning(f"Failed to build report from snapshot: {e}")
+                    if http_client:
+                        await http_client.shutdown_async()
+                except Exception as e:
+                    logger.warning(f"Client cleanup error: {e}")
+                logger.info(
+                    "Closing publisher (buffer=%d, pending=%d)...",
+                    publisher.buffered_count,
+                    publisher.pending_count,
+                )
+                publisher.close()
+                logger.info("Waiting for services to finish processing...")
+                await asyncio.to_thread(launcher.wait_for_exit, None)
 
-            metrics_subscriber.close()
-            pbar.close()
+                # Source the snapshot dict for Report:
+                # 1. Preferred: the JSON file the aggregator atomically wrote
+                #    in publish_final (ENDED-driven or signal-handler-driven).
+                # 2. Fallback: convert the last live snapshot from pub/sub to
+                #    its dict form. Only reached when the aggregator was killed
+                #    by an uncatchable signal (SIGKILL / OOM) before its
+                #    handler could write. Report will be marked incomplete
+                #    because state will be LIVE / DRAINING, not "complete".
+                snap_dict: dict[str, Any] | None = _load_final_snapshot_from_disk(
+                    metrics_output_dir / "final_snapshot.json"
+                )
+                if snap_dict is not None:
+                    logger.info("Built report from final_snapshot.json")
+                elif metrics_subscriber.latest is not None:
+                    snap_dict = snapshot_to_dict(metrics_subscriber.latest)
+                    logger.warning(
+                        "No final_snapshot.json on disk; falling back to last "
+                        "pub/sub snapshot (state may or may not be terminal)"
+                    )
+                else:
+                    logger.error("No metrics snapshot available; cannot build report")
+
+                if snap_dict is not None:
+                    try:
+                        runtime = ctx.config.settings.runtime
+                        warmup = ctx.config.settings.warmup
+                        load_pattern = ctx.config.settings.load_pattern
+                        report = Report.from_snapshot(
+                            snap_dict,
+                            seeds={
+                                "scheduler_random_seed": runtime.scheduler_random_seed,
+                                "dataloader_random_seed": runtime.dataloader_random_seed,
+                                "warmup_random_seed": warmup.warmup_random_seed,
+                            },
+                            use_legacy_loadgen_qps_metrics=(
+                                load_pattern.type == LoadPatternType.POISSON
+                                and load_pattern.use_legacy_loadgen_qps_metrics
+                            ),
+                        )
+                        if not report.complete:
+                            logger.warning(
+                                "Report is incomplete (state=%s, n_pending_tasks=%d)",
+                                report.state,
+                                snap_dict.get("n_pending_tasks", 0),
+                            )
+                        if report.legacy_loadgen_window_duration_ns is not None:
+                            logger.warning(
+                                "Reporting QPS/TPS with the legacy MLPerf LoadGen Server "
+                                "'completed' definition (deprecated; to be removed once a "
+                                "formal tail-cutting mechanism lands). Pass "
+                                "--no-use-legacy-loadgen-qps-metrics for endpoints-native "
+                                "metrics."
+                            )
+                    except Exception as e:  # noqa: BLE001 — best-effort report build.
+                        logger.warning(f"Failed to build report from snapshot: {e}")
+
+                metrics_subscriber.close()
+                pbar.close()
+    except BaseException:
+        # tmpfs_dir may still be None if the exception hit before it was
+        # created (e.g. ZMQ context setup), in which case there is nothing
+        # to clean up.
+        if tmpfs_dir is not None and tmpfs_dir.exists():
+            _salvage_tmpfs(ctx.report_dir, tmpfs_dir)
+            shutil.rmtree(tmpfs_dir, ignore_errors=True)
+        raise
 
     profiling_payload: dict[str, Any] | None = None
     if profiling_cfg.engine is not None:
@@ -1315,13 +1352,18 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
 def run_benchmark(
     config: BenchmarkConfig,
     test_mode: TestMode,
-) -> None:
-    """Orchestrate setup → execute → finalize.
+) -> Path:
+    """Orchestrate setup → execute → finalize for the main run.
 
     ``test_mode`` is the single source of truth for what runs: ``ACC`` is an
     accuracy-only run (no performance phase), ``PERF`` performance-only, and
     ``BOTH`` runs performance then accuracy. The CLI ``--accuracy-only`` flag is
     a convenience alias that resolves to ``TestMode.ACC``.
+
+    Returns the run's ``report_dir`` so the caller can locate artifacts (and, for
+    a config with an ``audit:`` block, point ``run_audit`` at ``<report_dir>/audit``).
+    The compliance audit is dispatched by the caller (``cli._run``), not here, so
+    this module does not depend on ``commands.audit``.
     """
     logger.debug(
         "BenchmarkConfig (%s):\n%s",
@@ -1334,10 +1376,14 @@ def run_benchmark(
         bench = run_benchmark_async(ctx)
         finalize_benchmark(ctx, bench)
     except KeyboardInterrupt:
+        # Salvage results (finally), then propagate to main.py -> exit 130.
         logger.warning("Benchmark interrupted by user")
+        raise
     finally:
         if bench:
             if bench.tmpfs_dir.exists():
                 _salvage_tmpfs(ctx.report_dir, bench.tmpfs_dir)
                 shutil.rmtree(bench.tmpfs_dir, ignore_errors=True)
             logger.info(f"Partial results saved to {ctx.report_dir}")
+
+    return ctx.report_dir
