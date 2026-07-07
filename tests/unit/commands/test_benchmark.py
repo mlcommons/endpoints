@@ -27,8 +27,6 @@ from urllib import error as urllib_error
 
 import pandas as pd
 import pytest
-from pydantic import ValidationError
-
 from inference_endpoint.commands.benchmark.cli import (
     benchmark_app,
     from_config,
@@ -81,6 +79,7 @@ from inference_endpoint.exceptions import InputValidationError, SetupError
 from inference_endpoint.load_generator.sample_order import create_sample_order
 from inference_endpoint.load_generator.session import PhaseType
 from inference_endpoint.metrics.metric import Throughput
+from pydantic import ValidationError
 
 TEMPLATE_DIR = (
     Path(__file__).resolve().parents[3]
