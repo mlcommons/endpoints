@@ -175,6 +175,8 @@ def test_v6_1_latency_targets_match_v5_1():
     )
     assert v6_1.scheduler_rng_seed != v5_1.scheduler_rng_seed
     assert v6_1.sample_index_rng_seed != v5_1.sample_index_rng_seed
+
+
 def test_edge_ruleset_registered():
     # Resolvable by version-specific name and the "current" alias.
     assert get_ruleset("mlperf-edge-v0.1") is EDGE_CURRENT
