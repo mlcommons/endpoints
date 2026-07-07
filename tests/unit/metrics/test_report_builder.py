@@ -181,16 +181,23 @@ class TestFromSnapshot:
         # OSL data was written → tps is computable.
         assert report.tps is not None
 
-    def test_seeds_keyword_only_passthrough(self):
-        """seeds is config, not a snapshot metric: None unless the caller
+    def test_run_config_keyword_only_passthrough(self):
+        """run_config is config, not a snapshot metric: None unless the caller
         supplies it, and carried verbatim into the report when it does."""
         registry = _make_registry(n_samples=5)
         snap = snapshot_to_dict(
             registry.build_snapshot(state=SessionState.COMPLETE, n_pending_tasks=0)
         )
-        assert Report.from_snapshot(snap).seeds is None
-        seeds = {"scheduler_random_seed": 42, "dataloader_random_seed": 7}
-        assert Report.from_snapshot(snap, seeds=seeds).seeds == seeds
+        assert Report.from_snapshot(snap).run_config is None
+        run_config = {
+            "load_pattern": {"type": "poisson", "target_qps": 14.75},
+            "warmup": {"enabled": False, "warmup_random_seed": 42},
+            "scheduler_random_seed": 42,
+            "dataloader_random_seed": 42,
+        }
+        assert (
+            Report.from_snapshot(snap, run_config=run_config).run_config == run_config
+        )
 
     def test_failed_uses_tracked_counter(self):
         """``n_samples_failed`` reads from ``tracked_samples_failed``, not
@@ -279,23 +286,28 @@ class TestReportDisplayAndSerialize:
         assert data["qps"] is None
         assert data["tps"] is None
 
-    def test_to_json_serializes_seeds(self):
-        """result_summary.json carries the run's RNG seeds so a run can be
-        validated as reproducible; absent seeds serialize as null."""
+    def test_to_json_and_display_carry_run_config(self):
+        """result_summary.json + report.txt carry the run's config so a run is
+        self-describing/reproducible; absent run_config serializes as null."""
         registry = _make_registry(n_samples=5)
         snap = snapshot_to_dict(
             registry.build_snapshot(state=SessionState.COMPLETE, n_pending_tasks=0)
         )
-        seeds = {"scheduler_random_seed": 42, "dataloader_random_seed": 42}
-        report = Report.from_snapshot(snap, seeds=seeds)
-        assert json.loads(report.to_json())["seeds"] == seeds
+        run_config = {
+            "load_pattern": {"type": "poisson", "target_qps": 14.75},
+            "scheduler_random_seed": 42,
+            "dataloader_random_seed": 42,
+        }
+        report = Report.from_snapshot(snap, run_config=run_config)
+        assert json.loads(report.to_json())["run_config"] == run_config
 
         lines: list[str] = []
         report.display(fn=lines.append, summary_only=True)
-        assert any("Seeds:" in ln for ln in lines)
+        assert any("Run config:" in ln for ln in lines)
+        assert any("load_pattern:" in ln and "poisson" in ln for ln in lines)
 
-        # Absent seeds -> null, not omitted.
-        assert json.loads(Report.from_snapshot(snap).to_json())["seeds"] is None
+        # Absent run_config -> null, not omitted.
+        assert json.loads(Report.from_snapshot(snap).to_json())["run_config"] is None
 
     def test_to_json_save(self, tmp_path: Path):
         registry = _make_registry(n_samples=5)
