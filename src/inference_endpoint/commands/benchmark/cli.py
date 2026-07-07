@@ -37,8 +37,19 @@ from inference_endpoint.exceptions import DatasetValidationError, InputValidatio
 benchmark_app = cyclopts.App(name="benchmark", help="Run benchmarks.")
 
 
-def _run(config: BenchmarkConfig, dataset: list[str], mode: TestMode) -> None:
-    """Unified entry point: inject CLI datasets if needed, then run."""
+def _run(
+    config: BenchmarkConfig,
+    dataset: list[str],
+    mode: TestMode,
+    accuracy_only: bool = False,
+) -> None:
+    """Unified entry point: inject CLI datasets if needed, then run.
+
+    ``--accuracy-only`` is a convenience alias that resolves to ``TestMode.ACC``;
+    the runner takes only ``test_mode``.
+    """
+    if accuracy_only:
+        mode = TestMode.ACC
     if not config.datasets and dataset:
         try:
             # Raw strings are parsed by BenchmarkConfig._coerce_dataset_strings validator
@@ -68,9 +79,16 @@ def offline(
         TestMode,
         cyclopts.Parameter(help="Test mode: perf, acc, or both"),
     ] = TestMode.PERF,
+    accuracy_only: Annotated[
+        bool,
+        cyclopts.Parameter(
+            name="--accuracy-only",
+            help="Run only accuracy evaluation, skip the performance phase entirely",
+        ),
+    ] = False,
 ):
     """Offline benchmark — all queries at t=0 for max throughput."""
-    _run(config, dataset, mode)
+    _run(config, dataset, mode, accuracy_only=accuracy_only)
 
 
 @benchmark_app.command(name="online")
@@ -87,9 +105,16 @@ def online(
         TestMode,
         cyclopts.Parameter(help="Test mode: perf, acc, or both"),
     ] = TestMode.PERF,
+    accuracy_only: Annotated[
+        bool,
+        cyclopts.Parameter(
+            name="--accuracy-only",
+            help="Run only accuracy evaluation, skip the performance phase entirely",
+        ),
+    ] = False,
 ):
     """Online benchmark — sustained QPS with load pattern."""
-    _run(config, dataset, mode)
+    _run(config, dataset, mode, accuracy_only=accuracy_only)
 
 
 @benchmark_app.command(name="from-config")
@@ -98,6 +123,20 @@ def from_config(
     config: Annotated[Path, cyclopts.Parameter(name=["--config", "-c"])],
     timeout: float | None = None,
     mode: TestMode | None = None,
+    accuracy_only: Annotated[
+        bool,
+        cyclopts.Parameter(
+            name="--accuracy-only",
+            help="Run only accuracy evaluation, skip the performance phase entirely",
+        ),
+    ] = False,
+    report_dir: Annotated[
+        Path | None,
+        cyclopts.Parameter(
+            name="--report-dir",
+            help="Override report_dir from config",
+        ),
+    ] = None,
 ):
     """Run benchmark from YAML config file."""
     try:
@@ -106,7 +145,9 @@ def from_config(
         raise InputValidationError(f"Config error: {e}") from e
     if timeout is not None:
         resolved = resolved.with_updates(timeout=timeout)
+    if report_dir is not None:
+        resolved = resolved.with_updates(report_dir=report_dir)
     test_mode = mode or (
         TestMode.BOTH if resolved.type == TestType.SUBMISSION else TestMode.PERF
     )
-    _run(resolved, [], test_mode)
+    _run(resolved, [], test_mode, accuracy_only=accuracy_only)
