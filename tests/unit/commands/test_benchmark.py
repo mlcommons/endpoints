@@ -756,6 +756,57 @@ class TestAggregatorArgs:
         expected = str(config.settings.drain.metrics_tokenizer_workers)
         assert args[idx + 1] == expected
 
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_tmpfs_dir_cleaned_up_on_mid_run_crash(self, tmp_path, monkeypatch):
+        """If _run_benchmark_async raises before returning a BenchmarkResult,
+        the tmpfs directory it created must not leak."""
+        config = OfflineConfig(**_OFFLINE_KWARGS, settings=OfflineSettings())
+        ctx = self._make_ctx(config, tmp_path)
+
+        fixed_uuid = MagicMock()
+        fixed_uuid.hex = "deadbeef"
+        monkeypatch.setattr(
+            "inference_endpoint.commands.benchmark.execute.uuid.uuid4",
+            lambda: fixed_uuid,
+        )
+
+        async def _capture_launch(service_configs, *, timeout):
+            raise RuntimeError("simulated mid-run crash")
+
+        mock_zmq = MagicMock()
+        mock_zmq.socket_dir = str(tmp_path / "sockets")
+
+        with (
+            patch(
+                "inference_endpoint.commands.benchmark.execute.ManagedZMQContext"
+            ) as MockZMQ,
+            patch(
+                "inference_endpoint.commands.benchmark.execute.EventPublisherService"
+            ) as MockPub,
+            patch(
+                "inference_endpoint.commands.benchmark.execute.MetricsSnapshotSubscriber"
+            ) as MockSub,
+            patch(
+                "inference_endpoint.commands.benchmark.execute.ServiceLauncher"
+            ) as MockLauncher,
+            patch("inference_endpoint.commands.benchmark.execute.tqdm"),
+        ):
+            MockZMQ.scoped.return_value.__enter__ = MagicMock(return_value=mock_zmq)
+            MockZMQ.scoped.return_value.__exit__ = MagicMock(return_value=False)
+            MockPub.return_value.socket_name = "test_pub"
+            MockSub.return_value.start = MagicMock()
+            MockLauncher.return_value.launch = _capture_launch
+
+            loop = asyncio.get_event_loop()
+            with pytest.raises(RuntimeError, match="simulated mid-run crash"):
+                await _run_benchmark_async(ctx, loop)
+
+        shm = Path("/dev/shm")
+        tmpfs_base = shm if shm.exists() else Path(tempfile.gettempdir())
+        tmpfs_dir = tmpfs_base / "benchmark_cli_benchmark_deadbeef"
+        assert not tmpfs_dir.exists()
+
 
 class TestAccuracyOnlyDatasetLoading:
     """`--accuracy-only` must skip the performance dataset even when the config
@@ -1729,3 +1780,157 @@ class TestProfilingHelpers:
         assert "Trigger span" in text
         # Mirrors what finalize_benchmark dumps to profiling.json
         assert json.loads(json.dumps(payload))["engine"] == "vllm"
+
+
+class TestRunBenchmarkInterrupt:
+    @pytest.mark.unit
+    def test_keyboard_interrupt_skips_audit(self, monkeypatch, tmp_path):
+        """A Ctrl-C during the main run must not start the audit."""
+        from inference_endpoint.commands.benchmark import cli
+        from inference_endpoint.config.schema import TestMode
+
+        config = MagicMock()
+        config.datasets = [object()]  # non-empty → _run skips CLI dataset injection
+        config.audit = MagicMock(only=False)  # audit IS configured
+        config.report_dir = str(tmp_path)
+        config.with_updates.return_value = config
+
+        def _interrupt(cfg, mode):
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(cli, "run_benchmark", _interrupt)
+        audit_spy = MagicMock()
+        monkeypatch.setattr(cli, "run_audit", audit_spy)
+
+        with pytest.raises(KeyboardInterrupt):
+            cli._run(config, [], TestMode.PERF)
+        audit_spy.assert_not_called()
+
+    @pytest.mark.unit
+    def test_main_run_before_audit_against_shared_report_dir(
+        self, monkeypatch, tmp_path
+    ):
+        """Main run executes before the audit (upstream MLPerf order),
+        sharing one report_dir."""
+        from inference_endpoint.commands.benchmark import cli
+        from inference_endpoint.config.schema import TestMode
+
+        config = MagicMock()
+        config.datasets = [object()]
+        config.audit = MagicMock(only=False)
+        config.report_dir = str(tmp_path)
+        config.with_updates.return_value = config
+
+        call_order = []
+
+        def _run_audit(cfg, base_report_dir):
+            call_order.append(("audit", cfg, base_report_dir))
+            result = MagicMock()
+            result.passed = True
+            return result
+
+        def _run_benchmark(cfg, mode):
+            call_order.append(("benchmark", cfg, mode))
+            return tmp_path
+
+        monkeypatch.setattr(cli, "run_audit", _run_audit)
+        monkeypatch.setattr(cli, "run_benchmark", _run_benchmark)
+
+        cli._run(config, [], TestMode.PERF)
+
+        assert [c[0] for c in call_order] == ["benchmark", "audit"]
+        _, benchmark_cfg, _ = call_order[0]
+        _, audit_cfg, audit_report_dir = call_order[1]
+        assert audit_report_dir == tmp_path / "audit"
+        assert audit_cfg is benchmark_cfg is config
+
+    @pytest.mark.unit
+    def test_audit_fail_raises_after_main_run(self, monkeypatch, tmp_path):
+        """A failing (not crashed) audit raises CLIError; the perf report
+        already exists because the main run went first."""
+        from inference_endpoint.commands.benchmark import cli
+        from inference_endpoint.config.schema import TestMode
+        from inference_endpoint.exceptions import CLIError
+
+        config = MagicMock()
+        config.datasets = [object()]
+        config.audit = MagicMock(only=False)
+        config.report_dir = str(tmp_path)
+        config.with_updates.return_value = config
+
+        call_order = []
+
+        def _run_audit(cfg, base_report_dir):
+            call_order.append("audit")
+            result = MagicMock()
+            result.passed = False
+            result.test_id = "output_caching_test"
+            result.details = {"reason": "caching detected"}
+            return result
+
+        def _run_benchmark(cfg, mode):
+            call_order.append("benchmark")
+            return tmp_path
+
+        monkeypatch.setattr(cli, "run_audit", _run_audit)
+        monkeypatch.setattr(cli, "run_benchmark", _run_benchmark)
+
+        with pytest.raises(CLIError):
+            cli._run(config, [], TestMode.PERF)
+
+        assert call_order == ["benchmark", "audit"]
+
+    @pytest.mark.unit
+    def test_audit_only_skips_main_run(self, monkeypatch, tmp_path):
+        """audit.only runs the audit standalone — the main benchmark is skipped."""
+        from inference_endpoint.commands.benchmark import cli
+        from inference_endpoint.config.schema import TestMode
+
+        config = MagicMock()
+        config.datasets = [object()]
+        config.audit = MagicMock(only=True)
+        config.report_dir = str(tmp_path)
+        config.with_updates.return_value = config
+
+        audit_calls = []
+
+        def _run_audit(cfg, base_report_dir):
+            audit_calls.append(base_report_dir)
+            result = MagicMock()
+            result.passed = True
+            return result
+
+        monkeypatch.setattr(cli, "run_audit", _run_audit)
+        benchmark_spy = MagicMock()
+        monkeypatch.setattr(cli, "run_benchmark", benchmark_spy)
+
+        cli._run(config, [], TestMode.PERF)
+
+        benchmark_spy.assert_not_called()
+        assert audit_calls == [tmp_path / "audit"]
+
+    @pytest.mark.unit
+    def test_audit_only_fail_raises(self, monkeypatch, tmp_path):
+        """audit.only maps a FAIL result to CLIError (exit 1)."""
+        from inference_endpoint.commands.benchmark import cli
+        from inference_endpoint.config.schema import TestMode
+        from inference_endpoint.exceptions import CLIError
+
+        config = MagicMock()
+        config.datasets = [object()]
+        config.audit = MagicMock(only=True)
+        config.report_dir = str(tmp_path)
+        config.with_updates.return_value = config
+
+        def _run_audit(cfg, base_report_dir):
+            result = MagicMock()
+            result.passed = False
+            result.test_id = "output_caching_test"
+            result.details = {"reason": "caching detected"}
+            return result
+
+        monkeypatch.setattr(cli, "run_audit", _run_audit)
+        monkeypatch.setattr(cli, "run_benchmark", MagicMock())
+
+        with pytest.raises(CLIError):
+            cli._run(config, [], TestMode.PERF)
