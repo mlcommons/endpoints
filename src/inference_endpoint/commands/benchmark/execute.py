@@ -106,6 +106,28 @@ transformers_logging.set_verbosity_error()
 
 logger = logging.getLogger(__name__)
 
+# generation_config_override keys that flow into request payloads but are NOT
+# honored by the single global tokenizer / metrics aggregator, so a per-dataset
+# value silently desyncs ISL/OSL/TTFT/TPOT accounting. The override is
+# intentionally permissive (see schema.py), so warn rather than reject.
+_METRICS_DECOUPLED_OVERRIDE_KEYS = frozenset({"name", "streaming", "tokenizer_name"})
+
+
+def _warn_ignored_override_keys(name: str, override: dict[str, Any] | None) -> None:
+    """Warn when a dataset override sets keys the single-aggregator path ignores."""
+    if not override:
+        return
+    ignored = sorted(_METRICS_DECOUPLED_OVERRIDE_KEYS & override.keys())
+    if ignored:
+        logger.warning(
+            "Dataset '%s': generation_config_override keys %s are applied to "
+            "request payloads but NOT honored by the single global tokenizer / "
+            "metrics aggregator; set them on top-level model_params for correct "
+            "ISL/OSL/TTFT/TPOT accounting.",
+            name,
+            ignored,
+        )
+
 
 def _default_report_path() -> Path:
     """Default report path with timestamp."""
@@ -328,6 +350,7 @@ def _load_datasets(
             raise InputValidationError(
                 f"Dataset '{acc_cfg.name}': invalid generation_config_override: {e}"
             ) from e
+        _warn_ignored_override_keys(acc_cfg.name, acc_cfg.generation_config_override)
         ds.load(api_type=config.endpoint_config.api_type, model_params=ds_model_params)
         logger.info(f"Loaded {ds} - {ds.num_samples()} samples")
 
@@ -350,6 +373,7 @@ def _load_datasets(
             raise InputValidationError(
                 f"Dataset '{perf_cfg.name}': invalid generation_config_override: {e}"
             ) from e
+        _warn_ignored_override_keys(perf_cfg.name, perf_cfg.generation_config_override)
         try:
             dataloader = DataLoaderFactory.create_loader(perf_cfg)
             dataloader.load(

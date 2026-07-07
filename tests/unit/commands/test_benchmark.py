@@ -1841,18 +1841,32 @@ class _OverrideTestBase:
         assert acc_datasets[0].load_sample(0)[self.max_tokens_key] == 32768
 
     @pytest.mark.unit
-    def test_invalid_override_value_raises_input_validation_error(self, tmp_path):
-        """A value-level invalidity (e.g. bad streaming enum) is caught at
-        load time and surfaces as InputValidationError, not a generic
-        SetupError, so the user sees a clear actionable message."""
+    def test_invalid_override_value_raises_at_construction(self, tmp_path):
+        """A value-level invalidity (e.g. bad streaming enum) is caught at config
+        construction (parse time) by BenchmarkConfig's validator, so a bad
+        override is rejected before any setup side effects rather than mid-run."""
         perf_path, acc_path = self._write_fixture(tmp_path)
-        config = self._build_config(
-            perf_path, acc_path, acc_override={"streaming": "garbage"}
-        )
-        with pytest.raises(
-            InputValidationError, match="invalid generation_config_override"
-        ):
-            _load_datasets(config, tmp_path, TestMode.PERF)
+        with pytest.raises(ValidationError):
+            self._build_config(
+                perf_path, acc_path, acc_override={"streaming": "garbage"}
+            )
+
+    @pytest.mark.unit
+    def test_completion_control_override_gated_by_api_type(self, tmp_path):
+        """A completion-only control (min_new_tokens) in a per-dataset override is
+        gated by api_type exactly like top-level model_params: rejected at
+        construction for non-completions APIs, accepted for openai_completions."""
+        perf_path, acc_path = self._write_fixture(tmp_path)
+        if self.api_type == "openai_completions":
+            cfg = self._build_config(
+                perf_path, acc_path, acc_override={"min_new_tokens": 5}
+            )
+            assert cfg is not None
+        else:
+            with pytest.raises(ValidationError, match="openai_completions"):
+                self._build_config(
+                    perf_path, acc_path, acc_override={"min_new_tokens": 5}
+                )
 
 
 class TestLoadDatasetsGenerationConfigOverrideChat(_OverrideTestBase):

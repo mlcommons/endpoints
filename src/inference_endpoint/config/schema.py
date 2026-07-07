@@ -73,6 +73,21 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
     return out
 
 
+def _non_default_completion_controls(mp: ModelParams) -> list[str]:
+    """Completion-only ModelParams controls set to a non-default value.
+
+    ``min_new_tokens``/``skip_special_tokens`` are only honored by the
+    ``openai_completions`` adapter; ``BenchmarkConfig`` rejects them for other
+    ``api_type``s. Shared by the top-level and per-dataset-override checks so
+    both config surfaces validate identically.
+    """
+    checks = {
+        "min_new_tokens": mp.min_new_tokens != 1,
+        "skip_special_tokens": not mp.skip_special_tokens,
+    }
+    return [name for name, non_default in checks.items() if non_default]
+
+
 class LoadPatternType(str, Enum):
     """Load pattern types."""
 
@@ -1012,24 +1027,32 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
 
         # TODO(vir): Move API-type-specific validation out of this generic
         # cross-model validator and into the selected adapter. Requires a larger refactor.
-        non_default_completion_controls = {
-            "model_params.min_new_tokens": self.model_params.min_new_tokens != 1,
-            "model_params.skip_special_tokens": not self.model_params.skip_special_tokens,
-        }
-        configured_controls = [
-            name
-            for name, is_non_default in non_default_completion_controls.items()
-            if is_non_default
+        #
+        # Completion-only controls must be gated by api_type for BOTH the
+        # top-level model_params AND every per-dataset generation_config_override,
+        # so the two config surfaces validate identically. Building each dataset's
+        # effective params here (parse time) also surfaces value-invalid overrides
+        # before setup produces side effects.
+        completion_control_surfaces: list[tuple[str, ModelParams]] = [
+            ("model_params", self.model_params)
         ]
-        if (
-            configured_controls
-            and self.endpoint_config.api_type != APIType.OPENAI_COMPLETIONS
-        ):
-            controls = " and ".join(configured_controls)
-            verb = "requires" if len(configured_controls) == 1 else "require"
-            required_api_type = "endpoint_config.api_type=openai_completions"
-            raise ValueError(f"{controls} {verb} {required_api_type}")
-        if configured_controls and any(
+        for dataset in self.datasets:
+            if dataset.generation_config_override:
+                completion_control_surfaces.append(
+                    (
+                        f"datasets['{dataset.name}'].generation_config_override",
+                        dataset.effective_generation_config(self.model_params),
+                    )
+                )
+        for prefix, mp in completion_control_surfaces:
+            controls = _non_default_completion_controls(mp)
+            if controls and self.endpoint_config.api_type != APIType.OPENAI_COMPLETIONS:
+                names = " and ".join(f"{prefix}.{name}" for name in controls)
+                verb = "requires" if len(controls) == 1 else "require"
+                raise ValueError(
+                    f"{names} {verb} endpoint_config.api_type=openai_completions"
+                )
+        if _non_default_completion_controls(self.model_params) and any(
             dataset.agentic_inference is not None for dataset in self.datasets
         ):
             raise ValueError(
