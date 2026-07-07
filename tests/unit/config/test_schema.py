@@ -20,6 +20,9 @@ import re
 
 import pytest
 from inference_endpoint import metrics
+from inference_endpoint.config import ruleset_registry
+from inference_endpoint.config.ruleset_registry import register_ruleset
+from inference_endpoint.config.rulesets.mlcommons.rules import RoundRuleset
 from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import (
     APIType,
@@ -268,12 +271,12 @@ class TestBenchmarkConfig:
             benchmark_mode=TestType.OFFLINE,
             endpoint_config={"endpoints": ["http://localhost:8000"]},
             submission_ref=SubmissionReference(
-                model="llama-2-70b", ruleset="mlperf-inference-v6.0"
+                model="llama-2-70b", ruleset="mlperf-inference-v6.1"
             ),
             datasets=[{"path": "perf.jsonl"}],
         )
         assert config.model_params.name == "llama-2-70b"
-        assert config.submission_ref.ruleset == "mlperf-inference-v6.0"
+        assert config.submission_ref.ruleset == "mlperf-inference-v6.1"
 
     @pytest.mark.unit
     def test_multiple_accuracy_datasets(self):
@@ -399,7 +402,7 @@ class TestBenchmarkConfigMethods:
             model_params={"name": "M"},
             endpoint_config={"endpoints": ["http://x"]},
             datasets=[{"path": "D"}],
-            submission_ref={"model": "M", "ruleset": "R"},
+            submission_ref={"model": "M", "ruleset": "mlperf-inference-v6.1"},
         )
         assert config.get_benchmark_mode() == TestType.OFFLINE
 
@@ -853,3 +856,149 @@ class TestProfilingConfig:
     def test_valid_urls_accepted(self):
         cfg = ProfilingConfig(engine="vllm", urls=["http://h:8001/v1"])
         assert cfg.urls == ["http://h:8001/v1"]
+
+
+# Official v6.1 seeds from loadgen/mlperf.conf L41-43 (schedule / sample_index).
+_V6_1_SCHED_SEED = 16159082839903944936
+_V6_1_SAMPLE_SEED = 2747215439041700203
+
+
+class TestRulesetSeedOverride:
+    """A submission ruleset pins the runtime RNG seeds at config construction,
+    before the config is dumped to the report dir."""
+
+    def _submission(self, ruleset: str, runtime: dict | None = None) -> BenchmarkConfig:
+        settings = {"runtime": runtime} if runtime is not None else {}
+        return BenchmarkConfig(
+            type=TestType.SUBMISSION,
+            benchmark_mode=TestType.OFFLINE,
+            endpoint_config={"endpoints": ["http://localhost:8000"]},
+            submission_ref=SubmissionReference(model="llama-2-70b", ruleset=ruleset),
+            datasets=[{"path": "perf.jsonl"}],
+            settings=settings,
+        )
+
+    @pytest.mark.unit
+    def test_registered_ruleset_pins_seeds(self):
+        cfg = self._submission("mlperf-inference-v6.1")
+        assert cfg.settings.runtime.scheduler_random_seed == _V6_1_SCHED_SEED
+        assert cfg.settings.runtime.dataloader_random_seed == _V6_1_SAMPLE_SEED
+        # Warmup is reseeded from the sample-index (dataloader) seed so its
+        # sample order derives from the same pinned seed as the perf phase.
+        assert cfg.settings.warmup.warmup_random_seed == _V6_1_SAMPLE_SEED
+
+    @pytest.mark.unit
+    def test_override_precedes_config_dump(self, tmp_path):
+        """The dumped config.yaml carries the pinned seeds, so the report dir's
+        config is representative of what actually ran."""
+        cfg = self._submission("mlperf-inference-v6.1")
+        out = tmp_path / "config.yaml"
+        cfg.to_yaml_file(out)
+        reloaded = BenchmarkConfig.from_yaml_file(out)
+        assert reloaded.settings.runtime.scheduler_random_seed == _V6_1_SCHED_SEED
+        assert reloaded.settings.runtime.dataloader_random_seed == _V6_1_SAMPLE_SEED
+
+    @pytest.mark.unit
+    def test_ruleset_seed_wins_over_user_value(self):
+        """Compliance rounds lock the seeds — a user-supplied seed is overridden
+        (mirrors LoadGen locking core seeds from user.conf)."""
+        cfg = self._submission(
+            "mlperf-inference-v6.1",
+            runtime={"scheduler_random_seed": 7, "dataloader_random_seed": 9},
+        )
+        assert cfg.settings.runtime.scheduler_random_seed == _V6_1_SCHED_SEED
+        assert cfg.settings.runtime.dataloader_random_seed == _V6_1_SAMPLE_SEED
+
+    @pytest.mark.unit
+    def test_unregistered_ruleset_submission_raises(self):
+        """A submission naming an unregistered ruleset must fail loudly rather
+        than silently falling back to default seeds."""
+        with pytest.raises(ValidationError):
+            self._submission("does-not-exist")
+
+    @pytest.mark.unit
+    def test_unregistered_ruleset_non_submission_is_lenient(self):
+        """Non-submission configs are unaffected: an unknown ruleset leaves the
+        runtime seeds at their defaults rather than erroring."""
+        cfg = BenchmarkConfig(
+            type=TestType.OFFLINE,
+            model_params={"name": "test"},
+            endpoint_config={"endpoints": ["http://localhost:8000"]},
+            datasets=[{"path": "test.jsonl"}],
+            submission_ref=SubmissionReference(model="test", ruleset="does-not-exist"),
+        )
+        assert cfg.settings.runtime.scheduler_random_seed == 42
+        assert cfg.settings.runtime.dataloader_random_seed == 42
+
+    @pytest.mark.unit
+    def test_no_submission_ref_keeps_defaults(self):
+        cfg = BenchmarkConfig(
+            type=TestType.OFFLINE,
+            model_params={"name": "test"},
+            endpoint_config={"endpoints": ["http://localhost:8000"]},
+            datasets=[{"path": "test.jsonl"}],
+        )
+        assert cfg.settings.runtime.scheduler_random_seed == 42
+        assert cfg.settings.runtime.dataloader_random_seed == 42
+
+    @pytest.fixture
+    def register_temp_ruleset(self):
+        """Register a throwaway RoundRuleset for the test, then unregister it."""
+        registered: list[str] = []
+
+        def _register(name, *, scheduler_rng_seed, sample_index_rng_seed):
+            register_ruleset(
+                name,
+                RoundRuleset(
+                    version=name,
+                    scheduler_rng_seed=scheduler_rng_seed,
+                    sample_index_rng_seed=sample_index_rng_seed,
+                    benchmark_rulesets={},
+                ),
+            )
+            registered.append(name)
+            return name
+
+        yield _register
+        for name in registered:
+            ruleset_registry._RULESET_REGISTRY.pop(name, None)
+
+    @pytest.mark.unit
+    def test_partial_none_seed_sample_index_rejected(self, register_temp_ruleset):
+        """A submission ruleset must pin both seeds. ``None`` (unseeded) is a
+        valid value in the general ruleset contract but incoherent for a pinned
+        submission, so a partially-unseeded ruleset is rejected loudly."""
+        name = register_temp_ruleset(
+            "test-partial-seed", scheduler_rng_seed=None, sample_index_rng_seed=999
+        )
+        with pytest.raises(ValidationError, match="leaves an RNG seed unset"):
+            self._submission(name)
+
+    @pytest.mark.unit
+    def test_partial_none_seed_scheduler_rejected(self, register_temp_ruleset):
+        """Mirror of the scheduler-None case: scheduler set, sample_index None."""
+        name = register_temp_ruleset(
+            "test-partial-sched", scheduler_rng_seed=777, sample_index_rng_seed=None
+        )
+        with pytest.raises(ValidationError, match="leaves an RNG seed unset"):
+            self._submission(name)
+
+    @pytest.mark.unit
+    def test_all_none_seed_rejected(self, register_temp_ruleset):
+        """A fully unseeded ruleset (both seeds ``None``) is rejected."""
+        name = register_temp_ruleset(
+            "test-no-seed", scheduler_rng_seed=None, sample_index_rng_seed=None
+        )
+        with pytest.raises(ValidationError, match="leaves an RNG seed unset"):
+            self._submission(name)
+
+    @pytest.mark.unit
+    def test_non_int_seed_rejected(self, register_temp_ruleset):
+        """Seed *values* are validated: a wrong-typed ruleset seed fails config
+        construction instead of silently landing a ``str`` on the runtime.
+        Guards against the model_copy(update=) __dict__ bypass."""
+        name = register_temp_ruleset(
+            "test-bad-seed", scheduler_rng_seed="oops", sample_index_rng_seed=999
+        )
+        with pytest.raises(ValidationError):
+            self._submission(name)
