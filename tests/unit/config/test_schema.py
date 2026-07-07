@@ -759,6 +759,9 @@ class TestRulesetSeedOverride:
         cfg = self._submission("mlperf-inference-v6.1")
         assert cfg.settings.runtime.scheduler_random_seed == _V6_1_SCHED_SEED
         assert cfg.settings.runtime.dataloader_random_seed == _V6_1_SAMPLE_SEED
+        # Warmup is reseeded from the sample-index (dataloader) seed so its
+        # sample order derives from the same pinned seed as the perf phase.
+        assert cfg.settings.warmup.warmup_random_seed == _V6_1_SAMPLE_SEED
 
     @pytest.mark.unit
     def test_override_precedes_config_dump(self, tmp_path):
@@ -837,35 +840,41 @@ class TestRulesetSeedOverride:
             ruleset_registry._RULESET_REGISTRY.pop(name, None)
 
     @pytest.mark.unit
-    def test_partial_none_seed_pins_only_set_seed(self, register_temp_ruleset):
-        """``ruleset_base`` documents ``None`` as a valid unseeded value. A
-        ruleset with one seed ``None`` pins only the seed that is set and leaves
-        the other at its runtime default (exercises one ``is not None`` branch)."""
+    def test_partial_none_seed_sample_index_rejected(self, register_temp_ruleset):
+        """A submission ruleset must pin both seeds. ``None`` (unseeded) is a
+        valid value in the general ruleset contract but incoherent for a pinned
+        submission, so a partially-unseeded ruleset is rejected loudly."""
         name = register_temp_ruleset(
             "test-partial-seed", scheduler_rng_seed=None, sample_index_rng_seed=999
         )
-        cfg = self._submission(name)
-        assert cfg.settings.runtime.scheduler_random_seed == 42  # left unchanged
-        assert cfg.settings.runtime.dataloader_random_seed == 999
+        with pytest.raises(ValidationError, match="leaves an RNG seed unset"):
+            self._submission(name)
 
     @pytest.mark.unit
-    def test_partial_none_seed_scheduler_only(self, register_temp_ruleset):
-        """Mirror of the scheduler-None case: scheduler set, sample_index None
-        (exercises the ``sample_index_rng_seed is not None`` False branch)."""
+    def test_partial_none_seed_scheduler_rejected(self, register_temp_ruleset):
+        """Mirror of the scheduler-None case: scheduler set, sample_index None."""
         name = register_temp_ruleset(
             "test-partial-sched", scheduler_rng_seed=777, sample_index_rng_seed=None
         )
-        cfg = self._submission(name)
-        assert cfg.settings.runtime.scheduler_random_seed == 777
-        assert cfg.settings.runtime.dataloader_random_seed == 42  # left unchanged
+        with pytest.raises(ValidationError, match="leaves an RNG seed unset"):
+            self._submission(name)
 
     @pytest.mark.unit
-    def test_all_none_seed_leaves_config_unchanged(self, register_temp_ruleset):
-        """A fully unseeded ruleset (both seeds ``None``) exercises the
-        ``if not updates`` early-exit — runtime seeds keep their defaults."""
+    def test_all_none_seed_rejected(self, register_temp_ruleset):
+        """A fully unseeded ruleset (both seeds ``None``) is rejected."""
         name = register_temp_ruleset(
             "test-no-seed", scheduler_rng_seed=None, sample_index_rng_seed=None
         )
-        cfg = self._submission(name)
-        assert cfg.settings.runtime.scheduler_random_seed == 42
-        assert cfg.settings.runtime.dataloader_random_seed == 42
+        with pytest.raises(ValidationError, match="leaves an RNG seed unset"):
+            self._submission(name)
+
+    @pytest.mark.unit
+    def test_non_int_seed_rejected(self, register_temp_ruleset):
+        """Seed *values* are validated: a wrong-typed ruleset seed fails config
+        construction instead of silently landing a ``str`` on the runtime.
+        Guards against the model_copy(update=) __dict__ bypass."""
+        name = register_temp_ruleset(
+            "test-bad-seed", scheduler_rng_seed="oops", sample_index_rng_seed=999
+        )
+        with pytest.raises(ValidationError):
+            self._submission(name)

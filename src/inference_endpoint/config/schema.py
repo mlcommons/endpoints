@@ -1041,7 +1041,7 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
         return self
 
     def _apply_ruleset_seed_overrides(self) -> None:
-        """Override runtime RNG seeds from the selected submission ruleset.
+        """Override runtime + warmup RNG seeds from the selected submission ruleset.
 
         MLPerf rounds pin the RNG seeds; this mirrors LoadGen locking the core
         seeds from ``user.conf`` (a submitter cannot substitute their own).
@@ -1049,6 +1049,11 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
         names an unregistered ruleset, a ``type=SUBMISSION`` config errors (a
         submission cannot silently fall back to default seeds), while any other
         type is left unchanged so non-submission/placeholder configs still work.
+
+        The warmup phase is reseeded from the sample-index (dataloader) seed so
+        its sample order derives from the same pinned seed as the perf phase.
+        Only the seed *value* is propagated — each phase builds its own
+        ``random.Random`` downstream, so the RNG object is never shared.
         """
         if self.submission_ref is None:
             return
@@ -1068,29 +1073,49 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
             )
             return
 
-        updates: dict[str, int] = {}
-        if ruleset.scheduler_rng_seed is not None:
-            updates["scheduler_random_seed"] = ruleset.scheduler_rng_seed
-        if ruleset.sample_index_rng_seed is not None:
-            updates["dataloader_random_seed"] = ruleset.sample_index_rng_seed
-        if not updates:
-            return
+        # A ruleset used as a submission_ref must pin both seeds. ``None`` means
+        # "unseeded" in the general ruleset contract (ruleset_base.py), but an
+        # unseeded submission is incoherent and would silently diverge from the
+        # random.Random(None) path in RoundRuleset.apply_user_config. Reject it.
+        if ruleset.scheduler_rng_seed is None or ruleset.sample_index_rng_seed is None:
+            raise ValueError(
+                f"submission_ref.ruleset {self.submission_ref.ruleset!r} leaves an "
+                "RNG seed unset; a pinned ruleset must define both the scheduler "
+                "and sample-index seeds."
+            )
 
-        # model_copy(update=) writes straight into __dict__ without validating
-        # that the keys are real fields; guard so a future RuntimeConfig rename
-        # fails loudly instead of silently attaching a junk attribute.
-        runtime_fields = type(self.settings.runtime).model_fields
-        unknown = updates.keys() - runtime_fields.keys()
-        if unknown:
-            raise ValueError(f"seed override targets unknown runtime fields: {unknown}")
-        new_runtime = self.settings.runtime.model_copy(update=updates)
+        # Rebuild through model_validate (not model_copy(update=)): with
+        # extra='forbid' this validates seed *values* and rejects renamed/unknown
+        # fields. model_copy(update=) writes straight into __dict__, so a
+        # wrong-typed (e.g. str) or renamed seed would slip through unchecked.
+        runtime = self.settings.runtime
+        new_runtime = type(runtime).model_validate(
+            {
+                **runtime.model_dump(),
+                "scheduler_random_seed": ruleset.scheduler_rng_seed,
+                "dataloader_random_seed": ruleset.sample_index_rng_seed,
+            }
+        )
+        warmup = self.settings.warmup
+        new_warmup = type(warmup).model_validate(
+            {
+                **warmup.model_dump(),
+                "warmup_random_seed": ruleset.sample_index_rng_seed,
+            }
+        )
         object.__setattr__(
             self,
             "settings",
-            self.settings.model_copy(update={"runtime": new_runtime}),
+            self.settings.model_copy(
+                update={"runtime": new_runtime, "warmup": new_warmup}
+            ),
         )
         logger.debug(
-            "Pinned RNG seeds from ruleset %r: %s", self.submission_ref.ruleset, updates
+            "Pinned RNG seeds from ruleset %r: scheduler=%s sample_index=%s "
+            "(warmup reseeded from sample_index)",
+            self.submission_ref.ruleset,
+            ruleset.scheduler_rng_seed,
+            ruleset.sample_index_rng_seed,
         )
 
     @model_validator(mode="after")
