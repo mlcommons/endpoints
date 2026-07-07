@@ -277,7 +277,7 @@ _v5_1 = RoundRuleset(
 # current mlperf.conf); only the round RNG seeds rotate. Seeds are the
 # schedule_rng_seed / sample_index_rng_seed values from loadgen/mlperf.conf,
 # pinned to a specific upstream commit for traceability:
-# https://github.com/mlcommons/inference/blob/10f823448fd38bb739e52690efe8191c3a55412b/loadgen/mlperf.conf#L41
+# https://github.com/mlcommons/inference/blob/10f823448fd38bb739e52690efe8191c3a55412b/loadgen/mlperf.conf#L42-L43
 # qsl_rng_seed is intentionally not modeled: it only selects the load order of
 # the first-N working set, which the sample-index shuffle already covers.
 _v6_1 = RoundRuleset(

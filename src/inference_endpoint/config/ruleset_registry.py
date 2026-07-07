@@ -47,8 +47,11 @@ def register_ruleset(name: str, ruleset: BenchmarkSuiteRuleset) -> None:
         ruleset: The ruleset instance to register
 
     Raises:
-        ValueError: If a ruleset is already registered under ``name`` (guards
-            against two rounds silently sharing a version string).
+        ValueError: If a ruleset is already registered under ``name`` (prevents
+            an accidental overwrite via this function). The MLCommons
+            auto-registration path uses ``setdefault`` and does not hit this
+            guard; round-version uniqueness is enforced by
+            ``test_round_versions_are_unique``.
     """
     if name in _RULESET_REGISTRY:
         raise ValueError(f"Ruleset {name!r} is already registered")
@@ -97,10 +100,11 @@ def _auto_register_mlcommons():
         _RULESET_REGISTRY.setdefault(f"mlperf-inference-{ruleset.version}", ruleset)
     # Also register the current round as "mlcommons-current" for convenience
     _RULESET_REGISTRY.setdefault("mlcommons-current", mlcommons_current)
-    register_ruleset(
+    # Edge-agentic ruleset: by version and as the edge "current".
+    _RULESET_REGISTRY.setdefault(
         f"mlperf-{mlcommons_edge_current.version}", mlcommons_edge_current
     )  # -> "mlperf-edge-v0.1"
-    register_ruleset("mlperf-edge-current", mlcommons_edge_current)
+    _RULESET_REGISTRY.setdefault("mlperf-edge-current", mlcommons_edge_current)
 
 
 # Auto-register on import
