@@ -216,6 +216,17 @@ class Scorer(ABC):
         n_repeats = len(scores) // self.dataset.num_samples()
         return np.mean(scores), n_repeats
 
+    def score_breakdown(self) -> dict[str, Any] | None:
+        """Optional structured detail accompanying the scalar ``score()``.
+
+        Most scorers report only the scalar mean from ``score()``. Scorers with a
+        multi-metric result (e.g. per-subset / per-category accuracy) cache that
+        breakdown and return it here, so ``results.json``, compliance, plotting,
+        and publishing read a typed dict without ``score()`` widening its scalar
+        return contract. Returns ``None`` when there is no extra detail.
+        """
+        return None
+
 
 class PassAt1Scorer(Scorer, scorer_id="pass_at_1"):
     """Implements pass@1 scoring as defined by Artificial Analysis.

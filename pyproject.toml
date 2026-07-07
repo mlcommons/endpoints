@@ -9,6 +9,16 @@ environments = [
     "sys_platform == 'darwin' and platform_machine == 'x86_64'",
     "sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]
+# bfcl-eval hard-pins an old dependency set (numpy==1.26.4, filelock, etc.).
+# Mark bfcl as conflicting with the tooling extras so uv resolves it in its own
+# fork; otherwise those old pins drag shared dev/test/performance deps (filelock,
+# virtualenv) down to versions with known CVEs. CI installs the tooling extras
+# without bfcl; bfcl is installed standalone (pip install -e ".[bfcl]").
+conflicts = [
+    [{ extra = "bfcl" }, { extra = "dev" }],
+    [{ extra = "bfcl" }, { extra = "test" }],
+    [{ extra = "bfcl" }, { extra = "performance" }],
+]
 
 [tool.uv.build-backend]
 module-root = "src"
@@ -65,7 +75,7 @@ dependencies = [
     "transformers==5.5.0",
     # Required by transformers' apply_chat_template
     "jinja2==3.1.6",
-    "numpy==2.4.4",
+    "numpy>=1.26.4",
     "datasets==4.8.4",
     "Pillow==12.2.0",
     "sentencepiece==0.2.1",
@@ -101,6 +111,13 @@ dev = [
     "myst-parser==5.0.0",
     # Security auditing
     "pip-audit==2.10.0",
+    # bfcl-eval hard-pins filelock==3.20.0, which uv would otherwise share across
+    # every resolution fork. Because bfcl conflicts with this extra (see
+    # [tool.uv].conflicts), these floors force uv to fork filelock/virtualenv:
+    # patched here, pinned only inside the bfcl fork. Closes CVE-2025-68146 /
+    # CVE-2026-22701 (filelock) and CVE-2026-22702 (virtualenv).
+    "filelock>=3.20.3",
+    "virtualenv>=20.36.1",
 ]
 test = [
     # Includes optional dependencies for full test coverage
@@ -127,6 +144,18 @@ test = [
 performance = [
     "pytest-benchmark==5.2.3",
     "memory-profiler==0.61.0",
+]
+bfcl = [
+    # BFCL v4 function-calling evaluation. Pins numpy==1.26.4, which is why
+    # the top-level numpy requirement is a lower bound (>=1.26.4).
+    "bfcl-eval==2026.3.23",
+    # bfcl-eval's qwen model handler transitively imports qwen_agent → soundfile;
+    # soundfile is not used by our scorer but must be present for the import to succeed.
+    "soundfile==0.13.1",
+    # Used directly by the multi-turn runner (bfcl_v4_multi_turn_runner.py).
+    # Present transitively via openai, but declared explicitly so the import
+    # does not depend on another package keeping it.
+    "httpx==0.28.1",
 ]
 
 [project.scripts]

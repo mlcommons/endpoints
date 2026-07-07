@@ -173,8 +173,8 @@ class BenchmarkContext:
     test_mode: TestMode
     report_dir: Path
     tokenizer_name: str | None
-    dataloader: Dataset
-    rt_settings: RuntimeSettings
+    dataloader: Dataset | None
+    rt_settings: RuntimeSettings | None
     total_samples: int
     accuracy_datasets: list[Dataset] = field(default_factory=list)
     eval_configs: list[AccuracyConfiguration] = field(default_factory=list)
@@ -183,6 +183,11 @@ class BenchmarkContext:
     @property
     def collect_responses(self) -> bool:
         return self.test_mode in (TestMode.ACC, TestMode.BOTH)
+
+    @property
+    def accuracy_only(self) -> bool:
+        """TestMode.ACC is the single source of truth for accuracy-only runs."""
+        return self.test_mode == TestMode.ACC
 
     @property
     def benchmark_mode(self) -> TestType | None:
@@ -270,17 +275,23 @@ def _resolve_accuracy_components(
 
 
 def _load_datasets(
-    config: BenchmarkConfig, report_dir: Path
-) -> tuple[Dataset, list[Dataset], list[AccuracyConfiguration]]:
+    config: BenchmarkConfig,
+    report_dir: Path,
+    test_mode: TestMode,
+) -> tuple[Dataset | None, list[Dataset], list[AccuracyConfiguration]]:
     """Load performance and accuracy datasets. Returns (perf_loader, acc_datasets, eval_configs)."""
-    # Get dataset - from CLI or from config
-    # TODO: Dataset Logic is not yet fully implemented
+    accuracy_only = test_mode == TestMode.ACC
     accuracy_cfgs = [ds for ds in config.datasets if ds.type == DatasetType.ACCURACY]
     performance_cfgs = [
         ds for ds in config.datasets if ds.type == DatasetType.PERFORMANCE
     ]
 
-    if not performance_cfgs:
+    if accuracy_only:
+        if not accuracy_cfgs:
+            raise InputValidationError(
+                "--accuracy-only requires at least one accuracy dataset"
+            )
+    elif not performance_cfgs:
         raise InputValidationError("At least one performance dataset required")
 
     accuracy_datasets: list[Dataset] = []
@@ -317,53 +328,90 @@ def _load_datasets(
 
     if not accuracy_cfgs:
         logger.info("No separate accuracy datasets provided")
-    if len(performance_cfgs) > 1:
-        raise InputValidationError("Multiple performance datasets not supported")
 
-    perf_cfg = performance_cfgs[0]
-    try:
-        dataloader = DataLoaderFactory.create_loader(perf_cfg)
-        dataloader.load(
-            api_type=config.endpoint_config.api_type, model_params=config.model_params
-        )
-        logger.info(f"Loaded {dataloader.num_samples()} samples")
-    except FileNotFoundError as e:
-        raise InputValidationError(
-            f"Dataset file not found: {performance_cfgs[0].path}"
-        ) from e
-    except Exception as e:
-        raise SetupError(f"Failed to load dataset: {e}") from e
-
-    if perf_cfg.accuracy_config is not None:
-        accuracy_config = perf_cfg.accuracy_config
-        if accuracy_config.num_repeats != 1:
+    dataloader: Dataset | None = None
+    # --accuracy-only skips the performance dataset entirely (including its inline
+    # accuracy scorer), so a single config carrying both a performance and an
+    # accuracy dataset can run accuracy on its own.
+    if performance_cfgs and not accuracy_only:
+        if len(performance_cfgs) > 1:
+            raise InputValidationError("Multiple performance datasets not supported")
+        perf_cfg = performance_cfgs[0]
+        try:
+            dataloader = DataLoaderFactory.create_loader(perf_cfg)
+            dataloader.load(
+                api_type=config.endpoint_config.api_type,
+                model_params=config.model_params,
+            )
+            logger.info(f"Loaded {dataloader.num_samples()} samples")
+        except FileNotFoundError as e:
             raise InputValidationError(
-                f"Dataset '{perf_cfg.name}' is a performance dataset; "
-                "accuracy_config.num_repeats must be 1 because scoring runs on "
-                "already-issued performance outputs"
-            )
-        scorer_cls, extractor_cls = _resolve_accuracy_components(
-            perf_cfg.name, accuracy_config
-        )
+                f"Dataset file not found: {performance_cfgs[0].path}"
+            ) from e
+        except Exception as e:
+            raise SetupError(f"Failed to load dataset: {e}") from e
 
-        eval_configs.append(
-            AccuracyConfiguration(
-                scorer_cls,
-                extractor_cls,
-                "performance",
-                dataloader,
-                report_dir,
-                accuracy_config.ground_truth,
-                accuracy_config.num_repeats,
-                accuracy_config.extras or {},
+        if perf_cfg.accuracy_config is not None:
+            accuracy_config = perf_cfg.accuracy_config
+            if accuracy_config.num_repeats != 1:
+                raise InputValidationError(
+                    f"Dataset '{perf_cfg.name}' is a performance dataset; "
+                    "accuracy_config.num_repeats must be 1 because scoring runs on "
+                    "already-issued performance outputs"
+                )
+            scorer_cls, extractor_cls = _resolve_accuracy_components(
+                perf_cfg.name, accuracy_config
             )
-        )
+
+            eval_configs.append(
+                AccuracyConfiguration(
+                    scorer_cls,
+                    extractor_cls,
+                    "performance",
+                    dataloader,
+                    report_dir,
+                    accuracy_config.ground_truth,
+                    accuracy_config.num_repeats,
+                    accuracy_config.extras or {},
+                )
+            )
 
     return dataloader, accuracy_datasets, eval_configs
 
 
-def setup_benchmark(config: BenchmarkConfig, test_mode: TestMode) -> BenchmarkContext:
+def setup_benchmark(
+    config: BenchmarkConfig,
+    test_mode: TestMode,
+) -> BenchmarkContext:
     """Load tokenizer, dataset, create scheduler, setup report dir."""
+    # Accuracy-only runs force single-stream (1 worker / 1 connection) for
+    # deterministic sample ordering. Bake it into the config here — before CPU
+    # affinity, report_dir/config.yaml persistence, and RuntimeSettings — so the
+    # written config.yaml matches what actually runs. The compliance gate reads
+    # config.yaml and asserts single_stream; without this it would fail a valid
+    # accuracy-only run whose source config declared multiple workers.
+    if test_mode == TestMode.ACC:
+        settings_update: dict[str, Any] = {
+            "client": config.settings.client.with_updates(
+                num_workers=1, max_connections=1
+            )
+        }
+        # The compliance single_stream gate also reads
+        # load_pattern.target_concurrency when it is set. Normalize it to 1 so a
+        # combined config that declares concurrency > 1 does not fail single_stream
+        # on an accuracy-only run whose client is already forced to one connection.
+        load_pattern = config.settings.load_pattern
+        if (
+            load_pattern.target_concurrency is not None
+            and load_pattern.target_concurrency != 1
+        ):
+            settings_update["load_pattern"] = load_pattern.model_copy(
+                update={"target_concurrency": 1}
+            )
+        config = config.with_updates(
+            settings=config.settings.model_copy(update=settings_update)
+        )
+
     # CPU affinity
     affinity_plan = (
         pin_loadgen(config.settings.client.num_workers)
@@ -400,13 +448,16 @@ def setup_benchmark(config: BenchmarkConfig, test_mode: TestMode) -> BenchmarkCo
     )
 
     # Datasets
-    dataloader, accuracy_datasets, eval_configs = _load_datasets(config, report_dir)
+    dataloader, accuracy_datasets, eval_configs = _load_datasets(
+        config, report_dir, test_mode
+    )
 
-    # Setup runtime settings using factory method
-    rt_settings = RuntimeSettings.from_config(config, dataloader.num_samples())
+    rt_settings: RuntimeSettings | None = None
+    total_samples = 0
+    if dataloader is not None:
+        rt_settings = RuntimeSettings.from_config(config, dataloader.num_samples())
+        total_samples = rt_settings.total_samples_to_issue()
 
-    # Calculate and display expected sample count
-    total_samples = rt_settings.total_samples_to_issue()
     if accuracy_datasets:
         total_samples += sum(ds.num_samples() * ds.repeats for ds in accuracy_datasets)
 
@@ -414,9 +465,12 @@ def setup_benchmark(config: BenchmarkConfig, test_mode: TestMode) -> BenchmarkCo
     logger.info(
         f"Mode: {test_mode}, Target QPS: {config.settings.load_pattern.target_qps}, Responses: {collect_responses}"
     )
-    logger.info(
-        f"Min Duration: {rt_settings.min_duration_ms / 1000:.1f}s, Expected samples: {total_samples}"
-    )
+    if rt_settings is not None:
+        logger.info(
+            f"Min Duration: {rt_settings.min_duration_ms / 1000:.1f}s, Expected samples: {total_samples}"
+        )
+    else:
+        logger.info(f"Accuracy-only mode, Expected samples: {total_samples}")
 
     return BenchmarkContext(
         config=config,
@@ -440,47 +494,48 @@ def _build_phases(
     phases: list[PhaseConfig] = []
     drain_cfg = ctx.config.settings.drain
 
-    # Warmup phase (optional, before performance)
-    warmup_cfg = ctx.config.settings.warmup
-    if warmup_cfg.enabled:
-        warmup_dataset: Dataset = (
-            ctx.dataloader.with_salt(random.Random(warmup_cfg.warmup_random_seed + 2))
-            if warmup_cfg.salt
-            else ctx.dataloader
-        )
-        warmup_rt = dataclass_replace(
-            ctx.rt_settings,
-            min_duration_ms=0,
-            max_duration_ms=None,
-            n_samples_from_dataset=ctx.dataloader.num_samples(),
-            n_samples_to_issue=warmup_cfg.n_requests,
-            min_sample_count=1,
-            rng_sched=random.Random(warmup_cfg.warmup_random_seed),
-            rng_sample_index=random.Random(warmup_cfg.warmup_random_seed + 1),
-            load_pattern=ctx.rt_settings.load_pattern,
-        )
+    if ctx.dataloader is not None and ctx.rt_settings is not None:
+        warmup_cfg = ctx.config.settings.warmup
+        if warmup_cfg.enabled:
+            warmup_dataset: Dataset = (
+                ctx.dataloader.with_salt(
+                    random.Random(warmup_cfg.warmup_random_seed + 2)
+                )
+                if warmup_cfg.salt
+                else ctx.dataloader
+            )
+            warmup_rt = dataclass_replace(
+                ctx.rt_settings,
+                min_duration_ms=0,
+                max_duration_ms=None,
+                n_samples_from_dataset=ctx.dataloader.num_samples(),
+                n_samples_to_issue=warmup_cfg.n_requests,
+                min_sample_count=1,
+                rng_sched=random.Random(warmup_cfg.warmup_random_seed),
+                rng_sample_index=random.Random(warmup_cfg.warmup_random_seed + 1),
+                load_pattern=ctx.rt_settings.load_pattern,
+            )
+            phases.append(
+                PhaseConfig(
+                    "warmup",
+                    warmup_rt,
+                    warmup_dataset,
+                    PhaseType.WARMUP,
+                    drain_after=warmup_cfg.drain,
+                    drain_timeout=drain_cfg.warmup_timeout_s,
+                )
+            )
+
         phases.append(
             PhaseConfig(
-                "warmup",
-                warmup_rt,
-                warmup_dataset,
-                PhaseType.WARMUP,
-                drain_after=warmup_cfg.drain,
-                drain_timeout=drain_cfg.warmup_timeout_s,
+                "performance",
+                ctx.rt_settings,
+                ctx.dataloader,
+                PhaseType.PERFORMANCE,
+                strategy=perf_strategy,
+                drain_timeout=drain_cfg.performance_timeout_s,
             )
         )
-
-    # Performance phase
-    phases.append(
-        PhaseConfig(
-            "performance",
-            ctx.rt_settings,
-            ctx.dataloader,
-            PhaseType.PERFORMANCE,
-            strategy=perf_strategy,
-            drain_timeout=drain_cfg.performance_timeout_s,
-        )
-    )
 
     # Accuracy mirrors the perf load pattern so evaluation exercises the
     # endpoint the same way it was benchmarked. AGENTIC_INFERENCE can't drive
@@ -517,17 +572,25 @@ def _build_phases(
             eval_cfg.dataset_name,
             acc_load_pattern.type.value,
             load_mode_detail,
+        # Accuracy phases run at MAX_THROUGHPUT; inheriting perf_lp (e.g. POISSON)
+        # would silently rate-limit evaluation until an agentic inference accuracy strategy
+        # and QPS-budgeting support are added.
+        rng_settings = ctx.rt_settings or RuntimeSettings.from_config(
+            ctx.config, acc_ds.num_samples()
+        )
+        acc_load_pattern: LoadPattern | None = LoadPattern(
+            type=LoadPatternType.MAX_THROUGHPUT
         )
         acc_settings = RuntimeSettings(
-            metric_target=ctx.rt_settings.metric_target,
-            reported_metrics=ctx.rt_settings.reported_metrics,
+            metric_target=rng_settings.metric_target,
+            reported_metrics=rng_settings.reported_metrics,
             min_duration_ms=0,
             max_duration_ms=None,
             n_samples_from_dataset=acc_ds.num_samples(),
             n_samples_to_issue=acc_ds.num_samples() * acc_ds.repeats,
             min_sample_count=acc_ds.num_samples() * acc_ds.repeats,
-            rng_sched=ctx.rt_settings.rng_sched,
-            rng_sample_index=ctx.rt_settings.rng_sample_index,
+            rng_sched=rng_settings.rng_sched,
+            rng_sample_index=rng_settings.rng_sample_index,
             load_pattern=acc_load_pattern,
         )
         phases.append(
@@ -562,6 +625,40 @@ def _load_final_snapshot_from_disk(path: Path) -> dict[str, Any] | None:
     except Exception as e:  # noqa: BLE001 — best-effort.
         logger.warning("Failed to read final snapshot %s: %s", path, e)
         return None
+
+
+class _PerfPhaseTimeout:
+    """Session-stop timer that bounds the PERFORMANCE phase only.
+
+    ``max_duration_ms`` is a safety cap on the performance phase. The timer is
+    armed when the performance phase starts and cancelled as soon as any later
+    phase starts, so it can never truncate a subsequent accuracy phase: a
+    combined perf+accuracy run must let accuracy finish regardless of how long
+    perf ran.
+    """
+
+    def __init__(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        max_duration_ms: int | None,
+        on_timeout: Callable[[], None],
+    ) -> None:
+        self._loop = loop
+        self._max_duration_ms = max_duration_ms
+        self._on_timeout = on_timeout
+        self._handle: asyncio.TimerHandle | None = None
+
+    def on_phase_start(self, phase_type: PhaseType) -> None:
+        self.cancel()
+        if phase_type == PhaseType.PERFORMANCE and self._max_duration_ms is not None:
+            self._handle = self._loop.call_later(
+                self._max_duration_ms / 1000.0, self._on_timeout
+            )
+
+    def cancel(self) -> None:
+        if self._handle is not None:
+            self._handle.cancel()
+            self._handle = None
 
 
 # (start_path, stop_path) for each supported inference engine's profiling
@@ -783,15 +880,24 @@ async def _run_benchmark_async(
             api_type: APIType = config.endpoint_config.api_type
             # client.api_type is propagated from endpoint_config.api_type by
             # BenchmarkConfig._propagate_client_api_type — no override needed here.
-            http_config = config.settings.client.with_updates(
-                endpoint_urls=[
+            client_overrides: dict = {
+                "endpoint_urls": [
                     urljoin(e.rstrip("/") + "/", api_type.default_route())
                     for e in endpoints
                 ],
-                api_key=config.endpoint_config.api_key,
-                event_logs_dir=ctx.report_dir,
-                cpu_affinity=ctx.affinity_plan,
-            )
+                "api_key": config.endpoint_config.api_key,
+                "event_logs_dir": ctx.report_dir,
+                "cpu_affinity": ctx.affinity_plan,
+            }
+            if ctx.accuracy_only:
+                # Single-stream (num_workers=1, max_connections=1) is baked into
+                # config in setup_benchmark so it is persisted to config.yaml;
+                # no runtime override needed here.
+                logger.info(
+                    "Accuracy-only: single-stream (1 worker, 1 connection) for "
+                    "deterministic ordering"
+                )
+            http_config = config.settings.client.with_updates(**client_overrides)
             http_client = await HTTPEndpointClient.create(http_config, loop)
             issuer = HttpClientSampleIssuer(http_client)
         except Exception as e:
@@ -859,11 +965,10 @@ async def _run_benchmark_async(
         phases = _build_phases(ctx, perf_strategy=agentic_inference_strategy)
         report: Report | None = None
 
-        # Timer starts when the performance phase begins (after warmup drains),
-        # so max_duration_ms applies only to the perf phase, not warmup.
-        global_timeout_handle = None
         _timeout_done = False
-        max_duration_ms = ctx.rt_settings.max_duration_ms
+        max_duration_ms = (
+            ctx.rt_settings.max_duration_ms if ctx.rt_settings is not None else None
+        )
 
         # Profile trigger state. Pre-derive URLs once so a bad config
         # (engine set but no endpoints) fails before the run.
@@ -885,19 +990,23 @@ async def _run_benchmark_async(
         def _on_global_timeout() -> None:
             if not _timeout_done:
                 logger.warning(
-                    "Global experiment timeout reached (%d ms); stopping session.",
+                    "Performance phase max_duration reached (%d ms); "
+                    "ending performance phase.",
                     max_duration_ms,
                 )
-                session.stop()
+                # Stop only the perf phase, not the whole session, so a combined
+                # perf+accuracy run still runs accuracy after the perf cap.
+                session.stop_current_phase()
+
+        perf_timeout = _PerfPhaseTimeout(loop, max_duration_ms, _on_global_timeout)
 
         def _on_phase_start(phase: PhaseConfig) -> None:
-            nonlocal global_timeout_handle
+            # _PerfPhaseTimeout arms the perf cap on PERFORMANCE and cancels it
+            # when any later phase starts, so a combined perf+accuracy run can
+            # never have its accuracy phase truncated by the perf cap.
+            perf_timeout.on_phase_start(phase.phase_type)
             if phase.phase_type != PhaseType.PERFORMANCE:
                 return
-            if max_duration_ms is not None:
-                global_timeout_handle = loop.call_later(
-                    max_duration_ms / 1000.0, _on_global_timeout
-                )
             # Fire /start_profile sequentially before any perf request is
             # issued, so the server is armed when traffic begins. Blocks
             # the loop briefly (sub-100ms per URL); strategy task hasn't
@@ -922,8 +1031,7 @@ async def _run_benchmark_async(
             raise ExecutionError(f"Benchmark execution failed: {e}") from e
         finally:
             _timeout_done = True
-            if global_timeout_handle is not None:
-                global_timeout_handle.cancel()
+            perf_timeout.cancel()
             loop.remove_signal_handler(signal.SIGINT)
             # Fire /stop_profile for URLs whose /start_profile succeeded.
             # Unifies the clean phase-end path and the abort path —
@@ -1138,7 +1246,7 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
         num_samples = len(eval_cfg.dataset.data)
         if eval_cfg.dataset_name == "performance":
             num_samples = sum(phase.issued_count for phase in result.perf_results)
-        accuracy_scores[eval_cfg.dataset_name] = {
+        entry: dict[str, Any] = {
             "dataset_name": eval_cfg.dataset_name,
             "num_samples": num_samples,
             "extractor": (
@@ -1151,6 +1259,10 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
             # so a partial number is never mistaken for a complete one.
             "complete": scorer_instance.complete,
         }
+        breakdown = scorer_instance.score_breakdown()
+        if breakdown is not None:
+            entry["breakdown"] = breakdown
+        accuracy_scores[eval_cfg.dataset_name] = entry
         logger.info(
             f"Score for {eval_cfg.dataset_name}: {score} "
             f"({n_repeats} repeats, complete={scorer_instance.complete})"
@@ -1174,9 +1286,15 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
         qps = total_issued / perf_elapsed if perf_elapsed > 0 else 0.0
 
     logger.info(f"Completed in {perf_elapsed:.1f}s")
-    logger.info(f"Results: {max(0, total_issued - n_errors)}/{total_issued} successful")
-    if qps > 0:
-        logger.info(f"Estimated QPS: {qps:.1f}")
+    if ctx.accuracy_only:
+        acc_total = sum(ds.num_samples() * ds.repeats for ds in ctx.accuracy_datasets)
+        logger.info(f"Accuracy-only: {acc_total} samples evaluated")
+    else:
+        logger.info(
+            f"Results: {max(0, total_issued - n_errors)}/{total_issued} successful"
+        )
+        if qps > 0:
+            logger.info(f"Estimated QPS: {qps:.1f}")
 
     if collector.errors:
         logger.warning(f"Errors: {len(collector.errors)}")
@@ -1191,6 +1309,7 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
             "config": {
                 "endpoint": config.endpoint_config.endpoints,
                 "mode": ctx.test_mode,
+                "accuracy_only": ctx.accuracy_only,
                 "target_qps": config.settings.load_pattern.target_qps,
             },
             "results": {
@@ -1216,8 +1335,17 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
         logger.error(f"Save failed: {e}")
 
 
-def run_benchmark(config: BenchmarkConfig, test_mode: TestMode) -> None:
-    """Orchestrate setup → execute → finalize."""
+def run_benchmark(
+    config: BenchmarkConfig,
+    test_mode: TestMode,
+) -> None:
+    """Orchestrate setup → execute → finalize.
+
+    ``test_mode`` is the single source of truth for what runs: ``ACC`` is an
+    accuracy-only run (no performance phase), ``PERF`` performance-only, and
+    ``BOTH`` runs performance then accuracy. The CLI ``--accuracy-only`` flag is
+    a convenience alias that resolves to ``TestMode.ACC``.
+    """
     logger.debug(
         "BenchmarkConfig (%s):\n%s",
         type(config).__name__,

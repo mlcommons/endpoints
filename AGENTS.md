@@ -99,6 +99,7 @@ Dataset Manager --> Load Generator --> Endpoint Client --> External Endpoint
 | **TensorRT-LLM**         | `src/inference_endpoint/trtllm/`                                                                                   | Adapter for TensorRT-LLM endpoints. `TRTLLMAdapter` sends requests; `TRTLLMSSEAccumulator` handles SSE streaming responses.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | **DeepSeek-R1 (MLPerf)** | `src/inference_endpoint/evaluation/scoring.py` (`LegacyMLPerfDeepSeekR1Scorer`), `examples/07_DeepSeekR1_Example/` | MLPerf DeepSeek-R1 accuracy. TensorRT-LLM is OpenAI-compatible, so it is served via `api_type: openai` / `openai_completions` (no dedicated trtllm adapter). The combined multi-subset eval (`math500`/`aime`/`gpqa`/`mmlu_pro`/`livecodebench`) is the official MLCommons `eval_accuracy.py`, run out-of-process via `uv run --project` against the isolated subproject at `src/inference_endpoint/evaluation/legacy_mlperf_deepseek_r1/` (a uv subproject excluded from the parent wheel; mirrors the VBench pattern). The example feeds the exact MLPerf prompt via pre-tokenized `input_tokens` to `/v1/completions`.                                                                                                                       |
 | **VideoGen**             | `src/inference_endpoint/videogen/`                                                                                 | Adapter for video-generation endpoints (e.g. trtllm-serve `POST /v1/videos/generations`, used by MLPerf WAN2.2-T2V-A14B). Defaults to `response_format=video_path` (server saves video to shared storage and returns path) to avoid large byte payloads. Accuracy mode also runs on `video_path`: the adapter mirrors the path into `response_output` so the event log carries it to `VBenchScorer` (see `evaluation/scoring.py`), which scores videos via VBench from a sibling `uv` subproject at `examples/09_Wan22_VideoGen_Example/accuracy/` (vbench's `transformers==4.33.2` + `numpy<2` pins are incompatible with the parent env, so it runs out-of-process via `uv run --project`). Dataset is ingested via the generic JSONL loader. |
+| **Compliance**           | `src/inference_endpoint/compliance/`                                                                               | Validates a completed run's report directory against a registered ruleset. `check_submission(report_dir, ruleset, model)` reads the resolved `config.yaml` plus scorer output (`results.json` for accuracy, `scores.json` for the agentic perf run) and runs config-lock (deterministic + single-stream), the accuracy gate (`score >= factor x reference`, factor 0.97 for Edge-Agentic), and run validity (0 dropped turns). Server-side launch flags (`--reasoning off`, `--ctx-size`) aren't in client artifacts, so they're surfaced as manual attestations. CLI: `scripts/check_compliance.py REPORT_DIR` (exit 0 = pass).                                                                                                                |
 
 ### Hot-Path Architecture
 
@@ -216,7 +217,8 @@ src/inference_endpoint/
 │   └── predefined/            # Built-in datasets (aime25, cnndailymail, gpqa, etc.)
 ├── metrics/
 │   ├── report.py              # Report.from_snapshot(MetricsSnapshot); display + JSON serialization
-│   └── metric.py              # Metric types (Throughput, etc.)
+│   ├── metric.py              # Metric types (Throughput, etc.)
+│   └── results_plots.py       # Standardized run-artifact plots (matplotlib-guarded); CLI: scripts/plot_results.py
 ├── config/
 │   ├── schema.py              # Single source of truth: Pydantic models + cyclopts annotations
 │   ├── runtime_settings.py    # RuntimeSettings dataclass
@@ -242,6 +244,9 @@ src/inference_endpoint/
 │   ├── types.py               # Pydantic: VideoPathRequest, VideoPathResponse, VideoPayloadResponse
 │   └── adapter.py             # VideoGenAdapter (HttpRequestAdapter) + VideoGenAccumulator (no-op)
 ├── evaluation/                # Accuracy evaluation (extractor, scoring, livecodebench)
+├── compliance/                # Submission compliance checks (config-lock, accuracy gate, run validity)
+│   ├── __init__.py
+│   └── checker.py             # check_submission() + Check/ComplianceReport (Edge-Agentic ruleset)
 ├── plugins/                   # Plugin system
 ├── profiling/                 # line_profiler integration, pytest plugin
 ├── testing/
