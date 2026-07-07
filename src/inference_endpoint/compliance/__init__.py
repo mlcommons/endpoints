@@ -13,8 +13,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""MLCommons benchmark ruleset implementation."""
+"""Submission compliance/validation for benchmark runs.
 
-from .rules import CURRENT, EDGE_CURRENT, OptimizationPriority, RoundRuleset
+Validates a completed run's report directory against a registered ruleset:
+config-lock (deterministic/single-stream settings), the accuracy gate, and
+run-validity rules (e.g. 0 dropped turns for the agentic performance run).
+"""
 
-__all__ = ["CURRENT", "EDGE_CURRENT", "OptimizationPriority", "RoundRuleset"]
+from .checker import (
+    Check,
+    ComplianceReport,
+    check_accuracy,
+    check_config_lock,
+    check_perf_validity,
+    check_submission,
+)
+
+__all__ = [
+    "Check",
+    "ComplianceReport",
+    "check_accuracy",
+    "check_config_lock",
+    "check_perf_validity",
+    "check_submission",
+]
