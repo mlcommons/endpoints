@@ -1052,13 +1052,19 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
                 raise ValueError(
                     f"{names} {verb} endpoint_config.api_type=openai_completions"
                 )
-        if _non_default_completion_controls(self.model_params) and any(
-            dataset.agentic_inference is not None for dataset in self.datasets
-        ):
-            raise ValueError(
-                "OpenAI text-completion generation controls are not supported "
-                "for agentic inference datasets"
+        for dataset in self.datasets:
+            if dataset.agentic_inference is None:
+                continue
+            effective = (
+                dataset.effective_generation_config(self.model_params)
+                if dataset.generation_config_override
+                else self.model_params
             )
+            if _non_default_completion_controls(effective):
+                raise ValueError(
+                    "OpenAI text-completion generation controls are not supported "
+                    "for agentic inference datasets"
+                )
 
         # --- Validate (cross-model checks only; sub-models self-validate) ---
         if self.type == TestType.SUBMISSION and not self.benchmark_mode:

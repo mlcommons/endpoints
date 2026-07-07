@@ -687,6 +687,23 @@ class TestAgenticInferenceValidation:
             BenchmarkConfig(**values)
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "override", [{"min_new_tokens": 0}, {"skip_special_tokens": False}]
+    )
+    def test_agentic_inference_rejects_completion_controls_via_override(self, override):
+        """Completion controls reaching an agentic dataset through a per-dataset
+        generation_config_override are rejected, exactly as when set on top-level
+        model_params."""
+        values = self._make_online_agentic_inference(
+            generation_config_override=override
+        )
+        values["endpoint_config"]["api_type"] = APIType.OPENAI_COMPLETIONS
+        with pytest.raises(
+            ValidationError, match="not supported for agentic inference"
+        ):
+            BenchmarkConfig(**values)
+
+    @pytest.mark.unit
     def test_agentic_inference_rejects_removed_stop_on_first_empty_slot_as_extra(self):
         # Legacy agentic inference knobs should remain rejected by extra="forbid".
         with pytest.raises(ValueError, match="stop_on_first_empty_slot"):
