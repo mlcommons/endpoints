@@ -541,7 +541,7 @@ def _build_phases(
     # endpoint the same way it was benchmarked. AGENTIC_INFERENCE can't drive
     # the (non-agentic) accuracy datasets — create_load_strategy rejects it —
     # so it (and a missing perf pattern) falls back to MAX_THROUGHPUT.
-    perf_lp = ctx.rt_settings.load_pattern
+    perf_lp = ctx.rt_settings.load_pattern if ctx.rt_settings is not None else None
     if perf_lp is None or perf_lp.type == LoadPatternType.AGENTIC_INFERENCE:
         acc_load_pattern = LoadPattern(type=LoadPatternType.MAX_THROUGHPUT)
     else:
@@ -572,14 +572,9 @@ def _build_phases(
             eval_cfg.dataset_name,
             acc_load_pattern.type.value,
             load_mode_detail,
-        # Accuracy phases run at MAX_THROUGHPUT; inheriting perf_lp (e.g. POISSON)
-        # would silently rate-limit evaluation until an agentic inference accuracy strategy
-        # and QPS-budgeting support are added.
+        )
         rng_settings = ctx.rt_settings or RuntimeSettings.from_config(
             ctx.config, acc_ds.num_samples()
-        )
-        acc_load_pattern: LoadPattern | None = LoadPattern(
-            type=LoadPatternType.MAX_THROUGHPUT
         )
         acc_settings = RuntimeSettings(
             metric_target=rng_settings.metric_target,
