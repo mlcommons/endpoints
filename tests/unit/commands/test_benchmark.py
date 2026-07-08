@@ -1940,6 +1940,8 @@ class TestLoadDatasetsGenerationConfigOverrideCompletions(_OverrideTestBase):
 
     api_type = "openai_completions"
     max_tokens_key = "max_tokens"
+
+
 class TestRunBenchmarkInterrupt:
     @pytest.mark.unit
     def test_keyboard_interrupt_skips_audit(self, monkeypatch, tmp_path):
