@@ -146,6 +146,25 @@ class TestLegacyMLPerfDeepSeekR1Scorer:
         assert Path(cmd[3]) == project
         assert Path(cmd[5]) == project / "deepseek_eval_runner.py"
 
+    def test_score_breakdown_in_process(
+        self, dataset, staged, project, patch_subprocess
+    ):
+        scorer = LegacyMLPerfDeepSeekR1Scorer(
+            dataset_name="dsr1_acc",
+            dataset=dataset,
+            report_dir=staged,
+            deepseek_eval_project_path=project,
+        )
+        assert scorer.score_breakdown() is None  # not populated until score()
+        scorer.score()
+
+        bd = scorer.score_breakdown()
+        assert bd is not None
+        # exact_match is already 0-100; surfaced as overall_accuracy (rounded).
+        assert bd["overall_accuracy"] == pytest.approx(66.67, abs=0.01)
+        assert bd["complete"] is True
+        assert bd["subset_scores"] == {}  # runner returned an empty per_dataset
+
     def test_subprocess_pins_subproject_venv(
         self, dataset, staged, project, patch_subprocess
     ):
@@ -363,6 +382,45 @@ class TestLegacyMLPerfDeepSeekR1ScorerContainer:
         assert lcb["status"] == "lcb-service"
         assert lcb["exact_match"] == pytest.approx(100.0)
         assert lcb["tokens_per_sample"] == 200.0  # preserved from the runner
+
+    def test_score_breakdown_merged(
+        self, dataset, staged, project, patch_subprocess, monkeypatch
+    ):
+        monkeypatch.setattr(
+            scoring_mod,
+            "_lcb_ws_evaluate",
+            lambda url, codes, timeout: {
+                "total_samples": 1,
+                "results": {"lcb-q0": [True]},
+            },
+        )
+        scorer = self._scorer(dataset, staged, project)
+        scorer.score()
+
+        bd = scorer.score_breakdown()
+        assert bd is not None
+        assert bd["overall_accuracy"] == pytest.approx(100.0)
+        assert bd["complete"] is True
+        assert bd["total_samples"] == 2
+        # livecodebench graded via the container is included, with its status.
+        assert bd["subset_scores"]["livecodebench"] == pytest.approx(100.0)
+        assert bd["per_subset_status"]["livecodebench"] == "lcb-service"
+
+    def test_score_breakdown_excludes_unscored_lcb(
+        self, dataset, staged, project, patch_subprocess, monkeypatch
+    ):
+        monkeypatch.setattr(
+            scoring_mod, "_lcb_ws_evaluate", lambda url, codes, timeout: None
+        )
+        scorer = self._scorer(dataset, staged, project)
+        scorer.score()
+
+        bd = scorer.score_breakdown()
+        assert bd is not None
+        assert bd["complete"] is False
+        # Unscored subset is dropped from subset_scores but kept in the status map.
+        assert "livecodebench" not in bd["subset_scores"]
+        assert bd["per_subset_status"]["livecodebench"] == "unscored"
 
     def test_container_unreachable_leaves_lcb_unscored(
         self, dataset, staged, project, patch_subprocess, monkeypatch

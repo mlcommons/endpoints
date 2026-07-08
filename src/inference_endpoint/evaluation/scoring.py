@@ -26,6 +26,7 @@ import tempfile
 import uuid
 from abc import ABC, abstractmethod
 from collections import Counter, defaultdict
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -53,6 +54,7 @@ from ..core.types import TextModelOutput
 from ..dataset_manager.agentic_inference_dataset import AgenticInferenceDataset
 from ..dataset_manager.dataset import Dataset
 from ..dataset_manager.predefined.shopify_product_catalogue import ProductMetadata
+from .accuracy_results import build_breakdown
 from .extractor import Extractor, PythonCodeExtractor
 
 logger = logging.getLogger(__name__)
@@ -1709,6 +1711,7 @@ class LegacyMLPerfDeepSeekR1Scorer(Scorer, scorer_id="legacy_mlperf_deepseek_r1"
             extractor=extractor,
             ground_truth_column=ground_truth_column,
         )
+        self._breakdown: dict[str, Any] | None = None
         self.subset_column = subset_column
         self.question_column = question_column
         self.tokenizer_path = tokenizer_path
@@ -1933,6 +1936,7 @@ class LegacyMLPerfDeepSeekR1Scorer(Scorer, scorer_id="legacy_mlperf_deepseek_r1"
                 return None, n_repeats
             # The runner reports complete=False if any subset failed to grade.
             self.complete = bool(results.get("complete", True))
+            self._cache_breakdown(results)
             return float(exact_match), n_repeats
 
         # Grade the text subsets in the subprocess and the livecodebench subset
@@ -2032,4 +2036,164 @@ class LegacyMLPerfDeepSeekR1Scorer(Scorer, scorer_id="legacy_mlperf_deepseek_r1"
 
         if combined is None:
             return None, n_repeats
+        self._cache_breakdown(results)
         return float(combined), n_repeats
+
+    def _cache_breakdown(self, results: dict[str, Any]) -> None:
+        """Cache a BFCL-shaped breakdown from the runner's per-subset results.
+
+        Subset ``exact_match`` values are already on the 0-100 scale, so they map
+        straight onto ``subset_scores``. Subsets that failed to grade
+        (``exact_match is None``) are omitted from ``subset_scores`` but kept in
+        ``per_subset_status`` so an incomplete run stays legible.
+        """
+        per_dataset = results.get("per_dataset") or {}
+        subset_scores: dict[str, float] = {}
+        status_map: dict[str, Any] = {}
+        for sub, d in per_dataset.items():
+            if not isinstance(d, dict):
+                continue
+            status_map[sub] = d.get("status")
+            em = d.get("exact_match")
+            if em is not None:
+                subset_scores[sub] = float(em)
+        overall = results.get("exact_match")
+        total_samples = int(
+            results.get("evaluated_samples") or results.get("num_samples") or 0
+        )
+        self._breakdown = build_breakdown(
+            overall=float(overall) if overall is not None else None,
+            subset_scores=subset_scores,
+            total_samples=total_samples,
+            complete=self.complete,
+            per_subset_status=status_map,
+        )
+
+    def score_breakdown(self) -> dict[str, Any] | None:
+        """Per-subset accuracy breakdown cached by :meth:`score` (BFCL-shaped).
+
+        ``None`` until :meth:`score` runs, or if scoring produced no usable
+        result.
+        """
+        return self._breakdown
+
+
+@dataclass
+class GptOssMember:
+    """One benchmark subset of a combined gpt-oss accuracy run.
+
+    ``full_name`` is the config dataset name (e.g. ``aime25::gptoss``) — the key
+    the member's own scorer needs to look up its outputs in ``sample_idx_map.json``.
+    ``subset`` is the base name (``aime25``) used for the breakdown key and weight.
+    """
+
+    full_name: str
+    subset: str
+    scorer_cls: type[Scorer]
+    extractor: type[Extractor] | None
+    dataset: Dataset
+    ground_truth_column: str | None
+    extras: dict[str, Any]
+
+
+class GptOssAccuracyScorer:
+    """Combined gpt-oss-120b accuracy over its per-benchmark subsets.
+
+    gpt-oss ships no combined dataset or scorer: aime25/gpqa are graded by
+    ``PassAt1Scorer`` and livecodebench by ``LiveCodeBenchScorer``, each on its
+    own dataset. This orchestrator runs each member's own scorer, then rolls the
+    scalar results into one headline **sample-weighted by unique problem count**
+    (``dataset.num_samples()``), matching the downstream MLPerf submission tooling
+    (``endpoints-launch`` ``generate_points.py``). ``score()`` returns the weighted
+    mean on the native ``[0, 1]`` scale; ``score_breakdown()`` reports the headline
+    and per-subset scores on the shared ``[0, 100]`` breakdown scale.
+
+    Each member's outcome is exposed via :attr:`member_scores` so
+    ``finalize_benchmark`` can emit the per-subset ``<subset>::gptoss`` entries
+    (for audit and backward-compat with consumers that read them) alongside the
+    consolidated entry — from this one scoring pass, without re-running the
+    (expensive) member scorers.
+
+    It duck-types the scorer surface (``score``/``score_breakdown``/``complete``)
+    that ``finalize_benchmark`` consumes; it is invoked directly for a group of
+    members rather than resolved from an ``eval_method``.
+    """
+
+    def __init__(self, members: list[GptOssMember], report_dir: os.PathLike):
+        self.members = members
+        self.report_dir = Path(report_dir)
+        self.complete = True
+        self._breakdown: dict[str, Any] | None = None
+        # Per-member outcome from the single scoring pass, keyed by full_name:
+        # (score in [0,1] or None, member_complete). Lets the caller emit
+        # per-subset audit entries without re-scoring the (expensive) members.
+        self.member_scores: dict[str, tuple[float | None, bool]] = {}
+
+    def score(self) -> tuple[float | None, int]:
+        subset_scores: dict[str, float] = {}
+        weights: dict[str, int] = {}
+        n_repeats = 1
+        self.member_scores = {}
+        for m in self.members:
+            try:
+                scorer = m.scorer_cls(
+                    m.full_name,
+                    m.dataset,
+                    self.report_dir,
+                    extractor=m.extractor,
+                    ground_truth_column=m.ground_truth_column,
+                    **m.extras,
+                )
+            except TypeError as e:
+                raise ValueError(
+                    f"Accuracy group member '{m.full_name}': invalid extras for "
+                    f"scorer '{m.scorer_cls.__name__}': {e}"
+                ) from e
+            subset_score, reps = scorer.score()
+            member_complete = bool(getattr(scorer, "complete", True))
+            n_repeats = max(n_repeats, reps)
+            # A failed subset (None) or a scorer that flagged itself partial
+            # shrinks coverage, so the combined headline is incomplete.
+            if subset_score is None or not member_complete:
+                self.complete = False
+            if subset_score is None:
+                self.member_scores[m.full_name] = (None, member_complete)
+                continue
+            # Members must be scalar [0,1] scorers (pass_at_1, code_bench_scorer).
+            # Guard against a mis-grouped scorer that returns a dict (RougeScorer)
+            # or a 0-100 scale (LegacyMLPerfDeepSeekR1Scorer) — float(dict) would
+            # crash and a 0-100 value would silently scale to ~10000%.
+            if not isinstance(subset_score, int | float) or not (
+                0.0 <= subset_score <= 1.0
+            ):
+                raise ValueError(
+                    f"Accuracy group member '{m.full_name}' "
+                    f"({m.scorer_cls.__name__}) returned {subset_score!r}; a "
+                    f"consolidation group requires scalar scores in [0, 1]."
+                )
+            score_val = float(subset_score)
+            subset_scores[m.subset] = score_val
+            weights[m.subset] = m.dataset.num_samples()
+            self.member_scores[m.full_name] = (score_val, member_complete)
+
+        if not subset_scores:
+            self.complete = False
+            self._breakdown = None
+            return None, n_repeats
+
+        total = sum(weights.values())
+        overall01 = (
+            sum(subset_scores[k] * weights[k] for k in subset_scores) / total
+            if total
+            else None
+        )
+        self._breakdown = build_breakdown(
+            overall=overall01 * 100 if overall01 is not None else None,
+            subset_scores={k: v * 100 for k, v in subset_scores.items()},
+            total_samples=total,
+            complete=self.complete,
+        )
+        return overall01, n_repeats
+
+    def score_breakdown(self) -> dict[str, Any] | None:
+        return self._breakdown

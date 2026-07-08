@@ -42,12 +42,15 @@ from pydantic import ValidationError
 from ..config.ruleset_base import BenchmarkSuiteRuleset
 from ..config.ruleset_registry import get_ruleset
 from ..config.schema import BenchmarkConfig
-
-# BFCL accuracy: ruleset golden-metric name -> key in the scorer's breakdown block.
-_ACCURACY_METRIC_KEYS = {
-    "bfcl_overall_accuracy": "overall_accuracy",
-    "bfcl_normalized_accuracy": "normalized_single_turn_score",
-}
+from ..evaluation.accuracy_results import (
+    ACCURACY_METRIC_KEYS as _ACCURACY_METRIC_KEYS,
+)
+from ..evaluation.accuracy_results import (
+    find_accuracy_breakdown as _find_accuracy_score,
+)
+from ..evaluation.accuracy_results import (
+    to_float as _to_float,
+)
 
 
 @dataclass(frozen=True)
@@ -99,20 +102,6 @@ def _get(d: dict[str, Any], *path: str, default: Any = None) -> Any:
             return default
         cur = cur[key]
     return cur
-
-
-def _to_float(value: Any) -> float | None:
-    """Coerce a metric value to float, or None if absent/non-numeric.
-
-    Breakdown metrics are numeric, but older artifacts stored them as formatted
-    strings (e.g. ``"86.23"``); coerce defensively before any comparison.
-    """
-    if value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
 
 
 def check_config_lock(config: dict[str, Any]) -> list[Check]:
@@ -229,25 +218,6 @@ def check_accuracy(
         )
 
     return checks
-
-
-def _find_accuracy_score(results: dict[str, Any]) -> dict[str, Any] | None:
-    """Return the BFCL per-subset breakdown from a run's ``accuracy_scores``.
-
-    Each entry carries a scalar ``score`` plus an optional ``breakdown`` dict
-    (per-subset/category accuracy + ``total_samples``); the gate reads the
-    breakdown. ``score``-as-dict is also accepted for older artifacts.
-    """
-    accuracy_scores = results.get("accuracy_scores")
-    if not isinstance(accuracy_scores, dict):
-        return None
-    for entry in accuracy_scores.values():
-        if not isinstance(entry, dict):
-            continue
-        for block in (entry.get("breakdown"), entry.get("score")):
-            if isinstance(block, dict) and "overall_accuracy" in block:
-                return block
-    return None
 
 
 def check_perf_validity(scores: dict[str, Any]) -> list[Check]:

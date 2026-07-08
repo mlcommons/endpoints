@@ -199,6 +199,32 @@ def test_accuracy_gate_fails_on_too_few_samples():
 
 
 @pytest.mark.unit
+def test_accuracy_gate_accepts_non_bfcl_breakdown():
+    """A deepseek/gpt-oss breakdown (overall_accuracy + subset_scores, no
+    normalized single-turn score) is discovered and gated on overall_accuracy."""
+    results = {
+        "accuracy_scores": {
+            "gptoss": {
+                "score": 0.83,
+                "breakdown": {
+                    "overall_accuracy": 83.0,
+                    "subset_scores": {"aime25": 80.0, "gpqa": 88.0},
+                    "total_samples": 1283,
+                },
+            }
+        }
+    }
+    golden = {"bfcl_overall_accuracy": 82.0}
+    factors = {"bfcl_overall_accuracy": (0.97,)}
+    checks = check_accuracy(results, golden, factors, 1000)
+
+    overall = next(c for c in checks if c.name == "accuracy:overall_accuracy")
+    assert overall.passed
+    samples = next(c for c in checks if c.name == "min_sample_count")
+    assert samples.passed  # total_samples read from the breakdown
+
+
+@pytest.mark.unit
 def test_perf_validity_passes_when_observed_matches_expected():
     # issued (1007) > expected (1006): a complete run observes every *scorable*
     # turn but fewer than issued. Validating against expected must still pass.

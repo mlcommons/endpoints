@@ -25,6 +25,7 @@ import json
 import math
 from pathlib import Path
 
+import msgspec.structs
 import pytest
 from inference_endpoint.async_utils.services.metrics_aggregator.aggregator import (
     MetricCounterKey,
@@ -241,7 +242,41 @@ class TestReportDisplayAndSerialize:
 
         assert "Summary" in output
         assert "QPS:" in output
+        assert "TPS:" in output
         assert "End of Summary" in output
+
+    def test_from_snapshot_leaves_accuracy_none(self):
+        """Accuracy isn't part of the metrics snapshot; from_snapshot never sets it."""
+        report = _build_report(_make_registry(n_samples=5))
+        assert report.accuracy is None
+
+    def test_display_tps_na_when_unmeasured(self):
+        """TPS renders an explicit N/A (symmetric with QPS) with no duration/OSL."""
+        report = _build_report(_make_registry(n_samples=0))
+        lines: list[str] = []
+        report.display(fn=lines.append, summary_only=True)
+        assert "TPS: N/A" in "\n".join(lines)
+
+    def test_display_accuracy_section(self):
+        """An attached accuracy breakdown renders overall + per-subset + the
+        incomplete marker in the summary."""
+        report = _build_report(_make_registry(n_samples=10))
+        breakdown = {
+            "overall_accuracy": 82.3,
+            "subset_scores": {"aime25": 70.0, "livecodebench": 60.0},
+            "total_samples": 1283,
+            "complete": False,
+        }
+        report = msgspec.structs.replace(report, accuracy={"gptoss": breakdown})
+
+        lines: list[str] = []
+        report.display(fn=lines.append, summary_only=True)
+        output = "\n".join(lines)
+
+        assert "Accuracy:" in output
+        assert "gptoss: 82.30% (n=1283)" in output
+        assert "aime25: 70.00%" in output
+        assert "(incomplete)" in output
 
     def test_display_full(self):
         registry = _make_registry(n_samples=10)
