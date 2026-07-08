@@ -404,9 +404,12 @@ class Worker:
                     await self._handle_error(req.query_id, e)
                     return None
                 attempt += 1
+                # Attach the fresh connection to the request BEFORE writing, so
+                # a write failure still leaves req.connection pointing at it for
+                # the caller's finally-block release (no leaked connection).
                 new_conn = await self._pool.acquire()
-                new_conn.protocol.write(req.http_bytes)
                 req.connection = new_conn
+                new_conn.protocol.write(req.http_bytes)
 
     @profile
     async def _process_response(self, req: InFlightRequest) -> None:

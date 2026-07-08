@@ -190,3 +190,34 @@ async def test_headers_ok_first_try_never_touches_pool():
     assert pool.acquired == []
     assert pool.released == []
     assert worker._handle_error_calls == []
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_fresh_conn_attached_before_write_so_failing_write_is_not_leaked():
+    """If the re-issue write fails, req.connection already points to the fresh
+    connection so the caller's finally-block can release it (no leak)."""
+
+    class _RaisingWriteProtocol(_FakeProtocol):
+        def write(self, data: bytes) -> None:
+            raise ConnectionResetError("write on closed transport")
+
+    dead = _FakeConn(_FakeProtocol(["reset"]))
+    fresh = _FakeConn(_RaisingWriteProtocol([200]))
+    pool = _FakePool(acquire_queue=[fresh])
+    worker = _make_worker(pool, max_retries=2)
+
+    req = InFlightRequest(
+        query_id="q5",
+        http_bytes=b"POST /x HTTP/1.1\r\n\r\n",
+        is_streaming=False,
+        connection=dead,
+    )
+
+    with pytest.raises(ConnectionError):
+        await worker._read_headers_with_retry(req)
+
+    # Fresh connection is attached before the failing write, so the request
+    # still owns a releasable connection (the old one was already released).
+    assert req.connection is fresh
+    assert pool.released == [dead]
