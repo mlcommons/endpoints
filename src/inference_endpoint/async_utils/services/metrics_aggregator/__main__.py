@@ -311,6 +311,11 @@ async def main() -> None:
                 ),
             )
 
+            # Touch a fixed startup marker in the (already-known) output dir once
+            # the signal handlers are registered, so a harness can poll for it as
+            # an exact "ready to receive signals" gate instead of a fixed sleep.
+            (metrics_output_dir / ".ready").touch()
+
             if args.readiness_path:
                 await send_ready_signal(zmq_ctx, args.readiness_path, args.readiness_id)
 

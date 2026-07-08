@@ -21,8 +21,11 @@ from pathlib import Path
 
 import pytest
 import yaml
+from inference_endpoint.commands.audit import run_audit
 from inference_endpoint.commands.benchmark.execute import run_benchmark
 from inference_endpoint.config.schema import (
+    AuditConfig,
+    AuditTestId,
     BenchmarkConfig,
     Dataset,
     DatasetType,
@@ -181,6 +184,149 @@ class TestBenchmarkCommandIntegration:
         assert "Mode:" in caplog.text
         assert "QPS: 20" in caplog.text
         assert "Responses: False" in caplog.text
+
+    @pytest.mark.integration
+    @pytest.mark.parametrize(
+        "test_type,settings",
+        [
+            (
+                TestType.OFFLINE,
+                Settings(
+                    runtime=RuntimeConfig(min_duration_ms=0),
+                    load_pattern=LoadPattern(type=LoadPatternType.MAX_THROUGHPUT),
+                    client=HTTPClientConfig(
+                        num_workers=1, warmup_connections=0, max_connections=10
+                    ),
+                ),
+            ),
+            (
+                TestType.ONLINE,
+                Settings(
+                    runtime=RuntimeConfig(min_duration_ms=0),
+                    load_pattern=LoadPattern(
+                        type=LoadPatternType.CONCURRENCY, target_concurrency=1
+                    ),
+                    client=HTTPClientConfig(
+                        num_workers=1, warmup_connections=0, max_connections=10
+                    ),
+                ),
+            ),
+        ],
+        ids=["offline", "single-stream"],
+    )
+    def test_audit_output_caching_two_phase_flow(
+        self,
+        mock_http_echo_server,
+        ds_dataset_path,
+        tmp_path,
+        caplog,
+        test_type,
+        settings,
+    ):
+        """Output-caching audit (MLPerf TEST04) runs reference + output_caching
+        phases for offline and single-stream.
+
+        Exercises the redesigned audit: config block → run_audit orchestrator →
+        AuditResult. Asserts both phase subdirs are created, the result file is
+        written, and — against the no-caching echo server — the audit PASSes
+        (result.passed and the verify .txt).
+
+        Equal per-phase counts avoid a count bias, and a wide threshold absorbs
+        connection-warmup skew: the audit phase runs second with warm pools, so
+        on a trivial echo server it can be measurably faster than the reference
+        without any caching. The exact threshold boundary is unit-tested in
+        tests/unit/compliance/test_output_caching.py; here we only assert the
+        no-caching PASS path is plumbed end-to-end.
+        """
+        config = BenchmarkConfig(
+            type=test_type,
+            audit=AuditConfig(
+                test=AuditTestId.OUTPUT_CACHING_TEST,
+                samples=5,
+                audit_samples=5,
+                sample_index=0,
+                threshold=0.9,
+            ),
+            endpoint_config=EndpointConfig(endpoints=[mock_http_echo_server.url]),
+            model_params=ModelParams(name="echo-server", streaming=StreamingMode.OFF),
+            datasets=[Dataset(path=ds_dataset_path, type=DatasetType.PERFORMANCE)],
+            settings=settings,
+            report_dir=str(tmp_path),
+        )
+
+        # run_benchmark does the main run and returns report_dir; the caller
+        # (cli._run, mirrored here) dispatches the audit under <report_dir>/audit/.
+        with caplog.at_level("INFO"):
+            report_dir = run_benchmark(config, TestMode.PERF)
+            result = run_audit(config, report_dir / "audit")
+
+        # All audit artifacts live under <report_dir>/audit/.
+        assert (tmp_path / "audit" / "reference").is_dir()
+        assert (tmp_path / "audit" / "output_caching").is_dir()
+        # Orchestrator returned a result and wrote both result files.
+        assert result is not None
+        # No caching on the echo server → the audit must PASS (a regression that
+        # always FAILs, or mis-plumbs the threshold, would otherwise slip by).
+        assert result.passed is True
+        assert result.test_id == AuditTestId.OUTPUT_CACHING_TEST.value
+        result_path = tmp_path / "audit" / "audit_result.json"
+        assert result_path.exists()
+        verify_txt = (tmp_path / "audit" / "verify_OUTPUT_CACHING_TEST.txt").read_text()
+        assert "Performance check pass: True" in verify_txt
+        result_json = json.loads(result_path.read_text())
+        assert result_json["passed"] is True
+
+    @pytest.mark.integration
+    def test_cli_run_dispatches_main_run_before_audit(
+        self, mock_http_echo_server, ds_dataset_path, tmp_path, monkeypatch
+    ):
+        """cli._run must dispatch the main benchmark run before the audit
+        (upstream MLPerf order)."""
+        from inference_endpoint.commands.benchmark import cli
+
+        config = BenchmarkConfig(
+            type=TestType.OFFLINE,
+            audit=AuditConfig(
+                test=AuditTestId.OUTPUT_CACHING_TEST,
+                samples=5,
+                audit_samples=5,
+                sample_index=0,
+                threshold=0.9,
+            ),
+            endpoint_config=EndpointConfig(endpoints=[mock_http_echo_server.url]),
+            model_params=ModelParams(name="echo-server", streaming=StreamingMode.OFF),
+            datasets=[Dataset(path=ds_dataset_path, type=DatasetType.PERFORMANCE)],
+            settings=Settings(
+                runtime=RuntimeConfig(min_duration_ms=0),
+                load_pattern=LoadPattern(type=LoadPatternType.MAX_THROUGHPUT),
+                client=HTTPClientConfig(
+                    num_workers=1, warmup_connections=0, max_connections=10
+                ),
+            ),
+            report_dir=str(tmp_path),
+        )
+
+        call_order: list[str] = []
+        real_run_audit = cli.run_audit
+        real_run_benchmark = cli.run_benchmark
+
+        def _spy_run_audit(cfg, base_report_dir):
+            call_order.append("audit")
+            return real_run_audit(cfg, base_report_dir)
+
+        def _spy_run_benchmark(cfg, mode):
+            call_order.append("benchmark")
+            return real_run_benchmark(cfg, mode)
+
+        monkeypatch.setattr(cli, "run_audit", _spy_run_audit)
+        monkeypatch.setattr(cli, "run_benchmark", _spy_run_benchmark)
+
+        cli._run(config, [], TestMode.PERF)
+
+        assert call_order == ["benchmark", "audit"]
+        # Both phases still land under the one shared report_dir.
+        assert (tmp_path / "audit" / "audit_result.json").exists()
+        assert (tmp_path / "config.yaml").exists()
 
 
 TEMPLATE_DIR = (
