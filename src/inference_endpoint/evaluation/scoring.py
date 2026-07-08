@@ -1009,7 +1009,12 @@ class VBenchScorer(Scorer, scorer_id="vbench"):
             # strict=True surfaces missing/unmounted sources here, not as an
             # opaque decord read failure inside VBench 30 minutes later.
             resolved_src = src.resolve(strict=True)
-            dst = staged_dir / f"{safe_prompt}-{idx}{src.suffix or '.mp4'}"
+            # Always stage as .mp4: VBench's load_video dispatches purely on
+            # the file extension and raises NotImplementedError for anything
+            # else (e.g. the MJPEG .avi that trtllm-serve emits when ffmpeg
+            # is unavailable server-side). decord detects the real container
+            # by content, so a non-mp4 file under an .mp4 name decodes fine.
+            dst = staged_dir / f"{safe_prompt}-{idx}.mp4"
             dst.symlink_to(resolved_src)
 
     def _run_vbench_subprocess(

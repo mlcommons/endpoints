@@ -466,6 +466,31 @@ class TestVBenchScorer:
         assert names == ["a cat-0.mp4", "a dog-0.mp4", "a tree-0.mp4"]
         assert not zombie.exists()
 
+    def test_stage_videos_renames_non_mp4_sources_to_mp4(
+        self, dataset, staged, vbench_project, tmp_path
+    ):
+        """Non-mp4 sources (e.g. trtllm-serve's MJPEG .avi) stage as .mp4.
+
+        VBench's load_video dispatches purely on the file extension and raises
+        NotImplementedError for anything but .mp4; decord detects the real
+        container by content, so an .avi under an .mp4 name decodes fine.
+        """
+        report_dir, _ = staged
+        avi = tmp_path / "video_x.avi"
+        avi.write_bytes(b"")
+        scorer = VBenchScorer(
+            dataset_name="vid_acc",
+            dataset=dataset,
+            report_dir=report_dir,
+            ground_truth_column="prompt",
+            vbench_project_path=vbench_project,
+        )
+        staged_dir = report_dir / "vbench_videos"
+        scorer._stage_videos(staged_dir, [str(avi)], ["a cat"])
+        (staged_file,) = staged_dir.iterdir()
+        assert staged_file.name == "a cat-0.mp4"
+        assert staged_file.resolve() == avi.resolve()
+
     def test_subprocess_failure_includes_stderr_tail(
         self, dataset, staged, vbench_project, monkeypatch, tmp_path
     ):
