@@ -76,6 +76,13 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
     return out
 
 
+# ModelParams fields that drive the single global tokenizer / MetricsAggregator
+# (launched once from top-level model_params), so a per-dataset override would
+# desync ISL/OSL/TTFT/TPOT accounting without changing what is measured. Rejected
+# as generation_config_override keys — they are per-run/identity, not per-dataset.
+_METRICS_DECOUPLED_OVERRIDE_KEYS = frozenset({"name", "streaming", "tokenizer_name"})
+
+
 def _non_default_completion_controls(mp: ModelParams) -> list[str]:
     """Completion-only ModelParams controls set to a non-default value.
 
@@ -462,24 +469,22 @@ class Dataset(BaseModel):
     agentic_inference: AgenticInferenceConfig | None = Field(
         None, description="Agentic inference conversation configuration"
     )
-    # TODO(post-mortem): generation config is per-phase (perf vs. accuracy),
-    # not per-dataset — phases are derived from datasets and the override is
-    # keyed to dataset identity. This lives on Dataset as a short-term WAR
-    # so MLPerf-style accuracy + perf can share one fleet. The proper fix is
-    # a first-class GenerationConfig carried on PhaseConfig, decoupled from
-    # the dataset entry. Field/method names use "generation_config" to keep
-    # the eventual migration mechanical.
+    # Per-dataset generation config is a first-class capability: different
+    # accuracy datasets legitimately want different generation settings (e.g.
+    # per-dataset max OSL or top_p, as seen in DS-V4), and dataset-scoping also
+    # enables per-dataset dynamic OSL distributions. Only generation knobs are
+    # overridable — per-run/identity fields (`_METRICS_DECOUPLED_OVERRIDE_KEYS`:
+    # name / streaming / tokenizer_name) drive the single global tokenizer and
+    # MetricsAggregator, so overriding them per-dataset would desync ISL/OSL/
+    # TTFT/TPOT accounting; they are rejected at validation.
     #
-    # Caveats on per-dataset overrides today:
-    #   - `name` flows into the request `model` field but the tokenizer and
-    #     aggregator are launched from the global `model_params.name`, so a
-    #     per-dataset rename mismatches ISL/OSL accounting.
-    #   - `streaming` flows into the request but the single MetricsAggregator
-    #     is launched with the global `model_params.streaming` flag, so a
-    #     per-dataset streaming flip will not produce TTFT/TPOT for that
-    #     phase. Keep streaming on `model_params` (per-run) for now.
-    #   - Nested dicts (`osl_distribution`, `chat_template_kwargs`) are
-    #     deep-merged so sparse overrides preserve sibling defaults.
+    # TODO(post-mortem): split ModelParams into a per-run ModelIdentity and a
+    # GenerationConfig, so the override surface is exactly the generation fields
+    # and identity fields cannot be named here at all. Field/method names use
+    # "generation_config" to keep that migration mechanical.
+    #
+    # Nested dicts (`osl_distribution`, `chat_template_kwargs`) are deep-merged
+    # so sparse overrides preserve sibling defaults.
     generation_config_override: dict[str, Any] | None = Field(
         None,
         description=(
@@ -489,9 +494,9 @@ class Dataset(BaseModel):
             "MLPerf-style runs where accuracy and performance use different "
             "output budgets in the same fleet, e.g. "
             "generation_config_override: {max_new_tokens: 32768, "
-            "temperature: 0.0}. NOTE: per-dataset `streaming` and `name` are "
-            "accepted (kwargs-style) but not honored by the single-aggregator "
-            "metrics path — set those on top-level model_params."
+            "temperature: 0.0}. NOTE: per-run/identity keys (`name`, "
+            "`streaming`, `tokenizer_name`) are rejected here — set them on "
+            "top-level model_params."
         ),
     )
 
@@ -504,18 +509,31 @@ class Dataset(BaseModel):
 
     @model_validator(mode="after")
     def _validate_generation_config_override(self) -> Self:
-        """Fail fast on unknown keys; values are validated at merge time
-        (see ``effective_generation_config``) because cross-field validation
-        needs the base ``ModelParams`` from ``BenchmarkConfig``.
+        """Fail fast on unknown keys and on per-run/identity keys the single
+        global tokenizer / MetricsAggregator would ignore. Override *values*
+        are validated at merge time (see ``effective_generation_config``)
+        because cross-field validation needs the base ``ModelParams`` from
+        ``BenchmarkConfig``.
         """
         if self.generation_config_override:
+            keys = set(self.generation_config_override)
             valid = set(ModelParams.model_fields)
-            bad = sorted(set(self.generation_config_override) - valid)
+            bad = sorted(keys - valid)
             if bad:
                 raise ValueError(
                     f"Dataset '{self.name}': unknown keys in "
                     f"generation_config_override: {bad}. "
                     f"Valid keys: {sorted(valid)}"
+                )
+            decoupled = sorted(keys & _METRICS_DECOUPLED_OVERRIDE_KEYS)
+            if decoupled:
+                raise ValueError(
+                    f"Dataset '{self.name}': generation_config_override keys "
+                    f"{decoupled} are not honored per-dataset — the single "
+                    "global tokenizer / metrics aggregator is launched from "
+                    "top-level model_params, so a per-dataset value would "
+                    "desync ISL/OSL/TTFT/TPOT accounting. Set them on "
+                    "top-level model_params instead."
                 )
         return self
 
@@ -1089,18 +1107,25 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
         #
         # Completion-only controls must be gated by api_type for BOTH the
         # top-level model_params AND every per-dataset generation_config_override,
-        # so the two config surfaces validate identically. Building each dataset's
-        # effective params here (parse time) also surfaces value-invalid overrides
-        # before setup produces side effects.
+        # so the two config surfaces validate identically. Merge each dataset's
+        # effective params once here (parse time) — this also surfaces
+        # value-invalid overrides before setup produces side effects — and reuse
+        # the result for the agentic-inference check below.
+        effective_by_dataset: dict[int, ModelParams] = {
+            id(dataset): dataset.effective_generation_config(self.model_params)
+            for dataset in self.datasets
+            if dataset.generation_config_override
+        }
         completion_control_surfaces: list[tuple[str, ModelParams]] = [
             ("model_params", self.model_params)
         ]
         for dataset in self.datasets:
-            if dataset.generation_config_override:
+            effective = effective_by_dataset.get(id(dataset))
+            if effective is not None:
                 completion_control_surfaces.append(
                     (
                         f"datasets['{dataset.name}'].generation_config_override",
-                        dataset.effective_generation_config(self.model_params),
+                        effective,
                     )
                 )
         for prefix, mp in completion_control_surfaces:
@@ -1114,11 +1139,7 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
         for dataset in self.datasets:
             if dataset.agentic_inference is None:
                 continue
-            effective = (
-                dataset.effective_generation_config(self.model_params)
-                if dataset.generation_config_override
-                else self.model_params
-            )
+            effective = effective_by_dataset.get(id(dataset), self.model_params)
             if _non_default_completion_controls(effective):
                 raise ValueError(
                     "OpenAI text-completion generation controls are not supported "

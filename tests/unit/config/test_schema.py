@@ -170,6 +170,23 @@ class TestDataset:
             )
 
     @pytest.mark.unit
+    @pytest.mark.parametrize("key", ["name", "streaming", "tokenizer_name"])
+    def test_generation_config_override_rejects_metrics_decoupled_key(self, key):
+        """Per-run/identity keys drive the single global tokenizer / aggregator,
+        so a per-dataset override is rejected at construction rather than
+        silently desyncing metrics accounting.
+        """
+        with pytest.raises(
+            ValueError,
+            match=r"not honored per-dataset",
+        ):
+            Dataset(
+                name="acc",
+                path="a.jsonl",
+                generation_config_override={key: "whatever"},
+            )
+
+    @pytest.mark.unit
     def test_generation_config_override_none_is_noop(self):
         base = ModelParams(name="m", max_new_tokens=1024, streaming=StreamingMode.ON)
         ds = Dataset(name="x", path="x.jsonl")
@@ -194,12 +211,12 @@ class TestDataset:
     @pytest.mark.unit
     def test_effective_generation_config_validates_value(self):
         """ModelParams.model_validate is invoked on the merged dict, so a
-        type-invalid override is rejected (e.g. wrong type for streaming)."""
+        type-invalid override is rejected (e.g. non-numeric temperature)."""
         base = ModelParams(name="m")
         ds = Dataset(
             name="x",
             path="x.jsonl",
-            generation_config_override={"streaming": "garbage"},
+            generation_config_override={"temperature": "hot"},
         )
         with pytest.raises(ValueError):
             ds.effective_generation_config(base)
