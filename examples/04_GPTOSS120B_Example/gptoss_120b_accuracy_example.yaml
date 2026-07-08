@@ -1,0 +1,68 @@
+# Composite MLPerf gpt-oss-120b accuracy example.
+#
+# One accuracy dataset (`gptoss_120b_accuracy`) bundles all three subsets
+# (aime25 / gpqa / livecodebench) and is graded by the matching composite scorer,
+# producing a SINGLE results.json entry with a headline `score` (0-100 scale) plus
+# a per-subset `breakdown` — mirroring the DeepSeek-R1 model.
+#
+# This is the alternative to the individual 3-dataset path (see
+# vllm_gptoss_120b_example.yaml, which wires `aime25::gptoss` / `gpqa::gptoss` /
+# `livecodebench::gptoss` under `group: gptoss` as three separate entries). Pick
+# ONE path per config. The composite issues a single uniform `num_repeats`; use
+# the individual datasets when per-subset repeats (aime 8 / gpqa 5 / lcb 3) are
+# required.
+#
+# livecodebench executes untrusted model code, so it is graded out-of-band against
+# the lcb-service WebSocket container (see
+# src/inference_endpoint/evaluation/livecodebench/README.md). Point
+# `extras.lcb_websocket_port` at that container; if it is unreachable, the
+# livecodebench subset is left unscored and the run is marked incomplete.
+name: "gpt-oss-120b-accuracy-composite"
+version: "1.0"
+type: "online"
+
+model_params:
+  name: "openai/gpt-oss-120b"
+  temperature: 1.0
+  max_new_tokens: 32768
+  min_new_tokens: 1
+  skip_special_tokens: false
+  top_k: -1
+  top_p: 1.0
+  streaming: "on"
+
+datasets:
+  - name: "perf-test"
+    type: "performance"
+    path: "examples/04_GPTOSS120B_Example/data/perf_eval_ref.parquet"
+    parser:
+      input_tokens: "input_tokens"
+  - name: "gptoss_120b_accuracy"
+    type: "accuracy"
+    accuracy_config:
+      eval_method: "gptoss_120b_accuracy"
+      num_repeats: 1
+      extras:
+        lcb_websocket_port: 13835
+
+settings:
+  runtime:
+    min_duration_ms: 3000
+    max_duration_ms: 60000
+    scheduler_random_seed: 42
+    dataloader_random_seed: 42
+
+  load_pattern:
+    type: "concurrency"
+    target_concurrency: 512
+
+  client:
+    num_workers: 8
+
+endpoint_config:
+  endpoints:
+    - "http://localhost:8000"
+  api_key: null
+  api_type: "openai_completions"
+
+report_dir: "results/gptoss_120b_accuracy_composite/"

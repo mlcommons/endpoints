@@ -55,7 +55,12 @@ from ..dataset_manager.agentic_inference_dataset import AgenticInferenceDataset
 from ..dataset_manager.dataset import Dataset
 from ..dataset_manager.predefined.shopify_product_catalogue import ProductMetadata
 from .accuracy_results import build_breakdown
-from .extractor import Extractor, PythonCodeExtractor
+from .extractor import (
+    ABCDExtractor,
+    BoxedMathExtractor,
+    Extractor,
+    PythonCodeExtractor,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -230,6 +235,16 @@ class Scorer(ABC):
         return None
 
 
+def _exact_match(value: str, ground_truth: str) -> float:
+    """pass@1 / exact-match: ``1.0`` if ``value == ground_truth`` else ``0.0``.
+
+    Shared by :class:`PassAt1Scorer` and :class:`GptOss120bAccuracyScorer` so the
+    per-sample match semantics stay identical across the individual and composite
+    gpt-oss paths.
+    """
+    return 1.0 if value == ground_truth else 0.0
+
+
 class PassAt1Scorer(Scorer, scorer_id="pass_at_1"):
     """Implements pass@1 scoring as defined by Artificial Analysis.
     pass@1 means the model gets exactly one attempt to produce the correct answer.
@@ -242,7 +257,7 @@ class PassAt1Scorer(Scorer, scorer_id="pass_at_1"):
     """
 
     def score_single_sample(self, value: str, ground_truth: str) -> float:
-        return 1.0 if value == ground_truth else 0.0
+        return _exact_match(value, ground_truth)
 
 
 class StringMatchScorer(Scorer, scorer_id="string_match"):
@@ -2078,6 +2093,40 @@ class LegacyMLPerfDeepSeekR1Scorer(Scorer, scorer_id="legacy_mlperf_deepseek_r1"
         return self._breakdown
 
 
+def _weighted_breakdown(
+    subset_scores01: dict[str, float],
+    weights: dict[str, int],
+    *,
+    complete: bool,
+    **extra: Any,
+) -> tuple[float | None, dict[str, Any]]:
+    """Sample-weighted roll-up shared by both gpt-oss consolidation paths.
+
+    ``subset_scores01`` are per-subset means on the native ``[0, 1]`` scale;
+    ``weights`` are per-subset sample counts (the summed **unique** problem
+    count). Returns ``(overall01, breakdown)`` where ``overall01`` is the
+    weight-averaged headline in ``[0, 1]`` (``None`` if the total weight is 0)
+    and ``breakdown`` is the BFCL-shaped dict with ``overall``/``subset_scores``
+    rescaled to ``[0, 100]``. Each caller applies its own top-level scale to
+    ``overall01`` (the individual orchestrator returns ``[0, 1]``, the composite
+    returns ``[0, 100]``).
+    """
+    total = sum(weights.values())
+    overall01 = (
+        sum(subset_scores01[k] * weights[k] for k in subset_scores01) / total
+        if total
+        else None
+    )
+    breakdown = build_breakdown(
+        overall=overall01 * 100 if overall01 is not None else None,
+        subset_scores={k: v * 100 for k, v in subset_scores01.items()},
+        total_samples=total,
+        complete=complete,
+        **extra,
+    )
+    return overall01, breakdown
+
+
 @dataclass
 class GptOssMember:
     """One benchmark subset of a combined gpt-oss accuracy run.
@@ -2181,19 +2230,233 @@ class GptOssAccuracyScorer:
             self._breakdown = None
             return None, n_repeats
 
-        total = sum(weights.values())
-        overall01 = (
-            sum(subset_scores[k] * weights[k] for k in subset_scores) / total
-            if total
-            else None
-        )
-        self._breakdown = build_breakdown(
-            overall=overall01 * 100 if overall01 is not None else None,
-            subset_scores={k: v * 100 for k, v in subset_scores.items()},
-            total_samples=total,
-            complete=self.complete,
+        overall01, self._breakdown = _weighted_breakdown(
+            subset_scores, weights, complete=self.complete
         )
         return overall01, n_repeats
+
+    def score_breakdown(self) -> dict[str, Any] | None:
+        return self._breakdown
+
+
+class GptOss120bAccuracyScorer(Scorer, scorer_id="gptoss_120b_accuracy"):
+    """Composite MLPerf gpt-oss-120b accuracy scorer (single dataset -> single entry).
+
+    Mirrors the DeepSeek-R1 model: one predefined dataset
+    (``gptoss_120b_accuracy``) carries all three subsets in a ``subset`` column,
+    and this one registered scorer routes per-subset grading in-process, then
+    rolls the per-subset means into a single headline **sample-weighted by unique
+    problem count** (the same weighting as :class:`GptOssAccuracyScorer` and the
+    downstream MLPerf submission tooling). ``score_breakdown()`` reports the
+    headline plus per-subset scores on the shared ``[0, 100]`` breakdown scale.
+
+    Per-subset grading (hardcoded — this is the "comes with all the configs"
+    part, so a config needs only ``eval_method: gptoss_120b_accuracy``):
+
+      - ``aime25``        : :class:`BoxedMathExtractor` + exact match.
+      - ``gpqa``          : :class:`ABCDExtractor` + exact match.
+      - ``livecodebench`` : :class:`PythonCodeExtractor`, graded out-of-band
+        against the lcb-service WebSocket container (keyed by question id). If the
+        container is unreachable (or ``lcb_websocket_port=None``), livecodebench is
+        left UNSCORED and the run is marked incomplete — untrusted model code is
+        never executed in-process.
+
+    Two intentional differences from the individual 3-dataset path
+    (:class:`GptOssAccuracyScorer`):
+
+      - **Top-level scale.** ``score()`` returns the headline on the ``[0, 100]``
+        scale (matching ``LegacyMLPerfDeepSeekR1Scorer``), whereas the individual
+        orchestrator returns ``[0, 1]``. The ``breakdown`` is ``[0, 100]`` in both.
+        Downstream tooling reading this entry's scalar ``score`` must treat it as a
+        percentage (divide by 100, or read ``breakdown``).
+      - **Uniform repeats.** ``num_repeats`` is a single value across all subsets;
+        per-subset repeats (aime 8 / gpqa 5 / lcb 3) remain available only via the
+        individual ``::gptoss`` datasets.
+
+    Returns ``(headline_0_100, n_repeats)``, or ``(None, n_repeats)`` when no
+    subset was scorable.
+    """
+
+    REQUIRES_EXTRACTOR: ClassVar[bool] = False
+
+    #: subset id -> (extractor, grading mode). ``"exact"`` grades in-process via
+    #: exact match on the extracted value; ``"lcb"`` grades via the lcb-service
+    #: container.
+    _SUBSET_GRADERS: ClassVar[dict[str, tuple[type[Extractor], str]]] = {
+        "aime25": (BoxedMathExtractor, "exact"),
+        "gpqa": (ABCDExtractor, "exact"),
+        "livecodebench": (PythonCodeExtractor, "lcb"),
+    }
+
+    def __init__(
+        self,
+        dataset_name: str,
+        dataset: Dataset,
+        report_dir: os.PathLike,
+        extractor: type[Extractor] | None = None,
+        ground_truth_column: str | None = "ground_truth",
+        subset_column: str = "subset",
+        lcb_websocket_port: int | None = 13835,
+        lcb_timeout: int = 60,
+    ):
+        super().__init__(
+            dataset_name=dataset_name,
+            dataset=dataset,
+            report_dir=report_dir,
+            extractor=extractor,
+            ground_truth_column=ground_truth_column,
+        )
+        self._breakdown: dict[str, Any] | None = None
+        self.subset_column = subset_column
+        self.lcb_timeout = lcb_timeout
+        self.lcb_websocket_url = (
+            f"ws://localhost:{lcb_websocket_port}/evaluate"
+            if lcb_websocket_port is not None
+            else None
+        )
+
+    def score_single_sample(self, value: str, ground_truth: str) -> float:
+        raise RuntimeError(
+            "gpt-oss-120b composite scoring requires per-subset routing; "
+            "call score() instead."
+        )
+
+    def _score_lcb(self, pairs: list[tuple[str, str]]) -> float | None:
+        """Grade livecodebench ``(output, question_id)`` pairs via lcb-service.
+
+        Extracts the python block from each output, groups it by question id
+        (the ground truth), and evaluates via the WebSocket container. Returns
+        ``passed / total`` in ``[0, 1]``, or ``None`` if the service is
+        unreachable or returns no summary (so the subset is left unscored and the
+        run marked incomplete — the in-process executor can't sandbox untrusted
+        model code).
+        """
+        if self.lcb_websocket_url is None:
+            return None
+        codes_dict: dict[str, list[str]] = defaultdict(list)
+        for output, question_id in pairs:
+            code = PythonCodeExtractor.extract(
+                output, default="# FAILED TO EXTRACT CODE"
+            )
+            codes_dict[question_id].append(code or "# FAILED TO EXTRACT CODE")
+        result = _lcb_ws_evaluate(
+            self.lcb_websocket_url, dict(codes_dict), self.lcb_timeout
+        )
+        if result is None:
+            return None
+        total_samples = int(result.get("total_samples", 0))
+        per_problem = result.get("results", {})
+        if not per_problem or not total_samples:
+            logger.error(
+                "GptOss120bAccuracyScorer: lcb-service returned an empty summary "
+                "(total_samples=%d); leaving livecodebench unscored.",
+                total_samples,
+            )
+            return None
+        passed = sum(sum(code_passed) for code_passed in per_problem.values())
+        return passed / total_samples
+
+    def score(self) -> tuple[float | None, int]:
+        df = self.get_outputs()
+        num_samples = self.dataset.num_samples()
+
+        # No COMPLETE events at all (e.g. SIGKILL before any response) yields a
+        # column-less frame; guard before indexing ``sample_uuid``.
+        if df.empty:
+            logger.warning(
+                "GptOss120bAccuracyScorer: no outputs to score; returning None score."
+            )
+            self.complete = False
+            return None, 0
+
+        valid_uuids = self.sample_index_map.keys()
+        df = df[df["sample_uuid"].isin(valid_uuids)]
+        n_repeats = len(df) // num_samples if num_samples else 0
+
+        if df.empty:
+            logger.warning(
+                "GptOss120bAccuracyScorer: no outputs matched this dataset; "
+                "returning None score."
+            )
+            self.complete = False
+            return None, n_repeats
+
+        df = df.apply(self.match_sample_index, axis=1)
+        order = df["sample_index"].to_numpy().astype(int)
+
+        ref = self.dataset.dataframe
+        if ref is None:
+            raise RuntimeError(f"Dataset {self.dataset} has no dataframe loaded")
+        for col in (self.ground_truth_column, self.subset_column):
+            if col not in ref.columns:
+                raise ValueError(
+                    f"Column {col!r} not found in dataset {self.dataset}; "
+                    f"available: {list(ref.columns)}"
+                )
+
+        subs = ref[self.subset_column].to_numpy()[order].astype(str)
+        gts = ref[self.ground_truth_column].to_numpy()[order].astype(str)
+        outs = df["output"].astype(str).to_numpy()
+        # Weights are the unique problem counts (one row per problem in the
+        # un-repeated dataframe); repeats never enter the denominator.
+        unique_counts = ref[self.subset_column].astype(str).value_counts()
+
+        by_subset: dict[str, list[tuple[str, str]]] = defaultdict(list)
+        for output, ground_truth, subset in zip(outs, gts, subs, strict=False):
+            by_subset[subset].append((output, ground_truth))
+
+        subset_scores01: dict[str, float] = {}
+        status: dict[str, str] = {}
+        for subset, pairs in by_subset.items():
+            grader = self._SUBSET_GRADERS.get(subset)
+            if grader is None:
+                logger.warning(
+                    "GptOss120bAccuracyScorer: no grader for subset %r; skipping.",
+                    subset,
+                )
+                status[subset] = "unknown-subset"
+                self.complete = False
+                continue
+            extractor_cls, mode = grader
+            if mode == "exact":
+                correct = [
+                    _exact_match(
+                        extractor_cls.extract(output, default="") or "", ground_truth
+                    )
+                    for output, ground_truth in pairs
+                ]
+                subset_scores01[subset] = float(np.mean(correct))
+                status[subset] = "in-process"
+            else:  # "lcb"
+                lcb01 = self._score_lcb(pairs)
+                if lcb01 is None:
+                    logger.warning(
+                        "GptOss120bAccuracyScorer: livecodebench left unscored "
+                        "(lcb-service unreachable at %s); run marked incomplete.",
+                        self.lcb_websocket_url,
+                    )
+                    status[subset] = "unscored"
+                    self.complete = False
+                    continue
+                subset_scores01[subset] = lcb01
+                status[subset] = "lcb-service"
+
+        if not subset_scores01:
+            self.complete = False
+            self._breakdown = None
+            return None, n_repeats
+
+        weights = {k: int(unique_counts[k]) for k in subset_scores01}
+        overall01, self._breakdown = _weighted_breakdown(
+            subset_scores01,
+            weights,
+            complete=self.complete,
+            per_subset_status=status,
+        )
+        if overall01 is None:
+            self._breakdown = None
+            return None, n_repeats
+        return overall01 * 100, n_repeats
 
     def score_breakdown(self) -> dict[str, Any] | None:
         return self._breakdown
