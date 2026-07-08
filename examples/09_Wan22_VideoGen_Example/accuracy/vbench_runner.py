@@ -27,7 +27,9 @@ Exit codes:
 """
 
 import argparse
+import functools
 import json
+import shutil
 import sys
 import traceback
 from importlib.resources import files as _pkg_files
@@ -35,6 +37,31 @@ from importlib.resources import files as _pkg_files
 import torch
 import vbench as _vbench_pkg
 from vbench import VBench
+
+
+def _default_torch_load_to_full_pickles() -> None:
+    """Make torch.load default to weights_only=False in this subprocess.
+
+    VBench's reference checkpoints (e.g. motion_smoothness AMT, RAFT) are full
+    pickled objects, written before torch 2.6 flipped torch.load's default to
+    weights_only=True; loading them with the new default fails with
+    UnpicklingError (e.g. "Unsupported global: typing.OrderedDict"). They are
+    the VBench-sanctioned reference weights, so loading them unrestricted here
+    matches upstream VBench behavior on the torch versions it was written for.
+    Callers that pass weights_only explicitly (e.g. torch.hub) are unaffected;
+    scoped to this subprocess only, the parent benchmark keeps stock semantics.
+    """
+    orig_load = torch.load
+
+    @functools.wraps(orig_load)
+    def _load(*args, **kwargs):
+        kwargs.setdefault("weights_only", False)
+        return orig_load(*args, **kwargs)
+
+    torch.load = _load
+
+
+_default_torch_load_to_full_pickles()
 
 
 def _emit_error(exc: BaseException) -> None:
@@ -84,6 +111,31 @@ def main() -> int:
         ),
     )
     args = parser.parse_args()
+
+    # vbench.utils.init_submodules downloads per-dimension weights via literal
+    # `wget`/`unzip` subprocesses on a cold cache. Fail fast with a clear
+    # message instead of a FileNotFoundError mid-evaluation (after the videos
+    # have already been generated and staged).
+    missing_tools = [t for t in ("wget", "unzip") if shutil.which(t) is None]
+    if missing_tools:
+        print(
+            json.dumps(
+                {
+                    "status": "error",
+                    "type": "MissingSystemDependency",
+                    "message": (
+                        f"Required system tool(s) not found: {', '.join(missing_tools)}. "
+                        "VBench downloads its per-dimension model weights via "
+                        "wget/unzip on first use. Install them in the client "
+                        "environment (e.g. `apt-get install wget unzip`) or "
+                        "pre-populate the VBench cache directory."
+                    ),
+                }
+            ),
+            file=sys.stderr,
+            flush=True,
+        )
+        return 2
 
     if not torch.cuda.is_available() and not args.allow_cpu:
         print(
