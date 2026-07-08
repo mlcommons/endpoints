@@ -1893,14 +1893,23 @@ class _OverrideTestBase:
 
     @pytest.mark.unit
     def test_invalid_override_value_raises_at_construction(self, tmp_path):
-        """A value-level invalidity (e.g. bad streaming enum) is caught at config
-        construction (parse time) by BenchmarkConfig's validator, so a bad
-        override is rejected before any setup side effects rather than mid-run."""
+        """A value-level invalidity (e.g. non-numeric temperature) is caught at
+        config construction (parse time) when BenchmarkConfig merges + revalidates
+        each dataset's effective params, so a bad override is rejected before any
+        setup side effects rather than mid-run."""
         perf_path, acc_path = self._write_fixture(tmp_path)
         with pytest.raises(ValidationError):
-            self._build_config(
-                perf_path, acc_path, acc_override={"streaming": "garbage"}
-            )
+            self._build_config(perf_path, acc_path, acc_override={"temperature": "hot"})
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("key", ["name", "streaming", "tokenizer_name"])
+    def test_metrics_decoupled_override_rejected_at_construction(self, tmp_path, key):
+        """Per-run/identity keys are rejected end-to-end at BenchmarkConfig
+        construction (not just on the Dataset submodel), so a per-dataset value
+        can never reach setup and desync the single global tokenizer/aggregator."""
+        perf_path, acc_path = self._write_fixture(tmp_path)
+        with pytest.raises(ValidationError, match="not honored per-dataset"):
+            self._build_config(perf_path, acc_path, acc_override={key: "whatever"})
 
     @pytest.mark.unit
     def test_completion_control_override_gated_by_api_type(self, tmp_path):

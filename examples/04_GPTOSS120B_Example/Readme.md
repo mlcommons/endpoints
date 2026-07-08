@@ -76,11 +76,14 @@ output budget: `reasoning_effort` is not a YAML field. With `api_type: openai_co
 format is applied client-side, so reasoning effort is encoded into the prompt tokens — pre-tokenized in
 the perf dataset, and fixed at `high` by the adapter's `Harmonize()` for the accuracy datasets.
 
-> **Reasoning effort caveat.** The accuracy datasets carry text prompts, so the client-side `Harmonize()`
-> encodes them at its default `reasoning_effort=high` — matching the MLPerf accuracy setting. The perf
-> dataset is consumed pre-tokenized (`parser.input_tokens`), so `Harmonize()` is skipped and its reasoning
-> effort is whatever was baked in when `perf_eval_ref.parquet` was built. To fully match the MLPerf perf
-> config, that parquet must be tokenized with `reasoning_effort=low`; this YAML cannot override it.
+> **Reasoning effort caveat.** This config controls only the output budget, not reasoning effort. The
+> accuracy datasets carry text prompts, so the client-side `Harmonize()` encodes them at its default
+> `reasoning_effort=high` — matching the MLPerf accuracy setting. The perf dataset is consumed
+> pre-tokenized (`parser.input_tokens`), so `Harmonize()` is skipped and its reasoning effort is fixed at
+> parquet-build time (the perf parquet is supplied by the LLM task-force — see "Getting the Dataset").
+> MLPerf's perf phase uses `reasoning_effort=low`, so a perf-compliant run depends on that parquet being
+> built with `low`; it is not something this client YAML (or the repo's default `Harmonize()`, which
+> encodes `high`) can set. Treat this example as a demonstration of the per-dataset OSL split.
 
 ```bash
 uv run inference-endpoint benchmark from-config \

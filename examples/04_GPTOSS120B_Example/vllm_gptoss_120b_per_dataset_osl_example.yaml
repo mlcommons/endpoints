@@ -34,7 +34,7 @@ datasets:
     parser:
       input_tokens: "input_tokens"
     generation_config_override:
-      max_new_tokens: 10240
+      max_new_tokens: 10240 # same as the global default; stated per-dataset so both phases use the mechanism
   - name: "aime25::gptoss" # ACCURACY: raised to the MLPerf accuracy budget (32768)
     type: "accuracy"
     generation_config_override:
