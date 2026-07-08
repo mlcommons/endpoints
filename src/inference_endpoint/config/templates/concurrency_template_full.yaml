@@ -78,6 +78,7 @@ settings:
     worker_force_kill_timeout: 0.5  # Force kill timeout after graceful wait (seconds)
     insecure: false  # Skip TLS certificate verification
     max_idle_time: 4.0  # Discard connections idle longer than this (seconds)
+    transport_max_retries: 0  # Retries on a pre-response connection reset (0=disabled)
     min_required_connections: -1  # Min connections to initialize (-1=auto, 0=disabled)
     worker_gc_mode: relaxed  # Worker GC strategy | options: disabled, relaxed, system
   drain:
