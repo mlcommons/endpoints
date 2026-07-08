@@ -28,7 +28,8 @@ from __future__ import annotations
 import logging
 import math
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from enum import Enum
 from typing import TYPE_CHECKING
 
 from .. import metrics
@@ -39,6 +40,38 @@ logger = logging.getLogger(__name__)
 if TYPE_CHECKING:
     from .ruleset_base import BenchmarkSuiteRuleset
     from .schema import BenchmarkConfig, LoadPattern
+
+
+class SampleOrderKind(str, Enum):
+    """Which SampleOrder strategy a SampleOrderSpec selects."""
+
+    WITHOUT_REPLACEMENT = "without_replacement"
+    WITH_REPLACEMENT = "with_replacement"
+    SINGLE = "single"
+
+
+@dataclass(frozen=True, slots=True)
+class SampleOrderSpec:
+    """Generic sample-ordering selector consumed by create_sample_order.
+
+    ``kind`` selects the strategy; ``fixed_index`` is only meaningful for
+    ``SampleOrderKind.SINGLE``.
+    """
+
+    kind: SampleOrderKind = SampleOrderKind.WITHOUT_REPLACEMENT
+    fixed_index: int | None = None
+
+    @classmethod
+    def without_replacement(cls) -> SampleOrderSpec:
+        return cls(kind=SampleOrderKind.WITHOUT_REPLACEMENT)
+
+    @classmethod
+    def with_replacement(cls) -> SampleOrderSpec:
+        return cls(kind=SampleOrderKind.WITH_REPLACEMENT)
+
+    @classmethod
+    def single(cls, index: int) -> SampleOrderSpec:
+        return cls(kind=SampleOrderKind.SINGLE, fixed_index=index)
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,6 +117,9 @@ class RuntimeSettings:
 
     load_pattern: LoadPattern | None
     """Load pattern configuration"""
+
+    sample_order: SampleOrderSpec = field(default_factory=SampleOrderSpec, kw_only=True)
+    """Sample-ordering strategy (default: without-replacement)."""
 
     @classmethod
     def from_config(
@@ -162,6 +198,7 @@ class RuntimeSettings:
             "rng_sched": random.Random(runtime_cfg.scheduler_random_seed),
             "rng_sample_index": random.Random(runtime_cfg.dataloader_random_seed),
             "load_pattern": load_pattern_cfg,
+            "sample_order": SampleOrderSpec(),
         }
 
         # Apply overrides
