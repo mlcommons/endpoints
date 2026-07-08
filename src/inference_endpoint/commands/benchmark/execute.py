@@ -452,6 +452,7 @@ def _build_phases(
 ) -> list[PhaseConfig]:
     """Build the phase list from BenchmarkContext."""
     phases: list[PhaseConfig] = []
+    drain_cfg = ctx.config.settings.drain
 
     # Warmup phase (optional, before performance)
     warmup_cfg = ctx.config.settings.warmup
@@ -479,6 +480,7 @@ def _build_phases(
                 warmup_dataset,
                 PhaseType.WARMUP,
                 drain_after=warmup_cfg.drain,
+                drain_timeout_s=drain_cfg.warmup_timeout_s,
             )
         )
 
@@ -489,6 +491,7 @@ def _build_phases(
             ctx.rt_settings,
             ctx.dataloader,
             PhaseType.PERFORMANCE,
+            drain_timeout_s=drain_cfg.performance_timeout_s,
             strategy=perf_strategy,
         )
     )
@@ -521,7 +524,13 @@ def _build_phases(
             load_pattern=acc_load_pattern,
         )
         phases.append(
-            PhaseConfig(eval_cfg.dataset_name, acc_settings, acc_ds, PhaseType.ACCURACY)
+            PhaseConfig(
+                eval_cfg.dataset_name,
+                acc_settings,
+                acc_ds,
+                PhaseType.ACCURACY,
+                drain_timeout_s=drain_cfg.accuracy_timeout_s,
+            )
         )
 
     return phases

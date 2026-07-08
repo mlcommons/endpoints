@@ -483,6 +483,48 @@ class WarmupConfig(BaseModel):
     ] = Field(42, description="RNG seed for warmup scheduling and sample ordering")
 
 
+class DrainConfig(BaseModel):
+    """Per-phase in-flight drain timeouts (seconds). ``None`` waits indefinitely.
+
+    After a phase finishes issuing, the session waits up to the phase's drain
+    timeout for in-flight responses before moving on. For slow generative
+    workloads (e.g. text-to-video at minutes per sample), the historical fixed
+    240 s bound silently abandoned every in-flight sample: a run could end
+    "successfully" with 0 samples completed, and accuracy phases (which issue
+    all samples up front) could never finish at all.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    warmup_timeout_s: float | None = Field(
+        240.0,
+        gt=0,
+        description=(
+            "Drain timeout after the warmup phase. Raise it when warmup "
+            "requests take minutes each, so leftovers don't leak into the "
+            "measured performance phase. None = wait for all."
+        ),
+    )
+    performance_timeout_s: float | None = Field(
+        240.0,
+        gt=0,
+        description=(
+            "Drain timeout after the performance phase. None = wait for all "
+            "in-flight responses (recommended when per-sample latency can "
+            "exceed 240 s, e.g. video generation)."
+        ),
+    )
+    accuracy_timeout_s: float | None = Field(
+        None,
+        gt=0,
+        description=(
+            "Drain timeout after accuracy phases. Default None: wait for all "
+            "responses, because abandoning in-flight accuracy samples "
+            "silently invalidates the score."
+        ),
+    )
+
+
 @cyclopts.Parameter(name="*")
 class Settings(BaseModel):
     """Test settings."""
@@ -493,6 +535,7 @@ class Settings(BaseModel):
     load_pattern: LoadPattern = Field(default_factory=LoadPattern)
     client: HTTPClientConfig = Field(default_factory=HTTPClientConfig)
     warmup: WarmupConfig = Field(default_factory=WarmupConfig)
+    drain: DrainConfig = Field(default_factory=DrainConfig)
 
 
 class OfflineSettings(Settings):

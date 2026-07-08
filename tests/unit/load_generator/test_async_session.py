@@ -445,6 +445,35 @@ class TestBenchmarkSession:
         assert result is not None
 
     @pytest.mark.asyncio
+    async def test_drain_respects_per_phase_timeout(self, caplog):
+        """A phase's drain_timeout_s bounds the in-flight drain wait.
+
+        With a never-responding issuer and a sub-second timeout, the drain
+        must expire (logging an error) instead of hanging for the historical
+        hard-coded 240 s.
+        """
+        loop = asyncio.get_running_loop()
+        publisher = FakePublisher()
+
+        issuer = FakeIssuer()
+        issuer._loop = loop
+        issuer._auto_respond = False  # samples issue but never complete
+
+        session = BenchmarkSession(issuer, publisher, loop)
+        phases = [
+            PhaseConfig(
+                "perf",
+                _make_settings(n_samples=2),
+                FakeDataset(2),
+                drain_timeout_s=0.1,
+            ),
+        ]
+
+        result = await asyncio.wait_for(session.run(phases), timeout=10.0)
+        assert result is not None
+        assert "Drain timed out after 0 s" in caplog.text or "Drain timed out" in caplog.text
+
+    @pytest.mark.asyncio
     async def test_streaming_query_completes_via_queryresult(self):
         """Streaming: StreamChunks publish timing events, QueryResult handles completion.
 
