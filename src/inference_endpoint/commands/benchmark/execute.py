@@ -584,19 +584,10 @@ def _build_phases(
                 "AgenticInferenceDataset, which is not yet supported for "
                 "accuracy evaluation."
             )
-        if acc_load_pattern.type == LoadPatternType.CONCURRENCY:
-            load_mode_detail = (
-                f" (target_concurrency={acc_load_pattern.target_concurrency})"
-            )
-        elif acc_load_pattern.type == LoadPatternType.POISSON:
-            load_mode_detail = f" (target_qps={acc_load_pattern.target_qps})"
-        else:
-            load_mode_detail = ""
         logger.info(
-            "Accuracy issuer '%s' load mode: %s%s",
+            "Accuracy issuer '%s' load mode: %s",
             eval_cfg.dataset_name,
-            acc_load_pattern.type.value,
-            load_mode_detail,
+            acc_load_pattern,
         )
         rng_settings = ctx.rt_settings or RuntimeSettings.from_config(
             ctx.config, acc_ds.num_samples()

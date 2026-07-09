@@ -718,6 +718,20 @@ class LoadPattern(BaseModel):
             )
         return self
 
+    def __str__(self) -> str:
+        """Human-readable "type (param=value)" form for logging, e.g.
+        ``concurrency (target_concurrency=7)`` / ``poisson (target_qps=10.0)``.
+        Patterns without a driving parameter render as just the type name.
+        """
+        if self.type in (
+            LoadPatternType.CONCURRENCY,
+            LoadPatternType.AGENTIC_INFERENCE,
+        ):
+            return f"{self.type.value} (target_concurrency={self.target_concurrency})"
+        if self.type == LoadPatternType.POISSON:
+            return f"{self.type.value} (target_qps={self.target_qps})"
+        return self.type.value
+
 
 @cyclopts.Parameter(name="*")
 class WarmupConfig(BaseModel):
