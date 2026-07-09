@@ -30,6 +30,7 @@ datasets:
       num_repeats: 1
       extras:
         num_instances: 200
+        # workers: 8 # parallel agent workers; defaults to target_concurrency if unset.
 
 settings:
   runtime:

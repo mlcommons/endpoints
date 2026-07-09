@@ -207,6 +207,11 @@ Keep `accuracy_config.num_repeats: 1`: the scorer performs one external
 evaluation run per benchmark. Optional `accuracy_config.extras.subset` and
 `split` are used consistently for dataset loading, preflight, and scoring.
 
+`accuracy_config.extras.workers` sets the agent run's parallelism (`--workers`).
+If unset, it defaults to the load pattern's `target_concurrency` (for
+`concurrency`/`agentic_inference` patterns), else 10. `max_eval_workers`
+(default 10, `--max_workers`) sets the eval harness's parallelism.
+
 The isolated `uv` environment for those tools lives in `accuracy/`. Sync it
 once before running:
 
