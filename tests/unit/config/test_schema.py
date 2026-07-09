@@ -145,6 +145,130 @@ class TestDataset:
         ds = Dataset(path="datasets/my_data.jsonl")
         assert ds.name == "my_data"
 
+    @pytest.mark.unit
+    def test_generation_config_override_accepts_known_keys(self):
+        ds = Dataset(
+            name="acc",
+            type=DatasetType.ACCURACY,
+            path="acc.jsonl",
+            generation_config_override={"max_new_tokens": 32768, "temperature": 0.0},
+        )
+        assert ds.generation_config_override == {
+            "max_new_tokens": 32768,
+            "temperature": 0.0,
+        }
+
+    @pytest.mark.unit
+    def test_generation_config_override_rejects_unknown_key(self):
+        with pytest.raises(
+            ValueError, match=r"unknown keys in generation_config_override.*bogus"
+        ):
+            Dataset(
+                name="acc",
+                path="a.jsonl",
+                generation_config_override={"bogus": 1},
+            )
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("key", ["name", "streaming", "tokenizer_name"])
+    def test_generation_config_override_rejects_metrics_decoupled_key(self, key):
+        """Per-run/identity keys drive the single global tokenizer / aggregator,
+        so a per-dataset override is rejected at construction rather than
+        silently desyncing metrics accounting.
+        """
+        with pytest.raises(
+            ValueError,
+            match=r"not honored per-dataset",
+        ):
+            Dataset(
+                name="acc",
+                path="a.jsonl",
+                generation_config_override={key: "whatever"},
+            )
+
+    @pytest.mark.unit
+    def test_generation_config_override_none_is_noop(self):
+        base = ModelParams(name="m", max_new_tokens=1024, streaming=StreamingMode.ON)
+        ds = Dataset(name="x", path="x.jsonl")
+        assert ds.effective_generation_config(base) is base
+
+    @pytest.mark.unit
+    def test_effective_generation_config_merges_sparse_dict(self):
+        base = ModelParams(name="m", temperature=0.5, top_p=0.9, max_new_tokens=1024)
+        ds = Dataset(
+            name="x",
+            path="x.jsonl",
+            generation_config_override={"max_new_tokens": 32768},
+        )
+        merged = ds.effective_generation_config(base)
+        # overridden field changes...
+        assert merged.max_new_tokens == 32768
+        # ...everything else is preserved from base
+        assert merged.name == "m"
+        assert merged.temperature == 0.5
+        assert merged.top_p == 0.9
+
+    @pytest.mark.unit
+    def test_effective_generation_config_validates_value(self):
+        """ModelParams.model_validate is invoked on the merged dict, so a
+        type-invalid override is rejected (e.g. non-numeric temperature)."""
+        base = ModelParams(name="m")
+        ds = Dataset(
+            name="x",
+            path="x.jsonl",
+            generation_config_override={"temperature": "hot"},
+        )
+        with pytest.raises(ValueError):
+            ds.effective_generation_config(base)
+
+    @pytest.mark.unit
+    def test_effective_generation_config_deep_merges_nested_dict(self):
+        """Sparse overrides of nested fields (osl_distribution,
+        chat_template_kwargs) preserve sibling defaults from the base rather
+        than wholesale-replacing the nested object. Pins the deep-merge
+        behavior added in response to PR review feedback.
+        """
+        base = ModelParams(
+            name="m",
+            osl_distribution=OSLDistribution(
+                type=OSLDistributionType.NORMAL, mean=1000, std=200, min=512, max=2048
+            ),
+        )
+        ds = Dataset(
+            name="x",
+            path="x.jsonl",
+            generation_config_override={"osl_distribution": {"max": 512}},
+        )
+        merged = ds.effective_generation_config(base)
+        # the explicitly overridden nested field changes...
+        assert merged.osl_distribution.max == 512
+        # ...and the unspecified siblings are preserved from base
+        assert merged.osl_distribution.type == OSLDistributionType.NORMAL
+        assert merged.osl_distribution.mean == 1000
+        assert merged.osl_distribution.std == 200
+        assert merged.osl_distribution.min == 512
+
+    @pytest.mark.unit
+    def test_effective_generation_config_deep_merges_chat_template_kwargs(self):
+        """Deep-merge also applies to free-form nested dicts like
+        chat_template_kwargs; sparse overrides preserve sibling entries.
+        """
+        base = ModelParams(
+            name="m", chat_template_kwargs={"enable_thinking": True, "tools": []}
+        )
+        ds = Dataset(
+            name="x",
+            path="x.jsonl",
+            generation_config_override={
+                "chat_template_kwargs": {"enable_thinking": False}
+            },
+        )
+        merged = ds.effective_generation_config(base)
+        assert merged.chat_template_kwargs == {
+            "enable_thinking": False,
+            "tools": [],
+        }
+
 
 class TestBenchmarkConfig:
     @pytest.mark.unit
@@ -576,6 +700,23 @@ class TestAgenticInferenceValidation:
     ):
         values = self._make_online_agentic_inference()
         values["model_params"].update(controls)
+        values["endpoint_config"]["api_type"] = APIType.OPENAI_COMPLETIONS
+        with pytest.raises(
+            ValidationError, match="not supported for agentic inference"
+        ):
+            BenchmarkConfig(**values)
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "override", [{"min_new_tokens": 0}, {"skip_special_tokens": False}]
+    )
+    def test_agentic_inference_rejects_completion_controls_via_override(self, override):
+        """Completion controls reaching an agentic dataset through a per-dataset
+        generation_config_override are rejected, exactly as when set on top-level
+        model_params."""
+        values = self._make_online_agentic_inference(
+            generation_config_override=override
+        )
         values["endpoint_config"]["api_type"] = APIType.OPENAI_COMPLETIONS
         with pytest.raises(
             ValidationError, match="not supported for agentic inference"

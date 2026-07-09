@@ -59,6 +59,45 @@ class SystemDefaults(BaseModel):
     DEFAULT_METRIC: ClassVar[metrics.Metric] = metrics.Throughput(0.0)
 
 
+def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    """Recursively merge ``override`` into ``base`` and return the result.
+
+    For overlapping keys whose values are both dicts, recurse; otherwise the
+    override value wins. Mutates a *copy* — callers can safely pass model_dump()
+    output. Used by ``Dataset.effective_generation_config`` so a sparse nested
+    override (e.g. ``{osl_distribution: {max: 512}}``) preserves siblings.
+    """
+    out = dict(base)
+    for k, v in override.items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = _deep_merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
+# ModelParams fields that drive the single global tokenizer / MetricsAggregator
+# (launched once from top-level model_params), so a per-dataset override would
+# desync ISL/OSL/TTFT/TPOT accounting without changing what is measured. Rejected
+# as generation_config_override keys — they are per-run/identity, not per-dataset.
+_METRICS_DECOUPLED_OVERRIDE_KEYS = frozenset({"name", "streaming", "tokenizer_name"})
+
+
+def _non_default_completion_controls(mp: ModelParams) -> list[str]:
+    """Completion-only ModelParams controls set to a non-default value.
+
+    ``min_new_tokens``/``skip_special_tokens`` are only honored by the
+    ``openai_completions`` adapter; ``BenchmarkConfig`` rejects them for other
+    ``api_type``s. Shared by the top-level and per-dataset-override checks so
+    both config surfaces validate identically.
+    """
+    checks = {
+        "min_new_tokens": mp.min_new_tokens != 1,
+        "skip_special_tokens": not mp.skip_special_tokens,
+    }
+    return [name for name, non_default in checks.items() if non_default]
+
+
 class LoadPatternType(str, Enum):
     """Load pattern types."""
 
@@ -108,6 +147,62 @@ class ScorerMethod(str, Enum):
     VBENCH = "vbench"
     BFCL_V4 = "bfcl_v4"
     LEGACY_MLPERF_DEEPSEEK_R1 = "legacy_mlperf_deepseek_r1"
+
+
+class AuditTestId(str, Enum):
+    """Registered compliance audit test identifiers."""
+
+    # Output-caching audit — MLPerf TEST04 (duplicate-query caching detection).
+    OUTPUT_CACHING_TEST = "output_caching_test"
+
+
+class OutputCachingTestConfig(BaseModel):
+    """Configuration for the output-caching audit (MLPerf TEST04).
+
+    The output-caching test runs two back-to-back phases — a reference run of
+    distinct samples and an audit run that repeats one fixed sample — then
+    checks that the audit QPS does not exceed the reference QPS by more than
+    ``threshold``. A large speedup indicates the SUT is caching responses.
+
+    samples: reference-phase query count (required — an explicit count keeps
+        the per-phase completion check meaningful; a duration-driven phase has
+        no independent target to validate completion against)
+    audit_samples: audit-phase query count (None → equals samples)
+    sample_index: which dataset row is repeated (MLCommons performance_issue_same_index)
+    threshold: tolerance shared by both pass checks — each phase must complete
+        ≥ requested * (1 - threshold), and audit_qps must stay < ref_qps * (1 + threshold)
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    test: Literal[AuditTestId.OUTPUT_CACHING_TEST]
+    only: bool = Field(
+        False,
+        description="Run only the audit — skip the main benchmark (upstream-style standalone TEST04)",
+    )
+    samples: int = Field(..., ge=1, description="Reference phase query count")
+    audit_samples: int | None = Field(
+        None, ge=1, description="Audit phase query count (default: equals samples)"
+    )
+    sample_index: int = Field(
+        0, ge=0, description="Dataset row index repeated in the audit phase"
+    )
+    threshold: float = Field(
+        0.10,
+        gt=0,
+        lt=1,
+        description=(
+            "Tolerance for both checks: each phase must complete "
+            "≥ requested * (1 - threshold), and audit_qps must stay "
+            "< ref_qps * (1 + threshold)"
+        ),
+    )
+
+
+# Single member today; becomes
+# Annotated[OutputCachingTestConfig | ..., Field(discriminator="test")]
+# when additional audit tests are added.
+AuditConfig = OutputCachingTestConfig
 
 
 class TestMode(str, Enum):
@@ -374,6 +469,36 @@ class Dataset(BaseModel):
     agentic_inference: AgenticInferenceConfig | None = Field(
         None, description="Agentic inference conversation configuration"
     )
+    # Per-dataset generation config is a first-class capability: different
+    # accuracy datasets legitimately want different generation settings (e.g.
+    # per-dataset max OSL or top_p, as seen in DS-V4), and dataset-scoping also
+    # enables per-dataset dynamic OSL distributions. Only generation knobs are
+    # overridable — per-run/identity fields (`_METRICS_DECOUPLED_OVERRIDE_KEYS`:
+    # name / streaming / tokenizer_name) drive the single global tokenizer and
+    # MetricsAggregator, so overriding them per-dataset would desync ISL/OSL/
+    # TTFT/TPOT accounting; they are rejected at validation.
+    #
+    # TODO(post-mortem): split ModelParams into a per-run ModelIdentity and a
+    # GenerationConfig, so the override surface is exactly the generation fields
+    # and identity fields cannot be named here at all. Field/method names use
+    # "generation_config" to keep that migration mechanical.
+    #
+    # Nested dicts (`osl_distribution`, `chat_template_kwargs`) are deep-merged
+    # so sparse overrides preserve sibling defaults.
+    generation_config_override: dict[str, Any] | None = Field(
+        None,
+        description=(
+            "Per-dataset overrides for the top-level model_params (sparse — "
+            "only the fields you want to override). Merged on top of "
+            "BenchmarkConfig.model_params at dataset-load time. Useful for "
+            "MLPerf-style runs where accuracy and performance use different "
+            "output budgets in the same fleet, e.g. "
+            "generation_config_override: {max_new_tokens: 32768, "
+            "temperature: 0.0}. NOTE: per-run/identity keys (`name`, "
+            "`streaming`, `tokenizer_name`) are rejected here — set them on "
+            "top-level model_params."
+        ),
+    )
 
     @model_validator(mode="after")
     def _auto_derive_name(self) -> Self:
@@ -381,6 +506,53 @@ class Dataset(BaseModel):
         if not self.name and self.path:
             object.__setattr__(self, "name", Path(self.path).stem)
         return self
+
+    @model_validator(mode="after")
+    def _validate_generation_config_override(self) -> Self:
+        """Fail fast on unknown keys and on per-run/identity keys the single
+        global tokenizer / MetricsAggregator would ignore. Override *values*
+        are validated at merge time (see ``effective_generation_config``)
+        because cross-field validation needs the base ``ModelParams`` from
+        ``BenchmarkConfig``.
+        """
+        if self.generation_config_override:
+            keys = set(self.generation_config_override)
+            valid = set(ModelParams.model_fields)
+            bad = sorted(keys - valid)
+            if bad:
+                raise ValueError(
+                    f"Dataset '{self.name}': unknown keys in "
+                    f"generation_config_override: {bad}. "
+                    f"Valid keys: {sorted(valid)}"
+                )
+            decoupled = sorted(keys & _METRICS_DECOUPLED_OVERRIDE_KEYS)
+            if decoupled:
+                raise ValueError(
+                    f"Dataset '{self.name}': generation_config_override keys "
+                    f"{decoupled} are not honored per-dataset — the single "
+                    "global tokenizer / metrics aggregator is launched from "
+                    "top-level model_params, so a per-dataset value would "
+                    "desync ISL/OSL/TTFT/TPOT accounting. Set them on "
+                    "top-level model_params instead."
+                )
+        return self
+
+    def effective_generation_config(self, base: ModelParams) -> ModelParams:
+        """Return base merged with this dataset's generation-config overrides.
+
+        Nested dicts are deep-merged so a sparse nested override preserves
+        sibling defaults (e.g. ``{osl_distribution: {max: 512}}`` keeps the
+        base ``type/mean/std/min``). The merged dict is re-validated through
+        ``ModelParams.model_validate`` so type-invalid scalar overrides (e.g.
+        ``temperature: 'hot'``) are rejected. Note that this only catches
+        scalar invalidity — a sparse nested override whose merged result
+        passes default-validation will not raise (callers that need stricter
+        nested validation should set ``base`` to an explicit instance).
+        """
+        if not self.generation_config_override:
+            return base
+        merged = _deep_merge(base.model_dump(), self.generation_config_override)
+        return ModelParams.model_validate(merged)
 
 
 class AccuracyConfig(BaseModel):
@@ -762,11 +934,7 @@ class Settings(BaseModel):
     ] = Field(
         default=30.0,
         ge=0,
-        description=(
-            "Seconds to wait for the metrics-aggregator and event-logger "
-            "subprocesses to report ready. Increase when service imports run "
-            "off a shared/Lustre FS under heavy login-node I/O contention."
-        ),
+        description="Seconds to wait for metrics-aggregator/event-logger services to become ready.",
     )
 
 
@@ -873,6 +1041,10 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
             help="NUMA-aware CPU pinning",
         ),
     ] = True
+    audit: Annotated[AuditConfig | None, cyclopts.Parameter(show=False)] = Field(
+        None,
+        description="Compliance audit config (YAML only). When set, runs the audit after the main benchmark.",
+    )
 
     @field_validator("datasets", mode="before")
     @classmethod
@@ -932,30 +1104,47 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
 
         # TODO(vir): Move API-type-specific validation out of this generic
         # cross-model validator and into the selected adapter. Requires a larger refactor.
-        non_default_completion_controls = {
-            "model_params.min_new_tokens": self.model_params.min_new_tokens != 1,
-            "model_params.skip_special_tokens": not self.model_params.skip_special_tokens,
+        #
+        # Completion-only controls must be gated by api_type for BOTH the
+        # top-level model_params AND every per-dataset generation_config_override,
+        # so the two config surfaces validate identically. Merge each dataset's
+        # effective params once here (parse time) — this also surfaces
+        # value-invalid overrides before setup produces side effects — and reuse
+        # the result for the agentic-inference check below.
+        effective_by_dataset: dict[int, ModelParams] = {
+            id(dataset): dataset.effective_generation_config(self.model_params)
+            for dataset in self.datasets
+            if dataset.generation_config_override
         }
-        configured_controls = [
-            name
-            for name, is_non_default in non_default_completion_controls.items()
-            if is_non_default
+        completion_control_surfaces: list[tuple[str, ModelParams]] = [
+            ("model_params", self.model_params)
         ]
-        if (
-            configured_controls
-            and self.endpoint_config.api_type != APIType.OPENAI_COMPLETIONS
-        ):
-            controls = " and ".join(configured_controls)
-            verb = "requires" if len(configured_controls) == 1 else "require"
-            required_api_type = "endpoint_config.api_type=openai_completions"
-            raise ValueError(f"{controls} {verb} {required_api_type}")
-        if configured_controls and any(
-            dataset.agentic_inference is not None for dataset in self.datasets
-        ):
-            raise ValueError(
-                "OpenAI text-completion generation controls are not supported "
-                "for agentic inference datasets"
-            )
+        for dataset in self.datasets:
+            effective = effective_by_dataset.get(id(dataset))
+            if effective is not None:
+                completion_control_surfaces.append(
+                    (
+                        f"datasets['{dataset.name}'].generation_config_override",
+                        effective,
+                    )
+                )
+        for prefix, mp in completion_control_surfaces:
+            controls = _non_default_completion_controls(mp)
+            if controls and self.endpoint_config.api_type != APIType.OPENAI_COMPLETIONS:
+                names = " and ".join(f"{prefix}.{name}" for name in controls)
+                verb = "requires" if len(controls) == 1 else "require"
+                raise ValueError(
+                    f"{names} {verb} endpoint_config.api_type=openai_completions"
+                )
+        for dataset in self.datasets:
+            if dataset.agentic_inference is None:
+                continue
+            effective = effective_by_dataset.get(id(dataset), self.model_params)
+            if _non_default_completion_controls(effective):
+                raise ValueError(
+                    "OpenAI text-completion generation controls are not supported "
+                    "for agentic inference datasets"
+                )
 
         # --- Validate (cross-model checks only; sub-models self-validate) ---
         if self.type == TestType.SUBMISSION and not self.benchmark_mode:

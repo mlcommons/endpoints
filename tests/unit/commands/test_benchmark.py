@@ -758,6 +758,57 @@ class TestAggregatorArgs:
         expected = str(config.settings.drain.metrics_tokenizer_workers)
         assert args[idx + 1] == expected
 
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_tmpfs_dir_cleaned_up_on_mid_run_crash(self, tmp_path, monkeypatch):
+        """If _run_benchmark_async raises before returning a BenchmarkResult,
+        the tmpfs directory it created must not leak."""
+        config = OfflineConfig(**_OFFLINE_KWARGS, settings=OfflineSettings())
+        ctx = self._make_ctx(config, tmp_path)
+
+        fixed_uuid = MagicMock()
+        fixed_uuid.hex = "deadbeef"
+        monkeypatch.setattr(
+            "inference_endpoint.commands.benchmark.execute.uuid.uuid4",
+            lambda: fixed_uuid,
+        )
+
+        async def _capture_launch(service_configs, *, timeout):
+            raise RuntimeError("simulated mid-run crash")
+
+        mock_zmq = MagicMock()
+        mock_zmq.socket_dir = str(tmp_path / "sockets")
+
+        with (
+            patch(
+                "inference_endpoint.commands.benchmark.execute.ManagedZMQContext"
+            ) as MockZMQ,
+            patch(
+                "inference_endpoint.commands.benchmark.execute.EventPublisherService"
+            ) as MockPub,
+            patch(
+                "inference_endpoint.commands.benchmark.execute.MetricsSnapshotSubscriber"
+            ) as MockSub,
+            patch(
+                "inference_endpoint.commands.benchmark.execute.ServiceLauncher"
+            ) as MockLauncher,
+            patch("inference_endpoint.commands.benchmark.execute.tqdm"),
+        ):
+            MockZMQ.scoped.return_value.__enter__ = MagicMock(return_value=mock_zmq)
+            MockZMQ.scoped.return_value.__exit__ = MagicMock(return_value=False)
+            MockPub.return_value.socket_name = "test_pub"
+            MockSub.return_value.start = MagicMock()
+            MockLauncher.return_value.launch = _capture_launch
+
+            loop = asyncio.get_event_loop()
+            with pytest.raises(RuntimeError, match="simulated mid-run crash"):
+                await _run_benchmark_async(ctx, loop)
+
+        shm = Path("/dev/shm")
+        tmpfs_base = shm if shm.exists() else Path(tempfile.gettempdir())
+        tmpfs_dir = tmpfs_base / "benchmark_cli_benchmark_deadbeef"
+        assert not tmpfs_dir.exists()
+
 
 class TestAccuracyOnlyDatasetLoading:
     """`--accuracy-only` must skip the performance dataset even when the config
@@ -1876,3 +1927,326 @@ class TestProfilingHelpers:
         assert "Trigger span" in text
         # Mirrors what finalize_benchmark dumps to profiling.json
         assert json.loads(json.dumps(payload))["engine"] == "vllm"
+
+
+class _OverrideTestBase:
+    """Shared helpers for the two end-to-end ``_load_datasets`` override classes
+    below (parametrized over the chat vs text-completions adapter)."""
+
+    # Subclasses set these:
+    api_type: str = ""
+    max_tokens_key: str = ""  # static column name AddStaticColumns adds
+
+    def _write_jsonl(self, path: Path, rows: list[dict]) -> None:
+        path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+
+    def _prompt_rows(self, prompt: str, ground_truth: str | None = None) -> list[dict]:
+        """Adapter-shaped row. Chat adapter wants a 'prompt' column; the
+        completions adapter wants pre-tokenized 'input_tokens' (so the
+        Harmonize transform early-exits and we avoid the HF tokenizer
+        dependency in unit tests)."""
+        row: dict = {"prompt": prompt}
+        if self.api_type == "openai_completions":
+            row = {"input_tokens": [1, 2, 3, 4]}
+        if ground_truth is not None:
+            row["ground_truth"] = ground_truth
+        return [row]
+
+    def _build_config(
+        self,
+        perf_path: Path,
+        acc_path: Path,
+        acc_override: dict | None,
+        perf_override: dict | None = None,
+    ) -> BenchmarkConfig:
+        return BenchmarkConfig(
+            type=TestType.OFFLINE,
+            model_params={"name": "test-model", "max_new_tokens": 1024},
+            endpoint_config={
+                "endpoints": ["http://localhost:8000"],
+                "api_type": self.api_type,
+            },
+            datasets=[
+                {
+                    "name": "perf",
+                    "type": "performance",
+                    "path": str(perf_path),
+                    **(
+                        {"generation_config_override": perf_override}
+                        if perf_override
+                        else {}
+                    ),
+                },
+                {
+                    "name": "acc",
+                    "type": "accuracy",
+                    "path": str(acc_path),
+                    "accuracy_config": {
+                        "eval_method": "pass_at_1",
+                        "ground_truth": "ground_truth",
+                        "extractor": "boxed_math_extractor",
+                    },
+                    **(
+                        {"generation_config_override": acc_override}
+                        if acc_override
+                        else {}
+                    ),
+                },
+            ],
+        )
+
+    def _write_fixture(self, tmp_path: Path) -> tuple[Path, Path]:
+        perf_path = tmp_path / "perf.jsonl"
+        acc_path = tmp_path / "acc.jsonl"
+        self._write_jsonl(perf_path, self._prompt_rows("perf-prompt"))
+        self._write_jsonl(acc_path, self._prompt_rows("acc-prompt", ground_truth="42"))
+        return perf_path, acc_path
+
+    @pytest.mark.unit
+    def test_override_propagates_to_loaded_rows(self, tmp_path):
+        """Override on accuracy dataset → its rows get the overridden value;
+        unmodified perf dataset keeps the global 1024."""
+        perf_path, acc_path = self._write_fixture(tmp_path)
+        config = self._build_config(
+            perf_path, acc_path, acc_override={"max_new_tokens": 32768}
+        )
+        perf_ds, acc_datasets, _ = _load_datasets(config, tmp_path, TestMode.PERF)
+        assert perf_ds.load_sample(0)[self.max_tokens_key] == 1024
+        assert acc_datasets[0].load_sample(0)[self.max_tokens_key] == 32768
+
+    @pytest.mark.unit
+    def test_no_override_inherits_global(self, tmp_path):
+        """Without overrides, both datasets use the global model_params."""
+        perf_path, acc_path = self._write_fixture(tmp_path)
+        config = self._build_config(perf_path, acc_path, acc_override=None)
+        perf_ds, acc_datasets, _ = _load_datasets(config, tmp_path, TestMode.PERF)
+        assert perf_ds.load_sample(0)[self.max_tokens_key] == 1024
+        assert acc_datasets[0].load_sample(0)[self.max_tokens_key] == 1024
+
+    @pytest.mark.unit
+    def test_perf_dataset_override_also_honored(self, tmp_path):
+        """Symmetric check: overrides on the performance entry also flow
+        through (relevant for MLPerf-style perf with shorter max_new_tokens)."""
+        perf_path, acc_path = self._write_fixture(tmp_path)
+        config = self._build_config(
+            perf_path,
+            acc_path,
+            acc_override={"max_new_tokens": 32768},
+            perf_override={"max_new_tokens": 10240},
+        )
+        perf_ds, acc_datasets, _ = _load_datasets(config, tmp_path, TestMode.PERF)
+        assert perf_ds.load_sample(0)[self.max_tokens_key] == 10240
+        assert acc_datasets[0].load_sample(0)[self.max_tokens_key] == 32768
+
+    @pytest.mark.unit
+    def test_invalid_override_value_raises_at_construction(self, tmp_path):
+        """A value-level invalidity (e.g. non-numeric temperature) is caught at
+        config construction (parse time) when BenchmarkConfig merges + revalidates
+        each dataset's effective params, so a bad override is rejected before any
+        setup side effects rather than mid-run."""
+        perf_path, acc_path = self._write_fixture(tmp_path)
+        with pytest.raises(ValidationError):
+            self._build_config(perf_path, acc_path, acc_override={"temperature": "hot"})
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("key", ["name", "streaming", "tokenizer_name"])
+    def test_metrics_decoupled_override_rejected_at_construction(self, tmp_path, key):
+        """Per-run/identity keys are rejected end-to-end at BenchmarkConfig
+        construction (not just on the Dataset submodel), so a per-dataset value
+        can never reach setup and desync the single global tokenizer/aggregator."""
+        perf_path, acc_path = self._write_fixture(tmp_path)
+        with pytest.raises(ValidationError, match="not honored per-dataset"):
+            self._build_config(perf_path, acc_path, acc_override={key: "whatever"})
+
+    @pytest.mark.unit
+    def test_completion_control_override_gated_by_api_type(self, tmp_path):
+        """A completion-only control (min_new_tokens) in a per-dataset override is
+        gated by api_type exactly like top-level model_params: rejected at
+        construction for non-completions APIs, accepted for openai_completions."""
+        perf_path, acc_path = self._write_fixture(tmp_path)
+        if self.api_type == "openai_completions":
+            cfg = self._build_config(
+                perf_path, acc_path, acc_override={"min_new_tokens": 5}
+            )
+            assert cfg is not None
+        else:
+            with pytest.raises(ValidationError, match="openai_completions"):
+                self._build_config(
+                    perf_path, acc_path, acc_override={"min_new_tokens": 5}
+                )
+
+
+class TestLoadDatasetsGenerationConfigOverrideChat(_OverrideTestBase):
+    """End-to-end ``_load_datasets`` check against the OpenAI **chat**
+    completions adapter, which emits ``max_completion_tokens``."""
+
+    api_type = "openai"
+    max_tokens_key = "max_completion_tokens"
+
+
+class TestLoadDatasetsGenerationConfigOverrideCompletions(_OverrideTestBase):
+    """End-to-end ``_load_datasets`` check against the OpenAI **text**
+    completions adapter (``/v1/completions``), which emits ``max_tokens``.
+
+    This is the headline target of PR #344 — MLPerf-style runs use
+    ``api_type: openai_completions`` for pre-tokenized inputs — so an
+    integration test on this code path is essential. Rows carry pre-baked
+    ``input_tokens`` so the adapter's ``Harmonize()`` transform early-exits
+    and the test stays free of HF tokenizer downloads."""
+
+    api_type = "openai_completions"
+    max_tokens_key = "max_tokens"
+
+
+class TestRunBenchmarkInterrupt:
+    @pytest.mark.unit
+    def test_keyboard_interrupt_skips_audit(self, monkeypatch, tmp_path):
+        """A Ctrl-C during the main run must not start the audit."""
+        from inference_endpoint.commands.benchmark import cli
+        from inference_endpoint.config.schema import TestMode
+
+        config = MagicMock()
+        config.datasets = [object()]  # non-empty → _run skips CLI dataset injection
+        config.audit = MagicMock(only=False)  # audit IS configured
+        config.report_dir = str(tmp_path)
+        config.with_updates.return_value = config
+
+        def _interrupt(cfg, mode):
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(cli, "run_benchmark", _interrupt)
+        audit_spy = MagicMock()
+        monkeypatch.setattr(cli, "run_audit", audit_spy)
+
+        with pytest.raises(KeyboardInterrupt):
+            cli._run(config, [], TestMode.PERF)
+        audit_spy.assert_not_called()
+
+    @pytest.mark.unit
+    def test_main_run_before_audit_against_shared_report_dir(
+        self, monkeypatch, tmp_path
+    ):
+        """Main run executes before the audit (upstream MLPerf order),
+        sharing one report_dir."""
+        from inference_endpoint.commands.benchmark import cli
+        from inference_endpoint.config.schema import TestMode
+
+        config = MagicMock()
+        config.datasets = [object()]
+        config.audit = MagicMock(only=False)
+        config.report_dir = str(tmp_path)
+        config.with_updates.return_value = config
+
+        call_order = []
+
+        def _run_audit(cfg, base_report_dir):
+            call_order.append(("audit", cfg, base_report_dir))
+            result = MagicMock()
+            result.passed = True
+            return result
+
+        def _run_benchmark(cfg, mode):
+            call_order.append(("benchmark", cfg, mode))
+            return tmp_path
+
+        monkeypatch.setattr(cli, "run_audit", _run_audit)
+        monkeypatch.setattr(cli, "run_benchmark", _run_benchmark)
+
+        cli._run(config, [], TestMode.PERF)
+
+        assert [c[0] for c in call_order] == ["benchmark", "audit"]
+        _, benchmark_cfg, _ = call_order[0]
+        _, audit_cfg, audit_report_dir = call_order[1]
+        assert audit_report_dir == tmp_path / "audit"
+        assert audit_cfg is benchmark_cfg is config
+
+    @pytest.mark.unit
+    def test_audit_fail_raises_after_main_run(self, monkeypatch, tmp_path):
+        """A failing (not crashed) audit raises CLIError; the perf report
+        already exists because the main run went first."""
+        from inference_endpoint.commands.benchmark import cli
+        from inference_endpoint.config.schema import TestMode
+        from inference_endpoint.exceptions import CLIError
+
+        config = MagicMock()
+        config.datasets = [object()]
+        config.audit = MagicMock(only=False)
+        config.report_dir = str(tmp_path)
+        config.with_updates.return_value = config
+
+        call_order = []
+
+        def _run_audit(cfg, base_report_dir):
+            call_order.append("audit")
+            result = MagicMock()
+            result.passed = False
+            result.test_id = "output_caching_test"
+            result.details = {"reason": "caching detected"}
+            return result
+
+        def _run_benchmark(cfg, mode):
+            call_order.append("benchmark")
+            return tmp_path
+
+        monkeypatch.setattr(cli, "run_audit", _run_audit)
+        monkeypatch.setattr(cli, "run_benchmark", _run_benchmark)
+
+        with pytest.raises(CLIError):
+            cli._run(config, [], TestMode.PERF)
+
+        assert call_order == ["benchmark", "audit"]
+
+    @pytest.mark.unit
+    def test_audit_only_skips_main_run(self, monkeypatch, tmp_path):
+        """audit.only runs the audit standalone — the main benchmark is skipped."""
+        from inference_endpoint.commands.benchmark import cli
+        from inference_endpoint.config.schema import TestMode
+
+        config = MagicMock()
+        config.datasets = [object()]
+        config.audit = MagicMock(only=True)
+        config.report_dir = str(tmp_path)
+        config.with_updates.return_value = config
+
+        audit_calls = []
+
+        def _run_audit(cfg, base_report_dir):
+            audit_calls.append(base_report_dir)
+            result = MagicMock()
+            result.passed = True
+            return result
+
+        monkeypatch.setattr(cli, "run_audit", _run_audit)
+        benchmark_spy = MagicMock()
+        monkeypatch.setattr(cli, "run_benchmark", benchmark_spy)
+
+        cli._run(config, [], TestMode.PERF)
+
+        benchmark_spy.assert_not_called()
+        assert audit_calls == [tmp_path / "audit"]
+
+    @pytest.mark.unit
+    def test_audit_only_fail_raises(self, monkeypatch, tmp_path):
+        """audit.only maps a FAIL result to CLIError (exit 1)."""
+        from inference_endpoint.commands.benchmark import cli
+        from inference_endpoint.config.schema import TestMode
+        from inference_endpoint.exceptions import CLIError
+
+        config = MagicMock()
+        config.datasets = [object()]
+        config.audit = MagicMock(only=True)
+        config.report_dir = str(tmp_path)
+        config.with_updates.return_value = config
+
+        def _run_audit(cfg, base_report_dir):
+            result = MagicMock()
+            result.passed = False
+            result.test_id = "output_caching_test"
+            result.details = {"reason": "caching detected"}
+            return result
+
+        monkeypatch.setattr(cli, "run_audit", _run_audit)
+        monkeypatch.setattr(cli, "run_benchmark", MagicMock())
+
+        with pytest.raises(CLIError):
+            cli._run(config, [], TestMode.PERF)
