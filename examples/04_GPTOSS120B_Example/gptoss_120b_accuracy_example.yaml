@@ -9,9 +9,8 @@
 # individual `::gptoss` datasets directly (see vllm_gptoss_120b_example.yaml, which
 # wires `aime25::gptoss` / `gpqa::gptoss` / `livecodebench::gptoss` as three
 # separate results.json entries). Pick ONE path per config. The composite issues a
-# single uniform `num_repeats`; use
-# the individual datasets when per-subset repeats (aime 8 / gpqa 5 / lcb 3) are
-# required.
+# single uniform `num_repeats`; use the individual datasets when per-subset repeats
+# (aime 8 / gpqa 5 / lcb 3) are required.
 #
 # livecodebench executes untrusted model code, so it is graded out-of-band against
 # the lcb-service WebSocket container (see

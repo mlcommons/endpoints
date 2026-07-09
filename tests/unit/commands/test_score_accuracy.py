@@ -108,3 +108,16 @@ class TestScoreAccuracy:
         scores = _score_accuracy(_ctx(cfgs), _RESULT)
         assert "breakdown" not in scores["plain"]
         assert scores["gptoss_120b_accuracy"]["breakdown"]["overall_accuracy"] == 80.0
+
+    def test_performance_dataset_num_samples_from_perf_results(self, tmp_path):
+        # The "performance" dataset reports num_samples from the perf phases'
+        # issued counts, not its own dataset length (here 3).
+        cfg = _cfg("performance", 3, 0.6, tmp_path)
+        result = SimpleNamespace(
+            perf_results=[
+                SimpleNamespace(issued_count=40),
+                SimpleNamespace(issued_count=88),
+            ]
+        )
+        scores = _score_accuracy(_ctx([cfg]), result)
+        assert scores["performance"]["num_samples"] == 128
