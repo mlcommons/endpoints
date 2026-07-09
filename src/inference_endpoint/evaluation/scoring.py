@@ -26,7 +26,6 @@ import tempfile
 import uuid
 from abc import ABC, abstractmethod
 from collections import Counter, defaultdict
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -2127,118 +2126,6 @@ def _weighted_breakdown(
     return overall01, breakdown
 
 
-@dataclass
-class GptOssMember:
-    """One benchmark subset of a combined gpt-oss accuracy run.
-
-    ``full_name`` is the config dataset name (e.g. ``aime25::gptoss``) — the key
-    the member's own scorer needs to look up its outputs in ``sample_idx_map.json``.
-    ``subset`` is the base name (``aime25``) used for the breakdown key and weight.
-    """
-
-    full_name: str
-    subset: str
-    scorer_cls: type[Scorer]
-    extractor: type[Extractor] | None
-    dataset: Dataset
-    ground_truth_column: str | None
-    extras: dict[str, Any]
-
-
-class GptOssAccuracyScorer:
-    """Combined gpt-oss-120b accuracy over its per-benchmark subsets.
-
-    gpt-oss ships no combined dataset or scorer: aime25/gpqa are graded by
-    ``PassAt1Scorer`` and livecodebench by ``LiveCodeBenchScorer``, each on its
-    own dataset. This orchestrator runs each member's own scorer, then rolls the
-    scalar results into one headline **sample-weighted by unique problem count**
-    (``dataset.num_samples()``), matching the downstream MLPerf submission tooling
-    (``endpoints-launch`` ``generate_points.py``). ``score()`` returns the weighted
-    mean on the native ``[0, 1]`` scale; ``score_breakdown()`` reports the headline
-    and per-subset scores on the shared ``[0, 100]`` breakdown scale.
-
-    Each member's outcome is exposed via :attr:`member_scores` so
-    ``finalize_benchmark`` can emit the per-subset ``<subset>::gptoss`` entries
-    (for audit and backward-compat with consumers that read them) alongside the
-    consolidated entry — from this one scoring pass, without re-running the
-    (expensive) member scorers.
-
-    It duck-types the scorer surface (``score``/``score_breakdown``/``complete``)
-    that ``finalize_benchmark`` consumes; it is invoked directly for a group of
-    members rather than resolved from an ``eval_method``.
-    """
-
-    def __init__(self, members: list[GptOssMember], report_dir: os.PathLike):
-        self.members = members
-        self.report_dir = Path(report_dir)
-        self.complete = True
-        self._breakdown: dict[str, Any] | None = None
-        # Per-member outcome from the single scoring pass, keyed by full_name:
-        # (score in [0,1] or None, member_complete). Lets the caller emit
-        # per-subset audit entries without re-scoring the (expensive) members.
-        self.member_scores: dict[str, tuple[float | None, bool]] = {}
-
-    def score(self) -> tuple[float | None, int]:
-        subset_scores: dict[str, float] = {}
-        weights: dict[str, int] = {}
-        n_repeats = 1
-        self.member_scores = {}
-        for m in self.members:
-            try:
-                scorer = m.scorer_cls(
-                    m.full_name,
-                    m.dataset,
-                    self.report_dir,
-                    extractor=m.extractor,
-                    ground_truth_column=m.ground_truth_column,
-                    **m.extras,
-                )
-            except TypeError as e:
-                raise ValueError(
-                    f"Accuracy group member '{m.full_name}': invalid extras for "
-                    f"scorer '{m.scorer_cls.__name__}': {e}"
-                ) from e
-            subset_score, reps = scorer.score()
-            member_complete = bool(getattr(scorer, "complete", True))
-            n_repeats = max(n_repeats, reps)
-            # A failed subset (None) or a scorer that flagged itself partial
-            # shrinks coverage, so the combined headline is incomplete.
-            if subset_score is None or not member_complete:
-                self.complete = False
-            if subset_score is None:
-                self.member_scores[m.full_name] = (None, member_complete)
-                continue
-            # Members must be scalar [0,1] scorers (pass_at_1, code_bench_scorer).
-            # Guard against a mis-grouped scorer that returns a dict (RougeScorer)
-            # or a 0-100 scale (LegacyMLPerfDeepSeekR1Scorer) — float(dict) would
-            # crash and a 0-100 value would silently scale to ~10000%.
-            if not isinstance(subset_score, int | float) or not (
-                0.0 <= subset_score <= 1.0
-            ):
-                raise ValueError(
-                    f"Accuracy group member '{m.full_name}' "
-                    f"({m.scorer_cls.__name__}) returned {subset_score!r}; a "
-                    f"consolidation group requires scalar scores in [0, 1]."
-                )
-            score_val = float(subset_score)
-            subset_scores[m.subset] = score_val
-            weights[m.subset] = m.dataset.num_samples()
-            self.member_scores[m.full_name] = (score_val, member_complete)
-
-        if not subset_scores:
-            self.complete = False
-            self._breakdown = None
-            return None, n_repeats
-
-        overall01, self._breakdown = _weighted_breakdown(
-            subset_scores, weights, complete=self.complete
-        )
-        return overall01, n_repeats
-
-    def score_breakdown(self) -> dict[str, Any] | None:
-        return self._breakdown
-
-
 class GptOss120bAccuracyScorer(Scorer, scorer_id="gptoss_120b_accuracy"):
     """Composite MLPerf gpt-oss-120b accuracy scorer (single dataset -> single entry).
 
@@ -2246,8 +2133,8 @@ class GptOss120bAccuracyScorer(Scorer, scorer_id="gptoss_120b_accuracy"):
     (``gptoss_120b_accuracy``) carries all three subsets in a ``subset`` column,
     and this one registered scorer routes per-subset grading in-process, then
     rolls the per-subset means into a single headline **sample-weighted by unique
-    problem count** (the same weighting as :class:`GptOssAccuracyScorer` and the
-    downstream MLPerf submission tooling). ``score_breakdown()`` reports the
+    problem count** (the same weighting as the downstream MLPerf submission
+    tooling). ``score_breakdown()`` reports the
     headline plus per-subset scores on the shared ``[0, 100]`` breakdown scale.
 
     Per-subset grading (hardcoded — this is the "comes with all the configs"
@@ -2261,12 +2148,13 @@ class GptOss120bAccuracyScorer(Scorer, scorer_id="gptoss_120b_accuracy"):
         left UNSCORED and the run is marked incomplete — untrusted model code is
         never executed in-process.
 
-    Two intentional differences from the individual 3-dataset path
-    (:class:`GptOssAccuracyScorer`):
+    Two intentional differences from running the individual per-subset
+    ``::gptoss`` datasets:
 
       - **Top-level scale.** ``score()`` returns the headline on the ``[0, 100]``
         scale (matching ``LegacyMLPerfDeepSeekR1Scorer``), whereas the individual
-        orchestrator returns ``[0, 1]``. The ``breakdown`` is ``[0, 100]`` in both.
+        per-subset scorers return ``[0, 1]``. The ``breakdown`` is ``[0, 100]`` in
+        both.
         Downstream tooling reading this entry's scalar ``score`` must treat it as a
         percentage (divide by 100, or read ``breakdown``).
       - **Uniform repeats.** ``num_repeats`` is a single value across all subsets;
