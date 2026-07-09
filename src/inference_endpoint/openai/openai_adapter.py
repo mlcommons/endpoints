@@ -50,6 +50,7 @@ class OpenAIAdapter(HttpRequestAdapter):
             "stream": (model_params.streaming == StreamingMode.ON),
             "max_completion_tokens": model_params.max_new_tokens,
             "temperature": model_params.temperature,
+            "seed": model_params.seed,
             "top_p": model_params.top_p,
             "top_k": model_params.top_k,
             "repetition_penalty": model_params.repetition_penalty,
@@ -93,7 +94,7 @@ class OpenAIAdapter(HttpRequestAdapter):
     def to_endpoint_request(cls, query: Query) -> CreateChatCompletionRequest:
         """Convert a Query to an OpenAI request.
 
-        Supports both single-turn (prompt/system) and multi-turn (messages array) formats.
+        Supports both single-turn (prompt/system) and agentic inference (messages array) formats.
         """
         if "messages" in query.data and isinstance(query.data["messages"], list):
             messages = query.data["messages"]
@@ -114,6 +115,7 @@ class OpenAIAdapter(HttpRequestAdapter):
             stream=query.data.get("stream", False),
             max_completion_tokens=query.data.get("max_completion_tokens", 100),
             temperature=query.data.get("temperature", 0.7),
+            seed=query.data.get("seed"),
             presence_penalty=query.data.get("presence_penalty"),
             frequency_penalty=query.data.get("frequency_penalty"),
             tools=query.data.get("tools"),

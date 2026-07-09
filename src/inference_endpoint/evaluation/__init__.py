@@ -13,6 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .extractor import Extractor
+from .extractor import Extractor, FunctionCallExtractor
 
-__all__ = ["Extractor"]
+try:
+    from .bfcl_v4_scorer import BFCLv4Scorer  # noqa: F401  # optional dep
+except ImportError:
+    BFCLv4Scorer = None  # type: ignore[assignment,misc]
+
+try:
+    from .bfcl_v4_multi_turn_scorer import (
+        BFCLv4MultiTurnScorer,  # noqa: F401  # optional dep
+    )
+except ImportError:
+    BFCLv4MultiTurnScorer = None  # type: ignore[assignment,misc]
+
+__all__ = ["Extractor", "FunctionCallExtractor"]

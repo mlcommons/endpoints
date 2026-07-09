@@ -15,6 +15,6 @@
 
 """MLCommons benchmark ruleset implementation."""
 
-from .rules import CURRENT, OptimizationPriority, RoundRuleset
+from .rules import CURRENT, EDGE_CURRENT, OptimizationPriority, RoundRuleset
 
-__all__ = ["CURRENT", "OptimizationPriority", "RoundRuleset"]
+__all__ = ["CURRENT", "EDGE_CURRENT", "OptimizationPriority", "RoundRuleset"]

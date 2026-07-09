@@ -40,7 +40,7 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
-from datasets import load_dataset
+from datasets import load_dataset_builder
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +95,7 @@ def generate_dataset(
     max_samples: int | None = None,
     force: bool = False,
     save_test_cases: bool = True,
+    writer_batch_size: int = 16,
 ) -> pd.DataFrame:
     """Generates the LiveCodeBench dataset.
 
@@ -106,6 +107,9 @@ def generate_dataset(
         force: Whether to force the generation of the dataset.
         save_test_cases: Whether to save test cases as separate JSON files.
             If True, test cases are saved to datasets_dir/test_cases/<question_id>.json
+        writer_batch_size: Number of examples the Arrow writer buffers before flushing to
+            disk while building the split. Lower values bound peak memory during the build
+            (the private_test_cases strings are large); reduce further if the build OOMs.
     """
 
     if not datasets_dir.exists():
@@ -116,44 +120,70 @@ def generate_dataset(
         logger.info(f"Dataset already exists at {dst_path}. Loading from file.")
         return pd.read_parquet(dst_path)
 
-    df = load_dataset(
+    # Columns dropped from the parquet output. We do not care about the contest/competition
+    # metadata since we evaluate on the entire dataset anyway (LiveCodeBench evolves but is
+    # pinned by version_tag). The heavy test-case columns (public_test_cases,
+    # private_test_cases, metadata) are consumed to write the per-question test-case JSON
+    # files but are never stored in the parquet.
+    drop_columns = {
+        "question_title",
+        "contest_date",
+        "contest_id",
+        "platform",
+        "difficulty",
+        "public_test_cases",
+        "private_test_cases",
+        "metadata",
+    }
+
+    # Build the split with a small ArrowWriter batch so the writer flushes to disk
+    # frequently rather than buffering ~1000 examples (each carrying a large compressed
+    # private_test_cases string) in memory before the first write — that buffering is what
+    # OOMs the build in tight memory. The prepared split is memory-mapped, then streamed
+    # row-by-row below.
+    builder = load_dataset_builder(
         "livecodebench/code_generation_lite",
         version_tag=variant,
         trust_remote_code=True,
-    )["test"].to_pandas()
-
-    df = df.rename(columns={"question_content": "question"})
-
-    # We do not care about 'competition start date' since we evaluate on the entire dataset anyway.
-    # LiveCodeBench is a constantly evolving dataset, but will be pinned by version, so as long as
-    # we are consistent with the version_tag being used, we should be good.
-    df = df.drop(
-        columns=[
-            "question_title",
-            "contest_date",
-            "contest_id",
-            "platform",
-            "difficulty",
-        ]
     )
+    builder._writer_batch_size = writer_batch_size
+    builder.download_and_prepare()
+    ds = builder.as_dataset(split="test")
 
-    # If max_samples is specified, sample 'max_samples' rows from the dataset
-    if max_samples is not None and max_samples < len(df):
+    # Iterate the Arrow-backed dataset one row at a time instead of materializing the whole
+    # thing via to_pandas(). The private_test_cases column decompresses to large objects;
+    # holding only a single row's worth at a time keeps the peak bounded by the largest
+    # single problem rather than the entire dataset, so the build fits in tight memory.
+    # question_content is surfaced as "question"; all other non-dropped columns pass through.
+    light_columns = [c for c in ds.column_names if c not in drop_columns]
+    output_columns = [
+        "question" if c == "question_content" else c for c in light_columns
+    ]
+
+    if max_samples is not None and max_samples < len(ds):
         rng = random.Random(seed)
-        sampled_indices = rng.sample(range(len(df)), max_samples)
-        df = df.iloc[sampled_indices].reset_index(drop=True)
+        indices = rng.sample(range(len(ds)), max_samples)
         logger.info(f"Sampled {max_samples} questions")
+    else:
+        indices = list(range(len(ds)))
 
-    # Process and save test cases if requested
     if save_test_cases:
-        # Save test cases to separate JSON files
         test_cases_dir = datasets_dir / "test_cases"
         test_cases_dir.mkdir(parents=True, exist_ok=True)
 
-        for _, row in df.iterrows():
-            question_id = row["question_id"]
-            test_case_json_path = test_cases_dir / f"{question_id}.json"
+    records: list[dict[str, Any]] = []
+    for idx in indices:
+        row = ds[idx]
 
+        records.append(
+            {
+                ("question" if c == "question_content" else c): row[c]
+                for c in light_columns
+            }
+        )
+
+        if save_test_cases:
+            question_id = row["question_id"]
             public_cases = json.loads(row["public_test_cases"])
             private_cases = deserialize_private_test(row["private_test_cases"])
             func_name = None
@@ -170,17 +200,20 @@ def generate_dataset(
                 "func_name": func_name,
             }
 
+            test_case_json_path = test_cases_dir / f"{question_id}.json"
             with test_case_json_path.open("w", encoding="utf-8") as f:
                 json.dump(test_case_data, f, indent=2)
 
+            # Release the decompressed test cases before the next iteration so the peak
+            # stays bounded by a single problem.
+            del public_cases, private_cases, test_case_data
+
+    if save_test_cases:
         logger.info(f"Saved test cases to {test_cases_dir}")
 
-    # Drop test case columns from the dataframe before saving to parquet
-    df_to_save = df.drop(
-        columns=["public_test_cases", "private_test_cases", "metadata"]
-    )
-
-    # Save to parquet file with pyarrow engine for better performance
+    # Build the parquet from only the light columns (column order follows the dataset's,
+    # minus the dropped columns) and save with pyarrow for performance.
+    df_to_save = pd.DataFrame.from_records(records, columns=output_columns)
     df_to_save.to_parquet(dst_path, engine="pyarrow")
     logger.info(f"Saved {len(df_to_save)} samples to {dst_path}")
 
@@ -224,6 +257,13 @@ if __name__ == "__main__":
         default=False,
         help="Do not save test cases as separate JSON files",
     )
+    parser.add_argument(
+        "--writer-batch-size",
+        type=int,
+        default=16,
+        help="Examples the Arrow writer buffers before flushing to disk during the build. "
+        "Lower values reduce peak memory; reduce further if the build runs out of memory.",
+    )
     args = parser.parse_args()
 
     generate_dataset(
@@ -233,4 +273,5 @@ if __name__ == "__main__":
         max_samples=args.max_samples,
         force=args.force,
         save_test_cases=not args.no_test_cases,
+        writer_batch_size=args.writer_batch_size,
     )

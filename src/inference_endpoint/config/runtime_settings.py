@@ -28,7 +28,8 @@ from __future__ import annotations
 import logging
 import math
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from enum import Enum
 from typing import TYPE_CHECKING
 
 from .. import metrics
@@ -39,6 +40,38 @@ logger = logging.getLogger(__name__)
 if TYPE_CHECKING:
     from .ruleset_base import BenchmarkSuiteRuleset
     from .schema import BenchmarkConfig, LoadPattern
+
+
+class SampleOrderKind(str, Enum):
+    """Which SampleOrder strategy a SampleOrderSpec selects."""
+
+    WITHOUT_REPLACEMENT = "without_replacement"
+    WITH_REPLACEMENT = "with_replacement"
+    SINGLE = "single"
+
+
+@dataclass(frozen=True, slots=True)
+class SampleOrderSpec:
+    """Generic sample-ordering selector consumed by create_sample_order.
+
+    ``kind`` selects the strategy; ``fixed_index`` is only meaningful for
+    ``SampleOrderKind.SINGLE``.
+    """
+
+    kind: SampleOrderKind = SampleOrderKind.WITHOUT_REPLACEMENT
+    fixed_index: int | None = None
+
+    @classmethod
+    def without_replacement(cls) -> SampleOrderSpec:
+        return cls(kind=SampleOrderKind.WITHOUT_REPLACEMENT)
+
+    @classmethod
+    def with_replacement(cls) -> SampleOrderSpec:
+        return cls(kind=SampleOrderKind.WITH_REPLACEMENT)
+
+    @classmethod
+    def single(cls, index: int) -> SampleOrderSpec:
+        return cls(kind=SampleOrderKind.SINGLE, fixed_index=index)
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,6 +117,9 @@ class RuntimeSettings:
 
     load_pattern: LoadPattern | None
     """Load pattern configuration"""
+
+    sample_order: SampleOrderSpec = field(default_factory=SampleOrderSpec, kw_only=True)
+    """Sample-ordering strategy (default: without-replacement)."""
 
     @classmethod
     def from_config(
@@ -162,6 +198,7 @@ class RuntimeSettings:
             "rng_sched": random.Random(runtime_cfg.scheduler_random_seed),
             "rng_sample_index": random.Random(runtime_cfg.dataloader_random_seed),
             "load_pattern": load_pattern_cfg,
+            "sample_order": SampleOrderSpec(),
         }
 
         # Apply overrides
@@ -195,21 +232,21 @@ class RuntimeSettings:
             )
             return self.n_samples_to_issue
 
-        # Multi-turn must issue exactly all client turns — QPS-based formulas are meaningless.
+        # Agentic inference must issue exactly all client turns — QPS-based formulas are meaningless.
         if (
             self.load_pattern is not None
-            and self.load_pattern.type == LoadPatternType.MULTI_TURN
+            and self.load_pattern.type == LoadPatternType.AGENTIC_INFERENCE
         ):
             if self.n_samples_from_dataset < self.min_sample_count:
                 logger.warning(
-                    "Multi-turn run: min_sample_count=%d exceeds dataset "
-                    "client-turn count=%d; using dataset size. Multi-turn cannot "
+                    "Agentic inference run: min_sample_count=%d exceeds dataset "
+                    "client-turn count=%d; using dataset size. Agentic inference cannot "
                     "issue more samples than the dataset provides.",
                     self.min_sample_count,
                     self.n_samples_from_dataset,
                 )
             logger.debug(
-                "Sample count: %d (multi-turn: issuing all client turns)",
+                "Sample count: %d (agentic inference: issuing all client turns)",
                 self.n_samples_from_dataset,
             )
             return self.n_samples_from_dataset

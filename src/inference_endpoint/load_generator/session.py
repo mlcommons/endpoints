@@ -31,6 +31,7 @@ from enum import Enum
 from typing import Any, Protocol
 
 from ..config.runtime_settings import RuntimeSettings
+from ..config.schema import LoadPatternType
 from ..core.record import (
     ErrorEventType,
     EventRecord,
@@ -177,6 +178,7 @@ class PhaseIssuer:
         "_dataset",
         "_issuer",
         "_on_inflight_drained",
+        "_performance_tracking_stopped",
         "_publisher",
         "_stop_check",
         "uuid_to_index",
@@ -204,11 +206,25 @@ class PhaseIssuer:
         self.completed_uuids: set[str] = set()
         self.inflight: int = 0
         self.issued_count: int = 0
+        self._performance_tracking_stopped = False
 
     def mark_inflight_complete(self) -> None:
         self.inflight -= 1
         if self.inflight <= 0:
             self._on_inflight_drained()
+
+    def stop_performance_tracking(self) -> None:
+        """Publish STOP_PERFORMANCE_TRACKING once for this phase."""
+        if self._performance_tracking_stopped:
+            return
+        self._performance_tracking_stopped = True
+        self._publisher.publish(
+            EventRecord(
+                event_type=SessionEventType.STOP_PERFORMANCE_TRACKING,
+                timestamp_ns=time.monotonic_ns(),
+            )
+        )
+        self._publisher.flush()
 
     def issue(
         self,
@@ -224,8 +240,8 @@ class PhaseIssuer:
         Args:
             sample_index: Index into the dataset.
             data_override: If provided, merged over the loaded sample data.
-                Keys in data_override take precedence. Used by MultiTurnStrategy
-                to substitute live-accumulated message history.
+                Keys in data_override take precedence. Used by AgenticInferenceStrategy
+                to override pre-baked messages when trajectory salting is enabled.
 
         Note: load_sample() runs synchronously before the ISSUED timestamp.
         For accurate timing, datasets MUST be pre-loaded into memory.
@@ -330,6 +346,7 @@ class BenchmarkSession:
 
         # Mutable state
         self._stop_requested = False
+        self._current_phase_stopped = False
         self._done = False
         self._current_phase_issuer: PhaseIssuer | None = None
         self._current_phase_type: PhaseType | None = None
@@ -346,6 +363,26 @@ class BenchmarkSession:
         event to unblock _drain_inflight if it's waiting for responses.
         """
         self._stop_requested = True
+        self._drain_event.set()
+        if self._strategy_task and not self._strategy_task.done():
+            self._strategy_task.cancel()
+
+    def stop_current_phase(self) -> None:
+        """End the in-progress phase without aborting the session.
+
+        Sets a per-phase stop flag the strategy's stop-check observes (so a
+        polling strategy stops issuing) and cancels the current strategy task
+        (so a strategy blocked awaiting a slow response is interrupted). Unlike
+        ``stop``, this does NOT set the session-wide ``_stop_requested`` flag —
+        a combined run whose performance phase hits its ``max_duration`` cap
+        still proceeds to the accuracy phase.
+
+        Also sets the drain event: if the cap fires while the phase is already
+        inside its ``_drain_inflight`` wait (strategy task finished), cancelling
+        the task is a no-op, so an unbounded (``performance_timeout_s: null``)
+        drain would otherwise hang forever on a stuck in-flight response.
+        """
+        self._current_phase_stopped = True
         self._drain_event.set()
         if self._strategy_task and not self._strategy_task.done():
             self._strategy_task.cancel()
@@ -395,12 +432,18 @@ class BenchmarkSession:
         """Run a single phase. Returns PhaseResult or None for warmup."""
         logger.info("Starting phase: %s (%s)", phase.name, phase.phase_type.value)
         phase_start = time.monotonic_ns()
+        # Per-phase stop flag is scoped to this phase; clear any cap left set by
+        # a previous phase so it can't short-circuit this one.
+        self._current_phase_stopped = False
 
         # Create per-phase state
         if phase.strategy is not None:
             strategy = phase.strategy
         else:
-            sample_order = create_sample_order(phase.runtime_settings)
+            sample_order = create_sample_order(
+                phase.runtime_settings,
+                sequential=(phase.phase_type == PhaseType.ACCURACY),
+            )
             strategy = create_load_strategy(
                 phase.runtime_settings, self._loop, sample_order
             )
@@ -433,7 +476,7 @@ class BenchmarkSession:
             await self._drain_inflight(phase_issuer, phase.drain_timeout)
 
         if phase.phase_type == PhaseType.PERFORMANCE:
-            self._publish_session_event(SessionEventType.STOP_PERFORMANCE_TRACKING)
+            phase_issuer.stop_performance_tracking()
 
         phase_end = time.monotonic_ns()
         logger.info(
@@ -456,7 +499,7 @@ class BenchmarkSession:
         )
 
     async def _drain_inflight(
-        self, phase_issuer: PhaseIssuer, timeout: float | None
+        self, phase_issuer: PhaseIssuer, timeout: float | None = None
     ) -> None:
         """Wait for all in-flight responses from this phase to complete.
 
@@ -466,10 +509,19 @@ class BenchmarkSession:
         complete and an offline burst over few connections legitimately exceeds
         any fixed bound. A dropped transport still unblocks the wait via the
         ``_receive_responses`` close path."""
-        if phase_issuer.inflight <= 0 or self._stop_requested:
+        if (
+            phase_issuer.inflight <= 0
+            or self._stop_requested
+            or self._current_phase_stopped
+        ):
             return
         logger.info("Draining %d in-flight responses...", phase_issuer.inflight)
         self._drain_event.clear()
+        # Re-check after clear: a completion (or a per-phase cap firing) may have
+        # set the event between the initial inflight check and clear(), which
+        # would otherwise be lost, hanging an unbounded drain forever.
+        if phase_issuer.inflight <= 0 or self._current_phase_stopped:
+            return
         if timeout is None:
             await self._drain_event.wait()
             return
@@ -477,7 +529,7 @@ class BenchmarkSession:
             await asyncio.wait_for(self._drain_event.wait(), timeout=timeout)
         except TimeoutError:
             logger.error(
-                "Drain timed out after %s s with %d responses still in flight; "
+                "Drain timed out after %.0f s with %d responses still in flight; "
                 "proceeding to next phase.",
                 timeout,
                 phase_issuer.inflight,
@@ -512,7 +564,7 @@ class BenchmarkSession:
         if isinstance(resp, QueryResult):
             query_id = resp.id
             # Drop late responses for queries already synthetically terminated
-            # (e.g. by MultiTurnStrategy._handle_timeout). Without this gate,
+            # (e.g. by AgenticInferenceStrategy._handle_timeout). Without this gate,
             # a real response arriving after timeout double-publishes ERROR/COMPLETE
             # and double-decrements inflight (no per-request HTTP timeout
             # exists in endpoint_client; late arrivals are possible).
@@ -609,12 +661,17 @@ class BenchmarkSession:
             else 0
         )
         total_samples = settings.total_samples_to_issue()
+        stop_on_sample_count = not (
+            settings.load_pattern is not None
+            and settings.load_pattern.type == LoadPatternType.AGENTIC_INFERENCE
+        )
 
         def check() -> bool:
-            if self._stop_requested:
+            if self._stop_requested or self._current_phase_stopped:
                 return True
             if (
-                self._current_phase_issuer
+                stop_on_sample_count
+                and self._current_phase_issuer
                 and self._current_phase_issuer.issued_count >= total_samples
             ):
                 return True

@@ -15,6 +15,7 @@
 
 
 import inspect
+import json
 import logging
 import os
 import re
@@ -24,10 +25,11 @@ import sys
 import tempfile
 import uuid
 from abc import ABC, abstractmethod
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, ClassVar
 
+import msgspec
 import msgspec.json
 import numpy as np
 import pandas as pd
@@ -47,6 +49,8 @@ except ImportError:
     _nltk = None
 
 from ..core.record import EventRecord, EventType, SampleEventType
+from ..core.types import TextModelOutput
+from ..dataset_manager.agentic_inference_dataset import AgenticInferenceDataset
 from ..dataset_manager.dataset import Dataset
 from ..dataset_manager.predefined.shopify_product_catalogue import ProductMetadata
 from .extractor import Extractor, PythonCodeExtractor
@@ -119,6 +123,12 @@ class Scorer(ABC):
             ground_truth_column if ground_truth_column is not None else "ground_truth"
         )
         self.sample_index_map = self._load_sample_index_map()
+
+        # Whether the most recent score() covered every issued sample. Scorers
+        # that can return a partial headline number (e.g. LegacyMLPerfDeepSeekR1Scorer when
+        # the lcb-service container is unreachable) set this False so callers
+        # can distinguish a partial result from a complete one. Default True.
+        self.complete: bool = True
 
     def _load_sample_index_map(self):
         sample_index_map_path = self.report_dir / "sample_idx_map.json"
@@ -205,6 +215,17 @@ class Scorer(ABC):
 
         n_repeats = len(scores) // self.dataset.num_samples()
         return np.mean(scores), n_repeats
+
+    def score_breakdown(self) -> dict[str, Any] | None:
+        """Optional structured detail accompanying the scalar ``score()``.
+
+        Most scorers report only the scalar mean from ``score()``. Scorers with a
+        multi-metric result (e.g. per-subset / per-category accuracy) cache that
+        breakdown and return it here, so ``results.json``, compliance, plotting,
+        and publishing read a typed dict without ``score()`` widening its scalar
+        return contract. Returns ``None`` when there is no extra detail.
+        """
+        return None
 
 
 class PassAt1Scorer(Scorer, scorer_id="pass_at_1"):
@@ -314,6 +335,574 @@ class RougeScorer(Scorer, scorer_id="rouge"):
         return result, 1
 
 
+def _uv_subproject_env(project_path: os.PathLike | str) -> dict[str, str]:
+    """Env for ``uv run --project <project_path>`` pinned to the subproject's OWN
+    ``.venv``.
+
+    Without this, an inherited ``UV_PROJECT_ENVIRONMENT`` (the dev image sets it
+    to ``/opt/venv``) redirects ``uv`` to the parent environment instead of the
+    isolated subproject venv - defeating the whole out-of-process isolation.
+    Mirrors how ``setup_eval.sh`` provisioned it (``UV_PROJECT_ENVIRONMENT=$(pwd)/.venv``).
+    """
+    return {**os.environ, "UV_PROJECT_ENVIRONMENT": str(Path(project_path) / ".venv")}
+
+
+def _lcb_ws_evaluate(
+    url: str, codes_dict: dict[str, list[str]], timeout_sec: int
+) -> dict | None:
+    """Evaluate extracted code via the lcb-service WebSocket (synchronous).
+
+    Sends ``{codes_dict, timeout_sec}`` and consumes progress frames until a
+    terminal ``completed`` (returns ``result`` = ``{total_samples, results}``)
+    or ``error``. Returns None on any failure so callers can fall back. Kept as
+    a module function so both LiveCodeBenchScorer and LegacyMLPerfDeepSeekR1Scorer (which
+    grades its livecodebench subset out-of-band) share one client.
+    """
+    if websocket is None:
+        logger.warning(
+            "websocket-client not installed; cannot reach lcb-service. "
+            "Install with: pip install websocket-client"
+        )
+        return None
+    try:
+        ws = websocket.create_connection(
+            url, timeout=7200, ping_interval=30, ping_timeout=10
+        )
+    except (OSError, websocket.WebSocketException) as e:
+        logger.warning("lcb-service WebSocket connect failed (%s): %s", url, e)
+        return None
+    total = sum(len(c) for c in codes_dict.values())
+    pbar = tqdm(total=total, desc="LCB Evaluation", unit="sample")
+    try:
+        ws.send(
+            msgspec.json.encode(
+                {"codes_dict": codes_dict, "timeout_sec": timeout_sec}
+            ).decode("utf-8")
+        )
+        while True:
+            message = ws.recv()
+            if not message:
+                return None
+            data = msgspec.json.decode(message)
+            status = data.get("status")
+            if status == "progress":
+                pbar.n = data.get("completed_samples", 0)
+                pbar.refresh()
+            elif status == "completed":
+                pbar.n = total
+                pbar.refresh()
+                return data.get("result")
+            elif status == "error":
+                logger.error("lcb-service evaluation error: %s", data.get("error"))
+                return None
+    except Exception as e:  # noqa: BLE001 - network/protocol failure -> fall back
+        logger.warning("lcb-service WebSocket evaluation failed: %s", e)
+        return None
+    finally:
+        pbar.close()
+        try:
+            ws.close()
+        except Exception:  # noqa: BLE001 - ignore close errors
+            pass
+
+
+class AgenticInferenceInlineScorer(Scorer, scorer_id="agentic_inference_inline"):
+    """Score agentic inference performance replay outputs without issuing another phase."""
+
+    REQUIRES_EXTRACTOR = False
+    _EXECUTABLE_ALIASES: ClassVar[dict[str, str]] = {
+        "python": "python",
+        "python2": "python",
+        "python3": "python",
+        "py": "python",
+        "pip": "pip",
+        "pip3": "pip",
+        "pytest": "pytest",
+        "pylint": "pylint",
+        "sphinx-build": "sphinx",
+        "sphinx-quickstart": "sphinx",
+        "cython": "cython",
+        "make": "make",
+        "conda": "conda",
+        "cat": "cat",
+        "head": "head",
+        "tail": "tail",
+        "less": "cat",
+        "more": "cat",
+        "wc": "wc",
+        "diff": "diff",
+        "grep": "grep",
+        "egrep": "grep",
+        "fgrep": "grep",
+        "rg": "grep",
+        "ag": "grep",
+        "sed": "sed",
+        "awk": "awk",
+        "gawk": "awk",
+        "tr": "tr",
+        "sort": "sort",
+        "uniq": "uniq",
+        "cut": "cut",
+        "find": "find",
+        "ls": "ls",
+        "locate": "find",
+        "xargs": "xargs",
+        "cp": "cp",
+        "mv": "mv",
+        "rm": "rm",
+        "mkdir": "mkdir",
+        "touch": "touch",
+        "tee": "tee",
+        "source": "source",
+        ".": "source",
+        "which": "which",
+        "alias": "alias",
+        "unset": "unset",
+        "export": "export",
+        "git": "git",
+        "curl": "curl",
+        "wget": "curl",
+        "true": "true",
+        "false": "false",
+        "timeout": "timeout",
+        "date": "date",
+        "apt-get": "apt",
+        "apt": "apt",
+        "yum": "yum",
+    }
+    _SHELL_WRAPPERS: ClassVar[set[str]] = {
+        "env",
+        "time",
+        "nice",
+        "sudo",
+        "exec",
+        "command",
+    }
+    _REPEAT_SUFFIX_RE: ClassVar[re.Pattern[str]] = re.compile(r"__repeat_(\d+)$")
+    _WORKFLOW_CONVERSATION_RE: ClassVar[re.Pattern[str]] = re.compile(r"^sim_\d+$")
+    _INTENT_RE: ClassVar[re.Pattern[str]] = re.compile(
+        r"\bintent:\s*(I\d{3})\b", re.IGNORECASE
+    )
+    _BARE_INTENT_RE: ClassVar[re.Pattern[str]] = re.compile(r"\bI(\d{3})\b")
+    _COMMAND_SEPARATOR_RE: ClassVar[re.Pattern[str]] = re.compile(r"\|\||\||&&|;|\n")
+    _QUOTED_RE: ClassVar[re.Pattern[str]] = re.compile(
+        r"'[^']*'|\"(?:[^\"\\]|\\.)*\"|`[^`]*`"
+    )
+    _ENV_ASSIGNMENT_RE: ClassVar[re.Pattern[str]] = re.compile(
+        r"^[A-Za-z_][A-Za-z0-9_]*="
+    )
+    _PY_VERSION_SUFFIX_RE: ClassVar[re.Pattern[str]] = re.compile(r"\.\d+(\.\d+)?$")
+
+    def __init__(
+        self,
+        dataset_name: str,
+        dataset: Dataset,
+        report_dir: os.PathLike,
+        extractor: type[Extractor] | None = None,
+        ground_truth_column: str | None = None,
+        scores_filename: str = "scores.json",
+    ):
+        """Initialize a scorer for already-issued agentic inference performance events.
+
+        The scorer intentionally does not use an extractor or a single
+        ``ground_truth`` column. Ground truth is derived from expected assistant
+        turns in the loaded ``AgenticInferenceDataset`` dataframe.
+
+        Example:
+            A performance dataset config such as
+            ``accuracy_config.eval_method: agentic_inference_inline`` instantiates this
+            scorer with ``dataset_name="performance"`` so it reads the
+            performance phase's entries from ``sample_idx_map.json``.
+        """
+        if extractor is not None:
+            raise ValueError("AgenticInferenceInlineScorer does not use an extractor")
+        super().__init__(
+            dataset_name=dataset_name,
+            dataset=dataset,
+            report_dir=report_dir,
+            extractor=None,
+            ground_truth_column=ground_truth_column,
+        )
+        self.scores_filename = scores_filename
+
+    def score_single_sample(self, value: str, ground_truth: str) -> float:
+        """Reject single-sample scoring for the conversation-level scorer.
+
+        Agentic inference accuracy depends on neighboring turns and conversation ids,
+        so a single output string cannot be scored in isolation.
+
+        Example:
+            ``score_single_sample("answer", "expected")`` raises
+            ``RuntimeError``; callers should use ``score()``.
+        """
+        raise RuntimeError(
+            "AgenticInferenceInlineScorer scores whole conversations; call score()."
+        )
+
+    def score(self) -> tuple[float | None, int]:
+        """Score completed agentic inference performance outputs.
+
+        The method builds expected assistant turns from the loaded dataset,
+        reads issued turns and model assistant completions from ``events.jsonl``,
+        identifies each conversation as workflow or coding, and averages issued
+        turns with scorable ground truth. Issued turns without a model output
+        contribute score ``0``.
+
+        Examples:
+            A workflow turn with ``intent_codes=["I042"]`` scores ``1.0`` when
+            the model text contains ``intent: I042``.
+
+            A coding turn with expected bash command ``{"cmd": "python test.py"}``
+            is scored by comparing normalized executables such as ``["python"]``
+            against the model's bash tool calls.
+        """
+        if not isinstance(self.dataset, AgenticInferenceDataset):
+            raise TypeError(
+                "AgenticInferenceInlineScorer requires an AgenticInferenceDataset"
+            )
+        assert (
+            self.dataset.dataframe is not None
+        ), f"Dataset {self.dataset} has no dataframe loaded"
+
+        expected = self._expected_assistant_turns()
+        scorable_expected: dict[tuple[str, int], dict[str, Any]] = {}
+        excluded_turns: list[dict[str, Any]] = []
+        for (conversation_id, client_turn), ground_truth in sorted(expected.items()):
+            domain = (
+                "workflow"
+                if self._WORKFLOW_CONVERSATION_RE.match(conversation_id)
+                else "coding"
+            )
+            has_ground_truth = (
+                bool(self._ground_truth_intents(ground_truth))
+                if domain == "workflow"
+                else bool(self._bash_actions(ground_truth))
+            )
+            if has_ground_truth:
+                scorable_expected[(conversation_id, client_turn)] = ground_truth
+            else:
+                excluded_turns.append(
+                    {
+                        "conversation_id": conversation_id,
+                        "turn": ground_truth["_assistant_turn"],
+                        "domain": domain,
+                        "exclude_reason": "no ground truth",
+                    }
+                )
+
+        issued_turns, model_turns = self._issued_and_completed_model_turns(
+            set(expected)
+        )
+        issued_repeats = sorted({key[1] for key in issued_turns})
+        scorable_issued_turns = sorted(
+            key for key in issued_turns if (key[0], key[2]) in scorable_expected
+        )
+
+        total_score = 0.0
+        n_scored = 0
+        domain_totals = {"coding": 0.0, "workflow": 0.0}
+        domain_counts = {"coding": 0, "workflow": 0}
+        per_turn: list[dict[str, Any]] = []
+
+        for conversation_id, repeat_id, client_turn in scorable_issued_turns:
+            ground_truth = scorable_expected[(conversation_id, client_turn)]
+            key = (conversation_id, repeat_id, client_turn)
+            model = model_turns.get(key)
+            domain = (
+                "workflow"
+                if self._WORKFLOW_CONVERSATION_RE.match(conversation_id)
+                else "coding"
+            )
+            row: dict[str, Any] = {
+                "conversation_id": conversation_id,
+                "repeat": repeat_id,
+                "turn": ground_truth["_assistant_turn"],
+                "domain": domain,
+            }
+
+            if model is None:
+                row["missing"] = True
+                model = {"role": "assistant"}
+
+            score: float
+            if domain == "workflow":
+                gt_intents = self._ground_truth_intents(ground_truth)
+                model_intent = self._model_intent(model)
+                row["gt_intents"] = sorted(gt_intents)
+                row["model_intent"] = model_intent
+                score = 1.0 if model_intent in gt_intents else 0.0
+            else:
+                gt_actions = self._bash_actions(ground_truth)
+                model_actions = self._bash_actions(model)
+                row["gt_actions"] = gt_actions
+                row["model_actions"] = model_actions
+                gt_counts = Counter(gt_actions)
+                model_counts = Counter(model_actions)
+                union = sum((gt_counts | model_counts).values())
+                score = sum((gt_counts & model_counts).values()) / union
+
+            row["score"] = round(score, 4)
+            per_turn.append(row)
+            total_score += score
+            n_scored += 1
+            domain_totals[domain] += score
+            domain_counts[domain] += 1
+
+        expected_outputs = set(scorable_issued_turns)
+        observed_outputs = {
+            key
+            for key, model in model_turns.items()
+            if model and key in expected_outputs
+        }
+        missing_outputs = len(expected_outputs - observed_outputs)
+        final_score = round(total_score / n_scored, 4) if n_scored else None
+        result: dict[str, Any] = {
+            "score": final_score,
+            "turns": {
+                "issued": len(issued_turns),
+                "expected": len(expected_outputs),
+                "observed": len(observed_outputs),
+                "missing": missing_outputs,
+                "scored": n_scored,
+            },
+            "domains": {
+                domain: {
+                    "score": round(domain_totals[domain] / domain_counts[domain], 4),
+                    "scored": domain_counts[domain],
+                }
+                for domain in ("coding", "workflow")
+                if domain_counts[domain]
+            },
+            "per_turn": per_turn,
+        }
+        if excluded_turns:
+            result["excluded_turns"] = excluded_turns
+
+        out_path = self.report_dir / self.scores_filename
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(result, indent=2))
+        return final_score, len(issued_repeats)
+
+    def _expected_assistant_turns(self) -> dict[tuple[str, int], dict[str, Any]]:
+        """Return expected assistant turns keyed by source conversation and turn.
+
+        The dataset stores alternating client-side rows and expected assistant
+        rows. This method pairs each ``user`` or ``tool`` row with the following
+        ``assistant`` row and uses the client row's turn as the event-log turn
+        to match.
+
+        Example:
+            Rows ``conv1/user/turn=1`` followed by ``conv1/assistant/turn=2``
+            produce ``expected[("conv1", 1)]`` with ``"_assistant_turn": 2``.
+        """
+        assert (
+            self.dataset.dataframe is not None
+        ), f"Dataset {self.dataset} has no dataframe loaded"
+
+        rows_by_conversation: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for raw_row in self.dataset.dataframe.to_dict("records"):
+            row: dict[str, Any] = {}
+            for field, value in raw_row.items():
+                try:
+                    row[field] = None if value != value else value
+                except (TypeError, ValueError):
+                    row[field] = value
+            conversation_id = row.get("conversation_id")
+            if conversation_id is not None:
+                rows_by_conversation[str(conversation_id)].append(row)
+
+        expected: dict[tuple[str, int], dict[str, Any]] = {}
+        for conversation_id, rows in rows_by_conversation.items():
+            rows.sort(key=lambda row: int(row.get("turn") or 0))
+            for row, next_row in zip(rows, rows[1:], strict=False):
+                if row.get("role") not in ("user", "tool"):
+                    continue
+                if next_row.get("role") != "assistant":
+                    continue
+                try:
+                    client_turn = int(row.get("turn") or 0)
+                    assistant_turn = int(next_row.get("turn") or 0)
+                except (TypeError, ValueError):
+                    continue
+                expected[(conversation_id, client_turn)] = {
+                    **next_row,
+                    "_assistant_turn": assistant_turn,
+                }
+        return expected
+
+    def _issued_and_completed_model_turns(
+        self, expected_keys: set[tuple[str, int]]
+    ) -> tuple[
+        set[tuple[str, int, int]],
+        dict[tuple[str, int, int], dict[str, Any] | None],
+    ]:
+        """Read issued turns and completed model outputs from ``events.jsonl``.
+
+        ISSUED records define the scoring denominator. COMPLETE records are
+        joined by ``sample_uuid`` and may carry ``None`` data for failed turns,
+        which keeps those turns in the denominator with score ``0``.
+
+        Example:
+            ISSUED conversation id ``"conv1__repeat_3"`` and turn ``1`` becomes
+            issued key ``("conv1", 3, 1)``. A matching COMPLETE record with
+            ``data=None`` is returned as ``model_turns[("conv1", 3, 1)] = None``.
+        """
+        events_path = self.report_dir / "events.jsonl"
+        if not events_path.exists():
+            raise FileNotFoundError(f"Events log file not found at {events_path}")
+
+        decoder = msgspec.json.Decoder(type=EventRecord, dec_hook=EventType.decode_hook)
+        uuid_to_key: dict[str, tuple[str, int, int]] = {}
+        completed_by_uuid: dict[str, dict[str, Any] | None] = {}
+        issued_turns: set[tuple[str, int, int]] = set()
+        model_turns: dict[tuple[str, int, int], dict[str, Any] | None] = {}
+        with events_path.open() as f:
+            for line_no, line in enumerate(f, 1):
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                try:
+                    record = decoder.decode(stripped)
+                except msgspec.DecodeError as exc:
+                    logger.warning(
+                        "Skipping malformed event log line %d in %s: %s",
+                        line_no,
+                        events_path,
+                        exc,
+                    )
+                    continue
+                if record.event_type not in (
+                    SampleEventType.ISSUED,
+                    SampleEventType.COMPLETE,
+                ):
+                    continue
+                if record.turn is None or not record.conversation_id:
+                    continue
+
+                conversation_id = record.conversation_id
+                repeat_id = 1
+                repeat_match = self._REPEAT_SUFFIX_RE.search(conversation_id)
+                if repeat_match is not None:
+                    conversation_id = conversation_id[: repeat_match.start()]
+                    repeat_id = int(repeat_match.group(1))
+                turn = int(record.turn)
+                if (conversation_id, turn) not in expected_keys:
+                    continue
+
+                key = (conversation_id, repeat_id, turn)
+                if record.event_type == SampleEventType.ISSUED:
+                    uuid_to_key[record.sample_uuid] = key
+                    issued_turns.add(key)
+                    if record.sample_uuid in completed_by_uuid:
+                        model_turns[key] = completed_by_uuid[record.sample_uuid]
+                    continue
+
+                model: dict[str, Any] | None = None
+                if isinstance(record.data, TextModelOutput):
+                    content, reasoning, tool_calls = record.data.as_message_parts()
+                    model = {
+                        "role": "assistant",
+                        "content": content,
+                        "reasoning_content": reasoning,
+                        "tool_calls": list(tool_calls) if tool_calls else None,
+                    }
+                if model is not None or record.sample_uuid not in completed_by_uuid:
+                    completed_by_uuid[record.sample_uuid] = model
+                if record.sample_uuid in uuid_to_key:
+                    key = uuid_to_key[record.sample_uuid]
+                    if model is not None or key not in model_turns:
+                        model_turns[key] = model
+        return issued_turns, model_turns
+
+    def _ground_truth_intents(self, turn: dict[str, Any]) -> set[str]:
+        """Extract valid workflow intent codes from a ground-truth turn.
+
+        Example:
+            ``{"intent_codes": ["i001", "I002", None]}`` returns
+            ``{"I001", "I002"}``.
+        """
+        codes = turn.get("intent_codes")
+        if not isinstance(codes, list | tuple):
+            return set()
+        return {code.upper() for code in codes if isinstance(code, str) and code}
+
+    def _model_intent(self, turn: dict[str, Any]) -> str | None:
+        """Extract the model's workflow intent code from text fields.
+
+        The explicit ``intent: I123`` form is preferred. If absent, the last bare
+        ``I123`` token in ``reasoning_content`` or ``content`` is used.
+
+        Example:
+            ``{"content": "final intent: I042"}`` returns ``"I042"``.
+        """
+        for field in ("reasoning_content", "content"):
+            text = turn.get(field) or ""
+            if not isinstance(text, str):
+                continue
+            match = self._INTENT_RE.search(text)
+            if match is not None:
+                return match.group(1).upper()
+        for field in ("reasoning_content", "content"):
+            text = turn.get(field) or ""
+            if not isinstance(text, str):
+                continue
+            matches = list(self._BARE_INTENT_RE.finditer(text))
+            if matches:
+                return f"I{matches[-1].group(1)}"
+        return None
+
+    def _bash_actions(self, turn: dict[str, Any]) -> list[str]:
+        """Extract normalized bash executable names from assistant tool calls.
+
+        Only ``bash`` function tool calls are considered. Shell wrappers,
+        leading environment assignments, command paths, and common aliases are
+        normalized before scoring.
+
+        Example:
+            A tool call with ``{"cmd": "CUDA_VISIBLE_DEVICES=0 /usr/bin/python3 -m pytest"}``
+            returns ``["python"]``.
+        """
+        tool_calls = turn.get("tool_calls")
+        if not isinstance(tool_calls, list | tuple):
+            return []
+
+        actions: list[str] = []
+        for tool_call in tool_calls:
+            if not isinstance(tool_call, dict):
+                continue
+            fn = tool_call.get("function") or {}
+            if not isinstance(fn, dict) or fn.get("name") != "bash":
+                continue
+            args = fn.get("arguments")
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except json.JSONDecodeError:
+                    continue
+            if not isinstance(args, dict):
+                continue
+            command = args.get("command") or args.get("cmd")
+            if not isinstance(command, str):
+                continue
+
+            command = self._QUOTED_RE.sub(" ", command)
+            for stage in self._COMMAND_SEPARATOR_RE.split(command):
+                tokens = stage.split()
+                while tokens and (
+                    self._ENV_ASSIGNMENT_RE.match(tokens[0])
+                    or tokens[0] in self._SHELL_WRAPPERS
+                ):
+                    tokens = tokens[1:]
+                if not tokens:
+                    continue
+                executable = tokens[0].rsplit("/", 1)[-1].lower()
+                executable = self._PY_VERSION_SUFFIX_RE.sub("", executable)
+                action = self._EXECUTABLE_ALIASES.get(executable)
+                if action:
+                    actions.append(action)
+        return actions
+
+
 class LiveCodeBenchScorer(Scorer, scorer_id="code_bench_scorer"):
     """Scorer for LiveCodeBench code generation tasks.
 
@@ -383,111 +972,6 @@ class LiveCodeBenchScorer(Scorer, scorer_id="code_bench_scorer"):
         raise RuntimeError(
             "This method should not be called. Use the score() method instead, which invokes lcb_runner."
         )
-
-    def _evaluate_via_websocket(self, codes_dict: dict[str, list[str]]) -> dict | None:
-        """Attempt to evaluate via WebSocket service (synchronous).
-
-        Configured for long-running connections (minutes to hours) with:
-        - Extended timeouts for send/receive operations
-        - Automatic ping/pong for connection keep-alive
-        - Proper error handling for network interruptions
-
-        Returns:
-            dict with evaluation results, or None if connection failed
-        """
-        if websocket is None:
-            print(
-                "Warning: websocket-client package not installed, falling back to subprocess"
-            )
-            print("Install with: pip install websocket-client")
-            return None
-
-        try:
-            # Create WebSocket connection with settings for long-running operations
-            # Timeout is set high for long evaluations (hours), but recv() will return
-            # as soon as data is available (not blocking for the full timeout)
-            ws = websocket.create_connection(
-                self.lcb_websocket_url,
-                timeout=7200,  # 2 hours connection timeout
-                ping_interval=30,  # Send ping every 30 seconds to keep connection alive
-                ping_timeout=10,  # Wait 10 seconds for pong response
-            )
-
-            # Setup progress tracking
-            total_samples = sum(len(codes) for codes in codes_dict.values())
-            pbar = None
-
-            try:
-                # Send evaluation request
-                request = {
-                    "codes_dict": codes_dict,
-                    "timeout_sec": self.timeout,
-                }
-                ws.send(msgspec.json.encode(request).decode("utf-8"))
-
-                print(f"Connected to WebSocket service: {self.lcb_websocket_url}")
-                print(
-                    f"Evaluating {len(codes_dict)} questions ({total_samples} samples)..."
-                )
-                pbar = tqdm(
-                    total=total_samples,
-                    desc="LCB Evaluation",
-                    unit="sample",
-                )
-
-                # Process responses
-                while True:
-                    try:
-                        message = ws.recv()
-                        if not message:
-                            # Connection closed cleanly
-                            break
-
-                        data = msgspec.json.decode(message)
-                        status = data.get("status")
-
-                        if status == "started":
-                            # Initial message, progress bar already initialized
-                            pass
-
-                        elif status == "progress":
-                            completed = data.get("completed_samples", 0)
-                            # Update progress bar to current position
-                            pbar.n = completed
-                            pbar.refresh()
-
-                        elif status == "completed":
-                            pbar.n = total_samples
-                            pbar.refresh()
-                            return data.get("result")
-
-                        elif status == "error":
-                            error_msg = data.get("error", "Unknown error")
-                            print(f"WebSocket evaluation error: {error_msg}")
-                            return None
-
-                    except websocket.WebSocketTimeoutException:
-                        # This shouldn't happen with ping/pong, but handle gracefully
-                        print("WebSocket timeout - connection lost")
-                        return None
-
-                # If we exit the loop without returning, something went wrong
-                return None
-
-            finally:
-                # Ensure progress bar is always closed
-                if pbar:
-                    pbar.close()
-
-                # Close WebSocket connection
-                try:
-                    ws.close()
-                except Exception:
-                    pass  # Ignore errors on close
-
-        except (ConnectionRefusedError, OSError, Exception) as e:
-            print(f"WebSocket connection failed: {e}, falling back to subprocess")
-            return None
 
     def _evaluate_via_subprocess(self, df: pd.DataFrame) -> float | None:
         """Evaluate via subprocess (fallback method).
@@ -631,8 +1115,10 @@ class LiveCodeBenchScorer(Scorer, scorer_id="code_bench_scorer"):
             for _, row in df.iterrows():
                 codes_dict[row["question_id"]].append(row["extracted_code"])
 
-            # Attempt WebSocket evaluation (synchronous)
-            result = self._evaluate_via_websocket(codes_dict)
+            # Attempt WebSocket evaluation (synchronous) via the shared client.
+            result = _lcb_ws_evaluate(
+                self.lcb_websocket_url, dict(codes_dict), self.timeout
+            )
 
             if result is not None:
                 # Successfully evaluated via WebSocket
@@ -716,7 +1202,7 @@ def _match_hierarchical_paths(
         # Pair 1: intersection=3, pred_len=3, true_len=3
         # Pair 2: intersection=2 (stops at "Dress" != "Polo"), pred_len=3, true_len=3
         # HP = (3+2)/(3+3) = 5/6,  HR = (3+2)/(3+3) = 5/6
-        # F1 = 2*(5/6)*(5/6) / (5/6+5/6) = 5/6 ≈ 0.833
+        # F1 = 2*(5/6)*(5/6) / (5/6+5/6) = 5/6 ~ 0.833
 
     Args:
         predicted_path: Categories predicted by the VLM.
@@ -868,7 +1354,7 @@ _DEFAULT_VBENCH_PROJECT_PATH = (
 
 _VBENCH_PROJECT_PATH_ENV = "VBENCH_PROJECT_PATH"
 
-# Filenames in `vbench_standard` mode key on the prompt verbatim — VBench looks
+# Filenames in `vbench_standard` mode key on the prompt verbatim - VBench looks
 # the filename's prompt-prefix up in vbench_full_info.json. We can therefore
 # only reshape unsafe characters, not replace the prompt with a UUID. Slashes
 # and `..` are turned into `_`; null bytes / control chars are rejected.
@@ -910,17 +1396,17 @@ class VBenchScorer(Scorer, scorer_id="vbench"):
     `{prompt}-{index}.mp4`, and VBench looks each prompt up in its
     bundled `vbench_full_info.json`. Prompts are passed through
     `_sanitize_prompt_for_filename` first to keep the staged path inside
-    `staged_dir`; VBench's prompt lookup tolerates the same `/`→`_`
+    `staged_dir`; VBench's prompt lookup tolerates the same `/`->`_`
     replacement applied here.
 
     The scorer reads each sample's video path from response_output (the
     VideoGenAdapter mirrors `video_path` into `TextModelOutput.output`)
-    and the prompt from `dataset.dataframe[ground_truth_column]` — the
+    and the prompt from `dataset.dataframe[ground_truth_column]` - the
     prompt is the VBench input, not a comparison target, so callers should
     set `ground_truth_column: prompt` in `accuracy_config`.
 
     Returns `(None, n_repeats)` when no successful video was produced or
-    when scoring fails to yield a usable per-dimension number — matching
+    when scoring fails to yield a usable per-dimension number - matching
     `LiveCodeBenchScorer` and the `Scorer.score()` contract.
     """
 
@@ -971,7 +1457,7 @@ class VBenchScorer(Scorer, scorer_id="vbench"):
     ) -> Path:
         """Resolve the VBench subproject path.
 
-        Lookup order: explicit ctor arg → ``$VBENCH_PROJECT_PATH`` env var →
+        Lookup order: explicit ctor arg -> ``$VBENCH_PROJECT_PATH`` env var ->
         editable-checkout fallback. The env var lets wheel-installed users
         point at a synced subproject without patching source.
         """
@@ -1050,6 +1536,7 @@ class VBenchScorer(Scorer, scorer_id="vbench"):
                 stderr=subprocess.STDOUT,
                 text=True,
                 timeout=self.subprocess_timeout_s,
+                env=_uv_subproject_env(self.vbench_project_path),
             )
         except subprocess.TimeoutExpired as e:
             partial = (
@@ -1103,7 +1590,7 @@ class VBenchScorer(Scorer, scorer_id="vbench"):
         df = df[df["sample_uuid"].isin(valid_uuids)]
         # Drop failed queries: Scorer.get_outputs() emits "" when record.data
         # is None (workers set response_output=None on error). Passing "" to
-        # _stage_videos would Path("").resolve() → cwd and symlink the repo
+        # _stage_videos would Path("").resolve() -> cwd and symlink the repo
         # root as a "video", corrupting the entire VBench run. Failed samples
         # still count toward the denominator via n_total below.
         n_total = len(df)
@@ -1157,3 +1644,392 @@ class VBenchScorer(Scorer, scorer_id="vbench"):
         per_dim_scores = self._extract_per_dim_scores(results)
         mean_score = float(np.mean(per_dim_scores))
         return mean_score, n_repeats
+
+
+class LegacyMLPerfDeepSeekR1Scorer(Scorer, scorer_id="legacy_mlperf_deepseek_r1"):
+    """MLPerf DeepSeek-R1 combined-subset accuracy scorer.
+
+    The MLPerf DeepSeek-R1 accuracy dataset is an ensemble of five subsets
+    (``aime``, ``math500``, ``gpqa``, ``mmlu_pro``, ``livecodebench``), each
+    parsed and graded differently. The official MLCommons ``eval_accuracy.py``
+    routes each sample by its ``dataset`` column, then reports an aggregate
+    ``exact_match`` (mean per-sample 100/0) plus ``tokens_per_sample``.
+
+    That evaluator pulls in pinned/heavy deps (``transformers`` plus the
+    ``prm800k`` math grader and ``LiveCodeBench`` code executor submodules)
+    that are incompatible with the parent benchmark env, so - exactly like
+    ``VBenchScorer`` - it runs out-of-process via ``uv run --project`` against
+    the isolated subproject at
+    ``src/inference_endpoint/evaluation/legacy_mlperf_deepseek_r1/``
+    (a uv subproject, excluded from the parent wheel). The parent process never
+    imports the evaluator.
+
+    This scorer builds the DataFrame the evaluator expects - ``model_output``
+    (the full raw generation, including the ``<think>`` trace, taken verbatim
+    from the COMPLETE event), ``ground_truth``, ``dataset`` (the subset id),
+    and ``question`` - writes it to a temp parquet, and shells out to
+    ``deepseek_eval_runner.py``. Output token lengths are computed inside the
+    subproject with the DeepSeek tokenizer so ``tokens_per_sample`` matches the
+    MLPerf token accounting.
+
+    Returns ``(exact_match, n_repeats)`` where ``exact_match`` is on the same
+    0-100 scale as the MLPerf golden accuracy (81.3582), or ``(None, n)`` if
+    no successful output was produced or the subprocess fails to yield a
+    usable number - matching the ``Scorer.score()`` contract.
+
+    Reads the subset id from ``dataset.dataframe[subset_column]`` (default
+    column ``dataset``) and the per-sample question from ``question_column``
+    (default ``question``); both are passed through ``accuracy_config.extras``.
+    """
+
+    REQUIRES_EXTRACTOR: ClassVar[bool] = False
+    DEFAULT_SUBPROCESS_TIMEOUT_S: ClassVar[int] = 4 * 60 * 60
+
+    def __init__(
+        self,
+        dataset_name: str,
+        dataset: Dataset,
+        report_dir: os.PathLike,
+        extractor: type[Extractor] | None = None,
+        ground_truth_column: str | None = "ground_truth",
+        subset_column: str = "dataset",
+        question_column: str = "question",
+        tokenizer_path: str = "deepseek-ai/DeepSeek-R1",
+        deepseek_eval_project_path: os.PathLike | None = None,
+        uv_executable: str = "uv",
+        subprocess_timeout_s: int | None = None,
+        lcb_subset: str = "livecodebench",
+        lcb_websocket_port: int | None = 13835,
+        lcb_timeout: int = 60,
+    ):
+        super().__init__(
+            dataset_name=dataset_name,
+            dataset=dataset,
+            report_dir=report_dir,
+            extractor=extractor,
+            ground_truth_column=ground_truth_column,
+        )
+        self.subset_column = subset_column
+        self.question_column = question_column
+        self.tokenizer_path = tokenizer_path
+        self.uv_executable = uv_executable
+        # LiveCodeBench executes untrusted code, which the in-process MLCommons
+        # executor can't sandbox. When a port is set, the livecodebench subset
+        # is graded out-of-band against the lcb-service WebSocket container
+        # (ws://localhost:<port>/evaluate); the rest go through the subprocess.
+        # If the socket is unreachable, livecodebench is left UNSCORED and the
+        # run is marked incomplete (it is never graded in-process). With no port
+        # configured, grading LCB in-process requires an explicit ALLOW_LCB_LOCAL=1.
+        self.lcb_subset = lcb_subset
+        self.lcb_timeout = lcb_timeout
+        self.lcb_websocket_url = (
+            f"ws://localhost:{lcb_websocket_port}/evaluate"
+            if lcb_websocket_port is not None
+            else None
+        )
+        self.project_path = self._resolve_project_path(deepseek_eval_project_path)
+        self.subprocess_timeout_s = (
+            subprocess_timeout_s
+            if subprocess_timeout_s is not None
+            else self.DEFAULT_SUBPROCESS_TIMEOUT_S
+        )
+        runner = self.project_path / "deepseek_eval_runner.py"
+        if not runner.exists():
+            raise FileNotFoundError(
+                f"deepseek_eval_runner.py not found at {runner}. "
+                f"Run `uv sync` and `bash setup_eval.sh` in the accuracy "
+                f"subproject, or set $DEEPSEEK_EVAL_PROJECT_PATH to the "
+                f"synced subproject path."
+            )
+
+    @staticmethod
+    def _resolve_project_path(explicit: os.PathLike | None) -> Path:
+        """Resolve the DeepSeek eval subproject path.
+
+        Lookup order: explicit ctor arg -> ``$DEEPSEEK_EVAL_PROJECT_PATH`` env
+        var -> editable-checkout fallback. The env var lets wheel-installed
+        users point at a synced subproject without patching source.
+        """
+        if explicit is not None:
+            return Path(explicit)
+        from_env = os.environ.get("DEEPSEEK_EVAL_PROJECT_PATH")
+        if from_env:
+            return Path(from_env)
+        return Path(__file__).resolve().parent / "legacy_mlperf_deepseek_r1"
+
+    def score_single_sample(self, value: str, ground_truth: str) -> float:
+        raise RuntimeError(
+            "DeepSeek-R1 scoring requires batch processing; call score() instead."
+        )
+
+    def _run_eval_subprocess(
+        self, input_parquet: Path, out_json: Path, external_subsets: str = ""
+    ) -> None:
+        """Invoke deepseek_eval_runner.py via ``uv run --project <subproject>``.
+
+        Captures stdout+stderr into ``report_dir/deepseek_eval_subprocess.log``
+        and, on non-zero exit, raises with the tail of the captured log so the
+        real failure (missing submodule, tokenizer download, code-exec error)
+        isn't lost. ``external_subsets`` (comma-separated) are tokenized but not
+        graded by the runner - the caller grades them out-of-band.
+        """
+        cmd = [
+            self.uv_executable,
+            "run",
+            "--project",
+            str(self.project_path),
+            "python",
+            str(self.project_path / "deepseek_eval_runner.py"),
+            "--input",
+            str(input_parquet),
+            "--output",
+            str(out_json),
+            "--tokenizer",
+            self.tokenizer_path,
+        ]
+        if external_subsets:
+            cmd += ["--external-subsets", external_subsets]
+        log_path = self.report_dir / "deepseek_eval_subprocess.log"
+        try:
+            completed = subprocess.run(
+                cmd,
+                check=False,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=self.subprocess_timeout_s,
+                env=_uv_subproject_env(self.project_path),
+            )
+        except subprocess.TimeoutExpired as e:
+            partial = (
+                e.stdout
+                if isinstance(e.stdout, str)
+                else (e.stdout or b"").decode("utf-8", errors="replace")
+            )
+            log_path.write_text(partial)
+            raise RuntimeError(
+                f"DeepSeek eval subprocess timed out after "
+                f"{self.subprocess_timeout_s}s; see {log_path} for partial output."
+            ) from e
+
+        log_path.write_text(completed.stdout or "")
+        if completed.returncode != 0:
+            tail = "\n".join((completed.stdout or "").splitlines()[-50:])
+            raise RuntimeError(
+                f"DeepSeek eval subprocess exited with code "
+                f"{completed.returncode}; full log at {log_path}. "
+                f"Last 50 lines:\n{tail}"
+            )
+
+    def _score_lcb_via_container(self, lcb_df: pd.DataFrame) -> tuple[int, int] | None:
+        """Grade the livecodebench rows against the lcb-service WebSocket.
+
+        Extracts the python block from each ``model_output`` and keys it by
+        question id (the ``ground_truth``), then evaluates via the container.
+        Returns ``(passed, total)`` or None if the service is unreachable (so
+        score() can fall back to the in-process path).
+        """
+        if self.lcb_websocket_url is None:
+            raise ValueError(
+                "lcb_websocket_url must be configured to score LCB via container"
+            )
+        codes_dict: dict[str, list[str]] = defaultdict(list)
+        for _, row in lcb_df.iterrows():
+            code = PythonCodeExtractor.extract(
+                str(row["model_output"]), default="# FAILED TO EXTRACT CODE"
+            )
+            codes_dict[str(row["ground_truth"])].append(
+                code or "# FAILED TO EXTRACT CODE"
+            )
+        result = _lcb_ws_evaluate(
+            self.lcb_websocket_url, dict(codes_dict), self.lcb_timeout
+        )
+        if result is None:
+            return None
+        total_samples = int(result.get("total_samples", 0))
+        per_problem = result.get("results", {})
+        if not per_problem and total_samples:
+            logger.error(
+                "lcb-service evaluated %d samples but returned an empty summary",
+                total_samples,
+            )
+            return None
+        passed = sum(sum(code_passed) for code_passed in per_problem.values())
+        return int(passed), total_samples
+
+    def score(self) -> tuple[float | None, int]:
+        df = self.get_outputs()
+        valid_uuids = self.sample_index_map.keys()
+        df = df[df["sample_uuid"].isin(valid_uuids)]
+
+        n_total = len(df)
+        num_samples = self.dataset.num_samples()
+        n_repeats = n_total // num_samples if num_samples else 0
+
+        # Failed queries log "" (Scorer.get_outputs() emits "" when
+        # record.data is None). They are graded as incorrect by the evaluator
+        # but still count toward the denominator, so keep them in.
+        if df.empty:
+            logger.warning(
+                "LegacyMLPerfDeepSeekR1Scorer: no outputs to score; returning None score."
+            )
+            self.complete = False
+            return None, n_repeats
+
+        df = df.apply(self.match_sample_index, axis=1)
+        order = df["sample_index"].to_numpy().astype(int)
+
+        ref = self.dataset.dataframe
+        if ref is None:
+            raise RuntimeError(f"Dataset {self.dataset} has no dataframe loaded")
+        for col in (self.ground_truth_column, self.subset_column, self.question_column):
+            if col not in ref.columns:
+                raise ValueError(
+                    f"Column {col!r} not found in dataset {self.dataset}; "
+                    f"available: {list(ref.columns)}"
+                )
+
+        eval_df = pd.DataFrame(
+            {
+                "model_output": df["output"].astype(str).to_numpy(),
+                "ground_truth": ref[self.ground_truth_column].to_numpy()[order],
+                "dataset": ref[self.subset_column].to_numpy()[order],
+                "question": ref[self.question_column].to_numpy()[order],
+            }
+        )
+
+        scratch = self.report_dir / "deepseek_eval"
+        scratch.mkdir(parents=True, exist_ok=True)
+        input_parquet = scratch / f"{self.dataset_name}_outputs.parquet"
+        out_json = scratch / f"{self.dataset_name}_results.json"
+        eval_df.to_parquet(input_parquet, index=False)
+
+        n_lcb = int((eval_df["dataset"].astype(str) == self.lcb_subset).sum())
+        use_container = self.lcb_websocket_url is not None and n_lcb > 0
+
+        if not use_container:
+            # Refuse to grade untrusted livecodebench code in-process without the
+            # sandboxed container, unless explicitly opted in. (n_lcb == 0 is
+            # safe: no LCB rows means no untrusted code to execute.)
+            if n_lcb > 0 and os.environ.get("ALLOW_LCB_LOCAL") != "1":
+                raise RuntimeError(
+                    "livecodebench rows present but no lcb-service container is "
+                    "configured (set lcb_websocket_port). Refusing to execute "
+                    "untrusted model-generated code in-process; configure the "
+                    "container, or set ALLOW_LCB_LOCAL=1 to override."
+                )
+            # No LCB rows (or explicit opt-in): grade every subset in-process.
+            self._run_eval_subprocess(input_parquet, out_json)
+            results = msgspec.json.decode(out_json.read_bytes())
+            exact_match = results.get("exact_match")
+            if exact_match is None:
+                logger.warning(
+                    "LegacyMLPerfDeepSeekR1Scorer: subprocess produced no exact_match; "
+                    "returning None score. See %s",
+                    out_json,
+                )
+                self.complete = False
+                return None, n_repeats
+            # The runner reports complete=False if any subset failed to grade.
+            self.complete = bool(results.get("complete", True))
+            return float(exact_match), n_repeats
+
+        # Grade the text subsets in the subprocess and the livecodebench subset
+        # against the lcb-service container, then merge into one 5-subset number
+        # so no follow-up scorer is needed.
+        self._run_eval_subprocess(
+            input_parquet, out_json, external_subsets=self.lcb_subset
+        )
+        results = msgspec.json.decode(out_json.read_bytes())
+        per_dataset = results.get("per_dataset", {})
+
+        # Aggregate every text subset the runner graded. Track whether any
+        # failed so a partial run is never reported as a complete score.
+        text_correct = 0
+        text_n = 0
+        text_complete = True
+        for sub, d in per_dataset.items():
+            if sub == self.lcb_subset:
+                continue
+            em = d.get("exact_match")
+            n = int(d.get("num_samples", 0))
+            if em is None:  # subset failed to grade (status != "ok")
+                text_complete = False
+                continue
+            # `em` is a per-subset mean of strictly-binary (0/100) per-sample
+            # scores, so round(em/100*n) recovers the exact integer correct
+            # count. If a future MLCommons subset emits fractional/partial
+            # credit, sum raw per-sample counts from the runner instead.
+            text_correct += round(em / 100.0 * n)
+            text_n += n
+
+        lcb_scored = self._score_lcb_via_container(
+            eval_df[eval_df["dataset"].astype(str) == self.lcb_subset]
+        )
+        # Preserve the runner's external LCB entry (it carries tokens_per_sample).
+        lcb_entry = dict(per_dataset.get(self.lcb_subset, {}))
+        if lcb_scored is None:
+            # Container unreachable: leave livecodebench UNSCORED. Do NOT re-run
+            # the in-process executor - it can't sandbox runaway model code and
+            # needs a ~21 GB dataset load. Launch the lcb-service container (see
+            # src/inference_endpoint/evaluation/livecodebench/README.md) and re-run.
+            logger.warning(
+                "LegacyMLPerfDeepSeekR1Scorer: lcb-service unreachable at %s; livecodebench "
+                "left unscored (reporting %d text samples only, run marked "
+                "incomplete). Launch the lcb-service container (see "
+                "evaluation/livecodebench/README.md) and re-run to score LCB.",
+                self.lcb_websocket_url,
+                text_n,
+            )
+            lcb_passed = 0
+            lcb_total = 0
+            lcb_entry["exact_match"] = None
+            lcb_entry["status"] = "unscored"
+            lcb_ok = False
+        else:
+            lcb_passed, lcb_total = lcb_scored
+            lcb_entry["exact_match"] = (
+                100.0 * lcb_passed / lcb_total if lcb_total else None
+            )
+            lcb_entry["num_samples"] = lcb_total
+            lcb_entry["status"] = "lcb-service"
+            lcb_ok = lcb_total > 0
+
+        total_n = text_n + lcb_total
+        combined = 100.0 * (text_correct + lcb_passed) / total_n if total_n else None
+
+        # The headline number is only valid if it covers every issued sample;
+        # a failed text subset or a diverging LCB count silently shrinks total_n.
+        expected_n = len(eval_df)
+        complete = bool(
+            combined is not None and text_complete and lcb_ok and total_n == expected_n
+        )
+        if combined is not None and lcb_ok and total_n != expected_n:
+            logger.warning(
+                "LegacyMLPerfDeepSeekR1Scorer: scored %d of %d samples (LCB count diverged "
+                "from the issued rows); marking the result incomplete.",
+                total_n,
+                expected_n,
+            )
+
+        self.complete = complete
+        per_dataset[self.lcb_subset] = lcb_entry
+        results["per_dataset"] = per_dataset
+        results["exact_match"] = combined
+        results["evaluated_samples"] = total_n
+        results["complete"] = complete
+        out_json.write_bytes(msgspec.json.encode(results))
+        logger.info(
+            "LegacyMLPerfDeepSeekR1Scorer: combined exact_match=%s (text %d/%d + LCB %d/%d, complete=%s)",
+            f"{combined:.4f}" if combined is not None else "None",
+            text_correct,
+            text_n,
+            lcb_passed,
+            lcb_total,
+            complete,
+        )
+
+        if combined is None:
+            return None, n_repeats
+        return float(combined), n_repeats

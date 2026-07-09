@@ -57,6 +57,39 @@ The config uses `api_type: openai_completions`, which routes to `/v1/completions
 token IDs (`prompt: [id, id, ...]`). This applies the Harmony format client-side and bypasses vLLM's
 chat template, producing the same token sequence as the SGLang path and matching SGLang accuracy scores.
 
+#### MLPerf per-dataset output budgets
+
+The MLPerf Inference gpt-oss-120b rules use **different max output lengths** for the performance and
+accuracy phases (see the
+[MLCommons reference](https://github.com/mlcommons/inference/tree/master/language/gpt-oss-120b)):
+
+| Phase       | `max_output_len` | `reasoning_effort` |
+| ----------- | ---------------- | ------------------ |
+| performance | 10240            | low                |
+| accuracy    | 32768            | high               |
+
+[`vllm_gptoss_120b_per_dataset_osl_example.yaml`](vllm_gptoss_120b_per_dataset_osl_example.yaml)
+expresses this in a single run using per-dataset `generation_config_override`: the global
+`model_params.max_new_tokens` sets the perf budget (10240) and each accuracy dataset overrides it to
+32768 so the harmony CoT is not truncated before the `assistantfinal` answer. This config sets only the
+output budget: `reasoning_effort` is not a YAML field. With `api_type: openai_completions` the Harmony
+format is applied client-side, so reasoning effort is encoded into the prompt tokens — pre-tokenized in
+the perf dataset, and fixed at `high` by the adapter's `Harmonize()` for the accuracy datasets.
+
+> **Reasoning effort caveat.** This config controls only the output budget, not reasoning effort. The
+> accuracy datasets carry text prompts, so the client-side `Harmonize()` encodes them at its default
+> `reasoning_effort=high` — matching the MLPerf accuracy setting. The perf dataset is consumed
+> pre-tokenized (`parser.input_tokens`), so `Harmonize()` is skipped and its reasoning effort is fixed at
+> parquet-build time (the perf parquet is supplied by the LLM task-force — see "Getting the Dataset").
+> MLPerf's perf phase uses `reasoning_effort=low`, so a perf-compliant run depends on that parquet being
+> built with `low`; it is not something this client YAML (or the repo's default `Harmonize()`, which
+> encodes `high`) can set. Treat this example as a demonstration of the per-dataset OSL split.
+
+```bash
+uv run inference-endpoint benchmark from-config \
+  -c examples/04_GPTOSS120B_Example/vllm_gptoss_120b_per_dataset_osl_example.yaml
+```
+
 ### vllm bench serve (Reference Comparison)
 
 `vllm bench serve` supports custom datasets only in `jsonl` format. To convert the parquet file:
