@@ -40,6 +40,15 @@ from pathlib import Path
 from typing import Any
 
 from ..config.ruleset_registry import get_ruleset
+from ..evaluation.accuracy_results import (
+    ACCURACY_METRIC_KEYS as _ACCURACY_METRIC_KEYS,
+)
+from ..evaluation.accuracy_results import (
+    find_accuracy_breakdown as _find_accuracy_score,
+)
+from ..evaluation.accuracy_results import (
+    to_float as _to_float,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -51,12 +60,6 @@ try:
 except ImportError:
     matplotlib = None  # type: ignore[assignment]
     plt = None  # type: ignore[assignment]
-
-# Accuracy: ruleset golden-metric name -> key in the scorer's breakdown block.
-_ACCURACY_METRIC_KEYS = {
-    "bfcl_overall_accuracy": "overall_accuracy",
-    "bfcl_normalized_accuracy": "normalized_single_turn_score",
-}
 
 # Latency-style summary blocks are nanoseconds; report in seconds.
 _NS_TO_S = 1e-9
@@ -94,39 +97,19 @@ class RunArtifacts:
     distributions: dict[str, Distribution] = field(default_factory=dict)
 
 
-def _to_float(value: Any) -> float | None:
-    """Coerce a metric to float (older artifacts stored strings like "86.23")."""
-    if value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _find_accuracy_score(results: dict[str, Any]) -> dict[str, Any] | None:
-    accuracy_scores = results.get("accuracy_scores")
-    if not isinstance(accuracy_scores, dict):
-        return None
-    for entry in accuracy_scores.values():
-        if not isinstance(entry, dict):
-            continue
-        # Prefer the structured breakdown; fall back to score-as-dict (older runs).
-        for block in (entry.get("breakdown"), entry.get("score")):
-            if isinstance(block, dict) and "overall_accuracy" in block:
-                return block
-    return None
-
-
 def extract_accuracy(results: dict[str, Any]) -> AccuracyBreakdown | None:
     """Pull the accuracy breakdown from a BFCL ``results.json`` dict."""
     score = _find_accuracy_score(results)
     if score is None:
         return None
     overall = _to_float(score.get("overall_accuracy"))
-    normalized = _to_float(score.get("normalized_single_turn_score"))
-    if overall is None or normalized is None:
+    if overall is None:
         return None
+    # BFCL carries a distinct normalized single-turn score; DeepSeek-R1 / gpt-oss
+    # breakdowns don't, so fall back to the overall accuracy for those.
+    normalized = _to_float(score.get("normalized_single_turn_score"))
+    if normalized is None:
+        normalized = overall
 
     def _floats(block: Any) -> dict[str, float]:
         if not isinstance(block, dict):

@@ -45,6 +45,7 @@ from inference_endpoint.commands.benchmark.execute import (
     _PerfPhaseTimeout,
     _post_profile,
     _render_profile_status,
+    _resolve_accuracy_components,
     _run_benchmark_async,
     _write_profiling_section,
     setup_benchmark,
@@ -76,7 +77,7 @@ from inference_endpoint.config.utils import cli_error_formatter as _error_format
 from inference_endpoint.core.types import QueryResult
 from inference_endpoint.dataset_manager.dataset import Dataset
 from inference_endpoint.endpoint_client.config import HTTPClientConfig
-from inference_endpoint.evaluation.scoring import Scorer
+from inference_endpoint.evaluation.scoring import GptOss120bAccuracyScorer, Scorer
 from inference_endpoint.exceptions import InputValidationError, SetupError
 from inference_endpoint.load_generator.sample_order import create_sample_order
 from inference_endpoint.load_generator.session import PhaseType
@@ -881,6 +882,35 @@ class TestAccuracyOnlyDatasetLoading:
         assert len(acc_datasets) == 1
         # Both the perf and accuracy datasets are loaded.
         assert mock_create.call_count == 2
+
+
+class TestGptOss120bCompositeExample:
+    """The composite gpt-oss-120b example resolves to the single-entry path.
+
+    A config that picks the composite ``gptoss_120b_accuracy`` dataset yields one
+    results.json entry and needs no extractor (the scorer routes per-subset
+    internally).
+    """
+
+    EXAMPLE = (
+        Path(__file__).resolve().parents[3]
+        / "examples/04_GPTOSS120B_Example/gptoss_120b_accuracy_example.yaml"
+    )
+
+    @pytest.mark.unit
+    def test_example_resolves_to_composite_singleton(self):
+        config = BenchmarkConfig.from_yaml_file(self.EXAMPLE)
+        entry = next(d for d in config.datasets if d.name == "gptoss_120b_accuracy")
+        acc_cfg = entry.accuracy_config
+
+        # No extractor required; the scorer routes per-subset internally.
+        scorer_cls, extractor_cls = _resolve_accuracy_components(
+            "gptoss_120b_accuracy", acc_cfg
+        )
+        assert scorer_cls is GptOss120bAccuracyScorer
+        assert extractor_cls is None
+        # extras forward the lcb-service port to the scorer ctor.
+        assert acc_cfg.extras == {"lcb_websocket_port": 13835}
 
 
 class TestBuildPhases:

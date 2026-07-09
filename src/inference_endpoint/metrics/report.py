@@ -152,6 +152,13 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
     # caller supplies them rather than reading them from the metrics snapshot.
     seeds: dict[str, int] | None = None
 
+    # Rolled-up accuracy breakdowns {workload_name: breakdown}, attached after
+    # scoring in finalize_benchmark. Accuracy is not in the metrics snapshot, so
+    # from_snapshot leaves this None; perf-only runs never set it. Each breakdown
+    # is the shared BFCL shape (overall_accuracy / subset_scores / total_samples,
+    # percentages in 0-100). Display-only.
+    accuracy: dict[str, Any] | None = None
+
     @classmethod
     def from_snapshot(
         cls,
@@ -325,6 +332,20 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
 
         if (tps := self.tps) is not None:
             fn(f"TPS: {tps:.2f}{newline}")
+        else:
+            fn(f"TPS: N/A{newline}")
+
+        if self.accuracy:
+            fn(f"Accuracy:{newline}")
+            for name, bd in self.accuracy.items():
+                overall = bd.get("overall_accuracy")
+                total = bd.get("total_samples")
+                head = f"{overall:.2f}%" if overall is not None else "N/A"
+                fn(f"  {name}: {head} (n={total}){newline}")
+                for sub, sub_score in (bd.get("subset_scores") or {}).items():
+                    fn(f"    {sub}: {sub_score:.2f}%{newline}")
+                if bd.get("complete") is False:
+                    fn(f"    (incomplete){newline}")
 
         if summary_only:
             fn(f"----------------- End of Summary -----------------{newline}")

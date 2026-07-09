@@ -147,6 +147,7 @@ class ScorerMethod(str, Enum):
     VBENCH = "vbench"
     BFCL_V4 = "bfcl_v4"
     LEGACY_MLPERF_DEEPSEEK_R1 = "legacy_mlperf_deepseek_r1"
+    GPTOSS_120B_ACCURACY = "gptoss_120b_accuracy"
 
 
 class AuditTestId(str, Enum):

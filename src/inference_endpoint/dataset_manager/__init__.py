@@ -30,6 +30,7 @@ except ImportError:
     BFCLv4 = None  # type: ignore[assignment,misc]
 from .predefined.cnndailymail import CNNDailyMail
 from .predefined.gpqa import GPQA
+from .predefined.gptoss_120b_accuracy import GptOss120bAccuracy
 from .predefined.legacy_mlperf_deepseek_r1 import LegacyMLPerfDeepSeekR1
 from .predefined.livecodebench import LiveCodeBench
 from .predefined.open_orca import OpenOrca
@@ -64,6 +65,7 @@ __all__ = [
     "AIME25",
     "LegacyMLPerfDeepSeekR1",
     "GPQA",
+    "GptOss120bAccuracy",
     "OpenOrca",
     "LiveCodeBench",
     "CNNDailyMail",

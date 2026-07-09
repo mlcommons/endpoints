@@ -44,6 +44,7 @@ from urllib.parse import urljoin
 
 import msgspec
 import msgspec.json
+import msgspec.structs
 from huggingface_hub import model_info
 from tqdm import tqdm
 from transformers.utils import logging as transformers_logging
@@ -1219,40 +1220,16 @@ def _salvage_tmpfs(report_dir: Path, tmpfs_dir: Path) -> None:
         logger.debug(f"Copied {src_events} -> {dst_events}")
 
 
-def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
-    """Score accuracy, aggregate results, write JSON."""
-    config = ctx.config
-    result = bench.session
-    collector = bench.collector
-    report = bench.report
+def _score_accuracy(ctx: BenchmarkContext, result: SessionResult) -> dict[str, Any]:
+    """Score each accuracy dataset into its own results.json entry.
 
-    # Display report if available (from MetricsAggregator pub/sub snapshot).
-    # result_summary.json is the self-complete machine-readable report (carries
-    # qps/tps/seeds via Report.to_json); report.txt is the full human-readable
-    # dump (histograms + percentiles); the console log shows just the summary.
-    if report is not None:
-        report.display(fn=lambda s: logger.info(s), summary_only=True)
-        report.to_json(save_to=ctx.report_dir / "result_summary.json")
-
-        report_txt = ctx.report_dir / "report.txt"
-        with report_txt.open("w") as f:
-            report.display(fn=lambda s: print(s, file=f))
-            if bench.profiling is not None:
-                _write_profiling_section(f, bench.profiling)
-        logger.info("Report written to %s", report_txt)
-
-    # Sibling profiling.json — kept separate so Report stays a pure
-    # snapshot-derived struct.
-    if bench.profiling is not None:
-        (ctx.report_dir / "profiling.json").write_text(
-            json.dumps(bench.profiling, indent=2)
-        )
-
-    # Write scoring artifacts + copy event log from tmpfs to disk
-    _write_scoring_artifacts(ctx, result, bench.tmpfs_dir)
-
-    # Accuracy scoring
+    Every eval_config is scored independently; there is no cross-dataset
+    consolidation. A scorer that returns a ``score_breakdown()`` attaches it to
+    its entry (e.g. the composite ``gptoss_120b_accuracy`` scorer); scorers that
+    return ``None`` (e.g. ``PassAt1Scorer``) yield a bare ``score`` entry.
+    """
     accuracy_scores: dict[str, Any] = {}
+
     for eval_cfg in ctx.eval_configs:
         try:
             scorer_instance = eval_cfg.scorer(
@@ -1282,8 +1259,8 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
             "ground_truth_column": eval_cfg.ground_truth_column,
             "score": score,
             # False when the scorer produced only a partial headline (e.g.
-            # LegacyMLPerfDeepSeekR1Scorer when the lcb-service container was unreachable),
-            # so a partial number is never mistaken for a complete one.
+            # LegacyMLPerfDeepSeekR1Scorer when the lcb-service container was
+            # unreachable), so a partial number is never mistaken for a complete one.
             "complete": scorer_instance.complete,
         }
         breakdown = scorer_instance.score_breakdown()
@@ -1295,12 +1272,71 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
             f"({n_repeats} repeats, complete={scorer_instance.complete})"
         )
 
+    return accuracy_scores
+
+
+def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
+    """Score accuracy, aggregate results, write JSON."""
+    config = ctx.config
+    result = bench.session
+    collector = bench.collector
+    report = bench.report
+
+    # Sibling profiling.json — kept separate so Report stays a pure
+    # snapshot-derived struct.
+    if bench.profiling is not None:
+        (ctx.report_dir / "profiling.json").write_text(
+            json.dumps(bench.profiling, indent=2)
+        )
+
+    # Write scoring artifacts + copy event log from tmpfs to disk (scorers read
+    # sample_idx_map.json + events.jsonl from here).
+    _write_scoring_artifacts(ctx, result, bench.tmpfs_dir)
+
+    # Accuracy scoring (one entry per accuracy dataset).
+    # Scoring runs before the report is written so the accuracy headline can be
+    # attached, but the report is written in the `finally` below so a scoring
+    # failure (e.g. lcb-service unreachable, missing eval subproject, bad extras)
+    # still leaves the perf run's result_summary.json / report.txt on disk
+    # instead of discarding them — then the exception propagates as before.
+    accuracy_scores: dict[str, Any] = {}
+    try:
+        accuracy_scores = _score_accuracy(ctx, result)
+    finally:
+        # Attach accuracy breakdowns so result_summary.json, the console summary,
+        # and report.txt all carry the headline from this one scoring pass
+        # (absent on a scoring failure — accuracy_scores stays {}).
+        if report is not None:
+            accuracy_for_report = {
+                name: entry["breakdown"]
+                for name, entry in accuracy_scores.items()
+                if "breakdown" in entry
+            }
+            if accuracy_for_report:
+                report = msgspec.structs.replace(report, accuracy=accuracy_for_report)
+
+        # Display report if available (from MetricsAggregator pub/sub snapshot).
+        # result_summary.json is the self-complete machine-readable report
+        # (carries qps/tps/seeds/accuracy via Report.to_json); report.txt is the
+        # full human-readable dump; the console log shows the summary.
+        if report is not None:
+            report.display(fn=lambda s: logger.info(s), summary_only=True)
+            report.to_json(save_to=ctx.report_dir / "result_summary.json")
+
+            report_txt = ctx.report_dir / "report.txt"
+            with report_txt.open("w") as f:
+                report.display(fn=lambda s: print(s, file=f))
+                if bench.profiling is not None:
+                    _write_profiling_section(f, bench.profiling)
+            logger.info("Report written to %s", report_txt)
+
     # Report metrics: prefer Report from MetricsSnapshot, fall back to SessionResult
     if report is not None and report.duration_ns is not None:
         perf_elapsed = report.duration_ns / 1e9
         total_issued = report.n_samples_issued
         n_errors = report.n_samples_failed
         qps = report.qps or 0.0
+        tps = report.tps
     else:
         perf = result.perf_results[0] if result.perf_results else None
         if perf:
@@ -1311,6 +1347,8 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
             total_issued = 0
         n_errors = len(collector.errors)
         qps = total_issued / perf_elapsed if perf_elapsed > 0 else 0.0
+        # No OSL source outside the metrics snapshot, so TPS is unknown here.
+        tps = None
 
     logger.info(f"Completed in {perf_elapsed:.1f}s")
     if ctx.accuracy_only:
@@ -1345,6 +1383,7 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
                 "failed": n_errors,
                 "elapsed_time": perf_elapsed,
                 "qps": qps,
+                "tps": tps,
             },
         }
         if accuracy_scores:
