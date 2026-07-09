@@ -447,6 +447,30 @@ class TestBenchmarkSession:
         assert session._current_phase_stopped is True
 
     @pytest.mark.asyncio
+    async def test_drain_respects_per_phase_timeout(self, caplog):
+        """PhaseConfig.drain_timeout bounds the drain wait for stuck samples."""
+        loop = asyncio.get_running_loop()
+        publisher = FakePublisher()
+
+        issuer = FakeIssuer()
+        issuer._loop = loop
+        issuer._auto_respond = False  # samples issue but never complete
+
+        session = BenchmarkSession(issuer, publisher, loop)
+        phases = [
+            PhaseConfig(
+                "perf",
+                _make_settings(n_samples=2),
+                FakeDataset(2),
+                drain_timeout=0.1,
+            ),
+        ]
+
+        result = await asyncio.wait_for(session.run(phases), timeout=10.0)
+        assert result is not None
+        assert "Drain timed out after" in caplog.text
+
+    @pytest.mark.asyncio
     async def test_on_sample_complete_callback(self):
         loop = asyncio.get_running_loop()
         issuer = FakeIssuer()
