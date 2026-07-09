@@ -1,0 +1,9 @@
+# Third-party evaluator dir. eval_accuracy.py is vendored (committed); the
+# prm800k / LiveCodeBench submodules are fetched by setup_eval.sh (ignored).
+mlperf_eval/*
+!mlperf_eval/eval_accuracy.py
+# uv virtualenv
+.venv/
+
+# Generated LiveCodeBench test cases + results (score_livecodebench.sh).
+lcb_datasets/

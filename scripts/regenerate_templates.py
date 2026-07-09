@@ -280,9 +280,9 @@ def _add_comments(text: str, comments: dict[str, str]) -> str:
     for key, comment in sorted(comments.items(), key=lambda x: -len(x[0])):
         text = re.sub(
             rf"^(\s*{re.escape(key)}.*)$",
-            lambda m, c=comment: m.group(0)
-            if "#" in m.group(0)
-            else f"{m.group(0)}  {c}",
+            lambda m, c=comment: (
+                m.group(0) if "#" in m.group(0) else f"{m.group(0)}  {c}"
+            ),
             text,
             count=0,
             flags=re.MULTILINE,
@@ -325,6 +325,15 @@ def _build_full(model_cls: type[BenchmarkConfig], overrides: dict) -> dict:
 
     if overrides:
         data = _deep_merge(data, overrides)
+
+    # Mirror LoadPattern's model_serializer: use_legacy_loadgen_qps_metrics
+    # applies only to poisson, so drop it from other patterns' templates.
+    # TODO(vir): remove this prune when use_legacy_loadgen_qps_metrics is removed.
+    settings = data.get("settings")
+    if isinstance(settings, dict):
+        load_pattern = settings.get("load_pattern")
+        if isinstance(load_pattern, dict) and load_pattern.get("type") != "poisson":
+            load_pattern.pop("use_legacy_loadgen_qps_metrics", None)
 
     # Resolve streaming AUTO → off/on (mirrors schema validator)
     test_type = data.get("type")

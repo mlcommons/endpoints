@@ -56,6 +56,43 @@ MLPerfDeepseekR1 = _Dataset(
     size=4388,
 )
 
+# --- Edge-Agentic (BFCL v4) benchmark datasets ---
+
+BFCLv4SingleTurn = _Dataset(
+    description=(
+        "BFCL v4 single-turn function-calling accuracy set (non_live, live, "
+        "hallucination), per-category sampled to a stable ~995-sample point "
+        "estimate. This is the gated accuracy workload for the Edge-Agentic "
+        "benchmark."
+    ),
+    size=995,
+    metadata={
+        "categories": ["non_live", "live", "hallucination"],
+        "category_sample_pct": {"non_live": 62, "live": 10, "hallucination": 10},
+        "subset_floor": 25,
+        "max_seq_len": 32768,
+        "scorer": "bfcl_v4",
+    },
+)
+
+AgenticCodingPerf = _Dataset(
+    description=(
+        "Recorded multi-turn agentic-coding trajectories (SWE-bench-style) "
+        "replayed as the Edge-Agentic performance workload. The dataset is both "
+        "the performance workload and its own ground truth for the inline online "
+        "checker (multiset IoU of executables). Sized so no conversation "
+        "overflows a 32K served context (peak ISL ~23.5K)."
+    ),
+    size=1007,
+    metadata={
+        "conversations": 20,
+        "generated_turns": 1007,
+        "peak_isl": 23456,
+        "max_seq_len": 32768,
+        "scorer": "agentic_inference_inline",
+    },
+)
+
 
 # Note this isn't completely robust, but will prevent simple cases of defining new instances
 def _disallow_instantiation(cls, *args, **kwargs):

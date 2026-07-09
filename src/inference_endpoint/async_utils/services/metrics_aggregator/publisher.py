@@ -88,7 +88,7 @@ class MetricsPublisher:
         self._final_snapshot_path = final_snapshot_path
         self._tick_task: asyncio.Task | None = None
         self._closed = False
-        # publish_final is idempotent: the SIGTERM/SIGINT handler in
+        # publish_final is idempotent: the SIGTERM handler in
         # __main__.py and the aggregator's ENDED-driven path can both
         # call it; the second call must not re-publish or re-write.
         self._finalized = False
@@ -107,10 +107,10 @@ class MetricsPublisher:
 
         ``get_runtime_state`` returns ``(state, n_pending_tasks)`` for the
         current moment: the aggregator's session state (``LIVE`` or
-        ``DRAINING``) and the count of in-flight async tokenize tasks. The
-        callable is invoked once per tick and the values are plumbed into
-        the published snapshot. ``COMPLETE`` is emitted only by
-        ``publish_final``, never by the tick task.
+        ``DRAINING``) and the count of pending tokenizations. The callable is
+        invoked once per tick and the values are plumbed into the published
+        snapshot. ``COMPLETE`` is emitted only by ``publish_final``, never by
+        the tick task.
 
         Idempotent on the tick-task slot: a second call (e.g. from a
         spurious duplicate ``STARTED`` event or a buggy replay producer)
@@ -166,12 +166,12 @@ class MetricsPublisher:
     ) -> None:
         """Write the final snapshot to disk and signal pub/sub consumers.
 
-        ``n_pending_tasks`` is the count of in-flight async tokenize tasks
-        at finalization time. Drain timeout is detected by Report consumers
-        as ``state == COMPLETE and n_pending_tasks > 0``.
+        ``n_pending_tasks`` is the count of buffered tokenizations not yet
+        recorded at finalization time. An incomplete drain is detected by
+        Report consumers as ``state == COMPLETE and n_pending_tasks > 0``.
 
         ``interrupted=True`` is set by the signal handler in __main__.py
-        when SIGTERM/SIGINT triggers shutdown before ``ENDED`` arrived;
+        when SIGTERM triggers shutdown before ``ENDED`` arrived;
         the resulting snapshot is tagged ``state=INTERRUPTED`` so Report
         can distinguish "user killed the run mid-execution" from a clean
         end. Stats in an INTERRUPTED snapshot are best-effort partial
@@ -197,7 +197,7 @@ class MetricsPublisher:
         of the terminal state as the last message).
 
         Idempotent: only the first call writes/publishes; subsequent
-        calls early-return. The SIGTERM/SIGINT handler relies on this to
+        calls early-return. The SIGTERM handler relies on this to
         race safely with the ENDED-driven path.
         """
         if self._finalized:

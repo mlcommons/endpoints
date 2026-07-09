@@ -318,6 +318,69 @@ def pin_loadgen(
 
 
 @require_linux
+def expand_to_all_online_cpus() -> set[int]:
+    """Reset the current process's affinity to every online CPU.
+
+    Undoes a narrow mask inherited from a pinned parent (subprocesses spawned
+    after ``pin_loadgen`` inherit the loadgen mask). The kernel intersects the
+    request with the cgroup cpuset, so container/Slurm CPU limits still apply.
+
+    Returns:
+        The effective CPU set after the reset.
+
+    Raises:
+        UnsupportedPlatformError: If not running on Linux.
+    """
+    online = _read_sysfs_cpulist(_SYSFS_CPU / "online") or set()
+    if not online:
+        # sysfs unreadable/filtered (common in some containers). Without this
+        # fallback the narrow inherited mask leaks through getaffinity below
+        # and starves the tokenizer shard pool on large runs. Expand against
+        # every logical CPU instead; the kernel intersects the request with
+        # the cgroup cpuset, so container/Slurm limits still apply.
+        online = set(range(os.cpu_count() or 1))
+        logger.warning(
+            "sysfs CPU 'online' list unreadable; expanding against all %d "
+            "logical CPUs (kernel clamps to cgroup cpuset)",
+            len(online),
+        )
+    try:
+        os.sched_setaffinity(0, online)
+    except OSError as e:
+        logger.warning(f"Could not expand CPU affinity: {e}")
+    try:
+        return os.sched_getaffinity(0)
+    except OSError:
+        return online
+
+
+def cgroup_clamped_cpus() -> list[int] | None:
+    """The CPUs this process may run on (cgroup/Slurm-clamped), independent of a
+    narrow inherited affinity mask.
+
+    Probes by transiently widening this process's affinity to every online CPU
+    (the kernel clamps to the cgroup cpuset) and then restoring the inherited
+    mask, so callers can compute core-block layouts without leaving the process
+    rescheduled. Returns a sorted CPU list, or ``None`` on platforms without an
+    affinity API (the caller should then run unpinned).
+    """
+    try:
+        original = os.sched_getaffinity(0)  # type: ignore[attr-defined]
+    except (OSError, AttributeError):
+        return None
+    try:
+        widened = expand_to_all_online_cpus()
+    finally:
+        try:
+            os.sched_setaffinity(0, original)  # type: ignore[attr-defined]
+        except OSError:
+            logger.warning(
+                "could not restore inherited CPU mask; process stays expanded"
+            )
+    return sorted(widened)
+
+
+@require_linux
 def set_cpu_affinity(pid: int, cpus: set[int]) -> bool:
     """Set CPU affinity for a process.
 
