@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for accuracy grouping/consolidation dispatch in finalize_benchmark."""
+"""Tests for per-dataset accuracy scoring in finalize_benchmark."""
 
 from __future__ import annotations
 
@@ -22,7 +22,6 @@ from types import SimpleNamespace
 import pytest
 from inference_endpoint.commands.benchmark.execute import (
     AccuracyConfiguration,
-    _accuracy_group,
     _score_accuracy,
 )
 
@@ -38,6 +37,8 @@ class _FakeDataset:
 
 
 class _FakeScorer:
+    """Duck-typed scorer stand-in with no breakdown."""
+
     def __init__(
         self, name, dataset, report_dir, extractor=None, ground_truth_column=None, **x
     ):
@@ -51,9 +52,16 @@ class _FakeScorer:
         return None
 
 
-def _cfg(name: str, n: int, score: float, group: str | None, tmp):
+class _FakeBreakdownScorer(_FakeScorer):
+    """Scorer that returns a breakdown (like the composite gpt-oss scorer)."""
+
+    def score_breakdown(self):
+        return {"overall_accuracy": 80.0, "subset_scores": {"x": 80.0}}
+
+
+def _cfg(name: str, n: int, score: float, tmp, scorer=_FakeScorer):
     return AccuracyConfiguration(
-        _FakeScorer,  # type: ignore[arg-type]  # duck-typed stand-in
+        scorer,  # type: ignore[arg-type]  # duck-typed stand-in
         None,
         name,
         _FakeDataset(n, score),  # type: ignore[arg-type]
@@ -61,7 +69,6 @@ def _cfg(name: str, n: int, score: float, group: str | None, tmp):
         None,
         1,
         {},
-        group=group,
     )
 
 
@@ -73,68 +80,31 @@ _RESULT = SimpleNamespace(perf_results=[])
 
 
 @pytest.mark.unit
-class TestAccuracyGroup:
-    def test_explicit_group_wins(self):
-        assert _accuracy_group(SimpleNamespace(group="gptoss")) == "gptoss"
-
-    def test_no_group(self):
-        assert _accuracy_group(SimpleNamespace(group=None)) is None
-        assert _accuracy_group(None) is None
-
-    def test_variant_suffix_is_not_a_group(self):
-        # The ::variant suffix must NOT implicitly consolidate — group comes only
-        # from an explicit accuracy_config.group.
-        cfg = SimpleNamespace(group=None, name="open_orca::llama2_70b")
-        assert _accuracy_group(cfg) is None
-
-
-@pytest.mark.unit
-class TestScoreAccuracyGrouping:
-    def test_group_of_three_consolidates(self, tmp_path):
+class TestScoreAccuracy:
+    def test_each_dataset_gets_its_own_entry(self, tmp_path):
         cfgs = [
-            _cfg("aime25::gptoss", 30, 0.8, "gptoss", tmp_path),
-            _cfg("gpqa::gptoss", 198, 0.9, "gptoss", tmp_path),
-            _cfg("livecodebench::gptoss", 1055, 0.6, "gptoss", tmp_path),
+            _cfg("aime25::gptoss", 30, 0.8, tmp_path),
+            _cfg("gpqa::gptoss", 198, 0.9, tmp_path),
+            _cfg("cnn_dailymail::llama3_8b", 100, 0.5, tmp_path),
         ]
         scores = _score_accuracy(_ctx(cfgs), _RESULT)
-        # Consolidated entry PLUS per-subset audit entries.
+        # One entry per dataset, no consolidated/group entry.
         assert set(scores) == {
-            "gptoss",
-            "aime25::gptoss",
-            "gpqa::gptoss",
-            "livecodebench::gptoss",
-        }
-        bd = scores["gptoss"]["breakdown"]
-        assert bd["subset_scores"] == {
-            "aime25": 80.0,
-            "gpqa": 90.0,
-            "livecodebench": 60.0,
-        }
-        assert bd["total_samples"] == 1283
-        # Per-subset entries carry the raw [0,1] score and no breakdown.
-        assert scores["aime25::gptoss"]["score"] == 0.8
-        assert scores["livecodebench::gptoss"]["score"] == 0.6
-        assert "breakdown" not in scores["aime25::gptoss"]
-
-    def test_single_member_group_stays_singleton(self, tmp_path):
-        # A group with only one member is below the >=2 threshold: scored on its
-        # own, keeping its full ::gptoss name and no consolidated breakdown.
-        cfgs = [_cfg("aime25::gptoss", 30, 0.8, "gptoss", tmp_path)]
-        scores = _score_accuracy(_ctx(cfgs), _RESULT)
-        assert set(scores) == {"aime25::gptoss"}
-        assert "breakdown" not in scores["aime25::gptoss"]
-
-    def test_ungrouped_dataset_not_consolidated(self, tmp_path):
-        cfgs = [
-            _cfg("aime25::gptoss", 30, 0.8, "gptoss", tmp_path),
-            _cfg("gpqa::gptoss", 198, 0.9, "gptoss", tmp_path),
-            _cfg("cnn_dailymail::llama3_8b", 100, 0.5, None, tmp_path),
-        ]
-        scores = _score_accuracy(_ctx(cfgs), _RESULT)
-        assert set(scores) == {
-            "gptoss",
             "aime25::gptoss",
             "gpqa::gptoss",
             "cnn_dailymail::llama3_8b",
         }
-        assert "breakdown" not in scores["cnn_dailymail::llama3_8b"]
+        assert scores["aime25::gptoss"]["score"] == 0.8
+        assert scores["gpqa::gptoss"]["num_samples"] == 198
+        assert "breakdown" not in scores["aime25::gptoss"]
+
+    def test_breakdown_attached_only_when_scorer_provides_it(self, tmp_path):
+        cfgs = [
+            _cfg("plain", 10, 0.7, tmp_path),
+            _cfg(
+                "gptoss_120b_accuracy", 10, 0.83, tmp_path, scorer=_FakeBreakdownScorer
+            ),
+        ]
+        scores = _score_accuracy(_ctx(cfgs), _RESULT)
+        assert "breakdown" not in scores["plain"]
+        assert scores["gptoss_120b_accuracy"]["breakdown"]["overall_accuracy"] == 80.0

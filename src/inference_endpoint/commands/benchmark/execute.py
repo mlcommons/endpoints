@@ -85,11 +85,7 @@ from inference_endpoint.endpoint_client.cpu_affinity import AffinityPlan, pin_lo
 from inference_endpoint.endpoint_client.http_client import HTTPEndpointClient
 from inference_endpoint.endpoint_client.http_sample_issuer import HttpClientSampleIssuer
 from inference_endpoint.evaluation import Extractor
-from inference_endpoint.evaluation.scoring import (
-    GptOssAccuracyScorer,
-    GptOssMember,
-    Scorer,
-)
+from inference_endpoint.evaluation.scoring import Scorer
 from inference_endpoint.exceptions import (
     ExecutionError,
     InputValidationError,
@@ -177,9 +173,6 @@ class AccuracyConfiguration:
     ground_truth_column: str | None
     num_repeats: int
     extras: dict[str, Any] = field(default_factory=dict)
-    # Consolidation group tag; members sharing a group (>=2) roll up into one
-    # combined score. None -> scored on its own.
-    group: str | None = None
 
 
 @dataclass
@@ -294,19 +287,6 @@ def _resolve_accuracy_components(
     return scorer_cls, extractor_cls
 
 
-def _accuracy_group(accuracy_config: Any | None) -> str | None:
-    """Explicit consolidation group for an accuracy dataset.
-
-    Only an explicit ``accuracy_config.group`` triggers consolidation. The
-    ``::<variant>`` name suffix is a naming convention (``open_orca::llama2_70b``,
-    ``cnn_dailymail::llama3_8b``), NOT a grouping signal, so it must not roll
-    datasets up implicitly — that would silently consolidate any future config
-    with two accuracy datasets sharing a model suffix. The gpt-oss example
-    configs set ``group: "gptoss"`` explicitly.
-    """
-    return getattr(accuracy_config, "group", None) if accuracy_config else None
-
-
 def _load_datasets(
     config: BenchmarkConfig,
     report_dir: Path,
@@ -352,7 +332,6 @@ def _load_datasets(
                 acc_cfg.accuracy_config.ground_truth,
                 acc_cfg.accuracy_config.num_repeats,
                 acc_cfg.accuracy_config.extras or {},
-                group=_accuracy_group(acc_cfg.accuracy_config),
             )
         )
         ds.load(
@@ -407,7 +386,6 @@ def _load_datasets(
                     accuracy_config.ground_truth,
                     accuracy_config.num_repeats,
                     accuracy_config.extras or {},
-                    group=_accuracy_group(accuracy_config),
                 )
             )
 
@@ -1230,75 +1208,16 @@ def _salvage_tmpfs(report_dir: Path, tmpfs_dir: Path) -> None:
 
 
 def _score_accuracy(ctx: BenchmarkContext, result: SessionResult) -> dict[str, Any]:
-    """Run accuracy scorers, consolidating grouped datasets into one entry each.
+    """Score each accuracy dataset into its own results.json entry.
 
-    Datasets sharing a consolidation group with >=2 members (e.g. gpt-oss's
-    aime25/gpqa/livecodebench subsets) are rolled up by GptOssAccuracyScorer into
-    a single combined entry keyed by the group name; everything else is scored on
-    its own exactly as before.
+    Every eval_config is scored independently; there is no cross-dataset
+    consolidation. A scorer that returns a ``score_breakdown()`` attaches it to
+    its entry (e.g. the composite ``gptoss_120b_accuracy`` scorer); scorers that
+    return ``None`` (e.g. ``PassAt1Scorer``) yield a bare ``score`` entry.
     """
     accuracy_scores: dict[str, Any] = {}
 
-    groups: dict[str, list[AccuracyConfiguration]] = {}
-    for cfg in ctx.eval_configs:
-        if cfg.group:
-            groups.setdefault(cfg.group, []).append(cfg)
-    combined = {g: members for g, members in groups.items() if len(members) >= 2}
-    combined_ids = {id(cfg) for members in combined.values() for cfg in members}
-
-    for group_name, members in combined.items():
-        gpt_members = [
-            GptOssMember(
-                full_name=cfg.dataset_name,
-                subset=cfg.dataset_name.split("::")[0],
-                scorer_cls=cfg.scorer,
-                extractor=cfg.extractor,
-                dataset=cfg.dataset,
-                ground_truth_column=cfg.ground_truth_column,
-                extras=cfg.extras,
-            )
-            for cfg in members
-        ]
-        scorer = GptOssAccuracyScorer(gpt_members, members[0].report_dir)
-        score, n_repeats = scorer.score()
-        breakdown = scorer.score_breakdown()
-        entry: dict[str, Any] = {
-            "dataset_name": group_name,
-            "num_samples": (breakdown or {}).get("total_samples", 0),
-            "score": score,
-            "complete": scorer.complete,
-        }
-        if breakdown is not None:
-            entry["breakdown"] = breakdown
-        accuracy_scores[group_name] = entry
-        logger.info(
-            f"Score for {group_name} (combined {len(members)} subsets): {score} "
-            f"({n_repeats} repeats, complete={scorer.complete})"
-        )
-
-        # Per-subset audit entries from the same scoring pass (no re-scoring):
-        # keeps the individual <subset>::gptoss scores in results.json for audit
-        # and for downstream consumers that read them. These carry no breakdown,
-        # so only the consolidated entry surfaces in the report headline.
-        for cfg in members:
-            member_score, member_complete = scorer.member_scores.get(
-                cfg.dataset_name, (None, False)
-            )
-            assert cfg.dataset.data is not None
-            accuracy_scores[cfg.dataset_name] = {
-                "dataset_name": cfg.dataset_name,
-                "num_samples": len(cfg.dataset.data),
-                "extractor": (
-                    cfg.extractor.__name__ if cfg.extractor is not None else None
-                ),
-                "ground_truth_column": cfg.ground_truth_column,
-                "score": member_score,
-                "complete": member_complete,
-            }
-
     for eval_cfg in ctx.eval_configs:
-        if id(eval_cfg) in combined_ids:
-            continue
         try:
             scorer_instance = eval_cfg.scorer(
                 eval_cfg.dataset_name,
@@ -1318,7 +1237,7 @@ def _score_accuracy(ctx: BenchmarkContext, result: SessionResult) -> dict[str, A
         num_samples = len(eval_cfg.dataset.data)
         if eval_cfg.dataset_name == "performance":
             num_samples = sum(phase.issued_count for phase in result.perf_results)
-        singleton_entry: dict[str, Any] = {
+        entry: dict[str, Any] = {
             "dataset_name": eval_cfg.dataset_name,
             "num_samples": num_samples,
             "extractor": (
@@ -1333,8 +1252,8 @@ def _score_accuracy(ctx: BenchmarkContext, result: SessionResult) -> dict[str, A
         }
         breakdown = scorer_instance.score_breakdown()
         if breakdown is not None:
-            singleton_entry["breakdown"] = breakdown
-        accuracy_scores[eval_cfg.dataset_name] = singleton_entry
+            entry["breakdown"] = breakdown
+        accuracy_scores[eval_cfg.dataset_name] = entry
         logger.info(
             f"Score for {eval_cfg.dataset_name}: {score} "
             f"({n_repeats} repeats, complete={scorer_instance.complete})"
@@ -1361,7 +1280,7 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
     # sample_idx_map.json + events.jsonl from here).
     _write_scoring_artifacts(ctx, result, bench.tmpfs_dir)
 
-    # Accuracy scoring (grouped datasets consolidated into one entry each).
+    # Accuracy scoring (one entry per accuracy dataset).
     # Scoring runs before the report is written so the accuracy headline can be
     # attached, but the report is written in the `finally` below so a scoring
     # failure (e.g. lcb-service unreachable, missing eval subproject, bad extras)
