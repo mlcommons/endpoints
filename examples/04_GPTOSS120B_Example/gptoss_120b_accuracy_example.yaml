@@ -5,10 +5,11 @@
 # producing a SINGLE results.json entry with a headline `score` (0-100 scale) plus
 # a per-subset `breakdown` — mirroring the DeepSeek-R1 model.
 #
-# This is the alternative to the individual 3-dataset path (see
-# vllm_gptoss_120b_example.yaml, which wires `aime25::gptoss` / `gpqa::gptoss` /
-# `livecodebench::gptoss` under `group: gptoss` as three separate entries). Pick
-# ONE path per config. The composite issues a single uniform `num_repeats`; use
+# This is the composite single-entry path; the alternative is to use the
+# individual `::gptoss` datasets directly (see vllm_gptoss_120b_example.yaml, which
+# wires `aime25::gptoss` / `gpqa::gptoss` / `livecodebench::gptoss` as three
+# separate results.json entries). Pick ONE path per config. The composite issues a
+# single uniform `num_repeats`; use
 # the individual datasets when per-subset repeats (aime 8 / gpqa 5 / lcb 3) are
 # required.
 #

@@ -37,7 +37,6 @@ from inference_endpoint.commands.benchmark.execute import (
     AccuracyConfiguration,
     BenchmarkContext,
     ResponseCollector,
-    _accuracy_group,
     _build_phases,
     _derive_profile_urls,
     _load_datasets,
@@ -886,9 +885,9 @@ class TestAccuracyOnlyDatasetLoading:
 class TestGptOss120bCompositeExample:
     """The composite gpt-oss-120b example resolves to the single-entry path.
 
-    A config that picks the composite ``gptoss_120b_accuracy`` dataset has no
-    ``group`` (so it takes the singleton branch, yielding one results.json entry)
-    and needs no extractor (the scorer routes per-subset internally).
+    A config that picks the composite ``gptoss_120b_accuracy`` dataset yields one
+    results.json entry and needs no extractor (the scorer routes per-subset
+    internally).
     """
 
     EXAMPLE = (
@@ -902,8 +901,6 @@ class TestGptOss120bCompositeExample:
         entry = next(d for d in config.datasets if d.name == "gptoss_120b_accuracy")
         acc_cfg = entry.accuracy_config
 
-        # No group -> singleton path (one entry with score + breakdown).
-        assert _accuracy_group(acc_cfg) is None
         # No extractor required; the scorer routes per-subset internally.
         scorer_cls, extractor_cls = _resolve_accuracy_components(
             "gptoss_120b_accuracy", acc_cfg

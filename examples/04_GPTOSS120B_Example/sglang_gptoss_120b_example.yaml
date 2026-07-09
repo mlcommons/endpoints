@@ -23,7 +23,6 @@ datasets:
       eval_method: "code_bench_scorer"
       extractor: "python_code_extractor"
       num_repeats: 3
-      group: "gptoss"
   - name: "aime25::gptoss"
     type: "accuracy"
     accuracy_config:
@@ -31,7 +30,6 @@ datasets:
       ground_truth: "answer"
       extractor: "boxed_math_extractor"
       num_repeats: 8
-      group: "gptoss"
   - name: "gpqa::gptoss"
     type: "accuracy"
     accuracy_config:
@@ -39,7 +37,6 @@ datasets:
       extractor: "abcd_extractor"
       ground_truth: "ground_truth"
       num_repeats: 5
-      group: "gptoss"
 settings:
   runtime:
     min_duration_ms: 3000

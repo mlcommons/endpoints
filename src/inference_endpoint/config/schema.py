@@ -478,13 +478,6 @@ class AccuracyConfig(BaseModel):
         None,
         description="Free-form scorer kwargs (e.g. vbench_project_path, subprocess_timeout_s)",
     )
-    group: str | None = Field(
-        None,
-        description="Consolidation group tag. Accuracy datasets sharing a group "
-        "(>=2 members) are rolled up into one combined, sample-weighted score "
-        "(e.g. gpt-oss aime25/gpqa/livecodebench). Defaults to the '::<variant>' "
-        "suffix of the dataset name when unset.",
-    )
 
 
 class RuntimeConfig(BaseModel):
