@@ -159,8 +159,10 @@ class TestAccuracyPipeline:
             results = json.load(f)
 
         assert "accuracy_scores" in results
-        assert "echo_accuracy" in results["accuracy_scores"]
-        score_data = results["accuracy_scores"]["echo_accuracy"]
+        # accuracy_scores is a list of per-dataset entries; index by dataset_name.
+        by_name = {e["dataset_name"]: e for e in results["accuracy_scores"]}
+        assert "echo_accuracy" in by_name
+        score_data = by_name["echo_accuracy"]
         score = score_data["score"]
 
         # 3 correct out of 5 = 0.6 accuracy

@@ -1251,11 +1251,12 @@ def _score_accuracy(
             ) from e
         score, n_repeats = scorer_instance.score()
         # Coerce a numpy scalar score (e.g. np.mean from the base Scorer) to a
-        # native Python type so the entry stays serializable by both msgspec
-        # (result_summary.json) and json (results.json). numpy scalars expose
-        # .item(); plain floats / dicts / None do not.
-        if hasattr(score, "item"):
-            score = score.item()
+        # native Python float so the entry stays serializable by both msgspec
+        # (result_summary.json) and json (results.json). numpy.float64 is a
+        # float subclass, so isinstance(..., float) catches it while leaving
+        # None / dict (RougeScorer) untouched; float(...) drops the numpy type.
+        if isinstance(score, float):
+            score = float(score)
         unit_samples = eval_cfg.dataset.num_samples()
         num_repeats = eval_cfg.num_repeats
         if eval_cfg.dataset_name == "performance":
