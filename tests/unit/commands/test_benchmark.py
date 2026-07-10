@@ -77,7 +77,10 @@ from inference_endpoint.core.types import QueryResult
 from inference_endpoint.dataset_manager.dataset import Dataset
 from inference_endpoint.endpoint_client.config import HTTPClientConfig
 from inference_endpoint.evaluation.scoring import Scorer
-from inference_endpoint.exceptions import InputValidationError, SetupError
+from inference_endpoint.exceptions import (
+    InputValidationError,
+    SetupError,
+)
 from inference_endpoint.load_generator.sample_order import create_sample_order
 from inference_endpoint.load_generator.session import PhaseType
 from inference_endpoint.metrics.metric import Throughput
@@ -219,6 +222,46 @@ class TestDatasetParsing:
         if acc_eval_method:
             assert ds.accuracy_config is not None
             assert ds.accuracy_config.eval_method == acc_eval_method
+
+
+@pytest.mark.unit
+class TestLoadDatasetsSaltValidation:
+    """_load_datasets validates salt-compatibility at dataset-load time — before
+    any worker/aggregator subprocess is spawned — when warmup salt is enabled.
+    """
+
+    def _config(self, tmp_path: Path, warmup: WarmupConfig) -> OfflineConfig:
+        ds = tmp_path / "perf.jsonl"
+        ds.write_text('{"prompt": "hello world"}\n{"prompt": "second prompt"}\n')
+        return OfflineConfig(
+            endpoint_config={"endpoints": ["http://test:8000"]},
+            model_params={"name": "test-model"},
+            datasets=[{"path": str(ds)}],
+            settings=OfflineSettings(
+                client=HTTPClientConfig(
+                    num_workers=1, warmup_connections=0, max_connections=10
+                ),
+                warmup=warmup,
+            ),
+        )
+
+    @patch.object(Dataset, "validate_saltable")
+    def test_validates_when_warmup_salt_enabled(self, mock_validate, tmp_path):
+        config = self._config(tmp_path, WarmupConfig(enabled=True, salt=True))
+        _load_datasets(config, tmp_path, TestMode.PERF)
+        mock_validate.assert_called_once()
+
+    @patch.object(Dataset, "validate_saltable")
+    def test_skips_validation_when_warmup_disabled(self, mock_validate, tmp_path):
+        config = self._config(tmp_path, WarmupConfig(enabled=False, salt=True))
+        _load_datasets(config, tmp_path, TestMode.PERF)
+        mock_validate.assert_not_called()
+
+    @patch.object(Dataset, "validate_saltable")
+    def test_skips_validation_when_salt_off(self, mock_validate, tmp_path):
+        config = self._config(tmp_path, WarmupConfig(enabled=True, salt=False))
+        _load_datasets(config, tmp_path, TestMode.PERF)
+        mock_validate.assert_not_called()
 
 
 class TestCommandHandlers:

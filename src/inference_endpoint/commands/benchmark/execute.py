@@ -367,6 +367,12 @@ def _load_datasets(
         except Exception as e:
             raise SetupError(f"Failed to load dataset: {e}") from e
 
+        # Fail fast on a warmup dataset that salt cannot bust — at load time,
+        # before any worker/aggregator subprocess is spawned.
+        warmup = config.settings.warmup
+        if warmup.enabled and warmup.salt:
+            dataloader.validate_saltable()
+
         if perf_cfg.accuracy_config is not None:
             accuracy_config = perf_cfg.accuracy_config
             if accuracy_config.num_repeats != 1:
