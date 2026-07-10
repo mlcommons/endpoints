@@ -152,12 +152,12 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
     # caller supplies them rather than reading them from the metrics snapshot.
     seeds: dict[str, int] | None = None
 
-    # Rolled-up accuracy breakdowns {workload_name: breakdown}, attached after
+    # Per-dataset accuracy entries (one per scored dataset), attached after
     # scoring in finalize_benchmark. Accuracy is not in the metrics snapshot, so
-    # from_snapshot leaves this None; perf-only runs never set it. Each breakdown
-    # is the shared BFCL shape (overall_accuracy / subset_scores / total_samples,
-    # percentages in 0-100). Display-only.
-    accuracy: dict[str, Any] | None = None
+    # from_snapshot leaves this empty; perf-only runs keep it empty. Each entry
+    # carries score + sample counts and, for multi-subset scorers, a BFCL-shaped
+    # breakdown. Display-only.
+    accuracy: list[dict[str, Any]] = msgspec.field(default_factory=list)
 
     @classmethod
     def from_snapshot(
@@ -337,14 +337,31 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
 
         if self.accuracy:
             fn(f"Accuracy:{newline}")
-            for name, bd in self.accuracy.items():
-                overall = bd.get("overall_accuracy")
-                total = bd.get("total_samples")
-                head = f"{overall:.2f}%" if overall is not None else "N/A"
-                fn(f"  {name}: {head} (n={total}){newline}")
-                for sub, sub_score in (bd.get("subset_scores") or {}).items():
-                    fn(f"    {sub}: {sub_score:.2f}%{newline}")
-                if bd.get("complete") is False:
+            for entry in self.accuracy:
+                name = entry.get("dataset_name", "?")
+                score = entry.get("score")
+                if score is None:
+                    score_str = "N/A"
+                elif isinstance(score, bool):
+                    score_str = str(score)
+                elif isinstance(score, int | float):
+                    score_str = f"{score:.4g}"
+                else:
+                    score_str = str(score)
+                unit = entry.get("unit_samples")
+                repeats = entry.get("num_repeats")
+                total = entry.get("total_samples")
+                fn(
+                    f"  {name}: {score_str} "
+                    f"(unit={unit}, repeats={repeats}, total={total}){newline}"
+                )
+                breakdown = entry.get("breakdown")
+                if isinstance(breakdown, dict):
+                    for sub, sub_score in (
+                        breakdown.get("subset_scores") or {}
+                    ).items():
+                        fn(f"    {sub}: {sub_score:.2f}%{newline}")
+                if entry.get("complete") is False:
                     fn(f"    (incomplete){newline}")
 
         if summary_only:

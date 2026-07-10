@@ -59,7 +59,7 @@ class _FakeBreakdownScorer(_FakeScorer):
         return {"overall_accuracy": 80.0, "subset_scores": {"x": 80.0}}
 
 
-def _cfg(name: str, n: int, score: float, tmp, scorer=_FakeScorer):
+def _cfg(name: str, n: int, score: float, tmp, scorer=_FakeScorer, repeats: int = 1):
     return AccuracyConfiguration(
         scorer,  # type: ignore[arg-type]  # duck-typed stand-in
         None,
@@ -67,9 +67,13 @@ def _cfg(name: str, n: int, score: float, tmp, scorer=_FakeScorer):
         _FakeDataset(n, score),  # type: ignore[arg-type]
         tmp,
         None,
-        1,
+        repeats,
         {},
     )
+
+
+def _by_name(scores: list[dict]) -> dict[str, dict]:
+    return {e["dataset_name"]: e for e in scores}
 
 
 def _ctx(cfgs):
@@ -83,35 +87,38 @@ _RESULT = SimpleNamespace(perf_results=[])
 class TestScoreAccuracy:
     def test_each_dataset_gets_its_own_entry(self, tmp_path):
         cfgs = [
-            _cfg("aime25::gptoss", 30, 0.8, tmp_path),
-            _cfg("gpqa::gptoss", 198, 0.9, tmp_path),
+            _cfg("aime25::gptoss", 30, 0.8, tmp_path, repeats=8),
+            _cfg("gpqa::gptoss", 198, 0.9, tmp_path, repeats=5),
             _cfg("cnn_dailymail::llama3_8b", 100, 0.5, tmp_path),
         ]
         scores = _score_accuracy(_ctx(cfgs), _RESULT)
-        # One entry per dataset, no consolidated/group entry.
-        assert set(scores) == {
+        assert isinstance(scores, list)
+        by = _by_name(scores)
+        assert set(by) == {
             "aime25::gptoss",
             "gpqa::gptoss",
             "cnn_dailymail::llama3_8b",
         }
-        assert scores["aime25::gptoss"]["score"] == 0.8
-        assert scores["gpqa::gptoss"]["num_samples"] == 198
-        assert "breakdown" not in scores["aime25::gptoss"]
+        assert by["aime25::gptoss"]["score"] == 0.8
+        # unit_samples = single instance; total = unit × repeats.
+        assert by["aime25::gptoss"]["unit_samples"] == 30
+        assert by["aime25::gptoss"]["num_repeats"] == 8
+        assert by["aime25::gptoss"]["total_samples"] == 240
+        assert by["gpqa::gptoss"]["total_samples"] == 990
+        assert "breakdown" not in by["aime25::gptoss"]
 
     def test_breakdown_attached_only_when_scorer_provides_it(self, tmp_path):
         cfgs = [
             _cfg("plain", 10, 0.7, tmp_path),
-            _cfg(
-                "gptoss_120b_accuracy", 10, 0.83, tmp_path, scorer=_FakeBreakdownScorer
-            ),
+            _cfg("with_bd", 10, 0.83, tmp_path, scorer=_FakeBreakdownScorer),
         ]
-        scores = _score_accuracy(_ctx(cfgs), _RESULT)
-        assert "breakdown" not in scores["plain"]
-        assert scores["gptoss_120b_accuracy"]["breakdown"]["overall_accuracy"] == 80.0
+        by = _by_name(_score_accuracy(_ctx(cfgs), _RESULT))
+        assert "breakdown" not in by["plain"]
+        assert by["with_bd"]["breakdown"]["overall_accuracy"] == 80.0
 
-    def test_performance_dataset_num_samples_from_perf_results(self, tmp_path):
-        # The "performance" dataset reports num_samples from the perf phases'
-        # issued counts, not its own dataset length (here 3).
+    def test_performance_entry_uses_issued_count_for_total(self, tmp_path):
+        # The "performance" dataset totals the perf phases' issued counts, not
+        # unit × repeats. unit_samples still reports its own dataset length (3).
         cfg = _cfg("performance", 3, 0.6, tmp_path)
         result = SimpleNamespace(
             perf_results=[
@@ -119,5 +126,10 @@ class TestScoreAccuracy:
                 SimpleNamespace(issued_count=88),
             ]
         )
-        scores = _score_accuracy(_ctx([cfg]), result)
-        assert scores["performance"]["num_samples"] == 128
+        by = _by_name(_score_accuracy(_ctx([cfg]), result))
+        assert by["performance"]["unit_samples"] == 3
+        assert by["performance"]["num_repeats"] == 1
+        assert by["performance"]["total_samples"] == 128
+
+    def test_empty_when_no_datasets(self, tmp_path):
+        assert _score_accuracy(_ctx([]), _RESULT) == []

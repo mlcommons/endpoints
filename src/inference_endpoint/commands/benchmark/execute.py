@@ -1220,15 +1220,19 @@ def _salvage_tmpfs(report_dir: Path, tmpfs_dir: Path) -> None:
         logger.debug(f"Copied {src_events} -> {dst_events}")
 
 
-def _score_accuracy(ctx: BenchmarkContext, result: SessionResult) -> dict[str, Any]:
-    """Score each accuracy dataset into its own results.json entry.
+def _score_accuracy(
+    ctx: BenchmarkContext, result: SessionResult
+) -> list[dict[str, Any]]:
+    """Score each accuracy dataset into its own list entry.
 
-    Every eval_config is scored independently; there is no cross-dataset
-    consolidation. A scorer that returns a ``score_breakdown()`` attaches it to
-    its entry (e.g. the composite ``gptoss_120b_accuracy`` scorer); scorers that
-    return ``None`` (e.g. ``PassAt1Scorer``) yield a bare ``score`` entry.
+    One entry per eval_config, in order; no cross-dataset consolidation. Each
+    entry carries the scalar ``score`` plus sample accounting
+    (``unit_samples`` × ``num_repeats`` = ``total_samples``); a scorer that
+    returns a ``score_breakdown()`` (DeepSeek-R1, BFCL) also attaches
+    ``breakdown``. The ``"performance"`` inline entry totals the perf phases'
+    issued counts instead of unit × repeats (repeats is forced to 1 there).
     """
-    accuracy_scores: dict[str, Any] = {}
+    accuracy_scores: list[dict[str, Any]] = []
 
     for eval_cfg in ctx.eval_configs:
         try:
@@ -1246,27 +1250,31 @@ def _score_accuracy(ctx: BenchmarkContext, result: SessionResult) -> dict[str, A
                 f"for scorer '{eval_cfg.scorer.__name__}': {e}"
             ) from e
         score, n_repeats = scorer_instance.score()
-        assert eval_cfg.dataset.data is not None
-        num_samples = len(eval_cfg.dataset.data)
+        unit_samples = eval_cfg.dataset.num_samples()
+        num_repeats = eval_cfg.num_repeats
         if eval_cfg.dataset_name == "performance":
-            num_samples = sum(phase.issued_count for phase in result.perf_results)
+            total_samples = sum(phase.issued_count for phase in result.perf_results)
+        else:
+            total_samples = unit_samples * num_repeats
         entry: dict[str, Any] = {
             "dataset_name": eval_cfg.dataset_name,
-            "num_samples": num_samples,
             "extractor": (
                 eval_cfg.extractor.__name__ if eval_cfg.extractor is not None else None
             ),
             "ground_truth_column": eval_cfg.ground_truth_column,
             "score": score,
+            "unit_samples": unit_samples,
+            "num_repeats": num_repeats,
+            "total_samples": total_samples,
             # False when the scorer produced only a partial headline (e.g.
-            # LegacyMLPerfDeepSeekR1Scorer when the lcb-service container was
-            # unreachable), so a partial number is never mistaken for a complete one.
+            # LegacyMLPerfDeepSeekR1Scorer when lcb-service was unreachable), so a
+            # partial number is never mistaken for a complete one.
             "complete": scorer_instance.complete,
         }
         breakdown = scorer_instance.score_breakdown()
         if breakdown is not None:
             entry["breakdown"] = breakdown
-        accuracy_scores[eval_cfg.dataset_name] = entry
+        accuracy_scores.append(entry)
         logger.info(
             f"Score for {eval_cfg.dataset_name}: {score} "
             f"({n_repeats} repeats, complete={scorer_instance.complete})"
@@ -1299,21 +1307,15 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
     # failure (e.g. lcb-service unreachable, missing eval subproject, bad extras)
     # still leaves the perf run's result_summary.json / report.txt on disk
     # instead of discarding them — then the exception propagates as before.
-    accuracy_scores: dict[str, Any] = {}
+    accuracy_scores: list[dict[str, Any]] = []
     try:
         accuracy_scores = _score_accuracy(ctx, result)
     finally:
-        # Attach accuracy breakdowns so result_summary.json, the console summary,
-        # and report.txt all carry the headline from this one scoring pass
-        # (absent on a scoring failure — accuracy_scores stays {}).
+        # Attach the per-dataset accuracy list so result_summary.json, the
+        # console summary, and report.txt all carry it (stays [] on a scoring
+        # failure).
         if report is not None:
-            accuracy_for_report = {
-                name: entry["breakdown"]
-                for name, entry in accuracy_scores.items()
-                if "breakdown" in entry
-            }
-            if accuracy_for_report:
-                report = msgspec.structs.replace(report, accuracy=accuracy_for_report)
+            report = msgspec.structs.replace(report, accuracy=accuracy_scores)
 
         # Display report if available (from MetricsAggregator pub/sub snapshot).
         # result_summary.json is the self-complete machine-readable report
@@ -1386,8 +1388,7 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
                 "tps": tps,
             },
         }
-        if accuracy_scores:
-            results["accuracy_scores"] = accuracy_scores
+        results["accuracy_scores"] = accuracy_scores
         if ctx.collect_responses:
             results["responses"] = collector.responses
         if collector.errors:
