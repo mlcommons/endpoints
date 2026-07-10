@@ -17,7 +17,7 @@
 
 Consumes a run's report directory (the artifacts written by a benchmark run:
 ``results.json`` for accuracy, ``scores.json`` for the agentic performance run,
-``result_summary.json`` for latency/throughput distributions) and renders a fixed
+``results_summary.json`` for latency/throughput distributions) and renders a fixed
 set of PNGs for leaderboard / report use:
 
 * accuracy — overall + normalized vs the ruleset gate, per-category and per-subset
@@ -146,7 +146,7 @@ def extract_turn_scores(scores: dict[str, Any]) -> list[float]:
 def extract_distribution(
     summary: dict[str, Any], key: str, scale: float = _NS_TO_S, unit: str = "s"
 ) -> Distribution | None:
-    """Build a Distribution from a ``result_summary.json`` metric block.
+    """Build a Distribution from a ``results_summary.json`` metric block.
 
     Returns None when the block is absent or empty (e.g. the run recorded no
     samples for this metric), so callers can skip it cleanly.
@@ -199,7 +199,7 @@ def load_run(report_dir: str | Path) -> RunArtifacts:
             artifacts.turn_summary = scores["turns"]
         artifacts.inline_score = _to_float(scores.get("score"))
 
-    summary_path = report_dir / "performance" / "result_summary.json"
+    summary_path = report_dir / "performance" / "results_summary.json"
     if summary_path.exists():
         summary = json.loads(summary_path.read_text())
         for key, unit in (("ttft", "s"), ("latency", "s"), ("tpot", "s")):

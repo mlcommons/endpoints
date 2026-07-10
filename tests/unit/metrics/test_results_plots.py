@@ -16,7 +16,6 @@
 import json
 
 import pytest
-
 from inference_endpoint.metrics.results_plots import (
     Distribution,
     extract_accuracy,
@@ -165,7 +164,7 @@ def test_load_run_assembles_artifacts(tmp_path):
     (tmp_path / "results.json").write_text(json.dumps(_accuracy_results()))
     (tmp_path / "scores.json").write_text(json.dumps(_perf_scores()))
     (tmp_path / "performance").mkdir(exist_ok=True)
-    (tmp_path / "performance" / "result_summary.json").write_text(
+    (tmp_path / "performance" / "results_summary.json").write_text(
         json.dumps(_result_summary())
     )
 
@@ -211,7 +210,7 @@ def test_generate_plots_writes_pngs(tmp_path):
     (tmp_path / "results.json").write_text(json.dumps(_accuracy_results()))
     (tmp_path / "scores.json").write_text(json.dumps(_perf_scores()))
     (tmp_path / "performance").mkdir(exist_ok=True)
-    (tmp_path / "performance" / "result_summary.json").write_text(
+    (tmp_path / "performance" / "results_summary.json").write_text(
         json.dumps(_result_summary())
     )
 

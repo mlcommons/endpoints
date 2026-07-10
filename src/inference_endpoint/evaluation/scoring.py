@@ -219,7 +219,7 @@ class Scorer(ABC):
 
         n_repeats = len(scores) // self.dataset.num_samples()
         # float(...) so callers get a native Python float, not a numpy scalar:
-        # the score flows into result_summary.json (msgspec) and results.json
+        # the score flows into results_summary.json (msgspec) and results.json
         # (json), neither of which can serialize numpy.float64.
         return float(np.mean(scores)), n_repeats
 

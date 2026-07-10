@@ -21,7 +21,6 @@ from pathlib import Path
 
 import pytest
 import yaml
-
 from inference_endpoint.commands.audit import run_audit
 from inference_endpoint.commands.benchmark.execute import run_benchmark
 from inference_endpoint.config.schema import (
@@ -159,14 +158,14 @@ class TestBenchmarkCommandIntegration:
     def test_result_summary_self_complete(
         self, mock_http_echo_server, ds_dataset_path, tmp_path
     ):
-        """result_summary.json carries qps/tps without needing any sidecar."""
+        """results_summary.json carries qps/tps without needing any sidecar."""
         run_benchmark(
             _config(mock_http_echo_server.url, ds_dataset_path, report_dir=tmp_path),
             TestMode.PERF,
         )
 
         summary = json.loads(
-            (tmp_path / "performance" / "result_summary.json").read_text()
+            (tmp_path / "performance" / "results_summary.json").read_text()
         )
         assert summary["qps"] > 0
         assert "tps" in summary
@@ -272,7 +271,7 @@ class TestBenchmarkCommandIntegration:
         # always FAILs, or mis-plumbs the threshold, would otherwise slip by).
         assert result.passed is True
         assert result.test_id == AuditTestId.OUTPUT_CACHING_TEST.value
-        result_path = tmp_path / "audit" / "audit_result.json"
+        result_path = tmp_path / "audit" / "audit_output_caching_test.json"
         assert result_path.exists()
         verify_txt = (tmp_path / "audit" / "verify_OUTPUT_CACHING_TEST.txt").read_text()
         assert "Performance check pass: True" in verify_txt
@@ -328,7 +327,7 @@ class TestBenchmarkCommandIntegration:
 
         assert call_order == ["benchmark", "audit"]
         # Both phases still land under the one shared report_dir.
-        assert (tmp_path / "audit" / "audit_result.json").exists()
+        assert (tmp_path / "audit" / "audit_output_caching_test.json").exists()
         assert (tmp_path / "config.yaml").exists()
 
 

@@ -318,7 +318,7 @@ class TestReportDisplayAndSerialize:
         assert "ttft" in data
 
     def test_to_json_serializes_qps_and_tps(self):
-        """result_summary.json is self-complete: qps/tps are serialized so
+        """results_summary.json is self-complete: qps/tps are serialized so
         consumers don't recompute them from duration + counts."""
         report = _build_report(_make_registry(n_samples=50))
         data = json.loads(report.to_json())
@@ -333,7 +333,7 @@ class TestReportDisplayAndSerialize:
         assert data["tps"] is None
 
     def test_to_json_and_display_carry_run_config(self):
-        """result_summary.json + report.txt carry the run's config so a run is
+        """results_summary.json + report.txt carry the run's config so a run is
         self-describing/reproducible; absent run_config serializes as null."""
         registry = _make_registry(n_samples=5)
         snap = snapshot_to_dict(
