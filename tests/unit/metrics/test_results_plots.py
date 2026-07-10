@@ -16,6 +16,7 @@
 import json
 
 import pytest
+
 from inference_endpoint.metrics.results_plots import (
     Distribution,
     extract_accuracy,
@@ -163,7 +164,10 @@ def test_extract_distribution_skips_empty_blocks():
 def test_load_run_assembles_artifacts(tmp_path):
     (tmp_path / "results.json").write_text(json.dumps(_accuracy_results()))
     (tmp_path / "scores.json").write_text(json.dumps(_perf_scores()))
-    (tmp_path / "result_summary.json").write_text(json.dumps(_result_summary()))
+    (tmp_path / "performance").mkdir(exist_ok=True)
+    (tmp_path / "performance" / "result_summary.json").write_text(
+        json.dumps(_result_summary())
+    )
 
     run = load_run(tmp_path)
     assert run.accuracy is not None
@@ -206,7 +210,10 @@ def test_generate_plots_writes_pngs(tmp_path):
     pytest.importorskip("matplotlib")
     (tmp_path / "results.json").write_text(json.dumps(_accuracy_results()))
     (tmp_path / "scores.json").write_text(json.dumps(_perf_scores()))
-    (tmp_path / "result_summary.json").write_text(json.dumps(_result_summary()))
+    (tmp_path / "performance").mkdir(exist_ok=True)
+    (tmp_path / "performance" / "result_summary.json").write_text(
+        json.dumps(_result_summary())
+    )
 
     written = generate_plots(tmp_path)
     names = {p.name for p in written}

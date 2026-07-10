@@ -199,7 +199,7 @@ def load_run(report_dir: str | Path) -> RunArtifacts:
             artifacts.turn_summary = scores["turns"]
         artifacts.inline_score = _to_float(scores.get("score"))
 
-    summary_path = report_dir / "result_summary.json"
+    summary_path = report_dir / "performance" / "result_summary.json"
     if summary_path.exists():
         summary = json.loads(summary_path.read_text())
         for key, unit in (("ttft", "s"), ("latency", "s"), ("tpot", "s")):

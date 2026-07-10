@@ -72,8 +72,14 @@ import sys
 from pathlib import Path
 from typing import Any
 
-# Artifacts the endpoints parser reads, in priority order.
-_RUN_ARTIFACTS = ("result_summary.json", "results.json", "config.yaml")
+# Artifacts the endpoints parser reads, as (source-path-in-run-dir, dest-name),
+# in priority order. result_summary.json lives under performance/ in the run
+# dir; it is still copied flat into the MLPerf performance/run_1 layout.
+_RUN_ARTIFACTS = (
+    ("performance/result_summary.json", "result_summary.json"),
+    ("results.json", "results.json"),
+    ("config.yaml", "config.yaml"),
+)
 
 # v6.1 ("default") endpoints submission layout, mirroring
 # tools/submission/submission_checker/constants.py in mlcommons/inference.
@@ -102,11 +108,11 @@ def _copy_artifacts(src_dir: Path, dst_dir: Path) -> list[str]:
     """
     dst_dir.mkdir(parents=True, exist_ok=True)
     copied = []
-    for name in _RUN_ARTIFACTS:
-        src = src_dir / name
+    for src_rel, dst_name in _RUN_ARTIFACTS:
+        src = src_dir / src_rel
         if src.is_file():
-            shutil.copy2(src, dst_dir / name)
-            copied.append(name)
+            shutil.copy2(src, dst_dir / dst_name)
+            copied.append(dst_name)
     return copied
 
 
@@ -135,7 +141,7 @@ def _percentile(metric: dict[str, Any], key: str) -> Any:
 def _verify_performance(run_dir: Path) -> list[str]:
     """Return human-readable findings for the performance artifacts."""
     findings: list[str] = []
-    summary = _load_json(run_dir / "result_summary.json")
+    summary = _load_json(run_dir / "performance" / "result_summary.json")
     results = _load_json(run_dir / "results.json")
     if not summary:
         findings.append("  MISSING: result_summary.json (perf rollups unreadable)")
@@ -311,7 +317,7 @@ def main() -> int:
         if not copied:
             print(
                 f"             ERROR: no parseable artifacts "
-                f"({', '.join(_RUN_ARTIFACTS)}) found under {perf_run}"
+                f"({', '.join(n for _, n in _RUN_ARTIFACTS)}) found under {perf_run}"
             )
             empty_runs.append(f"--performance-run {perf_run}")
         for line in _verify_performance(perf_run):
@@ -326,7 +332,7 @@ def main() -> int:
         if not copied:
             print(
                 f"             ERROR: no parseable artifacts "
-                f"({', '.join(_RUN_ARTIFACTS)}) found under {acc_run}"
+                f"({', '.join(n for _, n in _RUN_ARTIFACTS)}) found under {acc_run}"
             )
             empty_runs.append(f"--accuracy-run {acc_run}")
         for line in _verify_accuracy(acc_run):
@@ -360,7 +366,7 @@ def main() -> int:
             "FAILED: no parseable artifacts were copied for: "
             f"{', '.join(empty_runs)}. The submission tree is incomplete "
             "(check the run path(s) and that the run emitted "
-            f"{', '.join(_RUN_ARTIFACTS)})."
+            f"{', '.join(n for _, n in _RUN_ARTIFACTS)})."
         )
         return 1
 

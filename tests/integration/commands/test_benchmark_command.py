@@ -21,6 +21,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+
 from inference_endpoint.commands.audit import run_audit
 from inference_endpoint.commands.benchmark.execute import run_benchmark
 from inference_endpoint.config.schema import (
@@ -164,7 +165,9 @@ class TestBenchmarkCommandIntegration:
             TestMode.PERF,
         )
 
-        summary = json.loads((tmp_path / "result_summary.json").read_text())
+        summary = json.loads(
+            (tmp_path / "performance" / "result_summary.json").read_text()
+        )
         assert summary["qps"] > 0
         assert "tps" in summary
         # report.txt is the human-readable companion — kept alongside the JSON.
