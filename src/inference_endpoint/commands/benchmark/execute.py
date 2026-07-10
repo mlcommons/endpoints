@@ -1432,6 +1432,19 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
         with open(results_path, "w") as f:
             json.dump(results, f, indent=2)
         logger.info(f"Saved: {results_path}")
+
+        # Also emit the accuracy results as a focused artifact under accuracy/,
+        # so downstream accuracy consumers read one small file instead of the
+        # full results.json. Same "accuracy_scores" list shape (find_accuracy_
+        # breakdown reads it directly). Written only when scoring produced
+        # entries — a perf-only run leaves no accuracy/ folder.
+        if accuracy_scores:
+            accuracy_dir = ctx.report_dir / "accuracy"
+            accuracy_dir.mkdir(parents=True, exist_ok=True)
+            accuracy_results_path = accuracy_dir / "accuracy_results.json"
+            with open(accuracy_results_path, "w") as f:
+                json.dump({"accuracy_scores": accuracy_scores}, f, indent=2)
+            logger.info(f"Saved: {accuracy_results_path}")
     except Exception as e:
         logger.error(f"Save failed: {e}")
 

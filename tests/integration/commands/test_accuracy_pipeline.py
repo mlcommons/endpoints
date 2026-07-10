@@ -168,5 +168,14 @@ class TestAccuracyPipeline:
         # 3 correct out of 5 = 0.6 accuracy
         assert abs(score - 0.6) < 0.01, f"Expected 0.6, got {score}"
 
+        # The focused accuracy artifact is written under accuracy/ with the same
+        # list shape as results.json's accuracy_scores.
+        accuracy_results_path = report_dir / "accuracy" / "accuracy_results.json"
+        assert accuracy_results_path.exists()
+        with accuracy_results_path.open() as f:
+            accuracy_results = json.load(f)
+        acc_by_name = {e["dataset_name"] for e in accuracy_results["accuracy_scores"]}
+        assert "echo_accuracy" in acc_by_name
+
         # Verify logs mention scoring
         assert "Score for echo_accuracy" in caplog.text
