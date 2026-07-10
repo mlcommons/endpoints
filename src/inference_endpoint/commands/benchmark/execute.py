@@ -1250,6 +1250,12 @@ def _score_accuracy(
                 f"for scorer '{eval_cfg.scorer.__name__}': {e}"
             ) from e
         score, n_repeats = scorer_instance.score()
+        # Coerce a numpy scalar score (e.g. np.mean from the base Scorer) to a
+        # native Python type so the entry stays serializable by both msgspec
+        # (result_summary.json) and json (results.json). numpy scalars expose
+        # .item(); plain floats / dicts / None do not.
+        if hasattr(score, "item"):
+            score = score.item()
         unit_samples = eval_cfg.dataset.num_samples()
         num_repeats = eval_cfg.num_repeats
         if eval_cfg.dataset_name == "performance":

@@ -218,7 +218,10 @@ class Scorer(ABC):
             scores.append(self.score_single_sample(empirical[i], ground_truths[i]))
 
         n_repeats = len(scores) // self.dataset.num_samples()
-        return np.mean(scores), n_repeats
+        # float(...) so callers get a native Python float, not a numpy scalar:
+        # the score flows into result_summary.json (msgspec) and results.json
+        # (json), neither of which can serialize numpy.float64.
+        return float(np.mean(scores)), n_repeats
 
     def score_breakdown(self) -> dict[str, Any] | None:
         """Optional structured detail accompanying the scalar ``score()``.

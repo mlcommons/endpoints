@@ -133,3 +133,28 @@ class TestScoreAccuracy:
 
     def test_empty_when_no_datasets(self, tmp_path):
         assert _score_accuracy(_ctx([]), _RESULT) == []
+
+    def test_numpy_score_coerced_to_serializable(self, tmp_path):
+        """A scorer returning a numpy scalar (e.g. np.mean) must yield a native
+        float so the entry serializes via both json and msgspec — regression:
+        Report.to_json crashed with "Encoding objects of type numpy.float64 is
+        unsupported"."""
+        import json
+
+        import msgspec.json
+        import numpy as np
+
+        class _NumpyScorer(_FakeScorer):
+            def score(self):
+                return np.float64(0.5), 1
+
+        cfg = _cfg("np::ds", 10, 0.0, tmp_path, scorer=_NumpyScorer)
+        entry = _by_name(_score_accuracy(_ctx([cfg]), _RESULT))["np::ds"]
+        # np.floating is a float subclass, so isinstance(..., float) is not
+        # enough — assert it is specifically NOT a numpy scalar.
+        assert not isinstance(entry["score"], np.floating)
+        assert entry["score"] == 0.5
+        # Both serializers used downstream (results.json / result_summary.json)
+        # must accept the coerced entry.
+        json.dumps(entry)
+        msgspec.json.encode(entry)
