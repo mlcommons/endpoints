@@ -274,6 +274,7 @@ class TestReportDisplayAndSerialize:
             "unit_samples": 1283,
             "num_repeats": 1,
             "total_samples": 1283,
+            "duration_s": 12.5,
             "complete": False,
             "breakdown": {
                 "overall_accuracy": 82.3,
@@ -289,7 +290,9 @@ class TestReportDisplayAndSerialize:
         output = "\n".join(lines)
 
         assert "Accuracy:" in output
-        assert "gptoss: 82.3 (unit=1283, repeats=1, total=1283)" in output
+        assert (
+            "gptoss: 82.3 (unit=1283, repeats=1, total=1283, duration=12.50s)" in output
+        )
         assert "aime25: 70.00%" in output
         assert "(incomplete)" in output
 

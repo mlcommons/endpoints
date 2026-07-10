@@ -359,9 +359,13 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
                 unit = entry.get("unit_samples")
                 repeats = entry.get("num_repeats")
                 total = entry.get("total_samples")
+                dur = entry.get("duration_s")
+                dur_str = (
+                    f", duration={dur:.2f}s" if isinstance(dur, int | float) else ""
+                )
                 fn(
                     f"  {name}: {score_str} "
-                    f"(unit={unit}, repeats={repeats}, total={total}){newline}"
+                    f"(unit={unit}, repeats={repeats}, total={total}{dur_str}){newline}"
                 )
                 breakdown = entry.get("breakdown")
                 if isinstance(breakdown, dict):

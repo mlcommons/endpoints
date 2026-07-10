@@ -80,7 +80,7 @@ def _ctx(cfgs):
     return SimpleNamespace(eval_configs=cfgs)
 
 
-_RESULT = SimpleNamespace(perf_results=[])
+_RESULT = SimpleNamespace(perf_results=[], phase_results=[])
 
 
 @pytest.mark.unit
@@ -124,15 +124,40 @@ class TestScoreAccuracy:
             perf_results=[
                 SimpleNamespace(issued_count=40),
                 SimpleNamespace(issued_count=88),
-            ]
+            ],
+            phase_results=[
+                SimpleNamespace(
+                    name="performance",
+                    start_time_ns=2_000_000_000,
+                    end_time_ns=5_000_000_000,
+                ),
+            ],
         )
         by = _by_name(_score_accuracy(_ctx([cfg]), result))
         assert by["performance"]["unit_samples"] == 3
         assert by["performance"]["num_repeats"] == 1
         assert by["performance"]["total_samples"] == 128
+        assert by["performance"]["duration_s"] == 3.0
 
     def test_empty_when_no_datasets(self, tmp_path):
         assert _score_accuracy(_ctx([]), _RESULT) == []
+
+    def test_accuracy_entry_has_phase_duration(self, tmp_path):
+        """Each entry carries its issue phase's wall-clock (seconds), matched by
+        phase name == dataset_name."""
+        cfg = _cfg("aime25::gptoss", 30, 0.8, tmp_path)
+        result = SimpleNamespace(
+            perf_results=[],
+            phase_results=[
+                SimpleNamespace(
+                    name="aime25::gptoss",
+                    start_time_ns=1_000_000_000,
+                    end_time_ns=6_500_000_000,
+                ),
+            ],
+        )
+        entry = _by_name(_score_accuracy(_ctx([cfg]), result))["aime25::gptoss"]
+        assert entry["duration_s"] == 5.5
 
     def test_numpy_score_coerced_to_serializable(self, tmp_path):
         """A scorer returning a numpy scalar (e.g. np.mean) must yield a native

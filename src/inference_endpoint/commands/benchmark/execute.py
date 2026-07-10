@@ -1246,6 +1246,14 @@ def _score_accuracy(
     """
     accuracy_scores: list[dict[str, Any]] = []
 
+    # Per-phase wall-clock (seconds) keyed by phase name. The accuracy phase name
+    # is the dataset_name; the inline-scored perf entry keys on "performance".
+    phase_durations: dict[str, float] = {}
+    for pr in result.phase_results:
+        phase_durations[pr.name] = phase_durations.get(pr.name, 0.0) + max(
+            0.0, (pr.end_time_ns - pr.start_time_ns) / 1e9
+        )
+
     for eval_cfg in ctx.eval_configs:
         try:
             scorer_instance = eval_cfg.scorer(
@@ -1289,6 +1297,9 @@ def _score_accuracy(
             "unit_samples": unit_samples,
             "num_repeats": num_repeats,
             "total_samples": total_samples,
+            # Wall-clock of this dataset's issue phase (seconds); 0.0 if the
+            # phase left no timing (e.g. a scored-but-not-issued dataset).
+            "duration_s": round(phase_durations.get(eval_cfg.dataset_name, 0.0), 3),
             # False when the scorer produced only a partial headline (e.g.
             # LegacyMLPerfDeepSeekR1Scorer when lcb-service was unreachable), so a
             # partial number is never mistaken for a complete one.
