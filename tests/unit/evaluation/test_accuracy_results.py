@@ -72,19 +72,20 @@ class TestFindAccuracyBreakdown:
     def test_no_scores(self):
         assert find_accuracy_breakdown({}) is None
         assert find_accuracy_breakdown({"accuracy_scores": None}) is None
+        assert find_accuracy_breakdown({"accuracy_scores": []}) is None
 
     def test_breakdown_block(self):
         block = {"overall_accuracy": 90.0, "subset_scores": {}, "total_samples": 5}
-        results = {"accuracy_scores": {"gptoss": {"score": 0.9, "breakdown": block}}}
-        assert find_accuracy_breakdown(results) is block
-
-    def test_score_as_dict_fallback(self):
-        block = {"overall_accuracy": 88.0}
-        results = {"accuracy_scores": {"bfcl": {"score": block}}}
+        results = {
+            "accuracy_scores": [
+                {"dataset_name": "plain", "score": 0.5},
+                {"dataset_name": "gptoss", "score": 0.9, "breakdown": block},
+            ]
+        }
         assert find_accuracy_breakdown(results) is block
 
     def test_no_overall_key_is_ignored(self):
-        results = {"accuracy_scores": {"x": {"score": 0.5}}}
+        results = {"accuracy_scores": [{"dataset_name": "x", "score": 0.5}]}
         assert find_accuracy_breakdown(results) is None
 
 

@@ -56,21 +56,20 @@ def to_float(value: Any) -> float | None:
 def find_accuracy_breakdown(results: dict[str, Any]) -> dict[str, Any] | None:
     """Return the first per-subset breakdown from a run's ``accuracy_scores``.
 
-    Each entry carries a scalar ``score`` plus an optional ``breakdown`` dict
-    (per-subset accuracy + ``total_samples``); consumers read the breakdown.
-    ``score``-as-dict is also accepted for older artifacts. Matching keys on
-    ``overall_accuracy`` recognizes every BFCL-shaped breakdown (BFCL,
-    DeepSeek-R1, gpt-oss).
+    ``accuracy_scores`` is a list of per-dataset entries; each entry may carry a
+    ``breakdown`` dict (per-subset accuracy + ``total_samples``). Returns the
+    first breakdown whose keys include ``overall_accuracy`` — which recognizes
+    every BFCL-shaped breakdown (BFCL, DeepSeek-R1).
     """
     accuracy_scores = results.get("accuracy_scores")
-    if not isinstance(accuracy_scores, dict):
+    if not isinstance(accuracy_scores, list):
         return None
-    for entry in accuracy_scores.values():
+    for entry in accuracy_scores:
         if not isinstance(entry, dict):
             continue
-        for block in (entry.get("breakdown"), entry.get("score")):
-            if isinstance(block, dict) and "overall_accuracy" in block:
-                return block
+        block = entry.get("breakdown")
+        if isinstance(block, dict) and "overall_accuracy" in block:
+            return block
     return None
 
 

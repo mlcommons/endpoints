@@ -32,8 +32,9 @@ def _accuracy_results() -> dict:
     # values are left as strings to exercise the extractor's defensive coercion
     # (older artifacts serialized percentages as strings).
     return {
-        "accuracy_scores": {
-            "bfcl_v4::function_calling": {
+        "accuracy_scores": [
+            {
+                "dataset_name": "bfcl_v4::function_calling",
                 "score": 0.8623,
                 "breakdown": {
                     "overall_accuracy": 86.23,
@@ -47,7 +48,7 @@ def _accuracy_results() -> dict:
                     "total_samples": 995,
                 },
             }
-        }
+        ]
     }
 
 
@@ -103,7 +104,7 @@ def test_extract_accuracy_coerces_strings():
 
 @pytest.mark.unit
 def test_extract_accuracy_returns_none_without_scores():
-    assert extract_accuracy({"accuracy_scores": {}}) is None
+    assert extract_accuracy({"accuracy_scores": []}) is None
     assert extract_accuracy({}) is None
 
 
@@ -112,8 +113,9 @@ def test_extract_accuracy_non_bfcl_breakdown_falls_back_to_overall():
     """DeepSeek/gpt-oss breakdowns carry no normalized single-turn score;
     extract_accuracy falls back to the overall accuracy so they still plot."""
     results = {
-        "accuracy_scores": {
-            "gptoss": {
+        "accuracy_scores": [
+            {
+                "dataset_name": "gptoss",
                 "score": 0.83,
                 "breakdown": {
                     "overall_accuracy": 83.0,
@@ -121,7 +123,7 @@ def test_extract_accuracy_non_bfcl_breakdown_falls_back_to_overall():
                     "total_samples": 1283,
                 },
             }
-        }
+        ]
     }
     b = extract_accuracy(results)
     assert b is not None

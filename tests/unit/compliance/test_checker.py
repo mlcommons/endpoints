@@ -74,8 +74,9 @@ def _accuracy_results(
     overall: float | str, normalized: float | str, total: int | str
 ) -> dict:
     return {
-        "accuracy_scores": {
-            "bfcl_v4::function_calling": {
+        "accuracy_scores": [
+            {
+                "dataset_name": "bfcl_v4::function_calling",
                 "score": 0.8623,
                 "breakdown": {
                     "overall_accuracy": overall,
@@ -83,7 +84,7 @@ def _accuracy_results(
                     "total_samples": total,
                 },
             }
-        }
+        ]
     }
 
 
@@ -203,8 +204,9 @@ def test_accuracy_gate_accepts_non_bfcl_breakdown():
     """A deepseek/gpt-oss breakdown (overall_accuracy + subset_scores, no
     normalized single-turn score) is discovered and gated on overall_accuracy."""
     results = {
-        "accuracy_scores": {
-            "gptoss": {
+        "accuracy_scores": [
+            {
+                "dataset_name": "gptoss",
                 "score": 0.83,
                 "breakdown": {
                     "overall_accuracy": 83.0,
@@ -212,7 +214,7 @@ def test_accuracy_gate_accepts_non_bfcl_breakdown():
                     "total_samples": 1283,
                 },
             }
-        }
+        ]
     }
     golden = {"bfcl_overall_accuracy": 82.0}
     factors = {"bfcl_overall_accuracy": (0.97,)}
