@@ -25,7 +25,7 @@ emits in each run's ``report_dir``:
     ttft / tpot percentiles (keys are float-formatted, e.g. ``"99.0"``),
     ``n_samples_issued``, ``duration_ns``, ``git_sha``, ``version``.
   * ``results.json``         -- ``results.total/failed/qps`` and, for accuracy
-    runs, the ``accuracy_scores`` map.
+    runs, the ``accuracy_scores`` list.
   * ``config.yaml``          (lowest priority)   -- run configuration
     (``type``, ``model_params.streaming``, ``settings.runtime.*``,
     ``settings.load_pattern.*``).
@@ -177,18 +177,18 @@ def _verify_accuracy(run_dir: Path) -> list[str]:
             "(endpoints accuracy check requires this)."
         )
         return findings
-    for name, entry in scores.items():
-        if isinstance(entry, dict):
-            score = entry.get("score")
-            findings.append(f"  accuracy_scores[{name}].score = {score}")
-            breakdown = entry.get("breakdown")
-            if isinstance(breakdown, dict):
-                findings.append(
-                    f"  accuracy_scores[{name}].breakdown.overall_accuracy = "
-                    f"{breakdown.get('overall_accuracy')}"
-                )
-        else:
-            findings.append(f"  accuracy_scores[{name}] = {entry}")
+    for entry in scores:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("dataset_name", "?")
+        score = entry.get("score")
+        findings.append(f"  accuracy_scores[{name}].score = {score}")
+        breakdown = entry.get("breakdown")
+        if isinstance(breakdown, dict):
+            findings.append(
+                f"  accuracy_scores[{name}].breakdown.overall_accuracy = "
+                f"{breakdown.get('overall_accuracy')}"
+            )
     return findings
 
 

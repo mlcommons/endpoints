@@ -1253,6 +1253,10 @@ def _score_accuracy(
         unit_samples = eval_cfg.dataset.num_samples()
         num_repeats = eval_cfg.num_repeats
         if eval_cfg.dataset_name == "performance":
+            # A performance dataset always scores its already-issued outputs once
+            # (enforced by the num_repeats == 1 guard in _load_datasets), so make
+            # that locally provable rather than relying on eval_cfg carrying 1.
+            num_repeats = 1
             total_samples = sum(phase.issued_count for phase in result.perf_results)
         else:
             total_samples = unit_samples * num_repeats
