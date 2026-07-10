@@ -59,7 +59,15 @@ class _FakeBreakdownScorer(_FakeScorer):
         return {"overall_accuracy": 80.0, "subset_scores": {"x": 80.0}}
 
 
-def _cfg(name: str, n: int, score: float, tmp, scorer=_FakeScorer, repeats: int = 1):
+def _cfg(
+    name: str,
+    n: int,
+    score: float,
+    tmp,
+    scorer=_FakeScorer,
+    repeats: int = 1,
+    scale: float = 1.0,
+):
     return AccuracyConfiguration(
         scorer,  # type: ignore[arg-type]  # duck-typed stand-in
         None,
@@ -69,6 +77,7 @@ def _cfg(name: str, n: int, score: float, tmp, scorer=_FakeScorer, repeats: int 
         None,
         repeats,
         {},
+        scale,
     )
 
 
@@ -106,6 +115,17 @@ class TestScoreAccuracy:
         assert by["aime25::gptoss"]["total_samples"] == 240
         assert by["gpqa::gptoss"]["total_samples"] == 990
         assert "breakdown" not in by["aime25::gptoss"]
+
+    def test_scale_reports_score_as_percentage(self, tmp_path):
+        """accuracy_config.scale multiplies the scalar score (e.g. 100 turns a
+        [0,1] pass@1 into a percentage); default scale=1.0 leaves it untouched."""
+        cfgs = [
+            _cfg("aime25::gptoss", 30, 0.8, tmp_path, scale=100),
+            _cfg("plain", 10, 0.8, tmp_path),  # default scale=1.0
+        ]
+        by = _by_name(_score_accuracy(_ctx(cfgs), _RESULT))
+        assert by["aime25::gptoss"]["score"] == pytest.approx(80.0)
+        assert by["plain"]["score"] == pytest.approx(0.8)
 
     def test_breakdown_attached_only_when_scorer_provides_it(self, tmp_path):
         cfgs = [

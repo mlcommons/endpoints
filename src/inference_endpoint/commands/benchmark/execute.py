@@ -173,6 +173,7 @@ class AccuracyConfiguration:
     ground_truth_column: str | None
     num_repeats: int
     extras: dict[str, Any] = field(default_factory=dict)
+    scale: float = 1.0
 
 
 @dataclass
@@ -332,6 +333,7 @@ def _load_datasets(
                 acc_cfg.accuracy_config.ground_truth,
                 acc_cfg.accuracy_config.num_repeats,
                 acc_cfg.accuracy_config.extras or {},
+                acc_cfg.accuracy_config.scale,
             )
         )
         # Value/api-type validity of the override is already enforced at config
@@ -390,6 +392,7 @@ def _load_datasets(
                     accuracy_config.ground_truth,
                     accuracy_config.num_repeats,
                     accuracy_config.extras or {},
+                    accuracy_config.scale,
                 )
             )
 
@@ -1275,8 +1278,10 @@ def _score_accuracy(
         # (result_summary.json) and json (results.json). numpy.float64 is a
         # float subclass, so isinstance(..., float) catches it while leaving
         # None / dict (RougeScorer) untouched; float(...) drops the numpy type.
+        # accuracy_config.scale then applies (e.g. 100 to report a [0,1] pass@1
+        # score as a percentage); the breakdown, if any, keeps its own scale.
         if isinstance(score, float):
-            score = float(score)
+            score = float(score) * eval_cfg.scale
         unit_samples = eval_cfg.dataset.num_samples()
         num_repeats = eval_cfg.num_repeats
         if eval_cfg.dataset_name == "performance":
