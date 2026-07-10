@@ -81,10 +81,19 @@ class DataLoaderFactory:
                     )
 
                 preset_transforms = getattr(ds_cls.PRESETS, preset)()
+
+            # Pass dataset-specific params from config to generate()
+            dataset_params = (
+                dict(config.generate_params) if config.generate_params else {}
+            )
+            dataset_params.update(kwargs)
+            force_regenerate = dataset_params.pop("force_regenerate", False)
+
             return ds_cls.get_dataloader(
                 transforms=preset_transforms,
                 num_repeats=num_repeats,
-                **kwargs,
+                force_regenerate=force_regenerate,
+                **dataset_params,
             )
 
         if name not in Dataset.PREDEFINED and dataset_path is None:

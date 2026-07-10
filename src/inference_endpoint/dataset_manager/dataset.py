@@ -30,7 +30,12 @@ import pandas as pd
 from datasets import load_dataset, load_from_disk
 
 from ..config.schema import APIType, ModelParams
-from .transforms import Transform, apply_transforms, get_transforms_for_api_type
+from .transforms import (
+    ColumnFilter,
+    Transform,
+    apply_transforms,
+    get_transforms_for_api_type,
+)
 
 if TYPE_CHECKING:
     from inference_endpoint.endpoint_client.adapter_protocol import HttpRequestAdapter
@@ -372,12 +377,32 @@ class Dataset:
         if self.transforms is not None:
             transforms.extend(self.transforms)
 
-        # If adapter is specified, use it to get transforms, otherwise fallback to use APIType to
-        # get transforms.
+        # Collect the adapter's (or API type's) default transforms to append
+        # after any dataset-provided ones.
         if adapter is not None and model_params is not None:
-            transforms.extend(adapter.dataset_transforms(model_params))
+            adapter_transforms = adapter.dataset_transforms(model_params)
         elif api_type is not None and model_params is not None:
-            transforms.extend(get_transforms_for_api_type(api_type, model_params))
+            adapter_transforms = get_transforms_for_api_type(api_type, model_params)
+        else:
+            adapter_transforms = []
+
+        # A ColumnFilter projects the frame down to the columns the API path
+        # expects. The adapter's default filter assumes a single "prompt"
+        # column, which is wrong for datasets whose schema is "messages"+"tools"
+        # (e.g. the BFCL function-calling presets): running it would drop the
+        # columns those datasets need. When the dataset already supplies its own
+        # ColumnFilter (the authoritative projection for its schema), we drop
+        # ONLY the adapter's ColumnFilter and still apply every other adapter
+        # transform (Harmonize, tokenization, etc.), so behavior is unchanged
+        # apart from which columns survive the projection.
+        has_user_column_filter = any(isinstance(t, ColumnFilter) for t in transforms)
+        for t in adapter_transforms:
+            if has_user_column_filter and isinstance(t, ColumnFilter):
+                self.logger.debug(
+                    "Skipping adapter ColumnFilter (preset already provides one)"
+                )
+                continue
+            transforms.append(t)
 
         if transforms:
             df = apply_transforms(df, transforms)

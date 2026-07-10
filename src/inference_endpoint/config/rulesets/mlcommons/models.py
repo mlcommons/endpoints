@@ -146,6 +146,26 @@ Mixtral8x7B = _Model(
     dataset=datasets.TextGenComplex,
 )
 
+# Edge-Agentic (BFCL v4) reference model. The accuracy gate is BFCL v4 single-turn
+# (overall + non_live-normalized). golden_accuracy here is the validated Q4_K_M
+# reference point on a Jetson Thor (llama.cpp, reasoning off); accuracy is
+# hardware-independent and deterministic at temperature 0 + fixed seed.
+#
+# Gate: 3% one-sided band (working-group agreement) — a submission passes if its
+# score is >= 0.97 x reference (the Jetson Thor Q4_K_M number below), with no
+# upper bound. Overall gate = 0.97 x 86.23 = 83.64%.
+Qwen3_6_27B = _Model(
+    "qwen3.6-27b",
+    golden_accuracy=(
+        "q4_k_m-reference",
+        {"bfcl_overall_accuracy": 86.23, "bfcl_normalized_accuracy": 87.96},
+    ),
+    accuracy_target_settings=[
+        {"bfcl_overall_accuracy": (0.97,), "bfcl_normalized_accuracy": (0.97,)}
+    ],
+    dataset=datasets.BFCLv4SingleTurn,
+)
+
 
 # Note this isn't completely robust, but will prevent simple cases of defining new instances
 def _disallow_instantiation(cls, *args, **kwargs):

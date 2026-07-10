@@ -107,11 +107,19 @@ def _make_registry(n_samples: int = 50) -> MetricsRegistry:
     return registry
 
 
+def _set_loadgen_window(registry: MetricsRegistry, *, duration_ns: int) -> None:
+    """Populate the legacy LoadGen window counter a loadgen-view Report reads."""
+    registry.set_counter(
+        MetricCounterKey.LEGACY_LOADGEN_WINDOW_DURATION_NS.value, duration_ns
+    )
+
+
 def _build_report(
     registry: MetricsRegistry,
     *,
     state: SessionState = SessionState.COMPLETE,
     n_pending_tasks: int = 0,
+    use_legacy_loadgen_qps_metrics: bool = True,
 ) -> Report:
     """Build a Report from a snapshot dict (matches the consumer contract).
 
@@ -122,7 +130,10 @@ def _build_report(
     does (loaded JSON file → Report).
     """
     snap = registry.build_snapshot(state=state, n_pending_tasks=n_pending_tasks)
-    return Report.from_snapshot(snapshot_to_dict(snap))
+    return Report.from_snapshot(
+        snapshot_to_dict(snap),
+        use_legacy_loadgen_qps_metrics=use_legacy_loadgen_qps_metrics,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -151,7 +162,9 @@ class TestFromSnapshot:
 
     def test_with_metrics(self):
         registry = _make_registry(n_samples=50)
-        report = _build_report(registry)
+        # Native view (completed / tracked_duration) so QPS/TPS are computable
+        # from tracked_duration_ns alone (no loadgen window counter set here).
+        report = _build_report(registry, use_legacy_loadgen_qps_metrics=False)
 
         assert report.n_samples_issued == 50
         assert report.n_samples_completed == 50
@@ -168,16 +181,23 @@ class TestFromSnapshot:
         # OSL data was written → tps is computable.
         assert report.tps is not None
 
-    def test_seeds_keyword_only_passthrough(self):
-        """seeds is config, not a snapshot metric: None unless the caller
+    def test_run_config_keyword_only_passthrough(self):
+        """run_config is config, not a snapshot metric: None unless the caller
         supplies it, and carried verbatim into the report when it does."""
         registry = _make_registry(n_samples=5)
         snap = snapshot_to_dict(
             registry.build_snapshot(state=SessionState.COMPLETE, n_pending_tasks=0)
         )
-        assert Report.from_snapshot(snap).seeds is None
-        seeds = {"scheduler_random_seed": 42, "dataloader_random_seed": 7}
-        assert Report.from_snapshot(snap, seeds=seeds).seeds == seeds
+        assert Report.from_snapshot(snap).run_config is None
+        run_config = {
+            "load_pattern": {"type": "poisson", "target_qps": 14.75},
+            "warmup": {"enabled": False, "warmup_random_seed": 42},
+            "scheduler_random_seed": 42,
+            "dataloader_random_seed": 42,
+        }
+        assert (
+            Report.from_snapshot(snap, run_config=run_config).run_config == run_config
+        )
 
     def test_failed_uses_tracked_counter(self):
         """``n_samples_failed`` reads from ``tracked_samples_failed``, not
@@ -266,23 +286,28 @@ class TestReportDisplayAndSerialize:
         assert data["qps"] is None
         assert data["tps"] is None
 
-    def test_to_json_serializes_seeds(self):
-        """result_summary.json carries the run's RNG seeds so a run can be
-        validated as reproducible; absent seeds serialize as null."""
+    def test_to_json_and_display_carry_run_config(self):
+        """result_summary.json + report.txt carry the run's config so a run is
+        self-describing/reproducible; absent run_config serializes as null."""
         registry = _make_registry(n_samples=5)
         snap = snapshot_to_dict(
             registry.build_snapshot(state=SessionState.COMPLETE, n_pending_tasks=0)
         )
-        seeds = {"scheduler_random_seed": 42, "dataloader_random_seed": 42}
-        report = Report.from_snapshot(snap, seeds=seeds)
-        assert json.loads(report.to_json())["seeds"] == seeds
+        run_config = {
+            "load_pattern": {"type": "poisson", "target_qps": 14.75},
+            "scheduler_random_seed": 42,
+            "dataloader_random_seed": 42,
+        }
+        report = Report.from_snapshot(snap, run_config=run_config)
+        assert json.loads(report.to_json())["run_config"] == run_config
 
         lines: list[str] = []
         report.display(fn=lines.append, summary_only=True)
-        assert any("Seeds:" in ln for ln in lines)
+        assert any("Run config:" in ln for ln in lines)
+        assert any("load_pattern:" in ln and "poisson" in ln for ln in lines)
 
-        # Absent seeds -> null, not omitted.
-        assert json.loads(Report.from_snapshot(snap).to_json())["seeds"] is None
+        # Absent run_config -> null, not omitted.
+        assert json.loads(Report.from_snapshot(snap).to_json())["run_config"] is None
 
     def test_to_json_save(self, tmp_path: Path):
         registry = _make_registry(n_samples=5)
@@ -489,6 +514,69 @@ class TestFromSnapshotDict:
         assert "TTFT" in output
         # Scrubbed values surface as a sentinel rather than crashing.
         assert "N/A" in output
+
+
+# ---------------------------------------------------------------------------
+# use_legacy_loadgen_qps_metrics: legacy MLPerf LoadGen "completed" (default) vs
+# endpoints' native throughput, with native fallback when the window is
+# unavailable.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestLoadgenQpsMetrics:
+    def test_default_uses_loadgen_window(self):
+        """Default: QPS = (completed-1)/W, TPS = tokens/W, where W is the
+        legacy LoadGen window.
+        """
+        registry = _make_registry(n_samples=50)
+        _set_loadgen_window(registry, duration_ns=8_000_000_000)
+        report = _build_report(registry)
+        assert report.legacy_loadgen_window_duration_ns == 8_000_000_000
+        # (50 - 1) / 8 s
+        assert report.qps == pytest.approx(49 / 8.0)
+        total = report.output_sequence_lengths["total"]
+        assert report.tps == pytest.approx(total / 8.0)
+
+    def test_disabled_uses_native(self):
+        """--no-use-legacy-loadgen-qps-metrics → native completed/duration and
+        tokens/duration, ignoring the legacy LoadGen window.
+        """
+        registry = _make_registry(n_samples=50)
+        _set_loadgen_window(registry, duration_ns=8_000_000_000)
+        report = _build_report(registry, use_legacy_loadgen_qps_metrics=False)
+        # Native view selected → window not recorded on the report.
+        assert report.legacy_loadgen_window_duration_ns is None
+        # Native: 50 / 10 s.
+        assert report.qps == pytest.approx(5.0)
+        total = report.output_sequence_lengths["total"]
+        assert report.tps == pytest.approx(total / 10.0)
+
+    def test_falls_back_to_native_when_window_unavailable(self):
+        """loadgen with absent/zero window → native fallback (not None), so the
+        default never silently drops the headline.
+        """
+        registry = _make_registry(n_samples=50)  # no window counter set
+        report = _build_report(registry)
+        assert report.legacy_loadgen_window_duration_ns is None
+        assert report.qps == pytest.approx(5.0)
+        total = report.output_sequence_lengths["total"]
+        assert report.tps == pytest.approx(total / 10.0)
+
+    def test_loadgen_qps_falls_back_when_completed_lt_2(self):
+        """Fewer than 2 completions → native QPS (the (completed-1)/W form is
+        undefined for a single sample).
+        """
+        registry = _make_registry(n_samples=1)
+        _set_loadgen_window(registry, duration_ns=1_000_000_000)
+        report = _build_report(registry)
+        # Both QPS and TPS fall back to the native window (10s) — they must
+        # share one window, and the legacy field must be None so the serialized
+        # report does not mislabel which view it holds.
+        assert report.qps == pytest.approx(0.1)
+        total = report.output_sequence_lengths["total"]
+        assert report.tps == pytest.approx(total / 10.0)
+        assert report.legacy_loadgen_window_duration_ns is None
 
 
 @pytest.mark.unit

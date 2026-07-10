@@ -212,8 +212,8 @@ def _make_populated_report() -> MagicMock:
     directly so no MagicMock auto-attribute leaks into arithmetic comparisons.
     """
     report = MagicMock()
-    report.tps.return_value = 200.0
-    report.qps.return_value = 20.0
+    report.tps = 200.0
+    report.qps = 20.0
     report.n_samples_completed = 100
     report.n_samples_issued = 100
     report.n_samples_failed = 0

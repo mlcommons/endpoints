@@ -130,6 +130,14 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
     tpot: dict[str, Any]
     latency: dict[str, Any]
     output_sequence_lengths: dict[str, Any]
+    # Legacy MLPerf LoadGen Server "completed" window (poisson only): first
+    # issued request -> completion of the last-issued request
+    # (final_query_all_samples_done_time analog; see mlcommons/inference
+    # loadgen/results.cc). Not None iff QPS/TPS were computed over this window;
+    # None means the endpoints-native full-run window was used. Recorded so
+    # result_summary.json is self-describing about which view it holds.
+    # TODO(vir): deprecate once endpoints has a formal tail-cutting mechanism.
+    legacy_loadgen_window_duration_ns: int | None = None
 
     # Derived throughput, computed once in from_snapshot so the serialized
     # report (result_summary.json) is self-complete. qps is None without a
@@ -138,21 +146,28 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
     qps: float | None = None
     tps: float | None = None
 
-    # RNG seeds for this run (scheduler/dataloader/warmup, from config). Carried
-    # so result_summary.json is self-validating: a reproducible run is identified
-    # by its seeds. These are config, not a measured metric, so the from_snapshot
-    # caller supplies them rather than reading them from the metrics snapshot.
-    seeds: dict[str, int] | None = None
+    # Run configuration (load_pattern, warmup, and the scheduler/dataloader RNG
+    # seeds), from config. Carried so result_summary.json is self-describing and a
+    # valid run is identified by its settings. Config, not a measured metric, so
+    # the from_snapshot caller supplies it rather than reading it from the metrics
+    # snapshot. (Resolved/effective runtime settings — sample count + ordering,
+    # which can differ per audit phase — are deferred to a follow-up.)
+    run_config: dict[str, Any] | None = None
 
     @classmethod
     def from_snapshot(
-        cls, snap: dict[str, Any], *, seeds: dict[str, int] | None = None
+        cls,
+        snap: dict[str, Any],
+        *,
+        run_config: dict[str, Any] | None = None,
+        use_legacy_loadgen_qps_metrics: bool = True,
     ) -> Report:
         """Build a Report from a snapshot dict.
 
-        ``seeds`` (optional) carries the run's RNG seeds from config into the
-        report so result_summary.json is self-validating; it is keyword-only
-        because it is config, not part of the metrics snapshot.
+        ``run_config`` (optional, keyword-only) carries the run's configuration
+        (load_pattern, warmup, and the scheduler/dataloader RNG seeds) into the
+        report so result_summary.json is self-describing; it is config, not part
+        of the metrics snapshot.
 
         Input is the dict form produced by
         ``inference_endpoint.async_utils.services.metrics_aggregator.snapshot
@@ -169,6 +184,13 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
         honest "incomplete" report on missing fields instead of crashing:
         missing ``state`` defaults to ``"interrupted"`` (worst-case),
         missing counters / series to zero / empty.
+
+        The snapshot always carries BOTH ``tracked_duration_ns`` and
+        ``legacy_loadgen_window_duration_ns``, so it stays config-agnostic and
+        fully reinterpretable either way. Which window the reported QPS/TPS use
+        is decided by the run config (``use_legacy_loadgen_qps_metrics``,
+        recorded in ``config.yaml`` and in this Report's serialized JSON), not
+        by the snapshot.
         """
         counters: dict[str, int | float] = {}
         series: dict[str, dict[str, Any]] = {}
@@ -197,13 +219,39 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
         n_completed = _counter("tracked_samples_completed")
         osl = _series_dict("osl")
 
-        # Derived throughput. qps needs a duration; tps additionally needs OSL.
-        if duration_ns is None:
-            qps = tps = None
-        else:
+        # Legacy MLPerf LoadGen Server "completed" window (poisson only): first
+        # issued request -> completion of the last-issued request
+        # (final_query_all_samples_done_time analog; see mlcommons/inference
+        # loadgen/results.cc).
+        # TODO(vir): deprecate once endpoints has a formal tail-cutting mechanism.
+        raw_loadgen_window_ns = _counter("legacy_loadgen_window_duration_ns")
+
+        # Derived throughput, computed once so result_summary.json is
+        # self-complete. The legacy LoadGen window drives the headline QPS/TPS
+        # only when it is enabled, available, AND there are >=2 completions
+        # (QPS = (completed-1)/window is undefined below 2). If any of those
+        # fail, BOTH QPS and TPS fall back to the native window so they always
+        # share one window, and legacy_loadgen_window_duration_ns stays None so
+        # the serialized report honestly records which view it holds.
+        use_legacy_window = (
+            use_legacy_loadgen_qps_metrics
+            and raw_loadgen_window_ns > 0
+            and n_completed >= 2
+        )
+        legacy_loadgen_window_duration_ns = (
+            raw_loadgen_window_ns if use_legacy_window else None
+        )
+        if use_legacy_window:
+            window_s = raw_loadgen_window_ns / 1e9
+            qps = (n_completed - 1) / window_s
+            tps = (osl.get("total", 0) / window_s) if osl else None
+        elif duration_ns is not None:
             duration_s = duration_ns / 1e9
             qps = n_completed / duration_s
             tps = (osl.get("total", 0) / duration_s) if osl else None
+        else:
+            qps = None
+            tps = None
 
         # Default missing state to "interrupted" — a malformed / partial
         # snapshot dict is treated as worst-case (run did not reach a
@@ -226,9 +274,10 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
             tpot=_series_dict("tpot_ns"),
             latency=_series_dict("sample_latency_ns"),
             output_sequence_lengths=osl,
+            legacy_loadgen_window_duration_ns=legacy_loadgen_window_duration_ns,
             qps=qps,
             tps=tps,
-            seeds=seeds,
+            run_config=run_config,
         )
 
     def to_json(self, save_to: os.PathLike | None = None) -> bytes:
@@ -258,9 +307,14 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
         fn(f"Version: {self.version}{newline}")
         if self.git_sha:
             fn(f"Git SHA: {self.git_sha}{newline}")
-        if self.seeds:
-            seed_str = ", ".join(f"{k}={v}" for k, v in self.seeds.items())
-            fn(f"Seeds: {seed_str}{newline}")
+        if self.run_config:
+            fn(f"Run config:{newline}")
+            for section, params in self.run_config.items():
+                if isinstance(params, dict):
+                    inner = ", ".join(f"{k}={v}" for k, v in params.items())
+                    fn(f"  {section}: {inner}{newline}")
+                else:
+                    fn(f"  {section}: {params}{newline}")
         if self.test_started_at > 0:
             approx = monotime_to_datetime(self.test_started_at)
             fn(f"Test started at: {approx.strftime('%Y-%m-%d %H:%M:%S')}{newline}")

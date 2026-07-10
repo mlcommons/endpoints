@@ -6,6 +6,7 @@ benchmark_mode: null  # options: offline, online
 model_params:
   name: '<MODEL_NAME eg: meta-llama/Llama-3.1-8B-Instruct>'
   temperature: null  # Sampling temperature
+  seed: null  # Random seed for reproducible sampling
   top_k: null  # Top-K sampling
   top_p: null  # Top-P (nucleus) sampling
   repetition_penalty: null  # Repetition penalty
@@ -13,6 +14,8 @@ model_params:
   frequency_penalty: null  # Frequency penalty
   chat_template_kwargs: null  # Per-request chat-template kwargs forwarded to compatible servers.
   max_new_tokens: 1024  # Max output tokens
+  min_new_tokens: 1  # Minimum output tokens for OpenAI text-completions servers
+  skip_special_tokens: true  # Whether OpenAI text-completions servers omit special tokens from decoded output
   osl_distribution: null  # Output sequence length distribution
   streaming: 'off'  # Streaming mode: auto/on/off | options: auto, on, off
   tokenizer_name: null  # HF repo ID or local path for the tokenizer. Overrides model name for client-side token metrics (ISL/OSL/TPOT).
@@ -21,27 +24,31 @@ datasets:  # Dataset configs
   type: performance  # Dataset purpose: performance or accuracy | options: performance, accuracy
   path: '<DATASET_PATH eg: tests/assets/datasets/dummy_1k.jsonl>'  # Dataset file path
   format: null  # Dataset format (auto-detected)
-  samples: null  # Number of samples to use
+  samples: null
   eval_method: null
   parser:  # Column remapping: {prompt: <col>, system: <col>}
     prompt: text_input
+  generate_params: null  # Dataset-specific parameters passed to the generate() method
   accuracy_config: null  # Accuracy evaluation settings
   agentic_inference: null  # Agentic inference conversation configuration
+  generation_config_override: null  # Per-dataset overrides for the top-level model_params (sparse — only the fields you want to override). Merged on top of BenchmarkConfig.model_params at dataset-load time. Useful for MLPerf-style runs where accuracy and performance use different output budgets in the same fleet, e.g. generation_config_override: {max_new_tokens: 32768, temperature: 0.0}. NOTE: per-run/identity keys (`name`, `streaming`, `tokenizer_name`) are rejected here — set them on top-level model_params.
 - name: accuracy
   type: accuracy  # Dataset purpose: performance or accuracy | options: performance, accuracy
   path: '<DATASET_PATH eg: tests/assets/datasets/ds_samples.jsonl>'  # Dataset file path
   format: null  # Dataset format (auto-detected)
-  samples: null  # Number of samples to use
+  samples: null
   eval_method: exact_match  # Accuracy evaluation method | options: exact_match, contains, judge
   parser:  # Column remapping: {prompt: <col>, system: <col>}
     prompt: question
     system: system_prompt
+  generate_params: null  # Dataset-specific parameters passed to the generate() method
   accuracy_config:  # Accuracy evaluation settings
-    eval_method: pass_at_1  # Scorer method | options: pass_at_1, string_match, rouge, code_bench_scorer, shopify_category_f1, agentic_inference_inline, vbench
+    eval_method: pass_at_1  # Scorer method | options: pass_at_1, string_match, rouge, code_bench_scorer, shopify_category_f1, agentic_inference_inline, vbench, bfcl_v4, legacy_mlperf_deepseek_r1
     ground_truth: ground_truth  # Ground truth column name
     extractor: boxed_math_extractor  # Answer extractor (abcd_extractor, boxed_math_extractor, identity_extractor, python_code_extractor)
     num_repeats: 1  # Repeat dataset N times for evaluation
   agentic_inference: null  # Agentic inference conversation configuration
+  generation_config_override: null  # Per-dataset overrides for the top-level model_params (sparse — only the fields you want to override). Merged on top of BenchmarkConfig.model_params at dataset-load time. Useful for MLPerf-style runs where accuracy and performance use different output budgets in the same fleet, e.g. generation_config_override: {max_new_tokens: 32768, temperature: 0.0}. NOTE: per-run/identity keys (`name`, `streaming`, `tokenizer_name`) are rejected here — set them on top-level model_params.
 settings:
   runtime:
     min_duration_ms: 600000  # Min duration (ms, or with suffix: 600s, 10m)
@@ -79,8 +86,8 @@ settings:
     warmup_timeout_s: 240.0  # Warmup drain timeout in seconds (None = wait indefinitely)
     performance_timeout_s: 240.0  # Performance drain timeout in seconds (None = wait indefinitely)
     accuracy_timeout_s: null  # Accuracy drain timeout in seconds (None = wait indefinitely)
-    metrics_drain_timeout_s: 60.0  # Wall-clock budget (seconds) for the metrics aggregator to drain in-flight tokenize tasks after ENDED (default: 60.0; 0 = unlimited).
-    metrics_tokenizer_workers: 2  # Number of tokenizer worker threads in the metrics aggregator (default: 2).
+    metrics_drain_timeout_s: 0.0  # Wall-clock budget (seconds) to finish tokenizing buffered samples after ENDED (default: 0 = unlimited). An incomplete drain is surfaced via n_pending_tasks > 0, never silently dropped.
+    metrics_tokenizer_workers: 2  # In-process tokenizer threads for live (mid-run) ISL/OSL/TPOT (default: 2; 0 = defer everything to the end-of-run drain).
   warmup:
     enabled: false  # Enable warmup phase before performance run
     n_requests: null  # Warmup request count (None = full dataset once)
@@ -90,6 +97,7 @@ settings:
   profiling:
     engine: null  # Profile the named inference engine around the performance phase | options: vllm
     urls: null  # URL(s) the profiler start/stop triggers are derived from. When None, derived from endpoint_config.endpoints instead. Use when the profiler admin endpoint differs from the inference endpoint.
+  service_ready_timeout_s: 30.0  # Seconds to wait for metrics-aggregator/event-logger services to become ready.
 endpoint_config:
   endpoints:  # Endpoint URL(s). Must include scheme, e.g. 'http://host:port'.
   - http://localhost:8000
@@ -100,3 +108,4 @@ timeout: null  # Global timeout in seconds
 verbose: false  # Enable verbose logging
 enable_cpu_affinity: true  # NUMA-aware CPU pinning
 system_info: null
+audit: null  # Compliance audit config (YAML only). When set, runs the audit after the main benchmark.
