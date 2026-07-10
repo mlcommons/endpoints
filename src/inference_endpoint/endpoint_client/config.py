@@ -170,6 +170,23 @@ class HTTPClientConfig(WithUpdatesMixin, BaseModel):
         4.0, description="Discard connections idle longer than this (seconds)"
     )
 
+    # Retry a request when the connection fails BEFORE any response byte is
+    # received (e.g. "connection closed before headers received" — the server
+    # closed an idle keep-alive socket at the instant we wrote the request).
+    # Safe because the server produced no output; the retry re-issues on a fresh
+    # connection. Never fires once headers/chunks have started (would risk
+    # duplicate output). Guards single-stream localhost runs (e.g. llama.cpp with
+    # -np 1) where a stale-socket reset otherwise zeroes an accuracy sample.
+    #
+    # Opt-in: default 0 preserves the prior fail-fast behavior for every use
+    # case. Configs that need it (e.g. the edge-agentic accuracy reference)
+    # enable it explicitly via `client.transport_max_retries`.
+    transport_max_retries: int = Field(
+        0,
+        ge=0,
+        description="Retries on a pre-response connection reset (0=disabled)",
+    )
+
     # Minimum required connections for http-client to initialize.
     # Will log warning if not enough ephemeral ports are available during warmup.
     #

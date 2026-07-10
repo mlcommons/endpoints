@@ -106,6 +106,12 @@ settings:
     num_workers: 1
     max_connections: 1
     warmup_connections: 0
+    # Single-slot edge servers (e.g. llama.cpp -np 1) close idle keep-alive
+    # sockets between samples; a reused-then-reset socket would otherwise zero
+    # the affected accuracy sample. Retry the request on a fresh connection when
+    # the reset happens before any response byte (safe: the server produced no
+    # output). Off by default globally; enabled here for the gated run.
+    transport_max_retries: 2
 
 endpoint_config:
   endpoints:

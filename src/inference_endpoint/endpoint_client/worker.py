@@ -378,14 +378,50 @@ class Worker:
             logger.error(f"Request {req.query_id} failed: {type(e).__name__}: {e}")
             return False
 
+    async def _read_headers_with_retry(self, req: InFlightRequest) -> int | None:
+        """Read response headers, retrying on a pre-response connection reset.
+
+        A connection-level failure at this point means the server closed the
+        socket before sending any response byte (the idle keep-alive race:
+        server drops an idle -np 1 connection just as the client writes on it).
+        No output was produced, so re-issuing the identical request on a fresh
+        connection is safe and idempotent. Returns the HTTP status code, or None
+        if retries are exhausted (an error response has been emitted).
+        """
+        attempt = 0
+        while True:
+            conn = req.connection
+            try:
+                status_code, _ = await conn.protocol.read_headers()
+                return status_code
+            except ConnectionError as e:
+                # Dead connection: discard it (frees the pool slot) and, if
+                # retries remain, re-issue on a fresh connection. Retrying is
+                # only reached here because no headers arrived, so no partial
+                # output was delivered to the accumulator.
+                self._pool.release(conn)
+                if attempt >= self.http_config.transport_max_retries:
+                    await self._handle_error(req.query_id, e)
+                    return None
+                attempt += 1
+                # Attach the fresh connection to the request BEFORE writing, so
+                # a write failure still leaves req.connection pointing at it for
+                # the caller's finally-block release (no leaked connection).
+                new_conn = await self._pool.acquire()
+                req.connection = new_conn
+                new_conn.protocol.write(req.http_bytes)
+
     @profile
     async def _process_response(self, req: InFlightRequest) -> None:
         """Process response for a fired request."""
-        conn = req.connection
-
         try:
-            # Await headers and handle error status
-            status_code, _ = await conn.protocol.read_headers()
+            # Await headers, retrying on a pre-response connection reset.
+            status_code = await self._read_headers_with_retry(req)
+            if status_code is None:
+                # Retries exhausted; error already emitted.
+                return
+
+            conn = req.connection
             if status_code != 200:
                 error_body = await conn.protocol.read_body()
                 self._pool.release(conn)
@@ -406,8 +442,9 @@ class Worker:
             logger.warning(f"Request {req.query_id} failed: {type(e).__name__}: {e}")
 
         finally:
-            # Release connection back to pool if not already
-            self._pool.release(conn)
+            # Release the current connection (body handlers release early; this
+            # is idempotent and also covers the swapped connection after a retry)
+            self._pool.release(req.connection)
 
             # Clean up task reference
             current_task = asyncio.current_task()
