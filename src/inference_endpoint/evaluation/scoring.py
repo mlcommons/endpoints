@@ -58,6 +58,16 @@ from .extractor import Extractor, PythonCodeExtractor
 logger = logging.getLogger(__name__)
 
 
+def _join_output_parts(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (tuple, list)):
+        return "".join(str(part) for part in value)
+    return str(value)
+
+
 class Scorer(ABC):
     """Scorers will read in a dataset and outputs from a log and compute an accuracy score.
     An optional extractor can be provided to post-process the output to extract values that
@@ -155,7 +165,17 @@ class Scorer(ABC):
                     continue
                 record = decoder.decode(stripped)
                 if record.event_type == SampleEventType.COMPLETE:
-                    output_text = str(record.data) if record.data is not None else ""
+                    if isinstance(record.data, TextModelOutput):
+                        output_text = _join_output_parts(record.data.output)
+                        # Reasoning-model fallback: some responses emit the final
+                        # answer only inside the reasoning/thinking stream and leave
+                        # the main content empty. When the main output is empty,
+                        # fall back to the reasoning trace so the extractor can still
+                        # recover the answer.
+                        if not output_text.strip() and record.data.reasoning is not None:
+                            output_text = _join_output_parts(record.data.reasoning)
+                    else:
+                        output_text = str(record.data) if record.data is not None else ""
                     outputs.append(
                         {"sample_uuid": record.sample_uuid, "output": output_text}
                     )

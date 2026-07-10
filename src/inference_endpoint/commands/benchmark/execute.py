@@ -522,7 +522,15 @@ def _build_phases(
             )
         # Accuracy phases use bounded concurrency (not MAX_THROUGHPUT burst) so long
         # runs do not queue thousands of requests on the inference server at once.
-        acc_concurrency = max(1, ctx.config.settings.client.num_workers)
+        # If the top-level run is configured for fixed concurrency, keep that
+        # requested concurrency for accuracy instead of coupling it to the
+        # number of client worker processes.
+        lp = ctx.config.settings.load_pattern
+        if lp.type == LoadPatternType.CONCURRENCY and lp.target_concurrency is not None:
+            acc_concurrency = lp.target_concurrency
+        else:
+            acc_concurrency = ctx.config.settings.client.num_workers
+        acc_concurrency = max(1, acc_concurrency)
         acc_load_pattern: LoadPattern | None = LoadPattern(
             type=LoadPatternType.CONCURRENCY,
             target_concurrency=acc_concurrency,

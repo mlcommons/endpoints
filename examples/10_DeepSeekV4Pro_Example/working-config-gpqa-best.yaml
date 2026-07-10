@@ -1,0 +1,51 @@
+name: deepseek-v4-pro-gpqa-patch-concurrency256-256k-run_01
+version: '1.0'
+type: online
+timeout: 1209600
+model_params:
+  name: /data/workloads-inference/models/DeepSeek-V4-Pro
+  temperature: 0.6
+  max_new_tokens: 256000
+  top_k: -1
+  top_p: 0.95
+  streaming: 'on'
+  chat_template_kwargs:
+    thinking: true
+    reasoning_effort: max
+datasets:
+- name: perf-stub
+  type: performance
+  path: examples/10_DeepSeekV4Pro_Example/data/vllm_smoke.jsonl
+  samples: 1
+  parser:
+    prompt: text_input
+- name: gpqa::deepseek_v4
+  type: accuracy
+  accuracy_config:
+    eval_method: pass_at_1
+    extractor: abcd_extractor
+    ground_truth: ground_truth
+    num_repeats: 4
+settings:
+  runtime:
+    min_duration_ms: 100
+    max_duration_ms: 0
+    scheduler_random_seed: 42
+    dataloader_random_seed: 42
+  load_pattern:
+    type: concurrency
+    target_qps: null
+    target_concurrency: 256
+  client:
+    num_workers: 32
+    worker_initialization_timeout: 1200.0
+    warmup_connections: 0
+    min_required_connections: 0
+  warmup:
+    enabled: false
+endpoint_config:
+  endpoints:
+  - http://127.0.0.1:30000
+  api_key: null
+  api_type: openai
+report_dir: results/sglang_deepseek_v4_pro_gpqa_best/report

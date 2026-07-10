@@ -16,8 +16,10 @@ MODEL_REPO="${MODEL_REPO:-deepseek-ai/DeepSeek-V4-Pro}"
 PORT="${HTTP_PORT:-${SGLANG_PORT:-30000}}"
 TP="${TP:-8}"
 CONC="${CONC:-512}"
-MEM_FRACTION_STATIC="${MEM_FRACTION_STATIC:-0.85}"
-MAX_MODEL_LEN="${MAX_MODEL_LEN:-98304}"
+MEM_FRACTION_STATIC="${MEM_FRACTION_STATIC:-0.90}"
+# Must be >= max_new_tokens (320k) + input so 320k-token generations aren't
+# capped by context length. Model supports up to 1M positions.
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-327680}"
 DP_ATTENTION="${DP_ATTENTION:-false}"
 EP_SIZE="${EP_SIZE:-1}"
 # DSv4 tokenizer has no chat_template in tokenizer_config.json; SGLang needs --chat-template
@@ -26,7 +28,7 @@ CHAT_TEMPLATE="${CHAT_TEMPLATE:-/sgl-workspace/sglang/examples/chat_template/too
 if [[ ! -f "${CHAT_TEMPLATE}" ]]; then
   CHAT_TEMPLATE=""
 fi
-SGLANG_IMAGE="${SGLANG_IMAGE:-rocm/sgl-dev:rocm720-mi35x-f96ac98-20260526-DSv4}"
+SGLANG_IMAGE="${SGLANG_IMAGE:-lmsysorg/sglang-rocm:v0.5.14-rocm720-mi35x-20260706}"
 RUN_MODE="${RUN_MODE:-host}"  # host | docker
 
 patch_model_config() {
@@ -50,34 +52,31 @@ PYEOF
 }
 
 export_sglang_env() {
-  export SGLANG_REASONING_EFFORT=max
-  export SGLANG_OPT_USE_FUSED_COMPRESS=true
-  export SGLANG_OPT_USE_OLD_COMPRESSOR=false
-  export SGLANG_OPT_USE_TILELANG_SWA_PREPARE=false
-  export SGLANG_OPT_USE_JIT_KERNEL_FUSED_TOPK=false
-  export SGLANG_OPT_USE_FUSED_HASH_TOPK=true
+  # Triton/AITER fallback env block for the stock lmsysorg sglang-rocm image,
+  # which does not ship deep_gemm/tilelang kernels. Routes the DSv4 attention
+  # backend around deep_gemm (unified_kv_triton flashmla, triton fused compress,
+  # torch paged MQA logits, aiter indexer instead of tilelang).
+  export SGLANG_DEFAULT_THINKING=1
+  export SGLANG_DSV4_REASONING_EFFORT=max
   export SGLANG_OPT_DEEPGEMM_HC_PRENORM=false
+  export SGLANG_USE_AITER=1
+  export SGLANG_USE_ROCM700A=0
+  export SGLANG_DP_USE_GATHERV=1
+  export SGLANG_OPT_USE_FUSED_COMPRESS=true
+  export SGLANG_HACK_FLASHMLA_BACKEND=unified_kv_triton
+  export SGLANG_OPT_FP8_WO_A_GEMM=false
+  export SGLANG_OPT_USE_JIT_INDEXER_METADATA=false
+  export SGLANG_OPT_USE_TOPK_V2=false
+  export SGLANG_OPT_USE_AITER_INDEXER=true
+  export SGLANG_OPT_USE_TILELANG_INDEXER=false
   export SGLANG_OPT_USE_TILELANG_MHC_PRE=false
   export SGLANG_OPT_USE_TILELANG_MHC_POST=false
-  export SGLANG_OPT_USE_AITER_MHC_PRE=true
-  export SGLANG_OPT_USE_AITER_MHC_POST=true
-  export SGLANG_ENABLE_THINKING=1
-  export SGLANG_USE_AITER=1
-  export SGLANG_USE_ROCM700A=1
-  export SGLANG_TOPK_TRANSFORM_512_TORCH=0
   export SGLANG_FP8_PAGED_MQA_LOGITS_TORCH=1
-  export SGLANG_DSV4_FP4_EXPERTS=True
-  export SGLANG_OPT_DPSK_V4_RADIX=1
-  export SGLANG_OPT_USE_OVERLAP_STORE_CACHE=false
-  export SGLANG_OPT_USE_FUSED_STORE_CACHE=true
-  export SGLANG_FORCE_TRITON_MOE_FP8=0
-  export SGLANG_HACK_FLASHMLA_BACKEND=triton
-  export SGLANG_OPT_USE_TILELANG_INDEXER=true
-  export SGLANG_OPT_USE_TRITON_SWA_PREPARE=true
+  export SGLANG_OPT_USE_FUSED_COMPRESS_TRITON=true
   export AITER_BF16_FP8_MOE_BOUND=0
-  export SGLANG_OPT_FUSE_WQA_WKV=true
-  export SGLANG_OPT_USE_FUSED_PAGED_COMPRESS=true
-  export SGLANG_OPT_USE_MULTI_STREAM_OVERLAP=0
+  export SGLANG_EAGER_INPUT_NO_COPY=true
+  export SGLANG_OPT_USE_MULTI_STREAM_OVERLAP=false
+  export SGLANG_ROCM_USE_MULTI_STREAM=false
 }
 
 launch_sglang_server() {
@@ -89,7 +88,12 @@ launch_sglang_server() {
 
   local parallel_args=(--tensor-parallel-size "${TP}")
   if [[ "${DP_ATTENTION}" == "true" ]]; then
-    parallel_args+=(--dp "${TP}" --enable-dp-attention --enable-prefill-delayer)
+    export SGLANG_SHARED_EXPERT_TP1=1
+    export SGLANG_DP_SHARED_EXPERT_LOCAL=1
+    export SGLANG_DP_USE_GATHERV=1
+    export SGLANG_DP_USE_REDUCE_SCATTER=1
+    export GPU_MAX_HW_QUEUES=5
+    parallel_args+=(--dp "${TP}" --enable-dp-attention --enable-prefill-delayer --enable-two-batch-overlap)
   fi
   if [[ "${EP_SIZE:-1}" -gt 1 ]]; then
     parallel_args+=(--ep-size "${EP_SIZE}")
@@ -108,11 +112,13 @@ launch_sglang_server() {
     "${parallel_args[@]}" \
     --trust-remote-code \
     --disable-radix-cache \
-    --attention-backend compressed \
+    --attention-backend dsv4 \
+    --cuda-graph-max-bs "${CONC}" \
     --max-running-requests "${CONC}" \
     --mem-fraction-static "${MEM_FRACTION_STATIC}" \
     --swa-full-tokens-ratio 0.15 \
     --page-size 256 \
+    --kv-cache-dtype fp8_e4m3 \
     --context-length "${MAX_MODEL_LEN}" \
     --chunked-prefill-size 8192 \
     --disable-shared-experts-fusion \
@@ -178,6 +184,8 @@ if [[ "${RUN_MODE}" == "docker" && ! -f /.dockerenv ]]; then
     -v "${HF_HOME}:/root/.cache/huggingface" \
     -v "${LOG_DIR}:/workspace:rw" \
     -e HF_TOKEN="${HF_TOKEN:-}" \
+    -e MODEL="${MODEL}" \
+    -e MODEL_REPO="${MODEL_REPO}" \
     -e HTTP_PORT="${PORT}" \
     -e TP="${TP}" \
     -e CONC="${CONC}" \

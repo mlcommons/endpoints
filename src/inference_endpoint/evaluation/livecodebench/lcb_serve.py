@@ -531,11 +531,29 @@ if __name__ == "__main__":
         datasets_dir=args.datasets_dir,
     )
 
+    from collections import defaultdict as _dd
+
+    df["extracted_code"] = df["extracted_code"].fillna("")
+    codes_dict = _dd(list)
+    for _, row in df.iterrows():
+        codes_dict[row["question_id"]].append(row["extracted_code"])
+
     with tqdm(total=len(df)) as pbar:
-        results = lcb_serve.evaluate_dataframe(
-            df=df,
+        res = lcb_serve.evaluate(
+            codes_dict=codes_dict,
             timeout_sec=args.timeout,
             on_problem_complete=lambda x: pbar.update(len(x)),
         )
 
+    total = sum(len(v) for v in res.values())
+    passed = sum(sum(v) for v in res.values())
+    nq = len(res)
+    results = {
+        "total_samples": total,
+        "passed_samples": passed,
+        "pass_at_1": (passed / total) if total else 0.0,
+        "n_problems": nq,
+        "pass_at_k_any": (sum(1 for v in res.values() if any(v)) / nq) if nq else 0.0,
+        "pass_all_k": (sum(1 for v in res.values() if all(v)) / nq) if nq else 0.0,
+    }
     print(json.dumps(results))

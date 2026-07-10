@@ -1,9 +1,8 @@
 name: "deepseek-v4-pro-sglang-accuracy"
 version: "1.0"
 type: "offline"
-# Wall-clock CLI budget (seconds) for the full multi-phase run (AIME + GPQA + LCB).
-# Set large: max_new_tokens=256000 makes generations very long (multi-day total).
-timeout: 1209600
+# Wall-clock CLI budget (seconds) for the run (AIME25 + LCB; GPQA skipped, no HF_TOKEN).
+timeout: 86400
 
 model_params:
   # Must match the model id served by SGLang (see GET /v1/models).
@@ -27,20 +26,13 @@ datasets:
       eval_method: "pass_at_1"
       ground_truth: "answer"
       extractor: "boxed_math_extractor"
-      num_repeats: 2
-  - name: "gpqa::deepseek_v4"
-    type: "accuracy"
-    accuracy_config:
-      eval_method: "pass_at_1"
-      extractor: "abcd_extractor"
-      ground_truth: "ground_truth"
-      num_repeats: 2
+      num_repeats: 8
   - name: "livecodebench::deepseek_v4"
     type: "accuracy"
     accuracy_config:
       eval_method: "code_bench_scorer"
       extractor: "python_code_extractor"
-      num_repeats: 2
+      num_repeats: 3
 
 settings:
   runtime:
