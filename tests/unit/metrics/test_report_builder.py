@@ -317,8 +317,24 @@ class TestReportDisplayAndSerialize:
         assert data["n_samples_completed"] == 5
         assert "ttft" in data
 
+    def test_to_json_excludes_accuracy(self):
+        """Accuracy lives only in the dedicated accuracy report; result_summary.json
+        stays purely performance. The field remains on the struct so report.txt /
+        the console summary still render it."""
+        report = _build_report(_make_registry(n_samples=10))
+        report = msgspec.structs.replace(
+            report,
+            accuracy=[{"dataset_name": "d", "score": 0.5, "total_samples": 10}],
+        )
+        data = json.loads(report.to_json())
+        assert "accuracy" not in data
+        # ...but the human-readable render still shows it.
+        lines: list[str] = []
+        report.display(fn=lines.append, summary_only=True)
+        assert any("Accuracy:" in ln for ln in lines)
+
     def test_to_json_serializes_qps_and_tps(self):
-        """results_summary.json is self-complete: qps/tps are serialized so
+        """result_summary.json is self-complete: qps/tps are serialized so
         consumers don't recompute them from duration + counts."""
         report = _build_report(_make_registry(n_samples=50))
         data = json.loads(report.to_json())
@@ -333,7 +349,7 @@ class TestReportDisplayAndSerialize:
         assert data["tps"] is None
 
     def test_to_json_and_display_carry_run_config(self):
-        """results_summary.json + report.txt carry the run's config so a run is
+        """result_summary.json + report.txt carry the run's config so a run is
         self-describing/reproducible; absent run_config serializes as null."""
         registry = _make_registry(n_samples=5)
         snap = snapshot_to_dict(

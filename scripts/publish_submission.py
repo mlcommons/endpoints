@@ -21,7 +21,7 @@ in ``mlcommons/inference``, v5.0+) grew an endpoints parser that, instead of
 classic LoadGen ``mlperf_log_*`` text logs, reads the artifacts this tool already
 emits in each run's ``report_dir``:
 
-  * ``results_summary.json``  (highest priority)  -- perf rollups: latency /
+  * ``result_summary.json``  (highest priority)  -- perf rollups: latency /
     ttft / tpot percentiles (keys are float-formatted, e.g. ``"99.0"``),
     ``n_samples_issued``, ``duration_ns``, ``git_sha``, ``version``.
   * ``results.json``         -- ``results.total/failed/qps`` and, for accuracy
@@ -73,10 +73,10 @@ from pathlib import Path
 from typing import Any
 
 # Artifacts the endpoints parser reads, as (source-path-in-run-dir, dest-name),
-# in priority order. results_summary.json lives under performance/ in the run
+# in priority order. result_summary.json lives under performance/ in the run
 # dir; it is still copied flat into the MLPerf performance/run_1 layout.
 _RUN_ARTIFACTS = (
-    ("performance/results_summary.json", "results_summary.json"),
+    ("performance/result_summary.json", "result_summary.json"),
     ("results.json", "results.json"),
     ("config.yaml", "config.yaml"),
 )
@@ -141,10 +141,10 @@ def _percentile(metric: dict[str, Any], key: str) -> Any:
 def _verify_performance(run_dir: Path) -> list[str]:
     """Return human-readable findings for the performance artifacts."""
     findings: list[str] = []
-    summary = _load_json(run_dir / "performance" / "results_summary.json")
+    summary = _load_json(run_dir / "performance" / "result_summary.json")
     results = _load_json(run_dir / "results.json")
     if not summary:
-        findings.append("  MISSING: results_summary.json (perf rollups unreadable)")
+        findings.append("  MISSING: result_summary.json (perf rollups unreadable)")
         return findings
 
     duration_ns = summary.get("duration_ns")
@@ -253,7 +253,7 @@ def main() -> int:
         "--performance-run",
         type=Path,
         help="report_dir of the performance run (has populated latency "
-        "percentiles in results_summary.json).",
+        "percentiles in result_summary.json).",
     )
     src.add_argument(
         "--accuracy-run",

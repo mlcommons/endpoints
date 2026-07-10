@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 import msgspec.json
+import msgspec.structs
 
 from inference_endpoint.utils.version import get_version_info
 
@@ -135,19 +136,19 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
     # (final_query_all_samples_done_time analog; see mlcommons/inference
     # loadgen/results.cc). Not None iff QPS/TPS were computed over this window;
     # None means the endpoints-native full-run window was used. Recorded so
-    # results_summary.json is self-describing about which view it holds.
+    # result_summary.json is self-describing about which view it holds.
     # TODO(vir): deprecate once endpoints has a formal tail-cutting mechanism.
     legacy_loadgen_window_duration_ns: int | None = None
 
     # Derived throughput, computed once in from_snapshot so the serialized
-    # report (results_summary.json) is self-complete. qps is None without a
+    # report (result_summary.json) is self-complete. qps is None without a
     # duration; tps is also None when no OSL was recorded (non-streaming or
     # tokenizer unavailable).
     qps: float | None = None
     tps: float | None = None
 
     # Run configuration (load_pattern, warmup, and the scheduler/dataloader RNG
-    # seeds), from config. Carried so results_summary.json is self-describing and a
+    # seeds), from config. Carried so result_summary.json is self-describing and a
     # valid run is identified by its settings. Config, not a measured metric, so
     # the from_snapshot caller supplies it rather than reading it from the metrics
     # snapshot. (Resolved/effective runtime settings — sample count + ordering,
@@ -173,7 +174,7 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
 
         ``run_config`` (optional, keyword-only) carries the run's configuration
         (load_pattern, warmup, and the scheduler/dataloader RNG seeds) into the
-        report so results_summary.json is self-describing; it is config, not part
+        report so result_summary.json is self-describing; it is config, not part
         of the metrics snapshot.
 
         Input is the dict form produced by
@@ -233,7 +234,7 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
         # TODO(vir): deprecate once endpoints has a formal tail-cutting mechanism.
         raw_loadgen_window_ns = _counter("legacy_loadgen_window_duration_ns")
 
-        # Derived throughput, computed once so results_summary.json is
+        # Derived throughput, computed once so result_summary.json is
         # self-complete. The legacy LoadGen window drives the headline QPS/TPS
         # only when it is enabled, available, AND there are >=2 completions
         # (QPS = (completed-1)/window is undefined below 2). If any of those
@@ -288,7 +289,14 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
         )
 
     def to_json(self, save_to: os.PathLike | None = None) -> bytes:
-        json_bytes = msgspec.json.format(msgspec.json.encode(self), indent=2)
+        # result_summary.json is the performance report — accuracy lives only in
+        # the dedicated accuracy report (accuracy/accuracy_results.json). The
+        # accuracy field stays on the struct so report.txt / the console summary
+        # still render it; it is just dropped from this serialized perf summary.
+        payload = {
+            k: v for k, v in msgspec.structs.asdict(self).items() if k != "accuracy"
+        }
+        json_bytes = msgspec.json.format(msgspec.json.encode(payload), indent=2)
         if save_to is not None:
             with Path(save_to).open("wb") as f:
                 f.write(json_bytes)

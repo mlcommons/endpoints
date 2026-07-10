@@ -1114,7 +1114,7 @@ async def _run_benchmark_async(
                         load_pattern = ctx.config.settings.load_pattern
                         runtime_cfg = ctx.config.settings.runtime
                         # load_pattern + warmup config and the RNG seeds, so
-                        # results_summary.json is self-describing and a valid run is
+                        # result_summary.json is self-describing and a valid run is
                         # identified by its settings. The full, re-runnable config
                         # lives in config.yaml alongside. The resolved/effective
                         # runtime settings (sample count + ordering, which can differ
@@ -1272,7 +1272,7 @@ def _score_accuracy(
         score, n_repeats = scorer_instance.score()
         # Coerce a numpy scalar score (e.g. np.mean from the base Scorer) to a
         # native Python float so the entry stays serializable by both msgspec
-        # (results_summary.json) and json (results.json). numpy.float64 is a
+        # (result_summary.json) and json (results.json). numpy.float64 is a
         # float subclass, so isinstance(..., float) catches it while leaving
         # None / dict (RougeScorer) untouched; float(...) drops the numpy type.
         if isinstance(score, float):
@@ -1339,27 +1339,27 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
     # Scoring runs before the report is written so the accuracy headline can be
     # attached, but the report is written in the `finally` below so a scoring
     # failure (e.g. lcb-service unreachable, missing eval subproject, bad extras)
-    # still leaves the perf run's results_summary.json / report.txt on disk
+    # still leaves the perf run's result_summary.json / report.txt on disk
     # instead of discarding them — then the exception propagates as before.
     accuracy_scores: list[dict[str, Any]] = []
     try:
         accuracy_scores = _score_accuracy(ctx, result)
     finally:
-        # Attach the per-dataset accuracy list so results_summary.json, the
+        # Attach the per-dataset accuracy list so result_summary.json, the
         # console summary, and report.txt all carry it (stays [] on a scoring
         # failure).
         if report is not None:
             report = msgspec.structs.replace(report, accuracy=accuracy_scores)
 
         # Display report if available (from MetricsAggregator pub/sub snapshot).
-        # results_summary.json is the self-complete machine-readable report
+        # result_summary.json is the self-complete machine-readable report
         # (carries qps/tps/seeds/accuracy via Report.to_json); report.txt is the
         # full human-readable dump; the console log shows the summary.
         if report is not None:
             report.display(fn=lambda s: logger.info(s), summary_only=True)
             performance_dir = ctx.report_dir / "performance"
             performance_dir.mkdir(parents=True, exist_ok=True)
-            report.to_json(save_to=performance_dir / "results_summary.json")
+            report.to_json(save_to=performance_dir / "result_summary.json")
 
             report_txt = ctx.report_dir / "report.txt"
             with report_txt.open("w") as f:

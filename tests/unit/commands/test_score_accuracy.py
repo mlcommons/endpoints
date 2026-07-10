@@ -179,7 +179,7 @@ class TestScoreAccuracy:
         # enough — assert it is specifically NOT a numpy scalar.
         assert not isinstance(entry["score"], np.floating)
         assert entry["score"] == 0.5
-        # Both serializers used downstream (results.json / results_summary.json)
+        # Both serializers used downstream (results.json / result_summary.json)
         # must accept the coerced entry.
         json.dumps(entry)
         msgspec.json.encode(entry)
