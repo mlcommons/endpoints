@@ -19,17 +19,31 @@ from __future__ import annotations
 
 import math
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
 import msgspec.json
 import msgspec.structs
 
+from inference_endpoint.async_utils.services.metrics_aggregator.registry import (
+    _DEFAULT_PERCENTILES,
+    SeriesSampler,
+)
+from inference_endpoint.async_utils.services.metrics_aggregator.snapshot import (
+    _metric_to_dict,
+)
 from inference_endpoint.evaluation.accuracy_results import average_accuracy
 from inference_endpoint.utils.version import get_version_info
 
 from ..utils import monotime_to_datetime
+
+# HDR bounds for a token-count series — mirror the aggregator's OSL/ISL series
+# (metrics_aggregator.aggregator._TOKEN_HDR_LOW/HIGH). Only the exact (raw-array)
+# path is used below, so these feed the otherwise-unused HDR view; kept identical
+# so an accuracy OSL block is constructed the same way as the perf one.
+_TOKEN_HDR_LOW = 1
+_TOKEN_HDR_HIGH = 10_000_000
 
 
 def _series_to_metric_dict(stat: dict[str, Any]) -> dict[str, Any]:
@@ -99,6 +113,36 @@ def _series_to_metric_dict(stat: dict[str, Any]) -> dict[str, Any]:
             "counts": [c for _, c in histogram],
         },
     }
+
+
+def series_metric_dict(values: Iterable[int]) -> dict[str, Any]:
+    """Build a series rollup (same shape as the perf ``output_sequence_lengths``
+    block) from raw integer values, off the hot path.
+
+    Reuses the aggregator's ``SeriesSampler`` + the same ``_series_to_metric_dict``
+    shaping the perf report uses, so an accuracy-phase OSL block is byte-for-byte
+    the same shape (avg/min/max/median/std_dev/percentiles/histogram) as the
+    performance one. Returns ``{}`` when ``values`` is empty.
+    """
+    # sig_figs / n_histogram_buckets mirror the aggregator's OSL registration
+    # defaults (MetricsRegistry.register_series, and the --hdr-sig-figs /
+    # --n-histogram-buckets argparse defaults of 3 / 30) so the accuracy block
+    # matches the perf one. Only build_stat(exact=True) is used below, so the HDR
+    # bounds feed an otherwise-unused view; n_histogram_buckets, however, IS read
+    # by the exact histogram path — keep it aligned if the aggregator's is ever
+    # made configurable.
+    sampler = SeriesSampler(
+        "osl",
+        hdr_low=_TOKEN_HDR_LOW,
+        hdr_high=_TOKEN_HDR_HIGH,
+        sig_figs=3,
+        n_histogram_buckets=30,
+        percentiles=_DEFAULT_PERCENTILES,
+        dtype=int,
+    )
+    for v in values:
+        sampler.record(v)
+    return _series_to_metric_dict(_metric_to_dict(sampler.build_stat(exact=True)))
 
 
 # ---------------------------------------------------------------------------
@@ -376,6 +420,13 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
                     f"  {name}: {score_str} "
                     f"(unit={unit}, repeats={repeats}, total={total}{dur_str}){newline}"
                 )
+                osl = entry.get("output_sequence_lengths")
+                if isinstance(osl, dict):
+                    fn(
+                        f"    output tokens (avg/min/max): "
+                        f"{osl.get('avg', 0):.1f}/{osl.get('min')}/{osl.get('max')}"
+                        f"{newline}"
+                    )
                 breakdown = entry.get("breakdown")
                 if isinstance(breakdown, dict):
                     for sub, sub_score in (
@@ -387,6 +438,9 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
             avg = average_accuracy(self.accuracy)
             if avg is not None:
                 fn(f"  Average: {avg:.4g}{newline}")
+            if any("osl_tokenize_s" in e for e in self.accuracy):
+                osl_tok = sum(e.get("osl_tokenize_s", 0.0) for e in self.accuracy)
+                fn(f"  OSL tokenization: {osl_tok:.3g}s{newline}")
 
         if summary_only:
             fn(f"----------------- End of Summary -----------------{newline}")

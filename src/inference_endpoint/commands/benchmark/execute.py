@@ -32,7 +32,7 @@ import signal
 import tempfile
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from dataclasses import replace as dataclass_replace
 from datetime import datetime
@@ -47,6 +47,7 @@ import msgspec.json
 import msgspec.structs
 from huggingface_hub import model_info
 from tqdm import tqdm
+from transformers import AutoTokenizer
 from transformers.utils import logging as transformers_logging
 
 from inference_endpoint.async_utils.event_publisher import EventPublisherService
@@ -102,7 +103,7 @@ from inference_endpoint.load_generator.session import (
     PhaseType,
     SessionResult,
 )
-from inference_endpoint.metrics.report import Report
+from inference_endpoint.metrics.report import Report, series_metric_dict
 
 transformers_logging.set_verbosity_error()
 
@@ -1236,6 +1237,65 @@ def _salvage_tmpfs(report_dir: Path, tmpfs_dir: Path) -> None:
         logger.debug(f"Copied {src_events} -> {dst_events}")
 
 
+# Bound the memory of one batched tokenization pass over accuracy outputs, which
+# can be up to tens of thousands of tokens each (e.g. gpt-oss lcb at 32768).
+_OSL_TOKENIZE_BATCH = 256
+
+
+def _load_osl_tokenizer(name: str | None) -> Any | None:
+    """Load the run's tokenizer for accuracy-phase OSL, or ``None`` to skip it.
+
+    OSL is a reporting nicety, so a missing or unloadable tokenizer disables it
+    rather than failing scoring — mirroring the aggregator's no-tokenizer ⇒ no
+    OSL behavior on the perf side.
+    """
+    if name is None:
+        return None
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(name)
+    except Exception as e:  # noqa: BLE001 - OSL is optional; never fail scoring
+        logger.warning(
+            "Accuracy OSL disabled: could not load tokenizer %r: %s", name, e
+        )
+        return None
+    # Counting tokens on long outputs would otherwise spam the
+    # "sequence longer than model_max_length" warning; raise the cap so it can't.
+    tokenizer.model_max_length = int(1e12)
+    return tokenizer
+
+
+def _phase_osl_stats(
+    sample_uuids: Iterable[str],
+    uuid_to_text: dict[str, str],
+    tokenizer: Any,
+) -> dict[str, Any] | None:
+    """Output-token-length rollup over one accuracy phase's completions.
+
+    Re-tokenizes each sample's response text — the server's ``completion_tokens``
+    is not persisted, only the text is (in ``events.jsonl``) — then shapes the
+    lengths via ``series_metric_dict`` so the block matches the perf report's
+    ``output_sequence_lengths`` exactly. Returns ``None`` when the phase has no
+    completed outputs.
+    """
+    # Skip empty/failed completions (a failed request still logs a COMPLETE
+    # event with output == ""). The perf-side OslTrigger does the same
+    # (metrics_table.OslTrigger._extract_text returns None for empty text), so
+    # accuracy OSL matches its population and a failure isn't counted as a
+    # 0-token sample that would drag min/avg down.
+    texts = [
+        uuid_to_text[u] for u in sample_uuids if u in uuid_to_text and uuid_to_text[u]
+    ]
+    if not texts:
+        return None
+    lengths: list[int] = []
+    for i in range(0, len(texts), _OSL_TOKENIZE_BATCH):
+        encoded = tokenizer(
+            texts[i : i + _OSL_TOKENIZE_BATCH], add_special_tokens=False
+        )
+        lengths.extend(len(ids) for ids in encoded["input_ids"])
+    return series_metric_dict(lengths) or None
+
+
 def _score_accuracy(
     ctx: BenchmarkContext, result: SessionResult
 ) -> list[dict[str, Any]]:
@@ -1257,6 +1317,17 @@ def _score_accuracy(
         phase_durations[pr.name] = phase_durations.get(pr.name, 0.0) + max(
             0.0, (pr.end_time_ns - pr.start_time_ns) / 1e9
         )
+
+    # Accuracy-phase output-token lengths (finalize-side, off the hot path): the
+    # aggregator only tokenizes perf-window samples, so re-tokenize the accuracy
+    # responses (already in events.jsonl) here. Tokenizer loaded once; the
+    # uuid→text map is read once from the first scorer's get_outputs (it returns
+    # every phase's COMPLETE events) and reused across datasets. Loaded only when
+    # a real accuracy dataset exists — a perf-only run (or one with just the
+    # inline "performance" entry) must not pay a tokenizer load/download here.
+    has_accuracy = any(ec.dataset_name != "performance" for ec in ctx.eval_configs)
+    osl_tokenizer = _load_osl_tokenizer(ctx.tokenizer_name) if has_accuracy else None
+    uuid_to_text: dict[str, str] | None = None
 
     for eval_cfg in ctx.eval_configs:
         try:
@@ -1314,6 +1385,35 @@ def _score_accuracy(
         breakdown = scorer_instance.score_breakdown()
         if breakdown is not None:
             entry["breakdown"] = breakdown
+
+        # Attach avg/min/max output-token length. Skipped for the perf entry (its
+        # OSL is in result_summary.json) and when no tokenizer is configured. A
+        # tokenization/read failure only drops OSL — it never fails scoring.
+        if osl_tokenizer is not None and eval_cfg.dataset_name != "performance":
+            try:
+                if uuid_to_text is None:
+                    out_df = scorer_instance.get_outputs()
+                    uuid_to_text = dict(
+                        zip(out_df["sample_uuid"], out_df["output"], strict=False)
+                    )
+                    # Drop the DataFrame so finalize doesn't hold both it and the
+                    # dict (each carrying the full response-text corpus).
+                    del out_df
+                t0 = time.perf_counter()
+                osl = _phase_osl_stats(
+                    scorer_instance.sample_index_map, uuid_to_text, osl_tokenizer
+                )
+                if osl is not None:
+                    # Same shape/key as the perf report's output_sequence_lengths.
+                    entry["output_sequence_lengths"] = osl
+                    # Wall-clock of just this phase's tokenization (seconds);
+                    # summed across datasets for the accuracy report's total.
+                    entry["osl_tokenize_s"] = round(time.perf_counter() - t0, 3)
+            except Exception as e:  # noqa: BLE001 - OSL is optional; never fail scoring
+                logger.warning(
+                    "Accuracy OSL skipped for %s: %s", eval_cfg.dataset_name, e
+                )
+
         accuracy_scores.append(entry)
         logger.info(
             f"Score for {eval_cfg.dataset_name}: {score} "
@@ -1436,6 +1536,17 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
         avg_accuracy = average_accuracy(accuracy_scores)
         if avg_accuracy is not None:
             results["average_accuracy"] = avg_accuracy
+        # Total finalize-time spent tokenizing accuracy outputs for OSL (seconds),
+        # summed across datasets. Emitted whenever OSL was computed for at least
+        # one dataset — gating on the key's presence, not the rounded wall-clock,
+        # so a sub-millisecond total (tiny outputs) still records 0.0 rather than
+        # silently dropping the field.
+        osl_computed = any("osl_tokenize_s" in e for e in accuracy_scores)
+        osl_tokenization_s = round(
+            sum(e.get("osl_tokenize_s", 0.0) for e in accuracy_scores), 3
+        )
+        if osl_computed:
+            results["osl_tokenization_s"] = osl_tokenization_s
         if ctx.collect_responses:
             results["responses"] = collector.responses
         if collector.errors:
@@ -1458,6 +1569,8 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
             accuracy_payload: dict[str, Any] = {}
             if avg_accuracy is not None:
                 accuracy_payload["average_accuracy"] = avg_accuracy
+            if osl_computed:
+                accuracy_payload["osl_tokenization_s"] = osl_tokenization_s
             accuracy_payload["accuracy_scores"] = accuracy_scores
             with open(accuracy_results_path, "w") as f:
                 json.dump(accuracy_payload, f, indent=2)

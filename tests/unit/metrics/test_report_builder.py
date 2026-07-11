@@ -42,10 +42,55 @@ from inference_endpoint.async_utils.services.metrics_aggregator.snapshot import 
     SessionState,
     snapshot_to_dict,
 )
-from inference_endpoint.metrics.report import Report
+from inference_endpoint.metrics.report import Report, series_metric_dict
 
 # 1 hour in ns — same as the aggregator's default bound for time-series.
 _NS_HIGH = 3_600_000_000_000
+
+
+@pytest.mark.unit
+class TestSeriesMetricDict:
+    """Direct coverage for the accuracy-OSL rollup builder (perf-shape parity)."""
+
+    _PERF_KEYS = {
+        "avg",
+        "min",
+        "max",
+        "median",
+        "std_dev",
+        "total",
+        "percentiles",
+        "histogram",
+    }
+
+    def test_empty_returns_empty(self):
+        assert series_metric_dict([]) == {}
+
+    def test_keys_match_perf_block(self):
+        # Same key set as the perf report's output_sequence_lengths.
+        assert self._PERF_KEYS <= set(series_metric_dict([2, 4, 6]))
+
+    def test_basic_stats(self):
+        d = series_metric_dict([2, 4, 6])
+        assert d["avg"] == 4.0
+        assert d["min"] == 2
+        assert d["max"] == 6
+        assert d["total"] == 12
+        assert d["median"] == 4
+
+    def test_single_value(self):
+        d = series_metric_dict([7])
+        assert d["avg"] == 7.0
+        assert d["min"] == d["max"] == 7
+        assert d["std_dev"] == 0.0
+        assert d["median"] == 7
+
+    def test_all_equal_values(self):
+        # min == max must not degenerate the log-spaced histogram edges.
+        d = series_metric_dict([3, 3, 3])
+        assert d["min"] == d["max"] == 3
+        assert d["avg"] == 3.0
+        assert d["std_dev"] == 0.0
 
 
 def _make_registry(n_samples: int = 50) -> MetricsRegistry:
@@ -276,6 +321,8 @@ class TestReportDisplayAndSerialize:
             "total_samples": 1283,
             "duration_s": 12.5,
             "complete": False,
+            "output_sequence_lengths": {"avg": 650.4, "min": 12, "max": 4096},
+            "osl_tokenize_s": 1.234,
             "breakdown": {
                 "overall_accuracy": 82.3,
                 "subset_scores": {"aime25": 70.0, "livecodebench": 60.0},
@@ -295,8 +342,11 @@ class TestReportDisplayAndSerialize:
         )
         assert "aime25: 70.00%" in output
         assert "(incomplete)" in output
+        assert "output tokens (avg/min/max): 650.4/12/4096" in output
         # Cross-component mean (one component here, so it equals its score).
         assert "Average: 82.3" in output
+        # Total accuracy-path tokenization time (summed per-entry osl_tokenize_s).
+        assert "OSL tokenization: 1.23s" in output
 
     def test_display_full(self):
         registry = _make_registry(n_samples=10)

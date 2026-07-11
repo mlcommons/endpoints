@@ -22,6 +22,8 @@ from types import SimpleNamespace
 import pytest
 from inference_endpoint.commands.benchmark.execute import (
     AccuracyConfiguration,
+    _load_osl_tokenizer,
+    _phase_osl_stats,
     _score_accuracy,
 )
 
@@ -59,6 +61,26 @@ class _FakeBreakdownScorer(_FakeScorer):
         return {"overall_accuracy": 80.0, "subset_scores": {"x": 80.0}}
 
 
+class _FakeOSLScorer(_FakeScorer):
+    """Scorer exposing the get_outputs()/sample_index_map the OSL path reads."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Two completed samples: outputs of 2 and 4 "tokens" (words).
+        self.sample_index_map = {"u1": 0, "u2": 1}
+
+    def get_outputs(self):
+        import pandas as pd
+
+        return pd.DataFrame(
+            [
+                {"sample_uuid": "u1", "output": "a b"},
+                {"sample_uuid": "u2", "output": "a b c d"},
+                {"sample_uuid": "other", "output": "not in this phase"},
+            ]
+        )
+
+
 def _cfg(
     name: str,
     n: int,
@@ -85,8 +107,18 @@ def _by_name(scores: list[dict]) -> dict[str, dict]:
     return {e["dataset_name"]: e for e in scores}
 
 
-def _ctx(cfgs):
-    return SimpleNamespace(eval_configs=cfgs)
+def _ctx(cfgs, tokenizer_name=None):
+    # tokenizer_name None => OSL is skipped (the fake scorers have no get_outputs).
+    return SimpleNamespace(eval_configs=cfgs, tokenizer_name=tokenizer_name)
+
+
+class _WordTokenizer:
+    """Stand-in tokenizer: one token per whitespace-delimited word."""
+
+    model_max_length = 0
+
+    def __call__(self, texts, add_special_tokens=False):
+        return {"input_ids": [t.split() for t in texts]}
 
 
 _RESULT = SimpleNamespace(perf_results=[], phase_results=[])
@@ -161,6 +193,135 @@ class TestScoreAccuracy:
 
     def test_empty_when_no_datasets(self, tmp_path):
         assert _score_accuracy(_ctx([]), _RESULT) == []
+
+    def test_no_osl_without_tokenizer(self, tmp_path):
+        # tokenizer_name None (the default) => no output_sequence_lengths attached,
+        # and the OSL path is never entered (fake scorers have no get_outputs).
+        cfg = _cfg("aime25::gptoss", 30, 0.8, tmp_path)
+        entry = _by_name(_score_accuracy(_ctx([cfg]), _RESULT))["aime25::gptoss"]
+        assert "output_sequence_lengths" not in entry
+
+    def test_osl_attached_with_tokenizer(self, tmp_path, monkeypatch):
+        """With a tokenizer, each accuracy entry gets an output_sequence_lengths
+        block (same shape as the perf report) from the phase's completions."""
+        import inference_endpoint.commands.benchmark.execute as execute_mod
+
+        monkeypatch.setattr(
+            execute_mod, "_load_osl_tokenizer", lambda name: _WordTokenizer()
+        )
+        cfg = _cfg("aime25::gptoss", 2, 0.8, tmp_path, scorer=_FakeOSLScorer)
+        entry = _by_name(_score_accuracy(_ctx([cfg], tokenizer_name="fake"), _RESULT))[
+            "aime25::gptoss"
+        ]
+        # Outputs "a b" (2) and "a b c d" (4); "other" is not in sample_index_map.
+        osl = entry["output_sequence_lengths"]
+        assert osl["avg"] == 3.0
+        assert osl["min"] == 2
+        assert osl["max"] == 4
+        # Same block shape/keys as the perf report's output_sequence_lengths.
+        assert {"median", "std_dev", "total", "percentiles", "histogram"} <= set(osl)
+        # Tokenization is timed and attached alongside the OSL stats.
+        assert isinstance(entry["osl_tokenize_s"], float)
+        assert entry["osl_tokenize_s"] >= 0.0
+
+    def test_osl_skipped_for_performance_entry(self, tmp_path, monkeypatch):
+        import inference_endpoint.commands.benchmark.execute as execute_mod
+
+        monkeypatch.setattr(
+            execute_mod, "_load_osl_tokenizer", lambda name: _WordTokenizer()
+        )
+        cfg = _cfg("performance", 2, 0.6, tmp_path, scorer=_FakeOSLScorer)
+        entry = _by_name(_score_accuracy(_ctx([cfg], tokenizer_name="fake"), _RESULT))[
+            "performance"
+        ]
+        assert "output_sequence_lengths" not in entry
+
+    def test_osl_dropped_when_get_outputs_raises(self, tmp_path, monkeypatch):
+        """A read/tokenize failure only drops OSL — scoring still succeeds."""
+        import inference_endpoint.commands.benchmark.execute as execute_mod
+
+        monkeypatch.setattr(
+            execute_mod, "_load_osl_tokenizer", lambda name: _WordTokenizer()
+        )
+
+        class _RaisingScorer(_FakeOSLScorer):
+            def get_outputs(self):
+                raise RuntimeError("events.jsonl unreadable")
+
+        cfg = _cfg("ds", 1, 0.8, tmp_path, scorer=_RaisingScorer)
+        entry = _by_name(_score_accuracy(_ctx([cfg], tokenizer_name="fake"), _RESULT))[
+            "ds"
+        ]
+        assert "output_sequence_lengths" not in entry
+        assert entry["score"] == pytest.approx(0.8)  # scoring unaffected
+
+
+@pytest.mark.unit
+class TestPhaseOslStats:
+    def test_returns_perf_shaped_block(self):
+        uuid_to_text = {"a": "x y z", "b": "x", "c": "not in phase"}
+        block = _phase_osl_stats(["a", "b", "missing"], uuid_to_text, _WordTokenizer())
+        assert block["avg"] == 2.0
+        assert block["min"] == 1
+        assert block["max"] == 3
+        assert block["total"] == 4  # 3 + 1 tokens
+
+    def test_batching_over_256(self):
+        # >256 texts exercises the multi-batch tokenization loop; all are counted.
+        uuid_to_text = {str(i): "w" for i in range(300)}  # 1 token each
+        block = _phase_osl_stats(
+            [str(i) for i in range(300)], uuid_to_text, _WordTokenizer()
+        )
+        assert block["total"] == 300
+        assert block["avg"] == 1.0
+
+    def test_none_when_no_matching_outputs(self):
+        assert _phase_osl_stats([], {}, _WordTokenizer()) is None
+        assert _phase_osl_stats(["x"], {"y": "a b"}, _WordTokenizer()) is None
+
+    def test_skips_empty_outputs(self):
+        # A failed/empty completion (output == "") is excluded, matching the
+        # perf-side OslTrigger — it is not counted as a 0-token sample.
+        block = _phase_osl_stats(["a", "b"], {"a": "", "b": "x y"}, _WordTokenizer())
+        assert block["total"] == 2  # only "x y" counted
+        assert block["min"] == 2
+        assert block["avg"] == 2.0
+
+    def test_none_when_all_outputs_empty(self):
+        assert _phase_osl_stats(["a"], {"a": ""}, _WordTokenizer()) is None
+
+
+@pytest.mark.unit
+class TestLoadOslTokenizer:
+    def test_none_name_returns_none(self):
+        assert _load_osl_tokenizer(None) is None
+
+    def test_load_failure_returns_none(self, monkeypatch):
+        import inference_endpoint.commands.benchmark.execute as execute_mod
+
+        class _BoomAutoTokenizer:
+            @staticmethod
+            def from_pretrained(name):
+                raise OSError("no such tokenizer")
+
+        monkeypatch.setattr(execute_mod, "AutoTokenizer", _BoomAutoTokenizer)
+        assert _load_osl_tokenizer("bad/model") is None
+
+    def test_success_raises_model_max_length(self, monkeypatch):
+        import inference_endpoint.commands.benchmark.execute as execute_mod
+
+        class _FakeTok:
+            model_max_length = 5
+
+        class _FakeAutoTokenizer:
+            @staticmethod
+            def from_pretrained(name):
+                return _FakeTok()
+
+        monkeypatch.setattr(execute_mod, "AutoTokenizer", _FakeAutoTokenizer)
+        tok = _load_osl_tokenizer("some/model")
+        # Cap raised so counting long outputs can't trip the length warning.
+        assert tok.model_max_length == int(1e12)
 
     def test_accuracy_entry_has_phase_duration(self, tmp_path):
         """Each entry carries its issue phase's wall-clock (seconds), matched by
