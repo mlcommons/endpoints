@@ -44,7 +44,7 @@ from ..evaluation.accuracy_results import (
     ACCURACY_METRIC_KEYS as _ACCURACY_METRIC_KEYS,
 )
 from ..evaluation.accuracy_results import (
-    find_accuracy_breakdown as _find_accuracy_score,
+    find_accuracy_entry as _find_accuracy_entry,
 )
 from ..evaluation.accuracy_results import (
     to_float as _to_float,
@@ -99,10 +99,15 @@ class RunArtifacts:
 
 def extract_accuracy(results: dict[str, Any]) -> AccuracyBreakdown | None:
     """Pull the accuracy breakdown from a BFCL ``results.json`` dict."""
-    score = _find_accuracy_score(results)
-    if score is None:
+    entry = _find_accuracy_entry(results)
+    if entry is None:
         return None
+    score = entry.get("breakdown") or {}
+    # BFCL keeps the headline in its block; DeepSeek-R1 does not duplicate it there,
+    # so fall back to the entry's scalar score (the headline accuracy).
     overall = _to_float(score.get("overall_accuracy"))
+    if overall is None:
+        overall = _to_float(entry.get("score"))
     if overall is None:
         return None
     # BFCL carries a distinct normalized single-turn score; DeepSeek-R1 / gpt-oss

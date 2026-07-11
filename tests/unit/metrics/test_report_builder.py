@@ -295,6 +295,8 @@ class TestReportDisplayAndSerialize:
         )
         assert "aime25: 70.00%" in output
         assert "(incomplete)" in output
+        # Cross-component mean (one component here, so it equals its score).
+        assert "Average: 82.3" in output
 
     def test_display_full(self):
         registry = _make_registry(n_samples=10)

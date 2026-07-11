@@ -15,17 +15,21 @@
 
 """Shared helpers for the accuracy ``breakdown`` block in ``results.json``.
 
-Scorers with a multi-subset result (BFCL, DeepSeek-R1, gpt-oss) attach a
-``breakdown`` dict to their ``accuracy_scores`` entry via
-:func:`Scorer.score_breakdown`. All of them use the BFCL-shaped keys
-(``overall_accuracy`` / ``subset_scores`` / ``total_samples``, percentages in
-``[0, 100]``) so the report, plotting, and compliance layers read one shape.
+Scorers with a multi-subset result (BFCL, DeepSeek-R1) attach a ``breakdown``
+dict to their ``accuracy_scores`` entry via :func:`Scorer.score_breakdown`. The
+headline accuracy is the entry's scalar ``score``; the breakdown carries the
+per-subset detail (``subset_scores`` / ``total_samples``, percentages in
+``[0, 100]``) the entry can't. BFCL additionally keeps its gate metrics
+(``overall_accuracy`` / ``normalized_single_turn_score``) in the block for the
+compliance layer; DeepSeek-R1 does not duplicate the overall there — it reads
+back from the entry's ``score``.
 
-This module owns that contract: the constructor (:func:`build_breakdown`), the
-reader (:func:`find_accuracy_breakdown`), and the numeric coercion
-(:func:`to_float`). It lives under ``evaluation`` — the layer that *produces*
-breakdowns — so ``metrics`` and ``compliance`` can both import it without a
-cycle.
+This module owns that contract: the breakdown constructor
+(:func:`build_breakdown`), the readers (:func:`find_accuracy_entry` /
+:func:`find_accuracy_breakdown`), the cross-component mean
+(:func:`average_accuracy`), and the numeric coercion (:func:`to_float`). It lives
+under ``evaluation`` — the layer that *produces* breakdowns — so ``metrics`` and
+``compliance`` can both import it without a cycle.
 """
 
 from __future__ import annotations
@@ -53,13 +57,15 @@ def to_float(value: Any) -> float | None:
         return None
 
 
-def find_accuracy_breakdown(results: dict[str, Any]) -> dict[str, Any] | None:
-    """Return the first per-subset breakdown from a run's ``accuracy_scores``.
+def find_accuracy_entry(results: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the first ``accuracy_scores`` entry carrying a per-subset breakdown.
 
-    ``accuracy_scores`` is a list of per-dataset entries; each entry may carry a
-    ``breakdown`` dict (per-subset accuracy + ``total_samples``). Returns the
-    first breakdown whose keys include ``overall_accuracy`` — which recognizes
-    every BFCL-shaped breakdown (BFCL, DeepSeek-R1).
+    ``accuracy_scores`` is a list of per-dataset entries; a multi-subset scorer
+    (BFCL, DeepSeek-R1) attaches a ``breakdown`` dict with ``subset_scores``. The
+    entry's scalar ``score`` is the headline accuracy; the breakdown holds only
+    the per-subset detail. Recognized by the presence of ``subset_scores`` (every
+    breakdown-producing scorer emits it) rather than the overall, which
+    DeepSeek-R1 no longer stores in the block.
     """
     accuracy_scores = results.get("accuracy_scores")
     if not isinstance(accuracy_scores, list):
@@ -68,36 +74,64 @@ def find_accuracy_breakdown(results: dict[str, Any]) -> dict[str, Any] | None:
         if not isinstance(entry, dict):
             continue
         block = entry.get("breakdown")
-        if isinstance(block, dict) and "overall_accuracy" in block:
-            return block
+        if isinstance(block, dict) and "subset_scores" in block:
+            return entry
     return None
 
 
+def find_accuracy_breakdown(results: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the per-subset ``breakdown`` block of the first entry that has one.
+
+    Thin wrapper over :func:`find_accuracy_entry` for consumers that only need the
+    breakdown block (e.g. the compliance gate, which reads BFCL's
+    ``overall_accuracy`` / ``normalized_single_turn_score`` from it).
+    """
+    entry = find_accuracy_entry(results)
+    return entry.get("breakdown") if entry is not None else None
+
+
+def average_accuracy(accuracy_scores: list[dict[str, Any]]) -> float | None:
+    """Plain mean of the per-dataset scalar scores across accuracy components.
+
+    One component per accuracy dataset (3 for gpt-oss, 1 for DeepSeek-R1), so the
+    result equals the single dataset's score when there is only one. The inline
+    ``"performance"`` entry — a scored perf dataset, not an accuracy component —
+    and any non-numeric score are excluded. Returns ``None`` when no component has
+    a numeric score.
+    """
+    values = [
+        float(entry["score"])
+        for entry in accuracy_scores
+        if isinstance(entry, dict)
+        and entry.get("dataset_name") != "performance"
+        and isinstance(entry.get("score"), int | float)
+        and not isinstance(entry.get("score"), bool)
+    ]
+    if not values:
+        return None
+    return sum(values) / len(values)
+
+
 def build_breakdown(
-    overall: float | None,
     subset_scores: dict[str, float],
     total_samples: int,
     *,
     complete: bool = True,
-    **extra: Any,
 ) -> dict[str, Any]:
-    """Build a BFCL-shaped breakdown dict.
+    """Build a per-subset breakdown dict.
 
-    ``overall`` and ``subset_scores`` values are percentages in ``[0, 100]``
-    (``overall`` may be ``None`` when no subset was scorable). ``extra`` carries
-    scorer-specific detail (e.g. ``per_subset_status``) alongside the shared
-    keys.
+    ``subset_scores`` values are percentages in ``[0, 100]``. The overall/headline
+    accuracy is intentionally *not* stored here — it lives on the accuracy entry's
+    scalar ``score`` (see :func:`find_accuracy_entry`), so this block carries only
+    the per-subset detail the entry can't.
 
     ``total_samples`` semantics are producer-defined and not directly comparable
     across scorers: the gpt-oss roll-up uses the summed **unique** problem count,
     while ``LegacyMLPerfDeepSeekR1Scorer`` uses the **evaluated** sample count.
     Callers gating on it (e.g. a min-sample check) should account for this.
     """
-    breakdown: dict[str, Any] = {
-        "overall_accuracy": round(overall, 2) if overall is not None else None,
+    return {
         "subset_scores": {k: round(v, 2) for k, v in subset_scores.items()},
         "total_samples": int(total_samples),
         "complete": complete,
     }
-    breakdown.update(extra)
-    return breakdown

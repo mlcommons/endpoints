@@ -81,6 +81,7 @@ def _accuracy_results(
                 "breakdown": {
                     "overall_accuracy": overall,
                     "normalized_single_turn_score": normalized,
+                    "subset_scores": {"simple": overall},
                     "total_samples": total,
                 },
             }

@@ -85,6 +85,7 @@ from inference_endpoint.endpoint_client.cpu_affinity import AffinityPlan, pin_lo
 from inference_endpoint.endpoint_client.http_client import HTTPEndpointClient
 from inference_endpoint.endpoint_client.http_sample_issuer import HttpClientSampleIssuer
 from inference_endpoint.evaluation import Extractor
+from inference_endpoint.evaluation.accuracy_results import average_accuracy
 from inference_endpoint.evaluation.scoring import Scorer
 from inference_endpoint.exceptions import (
     ExecutionError,
@@ -1430,6 +1431,11 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
             },
         }
         results["accuracy_scores"] = accuracy_scores
+        # Plain cross-component mean of the per-dataset scores (3 datasets for
+        # gpt-oss, 1 for DeepSeek-R1); None when nothing numeric was scored.
+        avg_accuracy = average_accuracy(accuracy_scores)
+        if avg_accuracy is not None:
+            results["average_accuracy"] = avg_accuracy
         if ctx.collect_responses:
             results["responses"] = collector.responses
         if collector.errors:
@@ -1449,8 +1455,12 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
             accuracy_dir = ctx.report_dir / "accuracy"
             accuracy_dir.mkdir(parents=True, exist_ok=True)
             accuracy_results_path = accuracy_dir / "accuracy_results.json"
+            accuracy_payload: dict[str, Any] = {}
+            if avg_accuracy is not None:
+                accuracy_payload["average_accuracy"] = avg_accuracy
+            accuracy_payload["accuracy_scores"] = accuracy_scores
             with open(accuracy_results_path, "w") as f:
-                json.dump({"accuracy_scores": accuracy_scores}, f, indent=2)
+                json.dump(accuracy_payload, f, indent=2)
             logger.info(f"Saved: {accuracy_results_path}")
     except Exception as e:
         logger.error(f"Save failed: {e}")

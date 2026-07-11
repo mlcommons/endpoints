@@ -110,15 +110,15 @@ def test_extract_accuracy_returns_none_without_scores():
 
 @pytest.mark.unit
 def test_extract_accuracy_non_bfcl_breakdown_falls_back_to_overall():
-    """DeepSeek/gpt-oss breakdowns carry no normalized single-turn score;
-    extract_accuracy falls back to the overall accuracy so they still plot."""
+    """DeepSeek breakdowns carry neither the overall nor the normalized single-turn
+    score; extract_accuracy sources the headline from the entry's ``score`` and
+    falls back to it for ``normalized`` so they still plot."""
     results = {
         "accuracy_scores": [
             {
-                "dataset_name": "gptoss",
-                "score": 0.83,
+                "dataset_name": "dsr1",
+                "score": 83.0,
                 "breakdown": {
-                    "overall_accuracy": 83.0,
                     "subset_scores": {"aime25": 80.0, "livecodebench": 60.0},
                     "total_samples": 1283,
                 },
@@ -127,7 +127,7 @@ def test_extract_accuracy_non_bfcl_breakdown_falls_back_to_overall():
     }
     b = extract_accuracy(results)
     assert b is not None
-    assert b.overall == pytest.approx(83.0)
+    assert b.overall == pytest.approx(83.0)  # from the entry's scalar score
     assert b.normalized == pytest.approx(83.0)  # fell back to overall
     assert b.subset_scores["aime25"] == pytest.approx(80.0)
 

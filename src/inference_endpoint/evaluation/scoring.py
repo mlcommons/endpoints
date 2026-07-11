@@ -2053,33 +2053,29 @@ class LegacyMLPerfDeepSeekR1Scorer(Scorer, scorer_id="legacy_mlperf_deepseek_r1"
         return float(combined), n_repeats
 
     def _cache_breakdown(self, results: dict[str, Any]) -> None:
-        """Cache a BFCL-shaped breakdown from the runner's per-subset results.
+        """Cache a per-subset breakdown from the runner's per-subset results.
 
         Subset ``exact_match`` values are already on the 0-100 scale, so they map
         straight onto ``subset_scores``. Subsets that failed to grade
-        (``exact_match is None``) are omitted from ``subset_scores`` but kept in
-        ``per_subset_status`` so an incomplete run stays legible.
+        (``exact_match is None``) are omitted. The headline accuracy is the entry's
+        scalar ``score`` (this scorer's :meth:`score` return), so it is not
+        duplicated in the block.
         """
         per_dataset = results.get("per_dataset") or {}
         subset_scores: dict[str, float] = {}
-        status_map: dict[str, Any] = {}
         for sub, d in per_dataset.items():
             if not isinstance(d, dict):
                 continue
-            status_map[sub] = d.get("status")
             em = d.get("exact_match")
             if em is not None:
                 subset_scores[sub] = float(em)
-        overall = results.get("exact_match")
         total_samples = int(
             results.get("evaluated_samples") or results.get("num_samples") or 0
         )
         self._breakdown = build_breakdown(
-            overall=float(overall) if overall is not None else None,
             subset_scores=subset_scores,
             total_samples=total_samples,
             complete=self.complete,
-            per_subset_status=status_map,
         )
 
     def score_breakdown(self) -> dict[str, Any] | None:

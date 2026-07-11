@@ -156,12 +156,14 @@ class TestLegacyMLPerfDeepSeekR1Scorer:
             deepseek_eval_project_path=project,
         )
         assert scorer.score_breakdown() is None  # not populated until score()
-        scorer.score()
+        # exact_match (already 0-100) is the headline scalar score, not stored in
+        # the breakdown block.
+        score, _ = scorer.score()
+        assert score == pytest.approx(66.67, abs=0.01)
 
         bd = scorer.score_breakdown()
         assert bd is not None
-        # exact_match is already 0-100; surfaced as overall_accuracy (rounded).
-        assert bd["overall_accuracy"] == pytest.approx(66.67, abs=0.01)
+        assert "overall_accuracy" not in bd
         assert bd["complete"] is True
         assert bd["subset_scores"] == {}  # runner returned an empty per_dataset
 
@@ -395,16 +397,19 @@ class TestLegacyMLPerfDeepSeekR1ScorerContainer:
             },
         )
         scorer = self._scorer(dataset, staged, project)
-        scorer.score()
+        # The headline accuracy is the scalar score() return, not duplicated in
+        # the breakdown block.
+        score, _ = scorer.score()
+        assert score == pytest.approx(100.0)
 
         bd = scorer.score_breakdown()
         assert bd is not None
-        assert bd["overall_accuracy"] == pytest.approx(100.0)
+        assert "overall_accuracy" not in bd
+        assert "per_subset_status" not in bd
         assert bd["complete"] is True
         assert bd["total_samples"] == 2
-        # livecodebench graded via the container is included, with its status.
+        # livecodebench graded via the container is included in subset_scores.
         assert bd["subset_scores"]["livecodebench"] == pytest.approx(100.0)
-        assert bd["per_subset_status"]["livecodebench"] == "lcb-service"
 
     def test_score_breakdown_excludes_unscored_lcb(
         self, dataset, staged, project, patch_subprocess, monkeypatch
@@ -418,9 +423,9 @@ class TestLegacyMLPerfDeepSeekR1ScorerContainer:
         bd = scorer.score_breakdown()
         assert bd is not None
         assert bd["complete"] is False
-        # Unscored subset is dropped from subset_scores but kept in the status map.
+        # An unscored subset is simply dropped from subset_scores.
         assert "livecodebench" not in bd["subset_scores"]
-        assert bd["per_subset_status"]["livecodebench"] == "unscored"
+        assert "per_subset_status" not in bd
 
     def test_container_unreachable_leaves_lcb_unscored(
         self, dataset, staged, project, patch_subprocess, monkeypatch

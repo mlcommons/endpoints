@@ -26,6 +26,7 @@ from typing import Any
 import msgspec.json
 import msgspec.structs
 
+from inference_endpoint.evaluation.accuracy_results import average_accuracy
 from inference_endpoint.utils.version import get_version_info
 
 from ..utils import monotime_to_datetime
@@ -383,6 +384,9 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
                         fn(f"    {sub}: {sub_score:.2f}%{newline}")
                 if entry.get("complete") is False:
                     fn(f"    (incomplete){newline}")
+            avg = average_accuracy(self.accuracy)
+            if avg is not None:
+                fn(f"  Average: {avg:.4g}{newline}")
 
         if summary_only:
             fn(f"----------------- End of Summary -----------------{newline}")
