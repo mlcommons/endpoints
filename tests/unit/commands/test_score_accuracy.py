@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -26,6 +27,12 @@ from inference_endpoint.commands.benchmark.execute import (
     _phase_osl_stats,
     _score_accuracy,
 )
+
+# Module object for the tests that monkeypatch execute's own module-level symbols
+# (_load_osl_tokenizer / AutoTokenizer) so _score_accuracy resolves the patched
+# one. Taken from sys.modules to avoid importing execute under both the
+# ``from ... import`` and ``import ...`` styles.
+execute_mod = sys.modules[_score_accuracy.__module__]
 
 
 class _FakeDataset:
@@ -204,8 +211,6 @@ class TestScoreAccuracy:
     def test_osl_attached_with_tokenizer(self, tmp_path, monkeypatch):
         """With a tokenizer, each accuracy entry gets an output_sequence_lengths
         block (same shape as the perf report) from the phase's completions."""
-        import inference_endpoint.commands.benchmark.execute as execute_mod
-
         monkeypatch.setattr(
             execute_mod, "_load_osl_tokenizer", lambda name: _WordTokenizer()
         )
@@ -225,8 +230,6 @@ class TestScoreAccuracy:
         assert entry["osl_tokenize_s"] >= 0.0
 
     def test_osl_skipped_for_performance_entry(self, tmp_path, monkeypatch):
-        import inference_endpoint.commands.benchmark.execute as execute_mod
-
         monkeypatch.setattr(
             execute_mod, "_load_osl_tokenizer", lambda name: _WordTokenizer()
         )
@@ -238,8 +241,6 @@ class TestScoreAccuracy:
 
     def test_osl_dropped_when_get_outputs_raises(self, tmp_path, monkeypatch):
         """A read/tokenize failure only drops OSL — scoring still succeeds."""
-        import inference_endpoint.commands.benchmark.execute as execute_mod
-
         monkeypatch.setattr(
             execute_mod, "_load_osl_tokenizer", lambda name: _WordTokenizer()
         )
@@ -297,8 +298,6 @@ class TestLoadOslTokenizer:
         assert _load_osl_tokenizer(None) is None
 
     def test_load_failure_returns_none(self, monkeypatch):
-        import inference_endpoint.commands.benchmark.execute as execute_mod
-
         class _BoomAutoTokenizer:
             @staticmethod
             def from_pretrained(name):
@@ -308,8 +307,6 @@ class TestLoadOslTokenizer:
         assert _load_osl_tokenizer("bad/model") is None
 
     def test_success_raises_model_max_length(self, monkeypatch):
-        import inference_endpoint.commands.benchmark.execute as execute_mod
-
         class _FakeTok:
             model_max_length = 5
 
