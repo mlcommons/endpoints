@@ -76,6 +76,16 @@ ACCUMULATOR_MAP = {
 }
 
 
+# The auto (``max_connections=-1``) pool claims this fraction of the ephemeral-port
+# budget rather than the whole range. Binding the entire range leaves the OS no
+# headroom: under bursty connection establishment the transient TIME_WAIT backlog
+# occupies much of the range, so binding new sockets intermittently fails with
+# EADDRNOTAVAIL. The reserved margin keeps the zero-config default safe; the
+# remainder is still a large pool and scales with distinct endpoints. An explicit
+# ``max_connections`` may use the full budget.
+AUTO_MAX_CONNECTIONS_BUDGET_FRACTION = 0.5
+
+
 class HTTPClientConfig(WithUpdatesMixin, BaseModel):
     """HTTP endpoint client configuration.
 
@@ -280,7 +290,11 @@ class HTTPClientConfig(WithUpdatesMixin, BaseModel):
             port_budget = system_maximum_ports * max(1, distinct_endpoints)
 
             if self.max_connections == -1:
-                object.__setattr__(self, "max_connections", port_budget)
+                object.__setattr__(
+                    self,
+                    "max_connections",
+                    max(1, int(port_budget * AUTO_MAX_CONNECTIONS_BUDGET_FRACTION)),
+                )
             elif self.max_connections > 0:
                 if self.max_connections > port_budget:
                     raise RuntimeError(

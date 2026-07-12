@@ -46,6 +46,7 @@ class TestAutoNumWorkersNonLinux:
         assert c.num_workers == 10
 
 
+@pytest.mark.unit
 class TestEndpointBudgetScaling:
     """max_connections budget scales with the number of distinct endpoints.
 
@@ -64,29 +65,23 @@ class TestEndpointBudgetScaling:
                 ],
                 num_workers=10,
             )
-        assert c.max_connections == 30000  # 10000 ports x 3 distinct endpoints
+        assert c.max_connections == 15000  # 3 x 10000 budget, auto claims half
 
-    def test_single_endpoint_budget_unchanged(self):
+    def test_single_endpoint_auto_reserves_headroom(self):
         with patch.object(cfg, "get_ephemeral_port_range", return_value=(1, 10000)):
             c = cfg.HTTPClientConfig(
                 endpoint_urls=["http://10.0.0.1:8000"], num_workers=10
             )
-        assert c.max_connections == 10000  # single endpoint -> unchanged
+        assert c.max_connections == 5000  # 10000 budget, auto claims half
 
-    def test_live_socket_usage_does_not_reject_overall_connection_limit(self):
-        with (
-            patch.object(cfg, "get_ephemeral_port_range", return_value=(1, 10000)),
-            patch.object(
-                cfg, "get_ephemeral_port_limit", return_value=0, create=True
-            ) as live_port_limit,
-        ):
+    def test_explicit_max_connections_below_budget_unchanged(self):
+        with patch.object(cfg, "get_ephemeral_port_range", return_value=(1, 10000)):
             c = cfg.HTTPClientConfig(
                 endpoint_urls=["http://10.0.0.1:8000"],
                 num_workers=10,
                 max_connections=10,
             )
         assert c.max_connections == 10
-        live_port_limit.assert_not_called()
 
     def test_duplicate_endpoints_do_not_inflate_budget(self):
         # Same (host, port) repeated (even with different paths) is one
@@ -100,7 +95,7 @@ class TestEndpointBudgetScaling:
                 ],
                 num_workers=10,
             )
-        assert c.max_connections == 10000  # 1 distinct (host, port)
+        assert c.max_connections == 5000  # 1 distinct (host, port), auto claims half
 
     def test_explicit_max_connections_within_scaled_budget_ok(self):
         # 25000 exceeds one endpoint's budget (10000) but fits 3 (30000).
@@ -124,6 +119,21 @@ class TestEndpointBudgetScaling:
                     num_workers=10,
                     max_connections=40000,  # > 2 x 10000
                 )
+
+    def test_auto_reserves_headroom_but_explicit_may_use_full_budget(self):
+        # Auto (-1) leaves the OS headroom; an explicit value may still claim
+        # the full per-endpoint budget.
+        with patch.object(cfg, "get_ephemeral_port_range", return_value=(1, 10000)):
+            auto = cfg.HTTPClientConfig(
+                endpoint_urls=["http://10.0.0.1:8000"], num_workers=10
+            )
+            full = cfg.HTTPClientConfig(
+                endpoint_urls=["http://10.0.0.1:8000"],
+                num_workers=10,
+                max_connections=10000,
+            )
+        assert auto.max_connections < 10000
+        assert full.max_connections == 10000
 
 
 @pytest.mark.unit
@@ -161,4 +171,4 @@ class TestEndpointDestination:
                 endpoint_urls=["10.0.0.1:8000", "10.0.0.2:8000"],
                 num_workers=10,
             )
-        assert c.max_connections == 20000  # 10000 ports x 2 distinct hosts
+        assert c.max_connections == 10000  # 2 x 10000 budget, auto claims half
