@@ -28,6 +28,8 @@ from collections.abc import AsyncGenerator
 from typing import Any
 from urllib.parse import urlparse
 
+import msgspec
+
 from inference_endpoint.async_utils.transport import (
     ReceiverTransport,
     SenderTransport,
@@ -379,31 +381,45 @@ class Worker:
             return False
 
     async def _read_headers_with_retry(self, req: InFlightRequest) -> int | None:
-        """Read response headers, retrying on a pre-response connection reset.
+        """Read response headers, retrying only on a true zero-byte close.
 
-        A connection-level failure at this point means the server closed the
-        socket before sending any response byte (the idle keep-alive race:
-        server drops an idle -np 1 connection just as the client writes on it).
-        No output was produced, so re-issuing the identical request on a fresh
-        connection is safe and idempotent. Returns the HTTP status code, or None
-        if retries are exhausted (an error response has been emitted).
+        A connection-level failure here can mean the server closed the socket
+        before writing any response byte (the idle keep-alive race: an idle
+        ``-np 1`` connection dropped just as the client writes on it). Only a
+        true zero-byte close is retried — re-issuing on a fresh connection is
+        safe for *client* output because the accumulator has produced nothing.
+
+        If any response byte already arrived (partial status-line/header bytes
+        before the close), the server may have received and processed the
+        request, so a re-issue would duplicate server-side generation work; that
+        case surfaces the error instead of retrying. Each recovery is logged and
+        counted on ``req.transport_retries`` so the successful sample carries a
+        marker downstream. Returns the HTTP status code, or None if the reset is
+        not retryable or retries are exhausted (an error response was emitted).
         """
-        attempt = 0
         while True:
             conn = req.connection
             try:
                 status_code, _ = await conn.protocol.read_headers()
                 return status_code
             except ConnectionError as e:
-                # Dead connection: discard it (frees the pool slot) and, if
-                # retries remain, re-issue on a fresh connection. Retrying is
-                # only reached here because no headers arrived, so no partial
-                # output was delivered to the accumulator.
+                partial = conn.protocol.bytes_received
                 self._pool.release(conn)
-                if attempt >= self.http_config.transport_max_retries:
+                if (
+                    partial
+                    or req.transport_retries >= self.http_config.transport_max_retries
+                ):
                     await self._handle_error(req.query_id, e)
                     return None
-                attempt += 1
+                req.transport_retries += 1
+                logger.warning(
+                    "Request %s: retrying after pre-response connection reset "
+                    "(attempt %d/%d): %s",
+                    req.query_id,
+                    req.transport_retries,
+                    self.http_config.transport_max_retries,
+                    e,
+                )
                 # Attach the fresh connection to the request BEFORE writing, so
                 # a write failure still leaves req.connection pointing at it for
                 # the caller's finally-block release (no leaked connection).
@@ -469,7 +485,7 @@ class Worker:
         self._pool.release(conn)
 
         # Send final complete back to main rank
-        self._responses.send(accumulator.get_final_output())
+        self._responses.send(self._tag_retries(accumulator.get_final_output(), req))
 
     @profile
     async def _handle_non_streaming_body(self, req: InFlightRequest) -> None:
@@ -487,7 +503,20 @@ class Worker:
         result = self._adapter.decode_response(response_bytes, query_id)
 
         # Send result back to main rank
-        self._responses.send(result)
+        self._responses.send(self._tag_retries(result, req))
+
+    @staticmethod
+    def _tag_retries(result: QueryResult, req: InFlightRequest) -> QueryResult:
+        """Stamp a successful result with this request's retry count.
+
+        No-op when the request was not retried (the common path), so the hot
+        path pays nothing unless a pre-response reset was actually recovered.
+        """
+        if req.transport_retries:
+            msgspec.structs.force_setattr(
+                result, "transport_retries", req.transport_retries
+            )
+        return result
 
     async def _handle_error(self, query_id: str, error: Exception | str) -> None:
         """Send error response for a query."""

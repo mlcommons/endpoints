@@ -145,6 +145,9 @@ class SampleEventType(EventType):
     COMPLETE = "complete"
     RECV_FIRST = "recv_first"
     RECV_NON_FIRST = "recv_non_first"
+    # Emitted once per pre-response connection-reset re-issue (opt-in
+    # transport_max_retries). Diagnostic only — not a tracked sample event.
+    TRANSPORT_RETRY = "transport_retry"
 
 
 class EventRecord(msgspec.Struct, kw_only=True, frozen=True, gc=False):  # type: ignore[call-arg]

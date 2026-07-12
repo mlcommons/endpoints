@@ -131,6 +131,7 @@ class HttpResponseProtocol(asyncio.Protocol):
         "_message_complete",
         "_connection_lost",
         "_exc",
+        "_bytes_received",
     )
 
     def __init__(self, loop: asyncio.AbstractEventLoop):
@@ -158,6 +159,10 @@ class HttpResponseProtocol(asyncio.Protocol):
         self._message_complete: bool = False
         self._connection_lost: bool = False
         self._exc: Exception | None = None
+        # True once any response byte has been received for the current
+        # request. Distinguishes a true zero-byte close (safe to retry) from a
+        # partial-response close (server already processed the request).
+        self._bytes_received: bool = False
 
     def reset(self) -> None:
         """Reset protocol state for connection reuse."""
@@ -175,6 +180,7 @@ class HttpResponseProtocol(asyncio.Protocol):
         self._headers_complete = False
         self._message_complete = False
         self._exc = None
+        self._bytes_received = False
         # NOTE: Don't reset _connection_lost - that's transport state
 
     def _signal_stream_end(self) -> None:
@@ -196,6 +202,8 @@ class HttpResponseProtocol(asyncio.Protocol):
         self._parser = httptools.HttpResponseParser(self)
 
     def data_received(self, data: bytes) -> None:
+        if data:
+            self._bytes_received = True
         # Lazy parser creation for better reset() performance
         if self._parser is None:
             self._parser = httptools.HttpResponseParser(self)
@@ -315,6 +323,17 @@ class HttpResponseProtocol(asyncio.Protocol):
     def should_close(self) -> bool:
         """Whether connection should be closed after this response."""
         return self._should_close or self._connection_lost or self._exc is not None
+
+    @property
+    def bytes_received(self) -> bool:
+        """Whether any response byte arrived for the current request.
+
+        False means a true zero-byte close (the server never wrote a byte);
+        True means partial or complete response bytes were parsed. Used to gate
+        the pre-response reset retry so a request the server may already have
+        processed is not re-issued.
+        """
+        return self._bytes_received
 
     def write(self, data: bytes) -> None:
         """Write data to transport."""
@@ -588,8 +607,11 @@ class ConnectionPool:
         if not conn.in_use:
             return
 
-        # Must close if: dead, server requested close, or error occurred
+        # Must close if: dead, server requested close, or error occurred.
+        # Clear in_use first so a second release() short-circuits above
+        # instead of re-entering this branch and firing a spurious waiter wake.
         if not conn.is_alive() or conn.protocol.should_close:
+            conn.in_use = False
             self._close_connection(conn)
             self._notify_waiter()
             return
@@ -798,9 +820,11 @@ class InFlightRequest:
         http_bytes: Serialized HTTP request for socket.write().
         is_streaming: Whether this is a streaming (SSE) request or not.
         connection: PooledConnection assigned to this request (set once request is fired).
+        transport_retries: Count of pre-response reset re-issues for this request.
     """
 
     query_id: str
     http_bytes: bytes
     is_streaming: bool
     connection: PooledConnection = field(default=None, repr=False)  # type: ignore[assignment]
+    transport_retries: int = 0

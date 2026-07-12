@@ -90,8 +90,34 @@ def _accuracy_results(
 @pytest.mark.unit
 def test_config_lock_passes_on_compliant_config():
     checks = check_config_lock(_passing_config())
-    assert {c.name for c in checks} == {"temperature==0", "seed==42", "single_stream"}
+    assert {c.name for c in checks} == {
+        "temperature==0",
+        "seed==42",
+        "single_stream",
+        "transport_max_retries_locked",
+    }
     assert all(c.passed for c in checks)
+
+
+@pytest.mark.unit
+def test_config_lock_records_transport_max_retries():
+    config = _passing_config()
+    config["settings"]["client"]["transport_max_retries"] = 2
+    check = next(
+        c for c in check_config_lock(config) if c.name == "transport_max_retries_locked"
+    )
+    assert check.passed
+    assert "transport_max_retries=2" in check.detail
+
+
+@pytest.mark.unit
+def test_config_lock_fails_on_out_of_bound_transport_max_retries():
+    config = _passing_config()
+    config["settings"]["client"]["transport_max_retries"] = 9
+    check = next(
+        c for c in check_config_lock(config) if c.name == "transport_max_retries_locked"
+    )
+    assert not check.passed
 
 
 @pytest.mark.unit
@@ -272,6 +298,22 @@ def test_check_submission_uses_ruleset_thresholds(tmp_path):
     )
     report = check_submission(tmp_path)
     assert not report.passed
+
+
+@pytest.mark.unit
+def test_check_submission_surfaces_transport_retries_attestation(tmp_path):
+    # A nonzero transport_max_retries must be disclosed as a manual attestation
+    # so a retry-recovered reset can't silently satisfy no_dropped_turns.
+    config_with_retries = _VALID_CONFIG_YAML.replace(
+        "    max_connections: 1", "    max_connections: 1\n    transport_max_retries: 2"
+    )
+    (tmp_path / "config.yaml").write_text(config_with_retries)
+    (tmp_path / "results.json").write_text(
+        json.dumps(_accuracy_results(86.23, 87.96, 995))
+    )
+    report = check_submission(tmp_path)
+    assert report.passed
+    assert any("transport_max_retries=2" in n for n in report.notes)
 
 
 @pytest.mark.unit

@@ -600,6 +600,21 @@ class BenchmarkSession:
                         data=resp.error,
                     )
                 )
+            # Surface pre-response connection-reset recoveries as a diagnostic
+            # counter (one event per re-issue). Emitted for every completed
+            # sample, warmup included, since a reset is a SUT-health signal
+            # regardless of the tracking window.
+            if resp.transport_retries:
+                retry_record = EventRecord(
+                    event_type=SampleEventType.TRANSPORT_RETRY,
+                    timestamp_ns=time.monotonic_ns(),
+                    sample_uuid=query_id,
+                    conversation_id=conv_id_str,
+                    turn=turn_num,
+                )
+                for _ in range(resp.transport_retries):
+                    self._publisher.publish(retry_record)
+
             if self._current_phase_type != PhaseType.WARMUP:
                 self._publisher.publish(
                     EventRecord(

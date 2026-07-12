@@ -580,6 +580,33 @@ class TestConnectionPool:
         assert pool.total_count == 1
 
     @pytest.mark.asyncio
+    async def test_release_dead_connection_idempotent(self, pool):
+        """Double-releasing a dead connection clears ``in_use`` and does not
+        fire a second (spurious) waiter wake — the retry-exhausted / disabled
+        paths release the dead connection once in the worker and again in the
+        ``finally`` block."""
+        conn = await pool.acquire()
+        conn.transport.close()  # dead: is_alive() is now False
+
+        notify_calls = 0
+        original_notify = pool._notify_waiter
+
+        def counting_notify() -> None:
+            nonlocal notify_calls
+            notify_calls += 1
+            original_notify()
+
+        pool._notify_waiter = counting_notify  # type: ignore[method-assign]
+
+        pool.release(conn)
+        assert conn.in_use is False
+        assert pool.total_count == 0
+        # Second release must short-circuit on `not in_use` instead of
+        # re-entering the dead branch and waking a waiter again.
+        pool.release(conn)
+        assert notify_calls == 1
+
+    @pytest.mark.asyncio
     async def test_unlimited_pool(self, echo_server):
         """Pool with max_connections=None allows unlimited connections."""
         loop = asyncio.get_running_loop()

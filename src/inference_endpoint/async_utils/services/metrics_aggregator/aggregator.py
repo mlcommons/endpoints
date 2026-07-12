@@ -70,6 +70,11 @@ class MetricCounterKey(str, Enum):
     # tracked row still exists when the aggregator sees the ERROR.
     TRACKED_SAMPLES_FAILED = "tracked_samples_failed"
     TRACKED_DURATION_NS = "tracked_duration_ns"
+    # Total pre-response connection-reset re-issues across the run (opt-in
+    # transport_max_retries). Non-zero means the SUT reset idle connections
+    # that the client transparently retried — a "can't keep up" signal that
+    # would otherwise vanish once the retry converts the reset into a success.
+    TRANSPORT_RETRIES_TOTAL = "transport_retries_total"
     # Legacy MLPerf LoadGen Server "completed" window (final_query_all_samples_done_time).
     LEGACY_LOADGEN_WINDOW_DURATION_NS = "legacy_loadgen_window_duration_ns"
     # Total wall-clock duration since session start. Updated on every event as
@@ -366,6 +371,13 @@ class MetricsAggregatorService(ZmqMessageSubscriber[EventRecord]):
                 if record.sample_uuid and table.get_row(record.sample_uuid) is not None:
                     registry.increment(MetricCounterKey.TRACKED_SAMPLES_FAILED.value)
                 logger.debug("Error event: %s", record)
+                continue
+
+            # --- Transport retry events ---
+            # A SampleEventType, but not a tracked lifecycle event: it only
+            # bumps the diagnostic recovery counter and never touches the table.
+            if ev == SampleEventType.TRANSPORT_RETRY:
+                registry.increment(MetricCounterKey.TRANSPORT_RETRIES_TOTAL.value)
                 continue
 
             # --- Sample events ---

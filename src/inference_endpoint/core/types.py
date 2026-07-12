@@ -402,6 +402,12 @@ class QueryResult(
         error: Structured error if query failed (None if successful).
         completed_at: High-resolution timestamp (nanoseconds, monotonic clock).
                       Auto-set in __post_init__ to prevent tampering.
+        transport_retries: Number of pre-response connection-reset re-issues the
+                      worker performed for this sample (0 = none). Non-zero marks
+                      a sample whose timed window folds in dead-socket wait +
+                      reconnect + a second server pass, so the report can
+                      segregate or exclude it from the server latency
+                      distribution. Appended last for array_like backward compat.
 
     Note:
         The completed_at field is intentionally set internally to prevent
@@ -422,6 +428,7 @@ class QueryResult(
     metadata: dict[str, Any] = msgspec.field(default_factory=dict)
     error: ErrorData | None = None
     completed_at: int | msgspec.UnsetType = msgspec.UNSET
+    transport_retries: int = 0
 
     def __post_init__(self):
         """Set completion timestamp automatically.

@@ -152,6 +152,11 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
     # caller supplies them rather than reading them from the metrics snapshot.
     seeds: dict[str, int] | None = None
 
+    # Total pre-response connection-reset re-issues (opt-in transport_max_retries).
+    # Non-zero means the SUT reset idle connections that the client transparently
+    # retried; surfaced so a "clean" run still discloses the recovered resets.
+    transport_retries_total: int = 0
+
     @classmethod
     def from_snapshot(
         cls,
@@ -275,6 +280,7 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
             qps=qps,
             tps=tps,
             seeds=seeds,
+            transport_retries_total=_counter("transport_retries_total"),
         )
 
     def to_json(self, save_to: os.PathLike | None = None) -> bytes:
@@ -313,6 +319,11 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
         fn(f"Total samples issued: {self.n_samples_issued}{newline}")
         fn(f"Total samples completed: {self.n_samples_completed}{newline}")
         fn(f"Total samples failed: {self.n_samples_failed}{newline}")
+        if self.transport_retries_total:
+            fn(
+                "Transport retries (pre-response resets recovered): "
+                f"{self.transport_retries_total}{newline}"
+            )
         if self.duration_ns is not None:
             fn(f"Duration: {self.duration_ns / 1e9:.2f} seconds{newline}")
         else:

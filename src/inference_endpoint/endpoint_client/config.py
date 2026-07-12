@@ -181,10 +181,13 @@ class HTTPClientConfig(WithUpdatesMixin, BaseModel):
     # Opt-in: default 0 preserves the prior fail-fast behavior for every use
     # case. Configs that need it (e.g. the edge-agentic accuracy reference)
     # enable it explicitly via `client.transport_max_retries`.
+    # Bounded above so a genuinely-down server can't turn fail-fast into a long
+    # reconnect/re-write spin that masks a hard SUT failure and multiplies load.
     transport_max_retries: int = Field(
         0,
         ge=0,
-        description="Retries on a pre-response connection reset (0=disabled)",
+        le=5,
+        description="Retries on a pre-response connection reset (0=disabled, max 5)",
     )
 
     # Minimum required connections for http-client to initialize.

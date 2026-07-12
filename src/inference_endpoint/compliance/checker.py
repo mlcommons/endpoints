@@ -157,6 +157,21 @@ def check_config_lock(config: dict[str, Any]) -> list[Check]:
         detail += f" target_concurrency={target_concurrency}"
     checks.append(Check("single_stream", single_stream, detail))
 
+    # Lock the pre-response reset retry: it is a reproducibility knob that lets
+    # the client silently re-issue after a SUT-side reset, so its value must be
+    # recorded (and within the schema bound) rather than passing for any value.
+    # Disclosure that a recovered reset didn't mask a dropped turn is a manual
+    # attestation added in check_submission (transport_retries_total lives in the
+    # run's result summary, not in this config).
+    retries = _get(config, "settings", "client", "transport_max_retries", default=0)
+    checks.append(
+        Check(
+            "transport_max_retries_locked",
+            isinstance(retries, int) and 0 <= retries <= 5,
+            f"transport_max_retries={retries}",
+        )
+    )
+
     return checks
 
 
@@ -309,6 +324,22 @@ def check_submission(
             report.add("config_valid", False, f"{config_path} failed to load: {e}")
         else:
             report.checks.extend(check_config_lock(config))
+            retries = _get(
+                config, "settings", "client", "transport_max_retries", default=0
+            )
+            if retries:
+                # A recovered pre-response reset produces a clean success, so
+                # the no_dropped_turns gate can't see it from scores.json alone.
+                # Require the submitter to confirm the disclosed retry value and
+                # that transport_retries_total (in the run's result summary) did
+                # not mask a dropped-and-re-issued turn.
+                report.notes.append(
+                    f"transport_max_retries={retries}: pre-response connection "
+                    "resets are retried. Confirm this matches the disclosed "
+                    "ruleset value and that no retry-recovered reset (see "
+                    "transport_retries_total in the run's result summary) masked "
+                    "a dropped turn."
+                )
 
     results_path = report_dir / "results.json"
     scores_path = report_dir / "scores.json"
