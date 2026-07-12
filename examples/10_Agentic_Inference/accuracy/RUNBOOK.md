@@ -38,8 +38,12 @@ export SWE_BENCH_PROJECT_PATH="$(pwd)/examples/10_Agentic_Inference/accuracy"
 
 ```bash
 uv run inference-endpoint benchmark from-config \
-  --config examples/10_Agentic_Inference/swe_bench_accuracy.yaml
+  --config examples/10_Agentic_Inference/swe_bench_accuracy.yaml \
+  --mode both
 ```
+
+`--mode both` is required: `type: online` configs default to `TestMode.PERF`,
+which skips accuracy datasets.
 
 Scorer preflight resolves the requested SWE-bench instances and pre-pulls the
 required Docker images before `mini-extra swebench` starts, using the configured

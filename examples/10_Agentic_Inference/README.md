@@ -224,8 +224,12 @@ Then run the benchmark from the repo root:
 
 ```bash
 uv run inference-endpoint benchmark from-config \
-  --config examples/10_Agentic_Inference/swe_bench_accuracy.yaml
+  --config examples/10_Agentic_Inference/swe_bench_accuracy.yaml \
+  --mode both
 ```
+
+`--mode both` is required: `type: online` configs default to `TestMode.PERF`,
+which skips accuracy datasets.
 
 See `accuracy/RUNBOOK.md` for preconditions, sanity checks, and common failure
 modes.
