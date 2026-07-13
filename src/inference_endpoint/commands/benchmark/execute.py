@@ -315,6 +315,18 @@ def _validate_accuracy_config_for_scorer(
         )
 
 
+def _run_scorer_preflight(
+    scorer_cls: type[Scorer],
+    extras: dict[str, Any],
+    *,
+    loaded_sample_count: int | None = None,
+) -> None:
+    if scorer_cls.SCORER_ID == ScorerMethod.SWE_BENCH.value:
+        scorer_cls.preflight(extras, loaded_sample_count=loaded_sample_count)
+    else:
+        scorer_cls.preflight(extras)
+
+
 def _load_datasets(
     config: BenchmarkConfig,
     report_dir: Path,
@@ -352,13 +364,15 @@ def _load_datasets(
         )
         extras = acc_cfg.accuracy_config.extras or {}
 
-        scorer_cls.preflight(extras)
-
         ds = DataLoaderFactory.create_loader(
             acc_cfg,
             num_repeats=acc_cfg.accuracy_config.num_repeats,
             **scorer_cls.dataset_loader_kwargs(extras),
         )
+        ds_model_params = acc_cfg.effective_generation_config(config.model_params)
+        ds.load(api_type=config.endpoint_config.api_type, model_params=ds_model_params)
+        logger.info(f"Loaded {ds} - {ds.num_samples()} samples")
+        _run_scorer_preflight(scorer_cls, extras, loaded_sample_count=ds.num_samples())
         accuracy_datasets.append(ds)
         # TODO add tests and defaults
         eval_configs.append(
@@ -374,12 +388,6 @@ def _load_datasets(
                 dataset_type=DatasetType.ACCURACY,
             )
         )
-        # Value/api-type validity of the override is already enforced at config
-        # construction (BenchmarkConfig validates each dataset's effective params),
-        # so this cannot raise for a validated config.
-        ds_model_params = acc_cfg.effective_generation_config(config.model_params)
-        ds.load(api_type=config.endpoint_config.api_type, model_params=ds_model_params)
-        logger.info(f"Loaded {ds} - {ds.num_samples()} samples")
 
     if not accuracy_cfgs and load_accuracy:
         logger.info("No separate accuracy datasets provided")
@@ -430,7 +438,11 @@ def _load_datasets(
             _validate_accuracy_config_for_scorer(
                 scorer_cls, perf_cfg.name, accuracy_config
             )
-            scorer_cls.preflight(accuracy_config.extras or {})
+            _run_scorer_preflight(
+                scorer_cls,
+                accuracy_config.extras or {},
+                loaded_sample_count=dataloader.num_samples(),
+            )
 
             eval_configs.append(
                 AccuracyConfiguration(

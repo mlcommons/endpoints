@@ -223,6 +223,8 @@ class _FakeThreadPoolExecutor:
     def __init__(self, *, max_workers: int):
         self.max_workers = max_workers
         self.submitted: list[_FakeFuture] = []
+        self.shutdown_wait: bool | None = None
+        self.shutdown_cancel_futures: bool | None = None
         type(self).instances.append(self)
 
     def submit(self, fn, image: str) -> _FakeFuture:
@@ -231,6 +233,8 @@ class _FakeThreadPoolExecutor:
         return future
 
     def shutdown(self, wait: bool = True, cancel_futures: bool = False) -> None:
+        self.shutdown_wait = wait
+        self.shutdown_cancel_futures = cancel_futures
         if cancel_futures:
             for future in self.submitted:
                 future.cancel()
@@ -280,8 +284,8 @@ def patch_subprocess(monkeypatch, report_dir: Path, swe_bench_project: Path):
             (cwd / f"{safe_model}.{run_id}.json").write_text(
                 json.dumps(
                     {
-                        "resolved_instances": 3,
-                        "submitted_instances": 10,
+                        "resolved_instances": 1,
+                        "submitted_instances": 3,
                         "total_instances": 500,
                     }
                 )
@@ -307,6 +311,8 @@ class TestSWEBenchScorerRegistration:
             == SWEBenchScorer.DEFAULT_NUM_INSTANCES
         )
         assert SWEBenchScorer.external_sample_count({"num_instances": "bad"}) is None
+        assert SWEBenchScorer.external_sample_count({"num_instances": 0}) is None
+        assert SWEBenchScorer.external_sample_count({"num_instances": -1}) is None
 
 
 class TestSWEBenchScorer:
@@ -316,13 +322,26 @@ class TestSWEBenchScorer:
         scorer = _make_scorer(report_dir, swe_bench_project, template_yaml)
         score, n_repeats = scorer.score()
 
-        assert score == pytest.approx(0.3)
+        assert score == pytest.approx(1 / 3)
         assert n_repeats == 1
         assert (report_dir / "swe_bench_results.json").exists()
         assert {
             kwargs["env"]["UV_PROJECT_ENVIRONMENT"]
             for kwargs in patch_subprocess.kwargs
         } == {str(swe_bench_project / ".venv")}
+        assert {
+            cmd[cmd.index("--project") + 1]
+            for cmd in patch_subprocess
+            if cmd[:3] == ["uv", "run", "--project"]
+        } == {str(swe_bench_project.resolve())}
+        eval_cmd = patch_subprocess[1]
+        instance_idx = eval_cmd.index("--instance_ids") + 1
+        assert eval_cmd[instance_idx:] == [
+            "repo__repo-0",
+            "repo__repo-1",
+            "repo__repo-2",
+        ]
+        assert not (report_dir / "swe_bench_output" / "swebench_patched.yaml").exists()
 
     def test_score_does_not_install_toolcall_patch_by_default(
         self,
@@ -332,19 +351,19 @@ class TestSWEBenchScorer:
         patch_subprocess,
         monkeypatch,
     ):
-        def fail_install(cls, swe_bench_project_path):
-            pytest.fail("toolcall patch should not install by default")
+        def fail_overlay(cls, swe_bench_project_path, overlay_root):
+            pytest.fail("toolcall patch overlay should not be created by default")
 
         monkeypatch.setattr(
             SWEBenchScorer,
-            "_install_toolcall_patch",
-            classmethod(fail_install),
+            "_create_toolcall_patch_overlay",
+            classmethod(fail_overlay),
         )
         scorer = _make_scorer(report_dir, swe_bench_project, template_yaml)
 
         score, n_repeats = scorer.score()
 
-        assert score == pytest.approx(0.3)
+        assert score == pytest.approx(1 / 3)
         assert n_repeats == 1
 
     def test_score_rejects_toolcall_patch_for_non_qwen(
@@ -352,13 +371,13 @@ class TestSWEBenchScorer:
     ):
         _write_toolcall_patch_files(swe_bench_project)
 
-        def fail_install(cls, swe_bench_project_path):
-            pytest.fail("toolcall patch should be rejected before install")
+        def fail_overlay(cls, swe_bench_project_path, overlay_root):
+            pytest.fail("toolcall patch should be rejected before overlay creation")
 
         monkeypatch.setattr(
             SWEBenchScorer,
-            "_install_toolcall_patch",
-            classmethod(fail_install),
+            "_create_toolcall_patch_overlay",
+            classmethod(fail_overlay),
         )
         scorer = _make_scorer(
             report_dir,
@@ -370,7 +389,7 @@ class TestSWEBenchScorer:
         with pytest.raises(ValueError, match="only supported for Qwen"):
             scorer.score()
 
-    def test_score_installs_and_restores_toolcall_patch_for_qwen(
+    def test_score_uses_toolcall_patch_overlay_for_qwen_agent_run_only(
         self,
         report_dir,
         swe_bench_project,
@@ -384,26 +403,18 @@ class TestSWEBenchScorer:
             report_dir,
             model_params={"name": "Qwen/Qwen3.6-35B-A3B"},
         )
-        calls: list[str] = []
-        sentinel = tmp_path / "patched_file.py"
+        overlay_root = tmp_path / "overlay"
+        overlay_root.mkdir()
+        calls: list[Path] = []
 
-        def fake_install(cls, swe_bench_project_path):
-            calls.append("install")
-            return [(sentinel, b"original")]
-
-        def fake_restore(cls, backups):
-            assert backups == [(sentinel, b"original")]
-            calls.append("restore")
+        def fake_overlay(cls, swe_bench_project_path, root):
+            calls.append(root)
+            return overlay_root
 
         monkeypatch.setattr(
             SWEBenchScorer,
-            "_install_toolcall_patch",
-            classmethod(fake_install),
-        )
-        monkeypatch.setattr(
-            SWEBenchScorer,
-            "_restore_toolcall_patch",
-            classmethod(fake_restore),
+            "_create_toolcall_patch_overlay",
+            classmethod(fake_overlay),
         )
         scorer = _make_scorer(
             report_dir,
@@ -414,11 +425,18 @@ class TestSWEBenchScorer:
 
         score, n_repeats = scorer.score()
 
-        assert score == pytest.approx(0.3)
+        assert score == pytest.approx(1 / 3)
         assert n_repeats == 1
-        assert calls == ["install", "restore"]
+        assert len(calls) == 1
+        agent_env = patch_subprocess.kwargs[0]["env"]
+        eval_env = patch_subprocess.kwargs[1]["env"]
+        assert agent_env["PYTHONPATH"].split(":")[0] == str(overlay_root)
+        assert (
+            "PYTHONPATH" not in eval_env
+            or str(overlay_root) not in eval_env["PYTHONPATH"]
+        )
 
-    def test_install_toolcall_patch_restores_original_files(
+    def test_create_toolcall_patch_overlay_leaves_site_packages_unchanged(
         self, swe_bench_project, tmp_path, monkeypatch
     ):
         _write_toolcall_patch_files(swe_bench_project)
@@ -437,30 +455,22 @@ class TestSWEBenchScorer:
 
         monkeypatch.setattr(scoring_mod.subprocess, "run", fake_run)
 
-        backups = SWEBenchScorer._install_toolcall_patch(swe_bench_project)
-
-        assert actions_dest.read_text() == "# patched actions_toolcall.py\n"
-        assert litellm_dest.read_text() == "# patched litellm_model.py\n"
-
-        SWEBenchScorer._restore_toolcall_patch(backups)
+        overlay_root = tmp_path / "overlay"
+        SWEBenchScorer._create_toolcall_patch_overlay(swe_bench_project, overlay_root)
 
         assert actions_dest.read_text() == "# original actions\n"
         assert litellm_dest.read_text() == "# original litellm\n"
+        assert (
+            overlay_root / "minisweagent" / "models" / "utils" / "actions_toolcall.py"
+        ).read_text() == "# patched actions_toolcall.py\n"
+        assert (
+            overlay_root / "minisweagent" / "models" / "litellm_model.py"
+        ).read_text() == "# patched litellm_model.py\n"
 
-    def test_restore_toolcall_patch_removes_files_with_no_backup(self, tmp_path):
-        dest = tmp_path / "new_file.py"
-        dest.write_text("patched content\n")
-
-        SWEBenchScorer._restore_toolcall_patch([(dest, None)])
-
-        assert not dest.exists()
-
-    def test_install_toolcall_patch_missing_target_dir_raises(
+    def test_create_toolcall_patch_overlay_missing_package_raises(
         self, swe_bench_project, tmp_path, monkeypatch
     ):
         _write_toolcall_patch_files(swe_bench_project)
-        # site_packages exists (so path resolution succeeds) but the deeper
-        # utils/ target directory for actions_toolcall.py is missing.
         site_packages = tmp_path / "site-packages"
         site_packages.mkdir()
         actions_toolcall_file = (
@@ -474,10 +484,12 @@ class TestSWEBenchScorer:
 
         monkeypatch.setattr(scoring_mod.subprocess, "run", fake_run)
 
-        with pytest.raises(SetupError, match="Target directory does not exist"):
-            SWEBenchScorer._install_toolcall_patch(swe_bench_project)
+        with pytest.raises(SetupError, match="package directory not found"):
+            SWEBenchScorer._create_toolcall_patch_overlay(
+                swe_bench_project, tmp_path / "overlay"
+            )
 
-    def test_install_toolcall_patch_restores_on_partial_failure(
+    def test_create_toolcall_patch_overlay_propagates_copy_failure_without_mutation(
         self, swe_bench_project, tmp_path, monkeypatch
     ):
         _write_toolcall_patch_files(swe_bench_project)
@@ -501,7 +513,9 @@ class TestSWEBenchScorer:
         )
 
         with pytest.raises(OSError, match="disk full"):
-            SWEBenchScorer._install_toolcall_patch(swe_bench_project)
+            SWEBenchScorer._create_toolcall_patch_overlay(
+                swe_bench_project, tmp_path / "overlay"
+            )
 
         assert actions_dest.read_text() == "# original actions\n"
         assert litellm_dest.read_text() == "# original litellm\n"
@@ -574,6 +588,7 @@ class TestSWEBenchScorer:
         score, n_repeats = scorer.score()
         assert score is None
         assert n_repeats == 1
+        assert scorer.complete is False
 
     def test_config_patching_all_fields(self, report_dir, swe_bench_project, tmp_path):
         tmpl = {
@@ -883,6 +898,18 @@ class TestSWEBenchScorer:
                 max_eval_workers=max_eval_workers,
             )
 
+    @pytest.mark.parametrize("num_instances", [0, -1])
+    def test_invalid_num_instances_raises(
+        self, report_dir, swe_bench_project, template_yaml, num_instances
+    ):
+        with pytest.raises(SetupError, match=r"num_instances must be >= 1"):
+            _make_scorer(
+                report_dir,
+                swe_bench_project,
+                template_yaml,
+                num_instances=num_instances,
+            )
+
     def test_run_subprocess_replaces_decode_errors(
         self, report_dir, swe_bench_project, template_yaml, tmp_path, monkeypatch
     ):
@@ -954,7 +981,7 @@ class TestSWEBenchScorer:
         )
         scorer = _make_scorer(report_dir, swe_bench_project, template_yaml)
         score, n_repeats = scorer.score()
-        assert score == pytest.approx(1 / 5)
+        assert score == pytest.approx(1 / 3)
         assert n_repeats == 1
 
     def test_zero_submitted_instances_returns_none(
@@ -983,6 +1010,34 @@ class TestSWEBenchScorer:
         score, n_repeats = scorer.score()
         assert score is None
         assert n_repeats == 1
+        assert scorer.complete is False
+
+    def test_missing_result_file_returns_none_and_marks_incomplete(
+        self, report_dir, swe_bench_project, template_yaml, monkeypatch
+    ):
+        def _no_result(cmd, **kwargs):
+            return MagicMock(returncode=0, stdout="")
+
+        monkeypatch.setattr(scoring_mod.subprocess, "run", _make_staged_run(_no_result))
+        scorer = _make_scorer(report_dir, swe_bench_project, template_yaml)
+        score, n_repeats = scorer.score()
+        assert score is None
+        assert n_repeats == 1
+        assert scorer.complete is False
+
+    def test_zero_evaluated_instances_returns_none_and_marks_incomplete(
+        self, report_dir, swe_bench_project, template_yaml, patch_subprocess
+    ):
+        scorer = _make_scorer(
+            report_dir,
+            swe_bench_project,
+            template_yaml,
+            dataset=_make_dataset(n=0),
+        )
+        score, n_repeats = scorer.score()
+        assert score is None
+        assert n_repeats == 1
+        assert scorer.complete is False
 
     def test_num_instances_exceeding_dataset_warns_and_clamps(
         self, report_dir, swe_bench_project, template_yaml, patch_subprocess, caplog
@@ -1031,7 +1086,7 @@ class TestSWEBenchScorerPreflight:
             scoring_mod.concurrent.futures, "as_completed", _fake_as_completed
         )
 
-    def test_install_toolcall_patch_probes_minisweagent_with_uv_project_env(
+    def test_toolcall_patch_overlay_probes_minisweagent_with_uv_project_env(
         self, swe_bench_project, tmp_path, monkeypatch
     ):
         actions_path = (
@@ -1061,21 +1116,28 @@ class TestSWEBenchScorerPreflight:
 
         monkeypatch.setattr(scoring_mod.subprocess, "run", fake_run)
 
-        SWEBenchScorer._install_toolcall_patch(swe_bench_project)
+        overlay_root = tmp_path / "overlay"
+        SWEBenchScorer._create_toolcall_patch_overlay(swe_bench_project, overlay_root)
 
         probe_cmd = captured[0]
         assert probe_cmd[:5] == [
             "uv",
             "run",
             "--project",
-            str(swe_bench_project),
+            str(swe_bench_project.resolve()),
             "python",
         ]
         assert captured_kwargs[0]["env"]["UV_PROJECT_ENVIRONMENT"] == str(
-            swe_bench_project / ".venv"
+            swe_bench_project.resolve() / ".venv"
         )
-        assert actions_path.read_text() == "new actions\n"
-        assert litellm_path.read_text() == "new litellm\n"
+        assert actions_path.read_text() == "old actions\n"
+        assert litellm_path.read_text() == "old litellm\n"
+        assert (
+            overlay_root / "minisweagent" / "models" / "utils" / "actions_toolcall.py"
+        ).read_text() == "new actions\n"
+        assert (
+            overlay_root / "minisweagent" / "models" / "litellm_model.py"
+        ).read_text() == "new litellm\n"
 
     @pytest.mark.parametrize(
         "result, expected_match",
@@ -1157,7 +1219,8 @@ class TestSWEBenchScorerPreflight:
                 split="test",
                 num_instances=3,
                 workers=5,
-            )
+            ),
+            loaded_sample_count=2,
         )
 
         derive_cmd = next(
@@ -1165,7 +1228,7 @@ class TestSWEBenchScorerPreflight:
         )
         derive_idx = captured.index(derive_cmd)
         compile(derive_cmd[6], "<swebench-derive-images>", "exec")
-        assert derive_cmd[-3:] == ["lite", "test", "3"]
+        assert derive_cmd[-3:] == ["lite", "test", "2"]
         assert captured_kwargs[derive_idx]["env"]["UV_PROJECT_ENVIRONMENT"] == str(
             swe_bench_project / ".venv"
         )
@@ -1182,6 +1245,8 @@ class TestSWEBenchScorerPreflight:
         assert len(_FakeTqdm.instances) == 1
         assert len(_FakeThreadPoolExecutor.instances) == 1
         assert _FakeThreadPoolExecutor.instances[0].max_workers == 3
+        assert _FakeThreadPoolExecutor.instances[0].shutdown_wait is True
+        assert _FakeThreadPoolExecutor.instances[0].shutdown_cancel_futures is False
 
     def test_preflight_skips_cached_images(self, swe_bench_project, monkeypatch):
         monkeypatch.setattr(
@@ -1216,6 +1281,7 @@ class TestSWEBenchScorerPreflight:
         assert not any(cmd[:2] == ["docker", "pull"] for cmd in captured)
         assert len(_FakeTqdm.instances) == 1
         assert _FakeThreadPoolExecutor.instances[0].max_workers == 2
+        assert _FakeThreadPoolExecutor.instances[0].shutdown_wait is True
 
     def test_preflight_fails_uv_missing(self, swe_bench_project, monkeypatch):
         monkeypatch.setattr(scoring_mod.shutil, "which", lambda name: None)
@@ -1383,6 +1449,8 @@ class TestSWEBenchScorerPreflight:
         ):
             SWEBenchScorer.preflight(self._extras(swe_bench_project, workers=2))
         assert _FakeThreadPoolExecutor.instances[0].max_workers == 2
+        assert _FakeThreadPoolExecutor.instances[0].shutdown_wait is True
+        assert _FakeThreadPoolExecutor.instances[0].shutdown_cancel_futures is True
 
     def test_derive_required_images_nonzero_returncode_raises(
         self, swe_bench_project, monkeypatch

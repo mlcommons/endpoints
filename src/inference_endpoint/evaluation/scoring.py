@@ -126,7 +126,9 @@ class Scorer(ABC):
         return None
 
     @classmethod
-    def preflight(cls, extras: dict[str, Any]) -> None:
+    def preflight(
+        cls, extras: dict[str, Any], *, loaded_sample_count: int | None = None
+    ) -> None:
         return None
 
     def __init__(
@@ -1724,11 +1726,11 @@ def _resolve_subproject_path(
     default: Path,
 ) -> Path:
     if explicit is not None:
-        return Path(explicit)
+        return Path(explicit).expanduser().resolve()
     from_env = os.environ.get(env_var)
     if from_env:
-        return Path(from_env)
-    return default
+        return Path(from_env).expanduser().resolve()
+    return default.expanduser().resolve()
 
 
 def _run_subprocess_with_log(
@@ -1904,6 +1906,7 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
         enable_swebench_toolcall_patch: bool = False,
         subprocess_timeout_s: int | None = None,
     ):
+        ground_truth_column = ground_truth_column or "instance_id"
         super().__init__(
             dataset_name=dataset_name,
             dataset=dataset,
@@ -2076,6 +2079,7 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
             extras,
             "num_instances",
             default=cls.DEFAULT_NUM_INSTANCES,
+            min_value=1,
         )
         options["workers"] = cls._get_extra_int(
             extras,
@@ -2230,18 +2234,21 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
                         raise
                     bar.update(1)
         finally:
-            executor.shutdown(wait=not fail_fast, cancel_futures=fail_fast)
+            executor.shutdown(wait=True, cancel_futures=fail_fast)
 
     @classmethod
     def external_sample_count(cls, extras: dict[str, Any]) -> int | None:
         raw = extras.get("num_instances", cls.DEFAULT_NUM_INSTANCES)
         try:
-            return int(raw)
+            parsed = int(raw)
         except (TypeError, ValueError):
             return None
+        return parsed if parsed > 0 else None
 
     @classmethod
-    def preflight(cls, extras: dict[str, Any]) -> None:
+    def preflight(
+        cls, extras: dict[str, Any], *, loaded_sample_count: int | None = None
+    ) -> None:
         """Check uv, mini-extra, swebench, and Docker before the benchmark starts."""
         try:
             options = cls._resolve_options(extras)
@@ -2252,6 +2259,8 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
         subset = options["subset"]
         split = options["split"]
         num_instances = options["num_instances"]
+        if loaded_sample_count is not None:
+            num_instances = min(num_instances, loaded_sample_count)
         workers = options["workers"]
 
         if shutil.which("uv") is None:
@@ -2398,40 +2407,34 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
         return site_packages
 
     @classmethod
-    def _install_toolcall_patch(
-        cls, swe_bench_project_path: Path
-    ) -> list[tuple[Path, bytes | None]]:
+    def _create_toolcall_patch_overlay(
+        cls, swe_bench_project_path: Path, overlay_root: Path
+    ) -> Path:
         cls._validate_toolcall_patch_files(swe_bench_project_path)
         site_packages = cls._resolve_minisweagent_site_packages(swe_bench_project_path)
-        backups: list[tuple[Path, bytes | None]] = []
-        try:
-            for src_name, rel_dest in cls.TOOLCALL_PATCH_REPLACEMENTS.items():
-                src = swe_bench_project_path / src_name
-                dest = site_packages / rel_dest
-                if not dest.parent.is_dir():
-                    raise SetupError(f"Target directory does not exist: {dest.parent}")
-                backups.append((dest, dest.read_bytes() if dest.exists() else None))
-                shutil.copy2(src, dest)
-        except Exception:
-            cls._restore_toolcall_patch(backups)
-            raise
-        return backups
+        package_src = site_packages / "minisweagent"
+        if not package_src.is_dir():
+            raise SetupError(f"minisweagent package directory not found: {package_src}")
 
-    @classmethod
-    def _restore_toolcall_patch(cls, backups: list[tuple[Path, bytes | None]]) -> None:
-        for dest, original in reversed(backups):
-            if original is None:
-                dest.unlink(missing_ok=True)
-            else:
-                dest.write_bytes(original)
+        package_dest = overlay_root / "minisweagent"
+        shutil.copytree(package_src, package_dest)
+        for src_name, rel_dest in cls.TOOLCALL_PATCH_REPLACEMENTS.items():
+            src = swe_bench_project_path / src_name
+            dest = overlay_root / rel_dest
+            if not dest.parent.is_dir():
+                raise SetupError(
+                    f"Overlay target directory does not exist: {dest.parent}"
+                )
+            shutil.copy2(src, dest)
+        return overlay_root
 
     def score_single_sample(self, value: str, ground_truth: str) -> float:
         raise RuntimeError(
             "SWEBenchScorer uses subprocess evaluation; call score() instead."
         )
 
-    def _patch_config(self, output_dir: Path, benchmark_config_dict: dict) -> Path:
-        """Load template YAML, patch model fields from benchmark config, write to output_dir."""
+    def _patch_config(self, config_dir: Path, benchmark_config_dict: dict) -> Path:
+        """Load template YAML, patch model fields from benchmark config, write to config_dir."""
         with self.swebench_config_template.open() as f:
             cfg = yaml.safe_load(f)
         if not isinstance(cfg, dict):
@@ -2491,12 +2494,20 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
         else:
             model_kwargs.pop("chat_template_kwargs", None)
 
-        patched_path = output_dir / "swebench_patched.yaml"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        patched_path = config_dir / "swebench_patched.yaml"
         with patched_path.open("w") as f:
             yaml.safe_dump(cfg, f, default_flow_style=False, sort_keys=False)
         return patched_path
 
-    def _run_subprocess(self, cmd: list[str], log_path: Path, cwd: Path) -> None:
+    def _run_subprocess(
+        self,
+        cmd: list[str],
+        log_path: Path,
+        cwd: Path,
+        *,
+        env: dict[str, str] | None = None,
+    ) -> None:
         """Run a command inside the accuracy subproject via ``uv run --project``."""
         full_cmd = [
             "uv",
@@ -2510,11 +2521,16 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
             timeout_s=self.subprocess_timeout_s,
             label="SWE-bench",
             cwd=cwd,
-            env=_uv_subproject_env(self.swe_bench_project_path),
+            env=(
+                env
+                if env is not None
+                else _uv_subproject_env(self.swe_bench_project_path)
+            ),
         )
 
     def score(self) -> tuple[float | None, int]:
         """Run mini-swe-agent + swebench evaluation. Returns (resolved_rate, 1)."""
+        self.complete = True
         config_path = self.report_dir / "config.yaml"
         if not config_path.exists():
             raise FileNotFoundError(
@@ -2550,62 +2566,97 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
                 n_rows,
                 n_rows,
             )
-        slice_str = f"0:{min(self.num_instances, n_rows)}"
+        total_instances = min(self.num_instances, n_rows)
+        slice_str = f"0:{total_instances}"
+        evaluated_instance_ids = [
+            str(instance_id)
+            for instance_id in self.dataset.dataframe.iloc[:total_instances][
+                self.ground_truth_column
+            ].tolist()
+        ]
 
         output_dir = self.report_dir / "swe_bench_output"
         if output_dir.exists():
             shutil.rmtree(output_dir)
         output_dir.mkdir(parents=True)
 
-        patched_config = self._patch_config(output_dir, benchmark_cfg)
+        with tempfile.TemporaryDirectory(prefix="swebench_config_") as config_tmp:
+            patched_config = self._patch_config(Path(config_tmp), benchmark_cfg)
 
-        agent_cmd = [
-            "mini-extra",
-            "swebench",
-            "--model",
-            model_name,
-            "--config",
-            str(patched_config),
-            "--subset",
-            self.subset,
-            "--split",
-            self.split,
-            "--slice",
-            slice_str,
-            "--workers",
-            str(self.workers),
-            "--output",
-            str(output_dir),
-        ]
-        logger.info("Running mini-extra swebench: %s", " ".join(agent_cmd))
-        total_instances = min(self.num_instances, n_rows)
-        stop_event = threading.Event()
-        poll_thread = threading.Thread(
-            target=SWEBenchScorer._poll_swebench_progress,
-            args=(output_dir, total_instances, stop_event),
-            daemon=True,
-        )
-        patch_backups: list[tuple[Path, bytes | None]] = []
-        if self.enable_swebench_toolcall_patch:
-            patch_backups = self._install_toolcall_patch(self.swe_bench_project_path)
-        poll_thread.start()
-        try:
-            self._run_subprocess(
-                agent_cmd,
-                self.report_dir / "swe_bench_agent.log",
-                cwd=output_dir,
+            agent_cmd = [
+                "mini-extra",
+                "swebench",
+                "--model",
+                model_name,
+                "--config",
+                str(patched_config),
+                "--subset",
+                self.subset,
+                "--split",
+                self.split,
+                "--slice",
+                slice_str,
+                "--workers",
+                str(self.workers),
+                "--output",
+                str(output_dir),
+            ]
+            logger.info("Running mini-extra swebench: %s", " ".join(agent_cmd))
+            stop_event = threading.Event()
+            poll_thread = threading.Thread(
+                target=SWEBenchScorer._poll_swebench_progress,
+                args=(output_dir, total_instances, stop_event),
+                daemon=True,
             )
-        finally:
-            stop_event.set()
-            poll_thread.join(timeout=10)
-            if patch_backups:
-                self._restore_toolcall_patch(patch_backups)
+            agent_env = _uv_subproject_env(self.swe_bench_project_path)
+            if self.enable_swebench_toolcall_patch:
+                with tempfile.TemporaryDirectory(
+                    prefix="minisweagent_overlay_"
+                ) as overlay_tmp:
+                    overlay_root = self._create_toolcall_patch_overlay(
+                        self.swe_bench_project_path, Path(overlay_tmp)
+                    )
+                    pythonpath_parts = [str(overlay_root)]
+                    if existing_pythonpath := agent_env.get("PYTHONPATH"):
+                        pythonpath_parts.append(existing_pythonpath)
+                    agent_env = {
+                        **agent_env,
+                        "PYTHONPATH": os.pathsep.join(pythonpath_parts),
+                    }
+                    poll_thread.start()
+                    try:
+                        self._run_subprocess(
+                            agent_cmd,
+                            self.report_dir / "swe_bench_agent.log",
+                            cwd=output_dir,
+                            env=agent_env,
+                        )
+                    finally:
+                        stop_event.set()
+                        poll_thread.join(timeout=10)
+            else:
+                poll_thread.start()
+                try:
+                    self._run_subprocess(
+                        agent_cmd,
+                        self.report_dir / "swe_bench_agent.log",
+                        cwd=output_dir,
+                        env=agent_env,
+                    )
+                finally:
+                    stop_event.set()
+                    poll_thread.join(timeout=10)
 
         preds_path = output_dir / "preds.json"
         if not preds_path.exists():
             logger.error(
                 "preds.json not found after mini-swe-agent run; returning None score"
             )
+            self.complete = False
+            return None, 1
+        if not evaluated_instance_ids:
+            logger.warning("SWE-bench: no evaluated instances; returning None score")
+            self.complete = False
             return None, 1
 
         hf_dataset_name = SWEBench.hf_dataset_name(self.subset)
@@ -2624,6 +2675,8 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
             str(self.max_eval_workers),
             "--run_id",
             run_id,
+            "--instance_ids",
+            *evaluated_instance_ids,
         ]
         logger.info("Running swebench evaluation: %s", " ".join(eval_cmd))
         self._run_subprocess(
@@ -2635,12 +2688,13 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
         safe_model = model_name.replace("/", "__")
         result_path = output_dir / f"{safe_model}.{run_id}.json"
         if not result_path.exists():
-            candidates = list(output_dir.glob(f"*{run_id}*.json"))
+            candidates = sorted(output_dir.rglob(f"*{run_id}*.json"))
             if not candidates:
                 logger.error(
                     "SWE-bench result file not found (run_id=%s); returning None",
                     run_id,
                 )
+                self.complete = False
                 return None, 1
             result_path = candidates[0]
 
@@ -2651,13 +2705,22 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
         resolved = result.get("resolved_instances") or 0
         if submitted == 0:
             logger.warning("SWE-bench: submitted_instances=0; returning None score")
+            self.complete = False
             return None, 1
 
-        resolved_rate = resolved / submitted
+        denominator = len(evaluated_instance_ids)
+        if denominator == 0:
+            logger.warning(
+                "SWE-bench: evaluated instance count is 0; returning None score"
+            )
+            self.complete = False
+            return None, 1
+
+        resolved_rate = resolved / denominator
         logger.info(
-            "SWE-bench: resolved %d / %d submitted (%.1f%%)",
+            "SWE-bench: resolved %d / %d evaluated (%.1f%%)",
             resolved,
-            submitted,
+            denominator,
             resolved_rate * 100,
         )
         return resolved_rate, 1

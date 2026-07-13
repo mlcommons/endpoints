@@ -161,7 +161,11 @@ def parse_toolcall_actions(
             files_str = " ".join(shlex.quote(_to_rel(f)) for f in files)
             actions.append(
                 {
-                    "command": f"echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && git -C /testbed diff HEAD -- {files_str}",
+                    "command": (
+                        "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && "
+                        f"git -C /testbed add -N -- {files_str} && "
+                        f"git -C /testbed diff HEAD -- {files_str}"
+                    ),
                     "tool_call_id": tool_call_id,
                 }
             )
