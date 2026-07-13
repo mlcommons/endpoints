@@ -33,16 +33,16 @@ from inference_endpoint.config.schema import (
     LoadPattern,
     LoadPatternType,
     ModelParams,
-    RuntimeConfig,
     Settings,
     StreamingMode,
     TestMode,
     TestType,
 )
+from inference_endpoint.config.timeouts import Timeouts
 from inference_endpoint.endpoint_client.config import HTTPClientConfig
 
 _TEST_SETTINGS = Settings(
-    runtime=RuntimeConfig(min_duration_ms=0),
+    timeouts=Timeouts(min_duration_ms=0),
     load_pattern=LoadPattern(type=LoadPatternType.MAX_THROUGHPUT),
     client=HTTPClientConfig(num_workers=1, warmup_connections=0, max_connections=10),
 )
@@ -62,7 +62,7 @@ def _config(endpoint_url: str, dataset_path: str, **overrides) -> BenchmarkConfi
 
 def _poisson_settings(target_qps: float, duration_s: int = 2) -> Settings:
     return Settings(
-        runtime=RuntimeConfig(min_duration_ms=duration_s * 1000),
+        timeouts=Timeouts(min_duration_ms=duration_s * 1000),
         load_pattern=LoadPattern(type=LoadPatternType.POISSON, target_qps=target_qps),
         client=HTTPClientConfig(
             num_workers=1, warmup_connections=0, max_connections=10
@@ -121,7 +121,7 @@ class TestBenchmarkCommandIntegration:
             type=TestType.ONLINE,
             model_params=ModelParams(name="echo-server", streaming=streaming),
             settings=Settings(
-                runtime=RuntimeConfig(min_duration_ms=2000),
+                timeouts=Timeouts(min_duration_ms=2000),
                 load_pattern=LoadPattern(
                     type=LoadPatternType.CONCURRENCY, target_concurrency=4
                 ),
@@ -192,7 +192,7 @@ class TestBenchmarkCommandIntegration:
             (
                 TestType.OFFLINE,
                 Settings(
-                    runtime=RuntimeConfig(min_duration_ms=0),
+                    timeouts=Timeouts(min_duration_ms=0),
                     load_pattern=LoadPattern(type=LoadPatternType.MAX_THROUGHPUT),
                     client=HTTPClientConfig(
                         num_workers=1, warmup_connections=0, max_connections=10
@@ -202,7 +202,7 @@ class TestBenchmarkCommandIntegration:
             (
                 TestType.ONLINE,
                 Settings(
-                    runtime=RuntimeConfig(min_duration_ms=0),
+                    timeouts=Timeouts(min_duration_ms=0),
                     load_pattern=LoadPattern(
                         type=LoadPatternType.CONCURRENCY, target_concurrency=1
                     ),
@@ -297,7 +297,7 @@ class TestBenchmarkCommandIntegration:
             model_params=ModelParams(name="echo-server", streaming=StreamingMode.OFF),
             datasets=[Dataset(path=ds_dataset_path, type=DatasetType.PERFORMANCE)],
             settings=Settings(
-                runtime=RuntimeConfig(min_duration_ms=0),
+                timeouts=Timeouts(min_duration_ms=0),
                 load_pattern=LoadPattern(type=LoadPatternType.MAX_THROUGHPUT),
                 client=HTTPClientConfig(
                     num_workers=1, warmup_connections=0, max_connections=10

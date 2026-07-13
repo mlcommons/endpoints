@@ -151,6 +151,17 @@ class ServiceLauncher:
             if proc.poll() is None:
                 proc.kill()
 
+    def terminate_all(self) -> None:
+        """SIGTERM all managed subprocesses (graceful; see kill_all for SIGKILL).
+
+        The metrics aggregator installs a SIGTERM handler that writes an
+        INTERRUPTED final snapshot before exiting — this is the abort path
+        for the whole-run watchdog.
+        """
+        for proc in self._procs:
+            if proc.poll() is None:
+                proc.terminate()
+
     def wait_for_exit(self, timeout: float | None = 60.0) -> None:
         """Wait for all service subprocesses to exit.
 

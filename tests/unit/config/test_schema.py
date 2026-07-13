@@ -360,7 +360,7 @@ class TestBenchmarkConfig:
                 model_params={"name": "M"},
                 endpoint_config={"endpoints": ["http://x"]},
                 datasets=[{"path": "D"}],
-                settings={"runtime": {"min_duration_ms": -1}},
+                settings={"timeouts": {"min_duration_ms": -1}},
             )
 
     @pytest.mark.unit
@@ -372,7 +372,7 @@ class TestBenchmarkConfig:
                 endpoint_config={"endpoints": ["http://x"]},
                 datasets=[{"path": "D"}],
                 settings={
-                    "runtime": {"min_duration_ms": 5000, "max_duration_ms": 1000}
+                    "timeouts": {"min_duration_ms": 5000, "max_duration_ms": 1000}
                 },
             )
 
@@ -384,7 +384,7 @@ class TestBenchmarkConfig:
                 model_params={"name": "M"},
                 endpoint_config={"endpoints": ["http://x"]},
                 datasets=[{"path": "D"}],
-                settings={"runtime": {"max_duration_ms": -1}},
+                settings={"timeouts": {"max_duration_ms": -1}},
             )
 
     @pytest.mark.unit
@@ -511,7 +511,7 @@ class TestBenchmarkConfigMethods:
             model_params={"name": "M"},
             endpoint_config={"endpoints": ["http://x"]},
             datasets=[{"path": "D"}],
-            settings={"runtime": {"max_duration_ms": 0}},
+            settings={"timeouts": {"max_duration_ms": 0}},
         )
         rt = RuntimeSettings.from_config(config, dataloader_num_samples=100)
         assert rt.max_duration_ms is None
@@ -805,7 +805,7 @@ class TestAgenticInferenceTotalSamples:
             datasets=[{"path": "D", "agentic_inference": {}}],
             settings={
                 "load_pattern": {"type": "agentic_inference", "target_concurrency": 4},
-                "runtime": {"min_duration_ms": 600000},
+                "timeouts": {"min_duration_ms": 600000},
             },
         )
         rt = RuntimeSettings.from_config(config, dataloader_num_samples=4316)

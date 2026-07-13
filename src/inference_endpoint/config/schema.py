@@ -49,6 +49,7 @@ from ..endpoint_client.config import HTTPClientConfig
 from ..exceptions import CLIError
 from ..utils import WithUpdatesMixin
 from .ruleset_base import BenchmarkSuiteRuleset
+from .timeouts import Timeouts
 from .utils import parse_dataset_string, resolve_env_vars
 
 logger = logging.getLogger(__name__)
@@ -602,35 +603,11 @@ class RuntimeConfig(BaseModel):
     1. n_samples_to_issue (if specified) — explicit override
     2. Calculated from QPS * duration — duration-based (default: 600000ms)
     3. All dataset samples — fallback when duration is 0
+
+    Durations live in ``settings.timeouts`` (see ``config/timeouts.py``).
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
-
-    min_duration_ms: Annotated[
-        int,
-        cyclopts.Parameter(
-            alias="--duration", help="Min duration (ms, or with suffix: 600s, 10m)"
-        ),
-    ] = Field(600000, ge=0)
-    max_duration_ms: int = Field(
-        0,
-        ge=0,
-        description="Maximum test duration in ms (0 for no limit)",
-    )
-
-    @field_validator("min_duration_ms", "max_duration_ms", mode="before")
-    @classmethod
-    def _parse_duration_suffix(cls, v: object) -> object:
-        """Accept duration with unit suffix: 600s, 10m, 600000ms, or plain int (ms)."""
-        if isinstance(v, str):
-            v = v.strip()
-            if v.endswith("ms"):
-                return int(v[:-2])
-            if v.endswith("m"):
-                return int(float(v[:-1]) * 60_000)
-            if v.endswith("s"):
-                return int(float(v[:-1]) * 1000)
-        return v
 
     n_samples_to_issue: Annotated[
         int | None,
@@ -638,15 +615,6 @@ class RuntimeConfig(BaseModel):
     ] = Field(None, gt=0)
     scheduler_random_seed: int = Field(42, description="Scheduler RNG seed")
     dataloader_random_seed: int = Field(42, description="Dataloader RNG seed")
-
-    @model_validator(mode="after")
-    def _validate_durations(self) -> Self:
-        if self.max_duration_ms != 0 and self.max_duration_ms < self.min_duration_ms:
-            raise ValueError(
-                f"max_duration_ms ({self.max_duration_ms}) must be >= "
-                f"min_duration_ms ({self.min_duration_ms})"
-            )
-        return self
 
 
 @cyclopts.Parameter(name="*")
@@ -780,65 +748,12 @@ class WarmupConfig(BaseModel):
     ] = Field(42, description="RNG seed for warmup scheduling and sample ordering")
 
 
-class DrainConfig(BaseModel):
-    """Per-phase in-flight response drain timeout configuration."""
+class MetricsConfig(BaseModel):
+    """Metrics-aggregator tuning knobs (non-timeout; deadlines live in Timeouts)."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    warmup_timeout_s: Annotated[
-        float | None,
-        cyclopts.Parameter(
-            alias="--warmup-drain-timeout",
-            help="Warmup drain timeout in seconds (None = wait indefinitely)",
-        ),
-    ] = Field(
-        240.0,
-        gt=0,
-        description="Warmup drain timeout in seconds (None = wait indefinitely)",
-    )
-    performance_timeout_s: Annotated[
-        float | None,
-        cyclopts.Parameter(
-            alias="--performance-drain-timeout",
-            help="Performance drain timeout in seconds (None = wait indefinitely)",
-        ),
-    ] = Field(
-        240.0,
-        gt=0,
-        description="Performance drain timeout in seconds (None = wait indefinitely)",
-    )
-    accuracy_timeout_s: Annotated[
-        float | None,
-        cyclopts.Parameter(
-            alias="--accuracy-drain-timeout",
-            help="Accuracy drain timeout in seconds (None = wait indefinitely)",
-        ),
-    ] = Field(
-        None,
-        gt=0,
-        description="Accuracy drain timeout in seconds (None = wait indefinitely)",
-    )
-    metrics_drain_timeout_s: Annotated[
-        float,
-        cyclopts.Parameter(
-            alias="--metrics-drain-timeout",
-            help=(
-                "Wall-clock budget (seconds) for the metrics aggregator to finish "
-                "tokenizing buffered samples after the run ends. Set to 0 to wait "
-                "indefinitely. Increase for very large datasets where the end-of-run "
-                "tokenize batch is big."
-            ),
-        ),
-    ] = Field(
-        0.0,
-        ge=0,
-        description=(
-            "Wall-clock budget (seconds) to finish tokenizing buffered samples "
-            "after ENDED (default: 0 = unlimited). An incomplete drain is "
-            "surfaced via n_pending_tasks > 0, never silently dropped."
-        ),
-    )
-    metrics_tokenizer_workers: Annotated[
+    tokenizer_workers: Annotated[
         int,
         cyclopts.Parameter(
             alias="--metrics-tokenizer-workers",
@@ -933,23 +848,13 @@ class Settings(BaseModel):
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
     load_pattern: LoadPattern = Field(default_factory=LoadPattern)
     client: HTTPClientConfig = Field(default_factory=HTTPClientConfig)
-    drain: DrainConfig = Field(
-        default_factory=DrainConfig,
-        description="Per-phase in-flight response drain timeout configuration",
+    timeouts: Timeouts = Field(
+        default_factory=Timeouts,
+        description="All global durations and deadlines (see config/timeouts.py)",
     )
+    metrics: MetricsConfig = Field(default_factory=MetricsConfig)
     warmup: WarmupConfig = Field(default_factory=WarmupConfig)
     profiling: ProfilingConfig = Field(default_factory=ProfilingConfig)
-    service_ready_timeout_s: Annotated[
-        float,
-        cyclopts.Parameter(
-            alias="--service-ready-timeout",
-            help="Seconds to wait for metrics/event-logger services to start",
-        ),
-    ] = Field(
-        default=30.0,
-        ge=0,
-        description="Seconds to wait for metrics-aggregator/event-logger services to become ready.",
-    )
 
 
 class OfflineSettings(Settings):
@@ -1040,10 +945,6 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
         Path | None,
         cyclopts.Parameter(alias="--report-dir", help="Report output directory"),
     ] = None
-    timeout: Annotated[
-        float | None,
-        cyclopts.Parameter(alias="--timeout", help="Global timeout in seconds"),
-    ] = None
     # verbose is handled by cyclopts meta app (-v flag), not here
     verbose: Annotated[bool, cyclopts.Parameter(show=False)] = Field(
         False, description="Enable verbose logging"
@@ -1082,7 +983,6 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
 
         Validation:
         - Workers must be -1 (auto) or >= 1
-        - max_duration_ms >= min_duration_ms >= 0
         - No duplicate dataset (name, type) pairs
         - Load pattern must match test type
         """

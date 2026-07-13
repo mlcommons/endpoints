@@ -174,6 +174,7 @@ class RuntimeSettings:
         """
         # Extract settings from immutable Pydantic models
         runtime_cfg = config.settings.runtime
+        timeouts_cfg = config.settings.timeouts
         load_pattern_cfg = config.settings.load_pattern
 
         # TODO: The default target_qps should be None in Offline mode, but we use 10.0 for now.
@@ -188,10 +189,10 @@ class RuntimeSettings:
         kwargs = {
             "metric_target": metrics.Throughput(effective_qps),
             "reported_metrics": [metrics.Throughput(effective_qps)],
-            "min_duration_ms": runtime_cfg.min_duration_ms,
+            "min_duration_ms": timeouts_cfg.min_duration_ms,
             "max_duration_ms": None
-            if runtime_cfg.max_duration_ms == 0
-            else runtime_cfg.max_duration_ms,
+            if timeouts_cfg.max_duration_ms == 0
+            else timeouts_cfg.max_duration_ms,
             "n_samples_from_dataset": dataloader_num_samples,
             "n_samples_to_issue": runtime_cfg.n_samples_to_issue,  # From config (CLI --num-samples or YAML)
             "min_sample_count": 1,

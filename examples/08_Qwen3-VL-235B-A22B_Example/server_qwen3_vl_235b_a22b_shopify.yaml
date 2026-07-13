@@ -2,7 +2,6 @@
 name: "online-qwen3-vl-235b-a22b-shopify-benchmark"
 version: "1.0"
 type: "online"
-timeout: 14400
 
 model_params:
   name: "Qwen/Qwen3-VL-235B-A22B-Instruct"
@@ -23,9 +22,11 @@ datasets:
 
 settings:
   runtime:
-    min_duration_ms: 600000 # 10 minutes, this is override when n_samples_to_issue is set
     scheduler_random_seed: 42
     dataloader_random_seed: 42
+
+  timeouts:
+    min_duration_ms: 600000 # 10 minutes, this is override when n_samples_to_issue is set
 
   load_pattern:
     type: "poisson"
@@ -38,7 +39,7 @@ settings:
       recv_buffer_size: 16777216
       send_buffer_size: 16777216
     max_connections: 1000
-    # Increase timeout for slow worker startup (spawn, imports). Default 40s may be too short.
+    # Increase timeout for slow worker startup (spawn, imports). Default 60s may be too short.
     worker_initialization_timeout: 120
   warmup:
     enabled: true # Enable warmup phase before performance run

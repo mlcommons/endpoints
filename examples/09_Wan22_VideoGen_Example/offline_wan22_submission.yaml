@@ -50,13 +50,15 @@ audit:
 
 settings:
   runtime:
+    scheduler_random_seed: 42
+    dataloader_random_seed: 42
+    n_samples_to_issue: 144 # perf run only; accuracy scores its dataset (248), audit uses audit.samples
+
+  timeouts:
     # NOTE: runs are count-driven (n_samples_to_issue / audit.samples). min_duration_ms is
     # NOT enforced as a duration floor by the current stop logic (counts take priority);
     # MLCommons' 10-min minimum / AND-semantics is future work. Only max_duration_ms caps.
     max_duration_ms: 14400000 # 4-hour ceiling
-    scheduler_random_seed: 42
-    dataloader_random_seed: 42
-    n_samples_to_issue: 144 # perf run only; accuracy scores its dataset (248), audit uses audit.samples
 
   load_pattern:
     type: "max_throughput"

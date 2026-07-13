@@ -19,10 +19,12 @@ datasets:
 
 settings:
   runtime:
-    min_duration_ms: 60000 # 1 minute
-    max_duration_ms: 180000 # 3 minutes
     scheduler_random_seed: 42 # For Poisson/distribution sampling
     dataloader_random_seed: 42 # For dataset shuffling
+
+  timeouts:
+    min_duration_ms: 60000 # 1 minute
+    max_duration_ms: 180000 # 3 minutes
 
   load_pattern:
     type: "poisson"

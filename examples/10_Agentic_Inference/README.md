@@ -102,7 +102,7 @@ The runnable config is
   this field is `false`, the client keeps replaying already-started active
   trajectories to completion for accuracy/log coverage, but those later-issued
   turns are outside the performance measurement window.
-- `settings.runtime.min_duration_ms`: minimum run duration. Agentic inference replay
+- `settings.timeouts.min_duration_ms`: minimum run duration. Agentic inference replay
   completion is controlled by trajectory budget and active conversation drain.
 - `settings.load_pattern.type`: enables conversation-aware issuing.
 - `settings.load_pattern.target_concurrency`: maximum active conversations. Each
@@ -129,7 +129,7 @@ For official Kimi agentic benchmark runs, keep these values fixed:
 - `model_params.chat_template_kwargs.preserve_thinking: true`
 - First dataset `type: performance`
 - First dataset `accuracy_config.eval_method: agentic_inference_inline`
-- `settings.runtime.min_duration_ms: 0`
+- `settings.timeouts.min_duration_ms: 0`
 - `settings.load_pattern.type: agentic_inference`
 - `settings.client.warmup_connections: 0`
 - `settings.client.max_idle_time: 0.5`

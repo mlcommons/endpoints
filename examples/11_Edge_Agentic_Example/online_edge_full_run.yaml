@@ -14,9 +14,7 @@
 # Phases run perf -> accuracy (framework order). Both are deterministic
 # (temperature 0, seed 42) against a reasoning-off server, so order does not
 # affect results. Total wall-clock ~5.5 h on a single-stream edge box
-# (e.g. NVIDIA Jetson AGX Thor, Qwen3.6-27B Q4_K_M, reasoning off); `timeout`
-# below is sized to 6 h.
-#
+# (e.g. NVIDIA Jetson AGX Thor, Qwen3.6-27B Q4_K_M, reasoning off).
 # Requires: pip install -e ".[bfcl]"  (the BFCL accuracy dataset pulls bfcl-eval)
 #
 # Run from the repo root (start the edge server first; see README.md). The
@@ -33,7 +31,6 @@
 name: "edge-agentic-full-run"
 version: "1.0"
 type: "online"
-timeout: 21600 # 6 h: ~2.5 h perf + ~3 h accuracy, with headroom.
 
 model_params:
   name: "Qwen3.6-27B-Q4_K_M" # set to your served model name.
@@ -90,11 +87,12 @@ datasets:
 
 settings:
   runtime:
+    dataloader_random_seed: 42 # BFCL accuracy sampling seed; compliance requires 42.
+  timeouts:
     min_duration_ms: 0
     # Safety cap (4 h) so the performance phase stays bounded even if decode is
     # slower than expected; one pass should finish in ~2.5 h on an edge box.
     max_duration_ms: 14400000
-    dataloader_random_seed: 42 # BFCL accuracy sampling seed; compliance requires 42.
   load_pattern:
     # Drives the performance phase; the accuracy phase self-overrides to
     # max_throughput.

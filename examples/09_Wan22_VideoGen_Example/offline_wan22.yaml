@@ -34,10 +34,12 @@ datasets:
 
 settings:
   runtime:
-    max_duration_ms: 600000 # 10 minute cap
     scheduler_random_seed: 42
     dataloader_random_seed: 42
     n_samples_to_issue: 248
+
+  timeouts:
+    max_duration_ms: 600000 # 10 minute cap
 
   load_pattern:
     type: "max_throughput"
