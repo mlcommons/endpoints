@@ -2467,6 +2467,8 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
         api_key = endpoint_cfg.get("api_key")
         if api_key:
             model_kwargs["api_key"] = api_key
+        else:
+            model_kwargs.pop("api_key", None)
 
         for field in (
             "temperature",

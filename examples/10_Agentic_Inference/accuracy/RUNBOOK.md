@@ -51,11 +51,11 @@ SWE-bench `workers` count and a compact full-count progress bar. Cached images
 still complete immediately in that bar.
 
 Qwen SWE-bench configs may opt into `enable_swebench_toolcall_patch: true` and
-the `swebench_qwen_tools_template.yaml` template. That path temporarily
-overwrites minisweagent's `actions_toolcall.py` and `litellm_model.py` with the
-replacement files shipped in this subproject, adding `finish` and
-`str_replace_editor` tools for the agent run, then restores the original
-installed files. Leave this flag unset for Kimi and other non-Qwen runs.
+the `swebench_qwen_tools_template.yaml` template. That path builds a temporary
+minisweagent package overlay with the replacement files shipped in this
+subproject, prepends it to `PYTHONPATH` for the agent run, and leaves the
+installed package untouched. Leave this flag unset for Kimi and other non-Qwen
+runs.
 
 ## Common failure modes
 

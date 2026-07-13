@@ -112,3 +112,24 @@ def test_str_replace_editor_view_range_emits_clean_awk(monkeypatch):
         '{printf "%6d\\t%s\\n", NR, $0}\' /testbed/pkg/file.py'
     )
     assert r"\'" not in command
+
+
+def test_str_replace_editor_view_range_rejects_non_integers(monkeypatch):
+    actions_mod = _load_actions_module(monkeypatch)
+
+    with pytest.raises(
+        actions_mod.FormatError, match="view_range values must be integers"
+    ):
+        actions_mod.parse_toolcall_actions(
+            [
+                _tool_call(
+                    "str_replace_editor",
+                    {
+                        "command": "view",
+                        "path": "/testbed/pkg/file.py",
+                        "view_range": ["one", 4],
+                    },
+                )
+            ],
+            format_error_template="{{ error }}",
+        )

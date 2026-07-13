@@ -175,8 +175,19 @@ def parse_toolcall_actions(
             path = args.get("path", "")
             if command == "view":
                 view_range = args.get("view_range")
-                if view_range and len(view_range) == 2:
-                    start, end = view_range
+                if view_range is not None:
+                    if not isinstance(view_range, list | tuple) or len(view_range) != 2:
+                        errors.append(
+                            "str_replace_editor view_range must be [start, end]."
+                        )
+                        continue
+                    try:
+                        start, end = int(view_range[0]), int(view_range[1])
+                    except (TypeError, ValueError):
+                        errors.append(
+                            "str_replace_editor view_range values must be integers."
+                        )
+                        continue
                     bash_cmd = (
                         f"awk 'NR>={start} && NR<={end} "
                         f'{{printf "%6d\\t%s\\n", NR, $0}}\' {shlex.quote(path)}'

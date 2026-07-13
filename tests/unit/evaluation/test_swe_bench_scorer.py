@@ -728,23 +728,37 @@ class TestSWEBenchScorer:
             patched["model"]["model_kwargs"]["api_base"] == "http://localhost:30000/v1"
         )
 
-    def test_config_patching_sets_api_key_when_present(
-        self, report_dir, swe_bench_project, template_yaml, tmp_path
+    @pytest.mark.parametrize("api_key", ["secret-key", None])
+    def test_config_patching_updates_api_key(
+        self, report_dir, swe_bench_project, tmp_path, api_key
     ):
-        scorer = _make_scorer(report_dir, swe_bench_project, template_yaml)
+        tmpl = {
+            "model": {
+                "model_name": "",
+                "model_kwargs": {"api_base": "", "api_key": "test"},
+            }
+        }
+        template_path = tmp_path / "tmpl.yaml"
+        template_path.write_text(yaml.dump(tmpl))
+
+        scorer = _make_scorer(report_dir, swe_bench_project, template_path)
+        endpoint_cfg = {"endpoints": ["http://localhost:30000"]}
+        if api_key is not None:
+            endpoint_cfg["api_key"] = api_key
         patched = _patch_config_and_read(
             scorer,
             tmp_path / "out",
             {
                 "model_params": {"name": _MODEL_NAME},
-                "endpoint_config": {
-                    "endpoints": ["http://localhost:30000"],
-                    "api_key": "secret-key",
-                },
+                "endpoint_config": endpoint_cfg,
             },
         )
 
-        assert patched["model"]["model_kwargs"]["api_key"] == "secret-key"
+        model_kwargs = patched["model"]["model_kwargs"]
+        if api_key is None:
+            assert "api_key" not in model_kwargs
+        else:
+            assert model_kwargs["api_key"] == api_key
 
     @pytest.mark.parametrize(
         "num_instances, expected_slice",
