@@ -321,6 +321,12 @@ class TestReportDisplayAndSerialize:
             "total_samples": 1283,
             "duration_s": 12.5,
             "complete": False,
+            "response_counts": {
+                "issued": 1283,
+                "scored": 1280,
+                "empty": 2,
+                "missing": 1,
+            },
             "output_sequence_lengths": {"avg": 650.4, "min": 12, "max": 4096},
             "osl_tokenize_s": 1.234,
             "breakdown": {
@@ -342,6 +348,7 @@ class TestReportDisplayAndSerialize:
         )
         assert "aime25: 70.00%" in output
         assert "(incomplete)" in output
+        assert "responses: 1280/1283 scored (2 empty, 1 missing)" in output
         assert "output tokens (avg/min/max): 650.4/12/4096" in output
         # Cross-component mean (one component here, so it equals its score).
         assert "Average: 82.3" in output

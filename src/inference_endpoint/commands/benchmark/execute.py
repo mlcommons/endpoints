@@ -175,7 +175,6 @@ class AccuracyConfiguration:
     ground_truth_column: str | None
     num_repeats: int
     extras: dict[str, Any] = field(default_factory=dict)
-    scale: float = 1.0
 
 
 @dataclass
@@ -335,7 +334,6 @@ def _load_datasets(
                 acc_cfg.accuracy_config.ground_truth,
                 acc_cfg.accuracy_config.num_repeats,
                 acc_cfg.accuracy_config.extras or {},
-                acc_cfg.accuracy_config.scale,
             )
         )
         # Value/api-type validity of the override is already enforced at config
@@ -394,7 +392,6 @@ def _load_datasets(
                     accuracy_config.ground_truth,
                     accuracy_config.num_repeats,
                     accuracy_config.extras or {},
-                    accuracy_config.scale,
                 )
             )
 
@@ -1237,11 +1234,6 @@ def _salvage_tmpfs(report_dir: Path, tmpfs_dir: Path) -> None:
         logger.debug(f"Copied {src_events} -> {dst_events}")
 
 
-# Bound the memory of one batched tokenization pass over accuracy outputs, which
-# can be up to tens of thousands of tokens each (e.g. gpt-oss lcb at 32768).
-_OSL_TOKENIZE_BATCH = 256
-
-
 def _load_osl_tokenizer(name: str | None) -> Any | None:
     """Load the run's tokenizer for accuracy-phase OSL, or ``None`` to skip it.
 
@@ -1268,6 +1260,7 @@ def _phase_osl_stats(
     sample_uuids: Iterable[str],
     uuid_to_text: dict[str, str],
     tokenizer: Any,
+    batch_size: int = 256,
 ) -> dict[str, Any] | None:
     """Output-token-length rollup over one accuracy phase's completions.
 
@@ -1276,6 +1269,10 @@ def _phase_osl_stats(
     lengths via ``series_metric_dict`` so the block matches the perf report's
     ``output_sequence_lengths`` exactly. Returns ``None`` when the phase has no
     completed outputs.
+
+    ``batch_size`` bounds the memory of one batched tokenization pass over
+    accuracy outputs, which can be tens of thousands of tokens each (e.g.
+    gpt-oss lcb at 32768).
     """
     # Skip empty/failed completions (a failed request still logs a COMPLETE
     # event with output == ""). The perf-side OslTrigger does the same
@@ -1288,12 +1285,39 @@ def _phase_osl_stats(
     if not texts:
         return None
     lengths: list[int] = []
-    for i in range(0, len(texts), _OSL_TOKENIZE_BATCH):
-        encoded = tokenizer(
-            texts[i : i + _OSL_TOKENIZE_BATCH], add_special_tokens=False
-        )
+    for i in range(0, len(texts), batch_size):
+        encoded = tokenizer(texts[i : i + batch_size], add_special_tokens=False)
         lengths.extend(len(ids) for ids in encoded["input_ids"])
     return series_metric_dict(lengths) or None
+
+
+def _phase_response_counts(
+    sample_uuids: Iterable[str],
+    uuid_to_text: dict[str, str],
+) -> dict[str, int]:
+    """Per-phase response accounting over one accuracy phase's issued samples.
+
+    Complements :func:`_phase_osl_stats`, which reports token lengths only over
+    non-empty completions — on its own that can hide a run where the server
+    returned blanks or dropped requests. Classifies each issued ``sample_uuid``
+    as ``scored`` (COMPLETE, non-empty output — exactly the OSL population),
+    ``empty`` (COMPLETE with blank output: a failed request the load generator
+    logged as ERROR then an empty COMPLETE), or ``missing`` (no COMPLETE event).
+    ``issued == scored + empty + missing`` always holds.
+
+    Emptiness uses the same truthiness test as ``_phase_osl_stats`` so ``scored``
+    is byte-for-byte the OSL population — the two blocks cannot disagree.
+    """
+    issued = scored = empty = missing = 0
+    for u in sample_uuids:
+        issued += 1
+        if u not in uuid_to_text:
+            missing += 1
+        elif uuid_to_text[u]:
+            scored += 1
+        else:
+            empty += 1
+    return {"issued": issued, "scored": scored, "empty": empty, "missing": missing}
 
 
 def _score_accuracy(
@@ -1350,10 +1374,8 @@ def _score_accuracy(
         # (result_summary.json) and json (results.json). numpy.float64 is a
         # float subclass, so isinstance(..., float) catches it while leaving
         # None / dict (RougeScorer) untouched; float(...) drops the numpy type.
-        # accuracy_config.scale then applies (e.g. 100 to report a [0,1] pass@1
-        # score as a percentage); the breakdown, if any, keeps its own scale.
         if isinstance(score, float):
-            score = float(score) * eval_cfg.scale
+            score = float(score)
         unit_samples = eval_cfg.dataset.num_samples()
         num_repeats = eval_cfg.num_repeats
         if eval_cfg.dataset_name == "performance":
@@ -1386,12 +1408,21 @@ def _score_accuracy(
         if breakdown is not None:
             entry["breakdown"] = breakdown
 
-        # Attach avg/min/max output-token length. Skipped for the perf entry (its
-        # OSL is in result_summary.json) and when no tokenizer is configured. A
-        # tokenization/read failure only drops OSL — it never fails scoring.
-        if osl_tokenizer is not None and eval_cfg.dataset_name != "performance":
+        # Response accounting + avg/min/max output-token length. Skipped for the
+        # perf entry (its OSL / failure counts live in result_summary.json). The
+        # counts are computed independent of the tokenizer and of OSL returning a
+        # block — an all-failed phase must still publish scored=0 rather than
+        # silently omitting everything. OSL stays tokenizer-gated. A read/tokenize
+        # failure only drops these blocks — it never fails scoring.
+        if eval_cfg.dataset_name != "performance":
             try:
                 if uuid_to_text is None:
+                    # Built once from the first scorer and reused for every
+                    # dataset: get_outputs() returns *all* phases' COMPLETE events
+                    # (not just this dataset's), so intersecting it with each
+                    # dataset's sample_index_map yields correct per-dataset counts.
+                    # A future scorer whose get_outputs() returned only its own
+                    # rows would misclassify other datasets' samples as missing.
                     out_df = scorer_instance.get_outputs()
                     uuid_to_text = dict(
                         zip(out_df["sample_uuid"], out_df["output"], strict=False)
@@ -1399,19 +1430,25 @@ def _score_accuracy(
                     # Drop the DataFrame so finalize doesn't hold both it and the
                     # dict (each carrying the full response-text corpus).
                     del out_df
-                t0 = time.perf_counter()
-                osl = _phase_osl_stats(
-                    scorer_instance.sample_index_map, uuid_to_text, osl_tokenizer
+                entry["response_counts"] = _phase_response_counts(
+                    scorer_instance.sample_index_map, uuid_to_text
                 )
-                if osl is not None:
-                    # Same shape/key as the perf report's output_sequence_lengths.
-                    entry["output_sequence_lengths"] = osl
-                    # Wall-clock of just this phase's tokenization (seconds);
-                    # summed across datasets for the accuracy report's total.
-                    entry["osl_tokenize_s"] = round(time.perf_counter() - t0, 3)
-            except Exception as e:  # noqa: BLE001 - OSL is optional; never fail scoring
+                if osl_tokenizer is not None:
+                    t0 = time.perf_counter()
+                    osl = _phase_osl_stats(
+                        scorer_instance.sample_index_map, uuid_to_text, osl_tokenizer
+                    )
+                    if osl is not None:
+                        # Same shape/key as the perf report output_sequence_lengths.
+                        entry["output_sequence_lengths"] = osl
+                        # Wall-clock of just this phase's tokenization (seconds);
+                        # summed across datasets for the accuracy report's total.
+                        entry["osl_tokenize_s"] = round(time.perf_counter() - t0, 3)
+            except Exception as e:  # noqa: BLE001 - optional blocks; never fail scoring
                 logger.warning(
-                    "Accuracy OSL skipped for %s: %s", eval_cfg.dataset_name, e
+                    "Accuracy response counts/OSL skipped for %s: %s",
+                    eval_cfg.dataset_name,
+                    e,
                 )
 
         accuracy_scores.append(entry)

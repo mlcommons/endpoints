@@ -589,13 +589,6 @@ class AccuracyConfig(BaseModel):
     num_repeats: int = Field(
         1, ge=1, description="Repeat dataset N times for evaluation"
     )
-    scale: float = Field(
-        1.0,
-        gt=0,
-        description="Multiply the scalar accuracy score by this factor (e.g. 100 to "
-        "report a [0,1] pass@1 score as a percentage). Applies only to the scalar "
-        "score, not to any per-subset breakdown (which is already on its own scale).",
-    )
     extras: dict[str, Any] | None = Field(
         None,
         description="Free-form scorer kwargs (e.g. vbench_project_path, subprocess_timeout_s)",

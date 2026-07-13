@@ -420,6 +420,13 @@ class Report(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
                     f"  {name}: {score_str} "
                     f"(unit={unit}, repeats={repeats}, total={total}{dur_str}){newline}"
                 )
+                rc = entry.get("response_counts")
+                if isinstance(rc, dict):
+                    fn(
+                        f"    responses: {rc.get('scored', 0)}/{rc.get('issued', 0)} "
+                        f"scored ({rc.get('empty', 0)} empty, "
+                        f"{rc.get('missing', 0)} missing){newline}"
+                    )
                 osl = entry.get("output_sequence_lengths")
                 if isinstance(osl, dict):
                     fn(

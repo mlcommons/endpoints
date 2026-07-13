@@ -25,6 +25,7 @@ from inference_endpoint.commands.benchmark.execute import (
     AccuracyConfiguration,
     _load_osl_tokenizer,
     _phase_osl_stats,
+    _phase_response_counts,
     _score_accuracy,
 )
 
@@ -88,15 +89,40 @@ class _FakeOSLScorer(_FakeScorer):
         )
 
 
-def _cfg(
-    name: str,
-    n: int,
-    score: float,
-    tmp,
-    scorer=_FakeScorer,
-    repeats: int = 1,
-    scale: float = 1.0,
-):
+class _EmptyOSLScorer(_FakeOSLScorer):
+    """Every completion empty (all requests failed): OSL yields None."""
+
+    def get_outputs(self):
+        import pandas as pd
+
+        return pd.DataFrame(
+            [
+                {"sample_uuid": "u1", "output": ""},
+                {"sample_uuid": "u2", "output": ""},
+            ]
+        )
+
+
+class _MixedOSLScorer(_FakeOSLScorer):
+    """One scored, one empty (COMPLETE, blank), one missing (no COMPLETE)."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.sample_index_map = {"u1": 0, "u2": 1, "u3": 2}
+
+    def get_outputs(self):
+        import pandas as pd
+
+        return pd.DataFrame(
+            [
+                {"sample_uuid": "u1", "output": "x y"},  # scored
+                {"sample_uuid": "u2", "output": ""},  # empty
+                # u3 has no COMPLETE row -> missing
+            ]
+        )
+
+
+def _cfg(name: str, n: int, score: float, tmp, scorer=_FakeScorer, repeats: int = 1):
     return AccuracyConfiguration(
         scorer,  # type: ignore[arg-type]  # duck-typed stand-in
         None,
@@ -106,7 +132,6 @@ def _cfg(
         None,
         repeats,
         {},
-        scale,
     )
 
 
@@ -154,17 +179,6 @@ class TestScoreAccuracy:
         assert by["aime25::gptoss"]["total_samples"] == 240
         assert by["gpqa::gptoss"]["total_samples"] == 990
         assert "breakdown" not in by["aime25::gptoss"]
-
-    def test_scale_reports_score_as_percentage(self, tmp_path):
-        """accuracy_config.scale multiplies the scalar score (e.g. 100 turns a
-        [0,1] pass@1 into a percentage); default scale=1.0 leaves it untouched."""
-        cfgs = [
-            _cfg("aime25::gptoss", 30, 0.8, tmp_path, scale=100),
-            _cfg("plain", 10, 0.8, tmp_path),  # default scale=1.0
-        ]
-        by = _by_name(_score_accuracy(_ctx(cfgs), _RESULT))
-        assert by["aime25::gptoss"]["score"] == pytest.approx(80.0)
-        assert by["plain"]["score"] == pytest.approx(0.8)
 
     def test_breakdown_attached_only_when_scorer_provides_it(self, tmp_path):
         cfgs = [
@@ -254,7 +268,62 @@ class TestScoreAccuracy:
             "ds"
         ]
         assert "output_sequence_lengths" not in entry
+        assert "response_counts" not in entry  # dropped with OSL on the same read
         assert entry["score"] == pytest.approx(0.8)  # scoring unaffected
+
+    def test_response_counts_without_tokenizer(self, tmp_path):
+        """response_counts must be published even with no tokenizer configured —
+        failure visibility cannot depend on OSL being enabled."""
+        cfg = _cfg("aime25::gptoss", 2, 0.8, tmp_path, scorer=_FakeOSLScorer)
+        entry = _by_name(_score_accuracy(_ctx([cfg]), _RESULT))["aime25::gptoss"]
+        assert entry["response_counts"] == {
+            "issued": 2,
+            "scored": 2,
+            "empty": 0,
+            "missing": 0,
+        }
+        assert "output_sequence_lengths" not in entry  # no tokenizer
+
+    def test_response_counts_published_when_all_empty(self, tmp_path, monkeypatch):
+        """Masking regression: every response empty => OSL returns None, but
+        response_counts must still publish scored=0 rather than omitting all."""
+        monkeypatch.setattr(
+            execute_mod, "_load_osl_tokenizer", lambda name: _WordTokenizer()
+        )
+        cfg = _cfg("aime25::gptoss", 2, 0.8, tmp_path, scorer=_EmptyOSLScorer)
+        entry = _by_name(_score_accuracy(_ctx([cfg], tokenizer_name="fake"), _RESULT))[
+            "aime25::gptoss"
+        ]
+        assert "output_sequence_lengths" not in entry  # all empty -> OSL None
+        assert entry["response_counts"] == {
+            "issued": 2,
+            "scored": 0,
+            "empty": 2,
+            "missing": 0,
+        }
+
+    def test_response_counts_classifies_missing(self, tmp_path, monkeypatch):
+        """scored/empty/missing partition the issued samples; OSL tokenizes only
+        the one scored (non-empty) response."""
+        monkeypatch.setattr(
+            execute_mod, "_load_osl_tokenizer", lambda name: _WordTokenizer()
+        )
+        cfg = _cfg("ds", 1, 0.8, tmp_path, scorer=_MixedOSLScorer)
+        entry = _by_name(_score_accuracy(_ctx([cfg], tokenizer_name="fake"), _RESULT))[
+            "ds"
+        ]
+        assert entry["response_counts"] == {
+            "issued": 3,
+            "scored": 1,
+            "empty": 1,
+            "missing": 1,
+        }
+        assert entry["output_sequence_lengths"]["total"] == 2  # only "x y"
+
+    def test_response_counts_skipped_for_performance_entry(self, tmp_path):
+        cfg = _cfg("performance", 2, 0.6, tmp_path, scorer=_FakeOSLScorer)
+        entry = _by_name(_score_accuracy(_ctx([cfg]), _RESULT))["performance"]
+        assert "response_counts" not in entry
 
 
 @pytest.mark.unit
@@ -290,6 +359,39 @@ class TestPhaseOslStats:
 
     def test_none_when_all_outputs_empty(self):
         assert _phase_osl_stats(["a"], {"a": ""}, _WordTokenizer()) is None
+
+
+@pytest.mark.unit
+class TestPhaseResponseCounts:
+    def test_classifies_scored_empty_missing(self):
+        counts = _phase_response_counts(["u1", "u2", "u3"], {"u1": "x y", "u2": ""})
+        assert counts == {"issued": 3, "scored": 1, "empty": 1, "missing": 1}
+
+    def test_invariant_issued_equals_sum(self):
+        counts = _phase_response_counts(
+            ["a", "b", "c", "d"], {"a": "x", "b": "", "c": "y"}
+        )
+        assert (
+            counts["issued"] == counts["scored"] + counts["empty"] + counts["missing"]
+        )
+
+    def test_empty_iterable(self):
+        assert _phase_response_counts([], {}) == {
+            "issued": 0,
+            "scored": 0,
+            "empty": 0,
+            "missing": 0,
+        }
+
+    def test_scored_matches_osl_population(self):
+        # scored uses the same truthiness test as _phase_osl_stats, so it equals
+        # the number of texts OSL would tokenize (the OSL population).
+        uuid_to_text = {"a": "x y", "b": "", "c": "z"}
+        uuids = ["a", "b", "c", "missing"]
+        counts = _phase_response_counts(uuids, uuid_to_text)
+        osl = _phase_osl_stats(uuids, uuid_to_text, _WordTokenizer())
+        assert counts["scored"] == 2  # "a" and "c"
+        assert osl is not None  # a non-empty population exists
 
 
 @pytest.mark.unit
