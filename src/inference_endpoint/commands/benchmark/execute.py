@@ -175,6 +175,10 @@ class AccuracyConfiguration:
     ground_truth_column: str | None
     num_repeats: int
     extras: dict[str, Any] = field(default_factory=dict)
+    # Discriminates the inline perf-scored entry (PERFORMANCE) from real accuracy
+    # datasets (ACCURACY). Branch on this, not on dataset_name == "performance":
+    # a dataset legitimately named "performance" must not be misclassified.
+    dataset_type: DatasetType = DatasetType.ACCURACY
 
 
 @dataclass
@@ -334,6 +338,7 @@ def _load_datasets(
                 acc_cfg.accuracy_config.ground_truth,
                 acc_cfg.accuracy_config.num_repeats,
                 acc_cfg.accuracy_config.extras or {},
+                dataset_type=DatasetType.ACCURACY,
             )
         )
         # Value/api-type validity of the override is already enforced at config
@@ -392,6 +397,7 @@ def _load_datasets(
                     accuracy_config.ground_truth,
                     accuracy_config.num_repeats,
                     accuracy_config.extras or {},
+                    dataset_type=DatasetType.PERFORMANCE,
                 )
             )
 
@@ -578,7 +584,7 @@ def _build_phases(
     # Accuracy phases — use eval_cfg.dataset_name as phase name so it matches
     # what Scorer._load_sample_index_map() looks up in sample_idx_map.json
     for eval_cfg in ctx.eval_configs:
-        if eval_cfg.dataset_name == "performance":
+        if eval_cfg.dataset_type == DatasetType.PERFORMANCE:
             continue
         acc_ds = eval_cfg.dataset
         if isinstance(acc_ds, AgenticInferenceDataset):
@@ -1349,7 +1355,9 @@ def _score_accuracy(
     # every phase's COMPLETE events) and reused across datasets. Loaded only when
     # a real accuracy dataset exists — a perf-only run (or one with just the
     # inline "performance" entry) must not pay a tokenizer load/download here.
-    has_accuracy = any(ec.dataset_name != "performance" for ec in ctx.eval_configs)
+    has_accuracy = any(
+        ec.dataset_type == DatasetType.ACCURACY for ec in ctx.eval_configs
+    )
     osl_tokenizer = _load_osl_tokenizer(ctx.tokenizer_name) if has_accuracy else None
     uuid_to_text: dict[str, str] | None = None
 
@@ -1378,7 +1386,7 @@ def _score_accuracy(
             score = float(score)
         unit_samples = eval_cfg.dataset.num_samples()
         num_repeats = eval_cfg.num_repeats
-        if eval_cfg.dataset_name == "performance":
+        if eval_cfg.dataset_type == DatasetType.PERFORMANCE:
             # A performance dataset always scores its already-issued outputs once
             # (enforced by the num_repeats == 1 guard in _load_datasets), so make
             # that locally provable rather than relying on eval_cfg carrying 1.
@@ -1414,7 +1422,7 @@ def _score_accuracy(
         # block — an all-failed phase must still publish scored=0 rather than
         # silently omitting everything. OSL stays tokenizer-gated. A read/tokenize
         # failure only drops these blocks — it never fails scoring.
-        if eval_cfg.dataset_name != "performance":
+        if eval_cfg.dataset_type == DatasetType.ACCURACY:
             try:
                 if uuid_to_text is None:
                     # Built once from the first scorer and reused for every

@@ -28,6 +28,7 @@ from inference_endpoint.commands.benchmark.execute import (
     _phase_response_counts,
     _score_accuracy,
 )
+from inference_endpoint.config.schema import DatasetType
 
 # Module object for the tests that monkeypatch execute's own module-level symbols
 # (_load_osl_tokenizer / AutoTokenizer) so _score_accuracy resolves the patched
@@ -132,6 +133,9 @@ def _cfg(name: str, n: int, score: float, tmp, scorer=_FakeScorer, repeats: int 
         None,
         repeats,
         {},
+        dataset_type=(
+            DatasetType.PERFORMANCE if name == "performance" else DatasetType.ACCURACY
+        ),
     )
 
 
