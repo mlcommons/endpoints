@@ -161,7 +161,10 @@ def test_extract_distribution_skips_empty_blocks():
 
 @pytest.mark.unit
 def test_load_run_assembles_artifacts(tmp_path):
-    (tmp_path / "results.json").write_text(json.dumps(_accuracy_results()))
+    (tmp_path / "accuracy").mkdir(exist_ok=True)
+    (tmp_path / "accuracy" / "accuracy_results.json").write_text(
+        json.dumps(_accuracy_results())
+    )
     (tmp_path / "scores.json").write_text(json.dumps(_perf_scores()))
     (tmp_path / "performance").mkdir(exist_ok=True)
     (tmp_path / "performance" / "result_summary.json").write_text(
@@ -207,7 +210,10 @@ def test_plot_distribution_tolerates_bucket_count_mismatch(tmp_path, buckets, co
 @pytest.mark.unit
 def test_generate_plots_writes_pngs(tmp_path):
     pytest.importorskip("matplotlib")
-    (tmp_path / "results.json").write_text(json.dumps(_accuracy_results()))
+    (tmp_path / "accuracy").mkdir(exist_ok=True)
+    (tmp_path / "accuracy" / "accuracy_results.json").write_text(
+        json.dumps(_accuracy_results())
+    )
     (tmp_path / "scores.json").write_text(json.dumps(_perf_scores()))
     (tmp_path / "performance").mkdir(exist_ok=True)
     (tmp_path / "performance" / "result_summary.json").write_text(
