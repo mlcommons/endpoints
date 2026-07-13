@@ -152,30 +152,20 @@ class TestAccuracyPipeline:
         # Should have both perf (3) and accuracy (5) completions
         assert len(complete_events) == 8
 
-        # Verify results.json was written with accuracy scores
-        results_path = report_dir / "results.json"
-        assert results_path.exists()
-        with results_path.open() as f:
-            results = json.load(f)
-
-        assert "accuracy_scores" in results
-        # accuracy_scores is a list of per-dataset entries; index by dataset_name.
-        by_name = {e["dataset_name"]: e for e in results["accuracy_scores"]}
-        assert "echo_accuracy" in by_name
-        score_data = by_name["echo_accuracy"]
-        score = score_data["score"]
-
-        # 3 correct out of 5 = 0.6 accuracy
-        assert abs(score - 0.6) < 0.01, f"Expected 0.6, got {score}"
-
-        # The focused accuracy artifact is written under accuracy/ with the same
-        # list shape as results.json's accuracy_scores.
+        # Verify the accuracy artifact was written under accuracy/ with scores.
         accuracy_results_path = report_dir / "accuracy" / "accuracy_results.json"
         assert accuracy_results_path.exists()
         with accuracy_results_path.open() as f:
             accuracy_results = json.load(f)
-        acc_by_name = {e["dataset_name"] for e in accuracy_results["accuracy_scores"]}
-        assert "echo_accuracy" in acc_by_name
+
+        assert "accuracy_scores" in accuracy_results
+        # accuracy_scores is a list of per-dataset entries; index by dataset_name.
+        by_name = {e["dataset_name"]: e for e in accuracy_results["accuracy_scores"]}
+        assert "echo_accuracy" in by_name
+        score = by_name["echo_accuracy"]["score"]
+
+        # 3 correct out of 5 = 0.6 accuracy
+        assert abs(score - 0.6) < 0.01, f"Expected 0.6, got {score}"
 
         # Verify logs mention scoring
         assert "Score for echo_accuracy" in caplog.text

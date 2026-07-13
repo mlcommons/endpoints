@@ -192,7 +192,7 @@ def test_online_cli_no_crash(tokens):
 
 
 # ---------------------------------------------------------------------------
-# E2E: CLI tokens → echo server → results.json
+# E2E: CLI tokens → echo server → performance/result_summary.json
 # One test per execution mode: offline, poisson, concurrency.
 # ---------------------------------------------------------------------------
 
@@ -216,7 +216,7 @@ def _run(tokens: list[str]):
 
 
 def _bench(url, ds, tmp_path, *extra):
-    """Run a benchmark via CLI and return parsed results.json."""
+    """Run a benchmark via CLI and return parsed performance/result_summary.json."""
     _run(
         [
             *extra,
@@ -231,11 +231,11 @@ def _bench(url, ds, tmp_path, *extra):
             *_FAST,
         ]
     )
-    return json.loads((tmp_path / "results.json").read_text())
+    return json.loads((tmp_path / "performance" / "result_summary.json").read_text())
 
 
 class TestE2E:
-    """Full CLI → benchmark execution → echo server → results.json."""
+    """Full CLI → benchmark execution → echo server → result_summary.json."""
 
     @pytest.mark.integration
     def test_offline(self, mock_http_echo_server, ds_dataset_path, tmp_path):
@@ -251,8 +251,8 @@ class TestE2E:
             "--streaming",
             "off",
         )
-        assert r["results"]["total"] > 0
-        assert r["results"]["successful"] > 0
+        assert r["n_samples_issued"] > 0
+        assert r["n_samples_completed"] > 0
 
     @pytest.mark.integration
     def test_poisson(self, mock_http_echo_server, ds_dataset_path, tmp_path):
@@ -270,7 +270,7 @@ class TestE2E:
             "--duration",
             "2000",
         )
-        assert r["results"]["total"] > 0
+        assert r["n_samples_issued"] > 0
 
     @pytest.mark.integration
     def test_concurrency(self, mock_http_echo_server, ds_dataset_path, tmp_path):
@@ -288,4 +288,4 @@ class TestE2E:
             "--duration",
             "2000",
         )
-        assert r["results"]["total"] > 0
+        assert r["n_samples_issued"] > 0

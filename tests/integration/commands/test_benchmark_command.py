@@ -137,24 +137,6 @@ class TestBenchmarkCommandIntegration:
         assert "successful" in caplog.text
 
     @pytest.mark.integration
-    def test_results_json_output(
-        self, mock_http_echo_server, ds_dataset_path, tmp_path
-    ):
-        config = _config(
-            mock_http_echo_server.url,
-            ds_dataset_path,
-            report_dir=tmp_path,
-        )
-        run_benchmark(config, TestMode.PERF)
-
-        results_path = tmp_path / "results.json"
-        assert results_path.exists()
-        results = json.loads(results_path.read_text())
-        assert "config" in results
-        assert results["results"]["total"] > 0
-        assert results["results"]["successful"] >= 0
-
-    @pytest.mark.integration
     def test_result_summary_self_complete(
         self, mock_http_echo_server, ds_dataset_path, tmp_path
     ):

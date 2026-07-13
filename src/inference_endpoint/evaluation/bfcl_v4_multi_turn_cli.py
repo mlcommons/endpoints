@@ -242,7 +242,9 @@ def main() -> None:
             "elapsed_time": elapsed,
         }
 
-        results_path = report_dir / "results.json"
+        accuracy_dir = report_dir / "accuracy"
+        accuracy_dir.mkdir(parents=True, exist_ok=True)
+        results_path = accuracy_dir / "accuracy_results.json"
         with open(results_path, "w") as f:
             json.dump(output, f, indent=2)
         logger.info("Results saved to %s", results_path)

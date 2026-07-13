@@ -266,8 +266,8 @@ class BFCLv4Scorer(Scorer, scorer_id="bfcl_v4"):
 
         if df.empty:
             # No scorable samples: either the events log had no COMPLETE records
-            # or none map to a known sample_uuid. Emit the zero breakdown so
-            # results.json is well-formed; the sample_index lookup below would
+            # or none map to a known sample_uuid. Emit the zero breakdown so the
+            # accuracy report is well-formed; the sample_index lookup below would
             # otherwise KeyError on the empty frame.
             self._breakdown = self._zero_breakdown()
             return 0.0, 1

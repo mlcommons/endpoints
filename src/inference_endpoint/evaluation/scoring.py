@@ -228,9 +228,9 @@ class Scorer(ABC):
 
         Most scorers report only the scalar mean from ``score()``. Scorers with a
         multi-metric result (e.g. per-subset / per-category accuracy) cache that
-        breakdown and return it here, so ``results.json``, compliance, plotting,
-        and publishing read a typed dict without ``score()`` widening its scalar
-        return contract. Returns ``None`` when there is no extra detail.
+        breakdown and return it here, so ``accuracy_results.json``, compliance,
+        plotting, and publishing read a typed dict without ``score()`` widening
+        its scalar return contract. Returns ``None`` when there is no extra detail.
         """
         return None
 

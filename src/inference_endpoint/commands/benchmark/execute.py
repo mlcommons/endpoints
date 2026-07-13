@@ -1462,7 +1462,6 @@ def _score_accuracy(
 
 def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
     """Score accuracy, aggregate results, write JSON."""
-    config = ctx.config
     result = bench.session
     collector = bench.collector
     report = bench.report
@@ -1517,7 +1516,6 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
         total_issued = report.n_samples_issued
         n_errors = report.n_samples_failed
         qps = report.qps or 0.0
-        tps = report.tps
     else:
         perf = result.perf_results[0] if result.perf_results else None
         if perf:
@@ -1528,8 +1526,6 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
             total_issued = 0
         n_errors = len(collector.errors)
         qps = total_issued / perf_elapsed if perf_elapsed > 0 else 0.0
-        # No OSL source outside the metrics snapshot, so TPS is unknown here.
-        tps = None
 
     logger.info(f"Completed in {perf_elapsed:.1f}s")
     if ctx.accuracy_only:
@@ -1549,57 +1545,25 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
         if len(collector.errors) > 3:
             logger.debug(f"  ... +{len(collector.errors) - 3} more")
 
-    # Write results JSON
+    # Emit the accuracy results as a focused artifact under accuracy/. Perf
+    # rollups (qps/tps/latency percentiles) live in performance/result_summary.json
+    # and response/error text lives in events.jsonl, so neither is duplicated
+    # here. Written only when scoring produced entries — a perf-only run leaves
+    # no accuracy/ folder.
     try:
-        results: dict[str, Any] = {
-            "config": {
-                "endpoint": config.endpoint_config.endpoints,
-                "mode": ctx.test_mode,
-                "accuracy_only": ctx.accuracy_only,
-                "target_qps": config.settings.load_pattern.target_qps,
-            },
-            "results": {
-                "total": total_issued,
-                "successful": max(0, total_issued - n_errors),
-                "failed": n_errors,
-                "elapsed_time": perf_elapsed,
-                "qps": qps,
-                "tps": tps,
-            },
-        }
-        results["accuracy_scores"] = accuracy_scores
-        # Plain cross-component mean of the per-dataset scores (3 datasets for
-        # gpt-oss, 1 for DeepSeek-R1); None when nothing numeric was scored.
-        avg_accuracy = average_accuracy(accuracy_scores)
-        if avg_accuracy is not None:
-            results["average_accuracy"] = avg_accuracy
-        # Total finalize-time spent tokenizing accuracy outputs for OSL (seconds),
-        # summed across datasets. Emitted whenever OSL was computed for at least
-        # one dataset — gating on the key's presence, not the rounded wall-clock,
-        # so a sub-millisecond total (tiny outputs) still records 0.0 rather than
-        # silently dropping the field.
-        osl_computed = any("osl_tokenize_s" in e for e in accuracy_scores)
-        osl_tokenization_s = round(
-            sum(e.get("osl_tokenize_s", 0.0) for e in accuracy_scores), 3
-        )
-        if osl_computed:
-            results["osl_tokenization_s"] = osl_tokenization_s
-        if ctx.collect_responses:
-            results["responses"] = collector.responses
-        if collector.errors:
-            results["errors"] = collector.errors
-
-        results_path = ctx.report_dir / "results.json"
-        with open(results_path, "w") as f:
-            json.dump(results, f, indent=2)
-        logger.info(f"Saved: {results_path}")
-
-        # Also emit the accuracy results as a focused artifact under accuracy/,
-        # so downstream accuracy consumers read one small file instead of the
-        # full results.json. Same "accuracy_scores" list shape (find_accuracy_
-        # breakdown reads it directly). Written only when scoring produced
-        # entries — a perf-only run leaves no accuracy/ folder.
         if accuracy_scores:
+            # Plain cross-component mean of the per-dataset scores (3 datasets for
+            # gpt-oss, 1 for DeepSeek-R1); None when nothing numeric was scored.
+            avg_accuracy = average_accuracy(accuracy_scores)
+            # Total finalize-time spent tokenizing accuracy outputs for OSL
+            # (seconds), summed across datasets. Emitted whenever OSL was computed
+            # for at least one dataset — gating on the key's presence, not the
+            # rounded wall-clock, so a sub-millisecond total (tiny outputs) still
+            # records 0.0 rather than silently dropping the field.
+            osl_computed = any("osl_tokenize_s" in e for e in accuracy_scores)
+            osl_tokenization_s = round(
+                sum(e.get("osl_tokenize_s", 0.0) for e in accuracy_scores), 3
+            )
             accuracy_dir = ctx.report_dir / "accuracy"
             accuracy_dir.mkdir(parents=True, exist_ok=True)
             accuracy_results_path = accuracy_dir / "accuracy_results.json"

@@ -16,8 +16,9 @@
 """Standardized result plots for Edge-Agentic benchmark runs.
 
 Consumes a run's report directory (the artifacts written by a benchmark run:
-``results.json`` for accuracy, ``scores.json`` for the agentic performance run,
-``result_summary.json`` for latency/throughput distributions) and renders a fixed
+``accuracy/accuracy_results.json`` for accuracy, ``scores.json`` for the agentic
+performance run, ``result_summary.json`` for latency/throughput distributions)
+and renders a fixed
 set of PNGs for leaderboard / report use:
 
 * accuracy — overall + normalized vs the ruleset gate, per-category and per-subset
@@ -98,7 +99,7 @@ class RunArtifacts:
 
 
 def extract_accuracy(results: dict[str, Any]) -> AccuracyBreakdown | None:
-    """Pull the accuracy breakdown from a BFCL ``results.json`` dict."""
+    """Pull the accuracy breakdown from a BFCL ``accuracy_results.json`` dict."""
     entry = _find_accuracy_entry(results)
     if entry is None:
         return None
@@ -192,7 +193,7 @@ def load_run(report_dir: str | Path) -> RunArtifacts:
     report_dir = Path(report_dir)
     artifacts = RunArtifacts(report_dir=report_dir)
 
-    results_path = report_dir / "results.json"
+    results_path = report_dir / "accuracy" / "accuracy_results.json"
     if results_path.exists():
         artifacts.accuracy = extract_accuracy(json.loads(results_path.read_text()))
 

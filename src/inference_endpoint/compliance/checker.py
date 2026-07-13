@@ -16,8 +16,9 @@
 """Compliance checks for Edge-Agentic (BFCL v4) submissions.
 
 A submission is a run's report directory containing the resolved ``config.yaml``
-plus the scorer outputs (``results.json`` for the accuracy run, ``scores.json``
-for the agentic performance run). The checker compares those artifacts against a
+plus the scorer outputs (``accuracy/accuracy_results.json`` for the accuracy run,
+``scores.json`` for the agentic performance run). The checker compares those
+artifacts against a
 registered ruleset (default: ``mlperf-edge-current`` / ``qwen3.6-27b``):
 
 * config-lock — deterministic, single-stream settings the rules require;
@@ -166,7 +167,7 @@ def check_accuracy(
     factors: dict[str, tuple[float, ...]],
     min_samples: int | None,
 ) -> list[Check]:
-    """Validate the accuracy gate from a BFCL accuracy ``results.json`` dict."""
+    """Validate the accuracy gate from a BFCL ``accuracy_results.json`` dict."""
     checks: list[Check] = []
 
     score = _find_accuracy_score(results)
@@ -280,7 +281,7 @@ def check_submission(
         else:
             report.checks.extend(check_config_lock(config))
 
-    results_path = report_dir / "results.json"
+    results_path = report_dir / "accuracy" / "accuracy_results.json"
     scores_path = report_dir / "scores.json"
 
     is_accuracy = False
@@ -297,7 +298,7 @@ def check_submission(
         report.add(
             "scorer_output_present",
             False,
-            "no accuracy results.json or performance scores.json found",
+            "no accuracy/accuracy_results.json or performance scores.json found",
         )
 
     report.notes.append(
