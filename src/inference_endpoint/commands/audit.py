@@ -133,6 +133,11 @@ def run_audit(config: BenchmarkConfig, base_report_dir: Path) -> AuditResult:
         # stop, so the phase returns with an "interrupted" report. Propagate it
         # as KeyboardInterrupt so the CLI exits 130 (interrupted), not as a
         # generic ExecutionError (exit 4) indistinguishable from a phase crash.
+        if bench.run_timed_out:
+            raise ExecutionError(
+                f"Audit phase '{spec.label}' hit the run timeout "
+                "(settings.timeouts.run_timeout_s); report marked INTERRUPTED"
+            )
         if report.state == "interrupted":
             raise KeyboardInterrupt(f"Audit phase '{spec.label}' interrupted")
         # A drain-timeout (state complete but async tasks still pending) yields

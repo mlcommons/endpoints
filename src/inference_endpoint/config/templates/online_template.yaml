@@ -10,9 +10,10 @@ datasets:  # Dataset configs
     prompt: text_input
 settings:
   runtime:
-    min_duration_ms: 600000  # Min duration (ms, or with suffix: 600s, 10m)
-    max_duration_ms: 0  # Maximum test duration in ms (0 for no limit)
     n_samples_to_issue: null  # Sample count override
+  timeouts:  # All global durations and deadlines (see config/timeouts.py)
+    min_duration_ms: 600000  # Minimum duration of the whole performance phase in ms (drives sample-count math)
+    max_duration_ms: 0  # Maximum duration of the whole performance phase in ms (0 for no limit; never bounds warmup/accuracy)
   load_pattern:
     type: poisson  # Load pattern type | options: max_throughput, poisson, concurrency, agentic_inference, burst, step
     target_qps: 10.0  # Target QPS

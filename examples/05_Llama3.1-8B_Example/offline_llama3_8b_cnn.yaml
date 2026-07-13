@@ -28,11 +28,13 @@ datasets:
 
 settings:
   runtime:
-    min_duration_ms: 60000 # 1 minute
-    max_duration_ms: 360000 # 6 minutes (Arbitrary here, and doesn't have counterpart in legacy loadgen)
     scheduler_random_seed: 137 # For Poisson/distribution sampling
     dataloader_random_seed: 111 # For dataset shuffling (Will be updated after rng seeds are finalized for submission)
     n_samples_to_issue: 13368 # Number of samples to issue (for offline, this should match the dataset samples)
+
+  timeouts:
+    min_duration_ms: 60000 # 1 minute
+    max_duration_ms: 360000 # 6 minutes (Arbitrary here, and doesn't have counterpart in legacy loadgen)
 
   load_pattern:
     type: "max_throughput"

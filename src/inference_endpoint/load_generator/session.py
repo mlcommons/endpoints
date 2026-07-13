@@ -379,7 +379,7 @@ class BenchmarkSession:
 
         Also sets the drain event: if the cap fires while the phase is already
         inside its ``_drain_inflight`` wait (strategy task finished), cancelling
-        the task is a no-op, so an unbounded (``performance_timeout_s: null``)
+        the task is a no-op, so an unbounded (``performance_drain_timeout_s: null``)
         drain would otherwise hang forever on a stuck in-flight response.
         """
         self._current_phase_stopped = True

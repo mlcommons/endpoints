@@ -177,16 +177,17 @@ def generate_ie_config(
         ],
         "settings": {
             "runtime": {
+                "n_samples_to_issue": num_requests,
+            },
+            "timeouts": {
                 "min_duration_ms": 0,
                 "max_duration_ms": timeout * 1000,
-                "n_samples_to_issue": num_requests,
             },
             "load_pattern": {"type": "max_throughput"},
             "client": {"num_workers": workers},
         },
         "endpoint_config": {"endpoints": [endpoint_url]},
         "report_dir": str(report_dir),
-        "timeout": timeout,
     }
 
     with open(config_path, "w") as f:

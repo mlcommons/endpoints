@@ -16,7 +16,6 @@
 name: "gpt-oss-120b-per-dataset-osl"
 version: "1.0"
 type: "online"
-timeout: 9000
 
 model_params:
   name: "openai/gpt-oss-120b"
@@ -64,11 +63,13 @@ datasets:
 
 settings:
   runtime:
-    min_duration_ms: 30000
-    max_duration_ms: 14400000 # 4h whole-session deadline (perf + all accuracy phases)
     scheduler_random_seed: 42
     dataloader_random_seed: 42
     n_samples_to_issue: 2000 # PERF phase only; accuracy phases issue their own sample counts
+
+  timeouts:
+    min_duration_ms: 30000
+    max_duration_ms: 14400000 # 4h cap on the performance phase only
 
   load_pattern:
     type: "concurrency"

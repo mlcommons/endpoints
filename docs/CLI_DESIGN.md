@@ -204,5 +204,5 @@ class HTTPClientConfig(WithUpdatesMixin, BaseModel):
 `BenchmarkConfig` is frozen. Use `with_updates()` to produce new instances with re-validation:
 
 ```python
-config = config.with_updates(timeout=300, datasets=["new_data.jsonl"])
+config = config.with_updates(report_dir="results/run1", datasets=["new_data.jsonl"])
 ```

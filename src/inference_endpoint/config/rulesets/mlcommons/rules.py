@@ -27,9 +27,11 @@ from enum import Enum
 from .... import metrics
 from ...ruleset_base import BenchmarkSuiteRuleset
 from ...runtime_settings import RuntimeSettings
-from ...schema import SystemDefaults
 from ...user_config import UserConfig
 from . import models
+
+# Fallback metric when a ruleset resolves no explicit target.
+_DEFAULT_METRIC = metrics.Throughput(0.0)
 
 
 @dataclass(frozen=True)
@@ -214,7 +216,7 @@ class RoundRuleset(BenchmarkSuiteRuleset):
         return _RuntimeSettings(
             metric_target=metric_target
             if metric_target is not None
-            else SystemDefaults.DEFAULT_METRIC,
+            else _DEFAULT_METRIC,
             reported_metrics=reported_metrics,
             min_duration_ms=min_duration_ms,
             max_duration_ms=max_duration_ms,

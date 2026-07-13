@@ -3,7 +3,6 @@
 name: "interactive-qwen3-vl-235b-a22b-shopify-8k-benchmark"
 version: "1.0"
 type: "online"
-timeout: 1800 # 30 minutes for quick interactive runs
 
 model_params:
   name: "Qwen/Qwen3-VL-235B-A22B-Instruct"
@@ -24,9 +23,11 @@ datasets:
 
 settings:
   runtime:
-    min_duration_ms: 600000 # 10 minute
     scheduler_random_seed: 42
     dataloader_random_seed: 42
+
+  timeouts:
+    min_duration_ms: 600000 # 10 minute
 
   load_pattern:
     type: "poisson"

@@ -35,13 +35,13 @@ from inference_endpoint.config.schema import (
     LoadPattern,
     LoadPatternType,
     ModelParams,
-    RuntimeConfig,
     Settings,
     StreamingMode,
     TestMode,
     TestType,
 )
 from inference_endpoint.config.schema import Dataset as DatasetConfig
+from inference_endpoint.config.timeouts import Timeouts
 from inference_endpoint.endpoint_client.config import HTTPClientConfig
 
 
@@ -119,7 +119,7 @@ class TestAccuracyPipeline:
                 ),
             ],
             settings=Settings(
-                runtime=RuntimeConfig(min_duration_ms=0),
+                timeouts=Timeouts(min_duration_ms=0),
                 load_pattern=LoadPattern(type=LoadPatternType.MAX_THROUGHPUT),
                 client=HTTPClientConfig(
                     num_workers=1, warmup_connections=0, max_connections=10

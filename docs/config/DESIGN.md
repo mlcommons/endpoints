@@ -61,8 +61,8 @@ Immutable snapshot of all parameters needed to execute a run.
 | -------------------- | -------------- | --------------------------------------- |
 | `load_pattern`       | `LoadPattern`  | config                                  |
 | `n_samples_to_issue` | `int`          | calculated: QPS × duration, or explicit |
-| `min_duration_ms`    | `int`          | runtime config                          |
-| `max_duration_ms`    | `int`          | runtime config                          |
+| `min_duration_ms`    | `int`          | `settings.timeouts`                     |
+| `max_duration_ms`    | `int`          | `settings.timeouts`                     |
 | `min_sample_count`   | `int`          | current default / future ruleset hook   |
 | `metric_target`      | `Metric`       | primary target driving scheduler logic  |
 | `reported_metrics`   | `list[Metric]` | metrics validated after the run         |

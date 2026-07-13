@@ -96,7 +96,7 @@ Flag names shown as `--full.dotted.path --alias`. Both forms work.
 - `--model-params.max-new-tokens --max-output-tokens` - Max output tokens (default: 1024)
 - `--model-params.osl-distribution.min --min-output-tokens` - Min output tokens (default: 1)
 - `--model-params.streaming --streaming` - Streaming mode: auto/on/off (default: auto)
-- `--runtime.min-duration-ms --duration` - Min duration: ms default, or with suffix (600s, 10m) (default: 600000)
+- `--min-duration-ms --duration` - Min duration: ms default, or with suffix (600s, 10m) (default: 600000)
 - `--runtime.n-samples-to-issue --num-samples` - Explicit sample count override
 - `--client.num-workers --workers` - HTTP workers (-1=auto, default: -1)
 - `--client.max-connections --max-connections` - Max TCP connections (-1=unlimited)
@@ -106,7 +106,7 @@ Flag names shown as `--full.dotted.path --alias`. Both forms work.
   Note: applies to CLI-driven `benchmark offline` / `benchmark online`; `benchmark from-config`
   does not expose a CLI override for `report_dir`. Set it in the YAML only if you need to control
   the output location; otherwise a default report directory is used.
-- `--timeout` - Global timeout in seconds
+- `--timeout` - Whole-run watchdog in seconds (off by default). If it fires, the run is aborted and the report is marked INTERRUPTED (exits non-zero).
 - `--enable-cpu-affinity / --no-cpu-affinity` - NUMA-aware CPU pinning (default: true)
 
 **Online-specific:**

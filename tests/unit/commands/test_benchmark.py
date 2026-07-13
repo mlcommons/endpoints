@@ -53,7 +53,6 @@ from inference_endpoint.config.runtime_settings import RuntimeSettings
 from inference_endpoint.config.schema import (
     BenchmarkConfig,
     DatasetType,
-    DrainConfig,
     LoadPattern,
     LoadPatternType,
     OfflineSettings,
@@ -72,6 +71,7 @@ from inference_endpoint.config.schema import (
 from inference_endpoint.config.schema import (
     OnlineBenchmarkConfig as OnlineConfig,
 )
+from inference_endpoint.config.timeouts import Timeouts
 from inference_endpoint.config.utils import cli_error_formatter as _error_formatter
 from inference_endpoint.core.types import QueryResult
 from inference_endpoint.dataset_manager.dataset import Dataset
@@ -125,14 +125,15 @@ class TestCLIConfigModels:
         config = cls(**_OFFLINE_KWARGS, **extra_kwargs)
         assert config.type == expected_type
         assert config.model_params.streaming == expected_streaming
-        assert config.settings.runtime.min_duration_ms == 600000
+        assert config.settings.timeouts.min_duration_ms == 600000
 
     @pytest.mark.unit
     def test_num_samples_override(self):
         config = OfflineConfig(
             **_OFFLINE_KWARGS,
             settings=OfflineSettings(
-                runtime=RuntimeConfig(min_duration_ms=0, n_samples_to_issue=100)
+                runtime=RuntimeConfig(n_samples_to_issue=100),
+                timeouts=Timeouts(min_duration_ms=0),
             ),
         )
         assert config.settings.runtime.n_samples_to_issue == 100
@@ -165,9 +166,9 @@ class TestDurationSuffix:
     def test_duration_suffix(self, value, expected_ms):
         config = OfflineConfig(
             **_OFFLINE_KWARGS,
-            settings=OfflineSettings(runtime=RuntimeConfig(min_duration_ms=value)),
+            settings=OfflineSettings(timeouts=Timeouts(min_duration_ms=value)),
         )
-        assert config.settings.runtime.min_duration_ms == expected_ms
+        assert config.settings.timeouts.min_duration_ms == expected_ms
 
 
 class TestDatasetParsing:
@@ -341,7 +342,7 @@ datasets:
         config_file.write_text(yaml_content)
         from_config(config=config_file, timeout=42.0, mode=TestMode.BOTH)
         called_config, called_mode = mock_run.call_args[0]
-        assert called_config.timeout == 42.0
+        assert called_config.settings.timeouts.run_timeout_s == 42.0
         assert called_mode == TestMode.BOTH
 
     @pytest.mark.unit
@@ -555,41 +556,41 @@ settings:
         assert warmup.n_requests is None
 
 
-class TestDrainConfig:
-    """Tests for DrainConfig schema model."""
+class TestTimeoutsDrainFields:
+    """Tests for the drain-deadline fields on the Timeouts schema model."""
 
     @pytest.mark.unit
     def test_defaults(self):
-        cfg = DrainConfig()
-        assert cfg.warmup_timeout_s == 240.0
-        assert cfg.performance_timeout_s == 240.0
-        assert cfg.accuracy_timeout_s is None
-        assert cfg.metrics_drain_timeout_s == 0.0
+        cfg = Timeouts()
+        assert cfg.warmup_drain_timeout_s == 240.0
+        assert cfg.performance_drain_timeout_s is None
+        assert cfg.accuracy_drain_timeout_s is None
+        assert cfg.metrics_drain_timeout_s is None
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
         "field",
-        ["warmup_timeout_s", "performance_timeout_s", "accuracy_timeout_s"],
+        [
+            "warmup_drain_timeout_s",
+            "performance_drain_timeout_s",
+            "accuracy_drain_timeout_s",
+            "metrics_drain_timeout_s",
+        ],
     )
     @pytest.mark.parametrize("value", [0, -1.0])
     def test_timeout_must_be_positive_or_none(self, field, value):
         with pytest.raises(ValidationError):
-            DrainConfig(**{field: value})
+            Timeouts(**{field: value})
 
     @pytest.mark.unit
-    def test_metrics_drain_timeout_zero_is_valid(self):
-        cfg = DrainConfig(metrics_drain_timeout_s=0)
-        assert cfg.metrics_drain_timeout_s == 0.0
-
-    @pytest.mark.unit
-    def test_metrics_drain_timeout_negative_rejected(self):
-        with pytest.raises(ValidationError):
-            DrainConfig(metrics_drain_timeout_s=-1.0)
+    def test_metrics_drain_timeout_none_is_unlimited(self):
+        cfg = Timeouts(metrics_drain_timeout_s=None)
+        assert cfg.metrics_drain_timeout_s is None
 
     @pytest.mark.unit
     def test_extra_fields_rejected(self):
         with pytest.raises(ValidationError):
-            DrainConfig(unknown_field=1)
+            Timeouts(unknown_field=1)
 
     @pytest.mark.unit
     def test_yaml_roundtrip(self, tmp_path):
@@ -602,20 +603,20 @@ endpoint_config:
 datasets:
   - path: "test.jsonl"
 settings:
-  drain:
-    warmup_timeout_s: 12.5
-    performance_timeout_s: 30.0
-    accuracy_timeout_s: null
+  timeouts:
+    warmup_drain_timeout_s: 12.5
+    performance_drain_timeout_s: 30.0
+    accuracy_drain_timeout_s: null
     metrics_drain_timeout_s: 300.0
 """
-        config_file = tmp_path / "drain.yaml"
+        config_file = tmp_path / "timeouts.yaml"
         config_file.write_text(yaml_content)
         config = BenchmarkConfig.from_yaml_file(config_file)
-        drain = config.settings.drain
-        assert drain.warmup_timeout_s == 12.5
-        assert drain.performance_timeout_s == 30.0
-        assert drain.accuracy_timeout_s is None
-        assert drain.metrics_drain_timeout_s == 300.0
+        timeouts = config.settings.timeouts
+        assert timeouts.warmup_drain_timeout_s == 12.5
+        assert timeouts.performance_drain_timeout_s == 30.0
+        assert timeouts.accuracy_drain_timeout_s is None
+        assert timeouts.metrics_drain_timeout_s == 300.0
 
 
 class TestAggregatorArgs:
@@ -653,7 +654,7 @@ class TestAggregatorArgs:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "timeout_s, expected_flag",
-        [(120.0, "120.0"), (0.0, "0.0"), (60.0, "60.0")],
+        [(120.0, "120.0"), (None, "0.0"), (60.0, "60.0")],
     )
     async def test_drain_timeout_forwarded_to_aggregator_args(
         self, tmp_path, timeout_s, expected_flag
@@ -661,7 +662,7 @@ class TestAggregatorArgs:
         config = OfflineConfig(
             **_OFFLINE_KWARGS,
             settings=OfflineSettings(
-                drain=DrainConfig(metrics_drain_timeout_s=timeout_s)
+                timeouts=Timeouts(metrics_drain_timeout_s=timeout_s)
             ),
         )
         ctx = self._make_ctx(config, tmp_path)
@@ -711,7 +712,7 @@ class TestAggregatorArgs:
     async def test_tokenizer_and_workers_forwarded_from_schema(self, tmp_path):
         """The benchmark forwards --tokenizer and --tokenizer-workers; the
         workers value comes from the schema default
-        (drain.metrics_tokenizer_workers), the single source of truth."""
+        (metrics.tokenizer_workers), the single source of truth."""
         config = OfflineConfig(**_OFFLINE_KWARGS, settings=OfflineSettings())
         ctx = self._make_ctx(config, tmp_path)
         ctx.tokenizer_name = "gpt2"
@@ -755,7 +756,7 @@ class TestAggregatorArgs:
         idx = args.index("--tokenizer")
         assert args[idx + 1] == "gpt2"
         idx = args.index("--tokenizer-workers")
-        expected = str(config.settings.drain.metrics_tokenizer_workers)
+        expected = str(config.settings.metrics.tokenizer_workers)
         assert args[idx + 1] == expected
 
     @pytest.mark.unit
@@ -1136,10 +1137,10 @@ class TestBuildPhases:
         config = OfflineConfig(
             **_OFFLINE_KWARGS,
             settings=OfflineSettings(
-                drain=DrainConfig(
-                    warmup_timeout_s=7.0,
-                    performance_timeout_s=15.0,
-                    accuracy_timeout_s=45.0,
+                timeouts=Timeouts(
+                    warmup_drain_timeout_s=7.0,
+                    performance_drain_timeout_s=15.0,
+                    accuracy_drain_timeout_s=45.0,
                 ),
                 warmup=WarmupConfig(enabled=True, drain=True),
             ),

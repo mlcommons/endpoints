@@ -45,7 +45,7 @@ datasets:
     path: "test.jsonl"
 
 settings:
-  runtime:
+  timeouts:
     min_duration_ms: 60000
   load_pattern:
     type: "max_throughput"
@@ -175,7 +175,7 @@ class TestDefaultConfigs:
         config = BenchmarkConfig.create_default_config(BenchmarkTestType.OFFLINE)
         assert isinstance(config, BenchmarkConfig)
         assert config.settings.load_pattern.type == LoadPatternType.MAX_THROUGHPUT
-        assert config.settings.runtime.min_duration_ms == 600000
+        assert config.settings.timeouts.min_duration_ms == 600000
         assert config.settings.client.num_workers >= 1  # auto-resolved from -1
 
     def test_create_default_online_config(self):
@@ -183,7 +183,7 @@ class TestDefaultConfigs:
         assert isinstance(config, BenchmarkConfig)
         assert config.settings.load_pattern.type == LoadPatternType.POISSON
         assert config.settings.load_pattern.target_qps == 10.0
-        assert config.settings.runtime.min_duration_ms == 600000
+        assert config.settings.timeouts.min_duration_ms == 600000
 
     def test_create_default_eval_not_implemented(self):
         with pytest.raises(CLIError, match="EVAL"):
