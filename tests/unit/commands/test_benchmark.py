@@ -563,7 +563,7 @@ class TestTimeoutsDrainFields:
     def test_defaults(self):
         cfg = Timeouts()
         assert cfg.warmup_drain_timeout_s == 240.0
-        assert cfg.performance_drain_timeout_s == 240.0
+        assert cfg.performance_drain_timeout_s is None
         assert cfg.accuracy_drain_timeout_s is None
         assert cfg.metrics_drain_timeout_s is None
 

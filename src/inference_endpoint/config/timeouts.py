@@ -19,7 +19,9 @@ Two disjoint categories live here, and they must not be conflated:
 
 - **Workload durations** (``min_duration_ms``/``max_duration_ms``): part of
   the benchmark definition — they shape sample-count math and bound the
-  performance phase only. Reaching them is a *normal* end of the run.
+  performance phase only, as a whole (there is a single performance phase;
+  they are not per-dataset knobs). Reaching them is a *normal* end of the
+  run.
 - **Give-up deadlines** (everything else): failure handling. Reaching one
   means something is stuck. ``run_timeout_s`` is the whole-run watchdog:
   when it fires the run is aborted and the report is marked INTERRUPTED —
@@ -53,13 +55,24 @@ class Timeouts(WithUpdatesMixin, BaseModel):
     min_duration_ms: Annotated[
         int,
         cyclopts.Parameter(
-            alias="--duration", help="Min duration (ms, or with suffix: 600s, 10m)"
+            alias="--duration",
+            help="Min performance-phase duration (ms, or with suffix: 600s, 10m)",
         ),
-    ] = Field(600000, ge=0)
+    ] = Field(
+        600000,
+        ge=0,
+        description=(
+            "Minimum duration of the whole performance phase in ms "
+            "(drives sample-count math)"
+        ),
+    )
     max_duration_ms: int = Field(
         0,
         ge=0,
-        description="Maximum performance-phase duration in ms (0 for no limit)",
+        description=(
+            "Maximum duration of the whole performance phase in ms "
+            "(0 for no limit; never bounds warmup/accuracy)"
+        ),
     )
 
     # --- Whole-run watchdog ---
@@ -113,7 +126,7 @@ class Timeouts(WithUpdatesMixin, BaseModel):
             help="Performance drain timeout in seconds (None = wait indefinitely)",
         ),
     ] = Field(
-        240.0,
+        None,
         gt=0,
         description="Performance drain timeout in seconds (None = wait indefinitely)",
     )

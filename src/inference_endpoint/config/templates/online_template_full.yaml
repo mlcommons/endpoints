@@ -82,12 +82,12 @@ settings:
     min_required_connections: -1  # Min connections to initialize (-1=auto, 0=disabled)
     worker_gc_mode: relaxed  # Worker GC strategy | options: disabled, relaxed, system
   timeouts:  # All global durations and deadlines (see config/timeouts.py)
-    min_duration_ms: 600000  # Min duration (ms, or with suffix: 600s, 10m)
-    max_duration_ms: 0  # Maximum performance-phase duration in ms (0 for no limit)
+    min_duration_ms: 600000  # Minimum duration of the whole performance phase in ms (drives sample-count math)
+    max_duration_ms: 0  # Maximum duration of the whole performance phase in ms (0 for no limit; never bounds warmup/accuracy)
     run_timeout_s: null  # Whole-run watchdog in seconds (None = off). Covers every phase including drains; firing aborts the run, marks the report INTERRUPTED, and exits non-zero. Never derives per-stage deadlines.
     service_ready_timeout_s: 30.0  # Seconds to wait for metrics-aggregator/event-logger services to become ready.
     warmup_drain_timeout_s: 240.0  # Warmup drain timeout in seconds (None = wait indefinitely)
-    performance_drain_timeout_s: 240.0  # Performance drain timeout in seconds (None = wait indefinitely)
+    performance_drain_timeout_s: null  # Performance drain timeout in seconds (None = wait indefinitely)
     accuracy_drain_timeout_s: null  # Accuracy drain timeout in seconds (None = wait indefinitely; accuracy is unbounded by default because every sample must complete)
     metrics_drain_timeout_s: null  # Wall-clock budget (seconds) to finish tokenizing buffered samples after ENDED (None = wait indefinitely). An incomplete drain is surfaced via n_pending_tasks > 0, never silently dropped.
   metrics:
