@@ -24,9 +24,8 @@ from __future__ import annotations
 
 import logging
 from collections import Counter
-from enum import Enum
 from pathlib import Path
-from typing import Annotated, Any, ClassVar, Literal, Self, Union
+from typing import Annotated, Any, Literal, Self, Union
 
 import cyclopts
 import yaml
@@ -35,840 +34,87 @@ from pydantic import (
     ConfigDict,
     Discriminator,
     Field,
-    SerializerFunctionWrapHandler,
     Tag,
     TypeAdapter,
     field_validator,
-    model_serializer,
     model_validator,
 )
 
-from .. import metrics
 from ..core.types import APIType
-from ..endpoint_client.config import HTTPClientConfig
 from ..exceptions import CLIError
 from ..utils import WithUpdatesMixin
-from .ruleset_base import BenchmarkSuiteRuleset
+from .audit import AuditConfig, OutputCachingTestConfig
+from .datasets import AccuracyConfig, AgenticInferenceConfig, Dataset
+from .enums import (
+    AuditTestId,
+    DatasetType,
+    EvalMethod,
+    LoadPatternType,
+    OSLDistributionType,
+    ProfilerEngine,
+    ScorerMethod,
+    StreamingMode,
+    TestMode,
+    TestType,
+)
+from .model_params import (
+    ModelParams,
+    OSLDistribution,
+    SubmissionReference,
+    _non_default_completion_controls,
+)
+from .settings import (
+    LoadPattern,
+    MetricsConfig,
+    OfflineSettings,
+    OnlineSettings,
+    ProfilingConfig,
+    RuntimeConfig,
+    Settings,
+    WarmupConfig,
+)
 from .timeouts import Timeouts
 from .utils import parse_dataset_string, resolve_env_vars
 
+# Re-exported schema surface: models live in focused sibling modules
+# (enums/audit/model_params/datasets/settings/timeouts); this module remains
+# the single import point and owns the top-level BenchmarkConfig.
+__all__ = [
+    "APIType",
+    "AccuracyConfig",
+    "AgenticInferenceConfig",
+    "AuditConfig",
+    "AuditTestId",
+    "BenchmarkConfig",
+    "Dataset",
+    "DatasetType",
+    "EndpointConfig",
+    "EvalMethod",
+    "LoadPattern",
+    "LoadPatternType",
+    "MetricsConfig",
+    "ModelParams",
+    "OSLDistribution",
+    "OSLDistributionType",
+    "OfflineBenchmarkConfig",
+    "OfflineSettings",
+    "OnlineBenchmarkConfig",
+    "OnlineSettings",
+    "OutputCachingTestConfig",
+    "ProfilerEngine",
+    "ProfilingConfig",
+    "RuntimeConfig",
+    "ScorerMethod",
+    "Settings",
+    "StreamingMode",
+    "SubmissionReference",
+    "TestMode",
+    "TestType",
+    "Timeouts",
+    "WarmupConfig",
+]
+
 logger = logging.getLogger(__name__)
-
-
-class SystemDefaults(BaseModel):
-    DEFAULT_TIMEOUT: ClassVar[float] = 300.0
-    DEFAULT_METRIC: ClassVar[metrics.Metric] = metrics.Throughput(0.0)
-
-
-def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
-    """Recursively merge ``override`` into ``base`` and return the result.
-
-    For overlapping keys whose values are both dicts, recurse; otherwise the
-    override value wins. Mutates a *copy* — callers can safely pass model_dump()
-    output. Used by ``Dataset.effective_generation_config`` so a sparse nested
-    override (e.g. ``{osl_distribution: {max: 512}}``) preserves siblings.
-    """
-    out = dict(base)
-    for k, v in override.items():
-        if isinstance(v, dict) and isinstance(out.get(k), dict):
-            out[k] = _deep_merge(out[k], v)
-        else:
-            out[k] = v
-    return out
-
-
-# ModelParams fields that drive the single global tokenizer / MetricsAggregator
-# (launched once from top-level model_params), so a per-dataset override would
-# desync ISL/OSL/TTFT/TPOT accounting without changing what is measured. Rejected
-# as generation_config_override keys — they are per-run/identity, not per-dataset.
-_METRICS_DECOUPLED_OVERRIDE_KEYS = frozenset({"name", "streaming", "tokenizer_name"})
-
-
-def _non_default_completion_controls(mp: ModelParams) -> list[str]:
-    """Completion-only ModelParams controls set to a non-default value.
-
-    ``min_new_tokens``/``skip_special_tokens`` are only honored by the
-    ``openai_completions`` adapter; ``BenchmarkConfig`` rejects them for other
-    ``api_type``s. Shared by the top-level and per-dataset-override checks so
-    both config surfaces validate identically.
-    """
-    checks = {
-        "min_new_tokens": mp.min_new_tokens != 1,
-        "skip_special_tokens": not mp.skip_special_tokens,
-    }
-    return [name for name, non_default in checks.items() if non_default]
-
-
-class LoadPatternType(str, Enum):
-    """Load pattern types."""
-
-    MAX_THROUGHPUT = "max_throughput"  # Offline: all queries at t=0
-    POISSON = "poisson"  # Online: fixed QPS with Poisson distribution
-    CONCURRENCY = "concurrency"  # Online: fixed concurrent requests
-    AGENTIC_INFERENCE = (
-        "agentic_inference"  # Agentic inference conversations with turn sequencing
-    )
-    BURST = "burst"  # Burst pattern (TODO)
-    STEP = "step"  # Step pattern (TODO)
-
-
-class OSLDistributionType(str, Enum):
-    """Output Sequence Length distribution types."""
-
-    ORIGINAL = "original"  # Use original distribution from dataset (default)
-    FIXED = "fixed"  # Fixed length for all outputs
-    UNIFORM = "uniform"  # Uniform distribution between min and max
-    NORMAL = "normal"  # Normal/Gaussian distribution
-
-
-class DatasetType(str, Enum):
-    """Dataset purpose type."""
-
-    PERFORMANCE = "performance"
-    ACCURACY = "accuracy"
-
-
-class EvalMethod(str, Enum):
-    """Evaluation methods for accuracy testing."""
-
-    EXACT_MATCH = "exact_match"
-    CONTAINS = "contains"
-    JUDGE = "judge"
-
-
-class ScorerMethod(str, Enum):
-    """Registered scorer methods for accuracy evaluation."""
-
-    PASS_AT_1 = "pass_at_1"
-    STRING_MATCH = "string_match"
-    ROUGE = "rouge"
-    CODE_BENCH = "code_bench_scorer"
-    SHOPIFY_CATEGORY_F1 = "shopify_category_f1"
-    AGENTIC_INFERENCE_INLINE = "agentic_inference_inline"
-    VBENCH = "vbench"
-    BFCL_V4 = "bfcl_v4"
-    LEGACY_MLPERF_DEEPSEEK_R1 = "legacy_mlperf_deepseek_r1"
-
-
-class AuditTestId(str, Enum):
-    """Registered compliance audit test identifiers."""
-
-    # Output-caching audit — MLPerf TEST04 (duplicate-query caching detection).
-    OUTPUT_CACHING_TEST = "output_caching_test"
-
-
-class OutputCachingTestConfig(BaseModel):
-    """Configuration for the output-caching audit (MLPerf TEST04).
-
-    The output-caching test runs two back-to-back phases — a reference run of
-    distinct samples and an audit run that repeats one fixed sample — then
-    checks that the audit QPS does not exceed the reference QPS by more than
-    ``threshold``. A large speedup indicates the SUT is caching responses.
-
-    samples: reference-phase query count (required — an explicit count keeps
-        the per-phase completion check meaningful; a duration-driven phase has
-        no independent target to validate completion against)
-    audit_samples: audit-phase query count (None → equals samples)
-    sample_index: which dataset row is repeated (MLCommons performance_issue_same_index)
-    threshold: tolerance shared by both pass checks — each phase must complete
-        ≥ requested * (1 - threshold), and audit_qps must stay < ref_qps * (1 + threshold)
-    """
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    test: Literal[AuditTestId.OUTPUT_CACHING_TEST]
-    only: bool = Field(
-        False,
-        description="Run only the audit — skip the main benchmark (upstream-style standalone TEST04)",
-    )
-    samples: int = Field(..., ge=1, description="Reference phase query count")
-    audit_samples: int | None = Field(
-        None, ge=1, description="Audit phase query count (default: equals samples)"
-    )
-    sample_index: int = Field(
-        0, ge=0, description="Dataset row index repeated in the audit phase"
-    )
-    threshold: float = Field(
-        0.10,
-        gt=0,
-        lt=1,
-        description=(
-            "Tolerance for both checks: each phase must complete "
-            "≥ requested * (1 - threshold), and audit_qps must stay "
-            "< ref_qps * (1 + threshold)"
-        ),
-    )
-
-
-# Single member today; becomes
-# Annotated[OutputCachingTestConfig | ..., Field(discriminator="test")]
-# when additional audit tests are added.
-AuditConfig = OutputCachingTestConfig
-
-
-class TestMode(str, Enum):
-    """Test mode determining what to collect.
-
-    - PERF: Performance metrics only (no response storage)
-    - ACC: Accuracy metrics (collect and evaluate responses)
-    - BOTH: Both performance and accuracy (selective collection by dataset type)
-    """
-
-    PERF = "perf"
-    ACC = "acc"
-    BOTH = "both"
-
-
-class StreamingMode(str, Enum):
-    """Streaming mode for response handling.
-
-    - AUTO: Automatically enable for online mode, disable for offline mode
-    - ON: Force streaming enabled (for TTFT metrics)
-    - OFF: Force streaming disabled
-    """
-
-    AUTO = "auto"
-    ON = "on"
-    OFF = "off"
-
-
-class TestType(str, Enum):
-    """Test type for both config classification and execution mode.
-
-    - OFFLINE: Max throughput benchmark (all queries at t=0)
-    - ONLINE: Sustained QPS benchmark (Poisson or concurrency-based)
-    - EVAL: Accuracy evaluation
-    - SUBMISSION: Official submission (may include both perf and accuracy)
-    """
-
-    OFFLINE = "offline"
-    ONLINE = "online"
-    EVAL = "eval"
-    SUBMISSION = "submission"
-
-
-# Mapping from template type strings to TestType enums
-# Single source of truth for template type conversion
-TEMPLATE_TYPE_MAP = {
-    "offline": TestType.OFFLINE,
-    "online": TestType.ONLINE,
-    "eval": TestType.EVAL,
-    "submission": TestType.SUBMISSION,
-}
-
-
-class OSLDistribution(BaseModel):
-    """Output Sequence Length distribution configuration.
-
-    Distribution types:
-    - ORIGINAL: Use the natural distribution from the dataset (default)
-    - FIXED: All outputs have the same length (uses mean value)
-    - UNIFORM: Uniformly distributed between min and max
-    - NORMAL: Normal/Gaussian distribution with mean and std
-    """
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    type: OSLDistributionType = Field(
-        OSLDistributionType.ORIGINAL, description="Distribution type"
-    )
-    mean: int | None = Field(None, description="Mean length (FIXED/NORMAL)")
-    std: int | None = Field(None, description="Std deviation (NORMAL)")
-    min: Annotated[
-        int,
-        cyclopts.Parameter(alias="--min-output-tokens", help="Minimum output length"),
-    ] = 1
-    max: int = Field(2048, description="Maximum output length")
-
-
-class ModelParams(BaseModel):
-    """Model generation parameters."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
-
-    name: Annotated[
-        str,
-        cyclopts.Parameter(alias="--model", help="Model name", required=True),
-    ] = ""
-    temperature: float | None = Field(None, description="Sampling temperature")
-    seed: Annotated[
-        int | None,
-        cyclopts.Parameter(
-            alias="--seed", help="Random seed for reproducible sampling"
-        ),
-    ] = Field(None, description="Random seed for reproducible sampling")
-    top_k: int | None = Field(None, description="Top-K sampling")
-    top_p: float | None = Field(None, description="Top-P (nucleus) sampling")
-    repetition_penalty: float | None = Field(None, description="Repetition penalty")
-    presence_penalty: float | None = Field(None, description="Presence penalty")
-    frequency_penalty: float | None = Field(None, description="Frequency penalty")
-    chat_template_kwargs: dict[str, Any] | None = Field(
-        None,
-        description="Per-request chat-template kwargs forwarded to compatible servers.",
-    )
-    max_new_tokens: Annotated[
-        int, cyclopts.Parameter(alias="--max-output-tokens", help="Max output tokens")
-    ] = 1024
-    min_new_tokens: int = Field(
-        1,
-        ge=0,
-        description="Minimum output tokens for OpenAI text-completions servers",
-    )
-    skip_special_tokens: bool = Field(
-        True,
-        description=(
-            "Whether OpenAI text-completions servers omit special tokens from decoded output"
-        ),
-    )
-    osl_distribution: OSLDistribution | None = Field(
-        None, description="Output sequence length distribution"
-    )
-    streaming: Annotated[
-        StreamingMode,
-        cyclopts.Parameter(alias="--streaming", help="Streaming mode: auto/on/off"),
-    ] = StreamingMode.AUTO
-    tokenizer_name: Annotated[
-        str | None,
-        cyclopts.Parameter(
-            alias="--tokenizer",
-            help="HF repo ID or local path for the tokenizer. Overrides model name for client-side token metrics (ISL/OSL/TPOT).",
-        ),
-    ] = None
-
-    @model_validator(mode="after")
-    def _validate_generation_lengths(self) -> Self:
-        if self.min_new_tokens > self.max_new_tokens:
-            raise ValueError(
-                "min_new_tokens must be less than or equal to max_new_tokens"
-            )
-        return self
-
-
-class SubmissionReference(BaseModel):
-    """Reference configuration for official benchmark submissions.
-
-    Links a submission to a specific model and ruleset (competition rules).
-    The ruleset defines constraints like min duration, sample counts, and
-    performance targets that must be met for a valid submission.
-
-    Example:
-        submission_ref:
-          model: "llama-2-70b"
-          ruleset: "mlperf-inference-v5.1"
-    """
-
-    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
-
-    model: str  # Model identifier (e.g., "llama-2-70b")
-    ruleset: str  # Ruleset name/version (e.g., "mlperf-inference-v5.1")
-
-    def get_ruleset_instance(self) -> BenchmarkSuiteRuleset:
-        """Get the actual ruleset instance from registry.
-
-        Returns:
-            BenchmarkSuiteRuleset instance
-
-        Raises:
-            KeyError: If ruleset not found in registry
-        """
-        from .ruleset_registry import get_ruleset
-
-        return get_ruleset(self.ruleset)
-
-
-class AgenticInferenceConfig(BaseModel):
-    """Agentic inference conversation configuration.
-
-    Configuration for benchmarking conversational AI workloads with turn sequencing.
-    Enables testing agentic inference conversations where each turn depends on previous responses.
-    Presence of this block in the dataset config enables agentic inference mode.
-
-    Attributes:
-        turn_timeout_s: Deadline between issuing a turn and receiving its
-            response. A timeout aborts that turn and all remaining client
-            turns of the same conversation because subsequent turns depend
-            on the timed-out response.
-    """
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    turn_timeout_s: float = Field(
-        default=86400.0,
-        gt=0,
-        description=(
-            "Per-turn timeout in seconds. A timeout aborts that turn and all "
-            "remaining turns in the same conversation."
-        ),
-    )
-    enable_salt: bool = Field(
-        False,
-        description=(
-            "Add deterministic salt markers before and after the system prompt "
-            "to prevent KV cache reuse across trajectories in agentic inference setting."
-        ),
-    )
-    inject_tool_delay: bool = Field(
-        False,
-        description=(
-            "Pause for a predefined duration between turns. Duration is defined "
-            "in dataset."
-        ),
-    )
-    num_trajectories_to_issue: int | None = Field(
-        default=None,
-        gt=0,
-        description=(
-            "Number of conversation trajectories to start. Defaults to one pass "
-            "over the dataset; values above the dataset size repeat trajectories "
-            "with unique logical conversation ids."
-        ),
-    )
-    stop_issuing_on_first_user_complete: bool = Field(
-        False,
-        description=(
-            "When performance tracking stops because the first concurrency slot "
-            "has no next trajectory left to assign, also stop issuing future "
-            "turns. If false, replay continues outside the performance window "
-            "for accuracy/log coverage."
-        ),
-    )
-
-
-class Dataset(BaseModel):
-    """Dataset configuration.
-
-    Name and type have smart defaults: name is auto-derived from path,
-    type defaults to PERFORMANCE.
-
-    Accepts CLI strings via BeforeValidator on BenchmarkConfig.datasets:
-    ``[perf|acc:]<path>[,key=value...]``
-    """
-
-    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
-
-    name: str = Field("", description="Dataset name (auto-derived from path if empty)")
-    type: DatasetType = Field(
-        DatasetType.PERFORMANCE, description="Dataset purpose: performance or accuracy"
-    )
-    path: Annotated[
-        str | None, cyclopts.Parameter(alias="--dataset", help="Dataset file path")
-    ] = None
-    format: str | None = Field(None, description="Dataset format (auto-detected)")
-    samples: int | None = Field(None, gt=0, description="Number of samples to use")
-    eval_method: EvalMethod | None = Field(
-        None, description="Accuracy evaluation method"
-    )
-    parser: dict[str, str] | None = Field(
-        None, description="Column remapping: {prompt: <col>, system: <col>}"
-    )
-    generate_params: dict[str, Any] | None = Field(
-        None, description="Dataset-specific parameters passed to the generate() method"
-    )
-    accuracy_config: AccuracyConfig | None = Field(
-        None, description="Accuracy evaluation settings"
-    )
-    agentic_inference: AgenticInferenceConfig | None = Field(
-        None, description="Agentic inference conversation configuration"
-    )
-    # Per-dataset generation config is a first-class capability: different
-    # accuracy datasets legitimately want different generation settings (e.g.
-    # per-dataset max OSL or top_p, as seen in DS-V4), and dataset-scoping also
-    # enables per-dataset dynamic OSL distributions. Only generation knobs are
-    # overridable — per-run/identity fields (`_METRICS_DECOUPLED_OVERRIDE_KEYS`:
-    # name / streaming / tokenizer_name) drive the single global tokenizer and
-    # MetricsAggregator, so overriding them per-dataset would desync ISL/OSL/
-    # TTFT/TPOT accounting; they are rejected at validation.
-    #
-    # TODO(post-mortem): split ModelParams into a per-run ModelIdentity and a
-    # GenerationConfig, so the override surface is exactly the generation fields
-    # and identity fields cannot be named here at all. Field/method names use
-    # "generation_config" to keep that migration mechanical.
-    #
-    # Nested dicts (`osl_distribution`, `chat_template_kwargs`) are deep-merged
-    # so sparse overrides preserve sibling defaults.
-    generation_config_override: dict[str, Any] | None = Field(
-        None,
-        description=(
-            "Per-dataset overrides for the top-level model_params (sparse — "
-            "only the fields you want to override). Merged on top of "
-            "BenchmarkConfig.model_params at dataset-load time. Useful for "
-            "MLPerf-style runs where accuracy and performance use different "
-            "output budgets in the same fleet, e.g. "
-            "generation_config_override: {max_new_tokens: 32768, "
-            "temperature: 0.0}. NOTE: per-run/identity keys (`name`, "
-            "`streaming`, `tokenizer_name`) are rejected here — set them on "
-            "top-level model_params."
-        ),
-    )
-
-    @model_validator(mode="after")
-    def _auto_derive_name(self) -> Self:
-        """Derive name from path stem if not explicitly provided."""
-        if not self.name and self.path:
-            object.__setattr__(self, "name", Path(self.path).stem)
-        return self
-
-    @model_validator(mode="after")
-    def _validate_generation_config_override(self) -> Self:
-        """Fail fast on unknown keys and on per-run/identity keys the single
-        global tokenizer / MetricsAggregator would ignore. Override *values*
-        are validated at merge time (see ``effective_generation_config``)
-        because cross-field validation needs the base ``ModelParams`` from
-        ``BenchmarkConfig``.
-        """
-        if self.generation_config_override:
-            keys = set(self.generation_config_override)
-            valid = set(ModelParams.model_fields)
-            bad = sorted(keys - valid)
-            if bad:
-                raise ValueError(
-                    f"Dataset '{self.name}': unknown keys in "
-                    f"generation_config_override: {bad}. "
-                    f"Valid keys: {sorted(valid)}"
-                )
-            decoupled = sorted(keys & _METRICS_DECOUPLED_OVERRIDE_KEYS)
-            if decoupled:
-                raise ValueError(
-                    f"Dataset '{self.name}': generation_config_override keys "
-                    f"{decoupled} are not honored per-dataset — the single "
-                    "global tokenizer / metrics aggregator is launched from "
-                    "top-level model_params, so a per-dataset value would "
-                    "desync ISL/OSL/TTFT/TPOT accounting. Set them on "
-                    "top-level model_params instead."
-                )
-        return self
-
-    def effective_generation_config(self, base: ModelParams) -> ModelParams:
-        """Return base merged with this dataset's generation-config overrides.
-
-        Nested dicts are deep-merged so a sparse nested override preserves
-        sibling defaults (e.g. ``{osl_distribution: {max: 512}}`` keeps the
-        base ``type/mean/std/min``). The merged dict is re-validated through
-        ``ModelParams.model_validate`` so type-invalid scalar overrides (e.g.
-        ``temperature: 'hot'``) are rejected. Note that this only catches
-        scalar invalidity — a sparse nested override whose merged result
-        passes default-validation will not raise (callers that need stricter
-        nested validation should set ``base`` to an explicit instance).
-        """
-        if not self.generation_config_override:
-            return base
-        merged = _deep_merge(base.model_dump(), self.generation_config_override)
-        return ModelParams.model_validate(merged)
-
-
-class AccuracyConfig(BaseModel):
-    """Accuracy configuration.
-
-    eval_method: Scorer to use (see ScorerMethod enum for options).
-    ground_truth: Column in the dataset containing ground truth. Defaults to "ground_truth".
-    extractor: Post-processor to extract answers from model output
-        (abcd_extractor, boxed_math_extractor, identity_extractor, python_code_extractor).
-        Optional for scorers that declare REQUIRES_EXTRACTOR = False (e.g. vbench).
-    num_repeats: Number of times to repeat the dataset for evaluation. Defaults to 1.
-    extras: Free-form keyword args forwarded to the scorer's ``__init__`` —
-        used for scorer-specific knobs that don't warrant a top-level field
-        (e.g. ``vbench_project_path``, ``subprocess_timeout_s`` for VBench).
-
-    Example:
-        accuracy_config:
-          eval_method: "pass_at_1"
-          ground_truth: "answer"
-          extractor: "boxed_math_extractor"
-          num_repeats: 5
-          extras:
-            vbench_project_path: "/path/to/accuracy"
-    """
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    eval_method: ScorerMethod | None = Field(None, description="Scorer method")
-    ground_truth: str | None = Field(None, description="Ground truth column name")
-    extractor: str | None = Field(
-        None,
-        description="Answer extractor (abcd_extractor, boxed_math_extractor, identity_extractor, python_code_extractor)",
-    )
-    num_repeats: int = Field(
-        1, ge=1, description="Repeat dataset N times for evaluation"
-    )
-    extras: dict[str, Any] | None = Field(
-        None,
-        description="Free-form scorer kwargs (e.g. vbench_project_path, subprocess_timeout_s)",
-    )
-
-
-class RuntimeConfig(BaseModel):
-    """Runtime configuration.
-
-    Sample count priority (in RuntimeSettings.total_samples_to_issue()):
-    1. n_samples_to_issue (if specified) — explicit override
-    2. Calculated from QPS * duration — duration-based (default: 600000ms)
-    3. All dataset samples — fallback when duration is 0
-
-    Durations live in ``settings.timeouts`` (see ``config/timeouts.py``).
-    """
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    n_samples_to_issue: Annotated[
-        int | None,
-        cyclopts.Parameter(alias="--num-samples", help="Sample count override"),
-    ] = Field(None, gt=0)
-    scheduler_random_seed: int = Field(42, description="Scheduler RNG seed")
-    dataloader_random_seed: int = Field(42, description="Dataloader RNG seed")
-
-
-@cyclopts.Parameter(name="*")
-class LoadPattern(BaseModel):
-    """Load pattern configuration.
-
-    Different patterns use target_qps differently:
-    - max_throughput: target_qps used for calculating total queries (offline, optional with default)
-    - poisson: target_qps sets scheduler rate (online, required - validated)
-    - concurrency: issue at fixed target_concurrency (online, required - validated)
-    """
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    type: Annotated[
-        LoadPatternType,
-        cyclopts.Parameter(name="--load-pattern", help="Load pattern type"),
-    ] = LoadPatternType.MAX_THROUGHPUT
-    target_qps: Annotated[
-        float | None, cyclopts.Parameter(alias="--target-qps", help="Target QPS")
-    ] = Field(None, gt=0)
-    target_concurrency: Annotated[
-        int | None,
-        cyclopts.Parameter(alias="--concurrency", help="Concurrent requests"),
-    ] = Field(None, gt=0)
-
-    # TODO(vir): remove once the formal tail-cutting mechanism lands.
-    use_legacy_loadgen_qps_metrics: Annotated[
-        bool,
-        cyclopts.Parameter(
-            negative="--no-use-legacy-loadgen-qps-metrics",
-            help=(
-                "Only applies to the poisson load pattern. Report QPS/TPS using "
-                "the legacy MLPerf LoadGen Server 'completed' definition — (completed-1)/T "
-                "and tokens/T, T = first issued request to completion of the "
-                "last-issued request (see mlcommons/inference loadgen/results.cc). "
-                "--no-... uses endpoints-native completed/duration. Ignored for "
-                "non-poisson patterns."
-            ),
-        ),
-    ] = True
-
-    @model_serializer(mode="wrap")
-    def _serialize(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
-        # use_legacy_loadgen_qps_metrics only applies to poisson; drop it from
-        # the serialized form (and thus YAML templates) for other patterns.
-        data = handler(self)
-        if self.type != LoadPatternType.POISSON:
-            data.pop("use_legacy_loadgen_qps_metrics", None)
-        return data
-
-    @model_validator(mode="after")
-    def _validate_completeness(self) -> Self:
-        if self.type == LoadPatternType.POISSON and (
-            self.target_qps is None or self.target_qps <= 0
-        ):
-            raise ValueError("Poisson requires --target-qps (e.g., --target-qps 100)")
-        if self.type == LoadPatternType.CONCURRENCY and (
-            not self.target_concurrency or self.target_concurrency <= 0
-        ):
-            raise ValueError(
-                "Concurrency requires --concurrency (e.g., --concurrency 10)"
-            )
-        if self.type == LoadPatternType.AGENTIC_INFERENCE and (
-            not self.target_concurrency or self.target_concurrency <= 0
-        ):
-            raise ValueError(
-                "Agentic inference requires --concurrency (e.g., --concurrency 96)"
-            )
-        return self
-
-    def __str__(self) -> str:
-        """Human-readable "type (param=value)" form for logging, e.g.
-        ``concurrency (target_concurrency=7)`` / ``poisson (target_qps=10.0)``.
-        Patterns without a driving parameter render as just the type name.
-        """
-        if self.type in (
-            LoadPatternType.CONCURRENCY,
-            LoadPatternType.AGENTIC_INFERENCE,
-        ):
-            return f"{self.type.value} (target_concurrency={self.target_concurrency})"
-        if self.type == LoadPatternType.POISSON:
-            return f"{self.type.value} (target_qps={self.target_qps})"
-        return self.type.value
-
-
-@cyclopts.Parameter(name="*")
-class WarmupConfig(BaseModel):
-    """Warmup phase configuration. Runs before the performance phase; results are not recorded."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    enabled: Annotated[
-        bool,
-        cyclopts.Parameter(
-            alias="--warmup", help="Enable warmup phase before performance run"
-        ),
-    ] = Field(False, description="Enable warmup phase before performance run")
-    n_requests: Annotated[
-        int | None,
-        cyclopts.Parameter(
-            alias="--warmup-requests",
-            help="Warmup request count (None = full dataset once)",
-        ),
-    ] = Field(None, gt=0, description="Warmup request count (None = full dataset once)")
-    salt: Annotated[
-        bool,
-        cyclopts.Parameter(
-            alias="--warmup-salt",
-            help="Prepend a unique random hex salt to each warmup prompt",
-        ),
-    ] = Field(
-        True, description="Prepend a unique random hex salt to each warmup prompt"
-    )
-    drain: Annotated[
-        bool,
-        cyclopts.Parameter(
-            alias="--warmup-drain",
-            help="Drain in-flight warmup requests before starting the performance phase",
-        ),
-    ] = Field(
-        False,
-        description="Drain in-flight warmup requests before starting the performance phase",
-    )
-    warmup_random_seed: Annotated[
-        int,
-        cyclopts.Parameter(
-            alias="--warmup-seed",
-            help="RNG seed for warmup scheduling and sample ordering",
-        ),
-    ] = Field(42, description="RNG seed for warmup scheduling and sample ordering")
-
-
-class MetricsConfig(BaseModel):
-    """Metrics-aggregator tuning knobs (non-timeout; deadlines live in Timeouts)."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    tokenizer_workers: Annotated[
-        int,
-        cyclopts.Parameter(
-            alias="--metrics-tokenizer-workers",
-            help=(
-                "In-process tokenizer threads for live (mid-run) ISL/OSL/TPOT in "
-                "the metrics aggregator. 0 defers all tokenization to the "
-                "end-of-run drain, which always uses the auto-sized sharded pool."
-            ),
-        ),
-    ] = Field(
-        2,
-        ge=0,
-        description=(
-            "In-process tokenizer threads for live (mid-run) ISL/OSL/TPOT "
-            "(default: 2; 0 = defer everything to the end-of-run drain)."
-        ),
-    )
-
-
-class ProfilerEngine(str, Enum):
-    """Inference engine whose profiling protocol the client should drive.
-
-    Selects the HTTP path layout used to derive start/stop URLs from
-    ``endpoint_config.endpoints``. Each value corresponds to one server-side
-    profiling protocol; add a new variant + ``_PROFILE_PATHS`` row to support
-    another engine.
-    """
-
-    VLLM = "vllm"
-
-
-@cyclopts.Parameter(name="*")
-class ProfilingConfig(BaseModel):
-    """Client-side trigger for the server's profiler.
-
-    When ``engine`` is set, fires POST ``<start_path>`` at performance-phase
-    begin and POST ``<stop_path>`` at performance-phase end. URLs are derived
-    using the engine-specific protocol from ``urls`` when set, otherwise
-    from ``endpoint_config.endpoints``.
-    Server must be launched with profiling enabled (e.g. vLLM's
-    ``--profiler-config.profiler=cuda|torch``); the schedule
-    (``delay_iterations``, ``max_iterations``) is set there, not here.
-    """
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    engine: Annotated[
-        ProfilerEngine | None,
-        cyclopts.Parameter(
-            alias="--profile",
-            help="Profile the named inference engine around the performance phase",
-        ),
-    ] = Field(
-        None,
-        description="Profile the named inference engine around the performance phase",
-    )
-    urls: Annotated[
-        list[str] | None,
-        cyclopts.Parameter(
-            alias="--profile-urls",
-            help="Override URL(s) for profiler triggers; "
-            "defaults to endpoint_config.endpoints",
-            negative="",
-        ),
-    ] = Field(
-        None,
-        description="URL(s) the profiler start/stop triggers are derived from. "
-        "When None, derived from endpoint_config.endpoints instead. Use when "
-        "the profiler admin endpoint differs from the inference endpoint.",
-    )
-
-    @field_validator("urls", mode="after")
-    @classmethod
-    def _validate_url_scheme(cls, v: list[str] | None) -> list[str] | None:
-        if v is None:
-            return v
-        for url in v:
-            if not url.startswith(("http://", "https://")):
-                raise ValueError(
-                    f"Profiling endpoint URL must include scheme "
-                    f"(http:// or https://), got: {url!r}"
-                )
-        return v
-
-
-@cyclopts.Parameter(name="*")
-class Settings(BaseModel):
-    """Test settings."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
-    load_pattern: LoadPattern = Field(default_factory=LoadPattern)
-    client: HTTPClientConfig = Field(default_factory=HTTPClientConfig)
-    timeouts: Timeouts = Field(
-        default_factory=Timeouts,
-        description="All global durations and deadlines (see config/timeouts.py)",
-    )
-    metrics: MetricsConfig = Field(default_factory=MetricsConfig)
-    warmup: WarmupConfig = Field(default_factory=WarmupConfig)
-    profiling: ProfilingConfig = Field(default_factory=ProfilingConfig)
-
-
-class OfflineSettings(Settings):
-    """Offline mode default settings."""
-
-    load_pattern: Annotated[LoadPattern, cyclopts.Parameter(show=False)] = Field(
-        default_factory=lambda: LoadPattern(type=LoadPatternType.MAX_THROUGHPUT)
-    )
-
-
-class OnlineSettings(Settings):
-    """Online mode default settings."""
-
-    pass
 
 
 class EndpointConfig(BaseModel):

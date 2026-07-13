@@ -54,7 +54,7 @@ repos:
         entry: python scripts/regenerate_templates.py
         language: system
         pass_filenames: false
-        files: ^(src/inference_endpoint/config/(schema\.py|templates/.*)|src/inference_endpoint/endpoint_client/config\.py|scripts/regenerate_templates\.py)$
+        files: ^(src/inference_endpoint/config/((schema|enums|audit|model_params|datasets|settings|timeouts)\.py|templates/.*)|src/inference_endpoint/endpoint_client/config\.py|scripts/regenerate_templates\.py)$
 
       - id: add-license-header
         name: Add license headers
