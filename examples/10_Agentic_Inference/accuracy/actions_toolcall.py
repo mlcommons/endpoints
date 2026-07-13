@@ -158,7 +158,7 @@ def parse_toolcall_actions(
                     p = p[len("testbed/") :]
                 return p
 
-            files_str = " ".join(shlex.quote(f"/testbed/{_to_rel(f)}") for f in files)
+            files_str = " ".join(shlex.quote(_to_rel(f)) for f in files)
             actions.append(
                 {
                     "command": f"echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && git -C /testbed diff HEAD -- {files_str}",
@@ -175,8 +175,7 @@ def parse_toolcall_actions(
                     start, end = view_range
                     bash_cmd = (
                         f"awk 'NR>={start} && NR<={end} "
-                        f'{{printf "%6d\\t%s\\n", NR, $0}}\' '
-                        f"{shlex.quote(path)}"
+                        f'{{printf "%6d\\t%s\\n", NR, $0}}\' {shlex.quote(path)}'
                     )
                 else:
                     bash_cmd = f"cat -n {shlex.quote(path)}"

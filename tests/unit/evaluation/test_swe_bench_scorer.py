@@ -823,6 +823,16 @@ class TestSWEBenchScorer:
         with pytest.raises(ValueError, match="model_params.name is required"):
             scorer.score()
 
+    @pytest.mark.parametrize("config_text", ["", "[]", "not-a-mapping"])
+    def test_score_non_mapping_config_raises(
+        self, report_dir, swe_bench_project, template_yaml, config_text
+    ):
+        (report_dir / "config.yaml").write_text(config_text)
+        scorer = _make_scorer(report_dir, swe_bench_project, template_yaml)
+
+        with pytest.raises(ValueError, match="benchmark config.*YAML mapping"):
+            scorer.score()
+
     def test_template_missing_model_kwargs_raises(
         self, report_dir, swe_bench_project, tmp_path
     ):
@@ -836,6 +846,61 @@ class TestSWEBenchScorer:
                 swe_bench_project_path=swe_bench_project,
                 swebench_config_template=bad_template,
             )
+
+    @pytest.mark.parametrize("template_text", ["", "[]", "not-a-mapping"])
+    def test_template_non_mapping_raises(
+        self, report_dir, swe_bench_project, tmp_path, template_text
+    ):
+        bad_template = tmp_path / "bad_template.yaml"
+        bad_template.write_text(template_text)
+
+        with pytest.raises(ValueError, match="YAML mapping"):
+            SWEBenchScorer(
+                dataset_name=_DATASET_NAME,
+                dataset=_make_dataset(),
+                report_dir=report_dir,
+                swe_bench_project_path=swe_bench_project,
+                swebench_config_template=bad_template,
+            )
+
+    @pytest.mark.parametrize(
+        ("max_eval_workers", "expected_match"),
+        [(0, ">= 1"), (-1, ">= 1"), ("bad", "must be an integer")],
+    )
+    def test_invalid_max_eval_workers_raises(
+        self,
+        report_dir,
+        swe_bench_project,
+        template_yaml,
+        max_eval_workers,
+        expected_match,
+    ):
+        with pytest.raises(ValueError, match=expected_match):
+            _make_scorer(
+                report_dir,
+                swe_bench_project,
+                template_yaml,
+                max_eval_workers=max_eval_workers,
+            )
+
+    def test_run_subprocess_replaces_decode_errors(
+        self, report_dir, swe_bench_project, template_yaml, tmp_path, monkeypatch
+    ):
+        captured_kwargs: dict = {}
+
+        def fake_run(cmd, **kwargs):
+            captured_kwargs.update(kwargs)
+            return MagicMock(returncode=0, stdout="ok")
+
+        monkeypatch.setattr(scoring_mod.subprocess, "run", fake_run)
+        scorer = _make_scorer(report_dir, swe_bench_project, template_yaml)
+
+        scorer._run_subprocess(
+            ["python", "-c", "print('ok')"], tmp_path / "run.log", tmp_path
+        )
+
+        assert captured_kwargs["encoding"] == "utf-8"
+        assert captured_kwargs["errors"] == "replace"
 
     def test_subprocess_failure_raises(
         self, report_dir, swe_bench_project, template_yaml, monkeypatch

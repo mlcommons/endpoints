@@ -270,6 +270,13 @@ class TestCLIConfigModels:
             (
                 {
                     "eval_method": "swe_bench_scorer",
+                    "extras": {"workers": None},
+                },
+                32,
+            ),
+            (
+                {
+                    "eval_method": "swe_bench_scorer",
                     "extras": {"workers": 5},
                 },
                 5,

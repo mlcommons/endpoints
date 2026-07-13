@@ -1749,6 +1749,8 @@ def _run_subprocess_with_log(
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout_s,
             cwd=str(cwd) if cwd is not None else None,
             env=env,
@@ -1928,7 +1930,7 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
         self.num_instances = options["num_instances"]
         self.workers = options["workers"]
         self.enable_swebench_toolcall_patch = options[self.TOOLCALL_PATCH_EXTRA]
-        self.max_eval_workers = max_eval_workers
+        self.max_eval_workers = self._validate_max_eval_workers(max_eval_workers)
         self.subprocess_timeout_s = (
             subprocess_timeout_s
             if subprocess_timeout_s is not None
@@ -1973,6 +1975,18 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
             )
         return parsed
 
+    @staticmethod
+    def _validate_max_eval_workers(value: Any) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"max_eval_workers must be an integer; got {value!r}"
+            ) from exc
+        if parsed < 1:
+            raise ValueError(f"max_eval_workers must be >= 1; got {parsed}")
+        return parsed
+
     @classmethod
     def _get_extra_bool(
         cls, extras: dict[str, Any], key: str, *, default: bool = False
@@ -2011,7 +2025,12 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
                 "Pass swebench_config_template= in accuracy_config.extras."
             )
         with template_path.open() as template_file:
-            template = yaml.safe_load(template_file) or {}
+            template = yaml.safe_load(template_file)
+        if not isinstance(template, dict):
+            raise ValueError(
+                f"swebench template {template_path} must be a YAML mapping; "
+                "check the template structure."
+            )
         model_cfg = template.get("model")
         if not isinstance(model_cfg, dict) or not isinstance(
             model_cfg.get("model_kwargs"), dict
@@ -2415,6 +2434,14 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
         """Load template YAML, patch model fields from benchmark config, write to output_dir."""
         with self.swebench_config_template.open() as f:
             cfg = yaml.safe_load(f)
+        if not isinstance(cfg, dict):
+            raise ValueError("swebench template must be a YAML mapping")
+        model_cfg = cfg.get("model")
+        if not isinstance(model_cfg, dict):
+            raise ValueError("swebench template must define a model mapping")
+        model_kwargs = model_cfg.get("model_kwargs")
+        if not isinstance(model_kwargs, dict):
+            raise ValueError("swebench template must define model.model_kwargs")
 
         model_params = benchmark_config_dict.get("model_params") or {}
         endpoint_cfg = benchmark_config_dict.get("endpoint_config") or {}
@@ -2425,18 +2452,18 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
             raise ValueError(
                 "model_params.name is required in the benchmark config but is missing or empty"
             )
-        cfg["model"]["model_name"] = model_name
+        model_cfg["model_name"] = model_name
         if endpoints:
             base = endpoints[0].rstrip("/")
             if base.endswith("/v1"):
                 base = base[:-3]
-            cfg["model"]["model_kwargs"]["api_base"] = base + "/v1"
+            model_kwargs["api_base"] = base + "/v1"
         else:
-            cfg["model"]["model_kwargs"]["api_base"] = ""
+            model_kwargs["api_base"] = ""
 
         api_key = endpoint_cfg.get("api_key")
         if api_key:
-            cfg["model"]["model_kwargs"]["api_key"] = api_key
+            model_kwargs["api_key"] = api_key
 
         for field in (
             "temperature",
@@ -2448,21 +2475,21 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
         ):
             val = model_params.get(field)
             if val is not None:
-                cfg["model"]["model_kwargs"][field] = val
+                model_kwargs[field] = val
             else:
-                cfg["model"]["model_kwargs"].pop(field, None)
+                model_kwargs.pop(field, None)
 
         max_new_tokens_val = model_params.get("max_new_tokens")
         if max_new_tokens_val is not None:
-            cfg["model"]["model_kwargs"]["max_tokens"] = max_new_tokens_val
+            model_kwargs["max_tokens"] = max_new_tokens_val
         else:
-            cfg["model"]["model_kwargs"].pop("max_tokens", None)
+            model_kwargs.pop("max_tokens", None)
 
         chat_tmpl = model_params.get("chat_template_kwargs")
         if chat_tmpl is not None:
-            cfg["model"]["model_kwargs"]["chat_template_kwargs"] = chat_tmpl
+            model_kwargs["chat_template_kwargs"] = chat_tmpl
         else:
-            cfg["model"]["model_kwargs"].pop("chat_template_kwargs", None)
+            model_kwargs.pop("chat_template_kwargs", None)
 
         patched_path = output_dir / "swebench_patched.yaml"
         with patched_path.open("w") as f:
@@ -2497,6 +2524,10 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
             )
         with config_path.open() as f:
             benchmark_cfg = yaml.safe_load(f)
+        if not isinstance(benchmark_cfg, dict):
+            raise ValueError(
+                f"benchmark config at {config_path} must be a YAML mapping"
+            )
 
         model_params = benchmark_cfg.get("model_params") or {}
         model_name = model_params.get("name")

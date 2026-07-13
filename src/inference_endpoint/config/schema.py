@@ -1254,7 +1254,7 @@ class BenchmarkConfig(WithUpdatesMixin, BaseModel):
                 if (
                     acc is not None
                     and acc.eval_method == ScorerMethod.SWE_BENCH
-                    and (acc.extras is None or "workers" not in acc.extras)
+                    and (acc.extras is None or acc.extras.get("workers") is None)
                 ):
                     new_extras = {**(acc.extras or {}), "workers": concurrency}
                     new_acc = acc.model_copy(update={"extras": new_extras})
