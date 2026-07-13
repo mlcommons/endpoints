@@ -1023,11 +1023,14 @@ async def _run_benchmark_async(
                     "be marked INTERRUPTED.",
                     run_timeout_s,
                 )
-                # SIGTERM services first: the aggregator's handler writes the
-                # INTERRUPTED final snapshot. publish_final is idempotent, so
-                # the ENDED-driven finalize after session.stop() is a no-op —
-                # the run can never be reported COMPLETE once this fires.
-                launcher.terminate_all()
+                # SIGTERM the aggregator first: its handler writes the
+                # INTERRUPTED final snapshot (publish_final is first-wins, so
+                # the later ENDED-driven finalize is a no-op). Even if a still-
+                # draining aggregator finalizes as COMPLETE first, run_benchmark
+                # raises on run_timed_out, so a timed-out run always fails
+                # loudly. Targeted (not all services): the event logger flushes
+                # on ENDED, which session.stop() still delivers.
+                launcher.terminate("metrics_aggregator")
                 session.stop()
 
             def _on_perf_phase_timeout() -> None:
@@ -1079,19 +1082,26 @@ async def _run_benchmark_async(
                 session_completed_normally = True
             except Exception as e:
                 if run_timed_out:
-                    # The watchdog SIGTERMed the services before stopping the
-                    # session; a teardown race can surface here as a generic
-                    # exception. Report the timeout, not the symptom.
-                    raise ExecutionError(
-                        f"Run timeout ({run_timeout_s}s) reached; run aborted "
-                        "and report marked INTERRUPTED"
-                    ) from e
-                raise ExecutionError(f"Benchmark execution failed: {e}") from e
+                    # The watchdog already aborted the run; a teardown race can
+                    # surface here as a generic exception. Fall through with an
+                    # empty session result so finalize still writes the
+                    # INTERRUPTED report artifacts — run_benchmark raises the
+                    # timeout ExecutionError after finalization.
+                    logger.exception(
+                        "Session error after run timeout fired "
+                        "(continuing to finalize)"
+                    )
+                    result = SessionResult(
+                        session_id=session_id,
+                        phase_results=[],
+                        start_time_ns=0,
+                        end_time_ns=0,
+                    )
+                else:
+                    raise ExecutionError(f"Benchmark execution failed: {e}") from e
             finally:
                 _timeout_done = True
                 perf_timeout.cancel()
-                if run_watchdog is not None:
-                    run_watchdog.cancel()
                 loop.remove_signal_handler(signal.SIGINT)
                 # Fire /stop_profile for URLs whose /start_profile succeeded.
                 # Unifies the clean phase-end path and the abort path —
@@ -1127,7 +1137,12 @@ async def _run_benchmark_async(
                 )
                 publisher.close()
                 logger.info("Waiting for services to finish processing...")
+                # The run watchdog stays armed through this wait: the metrics
+                # drain is unbounded by default, so run_timeout_s must be able
+                # to SIGTERM a stuck aggregator drain too.
                 await asyncio.to_thread(launcher.wait_for_exit, None)
+                if run_watchdog is not None:
+                    run_watchdog.cancel()
 
                 # Source the snapshot dict for Report:
                 # 1. Preferred: the JSON file the aggregator atomically wrote
@@ -1307,9 +1322,18 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
     # Write scoring artifacts + copy event log from tmpfs to disk
     _write_scoring_artifacts(ctx, result, bench.tmpfs_dir)
 
-    # Accuracy scoring
+    # Accuracy scoring. Skipped entirely when the run watchdog fired: phases
+    # may never have started (scorer init KeyErrors on missing sample maps)
+    # and partial phases would yield misleading subset scores.
     accuracy_scores: dict[str, Any] = {}
-    for eval_cfg in ctx.eval_configs:
+    eval_configs = ctx.eval_configs
+    if bench.run_timed_out and eval_configs:
+        logger.warning(
+            "Run timeout fired — skipping accuracy scoring on partial data "
+            "(scoring artifacts are still salvaged for inspection)"
+        )
+        eval_configs = []
+    for eval_cfg in eval_configs:
         try:
             scorer_instance = eval_cfg.scorer(
                 eval_cfg.dataset_name,

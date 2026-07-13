@@ -187,6 +187,7 @@ class WarmupConfig(BaseModel):
     ] = Field(42, description="RNG seed for warmup scheduling and sample ordering")
 
 
+@cyclopts.Parameter(name="*")
 class MetricsConfig(BaseModel):
     """Metrics-aggregator tuning knobs (non-timeout; deadlines live in Timeouts)."""
 

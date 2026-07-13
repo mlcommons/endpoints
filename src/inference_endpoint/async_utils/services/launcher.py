@@ -69,6 +69,7 @@ class ServiceLauncher:
     def __init__(self, zmq_context: ManagedZMQContext) -> None:
         self._zmq_ctx = zmq_context
         self._procs: list[subprocess.Popen] = []
+        self._modules: list[str] = []
 
     @property
     def procs(self) -> list[subprocess.Popen]:
@@ -118,6 +119,7 @@ class ServiceLauncher:
                 logger.info("Launching service: %s (id=%d)", svc.module, i)
                 proc = subprocess.Popen(cmd)
                 self._procs.append(proc)
+                self._modules.append(svc.module)
 
             await receiver.wait(timeout=timeout)
             logger.info("All %d services ready", len(services))
@@ -151,15 +153,16 @@ class ServiceLauncher:
             if proc.poll() is None:
                 proc.kill()
 
-    def terminate_all(self) -> None:
-        """SIGTERM all managed subprocesses (graceful; see kill_all for SIGKILL).
+    def terminate(self, module_suffix: str) -> None:
+        """SIGTERM managed subprocesses whose module ends with ``module_suffix``.
 
-        The metrics aggregator installs a SIGTERM handler that writes an
-        INTERRUPTED final snapshot before exiting — this is the abort path
-        for the whole-run watchdog.
+        Targeted so the whole-run watchdog can abort the metrics aggregator
+        (whose SIGTERM handler writes an INTERRUPTED final snapshot) without
+        killing the event logger, which flushes its buffer on the session's
+        ENDED event and would lose buffered records on SIGTERM.
         """
-        for proc in self._procs:
-            if proc.poll() is None:
+        for module, proc in zip(self._modules, self._procs, strict=True):
+            if module.endswith(module_suffix) and proc.poll() is None:
                 proc.terminate()
 
     def wait_for_exit(self, timeout: float | None = 60.0) -> None:
