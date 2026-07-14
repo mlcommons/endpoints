@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 import pytest
+from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 _SERVICE_ROOT = (
@@ -20,7 +21,8 @@ _SERVICE_ROOT = (
 sys.path.insert(0, str(_SERVICE_ROOT))
 
 from swebench_service.config import ServiceConfig  # noqa: E402
-from swebench_service.server import create_app  # noqa: E402
+from swebench_service.schemas import RunRequest, RunStatus  # noqa: E402
+from swebench_service.server import RunManager, create_app  # noqa: E402
 
 pytestmark = pytest.mark.unit
 
@@ -368,6 +370,31 @@ async def test_bounded_concurrency_returns_429(tmp_path):
 
     assert first.status == 202
     assert second.status == 429
+
+
+@pytest.mark.asyncio
+async def test_concurrent_submit_reserves_capacity_once(tmp_path):
+    manager = RunManager(
+        config=ServiceConfig(artifact_root=tmp_path, max_concurrent_runs=1),
+        runner=FakeRunner(delay=0.2),
+    )
+    try:
+        manager_request = RunRequest.model_validate(_payload())
+        results = await asyncio.gather(
+            manager.submit(manager_request),
+            manager.submit(manager_request),
+            return_exceptions=True,
+        )
+    finally:
+        await manager.cancel_all_active()
+
+    accepted = [result for result in results if isinstance(result, RunStatus)]
+    rejected = [
+        result for result in results if isinstance(result, web.HTTPTooManyRequests)
+    ]
+    assert len(accepted) == 1
+    assert len(rejected) == 1
+    assert manager.active_count() <= 1
 
 
 @pytest.mark.asyncio

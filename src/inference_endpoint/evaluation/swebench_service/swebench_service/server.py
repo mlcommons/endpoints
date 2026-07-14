@@ -45,6 +45,7 @@ class RunManager:
         self._cancel_tokens: dict[str, CancellationToken] = {}
         self._secret_values: dict[str, set[str]] = {}
         self._semaphore = asyncio.Semaphore(config.max_concurrent_runs)
+        self._submit_lock = asyncio.Lock()
 
     def active_count(self) -> int:
         return sum(
@@ -52,26 +53,27 @@ class RunManager:
         )
 
     async def submit(self, request: RunRequest) -> RunStatus:
-        if self.active_count() >= self.config.max_concurrent_runs:
-            raise web.HTTPTooManyRequests(text="too many active SWE-bench runs")
-        run_id = uuid.uuid4().hex
-        now = time.time()
-        status = RunStatus(
-            run_id=run_id,
-            status="queued",
-            created_at=now,
-            updated_at=now,
-            phase="queued",
-            agent_total=len(request.evaluated_instance_ids),
-            agent_completed=0,
-            eval_total=0,
-            eval_completed=0,
-            message="queued",
-        )
-        self.runs[run_id] = status
-        self._requests[run_id] = request
-        self._cancel_tokens[run_id] = CancellationToken()
-        self._secret_values[run_id] = self._secrets_for_request(request)
+        async with self._submit_lock:
+            if self.active_count() >= self.config.max_concurrent_runs:
+                raise web.HTTPTooManyRequests(text="too many active SWE-bench runs")
+            run_id = uuid.uuid4().hex
+            now = time.time()
+            status = RunStatus(
+                run_id=run_id,
+                status="queued",
+                created_at=now,
+                updated_at=now,
+                phase="queued",
+                agent_total=len(request.evaluated_instance_ids),
+                agent_completed=0,
+                eval_total=0,
+                eval_completed=0,
+                message="queued",
+            )
+            self.runs[run_id] = status
+            self._requests[run_id] = request
+            self._cancel_tokens[run_id] = CancellationToken()
+            self._secret_values[run_id] = self._secrets_for_request(request)
         run_dir = self.run_dir(run_id)
         run_dir.mkdir(parents=True, exist_ok=True)
         (run_dir / "request.json").write_bytes(

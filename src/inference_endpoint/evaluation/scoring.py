@@ -23,6 +23,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 from abc import ABC, abstractmethod
 from collections import Counter, defaultdict
@@ -2315,8 +2316,6 @@ class SWEBenchScorer(Scorer, scorer_id="swe_bench_scorer"):
             if not run_id:
                 raise SetupError("SWE-bench service did not return run_id")
             type(self)._update_progress_bars(submitted, progress_state)
-
-            import time
 
             deadline = time.monotonic() + self.service_timeout_s
             status = submitted
