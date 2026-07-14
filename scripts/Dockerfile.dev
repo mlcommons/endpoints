@@ -2,6 +2,10 @@
 # From project root:
 # docker build -f scripts/Dockerfile.dev --build-arg USER_ID=$(id -u) --build-arg GROUP_ID=$(id -g) -t inference-endpoint-dev .
 # docker run -v $(pwd):/mnt/inference-endpoint -it --shm-size=512m inference-endpoint-dev bash
+#
+# VBench (WAN 2.2) accuracy scorer is OFF by default (lives under examples/, not
+# src/). To bake it in, build with --build-arg PROVISION_VBENCH=1:
+# docker build -f scripts/Dockerfile.dev --build-arg PROVISION_VBENCH=1 --build-arg USER_ID=$(id -u) --build-arg GROUP_ID=$(id -g) -t inference-endpoint-vbench .
 
 FROM python:3.12.11-slim
 
@@ -19,8 +23,11 @@ ENV PYTHONUNBUFFERED=1 \
 # git + curl + ca-certificates support the legacy_mlperf_deepseek_r1 evaluator's setup_eval.sh
 # (it git-clones prm800k / LiveCodeBench at pinned commits) in the provisioning RUN below;
 # without them that step fails and mlperf_eval/ is never baked. (eval_accuracy.py is vendored.)
+# libgl1 + libglib2.0-0: opencv (cv2), pulled in by the VBench accuracy scorer's video
+# reader, needs libGL.so.1 / libgthread at import time (only used when PROVISION_VBENCH=1).
 RUN apt-get update && \
     apt-get install -y --no-install-recommends build-essential procps git curl ca-certificates \
+        libgl1 libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
 RUN mkdir /mnt/inference-endpoint
@@ -38,7 +45,8 @@ RUN if ! getent group ${GROUP_ID}; then \
     fi && \
     useradd -u ${USER_ID} -g ${GROUP_ID} --create-home --shell /bin/bash appuser --no-log-init && \
     chown -R ${USER_ID}:${GROUP_ID} /mnt/inference-endpoint && \
-    mkdir -p /opt/venv && chown ${USER_ID}:${GROUP_ID} /opt/venv
+    mkdir -p /opt/venv /opt/uv-python /opt/vbench_accuracy && \
+    chown ${USER_ID}:${GROUP_ID} /opt/venv /opt/uv-python /opt/vbench_accuracy
 USER appuser
 ENV PATH="/opt/venv/bin:/home/appuser/.local/bin:$PATH"
 
@@ -76,4 +84,33 @@ RUN if [ "${PROVISION_DSR1}" = "1" ]; then \
         UV_PROJECT_ENVIRONMENT="$(pwd)/.venv" bash setup_eval.sh ; \
     else \
         echo "PROVISION_DSR1=${PROVISION_DSR1}: skipping DeepSeek-R1 evaluator provisioning" ; \
+    fi
+
+# Provision the isolated VBench (WAN 2.2) accuracy scorer. Gated by PROVISION_VBENCH
+# (default 0, matching upstream's lean image). VBench lives under examples/ (NOT src/),
+# so the stock build excludes it; turning this on materializes the accuracy uv project
+# at /opt/vbench_accuracy with its OWN .venv, so wan22 `benchmark --mode acc|both` reuses
+# it via UV_NO_SYNC=1 (accuracy configs' vbench_project_path=/opt/vbench_accuracy) — no
+# host checkout, no runtime network.
+#
+# Same isolation rule as DSR1 above: the vbench project pins Python 3.11 + heavy/old deps
+# (torch, decord, vbench 0.1.5 -> transformers 4.33.2 -> tokenizers 0.13.3) that must stay
+# OUT of the main /opt/venv, so every uv call overrides UV_PROJECT_ENVIRONMENT to the
+# subproject's own .venv. Built on a uv-managed Python 3.11 (persisted at /opt/uv-python)
+# because tokenizers 0.13.3 has no cp312 wheel. The pyproject patches relax requires-python
+# and swap decord->decord2 so the venv installs from wheels only — required on aarch64
+# (no decord 0.6.0 / tokenizers cp312 wheels), harmless on x86_64.
+ARG PROVISION_VBENCH=0
+ENV UV_PYTHON_INSTALL_DIR=/opt/uv-python
+COPY --chown=${USER_ID}:${GROUP_ID} examples/09_Wan22_VideoGen_Example/accuracy /opt/vbench_accuracy
+RUN if [ "${PROVISION_VBENCH}" = "1" ]; then \
+        cd /opt/vbench_accuracy && \
+        sed -i 's#requires-python = ">=3.12"#requires-python = ">=3.10"#' pyproject.toml && \
+        sed -i 's#    "vbench==0.1.5",#    "vbench==0.1.5",\n    "decord2>=3.4.0",#' pyproject.toml && \
+        sed -i "s#^package = false#package = false\noverride-dependencies = [\"decord; sys_platform == 'never'\"]#" pyproject.toml && \
+        UV_PROJECT_ENVIRONMENT="$(pwd)/.venv" uv lock --python 3.11 && \
+        UV_PROJECT_ENVIRONMENT="$(pwd)/.venv" uv sync --python 3.11 && \
+        UV_PROJECT_ENVIRONMENT="$(pwd)/.venv" uv run python -c "import torch, decord, tokenizers, vbench; print('vbench', vbench.__file__, '| decord', decord.__version__, '| tokenizers', tokenizers.__version__, '| torch', torch.__version__)" ; \
+    else \
+        echo "PROVISION_VBENCH=${PROVISION_VBENCH}: skipping VBench provisioning" ; \
     fi
