@@ -29,7 +29,7 @@ import sys
 import time
 from decimal import Decimal
 from enum import Enum
-from io import StringIO
+from io import BytesIO, StringIO
 
 # from pyext import RuntimeModule
 from types import ModuleType
@@ -119,7 +119,34 @@ class Capturing(list):
         sys.stdout = self._stdout
 
 
-# Custom mock for sys.stdin that supports buffer attribute
+class MockBuffer:
+    """Bytes-mode stand-in for ``sys.stdin.buffer`` backed by BytesIO so it
+    supports read/readline/readlines AND iteration (``for line in
+    sys.stdin.buffer``)."""
+
+    def __init__(self, inputs: str):
+        self._io = BytesIO(inputs.encode("utf-8"))
+
+    def read(self, *args):
+        return self._io.read(*args)
+
+    def readline(self, *args):
+        return self._io.readline(*args)
+
+    def readlines(self, *args):
+        return self._io.readlines(*args)
+
+    def __iter__(self):
+        return iter(self._io)
+
+    def __next__(self):
+        return next(self._io)
+
+    def __getattr__(self, name):
+        return getattr(self._io, name)
+
+
+# Custom mock for sys.stdin that supports the buffer attribute AND iteration.
 class MockStdinWithBuffer:
     def __init__(self, inputs: str):
         self.inputs = inputs
@@ -127,29 +154,23 @@ class MockStdinWithBuffer:
         self.buffer = MockBuffer(inputs)
 
     def read(self, *args):
-        return self.inputs
+        return self._stringio.read(*args)
 
     def readline(self, *args):
         return self._stringio.readline(*args)
 
     def readlines(self, *args):
-        return self.inputs.split("\n")
+        return self._stringio.readlines(*args)
+
+    def __iter__(self):
+        return iter(self._stringio)
+
+    def __next__(self):
+        return next(self._stringio)
 
     def __getattr__(self, name):
-        # Delegate other attributes to StringIO
+        # Delegate other attributes (e.g. seek, tell) to the backing StringIO
         return getattr(self._stringio, name)
-
-
-class MockBuffer:
-    def __init__(self, inputs: str):
-        self.inputs = inputs.encode("utf-8")  # Convert to bytes
-
-    def read(self, *args):
-        # Return as byte strings that can be split
-        return self.inputs
-
-    def readline(self, *args):
-        return self.inputs.split(b"\n")[0] + b"\n"
 
 
 def clean_if_name(code: str) -> str:
@@ -364,21 +385,36 @@ def grade_stdio(
     ## runtime doesn't interact well with __name__ == '__main__'
     code = clean_if_name(code)
 
-    ## we wrap the given code inside another function
-    code = make_function(code)
-
-    compiled_sol = compile_code(code, timeout)
-    if compiled_sol is None:
-        return
-
-    method = get_function(compiled_sol, "wrapped_function")
-
-    if method is None:
-        return
+    # Execute the solution at MODULE scope (re-exec per test input) instead of
+    # wrapping it in a function. Wrapping in a function turns module-level names
+    # into function locals, which breaks `global` declarations and comprehensions
+    # / nested functions that reference module-level state (the source of the
+    # spurious NameError / UnboundLocalError "Runtime Error" failures). Re-exec
+    # per input mirrors how a real judge runs the program once per test file.
+    full_code = import_string + "\n" + code
+    try:
+        compiled = compile(full_code, "<solution>", "exec")
+    except Exception as e:
+        return [-4], {
+            "error": repr(e),
+            "error_code": -4,
+            "error_message": "Compilation Error",
+        }
 
     all_results = []
     total_execution_time = 0.0
     for gt_inp, gt_out in zip(all_inputs, all_outputs, strict=False):
+        if isinstance(gt_inp, list):
+            gt_inp = "\n".join(gt_inp)
+
+        stdin_mock = MockStdinWithBuffer(gt_inp)
+
+        def _mock_input(*_args, _stdin: MockStdinWithBuffer = stdin_mock) -> str:
+            line = _stdin._stringio.readline()
+            if line == "":
+                raise EOFError("EOF when reading a line")
+            return line.rstrip("\n")
+
         signal.alarm(timeout)
         faulthandler.enable()
 
@@ -386,7 +422,16 @@ def grade_stdio(
         with Capturing() as captured_output:
             try:
                 start = time.time()
-                call_method(method, gt_inp)
+                with (
+                    patch("sys.stdin", stdin_mock),
+                    patch("builtins.input", _mock_input),
+                    patch("builtins.open", mock_open(read_data=gt_inp)),
+                ):
+                    try:
+                        exec(compiled, {"__name__": "__lcb_main__"})
+                    except SystemExit:
+                        # Solutions may call exit()/sys.exit() after printing.
+                        pass
                 total_execution_time += time.time() - start
                 # reset the alarm
                 signal.alarm(0)

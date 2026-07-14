@@ -14,6 +14,7 @@
 # limitations under the License.
 
 
+import ast
 import inspect
 import re
 from abc import ABC, abstractmethod
@@ -146,9 +147,7 @@ class ABCDExtractor(Extractor, extractor_id="abcd_extractor"):
         ),
         # Boxed answers.
         # Examples: "\\boxed{D}", "\\boxed{\\text{A}}", "\\boxed{\\textbf{C}}"
-        re.compile(
-            r"""(?is)\\boxed\{\s*(?:\\(?:text|textbf)\{\s*)?([ABCD])\b"""
-        ),
+        re.compile(r"""(?is)\\boxed\{\s*(?:\\(?:text|textbf)\{\s*)?([ABCD])\b"""),
         # A final standalone line such as "C", "**D**", or "(B)".
         # Examples: final line "A", final line "**D**", final line "(B)"
         re.compile(
@@ -291,11 +290,11 @@ class ABCDExtractor(Extractor, extractor_id="abcd_extractor"):
 
         matches = []
         for prio, pat in enumerate(cls.PATTERNS):
-            m = pat.search(text)
-            if m:
-                letter = m.group(1).upper()
+            sm = pat.search(text)
+            if sm:
+                letter = sm.group(1).upper()
                 if letter in "ABCD":
-                    matches.append((prio, m, letter))
+                    matches.append((prio, sm, letter))
 
         # Sort by priority (lower is better) and then by match length (shorter is better)
         matches.sort(key=lambda triple: (triple[0], len(triple[1].group(0))))
@@ -371,6 +370,44 @@ class PythonCodeExtractor(Extractor, extractor_id="python_code_extractor"):
         '# FAILED'
     """
 
+    @staticmethod
+    def _parses(code: str) -> bool:
+        try:
+            ast.parse(code)
+            return True
+        except (SyntaxError, ValueError):
+            return False
+
+    @classmethod
+    def _select_solution_block(cls, blocks: list[str]) -> str:
+        """Choose the block most likely to be the complete final solution.
+
+        Preference order (last-wins within each tier, since the final rewrite is
+        usually latest):
+          1. Parseable blocks that define a function/class OR read input and
+             write output (a self-contained program), length >= 200.
+          2. Any parseable block of length >= 200.
+          3. Any parseable block.
+          4. The last raw block (previous behaviour) as a last resort.
+        """
+        parseable = [b for b in blocks if cls._parses(b)]
+
+        def _complete(b: str) -> bool:
+            has_def = "def " in b or "class " in b
+            has_in = "input(" in b or "sys.stdin" in b
+            has_out = "print(" in b or "sys.stdout" in b
+            return has_def or (has_in and has_out)
+
+        for b in reversed(parseable):
+            if len(b) >= 200 and _complete(b):
+                return b
+        substantial = [b for b in parseable if len(b) >= 200]
+        if substantial:
+            return substantial[-1]
+        if parseable:
+            return parseable[-1]
+        return blocks[-1]
+
     @classmethod
     def extract(cls, text: str, default: str | None = None) -> str | None:
         if not text or not isinstance(text, str):
@@ -390,33 +427,41 @@ class PythonCodeExtractor(Extractor, extractor_id="python_code_extractor"):
             flags=re.IGNORECASE,
         )
 
-        # Try ```python blocks first (most specific). Pick the last NON-EMPTY
-        # block: models often emit a trailing empty ```python``` (e.g. in a
-        # meta-sentence) after the real solution.
+        # Try ```python blocks first (most specific). Reasoning models (e.g.
+        # DeepSeek-V4) stream their whole rationale into the answer and emit MANY
+        # ```python blocks — full-solution rewrites interleaved with tiny debug
+        # snippets ("idx = i + 1") and non-parseable pseudo-blocks. Blindly
+        # taking the last block often grabs a trailing fragment that references
+        # names defined in an earlier block (→ NameError) or garbage. Instead
+        # pick the last block that looks like a COMPLETE, self-contained solution.
         python_blocks = [
             m.group(1).strip()
-            for m in re.finditer(r"```[ \t]*python[ \t]*\r?\n(.*?)```", text, re.DOTALL | re.IGNORECASE)
+            for m in re.finditer(
+                r"```[ \t]*python[ \t]*\r?\n(.*?)```", text, re.DOTALL | re.IGNORECASE
+            )
         ]
         python_blocks = [c for c in python_blocks if c]
         if python_blocks:
-            return python_blocks[-1]
+            return cls._select_solution_block(python_blocks)
 
-        # Fall back to plain ``` blocks (last non-empty, strip any lang tag).
+        # Fall back to plain ``` blocks (strip any lang tag).
         plain_blocks = []
         for m in re.finditer(r"```(.*?)```", text, re.DOTALL):
-            code = re.sub(r"^(?:python|py)\s*\r?\n", "", m.group(1).strip(), flags=re.IGNORECASE).strip()
+            code = re.sub(
+                r"^(?:python|py)\s*\r?\n", "", m.group(1).strip(), flags=re.IGNORECASE
+            ).strip()
             if code:
                 plain_blocks.append(code)
         if plain_blocks:
-            return plain_blocks[-1]
+            return cls._select_solution_block(plain_blocks)
 
         # Last resort: an unclosed final fence (truncated response). Take from
         # the last opening fence to the end of text.
-        m = re.search(
+        tail_m = re.search(
             r"```[ \t]*(?:python|py)?[ \t]*\r?\n(.*)$", text, re.DOTALL | re.IGNORECASE
         )
-        if m:
-            code = m.group(1).strip().rstrip("`").strip()
+        if tail_m:
+            code = tail_m.group(1).strip().rstrip("`").strip()
             if code:
                 return code
 
