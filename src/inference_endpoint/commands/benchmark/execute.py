@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import numbers
 import random
 import shutil
 import signal
@@ -107,6 +108,7 @@ from inference_endpoint.load_generator.session import (
     SessionResult,
 )
 from inference_endpoint.metrics.report import Report, series_metric_dict
+from inference_endpoint.utils.atomic_write import atomic_write_bytes
 
 transformers_logging.set_verbosity_error()
 
@@ -1423,12 +1425,13 @@ def _score_accuracy(
                 f"for scorer '{eval_cfg.scorer.__name__}': {e}"
             ) from e
         score, n_repeats = scorer_instance.score()
-        # Coerce a numpy scalar score (e.g. np.mean from the base Scorer) to a
-        # native Python float so the entry stays serializable by both msgspec
-        # (result_summary.json) and json (results.json). numpy.float64 is a
-        # float subclass, so isinstance(..., float) catches it while leaving
-        # None / dict (RougeScorer) untouched; float(...) drops the numpy type.
-        if isinstance(score, float):
+        # Coerce a numpy scalar score (np.float32/64, numpy ints — e.g. np.mean
+        # from the base Scorer) to a native Python float so the entry stays
+        # serializable by both msgspec (result_summary.json) and json
+        # (accuracy_results.json). numbers.Real catches every numpy scalar (not
+        # just np.float64, which isinstance(..., float) alone would miss) while
+        # leaving None / dict (RougeScorer) untouched; bool is excluded.
+        if isinstance(score, numbers.Real) and not isinstance(score, bool):
             score = float(score)
         unit_samples = eval_cfg.dataset.num_samples()
         num_repeats = eval_cfg.num_repeats
@@ -1457,6 +1460,10 @@ def _score_accuracy(
             # LegacyMLPerfDeepSeekR1Scorer when lcb-service was unreachable), so a
             # partial number is never mistaken for a complete one.
             "complete": scorer_instance.complete,
+            # Persist the same DatasetType discriminator carried on the eval config
+            # so consumers filter the inline perf-scored entry by type, not by
+            # matching dataset_name == "performance".
+            "dataset_type": eval_cfg.dataset_type.value,
         }
         breakdown = scorer_instance.score_breakdown()
         if breakdown is not None:
@@ -1604,34 +1611,44 @@ def finalize_benchmark(ctx: BenchmarkContext, bench: BenchmarkResult) -> None:
     # and response/error text lives in events.jsonl, so neither is duplicated
     # here. Written only when scoring produced entries — a perf-only run leaves
     # no accuracy/ folder.
-    try:
-        if accuracy_scores:
-            # Plain cross-component mean of the per-dataset scores (3 datasets for
-            # gpt-oss, 1 for DeepSeek-R1); None when nothing numeric was scored.
-            avg_accuracy = average_accuracy(accuracy_scores)
-            # Total finalize-time spent tokenizing accuracy outputs for OSL
-            # (seconds), summed across datasets. Emitted whenever OSL was computed
-            # for at least one dataset — gating on the key's presence, not the
-            # rounded wall-clock, so a sub-millisecond total (tiny outputs) still
-            # records 0.0 rather than silently dropping the field.
-            osl_computed = any("osl_tokenize_s" in e for e in accuracy_scores)
-            osl_tokenization_s = round(
-                sum(e.get("osl_tokenize_s", 0.0) for e in accuracy_scores), 3
-            )
-            accuracy_dir = ctx.report_dir / "accuracy"
+    if accuracy_scores:
+        # Plain cross-component mean of the per-dataset scores (3 datasets for
+        # gpt-oss, 1 for DeepSeek-R1); None when nothing numeric was scored.
+        avg_accuracy = average_accuracy(accuracy_scores)
+        # Total finalize-time spent tokenizing accuracy outputs for OSL (seconds),
+        # summed across datasets. Emitted whenever OSL was computed for at least
+        # one dataset — gating on the key's presence, not the rounded wall-clock,
+        # so a sub-millisecond total (tiny outputs) still records 0.0 rather than
+        # silently dropping the field.
+        osl_computed = any("osl_tokenize_s" in e for e in accuracy_scores)
+        osl_tokenization_s = round(
+            sum(e.get("osl_tokenize_s", 0.0) for e in accuracy_scores), 3
+        )
+        accuracy_dir = ctx.report_dir / "accuracy"
+        accuracy_results_path = accuracy_dir / "accuracy_results.json"
+        accuracy_payload: dict[str, Any] = {}
+        if avg_accuracy is not None:
+            accuracy_payload["average_accuracy"] = avg_accuracy
+        if osl_computed:
+            accuracy_payload["osl_tokenization_s"] = osl_tokenization_s
+        accuracy_payload["accuracy_scores"] = accuracy_scores
+        # Atomic write so a crash mid-write can't leave truncated JSON the
+        # compliance checker would read as corrupt. Not swallowed: if scoring
+        # produced entries but they can't be persisted — the dir can't be made
+        # (OSError), the payload won't serialize (TypeError/ValueError, e.g. a
+        # numpy scalar left in a breakdown block), or the write fails — fail the
+        # run loudly rather than exit 0 with no accuracy artifact.
+        try:
             accuracy_dir.mkdir(parents=True, exist_ok=True)
-            accuracy_results_path = accuracy_dir / "accuracy_results.json"
-            accuracy_payload: dict[str, Any] = {}
-            if avg_accuracy is not None:
-                accuracy_payload["average_accuracy"] = avg_accuracy
-            if osl_computed:
-                accuracy_payload["osl_tokenization_s"] = osl_tokenization_s
-            accuracy_payload["accuracy_scores"] = accuracy_scores
-            with open(accuracy_results_path, "w") as f:
-                json.dump(accuracy_payload, f, indent=2)
-            logger.info(f"Saved: {accuracy_results_path}")
-    except Exception as e:
-        logger.error(f"Save failed: {e}")
+            atomic_write_bytes(
+                accuracy_results_path,
+                json.dumps(accuracy_payload, indent=2).encode(),
+            )
+        except (OSError, TypeError, ValueError) as e:
+            raise ExecutionError(
+                f"Failed to write accuracy results to {accuracy_results_path}: {e}"
+            ) from e
+        logger.info(f"Saved: {accuracy_results_path}")
 
 
 def run_benchmark(

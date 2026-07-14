@@ -36,6 +36,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..config.schema import DatasetType
+
 # Ruleset golden-metric name -> key in the scorer's breakdown block.
 ACCURACY_METRIC_KEYS = {
     "bfcl_overall_accuracy": "overall_accuracy",
@@ -95,15 +97,24 @@ def average_accuracy(accuracy_scores: list[dict[str, Any]]) -> float | None:
 
     One component per accuracy dataset (3 for gpt-oss, 1 for DeepSeek-R1), so the
     result equals the single dataset's score when there is only one. The inline
-    ``"performance"`` entry — a scored perf dataset, not an accuracy component —
-    and any non-numeric score are excluded. Returns ``None`` when no component has
-    a numeric score.
+    perf-scored entry (``dataset_type == "performance"``) — a scored perf dataset,
+    not an accuracy component — and any non-numeric score are excluded. Excluding
+    by the ``dataset_type`` discriminator (not by ``dataset_name == "performance"``)
+    means a dataset legitimately named ``performance`` is still counted. Returns
+    ``None`` when no component has a numeric score.
+
+    Assumes the components share a scale — real runs score one model's same-family
+    datasets (gpt-oss: three fraction ``[0, 1]`` scorers; DeepSeek-R1: one
+    percentage ``[0, 100]`` scorer). A hypothetical run mixing scales would yield a
+    meaningless mean, but magnitude alone can't tell a fraction from a low
+    percentage, so this does not guess; homogenizing the scorer ``score()``
+    contract to one unit is tracked separately.
     """
     values = [
         float(entry["score"])
         for entry in accuracy_scores
         if isinstance(entry, dict)
-        and entry.get("dataset_name") != "performance"
+        and entry.get("dataset_type") != DatasetType.PERFORMANCE.value
         and isinstance(entry.get("score"), int | float)
         and not isinstance(entry.get("score"), bool)
     ]

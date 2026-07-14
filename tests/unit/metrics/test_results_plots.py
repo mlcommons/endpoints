@@ -133,6 +133,51 @@ def test_extract_accuracy_non_bfcl_breakdown_falls_back_to_overall():
 
 
 @pytest.mark.unit
+def test_extract_accuracy_scalar_fallback_when_no_breakdown():
+    """gpt-oss runs three single-metric datasets with no breakdown; without the
+    scalar fallback the plot is empty. One bar per dataset, overall = mean."""
+    results = {
+        "accuracy_scores": [
+            {"dataset_name": "aime25::gptoss", "score": 0.8, "total_samples": 30},
+            {"dataset_name": "gpqa::gptoss", "score": 0.9, "total_samples": 198},
+            {"dataset_name": "lcb::gptoss", "score": 0.7, "total_samples": 100},
+            {
+                "dataset_name": "perf",
+                "score": 0.0,
+                "dataset_type": "performance",
+            },  # excl
+        ]
+    }
+    b = extract_accuracy(results)
+    assert b is not None
+    # Fraction scores are scaled to the plot's 0-100 percentage axis.
+    assert b.subset_scores == {
+        "aime25::gptoss": pytest.approx(80.0),
+        "gpqa::gptoss": pytest.approx(90.0),
+        "lcb::gptoss": pytest.approx(70.0),
+    }
+    assert b.overall == pytest.approx((80.0 + 90.0 + 70.0) / 3)
+    assert b.total_samples == 328  # perf entry excluded
+
+
+@pytest.mark.unit
+def test_extract_accuracy_scalar_fallback_none_cases():
+    # accuracy_scores not a list -> None.
+    assert extract_accuracy({"accuracy_scores": "nope"}) is None
+    # Only a perf entry (no accuracy component) -> None.
+    assert (
+        extract_accuracy(
+            {
+                "accuracy_scores": [
+                    {"dataset_name": "p", "score": 0.0, "dataset_type": "performance"}
+                ]
+            }
+        )
+        is None
+    )
+
+
+@pytest.mark.unit
 def test_extract_turn_scores_handles_str_and_float():
     scores = extract_turn_scores(_perf_scores())
     assert scores == pytest.approx([0.2857, 1.0, 0.3333, 0.5])

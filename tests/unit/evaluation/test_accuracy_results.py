@@ -116,16 +116,45 @@ class TestAverageAccuracy:
 
     def test_excludes_performance_and_non_numeric(self):
         scores = [
-            {"dataset_name": "performance", "score": 999.0},
+            {"dataset_name": "perf", "score": 999.0, "dataset_type": "performance"},
             {"dataset_name": "rouge", "score": {"rougeL": 1.0}},  # non-numeric
             {"dataset_name": "flag", "score": True},  # bool is not a score
             {"dataset_name": "aime", "score": 80.0},
         ]
         assert average_accuracy(scores) == 80.0
 
+    def test_homogeneous_fraction_scores_average(self):
+        scores = [
+            {"dataset_name": "aime", "score": 0.8},
+            {"dataset_name": "gpqa", "score": 0.9},
+        ]
+        assert average_accuracy(scores) == pytest.approx(0.85)
+
+    def test_all_percentage_scores_average_incl_near_zero(self):
+        # A percentage-scale set with a near-zero component must still average —
+        # the removed magnitude guard used to wrongly omit this.
+        scores = [
+            {"dataset_name": "lcb", "score": 0.0},
+            {"dataset_name": "aime", "score": 80.0},
+        ]
+        assert average_accuracy(scores) == pytest.approx(40.0)
+
+    def test_excludes_by_type_not_name(self):
+        # A dataset legitimately named "performance" but of accuracy type is still
+        # counted — exclusion is by dataset_type, not dataset_name.
+        scores = [
+            {"dataset_name": "performance", "score": 90.0, "dataset_type": "accuracy"}
+        ]
+        assert average_accuracy(scores) == 90.0
+
     def test_none_when_nothing_numeric(self):
         assert average_accuracy([]) is None
-        assert average_accuracy([{"dataset_name": "performance", "score": 5.0}]) is None
+        assert (
+            average_accuracy(
+                [{"dataset_name": "perf", "score": 5.0, "dataset_type": "performance"}]
+            )
+            is None
+        )
 
 
 @pytest.mark.unit
