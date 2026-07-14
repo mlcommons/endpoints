@@ -345,7 +345,7 @@ class TestWriteResult:
         write_result(result, tmp_path)
         txt = (tmp_path / "verify_OUTPUT_CACHING_TEST.txt").read_text()
         assert "Performance check pass: True" in txt
-        data = json.loads((tmp_path / "audit_result.json").read_text())
+        data = json.loads((tmp_path / "audit_output_caching_test.json").read_text())
         assert data["passed"] is True
         assert data["test"] == "output_caching_test"
 
@@ -370,7 +370,7 @@ class TestWriteResult:
             test_id="output_caching_test", passed=True, details=details
         )
         write_result(result, tmp_path)
-        data = json.loads((tmp_path / "audit_result.json").read_text())
+        data = json.loads((tmp_path / "audit_output_caching_test.json").read_text())
         assert data["ref_qps"] == 100.0
         assert data["threshold"] == 0.10
 

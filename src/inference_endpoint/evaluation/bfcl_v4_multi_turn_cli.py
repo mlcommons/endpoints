@@ -226,18 +226,25 @@ def main() -> None:
                 "subsets": subsets,
                 "max_steps_per_turn": args.max_steps_per_turn,
             },
-            "accuracy_scores": {
-                "bfcl_v4::multi_turn": {
+            "accuracy_scores": [
+                {
                     "dataset_name": "bfcl_v4::multi_turn",
-                    "num_samples": scores["total_samples"],
-                    "score": scores,
-                    "n_repeats": 1,
+                    "extractor": None,
+                    "ground_truth_column": None,
+                    "score": scores.get("overall_accuracy"),
+                    "unit_samples": scores["total_samples"],
+                    "num_repeats": 1,
+                    "total_samples": scores["total_samples"],
+                    "complete": True,
+                    "breakdown": scores,
                 },
-            },
+            ],
             "elapsed_time": elapsed,
         }
 
-        results_path = report_dir / "results.json"
+        accuracy_dir = report_dir / "accuracy"
+        accuracy_dir.mkdir(parents=True, exist_ok=True)
+        results_path = accuracy_dir / "accuracy_results.json"
         with open(results_path, "w") as f:
             json.dump(output, f, indent=2)
         logger.info("Results saved to %s", results_path)

@@ -16,8 +16,9 @@
 """Compliance checks for Edge-Agentic (BFCL v4) submissions.
 
 A submission is a run's report directory containing the resolved ``config.yaml``
-plus the scorer outputs (``results.json`` for the accuracy run, ``scores.json``
-for the agentic performance run). The checker compares those artifacts against a
+plus the scorer outputs (``accuracy/accuracy_results.json`` for the accuracy run,
+``scores.json`` for the agentic performance run). The checker compares those
+artifacts against a
 registered ruleset (default: ``mlperf-edge-current`` / ``qwen3.6-27b``):
 
 * config-lock — deterministic, single-stream settings the rules require;
@@ -42,12 +43,18 @@ from pydantic import ValidationError
 from ..config.ruleset_base import BenchmarkSuiteRuleset
 from ..config.ruleset_registry import get_ruleset
 from ..config.schema import BenchmarkConfig
-
-# BFCL accuracy: ruleset golden-metric name -> key in the scorer's breakdown block.
-_ACCURACY_METRIC_KEYS = {
-    "bfcl_overall_accuracy": "overall_accuracy",
-    "bfcl_normalized_accuracy": "normalized_single_turn_score",
-}
+from ..evaluation.accuracy_results import (
+    find_accuracy_breakdown as _find_accuracy_score,
+)
+from ..evaluation.accuracy_results import (
+    find_accuracy_entry as _find_accuracy_entry,
+)
+from ..evaluation.accuracy_results import (
+    to_float as _to_float,
+)
+from ..evaluation.bfcl_v4_metrics import (
+    ACCURACY_METRIC_KEYS as _ACCURACY_METRIC_KEYS,
+)
 
 
 @dataclass(frozen=True)
@@ -99,20 +106,6 @@ def _get(d: dict[str, Any], *path: str, default: Any = None) -> Any:
             return default
         cur = cur[key]
     return cur
-
-
-def _to_float(value: Any) -> float | None:
-    """Coerce a metric value to float, or None if absent/non-numeric.
-
-    Breakdown metrics are numeric, but older artifacts stored them as formatted
-    strings (e.g. ``"86.23"``); coerce defensively before any comparison.
-    """
-    if value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
 
 
 def check_config_lock(config: dict[str, Any]) -> list[Check]:
@@ -171,17 +164,27 @@ def _resolve_model(ruleset: BenchmarkSuiteRuleset, model_name: str) -> Any:
     )
 
 
+# The breakdown key for the headline accuracy. Only BFCL stores it in the block;
+# every other scorer keeps it on the entry's scalar ``score`` (see
+# accuracy_results.find_accuracy_entry), so this is the one metric the gate falls
+# back to the entry score for.
+_OVERALL_ACCURACY_KEY = "overall_accuracy"
+
+
 def check_accuracy(
     results: dict[str, Any],
     golden: dict[str, float],
     factors: dict[str, tuple[float, ...]],
     min_samples: int | None,
 ) -> list[Check]:
-    """Validate the accuracy gate from a BFCL accuracy ``results.json`` dict."""
+    """Validate the accuracy gate from an ``accuracy_results.json`` dict."""
     checks: list[Check] = []
 
-    score = _find_accuracy_score(results)
-    if score is None:
+    entry = _find_accuracy_entry(results)
+    if entry is None:
+        return [Check("accuracy_results_present", False, "no accuracy score found")]
+    block = entry.get("breakdown")
+    if not isinstance(block, dict):
         return [Check("accuracy_results_present", False, "no accuracy score found")]
 
     applicable_metrics = 0
@@ -189,7 +192,16 @@ def check_accuracy(
         if golden_key not in golden or golden_key not in factors:
             continue
         applicable_metrics += 1
-        measured = _to_float(score.get(result_key))
+        measured = _to_float(block.get(result_key))
+        if measured is None and result_key == _OVERALL_ACCURACY_KEY:
+            # The headline accuracy lives on the entry's scalar ``score``; only
+            # BFCL also duplicates it into the breakdown block. Fall back to the
+            # entry score (parity with the plot path) so a DeepSeek-R1 submission
+            # — which omits ``overall_accuracy`` from the block — is still gated.
+            # The block metrics and the deepseek/bfcl headline are percentages in
+            # [0, 100]; gpt-oss's fraction scorers aren't gate targets (they'd
+            # need the scale homogenization tracked separately).
+            measured = _to_float(entry.get("score"))
         if measured is None:
             checks.append(
                 Check(f"accuracy:{result_key}", False, "metric missing or non-numeric")
@@ -218,7 +230,7 @@ def check_accuracy(
         )
 
     if min_samples is not None:
-        raw_total = score.get("total_samples")
+        raw_total = block.get("total_samples")
         total = _to_float(raw_total)
         checks.append(
             Check(
@@ -229,25 +241,6 @@ def check_accuracy(
         )
 
     return checks
-
-
-def _find_accuracy_score(results: dict[str, Any]) -> dict[str, Any] | None:
-    """Return the BFCL per-subset breakdown from a run's ``accuracy_scores``.
-
-    Each entry carries a scalar ``score`` plus an optional ``breakdown`` dict
-    (per-subset/category accuracy + ``total_samples``); the gate reads the
-    breakdown. ``score``-as-dict is also accepted for older artifacts.
-    """
-    accuracy_scores = results.get("accuracy_scores")
-    if not isinstance(accuracy_scores, dict):
-        return None
-    for entry in accuracy_scores.values():
-        if not isinstance(entry, dict):
-            continue
-        for block in (entry.get("breakdown"), entry.get("score")):
-            if isinstance(block, dict) and "overall_accuracy" in block:
-                return block
-    return None
 
 
 def check_perf_validity(scores: dict[str, Any]) -> list[Check]:
@@ -310,7 +303,7 @@ def check_submission(
         else:
             report.checks.extend(check_config_lock(config))
 
-    results_path = report_dir / "results.json"
+    results_path = report_dir / "accuracy" / "accuracy_results.json"
     scores_path = report_dir / "scores.json"
 
     is_accuracy = False
@@ -327,7 +320,7 @@ def check_submission(
         report.add(
             "scorer_output_present",
             False,
-            "no accuracy results.json or performance scores.json found",
+            "no accuracy/accuracy_results.json or performance scores.json found",
         )
 
     report.notes.append(
